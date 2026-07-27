@@ -93,10 +93,61 @@ describe("OrchestrationProfileRegistry", () => {
 		).toThrow(OrchestrationProfileError);
 	});
 
+	it("rejects runtime-owned requirement correlation from model dispatch input", () => {
+		expect(() =>
+			parseOrchestrationDispatchRequest({
+				taskId: "task-1",
+				profileId: "fast-worker",
+				instructions: "run tests",
+				resourcePointerIds: [],
+				requirementIds: ["req-1"],
+			}),
+		).toThrow(OrchestrationProfileError);
+	});
+
+	it("rejects oversized model-facing dispatch fields before they become a durable attempt", () => {
+		expect(() =>
+			parseOrchestrationDispatchRequest({
+				taskId: "task-1",
+				profileId: "fast-worker",
+				instructions: "x".repeat(16 * 1024 + 1),
+				resourcePointerIds: [],
+			}),
+		).toThrow("Dispatch request is invalid");
+		expect(() =>
+			parseOrchestrationDispatchRequest({
+				taskId: "task-1",
+				profileId: "fast-worker",
+				instructions: "bounded",
+				resourcePointerIds: Array.from({ length: 65 }, (_, index) => `resource-${index}`),
+			}),
+		).toThrow("Dispatch request is invalid");
+		expect(() =>
+			parseOrchestrationDispatchRequest({
+				taskId: "task-1",
+				profileId: "fast-worker",
+				instructions: "bounded",
+				resourcePointerIds: ["resource-1", "resource-1"],
+			}),
+		).toThrow("Dispatch request is invalid");
+	});
+
 	it("rejects unrestricted process tools even when process authority exists", () => {
 		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "bash"] }))).toThrow(
 			"cannot expose unrestricted process tools",
 		);
+	});
+
+	it("caps profile process output at the shared execution-plane ceiling", () => {
+		expect(() =>
+			validateOrchestrationProfile({
+				...profile(),
+				executionPolicy: {
+					...profile().executionPolicy!,
+					maxOutputBytes: 512 * 1024 + 1,
+				},
+			}),
+		).toThrow("executionPolicy is invalid");
 	});
 
 	it("rejects unknown, duplicated, and capability-unbound profile tools", () => {

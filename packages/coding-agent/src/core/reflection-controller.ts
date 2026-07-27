@@ -17,13 +17,14 @@ import {
 	type AgentContext,
 	type AgentLoopConfig,
 	runAgentLoop,
+	startAgentProviderRequest,
 	type ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import {
 	type Api,
 	type AssistantMessage,
-	type Context,
+	type Message,
 	type Model,
 	resolveModelThinkingLevel,
 	type SimpleStreamOptions,
@@ -131,13 +132,16 @@ export class ReflectionController {
 	 * tools, and passes **no real `sessionId`** — only a deterministic SYNTHETIC cache-affinity key
 	 * (see {@link computeLaneAffinityKey}) derived from `(laneKind, model, systemPrompt)`, which can never
 	 * equal or embed the real session id. A tool-enabled call receives only caller-owned tools and hooks,
-	 * and is turn-bounded. It cannot mutate `agent.state.messages`, append session entries, or touch the
+	 * and applies a turn bound only when its owner explicitly supplies one. It cannot mutate `agent.state.messages`, append session entries, or touch the
 	 * foreground tool registry. Mirrors `generateSummary()`'s one-shot mechanics otherwise.
 	 *
 	 * Returns the result even on an error/aborted stop reason (callers — e.g. a background reflection
 	 * microtask — decide whether to act); it does not throw on a model-level error.
 	 */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
+		if (opts.maxTurns !== undefined && (!Number.isSafeInteger(opts.maxTurns) || opts.maxTurns <= 0)) {
+			throw new Error("runIsolatedCompletion: maxTurns must be a positive safe integer when provided");
+		}
 		const model = opts.model ?? this.deps.getModel();
 		if (!model) {
 			throw new Error("runIsolatedCompletion: no model available");
@@ -158,9 +162,10 @@ export class ReflectionController {
 		);
 		try {
 			// Fresh, isolated context: explicit messages, caller-owned tools only, nothing from the main session.
-			const context: Context = {
+			const history = opts.history ?? [];
+			const context: AgentContext = {
 				systemPrompt: opts.systemPrompt,
-				messages: opts.messages,
+				messages: [...history, ...opts.messages],
 				tools: opts.tools ?? [],
 			};
 
@@ -194,57 +199,69 @@ export class ReflectionController {
 				options.apiKey = auth.apiKey;
 				options.headers = auth.headers;
 			}
+			const agent = this.deps.getAgent();
+			const foregroundModel = agent.state.model;
+			const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
+			const textToolCallProtocol = this.deps.resolveTextToolCallProtocol(model);
+			const maxTurns = opts.maxTurns;
+			let completedTurns = 0;
+			const loopConfig: AgentLoopConfig = {
+				model,
+				interactionMode: "background",
+				maxTokens: opts.maxTokens,
+				cacheRetention: opts.cacheRetention,
+				reasoning: thinkingLevel,
+				// Same synthetic per-lane affinity key as the one-shot path above — never the real sessionId.
+				sessionId: affinityKey,
+				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+				...(options.headers !== undefined ? { headers: options.headers } : {}),
+				getApiKey: agent.getApiKey,
+				resolveRequestReasoning: agent.resolveRequestReasoning,
+				temperature: textToolCallProtocol ? 0 : undefined,
+				textToolCallProtocol,
+				onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
+				transport: agent.transport,
+				thinkingBudgets: agent.thinkingBudgets,
+				maxRetryDelayMs: agent.maxRetryDelayMs,
+				// This remains independent from an owner-provided turn budget: it stops only repeated
+				// identical tool calls, so legitimate long-running work can continue until completion.
+				maxStallTurns: agent.maxStallTurns,
+				onRunawayStop: usesForegroundModel ? agent.onRunawayStop : undefined,
+				toolExecution: "sequential",
+				toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
+				onToolArgumentValidation: usesForegroundModel ? agent.onToolArgumentValidation : undefined,
+				toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
+				onToolValidationEscalation: usesForegroundModel ? agent.onToolValidationEscalation : undefined,
+				beforeToolCall: opts.beforeToolCall,
+				afterToolCall: opts.afterToolCall,
+				getSteeringMessages: opts.getSteeringMessages,
+				getFollowUpMessages: opts.getFollowUpMessages,
+				transformContext: opts.transformContext,
+				requestPreflight: opts.requestPreflight,
+				...(maxTurns === undefined
+					? {}
+					: {
+							shouldStopAfterTurn: () => {
+								completedTurns += 1;
+								return completedTurns >= maxTurns;
+							},
+						}),
+				convertToLlm: agent.convertToLlm,
+			};
 
 			if (opts.tools && opts.tools.length > 0) {
-				const agent = this.deps.getAgent();
-				const foregroundModel = agent.state.model;
-				const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
-				const textToolCallProtocol = this.deps.resolveTextToolCallProtocol(model);
-				const requestedMaxTurns =
-					typeof opts.maxTurns === "number" && Number.isFinite(opts.maxTurns) ? Math.floor(opts.maxTurns) : 6;
-				const maxTurns = Math.max(1, Math.min(12, requestedMaxTurns));
-				let completedTurns = 0;
 				const childContext: AgentContext = {
 					systemPrompt: opts.systemPrompt,
-					messages: [],
+					messages: [...history],
 					tools: [...opts.tools],
-				};
-				const loopConfig: AgentLoopConfig = {
-					model,
-					interactionMode: "background",
-					maxTokens: opts.maxTokens,
-					cacheRetention: opts.cacheRetention,
-					reasoning: thinkingLevel,
-					// Same synthetic per-lane affinity key as the one-shot path above — never the real sessionId.
-					sessionId: affinityKey,
-					...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
-					...(options.headers !== undefined ? { headers: options.headers } : {}),
-					temperature: textToolCallProtocol ? 0 : undefined,
-					textToolCallProtocol,
-					onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
-					transport: agent.transport,
-					thinkingBudgets: agent.thinkingBudgets,
-					maxRetryDelayMs: agent.maxRetryDelayMs,
-					maxStallTurns: Math.max(2, Math.min(maxTurns, agent.maxStallTurns ?? maxTurns)),
-					onRunawayStop: usesForegroundModel ? agent.onRunawayStop : undefined,
-					toolExecution: "sequential",
-					toolArgumentTeachEnabled: agent.toolArgumentTeachEnabled,
-					onToolArgumentValidation: usesForegroundModel ? agent.onToolArgumentValidation : undefined,
-					toolValidationEscalationThreshold: agent.toolValidationEscalationThreshold,
-					onToolValidationEscalation: usesForegroundModel ? agent.onToolValidationEscalation : undefined,
-					beforeToolCall: opts.beforeToolCall,
-					afterToolCall: opts.afterToolCall,
-					shouldStopAfterTurn: () => {
-						completedTurns += 1;
-						return completedTurns >= maxTurns;
-					},
-					convertToLlm: agent.convertToLlm,
 				};
 				const messages = await runAgentLoop(
 					opts.messages,
 					childContext,
 					loopConfig,
-					() => {},
+					async (event) => {
+						if (event.type === "message_end") await opts.onMessage?.(event.message as Message);
+					},
 					opts.signal,
 					agent.streamFn,
 				);
@@ -263,21 +280,27 @@ export class ReflectionController {
 				if (opts.finalTextPrompt && !hasFinalText && endedOnToolCall && !opts.signal?.aborted) {
 					// A hard turn bound may stop immediately after successful tool execution. Preserve that bound,
 					// then allow exactly one tool-free synthesis call so the gathered work is not thrown away.
-					const finalizationMessages = await agent.convertToLlm(messages);
-					const finalizationStream = await agent.streamFn(
-						model,
-						{
-							systemPrompt: opts.systemPrompt,
-							messages: [
-								...finalizationMessages,
-								{ role: "user", content: opts.finalTextPrompt, timestamp: Date.now() },
-							],
-							tools: [],
-						},
-						options,
+					const finalizationPrompt: Message = {
+						role: "user",
+						content: opts.finalTextPrompt,
+						timestamp: Date.now(),
+					};
+					await opts.onMessage?.(finalizationPrompt);
+					const finalizationContext: AgentContext = {
+						systemPrompt: opts.systemPrompt,
+						messages: [...history, ...messages, finalizationPrompt],
+						tools: [],
+					};
+					const finalizationStream = await startAgentProviderRequest(
+						finalizationContext,
+						loopConfig,
+						opts.signal,
+						agent.streamFn,
 					);
 					finalAssistant = await finalizationStream.result();
+					await opts.onMessage?.(finalAssistant);
 					assistantMessages.push(finalAssistant);
+					messages.push(finalizationPrompt, finalAssistant);
 				}
 
 				const usage = assistantMessages.reduce<Usage>(
@@ -308,11 +331,20 @@ export class ReflectionController {
 					.filter((content): content is TextContent => content.type === "text")
 					.map((content) => content.text)
 					.join("");
-				return { text, usage, stopReason: finalAssistant.stopReason };
+				// Isolated inputs are Message values and this loop only adds assistant/tool-result messages,
+				// so the child transcript is safely representable by the public Message[] contract.
+				return {
+					text,
+					usage,
+					stopReason: finalAssistant.stopReason,
+					messages: [...history, ...(messages as Message[])],
+				};
 			}
 
-			const stream = await this.deps.getAgent().streamFn(model, context, options);
+			for (const message of opts.messages) await opts.onMessage?.(message);
+			const stream = await startAgentProviderRequest(context, loopConfig, opts.signal, agent.streamFn);
 			const result = await stream.result();
+			await opts.onMessage?.(result);
 			const text = result.content
 				.filter((c): c is TextContent => c.type === "text")
 				.map((c) => c.text)
@@ -325,7 +357,7 @@ export class ReflectionController {
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			return { text, usage, stopReason: result.stopReason };
+			return { text, usage, stopReason: result.stopReason, messages: [...history, ...opts.messages, result] };
 		} finally {
 			deregisterInFlight();
 		}

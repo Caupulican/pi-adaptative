@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
+import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
 import {
 	type AcceptanceCriterion,
 	type AgentBindingContract,
@@ -17,6 +18,10 @@ import {
 	type EvidenceContract,
 	type ExecutionGrant,
 	isHarnessCapability,
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	type ObjectiveContract,
 	type ObjectiveStatus,
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -209,11 +214,56 @@ function stringArray(value: unknown, label: string): string[] {
 	return [...value];
 }
 
+function dispatchIdentifier(value: unknown, label: string): string {
+	const identifier = string(value, label);
+	if (identifier.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
+		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
+	}
+	return identifier;
+}
+
+function optionalDispatchIdentifier(
+	value: unknown,
+	label: string,
+	maxLength = MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+): string | undefined {
+	if (value === undefined) return undefined;
+	const identifier = string(value, label);
+	if (identifier.length > maxLength) throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
+	return identifier;
+}
+
+function dispatchInstructions(value: unknown, label: string): string {
+	const instructions = string(value, label);
+	if (instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) {
+		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
+	}
+	return instructions;
+}
+
+function dispatchIdentifierArray(value: unknown, label: string): string[] {
+	if (
+		!Array.isArray(value) ||
+		value.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
+		!value.every(
+			(entry) =>
+				typeof entry === "string" && entry.length > 0 && entry.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+		)
+	) {
+		throw new DurableTaskRuntimeError(`${label} must be a bounded identifier array.`);
+	}
+	if (new Set(value).size !== value.length) {
+		throw new DurableTaskRuntimeError(`${label} contains duplicates.`);
+	}
+	return [...value];
+}
+
 const DISPATCH_FIELDS = new Set([
 	"taskId",
 	"profileId",
 	"instructions",
 	"resourcePointerIds",
+	"requirementIds",
 	"executionKind",
 	"logicalLaneId",
 	"dispatchSequence",
@@ -231,11 +281,14 @@ function dispatchFromValue(value: unknown, label: string): OrchestrationDispatch
 	if (executionKind !== undefined && executionKind !== "in-process" && executionKind !== "managed-process") {
 		throw new DurableTaskRuntimeError(`${label}.executionKind is invalid.`);
 	}
-	for (const field of ["logicalLaneId", "provider", "authorizationId", "worktreeLaneKey"] as const) {
-		if (dispatch[field] !== undefined && typeof dispatch[field] !== "string") {
-			throw new DurableTaskRuntimeError(`${label}.${field} is invalid.`);
-		}
-	}
+	const logicalLaneId = optionalDispatchIdentifier(dispatch.logicalLaneId, `${label}.logicalLaneId`);
+	const provider = optionalDispatchIdentifier(
+		dispatch.provider,
+		`${label}.provider`,
+		MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	);
+	const authorizationId = optionalDispatchIdentifier(dispatch.authorizationId, `${label}.authorizationId`);
+	const worktreeLaneKey = optionalDispatchIdentifier(dispatch.worktreeLaneKey, `${label}.worktreeLaneKey`);
 	if (
 		dispatch.dispatchSequence !== undefined &&
 		(!Number.isSafeInteger(dispatch.dispatchSequence) || Number(dispatch.dispatchSequence) < 1)
@@ -254,16 +307,20 @@ function dispatchFromValue(value: unknown, label: string): OrchestrationDispatch
 		throw new DurableTaskRuntimeError(`${label} cannot combine a worker execution contract with managed execution.`);
 	}
 	return {
-		taskId: string(dispatch.taskId, `${label}.taskId`),
-		profileId: string(dispatch.profileId, `${label}.profileId`),
-		instructions: string(dispatch.instructions, `${label}.instructions`),
-		resourcePointerIds: stringArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
+		taskId: dispatchIdentifier(dispatch.taskId, `${label}.taskId`),
+		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
+		instructions: dispatchInstructions(dispatch.instructions, `${label}.instructions`),
+		resourcePointerIds: dispatchIdentifierArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
+		requirementIds:
+			dispatch.requirementIds === undefined
+				? []
+				: dispatchIdentifierArray(dispatch.requirementIds, `${label}.requirementIds`),
 		...(executionKind ? { executionKind } : {}),
-		...(typeof dispatch.logicalLaneId === "string" ? { logicalLaneId: dispatch.logicalLaneId } : {}),
+		...(logicalLaneId ? { logicalLaneId } : {}),
 		...(typeof dispatch.dispatchSequence === "number" ? { dispatchSequence: dispatch.dispatchSequence } : {}),
-		...(typeof dispatch.provider === "string" ? { provider: dispatch.provider } : {}),
-		...(typeof dispatch.authorizationId === "string" ? { authorizationId: dispatch.authorizationId } : {}),
-		...(typeof dispatch.worktreeLaneKey === "string" ? { worktreeLaneKey: dispatch.worktreeLaneKey } : {}),
+		...(provider ? { provider } : {}),
+		...(authorizationId ? { authorizationId } : {}),
+		...(worktreeLaneKey ? { worktreeLaneKey } : {}),
 		...(executionContract ? { executionContract } : {}),
 	};
 }
@@ -305,6 +362,7 @@ function leaseFromPayload(payload: JsonObject): AttemptLease {
 
 function checkpointFromPayload(payload: JsonObject): AttemptCheckpoint {
 	const checkpoint = record(payload.checkpoint, "checkpoint");
+	const usage = checkpoint.usage === undefined ? undefined : usageFromPayload(checkpoint.usage, "checkpoint.usage");
 	return {
 		checkpointId: string(checkpoint.checkpointId, "checkpoint.checkpointId"),
 		attemptId: string(checkpoint.attemptId, "checkpoint.attemptId"),
@@ -312,8 +370,42 @@ function checkpointFromPayload(payload: JsonObject): AttemptCheckpoint {
 		summary: string(checkpoint.summary, "checkpoint.summary"),
 		artifactIds: stringArray(checkpoint.artifactIds, "checkpoint.artifactIds"),
 		evidenceIds: stringArray(checkpoint.evidenceIds, "checkpoint.evidenceIds"),
+		...(usage ? { usage } : {}),
 		createdAt: string(checkpoint.createdAt, "checkpoint.createdAt"),
 	};
+}
+
+function usageFromPayload(value: unknown, label: string): AttemptCheckpoint["usage"] {
+	const usage = record(value, label);
+	const expectedFields = [
+		"toolCalls",
+		"inputTokens",
+		"outputTokens",
+		"cacheReadTokens",
+		"cacheWriteTokens",
+		"totalTokens",
+		"costUsd",
+		"activeWallClockMs",
+	];
+	const unexpected = Object.keys(usage).find((field) => !expectedFields.includes(field));
+	if (unexpected) throw new DurableTaskRuntimeError(`${label}.${unexpected} is unsupported.`);
+	try {
+		return validateAttemptUsageSnapshot(
+			{
+				toolCalls: number(usage.toolCalls, `${label}.toolCalls`),
+				inputTokens: number(usage.inputTokens, `${label}.inputTokens`),
+				outputTokens: number(usage.outputTokens, `${label}.outputTokens`),
+				cacheReadTokens: number(usage.cacheReadTokens, `${label}.cacheReadTokens`),
+				cacheWriteTokens: number(usage.cacheWriteTokens, `${label}.cacheWriteTokens`),
+				totalTokens: number(usage.totalTokens, `${label}.totalTokens`),
+				costUsd: number(usage.costUsd, `${label}.costUsd`),
+				activeWallClockMs: number(usage.activeWallClockMs, `${label}.activeWallClockMs`),
+			},
+			label,
+		);
+	} catch (error) {
+		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+	}
 }
 
 function resultFromPayload(payload: JsonObject): WorkerResultContract {
@@ -700,6 +792,14 @@ export function reduceOrchestrationEvent(
 			const attemptId = string(event.payload.attemptId, "attempt.suspended.attemptId");
 			const attempt = attempts[attemptId];
 			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			const leaseId = string(event.payload.leaseId, "attempt.suspended.leaseId");
+			const fencingToken = number(event.payload.fencingToken, "attempt.suspended.fencingToken");
+			if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
+			}
+			if (attempt.status !== "leased" && attempt.status !== "running") {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot suspend from '${attempt.status}'.`);
+			}
 			attempts[attemptId] = {
 				...attempt,
 				status: "suspended",
@@ -1283,6 +1383,7 @@ export class DurableTaskRuntime {
 		summary: string;
 		artifactIds?: readonly string[];
 		evidenceIds?: readonly string[];
+		usage?: AttemptCheckpoint["usage"];
 	}): AttemptCheckpoint {
 		this.refresh();
 		const attempt = this.requireLiveLease(args.attemptId, args.leaseId, args.fencingToken);
@@ -1295,6 +1396,7 @@ export class DurableTaskRuntime {
 			summary: args.summary.trim(),
 			artifactIds: [...(args.artifactIds ?? [])],
 			evidenceIds: [...(args.evidenceIds ?? [])],
+			...(args.usage ? { usage: usageFromPayload(args.usage, "checkpoint.usage") } : {}),
 			createdAt: this.nowIso(),
 		};
 		if (!checkpoint.summary) throw new DurableTaskRuntimeError("Checkpoint summary is required.");
@@ -1409,6 +1511,44 @@ export class DurableTaskRuntime {
 		return structuredClone(this.state.attempts[attemptId]!);
 	}
 
+	/**
+	 * The only runtime suspension transition. Callers must present the exact current owner and lease
+	 * fence; liveness/restart policy stays outside this deterministic runtime.
+	 */
+	suspendBoundAttempt(args: {
+		attemptId: string;
+		ownerId: string;
+		leaseId: string;
+		fencingToken: number;
+		reasonCode: string;
+	}): AttemptRuntimeState {
+		this.refresh();
+		const attempt = this.requireAttempt(args.attemptId);
+		if (!attempt.agentId || !attempt.lease || !["leased", "running"].includes(attempt.status)) {
+			throw new DurableTaskRuntimeError(`Attempt '${args.attemptId}' is not a live agent-bound attempt.`);
+		}
+		if (attempt.lease.ownerId !== args.ownerId) {
+			throw new DurableTaskRuntimeError(`Attempt '${args.attemptId}' is not owned by '${args.ownerId}'.`);
+		}
+		if (attempt.lease.leaseId !== args.leaseId || attempt.lease.fencingToken !== args.fencingToken) {
+			throw new DurableTaskRuntimeError(`Attempt '${args.attemptId}' lease or fencing token is stale.`);
+		}
+		if (!args.reasonCode.trim()) throw new DurableTaskRuntimeError("Suspension reason is required.");
+		this.commit({
+			type: "attempt.suspended",
+			aggregateId: args.attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-suspended:${args.attemptId}:${args.leaseId}:${args.fencingToken}`,
+			payload: toJsonObject({
+				attemptId: args.attemptId,
+				leaseId: args.leaseId,
+				fencingToken: args.fencingToken,
+				reasonCode: args.reasonCode.trim(),
+			}),
+		});
+		return structuredClone(this.state.attempts[args.attemptId]!);
+	}
+
 	failTask(taskId: string, reasonCode: string): TaskContract {
 		this.refresh();
 		const task = this.state.tasks[taskId];
@@ -1494,7 +1634,7 @@ export class DurableTaskRuntime {
 		return structuredClone(this.state.agents[agentId]!);
 	}
 
-	resumeAttempt(attemptId: string, agentId: string, ttlMs: number): AttemptLease {
+	resumeAttempt(attemptId: string, agentId: string, ttlMs: number, ownerId = agentId): AttemptLease {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
 		const agent = this.state.agents[agentId];
@@ -1509,7 +1649,7 @@ export class DurableTaskRuntime {
 		const lease: AttemptLease = {
 			leaseId: `lease-${this.createId()}`,
 			attemptId,
-			ownerId: agentId,
+			ownerId,
 			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
 			issuedAt: new Date(issuedAtMs).toISOString(),
 			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),

@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CONFIG_DIR_NAME } from "../../config.ts";
 import { resourceDir } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import type { OrchestrationProfile } from "./contracts.ts";
 import {
 	OrchestrationProfileError,
@@ -26,6 +27,9 @@ export interface OrchestrationProfileLoadResult {
 }
 
 const PROFILE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+/** A fully populated profile is below this cap; reject expansion before JSON parsing or persistence. */
+const MAX_PROFILE_FILE_BYTES = 512 * 1024;
+const MAX_PROFILE_DIRECTORY_ENTRIES = 512;
 
 function authoredProfile(profile: OrchestrationProfile): Omit<OrchestrationProfile, "sourcePath"> {
 	const { sourcePath: _sourcePath, ...authored } = profile;
@@ -34,6 +38,14 @@ function authoredProfile(profile: OrchestrationProfile): Omit<OrchestrationProfi
 
 function messageFrom(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function serializeBoundedProfile(profile: Omit<OrchestrationProfile, "sourcePath">): string {
+	const serialized = `${JSON.stringify(profile, null, 2)}\n`;
+	if (Buffer.byteLength(serialized, "utf-8") > MAX_PROFILE_FILE_BYTES) {
+		throw new OrchestrationProfileError("Orchestration profile exceeds its byte limit.");
+	}
+	return serialized;
 }
 
 export class OrchestrationProfileStore {
@@ -134,13 +146,16 @@ export class OrchestrationProfileStore {
 		}
 		validateOrchestrationProfile(profile);
 		const filePath = this.filePath(profile.profileId, scope);
+		const serialized = serializeBoundedProfile(authoredProfile(profile));
+		// Keep the save path as strict as load: typed callers cannot persist a record the loader rejects.
+		parseOrchestrationProfile(JSON.parse(serialized));
 		withFileLockSync(filePath, () => {
 			if (!options.overwrite && existsSync(filePath)) {
 				throw new OrchestrationProfileError(
 					`Orchestration profile '${profile.profileId}' already exists in ${scope} scope.`,
 				);
 			}
-			writeFileAtomicSync(filePath, `${JSON.stringify(authoredProfile(profile), null, 2)}\n`);
+			writeFileAtomicSync(filePath, serialized);
 		});
 		return filePath;
 	}
@@ -153,7 +168,11 @@ export class OrchestrationProfileStore {
 		if (!existsSync(directory)) return [];
 		let entries: string[];
 		try {
-			entries = readdirSync(directory)
+			entries = readBoundedDirectoryNamesSync(
+				directory,
+				MAX_PROFILE_DIRECTORY_ENTRIES,
+				"Orchestration profiles directory",
+			)
 				.filter((entry) => entry.endsWith(".json"))
 				.sort((left, right) => left.localeCompare(right));
 		} catch (error) {
@@ -164,7 +183,10 @@ export class OrchestrationProfileStore {
 		for (const entry of entries) {
 			const sourcePath = join(directory, entry);
 			try {
-				const profile = parseOrchestrationProfile(JSON.parse(readFileSync(sourcePath, "utf-8")), sourcePath);
+				const profile = parseOrchestrationProfile(
+					JSON.parse(readBoundedTextFileSync(sourcePath, MAX_PROFILE_FILE_BYTES, "Orchestration profile")),
+					sourcePath,
+				);
 				if (profilesById.has(profile.profileId)) {
 					throw new OrchestrationProfileError(
 						`Duplicate orchestration profile '${profile.profileId}' in ${scope} scope.`,

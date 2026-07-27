@@ -35,6 +35,19 @@ describe("worker claim session persistence", () => {
 		expect(entry.customType).toBe(WORKER_CLAIM_CUSTOM_TYPE);
 	});
 
+	it("rejects an oversized claim before session persistence", () => {
+		const sessionManager = SessionManager.inMemory();
+		expect(() =>
+			appendWorkerClaimSnapshot(sessionManager, {
+				requestId: "req-oversized",
+				status: "completed",
+				summary: "must not persist",
+				changedFiles: Array.from({ length: 129 }, () => "safe.ts"),
+			}),
+		).toThrow("claim.changedFiles exceeds 128 entries");
+		expect(sessionManager.getEntries()).toEqual([]);
+	});
+
 	it("getWorkerClaimSnapshots returns all valid snapshots in chronological order", () => {
 		const sessionManager = SessionManager.inMemory();
 		const claim1 = { requestId: "req-1", status: "completed" as const, summary: "R1", changedFiles: [] };

@@ -58,9 +58,47 @@ function resolveSafely(absolutePath: string, hops: number): string {
 	return path.join(resolvedParent, path.basename(absolutePath));
 }
 
-function isPathInside(target: string, root: string): boolean {
-	const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
-	return target === root || target.startsWith(rootWithSep);
+function usesWindowsPath(value: string): boolean {
+	return /^[a-zA-Z]:([\\/]|$)/.test(value) || value.startsWith("\\\\") || value.startsWith("//");
+}
+
+function lexicalPathApi(...paths: readonly string[]): typeof path.posix | typeof path.win32 {
+	return paths.some(usesWindowsPath) ? path.win32 : path.posix;
+}
+
+function canonicalPathScopeIdentityWithApi(value: string, pathApi: typeof path.posix | typeof path.win32): string {
+	const resolved = pathApi.resolve(value);
+	return pathApi === path.win32 ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * Stable lexical scope identity for durable planners. Windows drive and UNC paths are normalized
+ * case-insensitively even when a WSL process is only comparing them and cannot realpath them.
+ */
+export function canonicalPathScopeIdentity(value: string): string {
+	return canonicalPathScopeIdentityWithApi(value, lexicalPathApi(value));
+}
+
+/**
+ * Boundary-safe lexical containment for already-resolved paths and portable scope planning.
+ * Windows drive and UNC paths compare case-insensitively; native POSIX paths remain case-sensitive.
+ * This deliberately does not resolve symlinks — callers that authorize filesystem access must first
+ * use {@link safeRealpathSync}.
+ */
+export function isPathWithinScope(targetPath: string, scopeRoot: string): boolean {
+	const pathApi = lexicalPathApi(targetPath, scopeRoot);
+	const target = canonicalPathScopeIdentityWithApi(targetPath, pathApi);
+	const root = canonicalPathScopeIdentityWithApi(scopeRoot, pathApi);
+	const relativePath = pathApi.relative(root, target);
+	return (
+		relativePath === "" ||
+		(!relativePath.startsWith(`..${pathApi.sep}`) && relativePath !== ".." && !pathApi.isAbsolute(relativePath))
+	);
+}
+
+/** True when either scope contains the other, including an exact match. */
+export function pathScopesOverlap(firstScope: string, secondScope: string): boolean {
+	return isPathWithinScope(firstScope, secondScope) || isPathWithinScope(secondScope, firstScope);
 }
 
 export function checkPathScope(scope: PathScope, targetPath: string): PathScopeDecision {
@@ -96,7 +134,7 @@ export function checkPathScope(scope: PathScope, targetPath: string): PathScopeD
 	}
 
 	// First, it must be inside the main root
-	if (!isPathInside(resolvedTarget, resolvedRoot)) {
+	if (!isPathWithinScope(resolvedTarget, resolvedRoot)) {
 		return {
 			kind: "outside",
 			path: targetPath,
@@ -110,7 +148,7 @@ export function checkPathScope(scope: PathScope, targetPath: string): PathScopeD
 		for (const denied of scope.deniedPaths) {
 			try {
 				const resolvedDenied = safeRealpathSync(denied);
-				if (isPathInside(resolvedTarget, resolvedDenied)) {
+				if (isPathWithinScope(resolvedTarget, resolvedDenied)) {
 					return {
 						kind: "denied",
 						path: targetPath,
@@ -131,7 +169,7 @@ export function checkPathScope(scope: PathScope, targetPath: string): PathScopeD
 		for (const allowed of scope.allowedPaths) {
 			try {
 				const resolvedAllowed = safeRealpathSync(allowed);
-				if (isPathInside(resolvedTarget, resolvedAllowed)) {
+				if (isPathWithinScope(resolvedTarget, resolvedAllowed)) {
 					isAllowed = true;
 					matchedAllowed = allowed;
 					break;

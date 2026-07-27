@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type AgentIdentityContract, type AgentResumeContext, isResourcePointerKind } from "./contracts.ts";
@@ -66,6 +67,13 @@ export function createAgentIdentity(agentId: string, resumeContext: AgentResumeC
 	const identity = { agentId: normalizedAgentId, resumeContext: structuredClone(resumeContext) };
 	if (!isAgentIdentity(identity)) throw new TypeError("Agent resume context is invalid.");
 	return identity;
+}
+
+/** Compare only the immutable identity behind a resumable agent; checkpoint position is mutable. */
+export function sameAgentResumeIdentity(left: AgentResumeContext, right: AgentResumeContext): boolean {
+	const { latestCheckpointId: _leftCheckpoint, ...leftIdentity } = left;
+	const { latestCheckpointId: _rightCheckpoint, ...rightIdentity } = right;
+	return isDeepStrictEqual(leftIdentity, rightIdentity);
 }
 
 /**

@@ -9,3 +9,9 @@ export function isPlainRecord(value: unknown): value is Record<string, unknown> 
 	const prototype = Object.getPrototypeOf(value);
 	return prototype === Object.prototype || prototype === null;
 }
+
+/** Fail closed when an untrusted record contains a field outside its typed contract. */
+export function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+	const allowedSet = new Set(allowed);
+	return Object.keys(record).every((key) => allowedSet.has(key));
+}

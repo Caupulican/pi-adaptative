@@ -84,10 +84,29 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		const historyBefore = session.state.messages.length;
 		const toolsBefore = session.getAllTools().map((t) => t.name);
 
+		const input = [
+			{
+				role: "user" as const,
+				content: [{ type: "text" as const, text: "What did we learn?" }],
+				timestamp: Date.now(),
+			},
+		];
 		const result = await session.runIsolatedCompletion({
 			systemPrompt: "You are a reflection engine.",
-			messages: [{ role: "user", content: [{ type: "text", text: "What did we learn?" }], timestamp: Date.now() }],
+			messages: input,
 			maxTokens: 64,
+			transformContext: async () => [
+				{ role: "user", content: [{ type: "text", text: "transformed request" }], timestamp: Date.now() },
+			],
+			requestPreflight: async ({ context, maxTokens }) => {
+				expect(context.messages).toHaveLength(1);
+				expect(context.messages[0]).toMatchObject({
+					role: "user",
+					content: [{ type: "text", text: "transformed request" }],
+				});
+				expect(maxTokens).toBe(64);
+				return { maxTokens: 32 };
+			},
 			cacheRetention: "none",
 		});
 
@@ -95,12 +114,14 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		expect(result.text).toBe("lesson: prefer X");
 		expect(result.usage.cost.total).toBeCloseTo(0.003, 10);
 		expect(result.stopReason).toBe("stop");
+		expect(result.messages).toEqual([...input, fakeReply]);
 
 		// Isolation of the OUTGOING call.
 		expect(capturedContext?.tools).toEqual([]);
 		expect(capturedOptions?.cacheRetention).toBe("none");
 		expect(capturedOptions?.reasoning).toBe("off");
 		expect(capturedOptions?.interactionMode).toBe("background");
+		expect(capturedOptions?.maxTokens).toBe(32);
 		// No REAL sessionId crosses the isolation boundary, but a synthetic, namespaced
 		// cache-affinity key is now sent so provider-side session-affinity caching can still route
 		// repeat calls from the same lane consistently.
@@ -110,6 +131,10 @@ describe("runIsolatedCompletion isolation invariants", () => {
 		expect(capturedOptions?.sessionId).not.toContain(session.sessionId);
 		// Main history was NOT used as the context.
 		expect(capturedContext?.messages).toHaveLength(1);
+		expect(capturedContext?.messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "transformed request" }],
+		});
 
 		// Isolation of the SESSION state: nothing mutated.
 		expect(session.sessionManager.getEntries().length).toBe(entriesBefore);

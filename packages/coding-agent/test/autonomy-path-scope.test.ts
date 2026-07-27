@@ -2,7 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkPathScope, safeRealpathSync } from "../src/core/autonomy/path-scope.ts";
+import {
+	canonicalPathScopeIdentity,
+	checkPathScope,
+	isPathWithinScope,
+	pathScopesOverlap,
+	safeRealpathSync,
+} from "../src/core/autonomy/path-scope.ts";
 
 describe("path-scope", () => {
 	let tempDir: string;
@@ -20,6 +26,35 @@ describe("path-scope", () => {
 
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	describe("lexical scope relationships", () => {
+		it("creates stable POSIX, drive, and UNC identities for durable scope stores", () => {
+			expect(canonicalPathScopeIdentity("/repo/src/../src")).toBe("/repo/src");
+			expect(canonicalPathScopeIdentity(String.raw`C:\Repository\src\..`)).toBe(String.raw`c:\repository`);
+			expect(canonicalPathScopeIdentity(String.raw`\\Server\Share\Repository\src\..`)).toBe(
+				String.raw`\\server\share\repository`,
+			);
+		});
+
+		it("keeps containment boundary-safe for equal, ancestor, and sibling-prefix paths", () => {
+			expect(isPathWithinScope("/repo/src/file.ts", "/repo/src")).toBe(true);
+			expect(isPathWithinScope("/repo/src", "/repo/src")).toBe(true);
+			expect(isPathWithinScope("/repo/src-evil/file.ts", "/repo/src")).toBe(false);
+			expect(pathScopesOverlap("/repo", "/repo/src")).toBe(true);
+			expect(pathScopesOverlap("/repo/src", "/repo/src")).toBe(true);
+			expect(pathScopesOverlap("/repo/src", "/repo/src-evil")).toBe(false);
+		});
+
+		it("compares Windows drive and UNC scopes case-insensitively without sibling-prefix overlap", () => {
+			expect(isPathWithinScope(String.raw`C:\Repository\src\file.ts`, String.raw`c:\repository`)).toBe(true);
+			expect(pathScopesOverlap(String.raw`C:\Repository\src`, String.raw`c:\repository`)).toBe(true);
+			expect(pathScopesOverlap(String.raw`C:\Repository\app`, String.raw`c:\repository\app2`)).toBe(false);
+			expect(
+				pathScopesOverlap(String.raw`\\Server\Share\Repository`, String.raw`\\server\share\repository\src`),
+			).toBe(true);
+			expect(pathScopesOverlap("//Server/Share/Repository", "//server/share/repository/src")).toBe(true);
+		});
 	});
 
 	describe("checkPathScope", () => {

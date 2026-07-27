@@ -48,6 +48,22 @@ describe("tool failure memory", () => {
 		);
 	});
 
+	it("uses bounded stdout evidence when a structured process failure has empty stderr", () => {
+		const assessment = assessToolFailure(
+			["outcome: failed", "exitCode: 1", "stdout:", "configdelphi: unknown option --auto", "stderr: (empty)"].join(
+				"\n",
+			),
+			"failed",
+			"tool_result_error",
+		);
+
+		expect(assessment).toEqual({
+			failureCode: "exit_1",
+			diagnostic: "configdelphi: unknown option --auto",
+			guidance: "No safe repair inferred; use the diagnostic and tool contract for the next action.",
+		});
+	});
+
 	it("does not promote arbitrary legacy output to a diagnostic without an error boundary", () => {
 		const assessment = assessToolFailure(`LEGACY_RAW_OUTPUT:${"x".repeat(10_000)}`, "failed");
 

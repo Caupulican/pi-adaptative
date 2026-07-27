@@ -10,7 +10,12 @@ import {
 	type SessionSnapshotPayload,
 } from "../session-snapshot.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import { cloneWorkerClaimForStorage, isParentReviewRequired, isWorkerClaim } from "./worker-claim.ts";
+import {
+	cloneWorkerClaimForStorage,
+	isParentReviewRequired,
+	isWorkerClaim,
+	normalizeWorkerClaimForHost,
+} from "./worker-claim.ts";
 
 export const WORKER_CLAIM_CUSTOM_TYPE = "worker_claim";
 
@@ -36,14 +41,15 @@ export function appendWorkerClaimSnapshot(
 	 * validator's own documented default for single-cwd-per-process callers. */
 	options?: { cwd?: string },
 ): string {
-	const stored = cloneWorkerClaimForStorage(claim);
+	const normalizedClaim = normalizeWorkerClaimForHost(claim);
+	const stored = cloneWorkerClaimForStorage(normalizedClaim);
 	// Stamp the parent-review marker here by re-running the SAME gate
 	// (validateWorkerClaim, via isParentReviewRequired) that originally decided
 	// ask-user/parent_review_required, so the marker can never drift from the gate's own verdict.
 	// Only computable when `request` is available; externally managed lanes leave the field unset —
 	// "unknown", never falsely "false".
 	if (request) {
-		stored.parentReviewRequired = isParentReviewRequired({ request, claim, cwd: options?.cwd });
+		stored.parentReviewRequired = isParentReviewRequired({ request, claim: normalizedClaim, cwd: options?.cwd });
 	}
 	const payload: WorkerClaimSnapshotPayload = {
 		version: 1,

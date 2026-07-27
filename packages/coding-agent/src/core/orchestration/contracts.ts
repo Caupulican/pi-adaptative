@@ -12,6 +12,20 @@ export { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-cont
 
 export const ORCHESTRATION_SCHEMA_VERSION = 1 as const;
 
+/** Shared durable-control bounds. Keep persisted orchestration records small enough to replay safely. */
+export const MAX_ORCHESTRATION_IDENTIFIER_LENGTH = 512;
+export const MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH = 128;
+export const MAX_ORCHESTRATION_MODEL_ID_LENGTH = 512;
+export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
+export const MAX_ORCHESTRATION_COLLECTION_LENGTH = 64;
+export const MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH = 16 * 1024;
+/** Runtime worker-delegation setting ceiling; profile policy may narrow it but never exceed it. */
+/** Matches the bounded worker/process result contract retained by the execution plane. */
+export const MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES = 512 * 1024;
+export const MAX_WORKER_AUTHORITY_PATHS = 64;
+export const MAX_WORKER_AUTHORITY_PATH_LENGTH = 4 * 1024;
+export const MAX_WORKER_SOUL_LENGTH = 16 * 1024;
+
 export const WORKER_ROLES = [
 	"orchestrator",
 	"planner",
@@ -180,6 +194,11 @@ export interface ResourcePointer {
 	metadata?: JsonObject;
 }
 
+/** Bounded metadata-only resources retained in one worker execution contract. */
+export const MAX_WORKER_RESOURCE_POINTERS = 64;
+export const MAX_WORKER_RESOURCE_PATH_LENGTH = 4096;
+export const MAX_WORKER_RESOURCE_METADATA_NAME_LENGTH = 256;
+
 /** Lightweight metadata catalogued without importing the executable tool module. */
 export interface ToolCapabilityManifest {
 	toolName: string;
@@ -220,6 +239,8 @@ export interface WorkerProfileExecutionContract {
 	profile: OrchestrationProfile;
 	modelBinding: OrchestrationModelBinding;
 	authority: WorkerExecutionAuthorityContract;
+	/** Metadata-only resources fixed at admission; their content remains lazy and non-durable. */
+	resourcePointers: readonly ResourcePointer[];
 	/** Resolved resource-profile identity text. Other worker resources are represented by profile tools. */
 	soul?: string;
 }
@@ -247,6 +268,8 @@ export interface OrchestrationDispatchRequest {
 	profileId: string;
 	instructions: string;
 	resourcePointerIds: readonly string[];
+	/** Runtime-owned goal/task correlation. Omitted by legacy records and normalized to an empty list. */
+	requirementIds?: readonly string[];
 	/** Execution owner. Omitted on legacy records and normalized to in-process. */
 	executionKind?: "in-process" | "managed-process";
 	/** Stable external lane identity shared by successive managed-process turns. */
@@ -307,6 +330,19 @@ export interface AttemptLease {
 	expiresAt: string;
 }
 
+/** Complete cumulative active usage for one execution attempt. Restart downtime is never included. */
+export interface AttemptUsageSnapshot {
+	toolCalls: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	/** Provider-authoritative total; detail categories are not assumed to be additive. */
+	totalTokens: number;
+	costUsd: number;
+	activeWallClockMs: number;
+}
+
 export interface AttemptCheckpoint {
 	checkpointId: string;
 	attemptId: string;
@@ -314,6 +350,8 @@ export interface AttemptCheckpoint {
 	summary: string;
 	artifactIds: readonly string[];
 	evidenceIds: readonly string[];
+	/** Omitted only by legacy checkpoints created before durable usage accounting existed. */
+	usage?: AttemptUsageSnapshot;
 	createdAt: string;
 }
 

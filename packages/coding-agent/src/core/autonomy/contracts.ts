@@ -137,6 +137,8 @@ export interface WorkerClaimVerificationDecision {
 /** Untrusted worker-authored report. Only host adjudication can turn this into a durable result. */
 export interface WorkerClaim {
 	requestId: string;
+	/** Host-stamped durable attempt identity for replay-safe claim persistence. */
+	terminalAttemptId?: string;
 	status: WorkerClaimStatus;
 	summary: string;
 	outputFormat?: WorkerClaimOutputFormat;

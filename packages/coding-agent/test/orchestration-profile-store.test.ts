@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -137,5 +137,45 @@ describe("OrchestrationProfileStore", () => {
 	it("rejects unsafe profile IDs before resolving a file path", () => {
 		expect(() => store.save(profile("../escape", "small"), "global")).toThrow("profile IDs");
 		expect(dirname(store.filePath("safe-worker", "global"))).toBe(store.directory("global"));
+	});
+
+	it("keeps an oversized malformed profile diagnostic-only without loading its content", () => {
+		store.save(profile("healthy", "small"), "global");
+		const oversizedPath = join(store.directory("global"), "oversized.json");
+		writeFileSync(oversizedPath, "x".repeat(512 * 1024 + 1), "utf-8");
+
+		const loaded = store.load();
+
+		expect(loaded.profiles.map((entry) => entry.profileId)).toEqual(["healthy"]);
+		expect(loaded.diagnostics).toEqual([
+			expect.objectContaining({
+				scope: "global",
+				path: oversizedPath,
+				message: expect.stringContaining("byte limit"),
+			}),
+		]);
+	});
+
+	it("diagnoses a profile directory burst without allocating an unbounded entry list", () => {
+		const directory = store.directory("global");
+		mkdirSync(directory, { recursive: true });
+		for (let index = 0; index < 513; index++) {
+			writeFileSync(join(directory, `burst-${String(index).padStart(4, "0")}.tmp`), "x", "utf-8");
+		}
+
+		const loaded = store.load();
+
+		expect(loaded.profiles).toEqual([]);
+		expect(loaded.diagnostics).toEqual([
+			expect.objectContaining({ scope: "global", path: directory, message: expect.stringContaining("entry limit") }),
+		]);
+	});
+
+	it("rejects an oversized owner-authored profile before creating its file", () => {
+		const oversized = profile("oversized", "small") as unknown as Record<string, unknown>;
+		oversized.unrecognizedPayload = "x".repeat(512 * 1024 + 1);
+
+		expect(() => store.save(oversized as unknown as OrchestrationProfile, "global")).toThrow("byte limit");
+		expect(() => readFileSync(store.filePath("oversized", "global"), "utf-8")).toThrow(/ENOENT/);
 	});
 });

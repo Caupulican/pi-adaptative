@@ -16,6 +16,7 @@ import {
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { createTestResourceLoader } from "./utilities.ts";
 
 describe("background lane budgets", () => {
 	it("clamps research lane spend to the foreground envelope cap", () => {
@@ -177,6 +178,18 @@ describe("worker runtime construction", () => {
 		controller.abortInFlightLanes();
 		expect(internals._workers).toBeUndefined();
 	});
+
+	it("refuses logical-worker controls before materializing delegation when UAC withholds it", () => {
+		const controller = new BackgroundLaneController({
+			isDelegateToolActive: () => false,
+			getAgentDir: () => "/tmp/pi-background-lane-uac-controls",
+			getSessionManager: () => ({ getEntries: () => [] }) as unknown as SessionManager,
+		} as never);
+		const internals = controller as unknown as { _workers?: unknown };
+
+		expect(() => controller.sendWorkerAgentMessage("agent-1", "do not load")).toThrow("UAC surface");
+		expect(internals._workers).toBeUndefined();
+	});
 });
 
 describe("worker execution locality", () => {
@@ -279,6 +292,7 @@ describe("quiesce registry", () => {
 			getSessionManager: () =>
 				({ getEntries: () => [], appendCustomEntry: () => "entry-1" }) as unknown as SessionManager,
 			getSettingsManager: () => settingsManager,
+			getResourceLoader: () => createTestResourceLoader(),
 			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
 			isModelExhausted: () => false,

@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	appendBoundedJsonLine,
@@ -49,6 +49,46 @@ describe("bounded JSONL", () => {
 			.map((line) => JSON.parse(line) as { index: number });
 		expect(records).toHaveLength(20);
 		expect(new Set(records.map((record) => record.index)).size).toBe(20);
+	});
+
+	it("enforces the record-count bound before the byte ceiling is reached", () => {
+		const filePath = tempFile();
+		const limits: BoundedJsonlLimits = { maxBytes: 10_000, targetBytes: 9_000, maxRecords: 3 };
+		for (let index = 0; index < 5; index++) appendBoundedJsonLineSync(filePath, { index }, limits);
+
+		const records = readFileSync(filePath, "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { index: number });
+		expect(records.map((record) => record.index)).toEqual([2, 3, 4]);
+	});
+
+	it("recovers from an oversized corrupt file without losing the newly appended record", async () => {
+		const syncFile = tempFile();
+		mkdirSync(dirname(syncFile), { recursive: true });
+		writeFileSync(syncFile, "corrupt".repeat(10_000));
+		appendBoundedJsonLineSync(syncFile, { index: 7 }, SMALL_LIMITS);
+		expect(readFileSync(syncFile, "utf-8").trim()).toBe('{"index":7}');
+
+		const asyncFile = tempFile();
+		mkdirSync(dirname(asyncFile), { recursive: true });
+		writeFileSync(asyncFile, "corrupt".repeat(10_000));
+		await appendBoundedJsonLine(asyncFile, { index: 8 }, SMALL_LIMITS);
+		expect(readFileSync(asyncFile, "utf-8").trim()).toBe('{"index":8}');
+	});
+
+	it("rejects a record larger than the hard byte ceiling before creating the log", async () => {
+		const syncFile = tempFile();
+		expect(() => appendBoundedJsonLineSync(syncFile, { text: "x".repeat(500) }, SMALL_LIMITS)).toThrow(
+			"record exceeds maxBytes",
+		);
+		expect(existsSync(syncFile)).toBe(false);
+
+		const asyncFile = tempFile();
+		await expect(appendBoundedJsonLine(asyncFile, { text: "x".repeat(500) }, SMALL_LIMITS)).rejects.toThrow(
+			"record exceeds maxBytes",
+		);
+		expect(existsSync(asyncFile)).toBe(false);
 	});
 
 	it("rejects values and limits that cannot form a bounded JSON record", async () => {

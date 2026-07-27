@@ -119,8 +119,8 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toBe(
-			"delegate started (queued) — wait for its terminal handoff, then retrieve once with delegate_status",
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; wait for its terminal handoff, then retrieve once with delegate_status",
 		);
-		expect(result.details).toEqual({ started: true, laneId: "worker-1", status: "queued" });
+		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
 	});
 });

@@ -2,8 +2,21 @@ import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { EvidenceRef, Finding, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
-import { type AppliedActionsReport, parseWorkerActions, type WorkerAction } from "./worker-actions.ts";
-import { validateWorkerClaim } from "./worker-claim.ts";
+import {
+	type AppliedActionsReport,
+	parseWorkerActions,
+	type RejectedWorkerActions,
+	type WorkerAction,
+} from "./worker-actions.ts";
+import {
+	collectBoundedWorkerClaimBlockers,
+	collectBoundedWorkerClaimChangedFiles,
+	MAX_WORKER_CLAIM_BLOCKER_CHARS,
+	MAX_WORKER_CLAIM_BLOCKERS,
+	MAX_WORKER_CLAIM_SUMMARY_CHARS,
+	normalizeWorkerClaimForHost,
+	validateWorkerClaim,
+} from "./worker-claim.ts";
 
 /**
  * Pure execution for one bounded specialist delegation: bounded isolated completion ->
@@ -129,64 +142,116 @@ export interface ParsedWorkerOutput {
 	blockers: string[];
 	findings: Array<{ summary: string; confidence?: number }>;
 	actions: WorkerAction[];
+	/** Present when the model emitted an action list that cannot safely reach execution. */
+	actionRejection?: RejectedWorkerActions;
 	verdict?: "accepted" | "rejected";
 	reasonCodes: string[];
 }
 
+const MAX_WORKER_OUTPUT_CHARS = 512 * 1024;
+const MAX_WORKER_JSON_CANDIDATES = 64;
+const MAX_WORKER_JSON_DEPTH = 256;
+const MAX_WORKER_FINDINGS = 64;
+const MAX_WORKER_FINDING_CHARS = 2_000;
+const MAX_WORKER_REASON_CODES = 32;
+const MAX_WORKER_REASON_CODE_CHARS = 128;
+
 function balancedObjectCandidates(text: string): string[] {
-	const candidates: string[] = [];
-	for (let start = 0; start < text.length; start++) {
-		if (text[start] !== "{") continue;
-		let depth = 0;
-		let inString = false;
-		let escaped = false;
-		for (let index = start; index < text.length; index++) {
-			const character = text[index];
-			if (inString) {
-				if (escaped) escaped = false;
-				else if (character === "\\") escaped = true;
-				else if (character === '"') inString = false;
-				continue;
-			}
-			if (character === '"') {
-				inString = true;
-			} else if (character === "{") {
-				depth++;
-			} else if (character === "}" && --depth === 0) {
-				candidates.push(text.slice(start, index + 1));
-				break;
-			}
+	const ranges: Array<{ start: number; end: number }> = [];
+	const starts: number[] = [];
+	let inString = false;
+	let escaped = false;
+	for (let index = 0; index < text.length; index++) {
+		const character = text[index];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (character === "\\") escaped = true;
+			else if (character === '"') inString = false;
+			continue;
 		}
+		if (character === '"') {
+			inString = true;
+			continue;
+		}
+		if (character === "{") {
+			if (starts.length >= MAX_WORKER_JSON_DEPTH) return ranges.map(({ start, end }) => text.slice(start, end));
+			starts.push(index);
+			continue;
+		}
+		if (character !== "}") continue;
+		const start = starts.pop();
+		if (start === undefined || ranges.length >= MAX_WORKER_JSON_CANDIDATES) continue;
+		const end = index + 1;
+		if (end - start <= MAX_WORKER_OUTPUT_CHARS) ranges.push({ start, end });
 	}
-	return candidates;
+	return ranges.map(({ start, end }) => text.slice(start, end));
 }
 
-export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined {
+function workerOutputRecords(text: string): Record<string, unknown>[] {
 	const trimmed = text.trim();
+	if (trimmed.length === 0 || trimmed.length > MAX_WORKER_OUTPUT_CHARS) return [];
 	const candidates: string[] = [trimmed];
 	const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
 	if (fenced?.[1]) candidates.push(fenced[1].trim());
 	candidates.push(...balancedObjectCandidates(trimmed));
-
+	const records: Record<string, unknown>[] = [];
 	for (const candidate of candidates) {
-		let parsed: unknown;
 		try {
-			parsed = JSON.parse(candidate);
+			const parsed: unknown = JSON.parse(candidate);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+				records.push(parsed as Record<string, unknown>);
 		} catch {
-			continue;
+			// Candidate extraction is deliberately best-effort; a later balanced candidate may still be valid.
 		}
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-		const record = parsed as Record<string, unknown>;
+	}
+	return records;
+}
+
+function isWorkerStatus(value: unknown): value is ParsedWorkerOutput["status"] {
+	return value === "completed" || value === "blocked";
+}
+
+/**
+ * Plain-text fallback is for output that never attempted the worker claim envelope. A JSON object
+ * with a claim summary but malformed typed fields is a contract failure, never an implicit success.
+ */
+function hasMalformedWorkerClaimEnvelope(text: string): boolean {
+	return workerOutputRecords(text).some((record) => {
+		if (typeof record.summary !== "string" || record.summary.trim().length === 0) return false;
+		if (!isWorkerStatus(record.status)) return true;
+		if (record.verdict !== undefined && record.verdict !== "accepted" && record.verdict !== "rejected") return true;
+		return (
+			record.reasonCodes !== undefined &&
+			(!Array.isArray(record.reasonCodes) ||
+				record.reasonCodes.some((reasonCode) => typeof reasonCode !== "string" || reasonCode.trim().length === 0))
+		);
+	});
+}
+
+export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined {
+	for (const record of workerOutputRecords(text)) {
 		const summary = record.summary;
 		if (typeof summary !== "string" || summary.trim().length === 0) continue;
+		if (!isWorkerStatus(record.status)) continue;
+		if (record.verdict !== undefined && record.verdict !== "accepted" && record.verdict !== "rejected") continue;
+		if (
+			record.reasonCodes !== undefined &&
+			(!Array.isArray(record.reasonCodes) ||
+				record.reasonCodes.some((reasonCode) => typeof reasonCode !== "string" || reasonCode.trim().length === 0))
+		) {
+			continue;
+		}
 
-		const status = record.status === "blocked" ? "blocked" : "completed";
+		const status = record.status;
 		const blockers = Array.isArray(record.blockers)
-			? record.blockers.filter((blocker): blocker is string => typeof blocker === "string" && blocker.length > 0)
+			? record.blockers
+					.filter((blocker): blocker is string => typeof blocker === "string" && blocker.trim().length > 0)
+					.slice(0, MAX_WORKER_CLAIM_BLOCKERS)
+					.map((blocker) => blocker.trim().slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS))
 			: [];
 		const findings: Array<{ summary: string; confidence?: number }> = [];
 		if (Array.isArray(record.findings)) {
-			for (const item of record.findings) {
+			for (const item of record.findings.slice(0, MAX_WORKER_FINDINGS)) {
 				if (!item || typeof item !== "object" || Array.isArray(item)) continue;
 				const findingSummary = (item as { summary?: unknown }).summary;
 				if (typeof findingSummary !== "string" || findingSummary.trim().length === 0) continue;
@@ -195,21 +260,26 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 					typeof confidenceRaw === "number" && Number.isFinite(confidenceRaw)
 						? Math.min(Math.max(confidenceRaw, 0), 1)
 						: undefined;
-				findings.push({ summary: findingSummary.trim(), confidence });
+				findings.push({ summary: findingSummary.trim().slice(0, MAX_WORKER_FINDING_CHARS), confidence });
 			}
 		}
 		const verdict = record.verdict === "accepted" || record.verdict === "rejected" ? record.verdict : undefined;
 		const reasonCodes = Array.isArray(record.reasonCodes)
-			? record.reasonCodes.filter(
-					(reasonCode): reasonCode is string => typeof reasonCode === "string" && reasonCode.length > 0,
-				)
+			? record.reasonCodes
+					.filter(
+						(reasonCode): reasonCode is string => typeof reasonCode === "string" && reasonCode.trim().length > 0,
+					)
+					.slice(0, MAX_WORKER_REASON_CODES)
+					.map((reasonCode) => reasonCode.trim().slice(0, MAX_WORKER_REASON_CODE_CHARS))
 			: [];
+		const actionOutcome = parseWorkerActions(record.actions);
 		return {
-			summary: summary.trim(),
+			summary: summary.trim().slice(0, MAX_WORKER_CLAIM_SUMMARY_CHARS),
 			status,
 			blockers,
 			findings,
-			actions: parseWorkerActions(record.actions),
+			actions: actionOutcome.kind === "accepted" ? actionOutcome.actions : [],
+			...(actionOutcome.kind === "rejected" ? { actionRejection: actionOutcome } : {}),
 			...(verdict ? { verdict } : {}),
 			reasonCodes,
 		};
@@ -253,9 +323,10 @@ function finishOutcome(args: {
 	costUsd: number;
 	cwd?: string;
 }): WorkerRunOutcome {
-	const acceptance = validateWorkerClaim({ request: args.request, claim: args.claim, cwd: args.cwd });
+	const claim = normalizeWorkerClaimForHost(args.claim);
+	const acceptance = validateWorkerClaim({ request: args.request, claim, cwd: args.cwd });
 	return {
-		claim: args.claim,
+		claim,
 		acceptance,
 		accepted: acceptance.outcome === "allow",
 		laneStatus: args.laneStatus,
@@ -290,10 +361,14 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			}),
 	});
 	const costUsd = bounded.completion?.costUsd ?? 0;
-	const liveChangedFiles = [...new Set(options.getChangedFiles?.() ?? [])];
+	const liveChangedFilesReport = collectBoundedWorkerClaimChangedFiles(options.getChangedFiles?.() ?? []);
+	const liveChangedFiles = liveChangedFilesReport.values;
 
 	if (bounded.failure) {
 		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
+		const blockers = liveChangedFilesReport.overflowed
+			? ["worker changed-file report exceeded the durable claim bound; parent review is required"]
+			: undefined;
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
@@ -302,6 +377,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				changedFiles: liveChangedFiles,
 				status: cancelled ? "cancelled" : "failed",
 				summary: `Worker did not complete: ${bounded.failure.reasonCode}`,
+				...(blockers ? { blockers } : {}),
 			},
 			laneStatus: bounded.failure.status,
 			reasonCode: bounded.failure.reasonCode,
@@ -310,7 +386,16 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	}
 
 	const completion = bounded.completion as WorkerCompletion | undefined;
-	const completionChangedFiles = [...new Set([...liveChangedFiles, ...(completion?.changedFiles ?? [])])];
+	const completionChangedFilesReport = collectBoundedWorkerClaimChangedFiles(completion?.changedFiles ?? []);
+	const mergedChangedFilesReport = collectBoundedWorkerClaimChangedFiles([
+		...liveChangedFiles,
+		...completionChangedFilesReport.values,
+	]);
+	const changedFilesOverflowed =
+		liveChangedFilesReport.overflowed ||
+		completionChangedFilesReport.overflowed ||
+		mergedChangedFilesReport.overflowed;
+	const completionChangedFiles = mergedChangedFilesReport.values;
 	const completionBaseClaim = { ...baseClaim, changedFiles: completionChangedFiles };
 	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
 		return finishOutcome({
@@ -325,18 +410,39 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 
 	const parsed = parseWorkerOutput(completion.text);
 	if (!parsed) {
+		if (hasMalformedWorkerClaimEnvelope(completion.text)) {
+			return finishOutcome({
+				request: options.request,
+				cwd: options.cwd,
+				claim: {
+					...completionBaseClaim,
+					status: "failed",
+					summary: "Worker output used a malformed structured claim envelope.",
+				},
+				laneStatus: "failed",
+				reasonCode: "unparseable_output",
+				costUsd,
+			});
+		}
 		const readOnlyPlainText =
 			!options.verificationSubjectTaskId &&
 			!writeCapable &&
 			completion.text.trim().length > 0 &&
-			completionChangedFiles.length === 0;
+			completionChangedFiles.length === 0 &&
+			!changedFilesOverflowed;
 		if (readOnlyPlainText) {
-			const completionBlockers = [...(completion.blockers ?? [])];
+			const completionBlockersReport = collectBoundedWorkerClaimBlockers(completion.blockers ?? []);
+			const completionBlockers = completionBlockersReport.overflowed
+				? [
+						...completionBlockersReport.values.slice(0, Math.max(0, MAX_WORKER_CLAIM_BLOCKERS - 1)),
+						"worker blocker report exceeded the durable claim bound; parent review is required",
+					]
+				: completionBlockersReport.values;
 			const incompleteNote =
 				completion.stopReason === "stop"
 					? ""
 					: `\n\n[Worker output ended with stop reason '${completion.stopReason}'; verify completeness.]`;
-			const summary = `${completion.text.trim().slice(0, Math.max(0, 8000 - incompleteNote.length))}${incompleteNote}`;
+			const summary = `${completion.text.trim().slice(0, Math.max(0, MAX_WORKER_CLAIM_SUMMARY_CHARS - incompleteNote.length))}${incompleteNote}`;
 			const blocked = completionBlockers.length > 0;
 			return finishOutcome({
 				request: options.request,
@@ -364,6 +470,13 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				...completionBaseClaim,
 				status: "failed",
 				summary: "Worker output was not valid structured JSON.",
+				...(changedFilesOverflowed
+					? {
+							blockers: [
+								"worker changed-file report exceeded the durable claim bound; parent review is required",
+							],
+						}
+					: {}),
 			},
 			laneStatus: "failed",
 			reasonCode: "unparseable_output",
@@ -372,6 +485,21 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	}
 
 	const evidence = buildWorkerEvidence(options.request, parsed.findings);
+	if (parsed.actionRejection) {
+		return finishOutcome({
+			request: options.request,
+			cwd: options.cwd,
+			claim: {
+				...completionBaseClaim,
+				status: "failed",
+				summary: "Worker output contained invalid structured actions.",
+				blockers: [parsed.actionRejection.reasonCode],
+			},
+			laneStatus: "failed",
+			reasonCode: "unparseable_output",
+			costUsd,
+		});
+	}
 	if (options.verificationSubjectTaskId && (!parsed.verdict || parsed.reasonCodes.length === 0)) {
 		return finishOutcome({
 			request: options.request,
@@ -387,7 +515,14 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		});
 	}
 	let changedFiles: string[] = [...completionChangedFiles];
-	const actionBlockers: string[] = [...(completion.blockers ?? [])];
+	const completionBlockersReport = collectBoundedWorkerClaimBlockers(completion.blockers ?? []);
+	const actionBlockers: string[] = [...completionBlockersReport.values];
+	if (changedFilesOverflowed) {
+		actionBlockers.push("worker changed-file report exceeded the durable claim bound; parent review is required");
+	}
+	if (completionBlockersReport.overflowed) {
+		actionBlockers.push("worker blocker report exceeded the durable claim bound; parent review is required");
+	}
 	if (!writeCapable && completionChangedFiles.length > 0) {
 		actionBlockers.push("worker reported file changes without a filesystem.write envelope grant");
 	}
@@ -395,17 +530,36 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		// Runner-side application through the envelope path scope: refusals and failures are
 		// surfaced as blockers so a partially-applied change can never look like clean success.
 		const applied = options.applyActions(parsed.actions);
-		changedFiles = [...new Set([...changedFiles, ...applied.changedFiles])];
+		const appliedChangedFilesReport = collectBoundedWorkerClaimChangedFiles(applied.changedFiles);
+		const mergedAppliedChangedFilesReport = collectBoundedWorkerClaimChangedFiles([
+			...changedFiles,
+			...appliedChangedFilesReport.values,
+		]);
+		changedFiles = mergedAppliedChangedFilesReport.values;
+		if (appliedChangedFilesReport.overflowed || mergedAppliedChangedFilesReport.overflowed) {
+			actionBlockers.push("applied changed-file report exceeded the durable claim bound; parent review is required");
+		}
 		for (const refusal of applied.refused) {
 			actionBlockers.push(`action refused (${refusal.path}): ${refusal.reason}`);
 		}
 		for (const failure of applied.failed) {
 			actionBlockers.push(`action failed (${failure.path}): ${failure.reason}`);
 		}
+		for (const inspection of applied.inspectionRequired) {
+			actionBlockers.push(
+				`action requires workspace/evidence inspection (${inspection.path}, ${inspection.state}): ${inspection.reasonCode}`,
+			);
+		}
 	} else if (!writeCapable && parsed.actions.length > 0) {
 		actionBlockers.push("worker emitted file actions without a filesystem.write envelope grant; nothing was applied");
 	}
-	const allBlockers = [...parsed.blockers, ...actionBlockers];
+	const allBlockersReport = collectBoundedWorkerClaimBlockers([...parsed.blockers, ...actionBlockers]);
+	const allBlockers = allBlockersReport.overflowed
+		? [
+				...allBlockersReport.values.slice(0, Math.max(0, MAX_WORKER_CLAIM_BLOCKERS - 1)),
+				"worker blocker report exceeded the durable claim bound; parent review is required",
+			]
+		: allBlockersReport.values;
 	const claim: WorkerClaim = {
 		...baseClaim,
 		changedFiles,

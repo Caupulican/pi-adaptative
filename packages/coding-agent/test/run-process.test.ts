@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OrchestrationExecutionPolicy } from "../src/core/orchestration/contracts.ts";
-import { createRunProcessTool } from "../src/core/tools/run-process.ts";
+import { createRunProcessTool, createRunProcessToolDefinition } from "../src/core/tools/run-process.ts";
 
 const originalScoped = process.env.PI_RUN_PROCESS_TEST_VISIBLE;
 const originalSecret = process.env.PI_RUN_PROCESS_TEST_SECRET;
@@ -68,5 +68,69 @@ describe("run_process", () => {
 		});
 
 		expect(result.details).toMatchObject({ outcome: "output_limit", truncated: true });
+		expect(result.isError).toBe(true);
+	});
+
+	it("marks a non-zero process exit as a tool failure while retaining bounded diagnostics", async () => {
+		const tool = createRunProcessTool(process.cwd(), { policy: policy(), maxWallClockMs: 5_000 });
+		const result = await tool.execute("call-nonzero", {
+			executable: process.execPath,
+			args: ["-e", "process.stderr.write('repair marker'); process.exit(3)"],
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({ outcome: "failed", exitCode: 3 });
+		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("repair marker");
+	});
+
+	it("enforces the shared process-output ceiling even if an unchecked caller supplies a larger policy", async () => {
+		const tool = createRunProcessTool(process.cwd(), {
+			policy: policy({ maxOutputBytes: 2 * 1024 * 1024 }),
+			maxWallClockMs: 5_000,
+		});
+		const result = await tool.execute("call-5", {
+			executable: process.execPath,
+			args: ["-e", "process.stdout.write('x'.repeat(600000))"],
+		});
+
+		expect(result.details).toMatchObject({ outcome: "output_limit", truncated: true });
+	});
+
+	it("rejects an oversized argv before invoking the process boundary", async () => {
+		const spawn = vi.fn(() => {
+			throw new Error("process boundary was invoked");
+		});
+		const tool = createRunProcessTool(process.cwd(), {
+			policy: policy(),
+			maxWallClockMs: 5_000,
+			spawn,
+		});
+
+		await expect(
+			tool.execute("call-6", {
+				executable: process.execPath,
+				args: Array.from({ length: 65 }, (_, index) => `arg-${index}`),
+			}),
+		).rejects.toThrow("process_argument_invalid");
+		expect(spawn).not.toHaveBeenCalled();
+	});
+
+	it("keeps the owner executable catalog bounded in the model prompt", () => {
+		const allowedExecutables = Array.from({ length: 64 }, (_, index) => `${index}-${"x".repeat(4_000)}`);
+		const tool = createRunProcessToolDefinition(process.cwd(), {
+			policy: policy({ allowedExecutables }),
+			maxWallClockMs: 5_000,
+		});
+
+		expect(tool.description.length).toBeLessThanOrEqual(4_096);
+	});
+
+	it("rejects an invalid process deadline instead of silently running without one", () => {
+		expect(() =>
+			createRunProcessToolDefinition(process.cwd(), {
+				policy: policy(),
+				maxWallClockMs: Number.NaN,
+			}),
+		).toThrow("process_policy_invalid");
 	});
 });

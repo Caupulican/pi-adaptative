@@ -51,6 +51,7 @@ import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./
 import type { ContextGcReport } from "./context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
+import type { WorkerAgentControlPort } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
@@ -169,6 +170,22 @@ export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefine
 		content: step.content,
 		...(step.requirementIds?.length ? { requirementIds: step.requirementIds } : {}),
 	}));
+}
+
+/** Bind goal-selected requirement identity as runtime metadata, outside the model-facing delegate schema. */
+export function createGoalWorkerDelegationRequest(args: {
+	requirementId: string;
+	instructions: string;
+}): WorkerDelegationRequest {
+	return {
+		instructions: args.instructions,
+		taskContext: {
+			requirementIds: [args.requirementId],
+			dependsOnTaskIds: [],
+			acceptanceCriterionIds: [],
+			resourcePointerIds: [],
+		},
+	};
 }
 
 interface ReloadRuntimeSnapshot {
@@ -297,6 +314,7 @@ export interface RuntimeBuilderDeps {
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	workerAgentControl?: WorkerAgentControlPort;
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerClaimSnapshots(): WorkerClaim[];
@@ -853,7 +871,7 @@ export class RuntimeBuilder {
 					// adapted from its `{started:true;record}|{started:false;skipReason}` shape onto this
 					// tool's narrower `{laneId}|{skipReason}` shape.
 					startWorkerDelegation: (args) => {
-						const outcome = this.deps.startWorkerDelegation({ instructions: args.instructions });
+						const outcome = this.deps.startWorkerDelegation(createGoalWorkerDelegationRequest(args));
 						return outcome.started ? { laneId: outcome.record.laneId } : { skipReason: outcome.skipReason };
 					},
 					// dispatch_worker's tool-layer side effect for `dispatchTarget:"tmux"`: core structurally
@@ -918,6 +936,7 @@ export class RuntimeBuilder {
 					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
+					...(this.deps.workerAgentControl ? { workerAgentControl: this.deps.workerAgentControl } : {}),
 				});
 				this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
 			}
@@ -930,6 +949,7 @@ export class RuntimeBuilder {
 					// passthrough dep, so no other package needs to change for this to work.
 					acknowledgeWorkerReview: (requestId) =>
 						acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId),
+					...(this.deps.workerAgentControl ? { workerAgentControl: this.deps.workerAgentControl } : {}),
 				});
 				this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
 			}

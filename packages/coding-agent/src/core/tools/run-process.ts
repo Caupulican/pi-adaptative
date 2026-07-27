@@ -3,13 +3,32 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { OrchestrationExecutionPolicy } from "../orchestration/contracts.ts";
+import {
+	MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES,
+	type OrchestrationExecutionPolicy,
+} from "../orchestration/contracts.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+
+const MAX_RUN_PROCESS_EXECUTABLE_CHARS = 4_096;
+const MAX_RUN_PROCESS_ARGUMENT_CHARS = 4_096;
+const MAX_RUN_PROCESS_ARGUMENTS = 64;
+const MAX_RUN_PROCESS_ARGV_BYTES = 32 * 1024;
+const MAX_RUN_PROCESS_WALL_CLOCK_MS = 3_600_000;
+const MAX_VISIBLE_EXECUTABLES = 16;
+const MAX_VISIBLE_EXECUTABLE_CHARS = 64;
 
 const runProcessSchema = Type.Object(
 	{
-		executable: Type.String({ description: "Exact owner-allowed executable name or path." }),
-		args: Type.Optional(Type.Array(Type.String(), { description: "Direct argv entries. No shell parsing occurs." })),
+		executable: Type.String({
+			maxLength: MAX_RUN_PROCESS_EXECUTABLE_CHARS,
+			description: "Exact owner-allowed executable name or path.",
+		}),
+		args: Type.Optional(
+			Type.Array(Type.String({ maxLength: MAX_RUN_PROCESS_ARGUMENT_CHARS }), {
+				maxItems: MAX_RUN_PROCESS_ARGUMENTS,
+				description: "Direct argv entries. No shell parsing occurs.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -51,6 +70,66 @@ function scopedEnvironment(allowedNames: readonly string[]): NodeJS.ProcessEnv {
 	return environment;
 }
 
+function executableCatalogDescription(allowedExecutables: readonly string[]): string {
+	const visible = allowedExecutables
+		.slice(0, MAX_VISIBLE_EXECUTABLES)
+		.map((executable) => executable.slice(0, MAX_VISIBLE_EXECUTABLE_CHARS));
+	const omitted = allowedExecutables.length - visible.length;
+	return `${allowedExecutables.length} configured: ${visible.join(", ")}${omitted > 0 ? `; ${omitted} omitted` : ""}`;
+}
+
+function resolveProcessPolicy(options: RunProcessToolOptions): { maxOutputBytes: number; timeoutMs: number } {
+	if (
+		!Number.isSafeInteger(options.policy.maxOutputBytes) ||
+		options.policy.maxOutputBytes <= 0 ||
+		!Number.isSafeInteger(options.maxWallClockMs) ||
+		options.maxWallClockMs < 0
+	) {
+		throw new TypeError("process_policy_invalid: output and wall-clock limits must be bounded integers.");
+	}
+	return {
+		maxOutputBytes: Math.min(options.policy.maxOutputBytes, MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES),
+		// A zero lane-level budget disables that budget, not the execution-plane safety ceiling.
+		timeoutMs:
+			options.maxWallClockMs === 0
+				? MAX_RUN_PROCESS_WALL_CLOCK_MS
+				: Math.min(options.maxWallClockMs, MAX_RUN_PROCESS_WALL_CLOCK_MS),
+	};
+}
+
+function validateProcessInput(input: RunProcessInput): string[] {
+	if (
+		typeof input.executable !== "string" ||
+		input.executable.length === 0 ||
+		input.executable.length > MAX_RUN_PROCESS_EXECUTABLE_CHARS ||
+		input.executable.includes("\0")
+	) {
+		throw new Error("process_argument_invalid: executable is empty, oversized, or contains a NUL byte.");
+	}
+	if (
+		input.args !== undefined &&
+		(!Array.isArray(input.args) ||
+			input.args.length > MAX_RUN_PROCESS_ARGUMENTS ||
+			input.args.some(
+				(argument) =>
+					typeof argument !== "string" ||
+					argument.length > MAX_RUN_PROCESS_ARGUMENT_CHARS ||
+					argument.includes("\0"),
+			))
+	) {
+		throw new Error("process_argument_invalid: argv exceeds its count/size bound or contains a NUL byte.");
+	}
+	const args = input.args ?? [];
+	let argvBytes = Buffer.byteLength(input.executable, "utf-8");
+	for (const argument of args) {
+		argvBytes += 1 + Buffer.byteLength(argument, "utf-8");
+		if (argvBytes > MAX_RUN_PROCESS_ARGV_BYTES) {
+			throw new Error(`process_argument_invalid: executable and argv exceed ${MAX_RUN_PROCESS_ARGV_BYTES} bytes.`);
+		}
+	}
+	return args;
+}
+
 function collectBoundedOutput(
 	child: ChildProcess,
 	maxBytes: number,
@@ -84,11 +163,12 @@ function collectBoundedOutput(
 }
 
 export function createRunProcessToolDefinition(cwd: string, options: RunProcessToolOptions): ToolDefinition {
+	const processPolicy = resolveProcessPolicy(options);
 	const allowedExecutables = new Set(options.policy.allowedExecutables);
 	return {
 		name: "run_process",
 		label: "Run Process",
-		description: `Run one owner-allowed executable using direct argv without a shell. Allowed: ${options.policy.allowedExecutables.join(", ")}.`,
+		description: `Run one owner-allowed executable using direct argv without a shell. Allowed executables: ${executableCatalogDescription(options.policy.allowedExecutables)}.`,
 		promptSnippet: "Run an owner-allowed executable through a constrained direct-argv launcher (not OS isolation).",
 		promptGuidelines: [
 			"Use only an executable listed by the profile. Arguments are passed literally; shell operators and interpolation are unavailable.",
@@ -96,12 +176,9 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 		],
 		parameters: runProcessSchema,
 		async execute(_toolCallId, input: RunProcessInput, signal) {
+			const args = validateProcessInput(input);
 			if (!allowedExecutables.has(input.executable)) {
 				throw new Error(`process_executable_denied: '${input.executable}' is not owner-allowed.`);
-			}
-			const args = input.args ?? [];
-			if (input.executable.includes("\0") || args.some((argument) => argument.includes("\0"))) {
-				throw new Error("process_argument_invalid: executable and argv must not contain NUL bytes.");
 			}
 			const startedAt = Date.now();
 			const outputLimitAbort = new AbortController();
@@ -112,7 +189,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
 			});
-			const output = collectBoundedOutput(child, options.policy.maxOutputBytes, () => {
+			const output = collectBoundedOutput(child, processPolicy.maxOutputBytes, () => {
 				outputLimitReached = true;
 				outputLimitAbort.abort();
 			});
@@ -126,7 +203,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 			try {
 				const terminal = await waitForChildProcessWithTermination(child, {
 					signal: combinedAbort.signal,
-					timeoutMs: options.maxWallClockMs > 0 ? options.maxWallClockMs : undefined,
+					timeoutMs: processPolicy.timeoutMs,
 					killGraceMs: 2_000,
 				});
 				const captured = output.read();
@@ -147,6 +224,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 				].join("\n");
 				return {
 					content: [{ type: "text" as const, text: body }],
+					...(outcome === "exited" ? {} : { isError: true }),
 					details: {
 						outcome,
 						executable: input.executable,

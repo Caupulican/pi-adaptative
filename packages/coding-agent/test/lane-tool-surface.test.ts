@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentContext } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
+import {
+	type ExecutionGrant,
+	ORCHESTRATION_SCHEMA_VERSION,
+	type ToolCapabilityManifest,
+} from "../src/core/orchestration/contracts.ts";
 import type { NormalizedProfile } from "../src/core/profile-registry.ts";
 import type { ResourceProfileSettings } from "../src/core/settings-manager.ts";
 
@@ -119,5 +124,92 @@ describe("classified lane tool surface", () => {
 			"find",
 			"ls",
 		]);
+	});
+
+	it("rejects an oversized memory query before invoking the memory boundary", async () => {
+		const readMemory = vi.fn(async () => "memory");
+		const surface = createLaneToolSurface({
+			cwd,
+			profile: profile({ tools: { allow: ["memory"] } }),
+			readMemory,
+		});
+		const memory = surface.tools.find((tool) => tool.name === "memory");
+		if (!memory) throw new Error("Expected the memory tool.");
+
+		await expect(memory.execute("memory-1", { query: "x".repeat(4_097) })).rejects.toThrow("memory_query_invalid");
+		expect(readMemory).not.toHaveBeenCalled();
+	});
+
+	it("seeds the compiled gateway from durable cumulative usage and rejects invalid seeds", () => {
+		const grant: ExecutionGrant = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			grantId: "grant-1",
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "explorer",
+			capabilities: ["filesystem.read"],
+			allowedTools: ["read"],
+			resources: [],
+			readPaths: [cwd],
+			writePaths: [],
+			deniedPaths: [],
+			budget: { maxToolCalls: 2 },
+			policyVersion: "policy-1",
+			decisionTrace: [],
+			issuedAt: "2026-07-27T00:00:00.000Z",
+		};
+		const manifests: ToolCapabilityManifest[] = [
+			{
+				toolName: "read",
+				moduleSpecifier: "./read.ts",
+				capabilities: ["filesystem.read"],
+				roles: ["explorer"],
+				enforcements: ["path-scope"],
+			},
+		];
+		const surface = createLaneToolSurface({
+			cwd,
+			grant,
+			toolManifests: manifests,
+			initialUsage: {
+				toolCalls: 1,
+				inputTokens: 2,
+				outputTokens: 3,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens: 5,
+				costUsd: 0.1,
+				activeWallClockMs: 4,
+			},
+		});
+
+		const usage = surface.gateway?.getUsage();
+		expect(usage).toMatchObject({
+			toolCalls: 1,
+			inputTokens: 2,
+			outputTokens: 3,
+			totalTokens: 5,
+			costUsd: 0.1,
+		});
+		expect(usage?.wallClockMs).toBeGreaterThanOrEqual(4);
+		expect(() =>
+			createLaneToolSurface({
+				cwd,
+				grant,
+				toolManifests: manifests,
+				initialUsage: {
+					toolCalls: -1,
+					inputTokens: 0,
+					outputTokens: 0,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					totalTokens: 0,
+					costUsd: 0,
+					activeWallClockMs: 0,
+				},
+			}),
+		).toThrow("initial usage must contain finite non-negative values and safe-integer counts");
 	});
 });

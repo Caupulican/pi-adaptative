@@ -1,7 +1,8 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { extractPathArguments } from "../autonomy/envelope-enforcement.ts";
-import { safeRealpathSync } from "../autonomy/path-scope.ts";
-import type { ExecutionGrant, HarnessCapability, ToolCapabilityManifest } from "./contracts.ts";
+import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
+import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
+import type { AttemptUsageSnapshot, ExecutionGrant, HarnessCapability, ToolCapabilityManifest } from "./contracts.ts";
 
 export type GatewayDecisionCode =
 	| "allowed"
@@ -28,6 +29,8 @@ export interface GatewayAuditRecord {
 export interface CapabilityGatewayOptions {
 	grant: ExecutionGrant;
 	cwd: string;
+	/** Durable active usage carried forward when an attempt resumes in a new process. */
+	initialUsage?: GatewayInitialUsage;
 	now?: () => number;
 	onAudit?: (record: GatewayAuditRecord) => void;
 }
@@ -35,6 +38,10 @@ export interface CapabilityGatewayOptions {
 export interface GatewayUsageDelta {
 	inputTokens?: number;
 	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	/** Provider-authoritative total. Defaults to the supplied detail sum when omitted. */
+	totalTokens?: number;
 	costUsd?: number;
 }
 
@@ -42,10 +49,15 @@ export interface GatewayUsageSnapshot {
 	toolCalls: number;
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 	totalTokens: number;
 	costUsd: number;
 	wallClockMs: number;
 }
+
+/** Persistable cumulative usage from a prior active segment; excludes restart downtime. */
+export type GatewayInitialUsage = AttemptUsageSnapshot;
 
 export class CapabilityGatewayDeniedError extends Error {
 	readonly reasonCode: GatewayDecisionCode;
@@ -66,20 +78,53 @@ const PATH_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set([
 
 const WRITE_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set(["filesystem.write", "worktree.mutate"]);
 
-function isWithinRoot(target: string, root: string): boolean {
-	const relativePath = relative(root, target);
-	return (
-		relativePath === "" ||
-		(!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath))
-	);
-}
-
 function resolveRealPath(cwd: string, value: string): string | undefined {
 	try {
 		return safeRealpathSync(resolve(cwd, value));
 	} catch {
 		return undefined;
 	}
+}
+
+function validateInitialUsage(usage: GatewayInitialUsage): void {
+	try {
+		validateAttemptUsageSnapshot(usage, "CapabilityGateway: initial usage");
+	} catch {
+		throw new Error(
+			"CapabilityGateway: initial usage must contain finite non-negative values and safe-integer counts.",
+		);
+	}
+}
+
+function validatedUsageDelta(delta: GatewayUsageDelta): Required<GatewayUsageDelta> {
+	const inputTokens = delta.inputTokens === undefined ? 0 : delta.inputTokens;
+	const outputTokens = delta.outputTokens === undefined ? 0 : delta.outputTokens;
+	const cacheReadTokens = delta.cacheReadTokens === undefined ? 0 : delta.cacheReadTokens;
+	const cacheWriteTokens = delta.cacheWriteTokens === undefined ? 0 : delta.cacheWriteTokens;
+	const totalTokens =
+		delta.totalTokens === undefined
+			? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
+			: delta.totalTokens;
+	const costUsd = delta.costUsd === undefined ? 0 : delta.costUsd;
+	if (
+		!Number.isSafeInteger(inputTokens) ||
+		inputTokens < 0 ||
+		!Number.isSafeInteger(outputTokens) ||
+		outputTokens < 0 ||
+		!Number.isSafeInteger(cacheReadTokens) ||
+		cacheReadTokens < 0 ||
+		!Number.isSafeInteger(cacheWriteTokens) ||
+		cacheWriteTokens < 0 ||
+		!Number.isSafeInteger(totalTokens) ||
+		totalTokens < 0 ||
+		!Number.isFinite(costUsd) ||
+		costUsd < 0
+	) {
+		throw new Error(
+			"CapabilityGateway: usage delta must contain finite non-negative values and safe-integer token counts.",
+		);
+	}
+	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, costUsd };
 }
 
 /**
@@ -93,17 +138,40 @@ export class CapabilityGateway {
 	private readonly now: () => number;
 	private readonly onAudit?: (record: GatewayAuditRecord) => void;
 	private readonly startedAt: number;
-	private toolCalls = 0;
-	private inputTokens = 0;
-	private outputTokens = 0;
-	private costUsd = 0;
+	private readonly initialWallClockMs: number;
+	private toolCalls: number;
+	private inputTokens: number;
+	private outputTokens: number;
+	private cacheReadTokens: number;
+	private cacheWriteTokens: number;
+	private totalTokens: number;
+	private costUsd: number;
 
 	constructor(options: CapabilityGatewayOptions) {
+		const initialUsage: GatewayInitialUsage = options.initialUsage ?? {
+			toolCalls: 0,
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			totalTokens: 0,
+			costUsd: 0,
+			activeWallClockMs: 0,
+		};
+		validateInitialUsage(initialUsage);
 		this.grant = options.grant;
 		this.cwd = options.cwd;
 		this.now = options.now ?? Date.now;
 		this.onAudit = options.onAudit;
-		this.startedAt = this.now();
+		this.startedAt = this.currentTime();
+		this.initialWallClockMs = initialUsage.activeWallClockMs;
+		this.toolCalls = initialUsage.toolCalls;
+		this.inputTokens = initialUsage.inputTokens;
+		this.outputTokens = initialUsage.outputTokens;
+		this.cacheReadTokens = initialUsage.cacheReadTokens;
+		this.cacheWriteTokens = initialUsage.cacheWriteTokens;
+		this.totalTokens = initialUsage.totalTokens;
+		this.costUsd = initialUsage.costUsd;
 	}
 
 	async execute<T>(
@@ -118,15 +186,46 @@ export class CapabilityGateway {
 
 	/** Immediate pre-execution authorization for runtimes that expose a before-tool-call hook. */
 	authorizeToolCall(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
-		this.authorize(manifest, toolName, params);
-		this.toolCalls++;
+		const now = this.currentTime();
+		const wallClockMs = this.wallClockMsAt(now);
+		this.authorize(manifest, toolName, params, now, wallClockMs);
+		const toolCalls = this.toolCalls + 1;
+		if (!Number.isSafeInteger(toolCalls)) {
+			throw new Error("CapabilityGateway: tool-call count would exceed safe cumulative usage bounds.");
+		}
+		this.toolCalls = toolCalls;
 		this.audit(toolName, "allow", "allowed");
 	}
 
 	recordUsage(delta: GatewayUsageDelta): void {
-		this.inputTokens += delta.inputTokens ?? 0;
-		this.outputTokens += delta.outputTokens ?? 0;
-		this.costUsd += delta.costUsd ?? 0;
+		const validated = validatedUsageDelta(delta);
+		const inputTokens = this.inputTokens + validated.inputTokens;
+		const outputTokens = this.outputTokens + validated.outputTokens;
+		const cacheReadTokens = this.cacheReadTokens + validated.cacheReadTokens;
+		const cacheWriteTokens = this.cacheWriteTokens + validated.cacheWriteTokens;
+		const totalTokens = this.totalTokens + validated.totalTokens;
+		const costUsd = this.costUsd + validated.costUsd;
+		if (
+			!Number.isSafeInteger(inputTokens) ||
+			!Number.isSafeInteger(outputTokens) ||
+			!Number.isSafeInteger(cacheReadTokens) ||
+			!Number.isSafeInteger(cacheWriteTokens) ||
+			!Number.isSafeInteger(totalTokens) ||
+			!Number.isFinite(costUsd)
+		) {
+			throw new Error("CapabilityGateway: usage delta would exceed safe cumulative usage bounds.");
+		}
+		this.inputTokens = inputTokens;
+		this.outputTokens = outputTokens;
+		this.cacheReadTokens = cacheReadTokens;
+		this.cacheWriteTokens = cacheWriteTokens;
+		this.totalTokens = totalTokens;
+		this.costUsd = costUsd;
+	}
+
+	/** Enforce resumed cumulative budgets before a provider request that has no tool-call boundary. */
+	assertBudgetAvailable(subject = "provider"): void {
+		this.enforceBudget(subject, this.wallClockMsAt(this.currentTime()));
 	}
 
 	getUsage(): GatewayUsageSnapshot {
@@ -134,14 +233,22 @@ export class CapabilityGateway {
 			toolCalls: this.toolCalls,
 			inputTokens: this.inputTokens,
 			outputTokens: this.outputTokens,
-			totalTokens: this.inputTokens + this.outputTokens,
+			cacheReadTokens: this.cacheReadTokens,
+			cacheWriteTokens: this.cacheWriteTokens,
+			totalTokens: this.totalTokens,
 			costUsd: this.costUsd,
-			wallClockMs: Math.max(0, this.now() - this.startedAt),
+			wallClockMs: this.wallClockMsAt(this.currentTime()),
 		};
 	}
 
-	private authorize(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
-		if (this.grant.expiresAt && Date.parse(this.grant.expiresAt) <= this.now()) {
+	private authorize(
+		manifest: ToolCapabilityManifest,
+		toolName: string,
+		params: unknown,
+		now: number,
+		wallClockMs: number,
+	): void {
+		if (this.grant.expiresAt && Date.parse(this.grant.expiresAt) <= now) {
 			this.deny(toolName, "grant_expired", `Execution grant '${this.grant.grantId}' expired.`);
 		}
 		if (!this.grant.allowedTools.includes(toolName)) {
@@ -153,7 +260,7 @@ export class CapabilityGateway {
 		if (!manifest.capabilities.every((capability) => this.grant.capabilities.includes(capability))) {
 			this.deny(toolName, "capability_not_granted", `Tool '${toolName}' requires an ungranted capability.`);
 		}
-		this.enforceBudget(toolName);
+		this.enforceBudget(toolName, wallClockMs);
 
 		if (manifest.capabilities.some((capability) => PATH_CAPABILITIES.has(capability))) {
 			const allowedPaths = manifest.capabilities.some((capability) => WRITE_CAPABILITIES.has(capability))
@@ -171,20 +278,40 @@ export class CapabilityGateway {
 		}
 	}
 
-	private enforceBudget(toolName: string): void {
+	private enforceBudget(toolName: string, wallClockMs: number): void {
 		const budget = this.grant.budget;
 		if (budget.maxToolCalls !== undefined && this.toolCalls >= budget.maxToolCalls) {
 			this.deny(toolName, "tool_call_budget_exhausted", "Tool-call budget exhausted.");
 		}
-		if (budget.maxTokens !== undefined && this.inputTokens + this.outputTokens >= budget.maxTokens) {
+		if (budget.maxTokens !== undefined && this.totalTokens >= budget.maxTokens) {
 			this.deny(toolName, "token_budget_exhausted", "Token budget exhausted.");
 		}
 		if (budget.maxCostUsd !== undefined && this.costUsd >= budget.maxCostUsd) {
 			this.deny(toolName, "cost_budget_exhausted", "Cost budget exhausted.");
 		}
-		if (budget.maxWallClockMs !== undefined && this.now() - this.startedAt >= budget.maxWallClockMs) {
+		if (budget.maxWallClockMs !== undefined && wallClockMs >= budget.maxWallClockMs) {
 			this.deny(toolName, "wall_clock_budget_exhausted", "Wall-clock budget exhausted.");
 		}
+	}
+
+	private currentTime(): number {
+		const now = this.now();
+		if (!Number.isFinite(now)) {
+			throw new Error("CapabilityGateway: clock source must return a finite time.");
+		}
+		return now;
+	}
+
+	private wallClockMsAt(now: number): number {
+		const elapsed = now - this.startedAt;
+		if (!Number.isFinite(elapsed)) {
+			throw new Error("CapabilityGateway: active wall-clock elapsed time must be finite.");
+		}
+		const wallClockMs = this.initialWallClockMs + Math.max(0, elapsed);
+		if (!Number.isFinite(wallClockMs) || wallClockMs < 0) {
+			throw new Error("CapabilityGateway: accumulated wall-clock usage must be finite and non-negative.");
+		}
+		return wallClockMs;
 	}
 
 	private pathAllowed(rawPath: string, allowedPaths: readonly string[]): boolean {
@@ -192,11 +319,11 @@ export class CapabilityGateway {
 		if (!target || allowedPaths.length === 0) return false;
 		for (const denied of this.grant.deniedPaths) {
 			const root = resolveRealPath(this.cwd, denied);
-			if (root && isWithinRoot(target, root)) return false;
+			if (root && isPathWithinScope(target, root)) return false;
 		}
 		return allowedPaths.some((allowed) => {
 			const root = resolveRealPath(this.cwd, allowed);
-			return root !== undefined && isWithinRoot(target, root);
+			return root !== undefined && isPathWithinScope(target, root);
 		});
 	}
 
@@ -212,7 +339,7 @@ export class CapabilityGateway {
 			toolName,
 			outcome,
 			reasonCode,
-			at: new Date(this.now()).toISOString(),
+			at: new Date(this.currentTime()).toISOString(),
 		});
 	}
 }

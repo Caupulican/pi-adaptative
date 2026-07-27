@@ -10,7 +10,11 @@ import {
 	type WorkerResultContract,
 } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
-import { DurableTaskRuntime, DurableTaskRuntimeError } from "../src/core/orchestration/task-runtime.ts";
+import {
+	DurableTaskRuntime,
+	DurableTaskRuntimeError,
+	reduceOrchestrationEvent,
+} from "../src/core/orchestration/task-runtime.ts";
 import { buildResumablePiAgentWakePrompt } from "../src/core/process-matrix/resume-launcher.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
 
@@ -84,6 +88,38 @@ afterEach(() => {
 });
 
 describe("DurableTaskRuntime", () => {
+	it("rejects oversized persisted dispatch fields before appending an attempt event", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			title: "Bound dispatch",
+			description: "Keep durable dispatch compact",
+		});
+		const task = runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Bounded worker",
+			description: "Reject unbounded worker input before persistence",
+			role: "implementer",
+		});
+
+		expect(() =>
+			runtime.queueAttempt(task.taskId, {
+				taskId: task.taskId,
+				profileId: "worker-default",
+				instructions: "x".repeat(16 * 1024 + 1),
+				resourcePointerIds: Array.from({ length: 65 }, (_, index) => `resource-${index}`),
+			}),
+		).toThrow("dispatch.instructions exceeds its durable size bound");
+		expect(() =>
+			runtime.queueAttempt(task.taskId, {
+				taskId: task.taskId,
+				profileId: "worker-default",
+				instructions: "bounded instructions",
+				resourcePointerIds: Array.from({ length: 65 }, (_, index) => `resource-${index}`),
+			}),
+		).toThrow("dispatch.resourcePointerIds must be a bounded identifier array");
+		expect(runtime.getSnapshot().attempts).toEqual({});
+	});
+
 	it("rejects invalid objective and task budgets through the shared contract", () => {
 		const { runtime } = createHarness();
 		expect(() =>
@@ -167,6 +203,54 @@ describe("DurableTaskRuntime", () => {
 		expect(snapshot.tasks[explore.taskId]?.task.status).toBe("completed");
 		expect(snapshot.tasks[build.taskId]?.task.status).toBe("ready");
 		expect(snapshot.attempts[attempt.attemptId]?.checkpointIds).toEqual([checkpoint.checkpointId]);
+	});
+
+	it("persists one complete fenced cumulative usage snapshot and rejects malformed checkpoints", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({ title: "Usage", description: "Persist active usage" });
+		const task = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Measure",
+			description: "Checkpoint cumulative worker usage",
+			role: "explorer",
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-usage");
+		const lease = harness.runtime.leaseAttempt(attempt.attemptId, "worker-usage", 60_000);
+		harness.runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
+
+		const usage = {
+			toolCalls: 2,
+			inputTokens: 11,
+			outputTokens: 7,
+			cacheReadTokens: 3,
+			cacheWriteTokens: 2,
+			totalTokens: 23,
+			costUsd: 0.25,
+			activeWallClockMs: 350,
+		};
+		const checkpoint = harness.runtime.checkpointAttempt({
+			attemptId: attempt.attemptId,
+			leaseId: lease.leaseId,
+			fencingToken: lease.fencingToken,
+			summary: "Usage persisted before restart",
+			usage,
+		});
+		expect(checkpoint.usage).toEqual(usage);
+		expect(
+			new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms }).getSnapshot().checkpoints[
+				checkpoint.checkpointId
+			]?.usage,
+		).toEqual(usage);
+
+		expect(() =>
+			harness.runtime.checkpointAttempt({
+				attemptId: attempt.attemptId,
+				leaseId: lease.leaseId,
+				fencingToken: lease.fencingToken,
+				summary: "Malformed usage",
+				usage: { ...usage, inputTokens: -1 },
+			}),
+		).toThrow("checkpoint.usage.inputTokens");
 	});
 
 	it("reopens and catches up from a compacted projection while keeping the event tail bounded", () => {
@@ -691,8 +775,22 @@ describe("DurableTaskRuntime", () => {
 			summary: "Inspection reached package boundary",
 			artifactIds: ["artifact-1"],
 		});
-		harness.clock.ms += 2_000;
-		harness.runtime.expireLeases();
+		harness.runtime.suspendBoundAttempt({
+			attemptId: attempt.attemptId,
+			ownerId: firstLease.ownerId,
+			leaseId: firstLease.leaseId,
+			fencingToken: firstLease.fencingToken,
+			reasonCode: "agent_process_interrupted",
+		});
+		expect(() =>
+			harness.runtime.suspendBoundAttempt({
+				attemptId: attempt.attemptId,
+				ownerId: firstLease.ownerId,
+				leaseId: firstLease.leaseId,
+				fencingToken: firstLease.fencingToken,
+				reasonCode: "agent_process_interrupted",
+			}),
+		).toThrow("not a live agent-bound attempt");
 
 		const interrupted = harness.runtime.getSnapshot();
 		expect(interrupted.attempts[attempt.attemptId]?.status).toBe("suspended");
@@ -757,6 +855,190 @@ describe("DurableTaskRuntime", () => {
 
 		const reopened = new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms });
 		expect(reopened.getSnapshot().agents[agent.agentId]?.resumeContext.sessionId).toBe("pi-session-123");
+	});
+
+	it("immediately suspends only bound in-process attempts on a known process restart", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({ title: "Restart", description: "Fence stopped workers" });
+		const agent = harness.runtime.registerAgent({
+			agentId: "agent-restart-1",
+			role: "explorer",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "pi-restart-1",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		});
+		const boundTask = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Bound",
+			description: "Resume this worker",
+			role: "explorer",
+		});
+		const unboundTask = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Unbound",
+			description: "Requeue this worker separately",
+			role: "explorer",
+		});
+		const managedTask = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Managed",
+			description: "Keep external supervision",
+			role: "explorer",
+		});
+		const bound = harness.runtime.queueAttempt(boundTask.taskId, dispatch(boundTask.taskId));
+		const unbound = harness.runtime.queueAttempt(unboundTask.taskId, dispatch(unboundTask.taskId));
+		const managed = harness.runtime.queueAttempt(managedTask.taskId, {
+			...dispatch(managedTask.taskId),
+			executionKind: "managed-process",
+		});
+		for (const [attempt, task] of [
+			[bound, boundTask],
+			[unbound, unboundTask],
+			[managed, managedTask],
+		] as const) {
+			harness.runtime.bindAttemptGrant(
+				attempt.attemptId,
+				createTestExecutionGrant({
+					objectiveId: objective.objectiveId,
+					taskId: task.taskId,
+					attemptId: attempt.attemptId,
+					role: "explorer",
+				}),
+			);
+		}
+		const boundLease = harness.runtime.leaseAttempt(bound.attemptId, agent.agentId, 60_000, agent.agentId);
+		const unboundLease = harness.runtime.leaseAttempt(unbound.attemptId, "worker-unbound", 60_000);
+		const managedLease = harness.runtime.leaseAttempt(managed.attemptId, "worker-managed", 60_000);
+		harness.runtime.startAttempt(bound.attemptId, boundLease.leaseId, boundLease.fencingToken);
+		harness.runtime.startAttempt(unbound.attemptId, unboundLease.leaseId, unboundLease.fencingToken);
+		harness.runtime.startAttempt(managed.attemptId, managedLease.leaseId, managedLease.fencingToken);
+
+		harness.runtime.suspendBoundAttempt({
+			attemptId: bound.attemptId,
+			ownerId: boundLease.ownerId,
+			leaseId: boundLease.leaseId,
+			fencingToken: boundLease.fencingToken,
+			reasonCode: "agent_process_interrupted",
+		});
+		expect(harness.runtime.getSnapshot()).toMatchObject({
+			agents: { [agent.agentId]: { status: "suspended", activeAttemptId: bound.attemptId } },
+			attempts: {
+				[bound.attemptId]: { status: "suspended", agentId: agent.agentId },
+				[unbound.attemptId]: { status: "running" },
+				[managed.attemptId]: { status: "running" },
+			},
+		});
+	});
+
+	it("requires the exact owner and current lease fence to suspend one bound attempt", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({ title: "Fence", description: "Do not steal work" });
+		const agent = harness.runtime.registerAgent({
+			agentId: "agent-fence",
+			role: "explorer",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "pi-fence",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		});
+		const task = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Bound",
+			description: "Require exact ownership",
+			role: "explorer",
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		harness.runtime.bindAttemptGrant(
+			attempt.attemptId,
+			createTestExecutionGrant({
+				objectiveId: objective.objectiveId,
+				taskId: task.taskId,
+				attemptId: attempt.attemptId,
+				role: "explorer",
+			}),
+		);
+		const lease = harness.runtime.leaseAttempt(attempt.attemptId, "pi-worker:42:owner-a", 60_000, agent.agentId);
+		harness.runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
+
+		expect(() =>
+			harness.runtime.suspendBoundAttempt({
+				attemptId: attempt.attemptId,
+				ownerId: "pi-worker:42:owner-b",
+				leaseId: lease.leaseId,
+				fencingToken: lease.fencingToken,
+				reasonCode: "owner_stopped",
+			}),
+		).toThrow("not owned");
+		expect(() =>
+			harness.runtime.suspendBoundAttempt({
+				attemptId: attempt.attemptId,
+				ownerId: lease.ownerId,
+				leaseId: "stale-lease",
+				fencingToken: lease.fencingToken,
+				reasonCode: "owner_stopped",
+			}),
+		).toThrow("lease or fencing token is stale");
+		expect(harness.runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({ status: "running" });
+	});
+
+	it("rejects replayed suspension events with a stale lease or fence", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({ title: "Replay", description: "Reject stale suspend" });
+		const agent = harness.runtime.registerAgent({
+			agentId: "agent-replay",
+			role: "explorer",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "pi-replay",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		});
+		const task = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Replay",
+			description: "Validate event fence",
+			role: "explorer",
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId));
+		harness.runtime.bindAttemptGrant(
+			attempt.attemptId,
+			createTestExecutionGrant({
+				objectiveId: objective.objectiveId,
+				taskId: task.taskId,
+				attemptId: attempt.attemptId,
+				role: "explorer",
+			}),
+		);
+		const lease = harness.runtime.leaseAttempt(attempt.attemptId, "pi-worker:43:owner", 60_000, agent.agentId);
+		harness.runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
+		const snapshot = harness.runtime.getSnapshot();
+
+		expect(() =>
+			reduceOrchestrationEvent(snapshot, {
+				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+				ordinal: snapshot.lastOrdinal + 1,
+				eventId: "event-stale-suspend",
+				type: "attempt.suspended",
+				aggregateId: attempt.attemptId,
+				actor: "runtime",
+				occurredAt: new Date(T0).toISOString(),
+				payload: {
+					attemptId: attempt.attemptId,
+					leaseId: lease.leaseId,
+					fencingToken: lease.fencingToken + 1,
+					reasonCode: "stale_replay",
+				},
+			}),
+		).toThrow("lease or fencing token is stale");
 	});
 
 	it("cancels non-terminal tasks and attempts as one replayable objective transition", () => {

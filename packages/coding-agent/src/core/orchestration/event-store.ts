@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { stateFile } from "../agent-paths.ts";
+import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import {
 	type AppendOrchestrationEventInput,
 	isOrchestrationEvent,
@@ -16,6 +17,17 @@ const SNAPSHOT_FILE_PATTERN = /^(\d{16})\.json$/;
 const DEFAULT_MAX_TAIL_EVENTS = 256;
 const DEFAULT_MAX_TAIL_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_IDEMPOTENCY_EVENTS = 512;
+const MAX_CONFIGURED_TAIL_EVENTS = 1_024;
+const MAX_CONFIGURED_TAIL_BYTES = 16 * 1024 * 1024;
+const MAX_CONFIGURED_IDEMPOTENCY_EVENTS = 1_024;
+const MAX_EVENT_DIRECTORY_ENTRIES = 2_048;
+const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
+const MAX_SNAPSHOT_DIRECTORY_ENTRIES = 8;
+const MAX_CURSOR_BYTES = 64 * 1024;
+const MAX_BASELINE_BYTES = 64 * 1024;
+const MAX_IDEMPOTENCY_MARKER_BYTES = 64 * 1024;
+/** Full current task state plus retained idempotency evidence; intentionally above the 16MiB tail cap. */
+const MAX_PROJECTION_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
 interface EventCursor {
 	version: 1;
@@ -99,16 +111,18 @@ export class OrchestrationSnapshotRequiredError extends OrchestrationEventStoreE
 	}
 }
 
-function safeSessionDirectoryName(sessionId: string): string {
-	const readable = encodeURIComponent(sessionId).replaceAll("%", "_").slice(0, 80) || "session";
-	const digest = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
-	return `${readable}-${digest}`;
-}
-
 function parseCursor(filePath: string): EventCursor | undefined {
 	if (!existsSync(filePath)) return undefined;
+	let content: string;
 	try {
-		const parsed: unknown = JSON.parse(readFileSync(filePath, "utf-8"));
+		content = readBoundedTextFileSync(filePath, MAX_CURSOR_BYTES, "Orchestration cursor");
+	} catch (error) {
+		throw new OrchestrationEventStoreError(
+			`Failed to read orchestration cursor: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	try {
+		const parsed: unknown = JSON.parse(content);
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
 		const record = parsed as Record<string, unknown>;
 		if (record.version !== 1 || !Number.isSafeInteger(record.lastOrdinal) || Number(record.lastOrdinal) < 0) {
@@ -131,6 +145,19 @@ function serialize(value: unknown): string {
 	return `${JSON.stringify(value, null, "\t")}\n`;
 }
 
+function serializeBounded(
+	value: unknown,
+	maxBytes: number,
+	label: string,
+	oversizedMessage = `${label} exceeds its byte limit.`,
+): string {
+	const serialized = serialize(value);
+	if (Buffer.byteLength(serialized, "utf-8") > maxBytes) {
+		throw new OrchestrationEventStoreError(oversizedMessage);
+	}
+	return serialized;
+}
+
 function eventFileName(ordinal: number): string {
 	return `${String(ordinal).padStart(16, "0")}.json`;
 }
@@ -139,11 +166,12 @@ function snapshotDigest(content: ProjectionSnapshotContent): string {
 	return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
 
-function positiveSafeInteger(value: number | undefined, fallback: number, label: string): number {
+function positiveSafeInteger(value: number | undefined, fallback: number, maximum: number, label: string): number {
 	const resolved = value ?? fallback;
 	if (!Number.isSafeInteger(resolved) || resolved < 1) {
 		throw new OrchestrationEventStoreError(`${label} must be a positive safe integer.`);
 	}
+	if (resolved > maximum) throw new OrchestrationEventStoreError(`${label} must not exceed ${maximum}.`);
 	return resolved;
 }
 
@@ -169,7 +197,7 @@ export class OrchestrationEventStore {
 	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
 
 	constructor(options: OrchestrationEventStoreOptions) {
-		this.rootDir = stateFile(options.agentDir, "orchestration", safeSessionDirectoryName(options.sessionId));
+		this.rootDir = orchestrationEventStoreDir(options.agentDir, options.sessionId);
 		this.eventsDir = join(this.rootDir, "events");
 		this.idempotencyDir = join(this.rootDir, "idempotency");
 		this.cursorPath = join(this.rootDir, "cursor.json");
@@ -177,11 +205,22 @@ export class OrchestrationEventStore {
 		this.baselinePath = join(this.rootDir, "projection-baseline.json");
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.createEventId = options.createEventId ?? randomUUID;
-		this.maxTailEvents = positiveSafeInteger(options.maxTailEvents, DEFAULT_MAX_TAIL_EVENTS, "maxTailEvents");
-		this.maxTailBytes = positiveSafeInteger(options.maxTailBytes, DEFAULT_MAX_TAIL_BYTES, "maxTailBytes");
+		this.maxTailEvents = positiveSafeInteger(
+			options.maxTailEvents,
+			DEFAULT_MAX_TAIL_EVENTS,
+			MAX_CONFIGURED_TAIL_EVENTS,
+			"maxTailEvents",
+		);
+		this.maxTailBytes = positiveSafeInteger(
+			options.maxTailBytes,
+			DEFAULT_MAX_TAIL_BYTES,
+			MAX_CONFIGURED_TAIL_BYTES,
+			"maxTailBytes",
+		);
 		this.maxIdempotencyEvents = positiveSafeInteger(
 			options.maxIdempotencyEvents,
 			DEFAULT_MAX_IDEMPOTENCY_EVENTS,
+			MAX_CONFIGURED_IDEMPOTENCY_EVENTS,
 			"maxIdempotencyEvents",
 		);
 	}
@@ -214,17 +253,29 @@ export class OrchestrationEventStore {
 				...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
 				payload: structuredClone(input.payload),
 			};
-			const serializedEvent = serialize(next);
-			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent);
-			if (input.idempotencyKey) this.writeIdempotencyMarkerUnlocked(input.idempotencyKey, ordinal);
-			writeFileAtomicSync(
-				this.cursorPath,
-				serialize({
+			const serializedEvent = serializeBounded(
+				next,
+				this.maxTailBytes,
+				"Orchestration event",
+				"Orchestration event exceeds its configured tail byte limit.",
+			);
+			const serializedMarker = input.idempotencyKey
+				? this.serializeIdempotencyMarker(input.idempotencyKey, ordinal)
+				: undefined;
+			const serializedCursor = serializeBounded(
+				{
 					version: 1,
 					lastOrdinal: ordinal,
 					tailBytes: cursor.tailBytes + Buffer.byteLength(serializedEvent),
-				} satisfies EventCursor),
+				} satisfies EventCursor,
+				MAX_CURSOR_BYTES,
+				"Orchestration cursor",
 			);
+			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent);
+			if (input.idempotencyKey && serializedMarker) {
+				this.writeIdempotencyMarkerUnlocked(input.idempotencyKey, serializedMarker);
+			}
+			writeFileAtomicSync(this.cursorPath, serializedCursor);
 			return { event: next, appended: true };
 		});
 
@@ -314,14 +365,23 @@ export class OrchestrationEventStore {
 			};
 			const digest = snapshotDigest(content);
 			const snapshotFile = eventFileName(throughOrdinal);
-			writeFileAtomicSync(
-				join(this.snapshotsDir, snapshotFile),
-				serialize({ ...content, digest } satisfies ProjectionSnapshot),
+			const serializedSnapshot = serializeBounded(
+				{ ...content, digest } satisfies ProjectionSnapshot,
+				MAX_PROJECTION_SNAPSHOT_BYTES,
+				"Orchestration projection snapshot",
 			);
-			writeFileAtomicSync(
-				this.baselinePath,
-				serialize({ version: 1, throughOrdinal, digest, snapshotFile } satisfies SnapshotBaseline),
+			const serializedBaseline = serializeBounded(
+				{ version: 1, throughOrdinal, digest, snapshotFile } satisfies SnapshotBaseline,
+				MAX_BASELINE_BYTES,
+				"Orchestration snapshot baseline",
 			);
+			const serializedCursor = serializeBounded(
+				{ version: 1, lastOrdinal: throughOrdinal, tailBytes: 0 } satisfies EventCursor,
+				MAX_CURSOR_BYTES,
+				"Orchestration cursor",
+			);
+			writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot);
+			writeFileAtomicSync(this.baselinePath, serializedBaseline);
 
 			for (const name of this.idempotencyFileNamesUnlocked()) {
 				this.unlinkManagedFile(join(this.idempotencyDir, name));
@@ -333,10 +393,7 @@ export class OrchestrationEventStore {
 			for (const name of this.snapshotFileNamesUnlocked()) {
 				if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
 			}
-			writeFileAtomicSync(
-				this.cursorPath,
-				serialize({ version: 1, lastOrdinal: throughOrdinal, tailBytes: 0 } satisfies EventCursor),
-			);
+			writeFileAtomicSync(this.cursorPath, serializedCursor);
 			return true;
 		});
 	}
@@ -369,7 +426,11 @@ export class OrchestrationEventStore {
 
 	private eventFileNamesUnlocked(): string[] {
 		try {
-			return readdirSync(this.eventsDir)
+			return readBoundedDirectoryNamesSync(
+				this.eventsDir,
+				MAX_EVENT_DIRECTORY_ENTRIES,
+				"Orchestration events directory",
+			)
 				.filter((candidate) => EVENT_FILE_PATTERN.test(candidate))
 				.sort();
 		} catch (error) {
@@ -380,19 +441,29 @@ export class OrchestrationEventStore {
 
 	private idempotencyFileNamesUnlocked(): string[] {
 		try {
-			return readdirSync(this.idempotencyDir).filter((candidate) => candidate.endsWith(".json"));
-		} catch {
-			return [];
+			return readBoundedDirectoryNamesSync(
+				this.idempotencyDir,
+				MAX_IDEMPOTENCY_DIRECTORY_ENTRIES,
+				"Orchestration idempotency directory",
+			).filter((candidate) => candidate.endsWith(".json"));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
 		}
 	}
 
 	private snapshotFileNamesUnlocked(): string[] {
 		try {
-			return readdirSync(this.snapshotsDir)
+			return readBoundedDirectoryNamesSync(
+				this.snapshotsDir,
+				MAX_SNAPSHOT_DIRECTORY_ENTRIES,
+				"Orchestration snapshots directory",
+			)
 				.filter((candidate) => SNAPSHOT_FILE_PATTERN.test(candidate))
 				.sort();
-		} catch {
-			return [];
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
 		}
 	}
 
@@ -429,7 +500,9 @@ export class OrchestrationEventStore {
 		if (!existsSync(this.baselinePath)) return undefined;
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(readFileSync(this.baselinePath, "utf-8"));
+			parsed = JSON.parse(
+				readBoundedTextFileSync(this.baselinePath, MAX_BASELINE_BYTES, "Orchestration snapshot baseline"),
+			);
 		} catch (error) {
 			throw new OrchestrationEventStoreError(
 				`Failed to parse orchestration snapshot baseline: ${error instanceof Error ? error.message : String(error)}`,
@@ -464,7 +537,13 @@ export class OrchestrationEventStore {
 		if (!baseline) return undefined;
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(readFileSync(join(this.snapshotsDir, baseline.snapshotFile), "utf-8"));
+			parsed = JSON.parse(
+				readBoundedTextFileSync(
+					join(this.snapshotsDir, baseline.snapshotFile),
+					MAX_PROJECTION_SNAPSHOT_BYTES,
+					"Orchestration projection snapshot",
+				),
+			);
 		} catch (error) {
 			throw new OrchestrationEventStoreError(
 				`Failed to parse orchestration projection snapshot: ${error instanceof Error ? error.message : String(error)}`,
@@ -483,6 +562,7 @@ export class OrchestrationEventStore {
 			typeof snapshot.projection !== "object" ||
 			Array.isArray(snapshot.projection) ||
 			!Array.isArray(snapshot.idempotencyEvents) ||
+			snapshot.idempotencyEvents.length > this.maxIdempotencyEvents ||
 			!snapshot.idempotencyEvents.every(isOrchestrationEvent) ||
 			!snapshot.idempotencyEvents.every(
 				(event) => event.ordinal <= baseline.throughOrdinal && event.idempotencyKey !== undefined,
@@ -570,7 +650,9 @@ export class OrchestrationEventStore {
 	private readEventFileUnlocked(name: string): OrchestrationEvent {
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(readFileSync(join(this.eventsDir, name), "utf-8"));
+			parsed = JSON.parse(
+				readBoundedTextFileSync(join(this.eventsDir, name), this.maxTailBytes, `Orchestration event ${name}`),
+			);
 		} catch (error) {
 			throw new OrchestrationEventStoreError(
 				`Failed to parse orchestration event ${name}: ${error instanceof Error ? error.message : String(error)}`,
@@ -586,11 +668,16 @@ export class OrchestrationEventStore {
 		return join(this.idempotencyDir, `${createHash("sha256").update(key).digest("hex")}.json`);
 	}
 
-	private writeIdempotencyMarkerUnlocked(key: string, ordinal: number): void {
-		writeFileAtomicSync(
-			this.idempotencyPath(key),
-			serialize({ version: 1, key, ordinal } satisfies IdempotencyMarker),
+	private serializeIdempotencyMarker(key: string, ordinal: number): string {
+		return serializeBounded(
+			{ version: 1, key, ordinal } satisfies IdempotencyMarker,
+			MAX_IDEMPOTENCY_MARKER_BYTES,
+			"Orchestration idempotency marker",
 		);
+	}
+
+	private writeIdempotencyMarkerUnlocked(key: string, serializedMarker: string): void {
+		writeFileAtomicSync(this.idempotencyPath(key), serializedMarker);
 	}
 
 	private readIdempotentEventUnlocked(key: string): OrchestrationEvent | undefined {
@@ -600,7 +687,9 @@ export class OrchestrationEventStore {
 		}
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(readFileSync(markerPath, "utf-8"));
+			parsed = JSON.parse(
+				readBoundedTextFileSync(markerPath, MAX_IDEMPOTENCY_MARKER_BYTES, "Orchestration idempotency marker"),
+			);
 		} catch (error) {
 			throw new OrchestrationEventStoreError(
 				`Failed to parse orchestration idempotency marker: ${error instanceof Error ? error.message : String(error)}`,
@@ -668,7 +757,12 @@ export class OrchestrationEventStore {
 			if (event.ordinal !== ordinal) {
 				throw new OrchestrationEventStoreError(`Event ordinal does not match file name: ${name}`);
 			}
-			if (event.idempotencyKey) this.writeIdempotencyMarkerUnlocked(event.idempotencyKey, ordinal);
+			if (event.idempotencyKey) {
+				this.writeIdempotencyMarkerUnlocked(
+					event.idempotencyKey,
+					this.serializeIdempotencyMarker(event.idempotencyKey, ordinal),
+				);
+			}
 		}
 		const tailBytes = names.reduce((total, name) => {
 			const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
@@ -681,7 +775,11 @@ export class OrchestrationEventStore {
 		}, 0);
 		writeFileAtomicSync(
 			this.cursorPath,
-			serialize({ version: 1, lastOrdinal: highest, tailBytes } satisfies EventCursor),
+			serializeBounded(
+				{ version: 1, lastOrdinal: highest, tailBytes } satisfies EventCursor,
+				MAX_CURSOR_BYTES,
+				"Orchestration cursor",
+			),
 		);
 		return { lastOrdinal: highest, tailBytes };
 	}

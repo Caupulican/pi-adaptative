@@ -235,8 +235,10 @@ export interface SpawnedUsageTotals {
 
 export interface IsolatedCompletionOptions {
 	systemPrompt: string;
-	/** Isolated conversation; foreground session history is never inherited. */
+	/** New child-owned prompt messages for this call; foreground session history is never inherited. */
 	messages: Message[];
+	/** Previously persisted child history. Omission preserves fresh one-shot behavior. */
+	history?: Message[];
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	maxTokens?: number;
@@ -250,6 +252,20 @@ export interface IsolatedCompletionOptions {
 	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
 	/** Child-only result observer. */
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
+	/**
+	 * Durable child transcript sink. Message-end ordering means an assistant tool request is recorded
+	 * before execution starts and each tool result is recorded before the next provider request.
+	 * Throwing aborts the child loop; continuing without durable history would make replay unsafe.
+	 */
+	onMessage?: (message: Message) => Promise<void> | void;
+	/** Durable mid-run steering inbox owned by the child conversation. */
+	getSteeringMessages?: AgentLoopConfig["getSteeringMessages"];
+	/** Durable post-turn follow-up inbox owned by the child conversation. */
+	getFollowUpMessages?: AgentLoopConfig["getFollowUpMessages"];
+	/** Child-owned provider projection, invoked before every request without mutating raw history. */
+	transformContext?: AgentLoopConfig["transformContext"];
+	/** Request-local budget/authority check, invoked immediately before every child provider transport. */
+	requestPreflight?: AgentLoopConfig["requestPreflight"];
 	signal?: AbortSignal;
 	/** Required cache policy; isolated calls never inherit a provider default implicitly. */
 	cacheRetention: CacheRetention;
@@ -272,6 +288,8 @@ export interface IsolatedCompletionResult {
 	text: string;
 	usage: Usage;
 	stopReason: StopReason;
+	/** Complete child-owned conversation; isolated calls never expose foreground history. */
+	messages?: Message[];
 }
 
 export interface ResearchLaneRunOutcome {

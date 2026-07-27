@@ -3,7 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
-import { requiresParentReview, validateWorkerClaim } from "../src/core/delegation/worker-claim.ts";
+import {
+	isWorkerClaim,
+	MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS,
+	normalizeWorkerClaimForHost,
+	requiresParentReview,
+	validateWorkerClaim,
+} from "../src/core/delegation/worker-claim.ts";
 
 describe("Worker Result Validator (Phase 6)", () => {
 	const mockEnvelope: CapabilityEnvelope = {
@@ -227,6 +233,86 @@ describe("Worker Result Validator (Phase 6)", () => {
 
 		it("false for completed no-change/no-blocker result", () => {
 			expect(requiresParentReview({ ...baseClaim })).toBe(false);
+		});
+	});
+
+	it("rejects an oversized host terminal attempt identity before claim persistence", () => {
+		expect(() =>
+			normalizeWorkerClaimForHost({
+				...baseClaim,
+				terminalAttemptId: "x".repeat(MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS + 1),
+			}),
+		).toThrow("claim.terminalAttemptId exceeds");
+	});
+
+	it("rejects oversized changed-file and evidence reports without invoking accessors", () => {
+		const changedFiles = Array.from({ length: 129 }, () => "safe.ts");
+		let changedFileGetterRead = false;
+		Object.defineProperty(changedFiles, "0", {
+			get: () => {
+				changedFileGetterRead = true;
+				throw new Error("must not read changed-file getter");
+			},
+		});
+		const hostileClaim = {
+			...baseClaim,
+			changedFiles,
+		};
+		expect(isWorkerClaim(hostileClaim)).toBe(false);
+		expect(changedFileGetterRead).toBe(false);
+		expect(() => normalizeWorkerClaimForHost(hostileClaim)).toThrow("claim.changedFiles exceeds 128 entries");
+
+		const evidenceSources = Array.from({ length: 65 }, () => ({ id: "source", kind: "tool", trusted: false }));
+		expect(
+			isWorkerClaim({
+				...baseClaim,
+				evidence: { query: "q", sources: evidenceSources, findings: [] },
+			}),
+		).toBe(false);
+	});
+
+	it("rejects unbounded scalar identities, timestamps, reason codes, and metadata at the same boundary", () => {
+		const metadata: Record<string, unknown> = {};
+		let metadataGetterRead = false;
+		Object.defineProperty(metadata, "secret", {
+			get: () => {
+				metadataGetterRead = true;
+				throw new Error("must not read metadata getter");
+			},
+		});
+		for (const claim of [
+			{ ...baseClaim, requestId: "r".repeat(257) },
+			{ ...baseClaim, usageReportId: "u".repeat(257) },
+			{ ...baseClaim, createdAt: "t".repeat(129) },
+			{
+				...baseClaim,
+				verification: { subjectTaskId: "v".repeat(257), verdict: "accepted", reasonCodes: ["ok"] },
+			},
+			{
+				...baseClaim,
+				verification: {
+					subjectTaskId: "task",
+					verdict: "accepted",
+					reasonCodes: Array.from({ length: 33 }, () => "reason"),
+				},
+			},
+			{
+				...baseClaim,
+				evidence: {
+					query: "q",
+					sources: [{ id: "source", kind: "tool", trusted: false, metadata }],
+					findings: [],
+				},
+			},
+		]) {
+			expect(isWorkerClaim(claim)).toBe(false);
+		}
+		expect(metadataGetterRead).toBe(false);
+		expect(
+			validateWorkerClaim({ request: mockRequest, claim: { ...baseClaim, summary: "s".repeat(8_001) } }),
+		).toMatchObject({
+			outcome: "block",
+			reasonCode: "invalid_worker_claim",
 		});
 	});
 });

@@ -1,5 +1,6 @@
-import { appendFileSync, promises as fsPromises, readFileSync, statSync } from "node:fs";
+import { appendFileSync, promises as fsPromises, type Stats, statSync } from "node:fs";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "./atomic-file.ts";
+import { readBoundedTextFile, readBoundedTextFileSync } from "./bounded-file.ts";
 
 export interface BoundedJsonlLimits {
 	maxBytes: number;
@@ -8,6 +9,50 @@ export interface BoundedJsonlLimits {
 }
 
 const asyncAppendTails = new Map<string, Promise<void>>();
+const MAX_CACHED_FILES = 128;
+
+interface JsonlFileState {
+	stats: Stats;
+	recordCount: number;
+}
+
+const fileStates = new Map<string, JsonlFileState>();
+
+function sameFileState(left: Stats, right: Stats): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs &&
+		left.ctimeMs === right.ctimeMs
+	);
+}
+
+function cachedRecordCount(filePath: string, stats: Stats): number | undefined {
+	const cached = fileStates.get(filePath);
+	if (!cached || !sameFileState(cached.stats, stats)) return undefined;
+	fileStates.delete(filePath);
+	fileStates.set(filePath, cached);
+	return cached.recordCount;
+}
+
+function rememberFileState(filePath: string, stats: Stats, recordCount: number): void {
+	fileStates.delete(filePath);
+	fileStates.set(filePath, { stats, recordCount });
+	while (fileStates.size > MAX_CACHED_FILES) {
+		const oldest = fileStates.keys().next().value;
+		if (oldest === undefined) break;
+		fileStates.delete(oldest);
+	}
+}
+
+function recordCount(content: string): number {
+	let count = 0;
+	for (const line of content.split("\n")) {
+		if (line.trim().length > 0) count++;
+	}
+	return count;
+}
 
 function validateLimits(limits: BoundedJsonlLimits): void {
 	if (
@@ -46,14 +91,62 @@ function serializeLine(value: unknown): string {
 	return `${encoded}\n`;
 }
 
+function assertLineFits(line: string, limits: BoundedJsonlLimits): number {
+	const bytes = Buffer.byteLength(line, "utf-8");
+	if (bytes > limits.maxBytes) throw new Error("Bounded JSONL record exceeds maxBytes.");
+	return bytes;
+}
+
+function existingStatsSync(filePath: string): Stats | undefined {
+	try {
+		return statSync(filePath);
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+async function existingStats(filePath: string): Promise<Stats | undefined> {
+	try {
+		return await fsPromises.stat(filePath);
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
 /** Append one JSON record and rotate to the newest low-water tail under one exclusive lock. */
 export function appendBoundedJsonLineSync(filePath: string, value: unknown, limits: BoundedJsonlLimits): void {
 	validateLimits(limits);
 	const line = serializeLine(value);
+	const lineBytes = assertLineFits(line, limits);
 	withFileLockSync(filePath, () => {
-		appendFileSync(filePath, line, "utf-8");
-		if (statSync(filePath).size <= limits.maxBytes) return;
-		writeFileAtomicSync(filePath, retainedContent(readFileSync(filePath, "utf-8"), limits));
+		try {
+			const before = existingStatsSync(filePath);
+			if (!before || before.size > limits.maxBytes) {
+				writeFileAtomicSync(filePath, line);
+				rememberFileState(filePath, statSync(filePath), 1);
+				return;
+			}
+			let content: string | undefined;
+			let count = cachedRecordCount(filePath, before);
+			if (count === undefined) {
+				content = readBoundedTextFileSync(filePath, limits.maxBytes, "Bounded JSONL file");
+				count = recordCount(content);
+			}
+			if (before.size + lineBytes <= limits.maxBytes && count + 1 <= limits.maxRecords) {
+				appendFileSync(filePath, line, "utf-8");
+				rememberFileState(filePath, statSync(filePath), count + 1);
+				return;
+			}
+			content ??= readBoundedTextFileSync(filePath, limits.maxBytes, "Bounded JSONL file");
+			const retained = retainedContent(`${content}${line}`, limits);
+			writeFileAtomicSync(filePath, retained);
+			rememberFileState(filePath, statSync(filePath), recordCount(retained));
+		} catch (error) {
+			fileStates.delete(filePath);
+			throw error;
+		}
 	});
 }
 
@@ -65,14 +158,38 @@ export async function appendBoundedJsonLine(
 ): Promise<void> {
 	validateLimits(limits);
 	const line = serializeLine(value);
+	const lineBytes = assertLineFits(line, limits);
 	const previous = asyncAppendTails.get(filePath) ?? Promise.resolve();
 	const operation = previous
 		.catch(() => undefined)
 		.then(async () => {
 			await withFileLock(filePath, async () => {
-				await fsPromises.appendFile(filePath, line, "utf-8");
-				if ((await fsPromises.stat(filePath)).size <= limits.maxBytes) return;
-				await writeFileAtomic(filePath, retainedContent(await fsPromises.readFile(filePath, "utf-8"), limits));
+				try {
+					const before = await existingStats(filePath);
+					if (!before || before.size > limits.maxBytes) {
+						await writeFileAtomic(filePath, line);
+						rememberFileState(filePath, await fsPromises.stat(filePath), 1);
+						return;
+					}
+					let content: string | undefined;
+					let count = cachedRecordCount(filePath, before);
+					if (count === undefined) {
+						content = await readBoundedTextFile(filePath, limits.maxBytes, "Bounded JSONL file");
+						count = recordCount(content);
+					}
+					if (before.size + lineBytes <= limits.maxBytes && count + 1 <= limits.maxRecords) {
+						await fsPromises.appendFile(filePath, line, "utf-8");
+						rememberFileState(filePath, await fsPromises.stat(filePath), count + 1);
+						return;
+					}
+					content ??= await readBoundedTextFile(filePath, limits.maxBytes, "Bounded JSONL file");
+					const retained = retainedContent(`${content}${line}`, limits);
+					await writeFileAtomic(filePath, retained);
+					rememberFileState(filePath, await fsPromises.stat(filePath), recordCount(retained));
+				} catch (error) {
+					fileStates.delete(filePath);
+					throw error;
+				}
 			});
 		});
 	asyncAppendTails.set(filePath, operation);

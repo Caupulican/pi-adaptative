@@ -1,9 +1,16 @@
 ## [Unreleased]
 
+### Changed
+
+- Rebuilt delegated workers around immutable owner-authored execution contracts, durable logical-agent identities, resumable conversations and mailboxes, fenced write reservations, bounded resource materialization, verified model-pinned compaction, and event-driven terminal handoffs.
+- Consolidated session-owned orchestration events, actions, mailboxes, conversations, and deletion under one bounded artifact bundle while keeping cross-session write reservations globally coordinated.
+
 ### Fixed
 
 - Made the Windows shell engine preserve `$?`, support controlled `exit`, and accept `head`/`tail -N`, so diagnostic-capture command chains complete with a terminal result instead of losing status or treating `exit` as an external command.
 - Added a provider- and tool-neutral WSL incident collector that packages the latest human session, recovery and orchestration records, explicitly requested command logs, TUI evidence, boot identity, installed-runtime hashes, bounded kernel diagnostics, and relevant Windows host events without collecting credential stores or emitting false missing-log warnings.
+- Made pre-start worker failures publish exactly one durable terminal handoff, rejected malformed typed result envelopes, and handled null or Buffer filesystem watcher filenames on Windows.
+- Made orchestration session paths portable across Windows and POSIX and bounded profile, process, event, result, and cumulative usage payloads at their owning contracts.
 
 ## [0.81.41] - 2026-07-27
 

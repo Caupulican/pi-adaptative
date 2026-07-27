@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import { mapManagedLaneTerminalStatus } from "../src/core/delegation/managed-lane-controller.ts";
+import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -19,18 +20,22 @@ function buildDeps(
 	agentDir: string,
 	overrides?: Partial<{
 		goalId: string | undefined;
+		sessionManager: SessionManager;
 		saveWorkerClaimSnapshot: (claim: WorkerClaim, request?: unknown) => string;
 		notifyWorkerTerminalHandoff: BackgroundLaneControllerDeps["notifyWorkerTerminalHandoff"];
+		addSpawnedUsage: BackgroundLaneControllerDeps["addSpawnedUsage"];
 	}>,
 ): BackgroundLaneControllerDeps {
 	const appendedEntries: Array<{ customType: string; data: unknown }> = [];
-	const sessionManager = {
-		getEntries: () => [],
-		appendCustomEntry: (customType: string, data: unknown) => {
-			appendedEntries.push({ customType, data });
-			return `entry-${appendedEntries.length}`;
-		},
-	} as unknown as SessionManager;
+	const sessionManager =
+		overrides?.sessionManager ??
+		({
+			getEntries: () => [],
+			appendCustomEntry: (customType: string, data: unknown) => {
+				appendedEntries.push({ customType, data });
+				return `entry-${appendedEntries.length}`;
+			},
+		} as unknown as SessionManager);
 	return {
 		isDisposed: () => false,
 		getSessionId: () => `test-session:${process.pid}:${agentDir}`,
@@ -45,12 +50,14 @@ function buildDeps(
 		saveWorkerClaimSnapshot: overrides?.saveWorkerClaimSnapshot ?? (() => "worker-claim-entry"),
 		emit: () => {},
 		notifyWorkerTerminalHandoff: overrides?.notifyWorkerTerminalHandoff ?? (async () => {}),
+		addSpawnedUsage: overrides?.addSpawnedUsage ?? (() => undefined),
 	} as never;
 }
 
 describe("managed lane host bridge (recordManagedLane)", () => {
 	afterEach(() => {
 		resetInFlightWorkRegistryForTests();
+		vi.restoreAllMocks();
 	});
 
 	it("mints a goalId-tagged tmux-worker lane on dispatch and holds exactly one quiesce unit", () => {
@@ -213,12 +220,15 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		expect(saveCalled).toBe(false);
 	});
 
-	it("deregisters the quiesce unit even if persisting the claim snapshot throws", () => {
+	it("keeps a managed lane resumably active when claim persistence fails, then finalizes exactly once on retry", () => {
 		const agentDir = "/tmp/pi-test-managed-lane-terminal-throws";
+		let saveAttempts = 0;
 		const controller = new BackgroundLaneController(
 			buildDeps(agentDir, {
 				saveWorkerClaimSnapshot: () => {
-					throw new Error("persistence boom");
+					saveAttempts += 1;
+					if (saveAttempts === 1) throw new Error("persistence boom");
+					return "worker-claim-entry";
 				},
 			}),
 		);
@@ -230,10 +240,15 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		});
 		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
-		expect(() => controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "failed" })).toThrow(
-			"persistence boom",
-		);
+		expect(
+			controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "failed" }),
+		).toBeUndefined();
+		expect(controller.getLaneRecords()[0]).toMatchObject({ laneId: "tmux-job-4", status: "running" });
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 
+		const completed = controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "failed" });
+		expect(completed).toMatchObject({ laneId: "tmux-job-4", status: "failed" });
+		expect(saveAttempts).toBe(2);
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 	});
 
@@ -276,6 +291,316 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 
 		expect(returned?.costUsd).toBe(0.03);
 		expect(controller.getLaneRecords()[0]?.costUsd).toBe(0.03);
+	});
+
+	it("accounts managed terminal usage through the same idempotent spawned-usage contract as native workers", () => {
+		const addSpawnedUsage = vi.fn(() => "managed-usage-report");
+		const saveWorkerClaimSnapshot = vi.fn(() => "managed-claim-entry");
+		const controller = new BackgroundLaneController(
+			buildDeps("/tmp/pi-test-managed-lane-spawned-usage", { addSpawnedUsage, saveWorkerClaimSnapshot }),
+		);
+		const usage = {
+			input: 100,
+			output: 50,
+			cacheRead: 10,
+			cacheWrite: 5,
+			totalTokens: 165,
+			cost: { input: 0.01, output: 0.02, cacheRead: 0.001, cacheWrite: 0.002, total: 0.033 },
+		};
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-accounted",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		controller.recordManagedLane({
+			laneId: "tmux-job-accounted",
+			phase: "terminal",
+			status: "succeeded",
+			usage,
+		});
+		controller.recordManagedLane({
+			laneId: "tmux-job-accounted",
+			phase: "terminal",
+			status: "succeeded",
+			usage,
+		});
+
+		expect(addSpawnedUsage).toHaveBeenCalledTimes(1);
+		expect(addSpawnedUsage).toHaveBeenCalledWith(usage, {
+			label: "managed-worker",
+			reportId: expect.stringMatching(/^managed-worker:/),
+		});
+		expect(saveWorkerClaimSnapshot).toHaveBeenCalledWith(
+			expect.objectContaining({ usageReportId: expect.stringMatching(/^managed-worker:/) }),
+		);
+	});
+
+	it("accounts usage before terminal finalization so a reporting failure remains retryable with one stable report id", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-usage-retry";
+		const reportIds: string[] = [];
+		let reportAttempts = 0;
+		const saveWorkerClaimSnapshot = vi.fn(() => "managed-claim-entry");
+		const controller = new BackgroundLaneController(
+			buildDeps(agentDir, {
+				addSpawnedUsage: vi.fn((_usage, options) => {
+					reportAttempts += 1;
+					reportIds.push(options.reportId);
+					if (reportAttempts === 1) throw new Error("spawned usage storage unavailable");
+					return "managed-usage-report";
+				}),
+				saveWorkerClaimSnapshot,
+			}),
+		);
+		const usage = {
+			input: 100,
+			output: 50,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 150,
+			cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+		};
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-usage-retry",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		expect(
+			controller.recordManagedLane({
+				laneId: "tmux-job-usage-retry",
+				phase: "terminal",
+				status: "succeeded",
+				usage,
+			}),
+		).toBeUndefined();
+		expect(saveWorkerClaimSnapshot).not.toHaveBeenCalled();
+		expect(controller.getLaneRecords()[0]).toMatchObject({ laneId: "tmux-job-usage-retry", status: "running" });
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+
+		const completed = controller.recordManagedLane({
+			laneId: "tmux-job-usage-retry",
+			phase: "terminal",
+			status: "succeeded",
+			usage,
+		});
+		expect(completed).toMatchObject({ laneId: "tmux-job-usage-retry", status: "succeeded", costUsd: 0.03 });
+		expect(reportIds).toHaveLength(2);
+		expect([...new Set(reportIds)]).toHaveLength(1);
+		expect(saveWorkerClaimSnapshot).toHaveBeenCalledWith(expect.objectContaining({ usageReportId: reportIds[0] }));
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("does not duplicate a persisted usage-tagged claim when lifecycle finalization fails before retry", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-finalizer-retry";
+		const addSpawnedUsage = vi.fn(() => "managed-usage-report");
+		const sessionManager = InMemorySessionManager.inMemory();
+		const saveWorkerClaimSnapshot = vi.fn((claim: WorkerClaim) =>
+			sessionManager.appendCustomEntry("worker_claim", { version: 1, claim }),
+		);
+		vi.spyOn(WorkerLifecycle.prototype, "finish").mockImplementationOnce(() => {
+			throw new Error("lifecycle storage unavailable");
+		});
+		const controller = new BackgroundLaneController(
+			buildDeps(agentDir, { addSpawnedUsage, saveWorkerClaimSnapshot, sessionManager }),
+		);
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.002 },
+		};
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-finalizer-retry",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		expect(
+			controller.recordManagedLane({
+				laneId: "tmux-job-finalizer-retry",
+				phase: "terminal",
+				status: "succeeded",
+				usage,
+			}),
+		).toBeUndefined();
+		expect(saveWorkerClaimSnapshot).toHaveBeenCalledTimes(1);
+		expect(controller.getLaneRecords()[0]).toMatchObject({ laneId: "tmux-job-finalizer-retry", status: "running" });
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+
+		const completed = controller.recordManagedLane({
+			laneId: "tmux-job-finalizer-retry",
+			phase: "terminal",
+			status: "succeeded",
+			usage,
+		});
+		expect(completed).toMatchObject({ laneId: "tmux-job-finalizer-retry", status: "succeeded" });
+		expect(saveWorkerClaimSnapshot).toHaveBeenCalledTimes(1);
+		expect(addSpawnedUsage).toHaveBeenCalledTimes(2);
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("does not duplicate a persisted no-usage claim when lifecycle finalization fails before retry", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-no-usage-finalizer-retry";
+		const sessionManager = InMemorySessionManager.inMemory();
+		const saveWorkerClaimSnapshot = vi.fn((claim: WorkerClaim) =>
+			sessionManager.appendCustomEntry("worker_claim", { version: 1, claim }),
+		);
+		vi.spyOn(WorkerLifecycle.prototype, "finish").mockImplementationOnce(() => {
+			throw new Error("lifecycle storage unavailable");
+		});
+		const controller = new BackgroundLaneController(buildDeps(agentDir, { saveWorkerClaimSnapshot, sessionManager }));
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-no-usage-finalizer-retry",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		expect(
+			controller.recordManagedLane({
+				laneId: "tmux-job-no-usage-finalizer-retry",
+				phase: "terminal",
+				status: "succeeded",
+			}),
+		).toBeUndefined();
+		expect(saveWorkerClaimSnapshot).toHaveBeenCalledTimes(1);
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+
+		const completed = controller.recordManagedLane({
+			laneId: "tmux-job-no-usage-finalizer-retry",
+			phase: "terminal",
+			status: "succeeded",
+		});
+		expect(completed).toMatchObject({ laneId: "tmux-job-no-usage-finalizer-retry", status: "succeeded" });
+		expect(saveWorkerClaimSnapshot).toHaveBeenCalledTimes(1);
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("persists distinct terminal claim identities for later dispatches on the same managed lane", () => {
+		const sessionManager = InMemorySessionManager.inMemory();
+		const savedClaims: WorkerClaim[] = [];
+		const controller = new BackgroundLaneController(
+			buildDeps("/tmp/pi-test-managed-lane-later-dispatch", {
+				sessionManager,
+				saveWorkerClaimSnapshot: (claim) => {
+					savedClaims.push(claim);
+					return sessionManager.appendCustomEntry("worker_claim", { version: 1, claim });
+				},
+			}),
+		);
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-later-dispatch",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch({ sequence: 1 }),
+		});
+		controller.recordManagedLane({ laneId: "tmux-job-later-dispatch", phase: "terminal", status: "succeeded" });
+		controller.recordManagedLane({
+			laneId: "tmux-job-later-dispatch",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch({ sequence: 2 }),
+		});
+		controller.recordManagedLane({ laneId: "tmux-job-later-dispatch", phase: "terminal", status: "succeeded" });
+
+		expect(savedClaims).toHaveLength(2);
+		expect(savedClaims[0]?.terminalAttemptId).toBeTruthy();
+		expect(savedClaims[1]?.terminalAttemptId).toBeTruthy();
+		expect(savedClaims[0]?.terminalAttemptId).not.toBe(savedClaims[1]?.terminalAttemptId);
+	});
+
+	it("returns the durable terminal record and releases registration when projection persistence fails after finalization", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-terminal-projection-failure";
+		let laneRecordWrites = 0;
+		const sessionManager = {
+			getEntries: () => [],
+			appendCustomEntry: (customType: string) => {
+				if (customType === "lane_record" && ++laneRecordWrites === 2) {
+					throw new Error("lane projection storage unavailable");
+				}
+				return "worker-claim-entry";
+			},
+		} as unknown as SessionManager;
+		const controller = new BackgroundLaneController(buildDeps(agentDir, { sessionManager }));
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-terminal-projection-failure",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		const terminal = controller.recordManagedLane({
+			laneId: "tmux-job-terminal-projection-failure",
+			phase: "terminal",
+			status: "succeeded",
+		});
+
+		expect(terminal).toMatchObject({ laneId: "tmux-job-terminal-projection-failure", status: "succeeded" });
+		expect(controller.getLaneRecords()[0]).toMatchObject({
+			laneId: "tmux-job-terminal-projection-failure",
+			status: "succeeded",
+		});
+		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
+	});
+
+	it("rejects malformed managed usage before it can poison durable state or accounting", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-invalid-usage";
+		const addSpawnedUsage = vi.fn(() => "unexpected");
+		const controller = new BackgroundLaneController(buildDeps(agentDir, { addSpawnedUsage }));
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-invalid-usage",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		expect(
+			controller.recordManagedLane({
+				laneId: "tmux-job-invalid-usage",
+				phase: "terminal",
+				status: "succeeded",
+				usage: {
+					input: Number.NaN,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			}),
+		).toBeUndefined();
+		expect(addSpawnedUsage).not.toHaveBeenCalled();
+		expect(controller.getLaneRecords()[0]).toMatchObject({ laneId: "tmux-job-invalid-usage", status: "running" });
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
+	});
+
+	it("rejects oversized changed-file terminal reports before review, accounting, or claim persistence", () => {
+		const agentDir = "/tmp/pi-test-managed-lane-oversized-changed-files";
+		const addSpawnedUsage = vi.fn(() => "unexpected");
+		const saveWorkerClaimSnapshot = vi.fn(() => "unexpected");
+		const controller = new BackgroundLaneController(
+			buildDeps(agentDir, { addSpawnedUsage, saveWorkerClaimSnapshot }),
+		);
+
+		controller.recordManagedLane({
+			laneId: "tmux-job-oversized-changed-files",
+			phase: "dispatch",
+			dispatch: createTestManagedLaneDispatch(),
+		});
+		expect(
+			controller.recordManagedLane({
+				laneId: "tmux-job-oversized-changed-files",
+				phase: "terminal",
+				status: "succeeded",
+				changedFiles: Array.from({ length: 129 }, (_, index) => `src/${index}.ts`),
+			}),
+		).toBeUndefined();
+		expect(addSpawnedUsage).not.toHaveBeenCalled();
+		expect(saveWorkerClaimSnapshot).not.toHaveBeenCalled();
+		expect(controller.getLaneRecords()[0]).toMatchObject({
+			laneId: "tmux-job-oversized-changed-files",
+			status: "running",
+		});
+		expect(getInFlightWorkUnits(agentDir)).toHaveLength(1);
 	});
 
 	it("a terminal event with no usage leaves costUsd unset (advisory, never fabricated)", () => {

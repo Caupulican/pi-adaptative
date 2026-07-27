@@ -19,6 +19,8 @@
  *              including context/sessions/<session-id>/{gc,artifacts}                     -- re-exported below
  *   runtimes/<kind>  models/<kind>                                                         -- runtimesDir/modelsDir
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
+ *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
+ *                                                                                            control-plane bundle
  *   worktrees/<repo-slug>/<laneKey>   durable lane checkouts (core/worktree-sync)           -- worktreesDir
  * ```
  *
@@ -34,6 +36,7 @@
  * `mkdirSync(dirname(filePath), { recursive: true })`), so duplicating that here would be redundant
  * and would blur the "pure function" contract readers rely on.
  */
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
 	acquireWorkRun,
@@ -48,6 +51,7 @@ import {
 	pruneWorkTenant,
 } from "../utils/work-directory.ts";
 import { getReloadCoordinationDir } from "./reload-blockers.ts";
+import { requireBoundedTrimmedText } from "./util/bounded-value.ts";
 
 /** Root entries reserved for user-authored configuration and memory. */
 export const AGENT_ROOT_FILE_NAMES = [
@@ -172,6 +176,83 @@ export function modelsDir(kind: string, agentDir: string): string {
 /** `<agentDir>/sessions` -- session transcript storage (large, established; not a "loose file"). */
 export function sessionsDir(agentDir: string): string {
 	return join(agentDir, "sessions");
+}
+
+function orchestrationSessionKey(parentSessionId: string): string {
+	const normalized = requireBoundedTrimmedText(parentSessionId, 512, "Parent session id");
+	const readable =
+		encodeURIComponent(normalized)
+			.replaceAll("%", "_")
+			// encodeURIComponent deliberately leaves `*` unescaped, but Windows forbids it in paths.
+			// Restrict the readable prefix to a portable ASCII subset; the digest retains exact identity.
+			.replaceAll(/[^a-zA-Z0-9._~-]/g, "_")
+			.slice(0, 80) || "session";
+	const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+	return `${readable}-${digest}`;
+}
+
+/**
+ * `<agentDir>/state/orchestration/sessions/<session-key>` -- the one durable control-plane
+ * bundle owned by a foreground session. Event state, worker mailboxes, mutation journals, and
+ * worker transcripts must stay beneath this boundary so explicit session deletion can remove
+ * exactly its companion artifacts without scanning global state.
+ */
+export function orchestrationSessionsDir(agentDir: string): string {
+	return stateFile(agentDir, "orchestration", "sessions");
+}
+
+/**
+ * `<agentDir>/state/orchestration/sessions/<session-key>` -- the one durable control-plane
+ * bundle owned by a foreground session.
+ */
+export function orchestrationSessionDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionsDir(agentDir), orchestrationSessionKey(parentSessionId));
+}
+
+/** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */
+export function orchestrationEventStoreDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "events");
+}
+
+/**
+ * `<orchestrationSessionDir>/worker-conversations` -- durable Pi worker transcripts owned by one
+ * foreground session. Worker conversations remain in SessionManager's established JSONL format,
+ * but are intentionally outside the foreground session picker namespace.
+ */
+export function workerConversationSessionsDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-conversations");
+}
+
+/**
+ * `<orchestrationSessionDir>/worker-mailboxes/<scope-digest>.json` -- durable bounded control
+ * messages for one logical worker. Identity stays hashed so neither agent ids nor project paths
+ * become path segments.
+ */
+export function workerAgentMailboxFile(agentDir: string, parentSessionId: string, scopeDigest: string): string {
+	if (!/^[a-f0-9]{32,64}$/i.test(scopeDigest)) {
+		throw new TypeError("Worker agent mailbox scope digest must be a hexadecimal SHA-256 prefix.");
+	}
+	return join(
+		orchestrationSessionDir(agentDir, parentSessionId),
+		"worker-mailboxes",
+		`${scopeDigest.toLowerCase()}.json`,
+	);
+}
+
+/**
+ * `<orchestrationSessionDir>/worker-actions/<scope-digest>.json` -- durable, bounded mutation
+ * intents and receipts for one fenced worker attempt. The opaque digest intentionally keeps task
+ * identifiers out of filesystem path segments and works on Windows and WSL.
+ */
+export function workerActionJournalFile(agentDir: string, parentSessionId: string, scopeDigest: string): string {
+	if (!/^[a-f0-9]{32,64}$/i.test(scopeDigest)) {
+		throw new TypeError("Worker action journal scope digest must be a hexadecimal SHA-256 prefix.");
+	}
+	return join(
+		orchestrationSessionDir(agentDir, parentSessionId),
+		"worker-actions",
+		`${scopeDigest.toLowerCase()}.json`,
+	);
 }
 
 /** `<agentDir>/npm` -- managed npm package installs. */

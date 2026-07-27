@@ -1,6 +1,15 @@
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { ExecutionGrant, WorkerExecutionContract, WorkerResultContract } from "../orchestration/contracts.ts";
+import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
+import type {
+	AgentBindingContract,
+	AgentResumeContext,
+	AttemptUsageSnapshot,
+	ExecutionGrant,
+	WorkerExecutionContract,
+	WorkerResultContract,
+	WorkerRole,
+} from "../orchestration/contracts.ts";
 import {
 	DelegationOrchestrationLedger,
 	type PrepareDelegationInput,
@@ -17,6 +26,7 @@ import {
 	selectedManagedWorkerAttempt,
 	selectedWorkerAttempt,
 } from "./worker-lane-projection.ts";
+import { isLocalProcessAlive, isLocalWorkerProcessOwnerProvenDead } from "./worker-process-owner.ts";
 
 export type PendingVerificationRecovery =
 	| {
@@ -43,9 +53,11 @@ export type PendingVerificationRecovery =
 export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
 	private nextLaneNumber: number;
+	private readonly isProcessAlive: (pid: number) => boolean;
 
-	constructor(options: { agentDir: string; sessionId: string }) {
+	constructor(options: { agentDir: string; sessionId: string; isProcessAlive?: (pid: number) => boolean }) {
 		this.ledger = new DelegationOrchestrationLedger(options);
+		this.isProcessAlive = options.isProcessAlive ?? isLocalProcessAlive;
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const highest = Object.keys(snapshot.tasks).reduce((current, taskId) => {
 			const suffix = /^worker-(\d+)$/.exec(taskId)?.[1];
@@ -71,6 +83,27 @@ export class WorkerLifecycle {
 		const record = this.getRecord(selectedLaneId);
 		if (!record) throw new Error(`Durable worker '${selectedLaneId}' was not projected after enqueue.`);
 		return { record, attempt };
+	}
+
+	/** Queue the next distinct task/attempt for an idle logical agent. */
+	prepareAgentTurn(input: { agentId: string; instructions: string }): {
+		record: LaneRecord;
+		attempt: AttemptRuntimeState;
+	} {
+		const attempt = this.ledger.prepareAgentTurn(input);
+		const record = this.getRecord(attempt.taskId);
+		if (!record) throw new Error(`Logical worker '${input.agentId}' turn was not projected after enqueue.`);
+		return { record, attempt };
+	}
+
+	ensureAgent(input: { agentId: string; role: WorkerRole; resumeContext: AgentResumeContext }): AgentBindingContract {
+		const agentId = input.agentId.trim();
+		const existing = this.ledger.runtime.getSnapshot().agents[agentId];
+		if (!existing) return this.ledger.runtime.registerAgent(input);
+		if (existing.role !== input.role || !sameAgentResumeIdentity(existing.resumeContext, input.resumeContext)) {
+			throw new Error(`Agent '${agentId}' was re-registered with conflicting identity.`);
+		}
+		return existing;
 	}
 
 	prepareManaged(
@@ -147,6 +180,112 @@ export class WorkerLifecycle {
 	start(laneId: string, leaseTtlMs: number): StartedDelegationAttempt {
 		const attempt = this.requireActiveAttempt(laneId);
 		return this.ledger.start(attempt.attemptId, leaseTtlMs);
+	}
+
+	startAgent(laneId: string, agentId: string, leaseTtlMs: number, ownerId = agentId): StartedDelegationAttempt {
+		const attempt = this.requireActiveAttempt(laneId);
+		return this.ledger.start(attempt.attemptId, leaseTtlMs, ownerId, agentId);
+	}
+
+	checkpoint(
+		laneId: string,
+		input: {
+			summary: string;
+			artifactIds?: readonly string[];
+			evidenceIds?: readonly string[];
+			usage?: AttemptUsageSnapshot;
+		},
+	) {
+		const attempt = this.requireActiveAttempt(laneId);
+		if (!attempt.lease) throw new Error(`Durable worker '${laneId}' has no live lease.`);
+		return this.ledger.runtime.checkpointAttempt({
+			attemptId: attempt.attemptId,
+			leaseId: attempt.lease.leaseId,
+			fencingToken: attempt.lease.fencingToken,
+			summary: input.summary,
+			...(input.artifactIds ? { artifactIds: input.artifactIds } : {}),
+			...(input.evidenceIds ? { evidenceIds: input.evidenceIds } : {}),
+			...(input.usage ? { usage: input.usage } : {}),
+		});
+	}
+
+	/**
+	 * Suspend only attempts whose exact controller owner is known (explicit shutdown) or whose
+	 * recorded local owner PID is proven gone (recovery). A live/unknown owner is never stolen.
+	 */
+	suspendBoundInProcessAttemptsForRestart(ownerId?: string): string[] {
+		const suspended: string[] = [];
+		for (const attempt of Object.values(this.ledger.runtime.getSnapshot().attempts)) {
+			if (
+				(attempt.status !== "leased" && attempt.status !== "running") ||
+				!attempt.agentId ||
+				attempt.dispatch.executionKind === "managed-process" ||
+				!attempt.lease
+			) {
+				continue;
+			}
+			const ownsAttempt =
+				ownerId !== undefined
+					? attempt.lease.ownerId === ownerId
+					: isLocalWorkerProcessOwnerProvenDead(attempt.lease.ownerId, this.isProcessAlive);
+			if (!ownsAttempt) continue;
+			this.suspendBoundAttempt({
+				laneId: attempt.taskId,
+				ownerId: attempt.lease.ownerId,
+				leaseId: attempt.lease.leaseId,
+				fencingToken: attempt.lease.fencingToken,
+				reasonCode:
+					ownerId === undefined ? "agent_process_recovered_after_owner_exit" : "agent_process_interrupted",
+			});
+			suspended.push(attempt.attemptId);
+		}
+		return suspended;
+	}
+
+	/**
+	 * Applies an explicitly authorized restart suspension. The caller must identify both the logical
+	 * lane and the current lease fence; process liveness policy is intentionally kept by this class.
+	 */
+	suspendBoundAttempt(args: {
+		laneId: string;
+		ownerId: string;
+		leaseId: string;
+		fencingToken: number;
+		reasonCode: string;
+	}): void {
+		const attempt = this.getActiveAttempt(args.laneId);
+		if (!attempt || !attempt.agentId || !attempt.lease) {
+			throw new Error(`Durable worker '${args.laneId}' has no live agent-bound attempt for suspension.`);
+		}
+		this.ledger.runtime.suspendBoundAttempt({
+			attemptId: attempt.attemptId,
+			ownerId: args.ownerId,
+			leaseId: args.leaseId,
+			fencingToken: args.fencingToken,
+			reasonCode: args.reasonCode,
+		});
+	}
+
+	resumeAgent(laneId: string, agentId: string, leaseTtlMs: number, ownerId = agentId): StartedDelegationAttempt {
+		const attempt = this.getActiveAttempt(laneId);
+		if (!attempt) throw new Error(`Durable worker '${laneId}' has no resumable attempt.`);
+		this.ledger.runtime.requestAgentResume(agentId);
+		const lease = this.ledger.runtime.resumeAttempt(attempt.attemptId, agentId, leaseTtlMs, ownerId);
+		return this.startedHandle(this.ledger.runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken));
+	}
+
+	suspendAgent(laneId: string, agentId: string, ownerId: string, reasonCode = "agent_interrupted"): void {
+		const attempt = this.getActiveAttempt(laneId);
+		if (!attempt || attempt.agentId !== agentId || !attempt.lease) {
+			throw new Error(`Logical worker '${agentId}' has no live attempt for interruption.`);
+		}
+		this.suspendBoundAttempt({
+			laneId,
+			ownerId,
+			leaseId: attempt.lease.leaseId,
+			fencingToken: attempt.lease.fencingToken,
+			reasonCode,
+		});
 	}
 
 	bindGrant(attemptId: string, grant: ExecutionGrant): void {
@@ -273,6 +412,17 @@ export class WorkerLifecycle {
 		return this.ledger.runtime.getSnapshot().tasks[taskId];
 	}
 
+	getAgent(agentId: string): AgentBindingContract | undefined {
+		return this.ledger.runtime.getSnapshot().agents[agentId];
+	}
+
+	getLatestAgentAttempt(agentId: string): AttemptRuntimeState | undefined {
+		return Object.values(this.ledger.runtime.getSnapshot().attempts)
+			.filter((attempt) => attempt.agentId === agentId)
+			.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+			.at(-1);
+	}
+
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection {
 		return this.ledger.runtime.getSnapshot();
 	}
@@ -314,6 +464,11 @@ export class WorkerLifecycle {
 
 	getActiveAttempt(laneId: string): AttemptRuntimeState | undefined {
 		return selectedWorkerAttempt(this.ledger.runtime.getSnapshot(), laneId);
+	}
+
+	getAttemptUsage(laneId: string): AttemptUsageSnapshot | undefined {
+		const attempt = this.getActiveAttempt(laneId);
+		return attempt ? this.ledger.getAttemptUsage(attempt.attemptId) : undefined;
 	}
 
 	getRunningCount(profileId?: string): number {

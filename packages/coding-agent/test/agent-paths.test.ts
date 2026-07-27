@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	cacheDir,
@@ -15,6 +15,9 @@ import {
 	modelsDir,
 	npmDir,
 	okfMemoryDir,
+	orchestrationEventStoreDir,
+	orchestrationSessionDir,
+	orchestrationSessionsDir,
 	reloadCoordinationDir,
 	resourceDir,
 	runtimesDir,
@@ -23,6 +26,9 @@ import {
 	sessionsDir,
 	stateDir,
 	stateFile,
+	workerActionJournalFile,
+	workerAgentMailboxFile,
+	workerConversationSessionsDir,
 } from "../src/core/agent-paths.ts";
 import { getReloadCoordinationDir } from "../src/core/reload-blockers.ts";
 import { getWorkRoot as workDirectoryGetWorkRoot } from "../src/utils/work-directory.ts";
@@ -78,6 +84,30 @@ describe("agent-paths SSOT accessors", () => {
 		expect(sessionsDir(AGENT_DIR)).toBe(join(AGENT_DIR, "sessions"));
 		expect(npmDir(AGENT_DIR)).toBe(join(AGENT_DIR, "npm"));
 		expect(gitDir(AGENT_DIR)).toBe(join(AGENT_DIR, "git"));
+	});
+
+	it("keeps every foreground-session orchestration artifact beneath one canonical bundle", () => {
+		const sessionId = "parent-session-1";
+		const root = orchestrationSessionDir(AGENT_DIR, sessionId);
+		expect(orchestrationSessionsDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "orchestration", "sessions"));
+		expect(root.startsWith(join(AGENT_DIR, "state", "orchestration", "sessions"))).toBe(true);
+		expect(root).toMatch(/parent-session-1-[a-f0-9]{16}$/);
+		expect(orchestrationEventStoreDir(AGENT_DIR, sessionId)).toBe(join(root, "events"));
+		expect(workerConversationSessionsDir(AGENT_DIR, sessionId)).toBe(join(root, "worker-conversations"));
+		expect(workerAgentMailboxFile(AGENT_DIR, sessionId, "a".repeat(64))).toBe(
+			join(root, "worker-mailboxes", `${"a".repeat(64)}.json`),
+		);
+		expect(workerActionJournalFile(AGENT_DIR, sessionId, "b".repeat(64))).toBe(
+			join(root, "worker-actions", `${"b".repeat(64)}.json`),
+		);
+	});
+
+	it("builds portable collision-resistant bundle names for imported session ids", () => {
+		const hostile = orchestrationSessionDir(AGENT_DIR, "CON*team/worker:one?");
+		const neighbor = orchestrationSessionDir(AGENT_DIR, "CON_team/worker:one?");
+		const hostileName = basename(hostile);
+		expect(hostileName).not.toMatch(/[<>:"/\\|?*\u0000-\u001f]/);
+		expect(hostile).not.toBe(neighbor);
 	});
 
 	it("resourceDir builds each user-resource directory at the agentDir root", () => {

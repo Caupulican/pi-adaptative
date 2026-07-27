@@ -1,6 +1,3 @@
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { unlink } from "node:fs/promises";
 import * as os from "node:os";
 import type { SessionInfo, SessionListProgress } from "@caupulican/pi-agent-core/node";
 import {
@@ -14,7 +11,9 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@caupulican/pi-tui";
+import { getAgentDir } from "../../../config.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
+import { deleteForegroundSessionBundle } from "../../../core/session-artifact-bundle.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -626,46 +625,6 @@ class SessionList implements Component, Focusable {
 type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[]>;
 
 /**
- * Delete a session file, trying the `trash` CLI first, then falling back to unlink
- */
-async function deleteSessionFile(
-	sessionPath: string,
-): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
-	// Try `trash` first (if installed)
-	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
-	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8", timeout: 10_000 });
-
-	const getTrashErrorHint = (): string | null => {
-		const parts: string[] = [];
-		if (trashResult.error) {
-			parts.push(trashResult.error.message);
-		}
-		const stderr = trashResult.stderr?.trim();
-		if (stderr) {
-			parts.push(stderr.split("\n")[0] ?? stderr);
-		}
-		if (parts.length === 0) return null;
-		return `trash: ${parts.join(" · ").slice(0, 200)}`;
-	};
-
-	// If trash reports success, or the file is gone afterwards, treat it as successful
-	if (trashResult.status === 0 || !existsSync(sessionPath)) {
-		return { ok: true, method: "trash" };
-	}
-
-	// Fallback to permanent deletion
-	try {
-		await unlink(sessionPath);
-		return { ok: true, method: "unlink" };
-	} catch (err) {
-		const unlinkError = err instanceof Error ? err.message : String(err);
-		const trashErrorHint = getTrashErrorHint();
-		const error = trashErrorHint ? `${unlinkError} (${trashErrorHint})` : unlinkError;
-		return { ok: false, method: "unlink", error };
-	}
-}
-
-/**
  * Component that renders a session selector
  */
 export class SessionSelectorComponent extends Container implements Focusable {
@@ -819,9 +778,23 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 		// Handle session deletion
 		this.sessionList.onDeleteSession = async (sessionPath: string) => {
-			const result = await deleteSessionFile(sessionPath);
+			const listedSessions = [...(this.currentSessions ?? []), ...(this.allSessions ?? [])];
+			const selected = listedSessions.find((session) => session.path === sessionPath);
+			if (!selected) {
+				this.header.setStatusMessage(
+					{ type: "error", message: "Failed to delete: selected session disappeared" },
+					3000,
+				);
+				this.requestRender();
+				return;
+			}
+			const result = await deleteForegroundSessionBundle({
+				agentDir: getAgentDir(),
+				parentSessionId: selected.id,
+				sessionPath,
+			});
 
-			if (result.ok) {
+			if (result.foreground.ok) {
 				if (this.currentSessions) {
 					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
 				}
@@ -833,11 +806,22 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				const showCwd = this.scope === "all";
 				this.sessionList.setSessions(sessions, showCwd);
 
-				const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-				this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+				if (result.complete) {
+					const msg = result.foreground.method === "trash" ? "Session moved to trash" : "Session deleted";
+					this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+				} else {
+					const artifactError = "error" in result.workerArtifacts ? result.workerArtifacts.error : undefined;
+					this.header.setStatusMessage(
+						{
+							type: "error",
+							message: `Session removed; worker artifacts remain: ${artifactError ?? "unknown error"}`,
+						},
+						5000,
+					);
+				}
 				await this.refreshSessionsAfterMutation();
 			} else {
-				const errorMessage = result.error ?? "Unknown error";
+				const errorMessage = result.foreground.error ?? "Unknown error";
 				this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
 			}
 

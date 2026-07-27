@@ -1,16 +1,25 @@
 import { describeToolCapabilityAuthority, resolveProfileToolCapability } from "../tool-capability-policy.ts";
-import { isPlainRecord } from "../util/value-guards.ts";
+import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type {
 	ExecutionGrant,
 	OrchestrationDispatchRequest,
 	OrchestrationModelBinding,
 	OrchestrationProfile,
 	ResourcePointer,
+	RiskBudget,
 	TaskContract,
 	ToolCapabilityManifest,
 } from "./contracts.ts";
 import {
 	HARNESS_CAPABILITIES,
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_DESCRIPTION_LENGTH,
+	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	ORCHESTRATION_SCHEMA_VERSION,
 	ORCHESTRATION_THINKING_LEVELS,
 	toJsonObject,
@@ -23,7 +32,7 @@ import {
 	type ExecutionPolicyCompiler,
 	type PolicyCompilationResult,
 } from "./policy-compiler.ts";
-import { RISK_BUDGET_FIELDS, validateRiskBudget } from "./risk-budget.ts";
+import { parseRiskBudget, validateRiskBudget } from "./risk-budget.ts";
 
 export interface ModelHealthView {
 	isHealthy(binding: OrchestrationModelBinding): boolean;
@@ -48,11 +57,6 @@ export class OrchestrationProfileError extends Error {
 	}
 }
 
-function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
-	const allowedSet = new Set(allowed);
-	return Object.keys(record).every((key) => allowedSet.has(key));
-}
-
 function duplicateStrings(values: readonly string[]): string[] {
 	const seen = new Set<string>();
 	const duplicates = new Set<string>();
@@ -65,7 +69,7 @@ function duplicateStrings(values: readonly string[]): string[] {
 
 export function parseOrchestrationDispatchRequest(value: unknown): OrchestrationDispatchRequest {
 	if (!isPlainRecord(value)) throw new OrchestrationProfileError("Dispatch request must be an object.");
-	if (!exactKeys(value, ["taskId", "profileId", "instructions", "resourcePointerIds"])) {
+	if (!hasOnlyKeys(value, ["taskId", "profileId", "instructions", "resourcePointerIds"])) {
 		throw new OrchestrationProfileError(
 			"Dispatch request contains an unsupported field. Model and thinking overrides are forbidden; select a profileId.",
 		);
@@ -73,12 +77,20 @@ export function parseOrchestrationDispatchRequest(value: unknown): Orchestration
 	if (
 		typeof value.taskId !== "string" ||
 		!value.taskId ||
+		value.taskId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
 		typeof value.profileId !== "string" ||
 		!value.profileId ||
+		value.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
 		typeof value.instructions !== "string" ||
+		value.instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH ||
 		!value.instructions.trim() ||
 		!Array.isArray(value.resourcePointerIds) ||
-		!value.resourcePointerIds.every((entry) => typeof entry === "string")
+		value.resourcePointerIds.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
+		!value.resourcePointerIds.every(
+			(entry) =>
+				typeof entry === "string" && entry.length > 0 && entry.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+		) ||
+		new Set(value.resourcePointerIds).size !== value.resourcePointerIds.length
 	) {
 		throw new OrchestrationProfileError("Dispatch request is invalid.");
 	}
@@ -94,7 +106,12 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	if (profile.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' has an unsupported schema version.`);
 	}
-	if (!profile.profileId.trim() || !profile.description.trim())
+	if (
+		profile.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
+		!profile.profileId.trim() ||
+		profile.description.length > MAX_ORCHESTRATION_DESCRIPTION_LENGTH ||
+		!profile.description.trim()
+	)
 		throw new OrchestrationProfileError("Profile id and description are required.");
 	if (profile.role !== "orchestrator" && profile.dispatchProfileIds.length > 0) {
 		throw new OrchestrationProfileError(
@@ -110,7 +127,10 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 				`Verifier profile '${profile.profileId}' cannot require another verifier.`,
 			);
 		}
-		if (!profile.verificationProfileId?.trim()) {
+		if (
+			!profile.verificationProfileId?.trim() ||
+			profile.verificationProfileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH
+		) {
 			throw new OrchestrationProfileError(
 				`Profile '${profile.profileId}' requires independent verification but has no verificationProfileId.`,
 			);
@@ -123,17 +143,59 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	if (profile.verificationProfileId === profile.profileId) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' cannot verify itself.`);
 	}
+	if (
+		!profile.createdAt.trim() ||
+		profile.createdAt.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
+		!profile.updatedAt.trim() ||
+		profile.updatedAt.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH
+	) {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' timestamps are invalid.`);
+	}
 	for (const [label, values] of [
 		["capabilityCeiling", profile.capabilityCeiling],
 		["toolNames", profile.toolNames],
 		["resourceProfileNames", profile.resourceProfileNames],
 		["dispatchProfileIds", profile.dispatchProfileIds],
 	] as const) {
+		if (
+			values.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
+			values.some((value) => !value.trim() || value.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)
+		) {
+			throw new OrchestrationProfileError(`Profile '${profile.profileId}' contains an invalid ${label}.`);
+		}
 		const duplicates = duplicateStrings(values);
 		if (duplicates.length > 0) {
 			throw new OrchestrationProfileError(
 				`Profile '${profile.profileId}' contains duplicate ${label}: ${duplicates.join(", ")}.`,
 			);
+		}
+	}
+	const roleCeiling = new Set(DEFAULT_ROLE_CAPABILITY_CEILINGS[profile.role]);
+	const outOfRoleCapabilities = profile.capabilityCeiling.filter((capability) => !roleCeiling.has(capability));
+	if (outOfRoleCapabilities.length > 0) {
+		throw new OrchestrationProfileError(
+			`Profile '${profile.profileId}' exceeds the ${profile.role} role ceiling: ${outOfRoleCapabilities.join(", ")}.`,
+		);
+	}
+	if (
+		profile.modelPolicy.candidates.length === 0 ||
+		profile.modelPolicy.candidates.length > MAX_ORCHESTRATION_COLLECTION_LENGTH
+	) {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' must declare a model candidate.`);
+	}
+	if (profile.modelPolicy.mode === "fixed" && profile.modelPolicy.candidates.length !== 1) {
+		throw new OrchestrationProfileError(
+			`Fixed profile '${profile.profileId}' must declare exactly one model candidate.`,
+		);
+	}
+	for (const candidate of profile.modelPolicy.candidates) {
+		if (
+			candidate.provider.length > MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH ||
+			!candidate.provider.trim() ||
+			candidate.modelId.length > MAX_ORCHESTRATION_MODEL_ID_LENGTH ||
+			!candidate.modelId.trim()
+		) {
+			throw new OrchestrationProfileError(`Profile '${profile.profileId}' contains an invalid model binding.`);
 		}
 	}
 	const duplicateModels = duplicateStrings(
@@ -143,26 +205,6 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 		throw new OrchestrationProfileError(
 			`Profile '${profile.profileId}' contains duplicate model candidates: ${duplicateModels.join(", ")}.`,
 		);
-	}
-	const roleCeiling = new Set(DEFAULT_ROLE_CAPABILITY_CEILINGS[profile.role]);
-	const outOfRoleCapabilities = profile.capabilityCeiling.filter((capability) => !roleCeiling.has(capability));
-	if (outOfRoleCapabilities.length > 0) {
-		throw new OrchestrationProfileError(
-			`Profile '${profile.profileId}' exceeds the ${profile.role} role ceiling: ${outOfRoleCapabilities.join(", ")}.`,
-		);
-	}
-	if (profile.modelPolicy.candidates.length === 0) {
-		throw new OrchestrationProfileError(`Profile '${profile.profileId}' must declare a model candidate.`);
-	}
-	if (profile.modelPolicy.mode === "fixed" && profile.modelPolicy.candidates.length !== 1) {
-		throw new OrchestrationProfileError(
-			`Fixed profile '${profile.profileId}' must declare exactly one model candidate.`,
-		);
-	}
-	for (const candidate of profile.modelPolicy.candidates) {
-		if (!candidate.provider.trim() || !candidate.modelId.trim()) {
-			throw new OrchestrationProfileError(`Profile '${profile.profileId}' contains an invalid model binding.`);
-		}
 	}
 	if (!Number.isSafeInteger(profile.maxConcurrent) || profile.maxConcurrent <= 0) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' maxConcurrent must be positive.`);
@@ -199,12 +241,20 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	}
 	if (profile.executionPolicy) {
 		if (
+			profile.executionPolicy.allowedExecutables.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
+			profile.executionPolicy.allowedEnvironmentVariables.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
 			profile.executionPolicy.allowedExecutables.some(
-				(executable) => !executable.trim() || /[\0\r\n]/.test(executable),
+				(executable) =>
+					!executable.trim() ||
+					executable.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
+					/[\0\r\n]/.test(executable),
 			) ||
-			profile.executionPolicy.allowedEnvironmentVariables.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) ||
+			profile.executionPolicy.allowedEnvironmentVariables.some(
+				(name) => name.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
+			) ||
 			!Number.isSafeInteger(profile.executionPolicy.maxOutputBytes) ||
-			profile.executionPolicy.maxOutputBytes <= 0
+			profile.executionPolicy.maxOutputBytes <= 0 ||
+			profile.executionPolicy.maxOutputBytes > MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES
 		) {
 			throw new OrchestrationProfileError(`Profile '${profile.profileId}' executionPolicy is invalid.`);
 		}
@@ -235,14 +285,18 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	toJsonObject({ profile });
 }
 
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+function isStringArray(value: unknown, maxLength = MAX_ORCHESTRATION_IDENTIFIER_LENGTH): value is string[] {
+	return (
+		Array.isArray(value) &&
+		value.length <= MAX_ORCHESTRATION_COLLECTION_LENGTH &&
+		value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= maxLength)
+	);
 }
 
 export function parseOrchestrationProfile(value: unknown, sourcePath?: string): OrchestrationProfile {
 	if (!isPlainRecord(value)) throw new OrchestrationProfileError("Orchestration profile must be an object.");
 	if (
-		!exactKeys(value, [
+		!hasOnlyKeys(value, [
 			"schemaVersion",
 			"profileId",
 			"description",
@@ -265,33 +319,45 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		throw new OrchestrationProfileError("Orchestration profile contains an unsupported field.");
 	}
 	const modelPolicy = value.modelPolicy;
-	const budget = value.budget;
+	const rawBudget = value.budget;
+	let budget: RiskBudget;
 	const executionPolicy = value.executionPolicy;
 	if (
 		!isPlainRecord(modelPolicy) ||
-		!exactKeys(modelPolicy, ["mode", "candidates"]) ||
-		!Array.isArray(modelPolicy.candidates)
+		!hasOnlyKeys(modelPolicy, ["mode", "candidates"]) ||
+		!Array.isArray(modelPolicy.candidates) ||
+		modelPolicy.candidates.length > MAX_ORCHESTRATION_COLLECTION_LENGTH
 	) {
 		throw new OrchestrationProfileError("Orchestration profile modelPolicy is invalid.");
 	}
-	if (!isPlainRecord(budget)) throw new OrchestrationProfileError("Orchestration profile budget is invalid.");
+	try {
+		budget = parseRiskBudget(rawBudget, "Orchestration profile budget");
+	} catch (error) {
+		throw new OrchestrationProfileError(
+			error instanceof Error ? error.message : "Orchestration profile budget is invalid.",
+		);
+	}
 	if (
 		executionPolicy !== undefined &&
 		(!isPlainRecord(executionPolicy) ||
-			!exactKeys(executionPolicy, ["allowedExecutables", "allowedEnvironmentVariables", "maxOutputBytes"]) ||
-			!isStringArray(executionPolicy.allowedExecutables) ||
+			!hasOnlyKeys(executionPolicy, ["allowedExecutables", "allowedEnvironmentVariables", "maxOutputBytes"]) ||
+			!isStringArray(executionPolicy.allowedExecutables, MAX_WORKER_AUTHORITY_PATH_LENGTH) ||
 			!isStringArray(executionPolicy.allowedEnvironmentVariables) ||
 			!Number.isSafeInteger(executionPolicy.maxOutputBytes))
 	) {
 		throw new OrchestrationProfileError("Orchestration profile executionPolicy is invalid.");
 	}
 	const candidates = modelPolicy.candidates.map((candidate) => {
-		if (!isPlainRecord(candidate) || !exactKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
+		if (!isPlainRecord(candidate) || !hasOnlyKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
 			throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
 		}
 		if (
 			typeof candidate.provider !== "string" ||
+			candidate.provider.length === 0 ||
+			candidate.provider.length > MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH ||
 			typeof candidate.modelId !== "string" ||
+			candidate.modelId.length === 0 ||
+			candidate.modelId.length > MAX_ORCHESTRATION_MODEL_ID_LENGTH ||
 			typeof candidate.thinkingLevel !== "string" ||
 			!ORCHESTRATION_THINKING_LEVELS.includes(
 				candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number],
@@ -308,11 +374,16 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 	if (
 		value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION ||
 		typeof value.profileId !== "string" ||
+		value.profileId.length === 0 ||
+		value.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
 		typeof value.description !== "string" ||
+		value.description.length === 0 ||
+		value.description.length > MAX_ORCHESTRATION_DESCRIPTION_LENGTH ||
 		typeof value.role !== "string" ||
 		!WORKER_ROLES.includes(value.role as (typeof WORKER_ROLES)[number]) ||
 		(modelPolicy.mode !== "fixed" && modelPolicy.mode !== "ordered-fallback") ||
 		!Array.isArray(value.capabilityCeiling) ||
+		value.capabilityCeiling.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
 		!value.capabilityCeiling.every(
 			(capability) =>
 				typeof capability === "string" &&
@@ -324,21 +395,18 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		!Number.isSafeInteger(value.maxConcurrent) ||
 		!Number.isSafeInteger(value.leaseTtlMs) ||
 		typeof value.requireIndependentVerification !== "boolean" ||
-		(value.verificationProfileId !== undefined && typeof value.verificationProfileId !== "string") ||
+		(value.verificationProfileId !== undefined &&
+			(typeof value.verificationProfileId !== "string" ||
+				value.verificationProfileId.length === 0 ||
+				value.verificationProfileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)) ||
 		typeof value.createdAt !== "string" ||
-		typeof value.updatedAt !== "string"
+		value.createdAt.length === 0 ||
+		value.createdAt.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
+		typeof value.updatedAt !== "string" ||
+		value.updatedAt.length === 0 ||
+		value.updatedAt.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH
 	) {
 		throw new OrchestrationProfileError("Orchestration profile is invalid.");
-	}
-	for (const [key, candidate] of Object.entries(budget)) {
-		if (
-			!RISK_BUDGET_FIELDS.includes(key as (typeof RISK_BUDGET_FIELDS)[number]) ||
-			typeof candidate !== "number" ||
-			!Number.isFinite(candidate) ||
-			candidate < 0
-		) {
-			throw new OrchestrationProfileError("Orchestration profile budget is invalid.");
-		}
 	}
 	const profile = structuredClone({
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,

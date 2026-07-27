@@ -253,6 +253,66 @@ describe("DelegationOrchestrationLedger", () => {
 		expect(reopened.runtime.getSnapshot().tasks["worker-1"]?.task.acceptanceCriterionIds).toEqual([]);
 	});
 
+	it("persists runtime-owned task context on the task and durable dispatch", () => {
+		const agentDir = root();
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-task-context" });
+		const state = goal([
+			{ id: "req-1", description: "Implement the change", required: true },
+			{ id: "req-2", description: "Run focused checks", required: true },
+		]);
+		const prerequisite = ledger.prepare({
+			laneId: "worker-prerequisite",
+			instructions: "Inspect the repository",
+			executionContract: executionContract(profile()),
+			requiredCapabilities: ["filesystem.read"],
+			goal: state,
+		});
+		bindTestGrant(ledger, prerequisite.attemptId, "grant-prerequisite");
+		const prerequisiteHandle = ledger.start(prerequisite.attemptId, 60_000);
+		ledger.runtime.finishAttempt(
+			createWorkerResultContract({
+				handle: prerequisiteHandle,
+				claim: {
+					requestId: "worker-prerequisite",
+					status: "completed",
+					summary: "inspected",
+					changedFiles: [],
+				},
+				accepted: true,
+				costUsd: 0,
+				cwd: agentDir,
+				wallClockMs: 1,
+				toolCalls: 0,
+			}),
+		);
+
+		ledger.prepare({
+			laneId: "worker-implementation",
+			instructions: "Implement the requirement",
+			executionContract: executionContract(profile()),
+			requiredCapabilities: ["filesystem.read", "filesystem.write"],
+			goal: state,
+			taskContext: {
+				requirementIds: ["req-1"],
+				dependsOnTaskIds: ["worker-prerequisite"],
+				acceptanceCriterionIds: ["req-1", "req-2"],
+				resourcePointerIds: ["repository:pi", "artifact:plan"],
+			},
+		});
+
+		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-task-context" });
+		const task = reopened.runtime.getSnapshot().tasks["worker-implementation"];
+		const attempt = task?.attemptIds.map((attemptId) => reopened.runtime.getSnapshot().attempts[attemptId])[0];
+		expect(task?.task).toMatchObject({
+			dependsOn: ["worker-prerequisite"],
+			acceptanceCriterionIds: ["req-1", "req-2"],
+		});
+		expect(attempt?.dispatch).toMatchObject({
+			requirementIds: ["req-1"],
+			resourcePointerIds: ["repository:pi", "artifact:plan"],
+		});
+	});
+
 	it("refuses to remove an acceptance criterion already referenced by a task", () => {
 		const ledger = new DelegationOrchestrationLedger({ agentDir: root(), sessionId: "session-criteria" });
 		ledger.runtime.createObjective(

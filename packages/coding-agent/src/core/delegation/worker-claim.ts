@@ -1,63 +1,258 @@
 import path from "node:path";
 import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
-import { cloneEvidenceBundleForStorage, isEvidenceBundle } from "../research/evidence-bundle.ts";
+import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
-export function cloneWorkerClaimForStorage(claim: WorkerClaim): WorkerClaim {
+export const MAX_WORKER_CLAIM_SUMMARY_CHARS = 8_000;
+export const MAX_WORKER_CLAIM_BLOCKERS = 32;
+export const MAX_WORKER_CLAIM_BLOCKER_CHARS = 1_000;
+export const MAX_WORKER_CLAIM_CHANGED_FILES = 128;
+export const MAX_WORKER_CLAIM_CHANGED_FILE_CHARS = 2_048;
+export const MAX_WORKER_CLAIM_REQUEST_ID_CHARS = 256;
+export const MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS = 256;
+export const MAX_WORKER_CLAIM_USAGE_REPORT_ID_CHARS = 256;
+export const MAX_WORKER_CLAIM_TIMESTAMP_CHARS = 128;
+export const MAX_WORKER_CLAIM_VERIFICATION_SUBJECT_ID_CHARS = 256;
+export const MAX_WORKER_CLAIM_REASON_CODES = 32;
+export const MAX_WORKER_CLAIM_REASON_CODE_CHARS = 128;
+
+export interface BoundedWorkerClaimStrings {
+	values: string[];
+	overflowed: boolean;
+}
+
+function collectBoundedWorkerClaimStrings(
+	values: readonly string[],
+	maximumCount: number,
+	maximumChars: number,
+	trim: boolean,
+): BoundedWorkerClaimStrings {
+	const bounded: string[] = [];
+	const seen = new Set<string>();
+	let overflowed = values.length > maximumCount;
+	for (let index = 0; index < Math.min(values.length, maximumCount); index++) {
+		const raw = values[index];
+		if (typeof raw !== "string" || raw.length > maximumChars) {
+			overflowed = true;
+			continue;
+		}
+		const normalized = trim ? raw.trim() : raw;
+		if (!normalized || seen.has(normalized)) continue;
+		seen.add(normalized);
+		bounded.push(normalized);
+	}
+	return { values: bounded, overflowed };
+}
+
+/** Native host observations may be reduced for terminal storage, but callers must surface overflow. */
+export function collectBoundedWorkerClaimBlockers(values: readonly string[]): BoundedWorkerClaimStrings {
+	return collectBoundedWorkerClaimStrings(values, MAX_WORKER_CLAIM_BLOCKERS, MAX_WORKER_CLAIM_BLOCKER_CHARS, true);
+}
+
+/** Changed paths preserve their exact spelling; trimming a real path could change its meaning. */
+export function collectBoundedWorkerClaimChangedFiles(values: readonly string[]): BoundedWorkerClaimStrings {
+	return collectBoundedWorkerClaimStrings(
+		values,
+		MAX_WORKER_CLAIM_CHANGED_FILES,
+		MAX_WORKER_CLAIM_CHANGED_FILE_CHARS,
+		false,
+	);
+}
+
+function invalidWorkerClaim(message: string): never {
+	throw new Error(`Invalid worker claim: ${message}`);
+}
+
+/**
+ * The worker boundary must not evaluate accessors from managed/external reports. Copy only own
+ * data descriptors, then validate and construct a fresh contract object from the bounded values.
+ */
+function ownWorkerClaimDataRecord(value: unknown, label: string): Record<string, unknown> {
+	if (!isPlainRecord(value)) invalidWorkerClaim(`${label} must be a plain object.`);
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	const record: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+	for (const [key, descriptor] of Object.entries(descriptors)) {
+		if (!("value" in descriptor)) invalidWorkerClaim(`${label}.${key} must not be an accessor.`);
+		record[key] = descriptor.value;
+	}
+	return record;
+}
+
+function requiredWorkerClaimString(value: unknown, label: string, maximumChars: number): string {
+	if (typeof value !== "string" || value.length === 0) invalidWorkerClaim(`${label} must be a non-empty string.`);
+	if (value.length > maximumChars) invalidWorkerClaim(`${label} exceeds ${maximumChars} characters.`);
+	return value;
+}
+
+function optionalWorkerClaimString(value: unknown, label: string, maximumChars: number): string | undefined {
+	if (value === undefined) return undefined;
+	return requiredWorkerClaimString(value, label, maximumChars);
+}
+
+function workerClaimStringArray(value: unknown, label: string, maximumCount: number, maximumChars: number): string[] {
+	if (!Array.isArray(value)) invalidWorkerClaim(`${label} must be an array.`);
+	if (value.length > maximumCount) invalidWorkerClaim(`${label} exceeds ${maximumCount} entries.`);
+	const copied: string[] = [];
+	const seen = new Set<string>();
+	for (let index = 0; index < value.length; index++) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+		if (!descriptor || !("value" in descriptor)) invalidWorkerClaim(`${label}[${index}] must be a data value.`);
+		const item = requiredWorkerClaimString(descriptor.value, `${label}[${index}]`, maximumChars);
+		if (seen.has(item)) continue;
+		seen.add(item);
+		copied.push(item);
+	}
+	return copied;
+}
+
+export function boundedWorkerClaimStrings(
+	values: readonly string[],
+	maximumCount: number,
+	maximumChars: number,
+): string[] {
+	const bounded: string[] = [];
+	const seen = new Set<string>();
+	for (const value of values) {
+		const normalized = value.trim().slice(0, maximumChars);
+		if (!normalized || seen.has(normalized)) continue;
+		seen.add(normalized);
+		bounded.push(normalized);
+		if (bounded.length >= maximumCount) break;
+	}
+	return bounded;
+}
+
+export function boundedWorkerClaimBlockers(values: readonly string[]): string[] {
+	return collectBoundedWorkerClaimBlockers(values).values;
+}
+
+export function boundedWorkerClaimChangedFiles(values: readonly string[]): string[] {
+	return collectBoundedWorkerClaimChangedFiles(values).values;
+}
+
+/**
+ * Applies the one mandatory bounded claim contract before persistence, review, finalization, or
+ * artifact inspection. Host-built/native reports have already bounded their model output; foreign
+ * reports must fit the exact same envelope and are rejected before cloning or getter invocation.
+ */
+export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
+	const claim = ownWorkerClaimDataRecord(value, "claim");
+	const status = claim.status;
+	if (status !== "completed" && status !== "blocked" && status !== "failed" && status !== "cancelled") {
+		invalidWorkerClaim("claim.status is invalid.");
+	}
+	if (claim.outputFormat !== undefined && claim.outputFormat !== "structured" && claim.outputFormat !== "plain_text") {
+		invalidWorkerClaim("claim.outputFormat is invalid.");
+	}
+	if (claim.parentReviewRequired !== undefined && typeof claim.parentReviewRequired !== "boolean") {
+		invalidWorkerClaim("claim.parentReviewRequired must be boolean.");
+	}
+	const verification =
+		claim.verification === undefined ? undefined : ownWorkerClaimDataRecord(claim.verification, "claim.verification");
+	if (verification && verification.verdict !== "accepted" && verification.verdict !== "rejected") {
+		invalidWorkerClaim("claim.verification.verdict is invalid.");
+	}
+	const normalizedVerification: WorkerClaim["verification"] = verification
+		? {
+				subjectTaskId: requiredWorkerClaimString(
+					verification.subjectTaskId,
+					"claim.verification.subjectTaskId",
+					MAX_WORKER_CLAIM_VERIFICATION_SUBJECT_ID_CHARS,
+				),
+				verdict: verification.verdict === "accepted" ? "accepted" : "rejected",
+				reasonCodes: workerClaimStringArray(
+					verification.reasonCodes,
+					"claim.verification.reasonCodes",
+					MAX_WORKER_CLAIM_REASON_CODES,
+					MAX_WORKER_CLAIM_REASON_CODE_CHARS,
+				),
+			}
+		: undefined;
+	if (normalizedVerification && normalizedVerification.reasonCodes.length === 0) {
+		invalidWorkerClaim("claim.verification.reasonCodes must not be empty.");
+	}
 	return {
-		...claim,
-		...(claim.outputFormat ? { outputFormat: claim.outputFormat } : {}),
-		changedFiles: [...claim.changedFiles],
-		blockers: claim.blockers ? [...claim.blockers] : undefined,
-		evidence: claim.evidence ? cloneEvidenceBundleForStorage(claim.evidence) : undefined,
-		verification: claim.verification
-			? { ...claim.verification, reasonCodes: [...claim.verification.reasonCodes] }
-			: undefined,
+		requestId: requiredWorkerClaimString(claim.requestId, "claim.requestId", MAX_WORKER_CLAIM_REQUEST_ID_CHARS),
+		...(claim.terminalAttemptId !== undefined
+			? {
+					terminalAttemptId: requiredWorkerClaimString(
+						claim.terminalAttemptId,
+						"claim.terminalAttemptId",
+						MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS,
+					),
+				}
+			: {}),
+		status,
+		summary: requiredWorkerClaimString(claim.summary, "claim.summary", MAX_WORKER_CLAIM_SUMMARY_CHARS),
+		...(claim.outputFormat !== undefined ? { outputFormat: claim.outputFormat } : {}),
+		...(claim.evidence !== undefined ? { evidence: normalizeEvidenceBundleForStorage(claim.evidence) } : {}),
+		changedFiles: workerClaimStringArray(
+			claim.changedFiles,
+			"claim.changedFiles",
+			MAX_WORKER_CLAIM_CHANGED_FILES,
+			MAX_WORKER_CLAIM_CHANGED_FILE_CHARS,
+		),
+		...(claim.blockers !== undefined
+			? {
+					blockers: workerClaimStringArray(
+						claim.blockers,
+						"claim.blockers",
+						MAX_WORKER_CLAIM_BLOCKERS,
+						MAX_WORKER_CLAIM_BLOCKER_CHARS,
+					),
+				}
+			: {}),
+		...(claim.usageReportId !== undefined
+			? {
+					usageReportId: requiredWorkerClaimString(
+						claim.usageReportId,
+						"claim.usageReportId",
+						MAX_WORKER_CLAIM_USAGE_REPORT_ID_CHARS,
+					),
+				}
+			: {}),
+		...(claim.createdAt !== undefined
+			? {
+					createdAt: optionalWorkerClaimString(
+						claim.createdAt,
+						"claim.createdAt",
+						MAX_WORKER_CLAIM_TIMESTAMP_CHARS,
+					),
+				}
+			: {}),
+		...(claim.parentReviewRequired !== undefined ? { parentReviewRequired: claim.parentReviewRequired } : {}),
+		...(claim.parentReviewedAt !== undefined
+			? {
+					parentReviewedAt: optionalWorkerClaimString(
+						claim.parentReviewedAt,
+						"claim.parentReviewedAt",
+						MAX_WORKER_CLAIM_TIMESTAMP_CHARS,
+					),
+				}
+			: {}),
+		...(normalizedVerification ? { verification: normalizedVerification } : {}),
 	};
 }
 
+export function normalizeWorkerClaimReasonCode(value: unknown, fallback: string): string {
+	return (typeof value === "string" && value.trim() ? value.trim() : fallback).slice(
+		0,
+		MAX_WORKER_CLAIM_REASON_CODE_CHARS,
+	);
+}
+
+export function cloneWorkerClaimForStorage(claim: WorkerClaim): WorkerClaim {
+	return normalizeWorkerClaimForHost(claim);
+}
+
 export function isWorkerClaim(value: unknown): value is WorkerClaim {
-	if (!isPlainRecord(value)) return false;
-	const obj = value as Record<string, unknown>;
-
-	if (typeof obj.requestId !== "string") return false;
-	if (typeof obj.status !== "string" || !["completed", "blocked", "failed", "cancelled"].includes(obj.status)) {
+	try {
+		normalizeWorkerClaimForHost(value);
+		return true;
+	} catch {
 		return false;
 	}
-	if (typeof obj.summary !== "string") return false;
-	if (obj.outputFormat !== undefined && obj.outputFormat !== "structured" && obj.outputFormat !== "plain_text")
-		return false;
-
-	if (!Array.isArray(obj.changedFiles) || !obj.changedFiles.every((f) => typeof f === "string")) {
-		return false;
-	}
-
-	if (obj.blockers !== undefined) {
-		if (!Array.isArray(obj.blockers) || !obj.blockers.every((b) => typeof b === "string")) {
-			return false;
-		}
-	}
-
-	if (obj.usageReportId !== undefined && typeof obj.usageReportId !== "string") return false;
-	if (obj.createdAt !== undefined && typeof obj.createdAt !== "string") return false;
-	if (obj.parentReviewRequired !== undefined && typeof obj.parentReviewRequired !== "boolean") return false;
-	if (obj.parentReviewedAt !== undefined && typeof obj.parentReviewedAt !== "string") return false;
-	if (obj.verification !== undefined) {
-		if (!isPlainRecord(obj.verification)) return false;
-		if (typeof obj.verification.subjectTaskId !== "string" || !obj.verification.subjectTaskId) return false;
-		if (obj.verification.verdict !== "accepted" && obj.verification.verdict !== "rejected") return false;
-		if (
-			!Array.isArray(obj.verification.reasonCodes) ||
-			!obj.verification.reasonCodes.every((reasonCode) => typeof reasonCode === "string" && reasonCode.length > 0)
-		) {
-			return false;
-		}
-	}
-
-	if (obj.evidence !== undefined && !isEvidenceBundle(obj.evidence)) return false;
-
-	return true;
 }
 
 export function requiresParentReview(claim: WorkerClaim): boolean {
@@ -96,7 +291,18 @@ export function validateWorkerClaim(args: {
 	 */
 	cwd?: string;
 }): GateOutcome {
-	const { request, claim } = args;
+	const { request } = args;
+	let claim: WorkerClaim;
+	try {
+		claim = normalizeWorkerClaimForHost(args.claim);
+	} catch (error) {
+		return {
+			outcome: "block",
+			gate: "worker_claim",
+			reasonCode: "invalid_worker_claim",
+			message: error instanceof Error ? error.message : "Worker claim failed host validation.",
+		};
+	}
 	const baseDir = args.cwd ?? process.cwd();
 
 	if (claim.requestId !== request.id) {
@@ -237,7 +443,14 @@ export function reviewManagedLaneChangedFiles(args: {
 	envelope: Pick<CapabilityEnvelope, "allowedPaths" | "deniedPaths">;
 	cwd?: string;
 }): { reviewRequired: boolean; reasonCode: string } {
-	if (args.changedFiles.length === 0) {
+	const boundedChangedFiles = normalizeWorkerClaimForHost({
+		requestId: "managed-lane-review",
+		status: "completed",
+		summary: "Managed lane changed-file review.",
+		changedFiles: args.changedFiles,
+		usageReportId: "managed-lane-review",
+	}).changedFiles;
+	if (boundedChangedFiles.length === 0) {
 		return { reviewRequired: false, reasonCode: "no_changed_files" };
 	}
 	const syntheticId = "managed-lane-review";
@@ -262,8 +475,8 @@ export function reviewManagedLaneChangedFiles(args: {
 		claim: {
 			requestId: syntheticId,
 			status: "completed",
-			summary: "",
-			changedFiles: [...args.changedFiles],
+			summary: "Managed lane changed-file review.",
+			changedFiles: boundedChangedFiles,
 			usageReportId: syntheticId,
 		},
 		cwd: args.cwd,

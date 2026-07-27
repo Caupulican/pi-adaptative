@@ -146,6 +146,19 @@ export interface ToolValidationEscalationEvent {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+/** Provider-ready request inspected after context transformation and immediately before transport. */
+export interface RequestPreflightContext {
+	model: Model<Api>;
+	context: Context;
+	/** Current owner-selected output cap before request-local narrowing. */
+	maxTokens?: number;
+}
+
+/** Request-local limits. A returned output cap can only narrow the current owner/model limit. */
+export interface RequestPreflightResult {
+	maxTokens?: number;
+}
+
 /**
  * Default runaway-loop backstop: a single identical tool-call signature recurring this many times
  * within a sliding window (2×) stops the loop. Generous enough that legitimate long/varied work never
@@ -205,6 +218,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * ```
 	 */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+
+	/**
+	 * Runs after context transformation and conversion, immediately before every provider request.
+	 *
+	 * Use this for request-local budget/authority checks whose state can change between tool turns.
+	 * Throwing prevents transport. A returned `maxTokens` must be a positive safe integer and can
+	 * only narrow the current owner/model output limit; it never mutates the persistent loop config.
+	 */
+	requestPreflight?: (
+		context: RequestPreflightContext,
+		signal?: AbortSignal,
+	) => RequestPreflightResult | undefined | Promise<RequestPreflightResult | undefined>;
 
 	/**
 	 * Resolve the reasoning effort after context transformation and immediately before the provider
@@ -417,6 +442,14 @@ export interface AgentToolResult<T> {
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
+	/**
+	 * Marks a completed execution as a failure without throwing.
+	 *
+	 * The agent loop preserves the result long enough for `afterToolCall` to
+	 * inspect it, then converts the bounded diagnostic into its durable failure
+	 * record. Throwing remains valid for exceptional execution failures.
+	 */
+	isError?: boolean;
 	/** Provider usage spent inside this tool, for durable budget and cost accounting. */
 	usage?: Usage;
 	/**
@@ -438,7 +471,11 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Must return an object that matches `TParameters`.
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
-	/** Execute the tool call. Throw on failure instead of encoding errors in `content`. */
+	/**
+	 * Execute the tool call. Throw for exceptional execution failures, or return
+	 * `{ isError: true }` with bounded diagnostic content for an expected
+	 * operation failure such as a non-zero subprocess exit.
+	 */
 	execute: (
 		toolCallId: string,
 		params: Static<TParameters>,

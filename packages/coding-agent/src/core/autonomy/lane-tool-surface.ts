@@ -1,7 +1,11 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
-import { CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
+import {
+	CapabilityGateway,
+	CapabilityGatewayDeniedError,
+	type GatewayInitialUsage,
+} from "../orchestration/capability-gateway.ts";
 import type {
 	ExecutionGrant,
 	OrchestrationExecutionPolicy,
@@ -24,8 +28,12 @@ const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const MEMORY_LANE_TOOL_NAME = "memory" as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
+const MAX_LANE_MEMORY_QUERY_CHARS = 4_096;
 const laneMemorySchema = Type.Object({
-	query: Type.String({ description: "What relevant standing memory or prior evidence to retrieve" }),
+	query: Type.String({
+		maxLength: MAX_LANE_MEMORY_QUERY_CHARS,
+		description: "What relevant standing memory or prior evidence to retrieve",
+	}),
 });
 type LaneMemoryParams = Static<typeof laneMemorySchema>;
 const WRITE_LANE_TOOL_NAME_SET = new Set<string>(WRITE_LANE_TOOL_NAMES);
@@ -61,6 +69,8 @@ export interface LaneToolSurfaceOptions {
 	/** Compiled policy path. When present, it is the only authorization source for this surface. */
 	grant?: ExecutionGrant;
 	toolManifests?: readonly ToolCapabilityManifest[];
+	/** Durable cumulative active usage to seed the compiled grant's gateway on resume. */
+	initialUsage?: GatewayInitialUsage;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -108,7 +118,12 @@ function createLaneTools(
 				"Retrieve bounded, source-labeled standing memory relevant to this delegated task. Read-only: no memory writes or lifecycle actions are available.",
 			parameters: laneMemorySchema,
 			execute: async (_toolCallId, params) => {
-				const { query } = params as LaneMemoryParams;
+				const query = (params as LaneMemoryParams).query?.trim();
+				if (!query || query.length > MAX_LANE_MEMORY_QUERY_CHARS) {
+					throw new Error(
+						`memory_query_invalid: query must contain from 1 through ${MAX_LANE_MEMORY_QUERY_CHARS} characters.`,
+					);
+				}
 				return {
 					content: [{ type: "text" as const, text: await readMemory(query) }],
 					details: { readOnly: true },
@@ -160,7 +175,13 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	if (options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
 		throw new Error("Compiled lane grant references a tool without a capability manifest.");
 	}
-	const gateway = options.grant ? new CapabilityGateway({ grant: options.grant, cwd: options.cwd }) : undefined;
+	const gateway = options.grant
+		? new CapabilityGateway({
+				grant: options.grant,
+				cwd: options.cwd,
+				...(options.initialUsage !== undefined ? { initialUsage: options.initialUsage } : {}),
+			})
+		: undefined;
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",

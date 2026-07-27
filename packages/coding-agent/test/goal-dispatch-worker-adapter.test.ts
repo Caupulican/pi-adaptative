@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import { createGoalWorkerDelegationRequest } from "../src/core/runtime-builder.ts";
 import {
 	createGoalToolDefinition,
 	type GoalToolDependencies,
@@ -50,6 +51,20 @@ function firstText(content: Array<{ type: string; text?: string }>): string {
  * the SAME tool instance to prove the live dep wiring composes with that existing verification.
  */
 describe("goal action 'dispatch_worker' (live adapter)", () => {
+	it("maps the selected goal requirement into runtime-owned worker correlation", () => {
+		expect(
+			createGoalWorkerDelegationRequest({ requirementId: "r1", instructions: "implement the requirement" }),
+		).toEqual({
+			instructions: "implement the requirement",
+			taskContext: {
+				requirementIds: ["r1"],
+				dependsOnTaskIds: [],
+				acceptanceCriterionIds: [],
+				resourcePointerIds: [],
+			},
+		});
+	});
+
 	it("captures a real laneId, binds it as boundLaneId, and reports the in-process route", async () => {
 		const { run, getState } = createProducer({
 			startWorkerDelegation: ({ requirementId }) => ({ laneId: `lane-for-${requirementId}` }),

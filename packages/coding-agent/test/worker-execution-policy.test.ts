@@ -63,6 +63,23 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(Object.values(plan.budget).every(Number.isFinite)).toBe(true);
 	});
 
+	it("preserves an absent owner tool-call budget instead of inventing a worker ceiling", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "no-tool-budget",
+			model: { provider: "test", id: "model" },
+		});
+		const plan = buildWorkerExecutionPlan({
+			profile: { ...profile, budget: { maxCostUsd: 1 } },
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+
+		expect(plan.budget.maxToolCalls).toBeUndefined();
+		expect("maxToolCalls" in plan.budget).toBe(false);
+	});
+
 	it("treats a zero global cost setting as disabled but preserves an explicit zero-cost profile", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "cost-sentinel",

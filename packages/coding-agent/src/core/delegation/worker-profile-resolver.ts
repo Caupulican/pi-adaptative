@@ -3,6 +3,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type {
 	OrchestrationModelBinding,
 	OrchestrationProfile,
+	ResourcePointer,
 	WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
 import {
@@ -12,11 +13,14 @@ import {
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
+import { catalogWorkerResourcePointers, type WorkerResourceCatalogResourceLoader } from "./worker-resource-catalog.ts";
 
 export interface ResolvedWorkerProfile {
 	model: Model<Api>;
 	modelBinding: OrchestrationModelBinding;
 	profile: OrchestrationProfile;
+	/** Metadata-only pointers admitted from the profile-linked resource configuration. */
+	resourcePointers: readonly ResourcePointer[];
 	soul?: string;
 }
 
@@ -24,6 +28,7 @@ export interface WorkerProfileResolverOptions {
 	agentDir: string;
 	cwd: string;
 	getSettingsManager(): SettingsManager;
+	getResourceLoader(): WorkerResourceCatalogResourceLoader;
 	getModelRegistry(): ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
 	getActiveOrchestrationProfile(): OrchestrationProfile | undefined;
@@ -103,6 +108,7 @@ export class WorkerProfileResolver {
 				model: resolvedModel.model,
 				modelBinding: resolvedModel.binding,
 				profile: structuredClone(contract.profile),
+				resourcePointers: structuredClone(contract.resourcePointers),
 				...(contract.soul ? { soul: contract.soul } : {}),
 			},
 		};
@@ -130,12 +136,20 @@ export class WorkerProfileResolver {
 			.flatMap((linked) => (linked?.soul ? [linked.soul] : []))
 			.join("\n\n")
 			.trim();
+		const resourcePointers = catalogWorkerResourcePointers({
+			cwd: this.options.cwd,
+			resourceLoader: this.options.getResourceLoader(),
+			resourceProfiles: linkedProfiles.filter(
+				(linked): linked is NonNullable<typeof linked> => linked !== undefined,
+			),
+		});
 		return {
 			ok: true,
 			resolved: {
 				model: resolvedModel.model,
 				modelBinding: resolvedModel.binding,
 				profile,
+				resourcePointers,
 				...(soul ? { soul } : {}),
 			},
 		};

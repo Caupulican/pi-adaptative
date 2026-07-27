@@ -1,7 +1,10 @@
-import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
+import { normalizeWorkerClaimForHost } from "../delegation/worker-claim.ts";
+import { sameFileVersion } from "../util/bounded-file.ts";
 import {
 	type ArtifactContract,
 	type EvidenceContract,
@@ -10,21 +13,186 @@ import {
 } from "./contracts.ts";
 import type { StartedDelegationAttempt } from "./delegation-ledger.ts";
 
-function artifactForChangedFile(cwd: string, changedPath: string, index: number, createdAt: string): ArtifactContract {
-	const absolutePath = path.isAbsolute(changedPath) ? path.resolve(changedPath) : path.resolve(cwd, changedPath);
-	let sizeBytes: number | undefined;
-	try {
-		if (existsSync(absolutePath)) sizeBytes = statSync(absolutePath).size;
-	} catch {
-		// The path remains useful evidence even if it disappeared before metadata collection.
-	}
+/** Matches the default text-read ceiling while keeping synchronous result capture bounded. */
+export const MAX_WORKER_ARTIFACT_HASH_BYTES = 16 * 1024 * 1024;
+/** A terminal result may report many files; bound their cumulative synchronous reads too. */
+export const MAX_WORKER_ARTIFACT_HASH_TOTAL_BYTES = 32 * 1024 * 1024;
+const WORKER_ARTIFACT_HASH_CHUNK_BYTES = 64 * 1024;
+
+type HostFileState = "regular" | "missing" | "non_regular" | "read_error";
+
+interface ChangedFileArtifactObservation {
+	artifact: ArtifactContract;
+	fileState: HostFileState;
+	digestBytesCaptured: number;
+}
+
+function metadataForFileState(fileState: HostFileState, digestStatus: string): ArtifactContract["metadata"] {
 	return {
-		artifactId: `changed-file-${index + 1}`,
-		kind: "file",
+		hostObservation: "file_state_captured",
+		fileState,
+		digestStatus,
+	};
+}
+
+function artifactForChangedFile(
+	cwd: string,
+	changedPath: string,
+	index: number,
+	createdAt: string,
+	remainingDigestBytes: number,
+): ChangedFileArtifactObservation {
+	const absolutePath = path.isAbsolute(changedPath) ? path.resolve(changedPath) : path.resolve(cwd, changedPath);
+	const artifactId = `changed-file-${index + 1}`;
+	const base = {
+		artifactId,
+		kind: "file" as const,
 		uri: pathToFileURL(absolutePath).href,
-		...(sizeBytes !== undefined ? { sizeBytes } : {}),
 		createdAt,
 	};
+	let initialStats: ReturnType<typeof lstatSync>;
+	try {
+		initialStats = lstatSync(absolutePath);
+	} catch (error: unknown) {
+		if (isMissingFileError(error)) {
+			return {
+				artifact: { ...base, metadata: metadataForFileState("missing", "not_available") },
+				fileState: "missing",
+				digestBytesCaptured: 0,
+			};
+		}
+		return {
+			artifact: { ...base, metadata: metadataForFileState("read_error", "not_available") },
+			fileState: "read_error",
+			digestBytesCaptured: 0,
+		};
+	}
+
+	if (!initialStats.isFile()) {
+		return {
+			artifact: {
+				...base,
+				sizeBytes: initialStats.size,
+				metadata: metadataForFileState("non_regular", "not_applicable"),
+			},
+			fileState: "non_regular",
+			digestBytesCaptured: 0,
+		};
+	}
+
+	let fileDescriptor: number | undefined;
+	try {
+		fileDescriptor = openSync(absolutePath, "r");
+		const stats = fstatSync(fileDescriptor);
+		if (!stats.isFile()) {
+			return {
+				artifact: {
+					...base,
+					sizeBytes: stats.size,
+					metadata: metadataForFileState("non_regular", "not_applicable"),
+				},
+				fileState: "non_regular",
+				digestBytesCaptured: 0,
+			};
+		}
+		if (!sameFileVersion(initialStats, stats)) throw new Error("File changed before hashing");
+		if (stats.size > MAX_WORKER_ARTIFACT_HASH_BYTES) {
+			return {
+				artifact: {
+					...base,
+					sizeBytes: stats.size,
+					metadata: {
+						...metadataForFileState("regular", "omitted_size_limit"),
+						digestMaxBytes: MAX_WORKER_ARTIFACT_HASH_BYTES,
+					},
+				},
+				fileState: "regular",
+				digestBytesCaptured: 0,
+			};
+		}
+		if (stats.size > remainingDigestBytes) {
+			return {
+				artifact: {
+					...base,
+					sizeBytes: stats.size,
+					metadata: {
+						...metadataForFileState("regular", "omitted_aggregate_limit"),
+						digestTotalMaxBytes: MAX_WORKER_ARTIFACT_HASH_TOTAL_BYTES,
+					},
+				},
+				fileState: "regular",
+				digestBytesCaptured: 0,
+			};
+		}
+
+		const hash = createHash("sha256");
+		const buffer = Buffer.allocUnsafe(Math.min(WORKER_ARTIFACT_HASH_CHUNK_BYTES, Math.max(stats.size, 1)));
+		let bytesHashed = 0;
+		while (bytesHashed < stats.size) {
+			const bytesRead = readSync(
+				fileDescriptor,
+				buffer,
+				0,
+				Math.min(buffer.length, stats.size - bytesHashed),
+				bytesHashed,
+			);
+			if (bytesRead === 0) throw new Error("File changed while hashing");
+			hash.update(buffer.subarray(0, bytesRead));
+			bytesHashed += bytesRead;
+		}
+		if (!sameFileVersion(stats, fstatSync(fileDescriptor))) throw new Error("File changed while hashing");
+		return {
+			artifact: {
+				...base,
+				digest: hash.digest("hex"),
+				sizeBytes: stats.size,
+				metadata: {
+					...metadataForFileState("regular", "computed"),
+					digestAlgorithm: "sha256",
+					digestBytes: bytesHashed,
+				},
+			},
+			fileState: "regular",
+			digestBytesCaptured: bytesHashed,
+		};
+	} catch {
+		return {
+			artifact: {
+				...base,
+				sizeBytes: initialStats.size,
+				metadata: metadataForFileState("read_error", "not_available"),
+			},
+			fileState: "read_error",
+			digestBytesCaptured: 0,
+		};
+	} finally {
+		if (fileDescriptor !== undefined) {
+			try {
+				closeSync(fileDescriptor);
+			} catch {
+				// The captured state remains valid even if the descriptor close reports an error.
+			}
+		}
+	}
+}
+
+function isMissingFileError(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function hostFileStateEvidence(
+	observations: readonly ChangedFileArtifactObservation[],
+	createdAt: string,
+): EvidenceContract[] {
+	return observations.map(({ artifact, fileState }, index) => ({
+		evidenceId: `host-file-state-${index + 1}`,
+		kind: "observation",
+		summary: "Host captured file state.",
+		artifactIds: [artifact.artifactId],
+		trusted: true,
+		createdAt,
+		metadata: { observation: "file_state_captured", fileState },
+	}));
 }
 
 function evidenceForClaim(claim: WorkerClaim, createdAt: string): EvidenceContract[] {
@@ -77,8 +245,8 @@ function verificationEvidence(
 	];
 }
 
-/** Sole host-owned conversion from an untrusted claim to a fenced durable result. */
-export function createWorkerResultContract(args: {
+/** Inputs shared by every worker terminal path before the durable result is committed. */
+export interface CreateWorkerResultContractInput {
 	handle: StartedDelegationAttempt;
 	claim: WorkerClaim;
 	accepted: boolean;
@@ -93,18 +261,28 @@ export function createWorkerResultContract(args: {
 	verificationCriterionIds?: readonly string[];
 	reasonCode?: string;
 	createdAt?: string;
-}): WorkerResultContract {
+}
+
+/** Sole host-owned conversion from an untrusted claim to a fenced durable result. */
+export function createWorkerResultContract(args: CreateWorkerResultContractInput): WorkerResultContract {
 	const createdAt = args.createdAt ?? new Date().toISOString();
-	const claim = args.claim;
+	// Result construction is reachable from recovery/error paths as well as the native runner.
+	// Normalize first so no claim can expand file iteration, hashing, evidence, or durable results.
+	const claim = normalizeWorkerClaimForHost(args.claim);
 	const status: WorkerResultContract["status"] =
 		claim.status === "completed"
 			? args.accepted && !args.verificationRequired
 				? "completed"
 				: "partial"
 			: claim.status;
-	const artifacts = claim.changedFiles.map((changedPath, index) =>
-		artifactForChangedFile(args.cwd, changedPath, index, createdAt),
-	);
+	const changedFileObservations: ChangedFileArtifactObservation[] = [];
+	let remainingDigestBytes = MAX_WORKER_ARTIFACT_HASH_TOTAL_BYTES;
+	for (const [index, changedPath] of claim.changedFiles.entries()) {
+		const observation = artifactForChangedFile(args.cwd, changedPath, index, createdAt, remainingDigestBytes);
+		changedFileObservations.push(observation);
+		remainingDigestBytes -= observation.digestBytesCaptured;
+	}
+	const artifacts = changedFileObservations.map(({ artifact }) => artifact);
 	const blockers = claim.blockers ?? [];
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -120,6 +298,7 @@ export function createWorkerResultContract(args: {
 		artifacts,
 		evidence: [
 			...evidenceForClaim(claim, createdAt),
+			...hostFileStateEvidence(changedFileObservations, createdAt),
 			...verificationEvidence(claim, args.accepted, args.verificationCriterionIds ?? [], createdAt),
 		],
 		errors: blockers.map((message) => ({ code: "worker_blocker", message, retryable: false })),

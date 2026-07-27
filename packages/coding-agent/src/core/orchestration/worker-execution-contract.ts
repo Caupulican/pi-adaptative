@@ -1,18 +1,31 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isPlainRecord } from "../util/value-guards.ts";
+import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
 	isHarnessCapability,
+	isResourcePointerKind,
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	MAX_WORKER_AUTHORITY_PATHS,
+	MAX_WORKER_RESOURCE_METADATA_NAME_LENGTH,
+	MAX_WORKER_RESOURCE_PATH_LENGTH,
+	MAX_WORKER_RESOURCE_POINTERS,
+	MAX_WORKER_SOUL_LENGTH,
 	ORCHESTRATION_SCHEMA_VERSION,
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
+	type ResourcePointer,
+	type RiskBudget,
 	type WorkerExecutionAuthorityContract,
 	type WorkerExecutionContract,
 	type WorkerProfileExecutionContract,
 } from "./contracts.ts";
 import { OrchestrationProfileError, parseOrchestrationProfile } from "./profile-registry.ts";
-import { intersectRiskBudgets, validateRiskBudget } from "./risk-budget.ts";
+import { intersectRiskBudgets, parseRiskBudget } from "./risk-budget.ts";
 
 export class WorkerExecutionContractError extends Error {
 	constructor(message: string) {
@@ -21,18 +34,15 @@ export class WorkerExecutionContractError extends Error {
 	}
 }
 
-function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
-	const allowedSet = new Set(allowed);
-	return Object.keys(record).every((key) => allowedSet.has(key));
-}
-
 function parseModelBinding(value: unknown, label: string): OrchestrationModelBinding {
 	if (
 		!isPlainRecord(value) ||
-		!exactKeys(value, ["provider", "modelId", "thinkingLevel"]) ||
+		!hasOnlyKeys(value, ["provider", "modelId", "thinkingLevel"]) ||
 		typeof value.provider !== "string" ||
+		value.provider.length > MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH ||
 		!value.provider.trim() ||
 		typeof value.modelId !== "string" ||
+		value.modelId.length > MAX_ORCHESTRATION_MODEL_ID_LENGTH ||
 		!value.modelId.trim() ||
 		typeof value.thinkingLevel !== "string" ||
 		!ORCHESTRATION_THINKING_LEVELS.includes(value.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number])
@@ -46,14 +56,72 @@ function parseModelBinding(value: unknown, label: string): OrchestrationModelBin
 	};
 }
 
-function stringArray(value: unknown, label: string): string[] {
-	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string" && entry.length > 0)) {
+function stringArray(
+	value: unknown,
+	label: string,
+	options: { maxEntries?: number; maxLength?: number } = {},
+): string[] {
+	const maxEntries = options.maxEntries ?? MAX_ORCHESTRATION_COLLECTION_LENGTH;
+	const maxLength = options.maxLength ?? MAX_ORCHESTRATION_IDENTIFIER_LENGTH;
+	if (
+		!Array.isArray(value) ||
+		value.length > maxEntries ||
+		!value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= maxLength)
+	) {
 		throw new WorkerExecutionContractError(`${label} must be an array of non-empty strings.`);
 	}
 	if (new Set(value).size !== value.length) {
 		throw new WorkerExecutionContractError(`${label} contains duplicates.`);
 	}
 	return [...value];
+}
+
+function parseResourcePointers(value: unknown, label: string): ResourcePointer[] {
+	if (!Array.isArray(value) || value.length > MAX_WORKER_RESOURCE_POINTERS) {
+		throw new WorkerExecutionContractError(`${label} resource pointers are invalid.`);
+	}
+	const ids = new Set<string>();
+	return value.map((candidate) => {
+		if (
+			!isPlainRecord(candidate) ||
+			!hasOnlyKeys(candidate, ["id", "kind", "uri", "readOnly", "digest", "metadata"]) ||
+			typeof candidate.id !== "string" ||
+			!/^(skill|prompt):[a-f0-9]{64}$/i.test(candidate.id) ||
+			typeof candidate.kind !== "string" ||
+			!isResourcePointerKind(candidate.kind) ||
+			(candidate.kind !== "skill" && candidate.kind !== "prompt") ||
+			!candidate.id.startsWith(`${candidate.kind}:`) ||
+			typeof candidate.uri !== "string" ||
+			candidate.uri.length === 0 ||
+			candidate.uri.length > MAX_WORKER_RESOURCE_PATH_LENGTH + 16 ||
+			!candidate.uri.startsWith("file:") ||
+			candidate.readOnly !== true ||
+			(candidate.digest !== undefined &&
+				(typeof candidate.digest !== "string" || !/^[a-f0-9]{64}$/i.test(candidate.digest))) ||
+			(candidate.metadata !== undefined &&
+				(!isPlainRecord(candidate.metadata) ||
+					typeof candidate.metadata.name !== "string" ||
+					candidate.metadata.name.length === 0 ||
+					candidate.metadata.name.length > MAX_WORKER_RESOURCE_METADATA_NAME_LENGTH ||
+					!hasOnlyKeys(candidate.metadata, ["name"])))
+		) {
+			throw new WorkerExecutionContractError(`${label} resource pointer is invalid.`);
+		}
+		if (ids.has(candidate.id)) {
+			throw new WorkerExecutionContractError(`${label} resource pointers contain duplicates.`);
+		}
+		ids.add(candidate.id);
+		return {
+			id: candidate.id,
+			kind: candidate.kind,
+			uri: candidate.uri,
+			readOnly: true,
+			...(typeof candidate.digest === "string" ? { digest: candidate.digest } : {}),
+			...(isPlainRecord(candidate.metadata) && typeof candidate.metadata.name === "string"
+				? { metadata: { name: candidate.metadata.name } }
+				: {}),
+		};
+	});
 }
 
 function parseAuthority(
@@ -63,7 +131,7 @@ function parseAuthority(
 ): WorkerExecutionAuthorityContract {
 	if (
 		!isPlainRecord(value) ||
-		!exactKeys(value, ["capabilities", "toolNames", "readPaths", "writePaths", "deniedPaths", "budget"])
+		!hasOnlyKeys(value, ["capabilities", "toolNames", "readPaths", "writePaths", "deniedPaths", "budget"])
 	) {
 		throw new WorkerExecutionContractError(`${label} authority is invalid.`);
 	}
@@ -78,18 +146,23 @@ function parseAuthority(
 	if (toolNames.some((toolName) => !profile.toolNames.includes(toolName))) {
 		throw new WorkerExecutionContractError(`${label} authority contains a tool outside its profile.`);
 	}
-	const readPaths = stringArray(value.readPaths, `${label} authority readPaths`);
-	const writePaths = stringArray(value.writePaths, `${label} authority writePaths`);
-	const deniedPaths = stringArray(value.deniedPaths, `${label} authority deniedPaths`);
-	if ([...readPaths, ...writePaths, ...deniedPaths].some((entry) => !path.isAbsolute(entry))) {
+	const pathArrayOptions = {
+		maxEntries: MAX_WORKER_AUTHORITY_PATHS,
+		maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	};
+	const readPaths = stringArray(value.readPaths, `${label} authority readPaths`, pathArrayOptions);
+	const writePaths = stringArray(value.writePaths, `${label} authority writePaths`, pathArrayOptions);
+	const deniedPaths = stringArray(value.deniedPaths, `${label} authority deniedPaths`, pathArrayOptions);
+	if (
+		[...readPaths, ...writePaths, ...deniedPaths].some(
+			(entry) => !path.isAbsolute(entry) && !path.win32.isAbsolute(entry),
+		)
+	) {
 		throw new WorkerExecutionContractError(`${label} authority paths must be absolute.`);
 	}
-	if (!isPlainRecord(value.budget)) {
-		throw new WorkerExecutionContractError(`${label} authority budget is invalid.`);
-	}
-	const budget = structuredClone(value.budget);
+	let budget: RiskBudget;
 	try {
-		validateRiskBudget(budget, `${label} authority budget`);
+		budget = parseRiskBudget(value.budget, `${label} authority budget`);
 	} catch (error) {
 		throw new WorkerExecutionContractError(error instanceof Error ? error.message : String(error));
 	}
@@ -121,7 +194,7 @@ function parseAuthority(
 function parseProfileContract(value: unknown, label: string): WorkerProfileExecutionContract {
 	if (
 		!isPlainRecord(value) ||
-		!exactKeys(value, ["schemaVersion", "profile", "modelBinding", "authority", "soul"]) ||
+		!hasOnlyKeys(value, ["schemaVersion", "profile", "modelBinding", "authority", "resourcePointers", "soul"]) ||
 		value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION
 	) {
 		throw new WorkerExecutionContractError(`${label} is invalid.`);
@@ -141,15 +214,20 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 	if (!profile.modelPolicy.candidates.some((candidate) => isDeepStrictEqual(candidate, modelBinding))) {
 		throw new WorkerExecutionContractError(`${label} model binding is not declared by its profile.`);
 	}
-	if (value.soul !== undefined && (typeof value.soul !== "string" || !value.soul.trim())) {
+	if (
+		value.soul !== undefined &&
+		(typeof value.soul !== "string" || value.soul.length > MAX_WORKER_SOUL_LENGTH || !value.soul.trim())
+	) {
 		throw new WorkerExecutionContractError(`${label} soul is invalid.`);
 	}
 	const authority = parseAuthority(value.authority, profile, label);
+	const resourcePointers = parseResourcePointers(value.resourcePointers ?? [], label);
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profile,
 		modelBinding,
 		authority,
+		resourcePointers,
 		...(typeof value.soul === "string" ? { soul: value.soul } : {}),
 	};
 }
@@ -157,7 +235,7 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 export function parseWorkerExecutionContract(value: unknown): WorkerExecutionContract {
 	if (
 		!isPlainRecord(value) ||
-		!exactKeys(value, ["schemaVersion", "worker", "verifier"]) ||
+		!hasOnlyKeys(value, ["schemaVersion", "worker", "verifier"]) ||
 		value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION
 	) {
 		throw new WorkerExecutionContractError("Worker execution contract is invalid.");
@@ -192,6 +270,7 @@ function snapshotResolvedProfile(source: {
 	profile: OrchestrationProfile;
 	modelBinding: OrchestrationModelBinding;
 	authority: WorkerExecutionAuthorityContract;
+	resourcePointers?: readonly ResourcePointer[];
 	soul?: string;
 }): WorkerProfileExecutionContract {
 	return {
@@ -199,6 +278,7 @@ function snapshotResolvedProfile(source: {
 		profile: snapshotProfile(source.profile),
 		modelBinding: structuredClone(source.modelBinding),
 		authority: structuredClone(source.authority),
+		resourcePointers: structuredClone(source.resourcePointers ?? []),
 		...(source.soul ? { soul: source.soul } : {}),
 	};
 }
@@ -208,12 +288,14 @@ export function createWorkerExecutionContract(args: {
 		profile: OrchestrationProfile;
 		modelBinding: OrchestrationModelBinding;
 		authority: WorkerExecutionAuthorityContract;
+		resourcePointers?: readonly ResourcePointer[];
 		soul?: string;
 	};
 	verifier?: {
 		profile: OrchestrationProfile;
 		modelBinding: OrchestrationModelBinding;
 		authority: WorkerExecutionAuthorityContract;
+		resourcePointers?: readonly ResourcePointer[];
 		soul?: string;
 	};
 }): WorkerExecutionContract {

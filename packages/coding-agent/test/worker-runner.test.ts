@@ -50,14 +50,15 @@ function runnerOptions(overrides: Partial<WorkerRunnerOptions> = {}): WorkerRunn
 		maxWallClockMs: 0,
 		usageReportId: "worker:session-1:worker-1",
 		now: () => "2026-07-01T00:00:01.000Z",
-		complete: async () => completionOf('{"summary":"Validation blocks out-of-scope file changes."}'),
+		complete: async () =>
+			completionOf('{"summary":"Validation blocks out-of-scope file changes.","status":"completed"}'),
 		...overrides,
 	};
 }
 
 describe("parseWorkerOutput", () => {
-	it("parses summary-only, blocked, and findings-bearing outputs", () => {
-		expect(parseWorkerOutput('{"summary":"All good"}')).toEqual({
+	it("parses exact statuses, blocked, and findings-bearing outputs", () => {
+		expect(parseWorkerOutput('{"summary":"All good","status":"completed"}')).toEqual({
 			summary: "All good",
 			status: "completed",
 			blockers: [],
@@ -71,7 +72,7 @@ describe("parseWorkerOutput", () => {
 		expect(blocked?.blockers).toEqual(["Missing spec"]);
 
 		const withFindings = parseWorkerOutput(
-			'```json\n{"summary":"Done","findings":[{"summary":"Rule A","confidence":0.7},{"summary":"Rule B"}]}\n```',
+			'```json\n{"summary":"Done","status":"completed","findings":[{"summary":"Rule A","confidence":0.7},{"summary":"Rule B"}]}\n```',
 		);
 		expect(withFindings?.findings).toHaveLength(2);
 		expect(withFindings?.findings[0]).toEqual({ summary: "Rule A", confidence: 0.7 });
@@ -83,10 +84,50 @@ describe("parseWorkerOutput", () => {
 		expect(parseWorkerOutput('{"summary":""}')).toBeUndefined();
 	});
 
+	it("rejects missing, unknown, and non-string claim statuses", () => {
+		expect(parseWorkerOutput('{"summary":"missing status"}')).toBeUndefined();
+		expect(parseWorkerOutput('{"summary":"failed status","status":"failed"}')).toBeUndefined();
+		expect(parseWorkerOutput('{"summary":"object status","status":{"value":"completed"}}')).toBeUndefined();
+	});
+
 	it("parses the typed independent-verifier verdict", () => {
 		expect(
-			parseWorkerOutput('{"summary":"checks passed","verdict":"accepted","reasonCodes":["focused_checks_passed"]}'),
+			parseWorkerOutput(
+				'{"summary":"checks passed","status":"completed","verdict":"accepted","reasonCodes":["focused_checks_passed"]}',
+			),
 		).toMatchObject({ verdict: "accepted", reasonCodes: ["focused_checks_passed"] });
+	});
+
+	it("bounds every untrusted structured claim field before it reaches durable state", () => {
+		const parsed = parseWorkerOutput(
+			JSON.stringify({
+				summary: "s".repeat(20_000),
+				status: "completed",
+				blockers: Array.from({ length: 100 }, () => "b".repeat(1_200)),
+				findings: Array.from({ length: 100 }, () => ({ summary: "f".repeat(2_200), confidence: 2 })),
+				reasonCodes: Array.from({ length: 100 }, () => "r".repeat(300)),
+			}),
+		);
+
+		expect(parsed?.summary).toHaveLength(8_000);
+		expect(parsed?.blockers).toHaveLength(32);
+		expect(parsed?.blockers[0]).toHaveLength(1_000);
+		expect(parsed?.findings).toHaveLength(64);
+		expect(parsed?.findings[0]?.summary).toHaveLength(2_000);
+		expect(parsed?.reasonCodes).toHaveLength(32);
+		expect(parsed?.reasonCodes[0]).toHaveLength(128);
+	});
+
+	it("preserves a rejected structured action contract for the runner to fail closed", () => {
+		const parsed = parseWorkerOutput(
+			JSON.stringify({
+				summary: "attempted write",
+				status: "completed",
+				actions: [{ op: "write", path: "x".repeat(2_049), content: "x" }],
+			}),
+		);
+
+		expect(parsed?.actionRejection).toMatchObject({ kind: "rejected", reasonCode: "worker_actions_path_too_long" });
 	});
 });
 
@@ -129,7 +170,9 @@ describe("runWorker", () => {
 		const outcome = await runWorker(
 			runnerOptions({
 				complete: async () =>
-					completionOf('{"summary":"Done","findings":[{"summary":"validateWorkerClaim blocks scope escapes"}]}'),
+					completionOf(
+						'{"summary":"Done","status":"completed","findings":[{"summary":"validateWorkerClaim blocks scope escapes"}]}',
+					),
 			}),
 		);
 		expect(outcome.claim.evidence?.findings).toHaveLength(1);
@@ -148,6 +191,41 @@ describe("runWorker", () => {
 		expect(outcome.acceptance.outcome).toBe("block");
 		expect(outcome.laneStatus).toBe("failed");
 		expect(outcome.reasonCode).toBe("worker_blocked");
+	});
+
+	it("fails closed instead of salvaging malformed structured claim statuses", async () => {
+		for (const text of [
+			'{"summary":"missing status"}',
+			'{"summary":"failed status","status":"failed"}',
+			'{"summary":"object status","status":{"value":"completed"}}',
+		]) {
+			const outcome = await runWorker(runnerOptions({ complete: async () => completionOf(text) }));
+			expect(outcome).toMatchObject({
+				claim: { status: "failed" },
+				accepted: false,
+				laneStatus: "failed",
+				reasonCode: "unparseable_output",
+			});
+		}
+	});
+
+	it("fails closed when a verifier's typed verdict fields contain malformed values", async () => {
+		const outcome = await runWorker(
+			runnerOptions({
+				verificationSubjectTaskId: "worker-subject",
+				complete: async () =>
+					completionOf(
+						'{"summary":"mixed reason codes","status":"completed","verdict":"accepted","reasonCodes":["focused_checks_passed",7]}',
+					),
+			}),
+		);
+
+		expect(outcome).toMatchObject({
+			claim: { status: "failed" },
+			accepted: false,
+			laneStatus: "failed",
+			reasonCode: "unparseable_output",
+		});
 	});
 
 	it("salvages read-only plain text as bounded untrusted output while preserving spend", async () => {
@@ -199,6 +277,26 @@ describe("runWorker", () => {
 		expect(outcome.reasonCode).toBe("worker_blocked");
 	});
 
+	it("surfaces host-observed claim overflow instead of silently preserving an incomplete file review", async () => {
+		const outcome = await runWorker(
+			runnerOptions({
+				getChangedFiles: () => Array.from({ length: 300 }, (_entry, index) => `src/${index}-${"p".repeat(3_000)}`),
+				complete: async () => ({
+					...completionOf('{"summary":"partial result","status":"completed"}'),
+					blockers: Array.from({ length: 100 }, (_entry, index) => `${index}:${"blocked ".repeat(300)}`),
+				}),
+			}),
+		);
+
+		expect(outcome.claim.changedFiles).toEqual([]);
+		expect(outcome.claim.blockers?.length).toBeLessThanOrEqual(32);
+		expect(outcome.claim.blockers?.every((blocker) => blocker.length <= 1_000)).toBe(true);
+		expect(outcome.claim.status).toBe("blocked");
+		expect(outcome.claim.blockers).toContain(
+			"worker changed-file report exceeded the durable claim bound; parent review is required",
+		);
+	});
+
 	it("fails on a model error stop reason", async () => {
 		const outcome = await runWorker(
 			runnerOptions({ complete: async () => completionOf("irrelevant", 0.002, "error") }),
@@ -210,7 +308,7 @@ describe("runWorker", () => {
 
 	it("marks the lane budget_exhausted when spend exceeds maxUsd but keeps the result", async () => {
 		const outcome = await runWorker(
-			runnerOptions({ complete: async () => completionOf('{"summary":"pricey"}', 1.5) }),
+			runnerOptions({ complete: async () => completionOf('{"summary":"pricey","status":"completed"}', 1.5) }),
 		);
 		expect(outcome.claim.status).toBe("completed");
 		expect(outcome.laneStatus).toBe("budget_exhausted");
@@ -219,7 +317,10 @@ describe("runWorker", () => {
 
 	it("treats an explicit zero-dollar budget as a hard ceiling", async () => {
 		const outcome = await runWorker(
-			runnerOptions({ maxUsd: 0, complete: async () => completionOf('{"summary":"not free"}', 0.01) }),
+			runnerOptions({
+				maxUsd: 0,
+				complete: async () => completionOf('{"summary":"not free","status":"completed"}', 0.01),
+			}),
 		);
 		expect(outcome.laneStatus).toBe("budget_exhausted");
 		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
@@ -260,7 +361,7 @@ describe("runWorker", () => {
 	it("keeps the worker system prompt static for provider prompt caching", async () => {
 		const complete = vi.fn(async ({ systemPrompt }: { systemPrompt: string }) => {
 			expect(systemPrompt).toBe(WORKER_LANE_SYSTEM_PROMPT);
-			return completionOf('{"summary":"ok"}');
+			return completionOf('{"summary":"ok","status":"completed"}');
 		});
 		await runWorker(runnerOptions({ complete }));
 		expect(complete).toHaveBeenCalledOnce();
@@ -272,7 +373,7 @@ describe("runWorker", () => {
 				verificationSubjectTaskId: "worker-subject",
 				complete: async () =>
 					completionOf(
-						'{"summary":"focused checks passed","verdict":"accepted","reasonCodes":["focused_checks_passed"]}',
+						'{"summary":"focused checks passed","status":"completed","verdict":"accepted","reasonCodes":["focused_checks_passed"]}',
 					),
 			}),
 		);
@@ -365,6 +466,7 @@ describe("worker write lane (G2)", () => {
 					changedFiles: ["src/helper.ts"],
 					refused: [{ path: "docs/leak.md", reason: "outside scope" }],
 					failed: [],
+					inspectionRequired: [],
 				};
 			},
 		});
@@ -404,5 +506,77 @@ describe("worker write lane (G2)", () => {
 		expect(outcome.claim.changedFiles).toEqual([]);
 		expect(outcome.claim.status).toBe("blocked");
 		expect(outcome.claim.blockers?.some((b) => b.includes("without a filesystem.write"))).toBe(true);
+	});
+
+	it("fails closed when a write-capable worker emits malformed structured actions", async () => {
+		const request = workerRequest({
+			envelope: {
+				id: "env-malformed-actions",
+				capabilities: ["filesystem.read", "filesystem.write"],
+				allowedPaths: ["src"],
+			},
+		});
+		const applyActions = vi.fn();
+
+		const outcome = await runWorker(
+			runnerOptions({
+				request,
+				complete: async () =>
+					completionOf(
+						JSON.stringify({
+							summary: "attempted mutation",
+							status: "completed",
+							actions: [{ op: "write", path: "x".repeat(2_049), content: "x" }],
+						}),
+					),
+				applyActions,
+			}),
+		);
+
+		expect(applyActions).not.toHaveBeenCalled();
+		expect(outcome).toMatchObject({
+			claim: { status: "failed" },
+			laneStatus: "failed",
+			reasonCode: "unparseable_output",
+		});
+		expect(outcome.claim.blockers).toContain("worker_actions_path_too_long");
+	});
+
+	it("blocks a structured write claim when its durable action journal requires inspection", async () => {
+		const request = workerRequest({
+			envelope: {
+				id: "env-journal",
+				capabilities: ["filesystem.read", "filesystem.write"],
+				allowedPaths: ["src"],
+			},
+		});
+		const outcome = await runWorker(
+			runnerOptions({
+				request,
+				complete: async () =>
+					completionOf(
+						'{"summary":"wrote it","status":"completed","actions":[{"op":"write","path":"src/a.ts","content":"x"}]}',
+					),
+				applyActions: () => ({
+					changedFiles: ["src/a.ts"],
+					refused: [],
+					failed: [],
+					inspectionRequired: [
+						{
+							path: "src/a.ts",
+							actionId: "wa-0-test",
+							state: "unknown",
+							reasonCode: "worker_action_outcome_unknown",
+						},
+					],
+				}),
+			}),
+		);
+
+		expect(outcome.claim.status).toBe("blocked");
+		expect(outcome.claim.changedFiles).toEqual(["src/a.ts"]);
+		expect(outcome.claim.blockers).toContain(
+			"action requires workspace/evidence inspection (src/a.ts, unknown): worker_action_outcome_unknown",
+		);
 	});
 });

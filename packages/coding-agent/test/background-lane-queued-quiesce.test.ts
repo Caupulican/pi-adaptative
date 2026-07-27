@@ -60,6 +60,7 @@ function buildQueuingDeps(
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
 		getSettingsManager: () => settingsManager,
+		getResourceLoader: () => ({ getDiscoverableSkillPaths: () => [], getDiscoverablePromptPaths: () => [] }) as never,
 		getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 		getModel: () => model,
 		isModelExhausted: () => false,
@@ -192,6 +193,29 @@ describe("queued-worker quiesce visibility", () => {
 });
 
 describe("worker dispatch priority", () => {
+	it("routes queued cancellation through the controller-owned cancellation boundary", () => {
+		const agentDir = createAgentDir("queued-reservation-release");
+		const records = new Map<string, LaneRecord>();
+		const cancelled: Array<{ laneId: string; reasonCode: string }> = [];
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir,
+			isDisposed: () => false,
+			admit: () => ({ action: "wait", reason: "write_reservation" }),
+			getRecord: (laneId) => records.get(laneId),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			cancel: (laneId, reasonCode) => cancelled.push({ laneId, reasonCode }),
+			warn: () => {},
+		});
+		const record: LaneRecord = { laneId: "reserved-write-lane", type: "worker", status: "queued" };
+		records.set(record.laneId, record);
+		scheduler.enqueue(record, { instructions: "write only inside the reserved path" });
+		scheduler.drain();
+
+		scheduler.cancelQueued();
+
+		expect(cancelled).toEqual([{ laneId: record.laneId, reasonCode: "session_disposed" }]);
+	});
+
 	it("starts a mandatory verifier before earlier ordinary queued work", () => {
 		const agentDir = createAgentDir("verification-priority");
 		const records = new Map<string, LaneRecord>();

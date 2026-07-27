@@ -1,8 +1,10 @@
 import path from "node:path";
+import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import type {
 	ExecutionGrant,
 	HarnessCapability,
 	OrchestrationProfile,
+	ResourcePointer,
 	RiskBudget,
 	ToolCapabilityManifest,
 	WorkerExecutionAuthorityContract,
@@ -29,16 +31,11 @@ export interface WorkerExecutionPlan {
 	budget: RiskBudget;
 }
 
-function pathContains(scope: string, candidate: string): boolean {
-	const relative = path.relative(scope, candidate);
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
-}
-
 function intersectPathScopes(admittedPaths: readonly string[], currentPaths: readonly string[]): string[] {
 	const intersections = admittedPaths.flatMap((admitted) =>
 		currentPaths.flatMap((current) => {
-			if (pathContains(admitted, current)) return [current];
-			if (pathContains(current, admitted)) return [admitted];
+			if (isPathWithinScope(current, admitted)) return [current];
+			if (isPathWithinScope(admitted, current)) return [admitted];
 			return [];
 		}),
 	);
@@ -144,7 +141,7 @@ export function buildWorkerExecutionPlan(args: {
 		readMemory,
 		writeEnabled,
 		processEnabled,
-		budget: { ...budget, maxToolCalls: budget.maxToolCalls ?? 6 },
+		budget,
 	};
 }
 
@@ -152,6 +149,7 @@ export function compileWorkerExecutionGrant(args: {
 	target: { objectiveId: string; taskId: string; attemptId: string };
 	profile: OrchestrationProfile;
 	plan: WorkerExecutionPlan;
+	resources: readonly ResourcePointer[];
 }): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
 	const compiled = new ExecutionPolicyCompiler().compile({
 		objectiveId: args.target.objectiveId,
@@ -164,6 +162,7 @@ export function compileWorkerExecutionGrant(args: {
 		authorityCapabilities: args.profile.capabilityCeiling,
 		requestedTools: args.plan.toolManifests.map((manifest) => manifest.toolName),
 		toolManifests: args.plan.toolManifests,
+		resources: args.resources,
 		readPaths: args.plan.readPaths,
 		writePaths: args.plan.writePaths,
 		deniedPaths: args.plan.deniedPaths,

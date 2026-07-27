@@ -1,6 +1,7 @@
 import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { WorkerAgentControlPort } from "../delegation/worker-agent-control.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	emptyOrchestrationCall,
@@ -9,15 +10,34 @@ import {
 	type OrchestrationPanelRow,
 } from "./orchestration-panel.ts";
 
+const MAX_WORKER_CONTROL_ID_CHARS = 512;
+
 const schema = Type.Object(
 	{
+		agentId: Type.Optional(
+			Type.String({
+				maxLength: MAX_WORKER_CONTROL_ID_CHARS,
+				description: "Stable logical worker id returned by delegate start; required only for action wait.",
+			}),
+		),
 		laneId: Type.Optional(
-			Type.String({ description: "Worker lane id to inspect. Omit it for a recent-session status overview." }),
+			Type.String({
+				maxLength: MAX_WORKER_CONTROL_ID_CHARS,
+				description: "Worker lane id to inspect. Omit it for a recent-session status overview.",
+			}),
 		),
 		action: Type.Optional(
-			Type.Literal("review", {
+			Type.String({
+				enum: ["review", "wait"],
 				description:
-					'Pass "review" together with laneId to durably acknowledge that worker\'s unreviewed mutation, clearing its sticky notice. Not required to read a status.',
+					'Pass "review" together with laneId to durably acknowledge that worker\'s unreviewed mutation, clearing its sticky notice. Pass "wait" with agentId for one event-driven state change; do not poll.',
+			}),
+		),
+		timeoutMs: Type.Optional(
+			Type.Integer({
+				minimum: 0,
+				maximum: 300_000,
+				description: "Optional bounded event-driven wait timeout in milliseconds.",
 			}),
 		),
 	},
@@ -36,7 +56,7 @@ export interface DelegateStatusLaneView {
 }
 
 export interface DelegateStatusToolDetails {
-	kind: "overview" | "lane" | "review" | "error";
+	kind: "overview" | "lane" | "review" | "wait" | "error";
 	count?: number;
 	queued?: number;
 	running?: number;
@@ -53,6 +73,8 @@ export interface DelegateStatusToolDetails {
 	claimSummary?: string;
 	changedFiles?: readonly string[];
 	blockers?: readonly string[];
+	agentId?: string;
+	agentStatus?: "active" | "suspended" | "idle" | "unknown";
 }
 
 export type AcknowledgeWorkerReviewResult =
@@ -68,6 +90,8 @@ export interface DelegateStatusDependencies {
 	 * it the "review" action reports itself unsupported instead of silently no-op'ing.
 	 */
 	acknowledgeWorkerReview?(requestId: string): AcknowledgeWorkerReviewResult;
+	/** Event-driven logical-worker controls; callers must not poll. */
+	workerAgentControl?: Pick<WorkerAgentControlPort, "waitForWorkerAgent">;
 }
 
 /** A worker claim flagged parent_review_required whose mutation has not yet been acked. */
@@ -200,7 +224,7 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 		name: "delegate_status",
 		label: "delegate_status",
 		description:
-			'Inspect queued, running, and terminal workers in this session, retrieve one worker\'s bounded, explicitly untrusted claim, or acknowledge (action: "review") an unreviewed worker mutation.',
+			'Inspect queued, running, and terminal workers in this session, retrieve one worker\'s bounded, explicitly untrusted claim, acknowledge (action: "review") an unreviewed worker mutation, or use action: "wait" with agentId for one event-driven update. Do not poll.',
 		promptSnippet:
 			"Inspect delegated workers after a terminal handoff without receiving a late transcript injection; acknowledge unreviewed mutations.",
 		parameters: schema,
@@ -217,38 +241,92 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			return new OrchestrationPanelComponent(theme, delegateStatusPanelModel(details), expanded);
 		},
 		async execute(_toolCallId, input: Input) {
+			if (input.action !== undefined && input.action.length > 16) {
+				return {
+					content: [{ type: "text" as const, text: "delegate_status action is invalid" }],
+					details: { kind: "error", reason: "invalid_action" },
+				};
+			}
+			if (input.action !== undefined && input.action !== "review" && input.action !== "wait") {
+				return {
+					content: [{ type: "text" as const, text: `delegate_status action is invalid: ${input.action}` }],
+					details: { kind: "error", reason: "invalid_action" },
+				};
+			}
+			if (input.action === "wait") {
+				if (input.agentId !== undefined && input.agentId.length > MAX_WORKER_CONTROL_ID_CHARS) {
+					return {
+						content: [{ type: "text" as const, text: "wait action agentId is invalid" }],
+						details: { kind: "wait" as const, reason: "invalid_agent_id" },
+					};
+				}
+				const agentId = input.agentId?.trim();
+				if (!agentId) {
+					return {
+						content: [{ type: "text" as const, text: "wait action requires agentId" }],
+						details: { kind: "wait", reason: "missing_agent_id" },
+					};
+				}
+				if (
+					input.timeoutMs !== undefined &&
+					(!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > 300_000)
+				) {
+					return {
+						content: [{ type: "text" as const, text: "wait action timeoutMs is invalid" }],
+						details: { kind: "wait", agentId, reason: "invalid_timeout_ms" },
+					};
+				}
+				if (!deps.workerAgentControl) {
+					return {
+						content: [
+							{ type: "text" as const, text: "event-driven worker wait is not available in this session" },
+						],
+						details: { kind: "wait", agentId, reason: "wait_unsupported" },
+					};
+				}
+				const outcome = await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs);
+				return {
+					content: [{ type: "text" as const, text: `worker ${agentId} wait completed: ${outcome.status}` }],
+					details: { kind: "wait", agentId, agentStatus: outcome.status },
+				};
+			}
 			if (input.action === "review") {
-				if (!input.laneId) {
+				if (!input.laneId?.trim()) {
 					return {
 						content: [{ type: "text" as const, text: "review action requires laneId" }],
 						details: { kind: "review", reviewed: false, reason: "missing_lane_id" },
 					};
 				}
+				if (input.laneId.length > MAX_WORKER_CONTROL_ID_CHARS) {
+					return {
+						content: [{ type: "text" as const, text: "review action laneId is invalid" }],
+						details: { kind: "review" as const, reviewed: false, reason: "invalid_lane_id" },
+					};
+				}
+				const laneId = input.laneId.trim();
 				if (!deps.acknowledgeWorkerReview) {
 					return {
 						content: [{ type: "text" as const, text: "review acknowledgement is not available in this session" }],
 						details: { kind: "review", reviewed: false, reason: "review_unsupported" },
 					};
 				}
-				const outcome = deps.acknowledgeWorkerReview(input.laneId);
+				const outcome = deps.acknowledgeWorkerReview(laneId);
 				if (!outcome.ok) {
 					return {
-						content: [
-							{ type: "text" as const, text: `review not acknowledged (${input.laneId}): ${outcome.reason}` },
-						],
-						details: { kind: "review", laneId: input.laneId, reviewed: false, reason: outcome.reason },
+						content: [{ type: "text" as const, text: `review not acknowledged (${laneId}): ${outcome.reason}` }],
+						details: { kind: "review", laneId, reviewed: false, reason: outcome.reason },
 					};
 				}
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `reviewed ${input.laneId} at ${outcome.reviewedAt} — unreviewed-mutation notice cleared`,
+							text: `reviewed ${laneId} at ${outcome.reviewedAt} — unreviewed-mutation notice cleared`,
 						},
 					],
 					details: {
 						kind: "review",
-						laneId: input.laneId,
+						laneId,
 						reviewed: true,
 						reviewedAt: outcome.reviewedAt,
 					},
@@ -261,8 +339,21 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			// unreviewed mutation must stay visible no matter how much later lane churn buries it.
 			const unreviewedRecords = records.filter((record) => isUnreviewed(claims.get(record.laneId)));
 
-			if (input.laneId) {
-				const record = records.find((candidate) => candidate.laneId === input.laneId);
+			if (input.laneId !== undefined) {
+				if (input.laneId.length > MAX_WORKER_CONTROL_ID_CHARS) {
+					return {
+						content: [{ type: "text" as const, text: "worker lane id is invalid" }],
+						details: { kind: "error" as const, reason: "invalid_lane_id" },
+					};
+				}
+				const laneId = input.laneId.trim();
+				if (!laneId) {
+					return {
+						content: [{ type: "text" as const, text: "worker lane id is invalid" }],
+						details: { kind: "error" as const, reason: "invalid_lane_id" },
+					};
+				}
+				const record = records.find((candidate) => candidate.laneId === laneId);
 				if (!record) {
 					return {
 						content: [{ type: "text" as const, text: "unknown_worker_lane" }],
@@ -289,7 +380,7 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			const queued = records.filter((record) => record.status === "queued").length;
 			const running = records.filter((record) => record.status === "running").length;
 			const terminal = records.length - queued - running;
-			const recent = recentRecords.map((record) => formatRecord(record, claims.get(record.laneId)));
+			const recent = recentRecords.map((record) => formatRecord(record, claims.get(record.laneId)).slice(0, 2_048));
 			const olderUnreviewed = unreviewedRecords.filter((record) => !recentLaneIds.has(record.laneId));
 			const displayedRecords = [...recentRecords, ...olderUnreviewed.slice(0, 10)].filter(
 				(record, index, all) => all.findIndex((candidate) => candidate.laneId === record.laneId) === index,
@@ -297,13 +388,16 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			const olderUnreviewedText =
 				olderUnreviewed.length > 0
 					? `\n\nOlder unreviewed workers (outside the recent list):\n${olderUnreviewed
-							.map((record) => formatRecord(record, claims.get(record.laneId)))
+							.slice(0, 10)
+							.map((record) => formatRecord(record, claims.get(record.laneId)).slice(0, 2_048))
 							.join("\n\n")}`
 					: "";
 			const overviewLines = [`workers: ${running} running, ${queued} queued, ${terminal} terminal`];
 			if (unreviewedRecords.length > 0) {
+				const visibleUnreviewedIds = unreviewedRecords.slice(0, 64).map((record) => record.laneId);
+				const omitted = unreviewedRecords.length - visibleUnreviewedIds.length;
 				overviewLines.push(
-					`${unreviewedRecords.length} unreviewed worker mutation${unreviewedRecords.length === 1 ? "" : "s"} pending review: ${unreviewedRecords.map((record) => record.laneId).join(", ")}. Acknowledge each with delegate_status { laneId, action: "review" }.`,
+					`${unreviewedRecords.length} unreviewed worker mutation${unreviewedRecords.length === 1 ? "" : "s"} pending review: ${visibleUnreviewedIds.join(", ")}${omitted > 0 ? `, and ${omitted} more` : ""}. Acknowledge each with delegate_status { laneId, action: "review" }.`,
 				);
 			}
 			const overview = overviewLines.join("\n");
@@ -324,7 +418,7 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 					running,
 					terminal,
 					unreviewedCount: unreviewedRecords.length,
-					unreviewedLaneIds: unreviewedRecords.map((record) => record.laneId),
+					unreviewedLaneIds: unreviewedRecords.slice(0, 64).map((record) => record.laneId),
 					lanes: displayedRecords.map((record) => laneView(record, claims.get(record.laneId))),
 				},
 			};

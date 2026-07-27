@@ -138,6 +138,7 @@ import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
+import { isLoopbackModelEndpoint } from "./models/model-endpoint.ts";
 import {
 	DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 	estimateContextPromptTokens,
@@ -553,6 +554,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
+			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
@@ -807,6 +809,7 @@ export class AgentSession {
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
 			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
+			workerAgentControl: this._backgroundLanes,
 			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
@@ -1022,13 +1025,7 @@ export class AgentSession {
 	}
 
 	private _isWarmableLocalModel(model: Model<Api>): boolean {
-		if (model.api !== "openai-completions") return false;
-		try {
-			const hostname = new URL(model.baseUrl).hostname.toLowerCase();
-			return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-		} catch {
-			return false;
-		}
+		return model.api === "openai-completions" && isLoopbackModelEndpoint(model.baseUrl);
 	}
 
 	/**

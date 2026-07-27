@@ -1,6 +1,6 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import type { CapabilityEnvelope } from "./contracts.ts";
-import { safeRealpathSync } from "./path-scope.ts";
+import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
 /**
  * Tool-level envelope enforcement (G2 prerequisite for code-writing workers): the capability
@@ -33,14 +33,6 @@ export function extractPathArguments(params: unknown): string[] {
 	return found;
 }
 
-function isWithinRoot(target: string, root: string): boolean {
-	const relativePath = relative(root, target);
-	return (
-		relativePath === "" ||
-		(!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath))
-	);
-}
-
 /**
  * Deny wins over allow; an empty/absent allow list means "no positive scope restriction"
  * (only denies apply) — mirroring the resource-profile filter semantics.
@@ -59,7 +51,7 @@ export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: stri
 	}
 	for (const denied of envelope.deniedPaths ?? []) {
 		try {
-			if (isWithinRoot(target, safeRealpathSync(resolve(cwd, denied)))) return false;
+			if (isPathWithinScope(target, safeRealpathSync(resolve(cwd, denied)))) return false;
 		} catch {
 			// Mirror checkPathScope: an unresolvable deny root cannot match anything.
 		}
@@ -68,7 +60,7 @@ export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: stri
 	if (allowed.length === 0) return true;
 	return allowed.some((root) => {
 		try {
-			return isWithinRoot(target, safeRealpathSync(resolve(cwd, root)));
+			return isPathWithinScope(target, safeRealpathSync(resolve(cwd, root)));
 		} catch {
 			return false;
 		}

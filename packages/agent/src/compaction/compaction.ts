@@ -133,6 +133,13 @@ export interface CompactionResult<T = unknown> {
 	deterministicGapFills?: number;
 }
 
+/** Host-owned provider boundary for shared compaction request enforcement and accounting. */
+export type CompactionCompletion = (
+	model: Model<any>,
+	context: Context,
+	options: SimpleStreamOptions,
+) => Promise<AssistantMessage>;
+
 /**
  * Carry failed LLM verification attempts into the result that the retry ladder eventually applies.
  * Only bounded numeric/check identifiers are persisted in details; raw facts stay in the in-memory reports.
@@ -669,7 +676,9 @@ async function completeSummarization(
 	context: Context,
 	options: SimpleStreamOptions,
 	streamFn?: StreamFn,
+	completion?: CompactionCompletion,
 ): Promise<AssistantMessage> {
+	if (completion) return completion(model, context, options);
 	if (!streamFn) {
 		return completeSimple(model, context, options);
 	}
@@ -728,6 +737,7 @@ export async function generateSummary(
 	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear as exact paths in ## Files, path recall threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
 	chunked = false,
 	precomputedConversationText?: string,
+	completion?: CompactionCompletion,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -745,6 +755,7 @@ export async function generateSummary(
 			factsBlock,
 			chunked,
 			precomputedConversationText,
+			completion,
 		)
 	).text;
 }
@@ -764,6 +775,7 @@ export async function generateSummaryWithUsage(
 	factsBlock = "verification demands:\nfiles-modified-recall (must appear in ## Files):\nfiles-read-recall (must appear as exact paths in ## Files, path recall threshold applies):\nworking-set-recall (must appear in ## Working Set):\nopen-errors-recall (must appear in ## Open Problems):\nactions-recall (must appear in ## Done):\nmandatory-rules-recall (must appear in ### Mandatory Rules):\nactive-task-containment (must appear in ## Active Task):\ncancelled-work-dropped (must NOT appear outside ### Mandatory Rules):",
 	chunked = false,
 	precomputedConversationText?: string,
+	completion?: CompactionCompletion,
 ): Promise<{ text: string; usage: Usage }> {
 	const usage = createEmptyUsage();
 	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
@@ -802,6 +814,7 @@ export async function generateSummaryWithUsage(
 			previousSummary,
 			promptSuffix,
 			usage,
+			completion,
 		);
 	}
 
@@ -823,6 +836,7 @@ export async function generateSummaryWithUsage(
 		},
 		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 		streamFn,
+		completion,
 	);
 	addUsage(usage, response.usage);
 
@@ -926,6 +940,7 @@ async function summarizeChunks(
 	previousSummary: string | undefined,
 	promptSuffix: string,
 	usage: Usage,
+	completion: CompactionCompletion | undefined,
 ): Promise<string> {
 	let reducedText = conversationText;
 	for (let pass = 0; pass < 3; pass++) {
@@ -940,6 +955,7 @@ async function summarizeChunks(
 			streamFn,
 			inputBound,
 			usage,
+			completion,
 		);
 		if (estimateStringTokens(buildSummarizationPrompt(summary, previousSummary, promptSuffix)) <= inputBound) {
 			return summary;
@@ -960,6 +976,7 @@ async function summarizeChunkPass(
 	streamFn: StreamFn | undefined,
 	inputBound: number,
 	usage: Usage,
+	completion: CompactionCompletion | undefined,
 ): Promise<string> {
 	const maxChunkTokens = getChunkSummarizationTokenBudget(inputBound);
 	const maxChunkChars = Math.max(1, maxChunkTokens * 4);
@@ -982,6 +999,7 @@ async function summarizeChunkPass(
 			},
 			createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 			streamFn,
+			completion,
 		);
 		addUsage(usage, response.usage);
 		if (response.stopReason === "error") {
@@ -1200,6 +1218,7 @@ async function generateVerifiedSummary(options: {
 	previousSummary: string | undefined;
 	thinkingLevel: ThinkingLevel | undefined;
 	streamFn: StreamFn | undefined;
+	completion: CompactionCompletion | undefined;
 	preDigest: ((conversationText: string, signal?: AbortSignal) => Promise<string>) | undefined;
 	facts: CompactionFacts;
 	factsBlock: string;
@@ -1230,6 +1249,7 @@ async function generateVerifiedSummary(options: {
 			options.factsBlock,
 			options.chunked,
 			precomputedConversationText,
+			options.completion,
 		);
 		addUsage(usage, generated.usage);
 		const summary = generated.text;
@@ -1279,7 +1299,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
-	executionOptions?: { chunked?: boolean },
+	executionOptions?: { chunked?: boolean; completion?: CompactionCompletion },
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -1318,6 +1338,7 @@ export async function compact(
 					previousSummary,
 					thinkingLevel,
 					streamFn,
+					completion: executionOptions?.completion,
 					preDigest,
 					facts,
 					factsBlock,
@@ -1336,6 +1357,7 @@ export async function compact(
 			signal,
 			thinkingLevel,
 			streamFn,
+			executionOptions?.completion,
 		);
 		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefix.text}`;
 		summaryUsage = combineUsage(summaryUsage, turnPrefix.usage);
@@ -1459,6 +1481,7 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	completion?: CompactionCompletion,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -1480,6 +1503,7 @@ async function generateTurnPrefixSummary(
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 		streamFn,
+		completion,
 	);
 
 	if (response.stopReason === "error") {

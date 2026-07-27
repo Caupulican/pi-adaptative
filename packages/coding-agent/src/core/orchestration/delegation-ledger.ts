@@ -1,7 +1,10 @@
+import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type {
+	AgentBindingContract,
+	AttemptUsageSnapshot,
 	HarnessCapability,
 	OrchestrationDispatchRequest,
 	RiskBudget,
@@ -25,6 +28,7 @@ export interface PrepareDelegationInput {
 	requiredCapabilities: readonly HarnessCapability[];
 	goal?: GoalState;
 	verificationOfTaskId?: string;
+	taskContext?: WorkerDelegationTaskContext;
 }
 
 export interface PrepareManagedDelegationInput {
@@ -48,6 +52,11 @@ export interface StartedDelegationAttempt {
 	leaseId: string;
 	fencingToken: number;
 	expiresAt: string;
+}
+
+export interface PrepareAgentTurnInput {
+	agentId: string;
+	instructions: string;
 }
 
 function activeAttempt(attempt: AttemptRuntimeState): boolean {
@@ -83,6 +92,7 @@ export class DelegationOrchestrationLedger {
 			executionContract: input.executionContract,
 			...(input.goal ? { goal: input.goal } : {}),
 			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
+			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 		});
 	}
 
@@ -111,6 +121,65 @@ export class DelegationOrchestrationLedger {
 		});
 	}
 
+	/**
+	 * Queue one new turn for an existing logical agent. The agent identity and its immutable
+	 * execution contract are inherited from the last bound turn; the durable task and attempt ids
+	 * are intentionally new so retries, leases, and terminal evidence never collide across turns.
+	 */
+	prepareAgentTurn(input: PrepareAgentTurnInput): AttemptRuntimeState {
+		const agentId = input.agentId.trim();
+		const instructions = input.instructions.trim();
+		if (!agentId) throw new DurableTaskRuntimeError("Logical worker agent id is required.");
+		if (!instructions) throw new DurableTaskRuntimeError("Worker follow-up instructions are required.");
+		const snapshot = this.runtime.getSnapshot();
+		const agent = snapshot.agents[agentId];
+		if (!agent) throw new DurableTaskRuntimeError(`Unknown logical worker agent '${agentId}'.`);
+		if (agent.status !== "registered") {
+			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' is not idle.`);
+		}
+		const prior = this.latestAgentAttempt(snapshot, agent);
+		const contract = prior?.dispatch.executionContract;
+		if (!prior || !contract) {
+			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no immutable execution contract.`);
+		}
+		const priorTask = snapshot.tasks[prior.taskId]?.task;
+		if (!priorTask) throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
+		const sequence = Object.values(snapshot.attempts).filter((attempt) => attempt.agentId === agentId).length + 1;
+		const taskId = `${agentId}:turn:${sequence}`;
+		if (snapshot.tasks[taskId]) {
+			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' already has turn ${sequence}.`);
+		}
+		return this.prepareNormalized({
+			laneId: taskId,
+			instructions,
+			profileId: contract.worker.profile.profileId,
+			role: agent.role,
+			requiredCapabilities: contract.worker.authority.capabilities,
+			riskBudget: contract.worker.profile.budget,
+			taskContext: {
+				requirementIds: prior.dispatch.requirementIds ?? [],
+				dependsOnTaskIds: priorTask.dependsOn,
+				acceptanceCriterionIds: priorTask.acceptanceCriterionIds,
+				resourcePointerIds: prior.dispatch.resourcePointerIds,
+			},
+			executionContract: contract,
+			dispatchMetadata: {
+				logicalLaneId: agentId,
+				dispatchSequence: sequence,
+			},
+		});
+	}
+
+	private latestAgentAttempt(
+		snapshot: ReturnType<DurableTaskRuntime["getSnapshot"]>,
+		agent: AgentBindingContract,
+	): AttemptRuntimeState | undefined {
+		return Object.values(snapshot.attempts)
+			.filter((attempt) => attempt.agentId === agent.agentId)
+			.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+			.at(-1);
+	}
+
 	private prepareNormalized(input: {
 		laneId: string;
 		instructions: string;
@@ -121,6 +190,7 @@ export class DelegationOrchestrationLedger {
 		goal?: GoalState;
 		goalId?: string;
 		verificationOfTaskId?: string;
+		taskContext?: WorkerDelegationTaskContext;
 		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
 			OrchestrationDispatchRequest,
@@ -161,7 +231,9 @@ export class DelegationOrchestrationLedger {
 				title: deriveWorkerTaskLabel(input.instructions, `Delegated ${input.role} work`),
 				description: input.instructions,
 				role: input.role,
+				dependsOn: input.taskContext?.dependsOnTaskIds ?? [],
 				requiredCapabilities: input.requiredCapabilities,
+				acceptanceCriterionIds: input.taskContext?.acceptanceCriterionIds ?? [],
 				riskBudget: input.riskBudget,
 				...(input.verificationOfTaskId
 					? {
@@ -185,7 +257,8 @@ export class DelegationOrchestrationLedger {
 			taskId: input.laneId,
 			profileId: input.profileId,
 			instructions: input.instructions,
-			resourcePointerIds: [],
+			resourcePointerIds: input.taskContext?.resourcePointerIds ?? [],
+			requirementIds: input.taskContext?.requirementIds ?? [],
 			...(input.executionContract ? { executionContract: input.executionContract } : {}),
 			...input.dispatchMetadata,
 		});
@@ -219,13 +292,18 @@ export class DelegationOrchestrationLedger {
 		}
 	}
 
-	start(attemptId: string, leaseTtlMs: number, ownerId = `in-process:${this.sessionId}`): StartedDelegationAttempt {
+	start(
+		attemptId: string,
+		leaseTtlMs: number,
+		ownerId = `in-process:${this.sessionId}`,
+		agentId?: string,
+	): StartedDelegationAttempt {
 		const snapshot = this.runtime.getSnapshot();
 		const attempt = snapshot.attempts[attemptId];
 		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
 		const task = snapshot.tasks[attempt.taskId];
 		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${attempt.taskId}'.`);
-		const lease = this.runtime.leaseAttempt(attemptId, ownerId, leaseTtlMs);
+		const lease = this.runtime.leaseAttempt(attemptId, ownerId, leaseTtlMs, agentId);
 		this.runtime.startAttempt(attemptId, lease.leaseId, lease.fencingToken);
 		return {
 			objectiveId: task.task.objectiveId,
@@ -239,6 +317,18 @@ export class DelegationOrchestrationLedger {
 
 	cancel(attemptId: string, reasonCode: string): void {
 		this.runtime.cancelAttempt(attemptId, reasonCode);
+	}
+
+	/** Latest fenced cumulative usage, if this attempt has crossed a durable checkpoint boundary. */
+	getAttemptUsage(attemptId: string): AttemptUsageSnapshot | undefined {
+		const snapshot = this.runtime.getSnapshot();
+		const attempt = snapshot.attempts[attemptId];
+		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+		for (const checkpointId of [...attempt.checkpointIds].reverse()) {
+			const usage = snapshot.checkpoints[checkpointId]?.usage;
+			if (usage) return structuredClone(usage);
+		}
+		return undefined;
 	}
 
 	/** Fence interrupted isolated completions and queue one replacement attempt per task. */

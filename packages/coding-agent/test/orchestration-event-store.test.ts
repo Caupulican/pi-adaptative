@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -343,5 +343,66 @@ describe("OrchestrationEventStore", () => {
 		writeFileSync(filePath, JSON.stringify(invalid), "utf-8");
 
 		expect(() => store.readAll()).toThrow("Invalid orchestration event record");
+	});
+
+	it("rejects one event that cannot fit the configured bounded tail before writing it", () => {
+		const store = makeStore("event-too-large", { maxTailBytes: 256 });
+
+		expect(() =>
+			store.append({
+				type: "objective.created",
+				aggregateId: "objective-1",
+				actor: "kernel",
+				payload: { unbounded: "x".repeat(1024) },
+			}),
+		).toThrow("exceeds its configured tail byte limit");
+		expect(existsSync(join(store.eventsDir, "0000000000000001.json"))).toBe(false);
+		expect(
+			new OrchestrationEventStore({
+				agentDir: store.rootDir.split(`${join("state", "orchestration")}`)[0]!,
+				sessionId: "event-too-large",
+				maxTailBytes: 256,
+			}).readAll(),
+		).toEqual([]);
+	});
+
+	it("fails closed when a corrupt event file exceeds the configured bounded tail", () => {
+		const store = makeStore("oversized-corrupt-event", { maxTailBytes: 256 });
+		const eventPath = join(store.eventsDir, "0000000000000001.json");
+		mkdirSync(store.eventsDir, { recursive: true });
+		writeFileSync(eventPath, "x".repeat(257), "utf-8");
+
+		expect(() => store.readAll()).toThrow("Orchestration event 0000000000000001.json exceeds its byte limit");
+		expect(() =>
+			new OrchestrationEventStore({
+				agentDir: store.rootDir.split(`${join("state", "orchestration")}`)[0]!,
+				sessionId: "oversized-corrupt-event",
+				maxTailBytes: 256,
+			}).readAll(),
+		).toThrow("Orchestration event 0000000000000001.json exceeds its byte limit");
+	});
+
+	it("fails closed on a managed event-directory burst without loading an unbounded listing", () => {
+		const store = makeStore("directory-burst");
+		mkdirSync(store.eventsDir, { recursive: true });
+		for (let index = 0; index < 2_049; index++) {
+			writeFileSync(join(store.eventsDir, `burst-${String(index).padStart(4, "0")}.tmp`), "x", "utf-8");
+		}
+
+		expect(() => store.readAll()).toThrow("Orchestration events directory exceeds its entry limit");
+	});
+
+	it("caps caller-configured durable retention bounds", () => {
+		const agentDir = makeAgentDir();
+		expect(
+			() => new OrchestrationEventStore({ agentDir, sessionId: "max-tail-events", maxTailEvents: 1_025 }),
+		).toThrow("maxTailEvents must not exceed 1024");
+		expect(
+			() =>
+				new OrchestrationEventStore({ agentDir, sessionId: "max-tail-bytes", maxTailBytes: 16 * 1024 * 1024 + 1 }),
+		).toThrow("maxTailBytes must not exceed 16777216");
+		expect(
+			() => new OrchestrationEventStore({ agentDir, sessionId: "max-idempotency", maxIdempotencyEvents: 1_025 }),
+		).toThrow("maxIdempotencyEvents must not exceed 1024");
 	});
 });

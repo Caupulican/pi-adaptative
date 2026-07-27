@@ -1,11 +1,11 @@
-import type { WorkerDelegationRunOutcome } from "../agent-session.ts";
+import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 
 export type WorkerDispatchAdmission =
 	| { action: "start" }
-	| { action: "wait" }
+	| { action: "wait"; reason?: "capacity" | "write_reservation" }
 	| { action: "cancel"; reasonCode: string };
 
 export interface WorkerDispatchSchedulerOptions {
@@ -27,6 +27,7 @@ export class WorkerDispatchScheduler {
 	private readonly queued = new Map<string, WorkerDelegationRequest>();
 	private readonly queuedDeregisters = new Map<string, () => void>();
 	private readonly running = new Map<string, Promise<WorkerDelegationRunOutcome>>();
+	private readonly reservationBlocked = new Set<string>();
 	private draining = false;
 
 	constructor(options: WorkerDispatchSchedulerOptions) {
@@ -74,18 +75,23 @@ export class WorkerDispatchScheduler {
 		);
 	}
 
-	drain(): void {
+	drain(reservationAvailable = false): void {
 		if (this.draining || this.options.isDisposed()) return;
 		this.draining = true;
 		try {
 			for (const [laneId, request] of [...this.queued]) {
+				if (this.reservationBlocked.has(laneId) && !reservationAvailable) continue;
 				const record = this.options.getRecord(laneId);
 				if (!record) {
 					this.removeQueued(laneId);
 					continue;
 				}
 				const admission = this.options.admit(request, record);
-				if (admission.action === "wait") continue;
+				if (admission.action === "wait") {
+					if (admission.reason === "write_reservation") this.reservationBlocked.add(laneId);
+					continue;
+				}
+				this.reservationBlocked.delete(laneId);
 				this.removeQueued(laneId);
 				if (admission.action === "cancel") {
 					this.options.cancel(laneId, admission.reasonCode);
@@ -99,9 +105,12 @@ export class WorkerDispatchScheduler {
 	}
 
 	cancelQueued(): void {
-		for (const deregister of this.queuedDeregisters.values()) deregister();
-		this.queuedDeregisters.clear();
-		this.queued.clear();
+		for (const laneId of [...this.queued.keys()]) {
+			// The controller owns durable cancellation and any pre-admission resources (for example a
+			// write reservation). Dropping this scheduler-only reference would leak those resources.
+			this.options.cancel(laneId, "session_disposed");
+			this.removeQueued(laneId);
+		}
 	}
 
 	dropQueued(laneId: string): boolean {
@@ -112,6 +121,7 @@ export class WorkerDispatchScheduler {
 
 	private removeQueued(laneId: string): void {
 		this.queued.delete(laneId);
+		this.reservationBlocked.delete(laneId);
 		this.queuedDeregisters.get(laneId)?.();
 		this.queuedDeregisters.delete(laneId);
 	}

@@ -262,6 +262,159 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedMessages.length).toBe(2);
 	});
 
+	it("runs request preflight after context transformation and narrows the request output cap", async () => {
+		const order: string[] = [];
+		let transportedMaxTokens: number | undefined;
+		const context: AgentContext = { systemPrompt: "preflight", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			maxTokens: 128,
+			transformContext: async (messages) => {
+				order.push("transform");
+				return messages;
+			},
+			requestPreflight: ({ context: requestContext, maxTokens }) => {
+				order.push("preflight");
+				expect(requestContext.messages.at(-1)?.role).toBe("user");
+				expect(maxTokens).toBe(128);
+				return { maxTokens: 64 };
+			},
+			getApiKey: async () => {
+				order.push("auth");
+				return "fresh-key";
+			},
+			convertToLlm: identityConverter,
+		};
+		const stream = agentLoop(
+			[createUserMessage("bounded request")],
+			context,
+			config,
+			undefined,
+			(_model, _ctx, opts) => {
+				order.push("transport");
+				transportedMaxTokens = opts?.maxTokens;
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					response.push({ type: "done", reason: "stop", message });
+				});
+				return response;
+			},
+		);
+
+		for await (const _ of stream) {
+			// consume
+		}
+
+		expect(order).toEqual(["transform", "preflight", "auth", "transport"]);
+		expect(transportedMaxTokens).toBe(64);
+	});
+
+	it("fails before transport when request preflight rejects and never widens the owner cap", async () => {
+		let transportCalls = 0;
+		const context: AgentContext = { systemPrompt: "preflight", messages: [], tools: [] };
+		const widened = agentLoop(
+			[createUserMessage("do not widen")],
+			context,
+			{
+				model: createModel(),
+				maxTokens: 32,
+				requestPreflight: () => ({ maxTokens: 1_024 }),
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			(_model, _ctx, opts) => {
+				transportCalls++;
+				expect(opts?.maxTokens).toBe(32);
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage([{ type: "text", text: "bounded" }]);
+					response.push({ type: "done", reason: "stop", message });
+				});
+				return response;
+			},
+		);
+		for await (const _ of widened) {
+			// consume
+		}
+
+		let authCalls = 0;
+		const rejected = agentLoop(
+			[createUserMessage("reject")],
+			context,
+			{
+				model: createModel(),
+				requestPreflight: () => {
+					throw new Error("request budget exhausted");
+				},
+				getApiKey: async () => {
+					authCalls += 1;
+					return "must-not-be-read";
+				},
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			() => {
+				transportCalls++;
+				throw new Error("transport must not be called");
+			},
+		);
+		const messages = await rejected.result();
+
+		expect(transportCalls).toBe(1);
+		expect(authCalls).toBe(0);
+		expect(messages.at(-1)).toMatchObject({ stopReason: "error", errorMessage: "request budget exhausted" });
+
+		const invalid = agentLoop(
+			[createUserMessage("invalid allowance")],
+			context,
+			{
+				model: createModel(),
+				requestPreflight: () => ({ maxTokens: 0 }),
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			() => {
+				transportCalls++;
+				throw new Error("transport must not be called");
+			},
+		);
+		const invalidMessages = await invalid.result();
+		expect(transportCalls).toBe(1);
+		expect(invalidMessages.at(-1)).toMatchObject({
+			stopReason: "error",
+			errorMessage: "requestPreflight.maxTokens must be a positive safe integer",
+		});
+	});
+
+	it("treats a nonpositive model output limit as unspecified during request preflight", async () => {
+		let transportedMaxTokens: number | undefined;
+		const stream = agentLoop(
+			[createUserMessage("model limit is unspecified")],
+			{ systemPrompt: "preflight", messages: [], tools: [] },
+			{
+				model: { ...createModel(), maxTokens: 0 },
+				requestPreflight: () => ({ maxTokens: 64 }),
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			(_model, _ctx, opts) => {
+				transportedMaxTokens = opts?.maxTokens;
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage([{ type: "text", text: "bounded" }]);
+					response.push({ type: "done", reason: "stop", message });
+				});
+				return response;
+			},
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		expect(transportedMaxTokens).toBe(64);
+	});
+
 	it("should handle tool calls and results", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
@@ -624,6 +777,162 @@ describe("agentLoop with AgentMessage", () => {
 				text: expect.stringMatching(/"occ":2.*"diagnostic":"svn: invalid option: --stat".*"next_action":/),
 			}),
 		]);
+	});
+
+	it("converts a returned structured tool failure into compact failure memory and clears it on a matching success", async () => {
+		const toolSchema = Type.Object({ command: Type.String() });
+		const usage = { ...createUsage(), output: 7, totalTokens: 7 };
+		let attempts = 0;
+		const observedAfterCall: Array<{ isError: boolean; text: string; usage: unknown }> = [];
+		const tool: AgentTool<typeof toolSchema, { exitCode: number }> = {
+			name: "direct_argv",
+			label: "Direct argv",
+			description: "Run a constrained direct argv operation",
+			parameters: toolSchema,
+			async execute() {
+				attempts++;
+				if (attempts === 1) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "outcome: failed\nexitCode: 3\nstdout: (empty)\nstderr:\nrepair marker",
+							},
+						],
+						details: { exitCode: 3 },
+						usage,
+						isError: true,
+					};
+				}
+				return { content: [{ type: "text", text: "completed" }], details: { exitCode: 0 }, usage };
+			},
+		};
+		const providerContexts: Array<{ systemPrompt: string; messages: Message[] }> = [];
+		let callIndex = 0;
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: "base", messages: [], tools: [tool] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				afterToolCall: async ({ isError, result }) => {
+					observedAfterCall.push({
+						isError,
+						text: result.content[0]?.type === "text" ? result.content[0].text : "",
+						usage: result.usage,
+					});
+					return undefined;
+				},
+			},
+			undefined,
+			(_model, providerContext) => {
+				providerContexts.push({
+					systemPrompt: providerContext.systemPrompt ?? "",
+					messages: structuredClone(providerContext.messages),
+				});
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex < 2) {
+						mockStream.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: `tool-${callIndex}`,
+										name: "direct_argv",
+										arguments: { command: "check" },
+									},
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						mockStream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					callIndex++;
+				});
+				return mockStream;
+			},
+		);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+
+		const messages = await stream.result();
+		const toolResults = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+		expect(attempts).toBe(2);
+		expect(observedAfterCall).toEqual([
+			{ isError: true, text: expect.stringContaining("repair marker"), usage },
+			{ isError: false, text: "completed", usage },
+		]);
+		expect(events.filter((event) => event.type === "tool_execution_end")[0]).toMatchObject({ isError: true });
+		expect(toolResults[0]).toMatchObject({ isError: true, usage });
+		expect(toolResults[0]?.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining('"failure_code":"exit_3"'),
+		});
+		expect(JSON.stringify(toolResults[0])).not.toContain("stdout: (empty)");
+		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"repair marker"');
+		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
+		expect(providerContexts[2]?.systemPrompt).not.toContain("<harness_tool_failures>");
+		expect(toolResults[1]).toMatchObject({ isError: false, usage });
+	});
+
+	it("preserves termination from a returned structured tool failure", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { outcome: string }> = {
+			name: "bounded_failure",
+			label: "Bounded failure",
+			description: "Return a bounded operation failure",
+			parameters: toolSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "outcome: failed\nexitCode: 1\nstderr:\nno permission" }],
+					details: { outcome: "failed" },
+					isError: true,
+					terminate: true,
+				};
+			},
+		};
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			() => {
+				providerCalls++;
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					mockStream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "bounded_failure", arguments: { value: "x" } }],
+							"toolUse",
+						),
+					});
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const toolResult = (await stream.result()).find((message) => message.role === "toolResult");
+		expect(providerCalls).toBe(1);
+		expect(toolResult).toMatchObject({ isError: true });
+		expect(toolResult?.role === "toolResult" ? toolResult.details : undefined).toMatchObject({
+			piToolFailureMemory: expect.any(Object),
+		});
 	});
 
 	it("sanitizes legacy failed tool turns before provider conversion", async () => {

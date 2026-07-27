@@ -122,7 +122,7 @@ function boundedFailureCode(value: string): string {
 export function classifyToolFailure(message: string, errorClass?: string): string {
 	const errno = /\b(E[A-Z][A-Z0-9_]{2,})\b/.exec(message)?.[1];
 	if (errno) return boundedFailureCode(errno);
-	const exitCode = /\bexit(?:ed)?(?: with)?(?: code)?\s*[:=]?\s*(-?\d+)\b/i.exec(message)?.[1];
+	const exitCode = /\b(?:exit(?:ed)?(?: with)?(?: code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i.exec(message)?.[1];
 	if (exitCode) return boundedFailureCode(`exit_${exitCode}`);
 	return boundedFailureCode(errorClass ?? "tool_error");
 }
@@ -147,7 +147,11 @@ function extractFailureDiagnostic(message: string, allowUnclassifiedFallback: bo
 		.map((line) => line.trim())
 		.filter(
 			(line) =>
-				line.length > 0 && !/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line),
+				line.length > 0 &&
+				!/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line) &&
+				!/^outcome:\s*(?:failed|aborted|timeout|output_limit)\b/i.test(line) &&
+				!/^exitcode:\s*-?\d+\b/i.test(line) &&
+				!/^(?:stdout|stderr):(?:\s*\(empty\))?$/i.test(line),
 		);
 	if (lines.length === 0) return undefined;
 	const diagnosticPattern =

@@ -1,3 +1,4 @@
+import { isPlainRecord } from "../util/value-guards.ts";
 import type { RiskBudget } from "./contracts.ts";
 
 export const RISK_BUDGET_LIMIT_FIELDS = [
@@ -19,9 +20,33 @@ const DISCRETE_BUDGET_FIELDS: ReadonlySet<(typeof RISK_BUDGET_FIELDS)[number]> =
 	"maxToolCalls",
 ]);
 
-export function validateRiskBudget(budget: RiskBudget, label: string): void {
+function assertKnownRiskBudgetFields(budget: Record<string, unknown>, label: string): void {
+	const unknownField = Object.keys(budget).find(
+		(field) => !RISK_BUDGET_FIELDS.includes(field as (typeof RISK_BUDGET_FIELDS)[number]),
+	);
+	if (unknownField) throw new TypeError(`${label} contains an unsupported field.`);
+}
+
+/** Parse raw durable budget input without cloning untrusted values. */
+export function parseRiskBudget(value: unknown, label: string): RiskBudget {
+	if (!isPlainRecord(value)) throw new TypeError(`${label} must be an object.`);
+	assertKnownRiskBudgetFields(value, label);
+	const budget: RiskBudget = {};
 	for (const field of RISK_BUDGET_FIELDS) {
-		const value = budget[field];
+		const candidate = value[field];
+		if (candidate === undefined) continue;
+		if (typeof candidate !== "number") throw new TypeError(`${label}.${field} must be a number.`);
+		budget[field] = candidate;
+	}
+	validateRiskBudget(budget, label);
+	return budget;
+}
+
+export function validateRiskBudget(budget: RiskBudget, label: string): void {
+	if (!isPlainRecord(budget)) throw new TypeError(`${label} must be an object.`);
+	assertKnownRiskBudgetFields(budget, label);
+	for (const field of RISK_BUDGET_FIELDS) {
+		const value = (budget as RiskBudget)[field];
 		if (value === undefined) continue;
 		if (!Number.isFinite(value) || value < 0) throw new TypeError(`${label}.${field} must be non-negative.`);
 		if (DISCRETE_BUDGET_FIELDS.has(field) && !Number.isSafeInteger(value)) {

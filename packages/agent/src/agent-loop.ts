@@ -34,6 +34,8 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
+	RequestPreflightContext,
+	RequestPreflightResult,
 	StreamFn,
 	ToolCallRepairInfo,
 } from "./types.ts";
@@ -202,6 +204,41 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 const STALL_WINDOW_PERIODS = 4;
 
 /**
+ * Apply one request-local preflight without mutating persistent loop configuration.
+ * Shared with isolated tool-free provider calls so every transport boundary has identical
+ * validation and non-widening semantics.
+ */
+export async function resolveRequestPreflightMaxTokens(options: {
+	requestPreflight?: (
+		context: RequestPreflightContext,
+		signal?: AbortSignal,
+	) => RequestPreflightResult | undefined | Promise<RequestPreflightResult | undefined>;
+	model: RequestPreflightContext["model"];
+	context: RequestPreflightContext["context"];
+	maxTokens?: number;
+	signal?: AbortSignal;
+}): Promise<number | undefined> {
+	if (!options.requestPreflight) return options.maxTokens;
+	if (options.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) {
+		throw new TypeError("request maxTokens must be a positive safe integer");
+	}
+	const preflight = await options.requestPreflight(
+		{ model: options.model, context: options.context, maxTokens: options.maxTokens },
+		options.signal,
+	);
+	if (preflight?.maxTokens === undefined) return options.maxTokens;
+	if (!Number.isSafeInteger(preflight.maxTokens) || preflight.maxTokens <= 0) {
+		throw new TypeError("requestPreflight.maxTokens must be a positive safe integer");
+	}
+	const ceilings = [preflight.maxTokens];
+	if (options.maxTokens !== undefined) ceilings.push(options.maxTokens);
+	if (Number.isSafeInteger(options.model.maxTokens) && options.model.maxTokens > 0) {
+		ceilings.push(options.model.maxTokens);
+	}
+	return Math.min(...ceilings);
+}
+
+/**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
 async function runLoop(
@@ -355,16 +392,18 @@ async function runLoop(
 }
 
 /**
- * Stream an assistant response from the LLM.
- * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ * Start one provider request through the canonical agent-loop boundary.
+ *
+ * All callers, including host-owned tool-free finalization, receive the same failure-context
+ * sanitization, context transformation/conversion, dynamic authentication, request-local reasoning,
+ * and request preflight immediately before transport.
  */
-async function streamAssistantResponse(
+export async function startAgentProviderRequest(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
 	streamFn?: StreamFn,
-): Promise<AssistantMessage> {
+): Promise<Awaited<ReturnType<StreamFn>>> {
 	// Failed protocol turns never reach host transforms or provider conversion. Their bounded,
 	// unresolved state is carried separately in the system prompt until the same operation succeeds.
 	const sanitized = sanitizeToolFailureContext(context.messages, context.systemPrompt);
@@ -384,23 +423,46 @@ async function streamAssistantResponse(
 
 	const streamFunction = streamFn || streamSimple;
 
-	// Resolve API key (important for expiring tokens)
+	const requestMaxTokens = await resolveRequestPreflightMaxTokens({
+		requestPreflight: config.requestPreflight,
+		model: config.model,
+		context: llmContext,
+		maxTokens: config.maxTokens,
+		signal,
+	});
+	// Resolve credentials only after the request-local authority/budget gate accepts the request.
+	// This prevents an already-exhausted background lane from refreshing OAuth/SSO credentials.
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 	const requestReasoning = config.resolveRequestReasoning
 		? config.resolveRequestReasoning(config.reasoning, {
 				model: config.model,
 				context: llmContext,
-				maxTokens: config.maxTokens,
+				maxTokens: requestMaxTokens,
 			})
 		: config.reasoning;
 
-	const response = await streamFunction(config.model, llmContext, {
+	return await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,
+		maxTokens: requestMaxTokens,
 		reasoning: requestReasoning,
 		signal,
 	});
+}
+
+/**
+ * Stream an assistant response from the LLM.
+ * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ */
+async function streamAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise<AssistantMessage> {
+	const response = await startAgentProviderRequest(context, config, signal, streamFn);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
@@ -973,7 +1035,14 @@ async function executePreparedToolCall(
 			},
 		);
 		await Promise.all(updateEvents);
-		return { result, isError: false };
+		return {
+			result,
+			// Tool definitions can report an expected operation failure without
+			// throwing. Keep the returned result intact through afterToolCall so
+			// policy hooks can inspect its bounded diagnostics and metadata.
+			isError: result.isError === true,
+			...(result.isError === true ? { errorClass: "tool_result_error" } : {}),
+		};
 	} catch (error) {
 		await Promise.all(updateEvents);
 		const message = error instanceof Error ? error.message : String(error);
