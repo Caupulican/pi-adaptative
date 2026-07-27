@@ -26,6 +26,7 @@ describe("model capability auto-detection", () => {
 				"goal",
 				"task_steps",
 				"ask_question",
+				"secret_store",
 				"delegate",
 				"run_toolkit_script",
 				"artifact_retrieve",

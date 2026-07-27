@@ -68,6 +68,7 @@ function supportWithReadinessDep(
 	const registry = {
 		getApiKeyAndHeaders: async (model: Model<any>) =>
 			authOk.has(model.id) ? { ok: true as const, apiKey: `${model.id}-key` } : { ok: false as const },
+		canUseResolvedRequestAuth: (_model: Model<any>, auth: { ok: boolean }) => auth.ok,
 	} as unknown as ModelRegistry;
 	const deps: CompactionSupportDeps = {
 		getModel: () => undefined,

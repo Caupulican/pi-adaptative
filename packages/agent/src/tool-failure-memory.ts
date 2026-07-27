@@ -4,6 +4,7 @@ import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 const TOOL_FAILURE_MEMORY_VERSION = 1;
 const MAX_OPERATION_CHARS = 240;
 const MAX_FAILURE_CODE_CHARS = 48;
+const MAX_DIAGNOSTIC_CHARS = 240;
 const MAX_CORRECTION_CHARS = 320;
 const MAX_TOOL_NAME_CHARS = 64;
 const MAX_ACTIVE_FAILURES = 8;
@@ -19,6 +20,7 @@ export interface ToolFailureMemoryRecord {
 	occurrence: number;
 	state: ToolFailureState;
 	failureCode: string;
+	diagnostic?: string;
 	correction: string;
 }
 
@@ -145,6 +147,8 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		occurrence: candidate.occurrence,
 		state: candidate.state,
 		failureCode: boundedFailureCode(candidate.failureCode),
+		diagnostic:
+			typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 		correction:
 			typeof candidate.correction === "string"
 				? truncate(candidate.correction, MAX_CORRECTION_CHARS)
@@ -206,6 +210,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				occurrence,
 				state: retained?.state ?? "failed",
 				failureCode: retained?.failureCode ?? classifyToolFailure(firstText(message)),
+				diagnostic: retained?.diagnostic,
 				correction: retained?.correction ?? toolFailureCorrection(firstText(message), retained?.state ?? "failed"),
 			};
 			active.delete(failureKey);
@@ -255,6 +260,7 @@ export function rememberToolFailure(
 	state: ToolFailureState,
 	failureCode: string,
 	correction: string,
+	diagnostic?: string,
 ): ToolFailureMemoryRecord {
 	const identity = operationIdentity(tool, args);
 	const previous = tracker.get(identity.failureKey);
@@ -264,6 +270,7 @@ export function rememberToolFailure(
 		occurrence: (previous?.occurrence ?? 0) + 1,
 		state,
 		failureCode: boundedFailureCode(failureCode),
+		diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 		correction: truncate(correction, MAX_CORRECTION_CHARS),
 	};
 	tracker.delete(identity.failureKey);
@@ -294,6 +301,7 @@ export function createToolFailureResult(
 					state: record.state,
 					tool: record.tool,
 					failure_code: record.failureCode,
+					...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
 					repair: record.correction,
 				})}`,
 			},
@@ -326,6 +334,7 @@ export function sanitizeToolFailureContext(
 				tool: record.tool,
 				operation: record.operation,
 				failure_code: record.failureCode,
+				...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
 				repair: record.correction,
 			}),
 		),

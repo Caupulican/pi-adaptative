@@ -412,6 +412,7 @@ describe("auto-compaction never fails silently", () => {
 				if (m.id === "cheap-model") return { ok: false as const };
 				return { ok: true as const, apiKey: "session-key", headers: { h: "1" } };
 			},
+			canUseResolvedRequestAuth: (_model: unknown, auth: { ok: boolean }) => auth.ok,
 		};
 		const support = new CompactionSupport({
 			getModel: () => undefined,

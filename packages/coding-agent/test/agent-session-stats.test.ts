@@ -223,7 +223,7 @@ describe("AgentSession.getSessionStats", () => {
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(195_000);
+			expect(stats.tokens.input).toBe(375_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBeNull();
 			expect(stats.contextUsage?.percent).toBeNull();
@@ -239,8 +239,9 @@ describe("AgentSession.getSessionStats", () => {
 			sessionManager.appendMessage(createUserMessage("first", 1));
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 2));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 3));
-			sessionManager.appendMessage(createAssistantMessage("response", 25_000, 4));
+			const postCompactionTimestamp = Date.now() + 1_000;
+			sessionManager.appendMessage(createUserMessage("third", postCompactionTimestamp));
+			sessionManager.appendMessage(createAssistantMessage("response", 25_000, postCompactionTimestamp + 1));
 			syncAgentMessages(session, sessionManager);
 			const getBranch = vi.spyOn(sessionManager, "getBranch");
 
@@ -284,12 +285,13 @@ describe("AgentSession.getSessionStats", () => {
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
 			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
+			const postCompactionTimestamp = Date.now() + 1_000;
+			sessionManager.appendMessage(createUserMessage("third", postCompactionTimestamp));
+			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, postCompactionTimestamp + 1));
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(220_000);
+			expect(stats.tokens.input).toBe(400_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);

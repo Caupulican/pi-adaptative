@@ -3,7 +3,7 @@
 ### Fixed
 
 - Restored explicit provider retry-message classification, routed compaction failures through the shared reliability classifier, and bounded serialized tool-call arguments before summarization.
-- Replaced failed tool-call transcript payloads with a bounded occurrence-and-repair ledger, removed failed protocol turns before provider conversion, and clear matching failure reminders after a successful retry.
+- Replaced failed tool-call transcript payloads with a bounded occurrence-and-repair ledger, retained bounded preflight-denial diagnostics, removed failed protocol turns before provider conversion, and clear matching failure reminders after a successful retry.
 - Isolated compaction and branch-summary requests from provider caches, persisted their exact token usage, and kept durable tool-hook usage visible after compaction and session resume.
 - Added early-EOF, DNS, and resource-exhaustion retry classification and shared UUIDv7 generation across agent and provider boundaries.
 

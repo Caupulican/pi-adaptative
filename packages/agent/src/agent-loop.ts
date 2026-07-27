@@ -653,6 +653,7 @@ type ImmediateToolCallOutcome = {
 	isError: boolean;
 	failureCode: string;
 	correction: string;
+	diagnostic?: string;
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -876,12 +877,14 @@ async function prepareToolCall(
 				};
 			}
 			if (beforeResult?.block) {
+				const reason = beforeResult.reason || "Tool execution was blocked";
 				return {
 					kind: "immediate",
-					result: createErrorToolResult(beforeResult.reason || "Tool execution was blocked"),
+					result: createErrorToolResult(reason),
 					isError: true,
 					failureCode: "blocked",
 					correction: "Choose an allowed approach or request the required authority before retrying.",
+					diagnostic: reason,
 					validationEvent,
 				};
 			}
@@ -934,6 +937,7 @@ function finalizeRejectedToolCall(
 		"rejected",
 		outcome.failureCode,
 		outcome.correction,
+		outcome.diagnostic,
 	);
 	return {
 		toolCall,

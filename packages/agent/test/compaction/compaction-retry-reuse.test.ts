@@ -131,17 +131,18 @@ describe("compact() structurally-broken-summary retry", () => {
 		expect(result.verification).toEqual({ ok: true, failures: [] });
 	});
 
-	it("sets cacheRetention explicitly on the summarization request options", async () => {
+	it("isolates the summarization request from provider continuation caches", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		const seenOptions: Array<{ cacheRetention?: string }> = [];
+		const seenOptions: Array<{ cacheRetention?: string; sessionId?: string }> = [];
 		const streamFn: StreamFn = async (_model, _context, options) => {
-			seenOptions.push({ cacheRetention: options?.cacheRetention });
+			seenOptions.push({ cacheRetention: options?.cacheRetention, sessionId: options?.sessionId });
 			return createDoneStream(createAssistantMessage(VALID_CHECKPOINT));
 		};
 
 		await compact(createPreparation(), model, "test-key", undefined, undefined, undefined, undefined, streamFn);
 
 		expect(seenOptions).toHaveLength(1);
-		expect(seenOptions[0].cacheRetention).toBe("short");
+		expect(seenOptions[0].cacheRetention).toBe("none");
+		expect(seenOptions[0].sessionId).toBeTruthy();
 	});
 });

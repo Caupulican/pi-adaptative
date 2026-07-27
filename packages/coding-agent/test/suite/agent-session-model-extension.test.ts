@@ -152,7 +152,7 @@ describe("AgentSession model and extension characterization", () => {
 
 		await harness.session.prompt("hi");
 
-		expect(getAssistantTexts(harness)).toContain("Blocked by test");
+		expect(getAssistantTexts(harness).some((text) => text.includes("Blocked by test"))).toBe(true);
 		expect(
 			harness.session.messages.find((message) => message.role === "toolResult" && message.isError),
 		).toBeDefined();
