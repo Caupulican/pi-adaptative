@@ -21,6 +21,7 @@ import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
+import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 const RESEARCH_JSON = '{"findings":[{"summary":"profile-shipped finding","confidence":0.9}]}';
 
@@ -262,7 +263,7 @@ describe("profile-shipped lanes", () => {
 				const readSucceeded = JSON.stringify(context.messages).includes("PROFILE_REPAIR_FILE_OK");
 				return fauxAssistantMessage(
 					readSucceeded
-						? '{"summary":"profile repair read succeeded"}'
+						? completedWorkerOutput("profile repair read succeeded")
 						: '{"summary":"profile repair read failed","status":"blocked","blockers":["read did not execute"]}',
 				);
 			},
@@ -288,7 +289,7 @@ describe("profile-shipped lanes", () => {
 		faux.setResponses([
 			(context) => {
 				seenSystemPrompt = context.systemPrompt;
-				return fauxAssistantMessage('{"summary":"minimal worker done"}');
+				return fauxAssistantMessage(completedWorkerOutput("minimal worker done"));
 			},
 		]);
 

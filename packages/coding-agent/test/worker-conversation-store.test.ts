@@ -113,6 +113,26 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getProviderContext().messages).toEqual([...transcript, userMessage("continue")]);
 	});
 
+	it("persists bounded changed-file progress without injecting it into provider context", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const conversation = store.create(options);
+		conversation.appendMessage(userMessage("modify the focused files"));
+
+		conversation.recordChangedFile("attempt-1", "src/first.ts");
+		conversation.recordChangedFile("attempt-1", "src/first.ts");
+		conversation.recordChangedFile("attempt-1", "src/second.ts");
+		conversation.recordChangedFile("attempt-2", "src/later.ts");
+
+		expect(conversation.getChangedFiles("attempt-1")).toEqual(["src/first.ts", "src/second.ts"]);
+		expect(conversation.getChangedFiles("attempt-2")).toEqual(["src/later.ts"]);
+		expect(conversation.getProviderContext().messages).toEqual([userMessage("modify the focused files")]);
+		const reopened = store.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() });
+		expect(reopened.getChangedFiles("attempt-1")).toEqual(["src/first.ts", "src/second.ts"]);
+		expect(reopened.getChangedFiles("attempt-2")).toEqual(["src/later.ts"]);
+		expect(reopened.getProviderContext().messages).toEqual([userMessage("modify the focused files")]);
+	});
+
 	it("refuses divergent complete transcripts rather than duplicating or branching context", () => {
 		const options = createOptions();
 		const conversation = new WorkerConversationStore().create(options);

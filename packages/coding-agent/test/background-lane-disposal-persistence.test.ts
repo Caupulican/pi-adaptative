@@ -7,12 +7,14 @@ import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "../src/core/delegation/session-worker-claim.ts";
+import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import {
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { createTestResourceLoader } from "./utilities.ts";
 
 interface FakeAfterToolCallArgs {
 	toolCall: { name: string };
@@ -48,16 +50,27 @@ describe("background lane disposal persistence", () => {
 		resetInFlightWorkRegistryForTests();
 	});
 
-	it("persists a durable canceled lane record + a bounded worker-result (with changedFiles) synchronously at the disposal cutoff, and appends nothing after dispose returns", async () => {
+	it("suspends a running agent for resume, preserving changed files without terminal parent-session writes", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-disposal-persistence-"));
 		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
 		const settingsManager = SettingsManager.inMemory({
-			workerDelegation: { enabled: true, orchestrationProfile: "disposal-worker", maxConcurrent: 3 },
+			workerDelegation: {
+				enabled: true,
+				orchestrationProfile: "disposal-worker",
+				maxConcurrent: 3,
+				writeEnabled: true,
+				writePaths: ["/repo"],
+			},
 		});
 		saveTestWorkerOrchestrationProfile({
 			agentDir,
 			cwd: "/repo",
-			profile: createTestWorkerOrchestrationProfile({ profileId: "disposal-worker", model }),
+			profile: createTestWorkerOrchestrationProfile({
+				profileId: "disposal-worker",
+				model,
+				capabilityCeiling: ["filesystem.write"],
+				toolNames: ["write"],
+			}),
 		});
 		const { sessionManager, entries, getAppendCount } = makeTrackedSessionManager();
 
@@ -71,6 +84,7 @@ describe("background lane disposal persistence", () => {
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
 			getSettingsManager: () => settingsManager,
+			getResourceLoader: () => createTestResourceLoader(),
 			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
 			isModelExhausted: () => false,
@@ -88,6 +102,7 @@ describe("background lane disposal persistence", () => {
 			saveWorkerClaimSnapshot: (claim: WorkerClaim, request?: WorkerRequest) =>
 				appendWorkerClaimSnapshot(sessionManager, claim, request),
 			addSpawnedUsage: () => undefined,
+			notifyWorkerTerminalHandoff: async () => {},
 			emitAutonomyTelemetry: () => {},
 			emit: () => {},
 		} as never);
@@ -111,18 +126,23 @@ describe("background lane disposal persistence", () => {
 		disposed = true;
 		controller.abortInFlightLanes();
 
-		expect(getAppendCount()).toBe(2); // one canceled lane record + one bounded canceled worker-result
-		const laneRecords = getLaneRecordSnapshots(entries as never);
-		expect(laneRecords).toEqual([
-			expect.objectContaining({ type: "worker", status: "canceled", reasonCode: "session_disposed" }),
-		]);
-		const workerClaims = getWorkerClaimSnapshots(entries as never);
-		expect(workerClaims).toEqual([
-			expect.objectContaining({
-				status: "cancelled",
-				changedFiles: ["notes/output.md"],
-			}),
-		]);
+		expect(getAppendCount()).toBe(0);
+		expect(getLaneRecordSnapshots(entries as never)).toEqual([]);
+		expect(getWorkerClaimSnapshots(entries as never)).toEqual([]);
+		const runtime = controller.getTaskRuntimeSnapshot();
+		expect(runtime).toBeDefined();
+		const [attempt] = Object.values(runtime?.attempts ?? {});
+		expect(attempt).toMatchObject({ status: "suspended", reasonCode: "agent_process_interrupted" });
+		if (!attempt?.agentId) throw new Error("Expected the interrupted worker to retain its agent binding.");
+		const agent = runtime?.agents[attempt.agentId];
+		expect(agent).toMatchObject({ status: "suspended" });
+		if (!agent) throw new Error("Expected a durable suspended worker agent.");
+		const conversation = new WorkerConversationStore().open({
+			agentDir,
+			resumeContext: agent.resumeContext,
+			expectedLogicalAgentId: agent.agentId,
+		});
+		expect(conversation.getChangedFiles(attempt.attemptId)).toEqual(["notes/output.md"]);
 
 		const appendCountAtCutoff = getAppendCount();
 
@@ -131,7 +151,7 @@ describe("background lane disposal persistence", () => {
 		const outcome = await runPromise;
 		expect(outcome.started).toBe(true);
 
-		// No append happened after dispose returned -- the consumed-ledger guard held.
+		// No terminal append happened after dispose returned; the suspended attempt remains resumable.
 		expect(getAppendCount()).toBe(appendCountAtCutoff);
 		rmSync(agentDir, { recursive: true, force: true });
 	});
@@ -161,6 +181,7 @@ describe("background lane disposal persistence", () => {
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
 			getSettingsManager: () => settingsManager,
+			getResourceLoader: () => createTestResourceLoader(),
 			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
 			isModelExhausted: () => false,
@@ -169,6 +190,7 @@ describe("background lane disposal persistence", () => {
 			getGoalStateSnapshot: () => undefined,
 			saveWorkerClaimSnapshot: () => "unused",
 			addSpawnedUsage: () => undefined,
+			notifyWorkerTerminalHandoff: async () => {},
 			emitAutonomyTelemetry: () => {},
 			emit: () => {},
 		} as never);

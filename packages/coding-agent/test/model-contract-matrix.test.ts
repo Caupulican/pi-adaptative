@@ -12,6 +12,7 @@ import { resolveModelToolProtocol } from "../src/core/model-tool-protocol.ts";
 import type { OrchestrationThinkingLevel } from "../src/core/orchestration/contracts.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
+import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 interface ProviderContractCase {
 	name: string;
@@ -161,7 +162,7 @@ describe("provider-neutral model contract matrix", () => {
 							toolNames: context.tools?.map((tool) => tool.name) ?? [],
 							textProtocolPrimer: context.systemPrompt?.includes("Text tool-call protocol is enabled.") ?? false,
 						};
-						return fauxAssistantMessage('{"summary":"provider-neutral worker completed","findings":[]}');
+						return fauxAssistantMessage(completedWorkerOutput("provider-neutral worker completed", []));
 					},
 				]);
 

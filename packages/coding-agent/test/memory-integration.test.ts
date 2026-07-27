@@ -21,6 +21,7 @@ import {
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 /**
  * Side M + Side H integration: the bundled file-store provider must surface the `memory` tool
@@ -150,7 +151,7 @@ describe("Memory subsystem integration (file-store)", () => {
 					const recalled = JSON.stringify(context.messages).includes("LANE_MEMORY_READ_OK");
 					return fauxAssistantMessage(
 						recalled
-							? '{"summary":"read-only memory recall succeeded"}'
+							? completedWorkerOutput("read-only memory recall succeeded")
 							: '{"summary":"memory recall failed","status":"blocked","blockers":["marker absent"]}',
 					);
 				},
@@ -192,7 +193,7 @@ describe("Memory subsystem integration (file-store)", () => {
 					fauxAssistantMessage(
 						JSON.stringify(context.messages).includes("DISABLED_MEMORY_MARKER")
 							? '{"summary":"policy bypassed","status":"blocked","blockers":["memory leaked"]}'
-							: '{"summary":"memory remained disabled"}',
+							: completedWorkerOutput("memory remained disabled"),
 					),
 			]);
 

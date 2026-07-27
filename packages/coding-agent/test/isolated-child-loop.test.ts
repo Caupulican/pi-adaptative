@@ -202,6 +202,34 @@ describe("isolated child tool loop", () => {
 		}
 	});
 
+	it("repairs a hallucinated tool call when the caller explicitly supplies an empty tool surface", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("memory", { query: "private" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage("continued without the unavailable tool"),
+			]);
+
+			const result = await harness.session.runIsolatedCompletion({
+				systemPrompt: "isolated",
+				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
+				tools: [],
+				cacheRetention: "none",
+			});
+
+			expect(result.text).toBe("continued without the unavailable tool");
+			expect(result.messages).toEqual([
+				expect.objectContaining({ role: "user" }),
+				expect.objectContaining({ role: "assistant" }),
+				expect.objectContaining({ role: "toolResult", toolName: "memory", isError: true }),
+				expect.objectContaining({ role: "assistant" }),
+			]);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("applies a child-owned context projection before every provider turn while returning raw history", async () => {
 		const harness = await createHarness();
 		try {

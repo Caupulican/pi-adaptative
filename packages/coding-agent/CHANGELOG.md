@@ -11,6 +11,8 @@
 - Added a provider- and tool-neutral WSL incident collector that packages the latest human session, recovery and orchestration records, explicitly requested command logs, TUI evidence, boot identity, installed-runtime hashes, bounded kernel diagnostics, and relevant Windows host events without collecting credential stores or emitting false missing-log warnings.
 - Made pre-start worker failures publish exactly one durable terminal handoff, rejected malformed typed result envelopes, and handled null or Buffer filesystem watcher filenames on Windows.
 - Made orchestration session paths portable across Windows and POSIX and bounded profile, process, event, result, and cumulative usage payloads at their owning contracts.
+- Kept explicit empty worker tool surfaces inside the repair loop and persisted immediate or argument-repaired tool requests in durable execution order, preventing unavailable-tool calls from collapsing into completion errors or divergent transcripts.
+- Preserved bounded host-observed changed-file progress when an agent-bound worker is suspended, so owner-session disposal remains resumable without fabricating terminal parent-session records.
 
 ## [0.81.41] - 2026-07-27
 

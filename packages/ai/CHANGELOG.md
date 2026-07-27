@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed generated provider model metadata, including current Kimi K3 availability, output limits, and pricing.
+
 ### Fixed
 
 - Replaced ambiguous synthetic results for interrupted tool calls with a compact unknown-outcome record that requires side-effect inspection before retrying after resume.

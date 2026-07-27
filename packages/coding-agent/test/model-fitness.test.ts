@@ -12,6 +12,7 @@ import {
 	TOOL_CALL_PROBE_SYSTEM_PROMPT,
 } from "../src/core/research/model-fitness.ts";
 import { RESEARCH_LANE_SYSTEM_PROMPT } from "../src/core/research/research-runner.ts";
+import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 /** Scripted completer that answers each probe surface by its system prompt. */
 function scriptedComplete(behavior: {
@@ -49,7 +50,7 @@ describe("runModelFitnessProbe", () => {
 			now: () => 0,
 			complete: scriptedComplete({
 				research: '{"findings":[{"summary":"finding","confidence":0.8}]}',
-				worker: '{"summary":"done"}',
+				worker: completedWorkerOutput("done"),
 				judge: (prompt) =>
 					/plan|design|roadmap/i.test(prompt)
 						? '{"tier":"medium","risk":"read-only","trivial":false,"reason":"planning"}'
@@ -225,7 +226,7 @@ describe("isProbeAllFailed", () => {
 			now: () => 0,
 			complete: scriptedComplete({
 				research: '{"findings":[{"summary":"finding","confidence":0.8}]}',
-				worker: '{"summary":"done"}',
+				worker: completedWorkerOutput("done"),
 				judge: (prompt) =>
 					/plan|design|roadmap/i.test(prompt)
 						? '{"tier":"medium","risk":"read-only","trivial":false,"reason":"planning"}'

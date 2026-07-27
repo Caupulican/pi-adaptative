@@ -20,8 +20,14 @@ import { validateAttemptUsageSnapshot } from "../orchestration/attempt-usage.ts"
 import type { AgentResumeContext, AttemptUsageSnapshot, ResourcePointer } from "../orchestration/contracts.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import {
+	collectBoundedWorkerClaimChangedFiles,
+	MAX_WORKER_CLAIM_CHANGED_FILES,
+	MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS,
+} from "./worker-claim.ts";
 
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
+const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
 
 export interface CreateWorkerConversationOptions {
 	agentDir: string;
@@ -226,6 +232,47 @@ export class WorkerConversation {
 			}
 		}
 		return messages;
+	}
+
+	/** Durable host-observed mutation progress. Custom entries never enter provider context. */
+	recordChangedFile(attemptId: string, filePath: string): void {
+		if (!attemptId.trim() || attemptId.length > MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS) {
+			throw new TypeError("Worker changed-file progress attempt id is invalid or exceeds its durable bound.");
+		}
+		const candidate = collectBoundedWorkerClaimChangedFiles([filePath]);
+		if (candidate.overflowed || candidate.values.length !== 1) {
+			throw new TypeError("Worker changed-file progress path is invalid or exceeds its durable bound.");
+		}
+		const path = candidate.values[0]!;
+		const existing = this.getChangedFiles(attemptId);
+		if (existing.includes(path)) return;
+		if (existing.length >= MAX_WORKER_CLAIM_CHANGED_FILES) {
+			throw new Error("Worker changed-file progress exceeds its durable entry bound.");
+		}
+		this.sessionManager.appendCustomEntry(WORKER_CHANGED_FILE_CUSTOM_TYPE, { attemptId, path });
+	}
+
+	/** Rehydrate the bounded mutation set across owner-session disposal and worker resume. */
+	getChangedFiles(attemptId: string): string[] {
+		const paths: string[] = [];
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== WORKER_CHANGED_FILE_CUSTOM_TYPE) continue;
+			const data = entry.data;
+			if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+			const attemptDescriptor = Object.getOwnPropertyDescriptor(data, "attemptId");
+			const pathDescriptor = Object.getOwnPropertyDescriptor(data, "path");
+			if (
+				attemptDescriptor &&
+				"value" in attemptDescriptor &&
+				attemptDescriptor.value === attemptId &&
+				pathDescriptor &&
+				"value" in pathDescriptor &&
+				typeof pathDescriptor.value === "string"
+			) {
+				paths.push(pathDescriptor.value);
+			}
+		}
+		return collectBoundedWorkerClaimChangedFiles(paths).values;
 	}
 
 	/**

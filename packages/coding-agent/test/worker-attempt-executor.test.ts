@@ -235,6 +235,45 @@ describe("worker attempt executor", () => {
 		expect(harness.checkpoints.at(-1)).toBe("Persisted final cumulative worker usage before terminal result.");
 	});
 
+	it("persists an immediate unknown-tool request before its error result", async () => {
+		const harness = createExecutorHarness(async (options) => {
+			const assistant = fauxAssistantMessage([fauxToolCall("memory", { query: "private" })], {
+				stopReason: "toolUse",
+			});
+			const toolCall = assistant.content.find((content) => content.type === "toolCall");
+			if (!toolCall || toolCall.type !== "toolCall") throw new Error("Expected an unknown tool request.");
+			const toolResult: Message = {
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				content: [{ type: "text", text: "Tool memory not found" }],
+				isError: true,
+				timestamp: Date.now(),
+			};
+			const finalAssistant = fauxAssistantMessage('{"summary":"continued without memory","status":"completed"}');
+			await options.onMessage?.(assistant);
+			await options.onMessage?.(toolResult);
+			await options.onMessage?.(finalAssistant);
+			return {
+				text: '{"summary":"continued without memory","status":"completed"}',
+				usage: ZERO_USAGE,
+				stopReason: "stop",
+				messages: [...(options.history ?? []), assistant, toolResult, finalAssistant],
+			};
+		});
+
+		const result = await harness.executor.run();
+
+		expect(result.rawOutcome.accepted).toBe(true);
+		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+		expect(harness.events.indexOf("append:assistant")).toBeLessThan(harness.events.indexOf("append:toolResult"));
+	});
+
 	it("blocks the second provider request after the first response exhausts the token budget", async () => {
 		let providerRequests = 0;
 		const harness = createExecutorHarness(async (options) => {

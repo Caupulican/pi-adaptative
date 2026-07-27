@@ -107,8 +107,19 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	checkpointUsage(summary: string): AttemptUsageSnapshot;
 	run(): Promise<WorkerAttemptExecutionResult>;
 } {
-	const changedFiles = new Set<string>();
+	const changedFiles = new Set(options.conversation.getChangedFiles(options.durableHandle.attemptId));
 	const toolIssues = new Set<string>();
+	const recordChangedFile = (filePath: string): void => {
+		changedFiles.add(filePath);
+		try {
+			options.conversation.recordChangedFile(options.durableHandle.attemptId, filePath);
+		} catch (error) {
+			toolIssues.add("worker changed-file progress could not be persisted; parent review is required");
+			options.warn(
+				`Worker changed-file progress persistence failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	};
 	const actionJournal = options.request.envelope.capabilities.includes("filesystem.write")
 		? new WorkerActionJournal({
 				agentDir: options.agentDir,
@@ -246,7 +257,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					: {}),
 				...(options.applyActions
 					? {
-							applyActions: (actions: readonly WorkerAction[]) => options.applyActions!(actions, actionJournal),
+							applyActions: (actions: readonly WorkerAction[]) => {
+								const report = options.applyActions!(actions, actionJournal);
+								for (const filePath of report.changedFiles) recordChangedFile(filePath);
+								return report;
+							},
 						}
 					: {}),
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
@@ -259,6 +274,20 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						};
 					}
 					const persistedToolAssistantIds = new Set<string>();
+					const pendingToolAssistants = new Map<string, AssistantMessage>();
+					const persistToolRequest = (message: AssistantMessage): void => {
+						const toolCallIds = message.content.flatMap((content) =>
+							content.type === "toolCall" ? [content.id] : [],
+						);
+						if (toolCallIds.length === 0 || toolCallIds.every((id) => persistedToolAssistantIds.has(id))) return;
+						recordAssistantUsage(options.toolSurface, message);
+						options.conversation.appendMessage(message);
+						for (const id of toolCallIds) {
+							persistedToolAssistantIds.add(id);
+							pendingToolAssistants.delete(id);
+						}
+						checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
+					};
 					options.toolSurface.gateway?.assertBudgetAvailable("worker_provider_completion");
 					const remainingTokens = remainingTokenBudget(options.grant.budget.maxTokens, currentUsage());
 					if (remainingTokens !== undefined && remainingTokens <= 0) {
@@ -304,14 +333,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							};
 						},
 						beforeToolCall: async (context, toolSignal) => {
-							if (!persistedToolAssistantIds.has(context.toolCall.id)) {
-								recordAssistantUsage(options.toolSurface, context.assistantMessage);
-								options.conversation.appendMessage(context.assistantMessage);
-								for (const content of context.assistantMessage.content) {
-									if (content.type === "toolCall") persistedToolAssistantIds.add(content.id);
-								}
-								checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
-							}
+							persistToolRequest(context.assistantMessage);
 							const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
 							if (decision?.block) {
 								toolIssues.add(`${context.toolCall.name} blocked: ${decision.reason ?? "capability denied"}`);
@@ -338,14 +360,26 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									} catch {
 										// The operation entered execution; retain its lexical target if canonicalization failed.
 									}
-									changedFiles.add(path.relative(options.cwd, canonicalPath).split(path.sep).join("/"));
+									recordChangedFile(path.relative(options.cwd, canonicalPath).split(path.sep).join("/"));
 								}
 							}
 							if (isError) toolIssues.add(`${toolCall.name} failed during isolated execution`);
 							return undefined;
 						},
 						onMessage: (message) => {
-							if (isToolRequest(message)) return;
+							if (message.role === "assistant" && isToolRequest(message)) {
+								// Known calls are normalized before beforeToolCall and persist from that hook.
+								// Retain the request only so immediate unknown/malformed results can close the
+								// transcript without freezing pre-repair arguments into durable history.
+								for (const content of message.content) {
+									if (content.type === "toolCall") pendingToolAssistants.set(content.id, message);
+								}
+								return;
+							}
+							if (message.role === "toolResult" && !persistedToolAssistantIds.has(message.toolCallId)) {
+								const pending = pendingToolAssistants.get(message.toolCallId);
+								if (pending) persistToolRequest(pending);
+							}
 							if (message.role === "assistant") recordAssistantUsage(options.toolSurface, message);
 							options.conversation.appendMessage(message);
 							options.agentControl.acknowledgeMailboxMessage(options.agentId, message);

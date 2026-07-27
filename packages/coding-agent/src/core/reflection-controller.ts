@@ -249,7 +249,10 @@ export class ReflectionController {
 				convertToLlm: agent.convertToLlm,
 			};
 
-			if (opts.tools && opts.tools.length > 0) {
+			// An explicitly supplied surface owns a child tool loop even when it is empty: a model may
+			// hallucinate an unavailable tool and must receive the bounded unknown-tool result so it can
+			// repair. Only an omitted tools option selects the one-shot completion path.
+			if (opts.tools !== undefined) {
 				const childContext: AgentContext = {
 					systemPrompt: opts.systemPrompt,
 					messages: [...history],

@@ -7,9 +7,10 @@ import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../src/core/autonomy/telemetry-e
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 const RESEARCH_JSON = '{"findings":[{"summary":"Reuse the evidence-bundle helper","confidence":0.9}]}';
-const WORKER_JSON = '{"summary":"Validator blocks out-of-scope changes.","findings":[]}';
+const WORKER_JSON = completedWorkerOutput("Validator blocks out-of-scope changes.", []);
 const JUDGE_MEDIUM = '{"tier":"medium","risk":"read-only","trivial":false,"reason":"non-trivial planning"}';
 
 interface StoredTelemetry {
