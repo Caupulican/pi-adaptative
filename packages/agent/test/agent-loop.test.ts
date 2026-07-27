@@ -518,12 +518,13 @@ describe("agentLoop with AgentMessage", () => {
 			type: "text",
 			text: expect.stringContaining('"occ":2'),
 		});
-		expect(JSON.stringify(toolResults)).not.toContain("backend exploded");
+		expect(JSON.stringify(toolResults)).toContain('"diagnostic":"backend exploded"');
 	});
 
 	it("replaces failed execution output with one occurrence ledger and clears it after success", async () => {
 		const toolSchema = Type.Object({ command: Type.String() });
 		let attempts = 0;
+		const command = `svn status -q; ${"x".repeat(300)}; svn diff --stat`;
 		const tool: AgentTool<typeof toolSchema, { command: string }> = {
 			name: "shell",
 			label: "Shell",
@@ -532,7 +533,9 @@ describe("agentLoop with AgentMessage", () => {
 			async execute(_toolCallId, params) {
 				attempts++;
 				if (attempts <= 2) {
-					throw new Error(`RAW_FAILURE_OUTPUT:${"x".repeat(20_000)}`);
+					throw new Error(
+						`RAW_FAILURE_OUTPUT:${"x".repeat(20_000)}\nsvn: invalid option: --stat\nCommand exited with code 1`,
+					);
 				}
 				return {
 					content: [{ type: "text", text: "command succeeded" }],
@@ -565,7 +568,7 @@ describe("agentLoop with AgentMessage", () => {
 										type: "toolCall",
 										id: `tool-${callIndex}`,
 										name: "shell",
-										arguments: { command: "npm run focused" },
+										arguments: { command },
 									},
 								],
 								"toolUse",
@@ -584,9 +587,8 @@ describe("agentLoop with AgentMessage", () => {
 			},
 		);
 
-		for await (const _event of stream) {
-			// consume
-		}
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
 
 		const messages = await stream.result();
 		const failedResults = messages.filter(
@@ -596,8 +598,12 @@ describe("agentLoop with AgentMessage", () => {
 		expect(providerContexts[1]?.systemPrompt).toContain("<harness_tool_failures>");
 		expect(providerContexts[1]?.systemPrompt).toContain('"occ":1');
 		expect(providerContexts[1]?.systemPrompt).toContain('"state":"failed"');
-		expect(providerContexts[1]?.systemPrompt).toContain("npm run focused");
-		expect(providerContexts[1]?.systemPrompt).toContain("Change the arguments or approach before retrying");
+		expect(providerContexts[1]?.systemPrompt).toContain("svn status -q");
+		expect(providerContexts[1]?.systemPrompt).toContain("svn diff --stat");
+		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"svn: invalid option: --stat"');
+		expect(providerContexts[1]?.systemPrompt).toContain('"next_action":');
+		expect(providerContexts[1]?.systemPrompt).not.toContain('"repair":');
+		expect(providerContexts[1]?.systemPrompt).not.toContain("Change the arguments or approach before retrying");
 		expect(JSON.stringify(providerContexts[1])).not.toContain("RAW_FAILURE_OUTPUT");
 		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
 		expect(providerContexts[2]?.systemPrompt).toContain('"occ":2');
@@ -606,10 +612,17 @@ describe("agentLoop with AgentMessage", () => {
 		expect(JSON.stringify(providerContexts[3])).not.toContain("RAW_FAILURE_OUTPUT");
 		expect(providerContexts[3]?.messages.some((message) => message.role === "toolResult")).toBe(true);
 		expect(failedResults).toHaveLength(2);
+		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(3);
+		expect(
+			events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
+		).toHaveLength(3);
 		expect(JSON.stringify(failedResults)).not.toContain("RAW_FAILURE_OUTPUT");
 		expect(JSON.stringify(failedResults).length).toBeLessThan(2_000);
 		expect(failedResults[1]?.content).toEqual([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('"occ":2') }),
+			expect.objectContaining({
+				type: "text",
+				text: expect.stringMatching(/"occ":2.*"diagnostic":"svn: invalid option: --stat".*"next_action":/),
+			}),
 		]);
 	});
 

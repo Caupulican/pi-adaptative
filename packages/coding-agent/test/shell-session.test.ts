@@ -106,6 +106,14 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		expect(after.output.trim()).toBe("doomed=[]");
 	});
 
+	it("settles a compound diagnostic command that ends in exit zero", async () => {
+		const session = makeSession("bash");
+		const result = await run(session, `false; rc=$?; printf 'exit=%s\\n' "$rc"; exit 0`, cwd);
+
+		expect(result).toEqual({ exitCode: 0, output: "exit=1\n" });
+		expect((await run(session, "printf recovered", cwd)).output).toBe("recovered");
+	});
+
 	it("contains syntax errors without killing the session", async () => {
 		const session = makeSession("bash");
 		const bad = await run(session, "if then fi", cwd);

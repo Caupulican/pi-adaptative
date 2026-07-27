@@ -488,6 +488,32 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 		expect(frame.unsupported).toBeNull();
 	});
 
+	it("captures a failed command status and frames an explicit exit without terminating the protocol", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-shell-status-"));
+		const log = join(dir, "command.log").replaceAll("\\", "/");
+		const command = `{ printf 'failure detail\\n'; false; } >"${log}" 2>&1; rc=$?; printf 'exit=%s\\n' "$rc"; tail -80 "${log}"; exit 0`;
+		const { stdout, stderr, frame } = runMain(command, dir);
+
+		expect(stdout).toBe("exit=1\nfailure detail\n");
+		expect(stderr).toBe("");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("keeps exit inside a subshell local and exposes its status to the parent", () => {
+		const { stdout, frame } = runMain(`(exit 7); printf 'status=%s\\n' "$?"`, tmpdir());
+
+		expect(stdout).toBe("status=7\n");
+		expect(frame.exitCode).toBe(0);
+	});
+
+	it("frames invalid exit arguments and does not execute the remaining command list", () => {
+		const { stdout, frame } = runMain("exit 1 2; printf unreachable", tmpdir());
+
+		expect(stdout).toBe("exit: too many arguments\n");
+		expect(frame.exitCode).toBe(1);
+	});
+
 	describe("pipeline stages through the REAL builtin registry (architect G1/G2 fix)", () => {
 		it("a three-stage builtin pipeline pipes bytes correctly and exits 0", () => {
 			const { stdout, stderr, frame } = runMain('printf "%s\\n" one two three | grep t | sort -r', tmpdir());

@@ -97,7 +97,7 @@ def cat(ctx: "BuiltinContext") -> int:
 
 
 def _parse_n_flag(name: str, argv: list[str]) -> tuple[int, list[str]]:
-    """Parse `[-n N] [FILE]` only. Any other flag/form -> unsupported-flag."""
+    """Parse `[-n N|-N] [FILE]`. Any other flag/form -> unsupported-flag."""
     n = 10
     operands: list[str] = []
     args = argv[1:]
@@ -116,6 +116,10 @@ def _parse_n_flag(name: str, argv: list[str]) -> tuple[int, list[str]]:
             continue
         if a.startswith("-n") and len(a) > 2:
             n = _parse_int_operand(name, a[2:])
+            i += 1
+            continue
+        if len(a) > 1 and a[0] == "-" and a[1:].isdigit():
+            n = int(a[1:])
             i += 1
             continue
         if a.startswith("-") and a != "-":

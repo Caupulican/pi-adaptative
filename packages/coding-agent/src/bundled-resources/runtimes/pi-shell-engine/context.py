@@ -46,7 +46,7 @@ class ExecContext:
     stderr: BinaryIO | int | None = None
 
 
-# Frozen inline sets: state mutators and the runner builtin are NOT in commands/REGISTRY;
-# exec.py handles them inline because they need ShellState / the executor.
-STATE_BUILTINS = {"cd", "export", "unset"}
+# Executor-owned builtins are NOT in commands/REGISTRY: state mutators and `exit`
+# need ShellState/control-flow access, while the runner needs the executor.
+STATE_BUILTINS = {"cd", "export", "unset", "exit"}
 RUNNER_BUILTINS = {"xargs"}

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Replaced ambiguous synthetic results for interrupted tool calls with a compact unknown-outcome record that requires side-effect inspection before retrying after resume.
+
 ## [0.81.41] - 2026-07-27
 
 ### Added

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made the Windows shell engine preserve `$?`, support controlled `exit`, and accept `head`/`tail -N`, so diagnostic-capture command chains complete with a terminal result instead of losing status or treating `exit` as an external command.
+- Added a provider- and tool-neutral WSL incident collector that packages the latest human session, recovery and orchestration records, explicitly requested command logs, TUI evidence, boot identity, installed-runtime hashes, bounded kernel diagnostics, and relevant Windows host events without collecting credential stores or emitting false missing-log warnings.
+
 ## [0.81.41] - 2026-07-27
 
 ### Added

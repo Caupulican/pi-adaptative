@@ -16,7 +16,7 @@ import {
 	validateToolArguments,
 } from "@caupulican/pi-ai";
 import {
-	classifyToolFailure,
+	assessToolFailure,
 	clearToolFailure,
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
@@ -1063,13 +1063,17 @@ async function finalizeExecutedToolCall(
 
 	if (isError) {
 		const usage = result.usage;
+		const effectiveFailureMessage =
+			failureMessage || result.content.find((block) => block.type === "text")?.text || "Tool execution failed";
+		const assessment = assessToolFailure(effectiveFailureMessage, "failed", errorClass);
 		const record = rememberToolFailure(
 			toolFailureMemory,
 			prepared.toolCall.name,
 			prepared.args,
 			"failed",
-			classifyToolFailure(failureMessage, errorClass),
-			toolFailureCorrection(failureMessage, "failed"),
+			assessment.failureCode,
+			assessment.guidance,
+			assessment.diagnostic,
 		);
 		result = { ...createToolFailureResult(record, result.terminate), usage };
 	} else {

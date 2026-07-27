@@ -2,6 +2,8 @@
 
 Pi validates every model-emitted tool call against its TypeBox schema before execution. Valid calls run unchanged. Invalid calls either pass through a named deterministic repair and then execute with the repaired arguments, or they bounce with schema feedback when no safe repair applies.
 
+Execution failures are not argument repairs. Pi removes their potentially large failed protocol turns from provider context and retains one bounded failure record: stable operation identity, occurrence count, failure code, a cause-bearing diagnostic when available, and `next_action`. A matching successful retry clears the record. Pi uses `repair` only for argument/protocol rejections with a concrete call correction; policy, preflight, abort, and execution failures use `next_action`. It never invents a deterministic repair from an unknown nonzero exit.
+
 ## Runtime behavior
 
 - The shared validation choke point is `validateToolArguments` in `packages/ai/src/utils/validation.ts`.
@@ -80,6 +82,7 @@ Confirmed against current source:
 - Shared validation and repair choke point: `packages/ai/src/utils/validation.ts`.
 - Repair mode names and standing-rule text: `packages/ai/src/utils/tool-repair/registry.ts`.
 - Agent repair event metadata and teach-note gate: `packages/agent/src/types.ts`, `packages/agent/src/agent-loop.ts`.
+- Bounded execution-failure assessment and retry memory: `packages/agent/src/tool-failure-memory.ts`.
 - Interactive marker: `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`.
 - Settings/env kill switches: `packages/coding-agent/src/core/settings-manager.ts`, `packages/coding-agent/src/core/tool-repair-settings.ts`.
 - Health, tool probing, rule removal, and protocol reset: `packages/coding-agent/src/core/tool-repair-health.ts`, `packages/coding-agent/src/core/models/adaptation-store.ts`, `packages/coding-agent/src/core/slash-commands.ts`, `packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.

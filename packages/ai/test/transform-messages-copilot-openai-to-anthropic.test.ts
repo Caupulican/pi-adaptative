@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { transformMessages } from "../src/providers/transform-messages.ts";
+import { INTERRUPTED_TOOL_RESULT_TEXT, transformMessages } from "../src/providers/transform-messages.ts";
 import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.ts";
 
 // Normalize function matching what anthropic.ts uses
@@ -155,7 +155,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			toolCallId: "call_123_fc_123",
 			toolName: "read",
 			isError: true,
-			content: [{ type: "text", text: "No result provided" }],
+			content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
 		});
 	});
 
@@ -185,7 +185,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			role: "toolResult",
 			toolCallId: "call_2_fc_2",
 			toolName: "bash",
-			content: [{ type: "text", text: "No result provided" }],
+			content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
 		});
 	});
 });

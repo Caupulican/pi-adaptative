@@ -17,7 +17,7 @@ import parser as parser_module
 import proc
 import tokens as tokens_module
 from context import RUNNER_BUILTINS, STATE_BUILTINS, BuiltinContext, ExecContext
-from errors import UnsupportedConstruct
+from errors import ShellExit, UnsupportedConstruct
 from state import ShellState
 
 DEVNULL = os.devnull
@@ -209,6 +209,7 @@ def execute(list_node: nodes.CommandList, ctx: ExecContext) -> int:
     exit_code = 0
     for entry in list_node.entries:
         exit_code = _execute_andor(entry, ctx)
+        ctx.state.last_exit_code = exit_code
     return exit_code
 
 
@@ -222,6 +223,7 @@ def _execute_andor(andor: nodes.AndOr, ctx: ExecContext) -> int:
             if operator == "||" and exit_code == 0:
                 continue
         exit_code = _execute_pipeline(pipeline, ctx)
+        ctx.state.last_exit_code = exit_code
     return exit_code
 
 
@@ -310,6 +312,8 @@ def _run_pipeline_elements(elements: list, ctx: ExecContext) -> int:
                     # fabricated exit-0/empty-output success.
                     refusals[idx] = exc
                     results[idx] = 1
+                except ShellExit as exc:
+                    results[idx] = exc.exit_code
                 except BaseException as exc:  # noqa: BLE001 - any other stage failure must not crash the engine
                     # Any OTHER exception is a real per-stage failure, not a refusal: it
                     # gets a named, actionable one-line message on the merged sink (never
@@ -477,7 +481,10 @@ def _execute_subshell(node: nodes.Subshell, ctx: ExecContext, stdin_stream, stdo
         )
         isolated_state = ctx.state.copy()
         inner_ctx = _sub_ctx(ctx, isolated_state, r_in, r_out, r_err)
-        return execute(node.body, inner_ctx)
+        try:
+            return execute(node.body, inner_ctx)
+        except ShellExit as exc:
+            return exc.exit_code
     finally:
         tracker.close()
 
@@ -569,6 +576,19 @@ def _as_stream(fd_or_stream: BinaryIO | int, mode: str) -> BinaryIO:
 
 
 def _run_state_builtin(name: str, argv: list[str], ctx: ExecContext, out_stream: BinaryIO | int) -> int:
+    if name == "exit":
+        if len(argv) > 2:
+            _write_merged(out_stream, b"exit: too many arguments\n", ctx)
+            raise ShellExit(1)
+        if len(argv) == 1:
+            raise ShellExit(ctx.state.last_exit_code)
+        try:
+            exit_code = int(argv[1], 10)
+        except ValueError:
+            _write_merged(out_stream, f"exit: {argv[1]}: numeric argument required\n".encode("utf-8"), ctx)
+            raise ShellExit(2)
+        raise ShellExit(exit_code & 0xFF)
+
     if name == "cd":
         target = argv[1] if len(argv) > 1 else ctx.state.env.get("HOME")
         print_new_cwd = argv[1:2] == ["-"]
@@ -729,6 +749,9 @@ def run_command_substitution(src: str, ctx: ExecContext) -> tuple[str, int]:
         deadline=ctx.deadline,
         stderr=ctx.stderr,
     )
-    exit_code = execute(ast, sub_ctx)
+    try:
+        exit_code = execute(ast, sub_ctx)
+    except ShellExit as exc:
+        exit_code = exc.exit_code
     text = buffer.getvalue().decode("utf-8", errors="replace")
     return text.rstrip("\n"), exit_code

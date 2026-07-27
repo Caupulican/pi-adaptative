@@ -183,6 +183,12 @@ describe("pi-shell-engine commands/text.py", () => {
 			expect(res.stdout).toBe("s4\ns5\n");
 		});
 
+		it("-N compatibility form matches -n N", () => {
+			const compact = runBuiltin(python, cwd, "tail", ["tail", "-2", "lines.txt"], "");
+			const explicit = runBuiltin(python, cwd, "tail", ["tail", "-n", "2", "lines.txt"], "");
+			expect(compact).toEqual(explicit);
+		});
+
 		it("-f is out-of-matrix -> unsupported-flag", () => {
 			const refusal = runRefusal(python, cwd, "tail", ["tail", "-f", "lines.txt"], "");
 			expect(refusal.construct).toBe("unsupported-flag");

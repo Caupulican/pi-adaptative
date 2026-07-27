@@ -35,12 +35,12 @@ The PowerShell tier runs with `-NoLogo -NoProfile -NonInteractive -Command` and 
 | Redirection | `>`, `>>`, `1>`, `1>>`, `<`, `2>`, `2>>`, `2>&1`, `&>`, `>&` | `/dev/null` maps to `os.devnull`. A builtin's stderr is merged into its own stdout (one sink) — an explicit `2>file` on a builtin does not capture its error text; external commands capture normally. |
 | Quoting | `'…'`, `"…"`, `\x`, `$'…'` | Standard single/double/backslash/ANSI-C semantics. |
 | Tilde | `~`, `~/x` | Word-start, unquoted, expands to `$HOME`. `~user` is unsupported (refusal). |
-| Parameter expansion | `$VAR`, `${VAR}`, `${V:-w}`, `${V:=w}`, `${V:+w}`, `${V:?w}`, `${#VAR}` | POSIX `:`-prefixed (empty-or-unset) semantics only; other `${…}` operators refuse. |
+| Parameter expansion | `$VAR`, `$?`, `${VAR}`, `${V:-w}`, `${V:=w}`, `${V:+w}`, `${V:?w}`, `${#VAR}` | `$?` is the latest foreground pipeline status. POSIX `:`-prefixed (empty-or-unset) semantics only; other `${…}` operators refuse. |
 | Command substitution | `$(…)`, `` `…` `` | Runs through the same executor; trailing newlines stripped; nesting bounded to depth 8. |
 | Glob | `*`, `?`, `[…]` | Case-sensitive, `/`-normalized, ordinal (`LC_ALL=C`) sort; final path segment only; no match falls back to the literal word. |
 | Assignment | `NAME=value` (standalone or prefixed to a command) | Standalone sets engine env for the session; prefixed applies only to that command. No shell-var/exported-env split — every assignment sets env. |
 
-Builtins: `cd`, `pwd`, `echo [-n -e -E]`, `printf`, `export`, `unset`, `true`, `false`, `which`, `test`/`[`, `ls [-a -A -1 -r]`, `cat`, `head [-n N]`, `tail [-n N]`, `grep [-i -v -n -c -l -w -F -E]`, `find [-type f|d] [-name GLOB]`, `rm [-f -r -rf]`, `cp [-r|-R]`, `mv`, `mkdir [-p]`, `touch`, `wc [-l -w -c -m]`, `sort [-r -n -u -f]`, `uniq [-c -d -u -i]`, `cut -d/-f` or `-c`, `tr [-d -s -c]`, `basename`, `dirname`, `sed 's/RE/REPL/[g][i]'` (substitute only), `xargs [-0 -n -I]`. An unknown flag on a listed builtin, or any builtin/form not listed, returns a named `unsupported-flag`/`unsupported-builtin` refusal rather than a guess.
+Builtins: `cd`, `pwd`, `echo [-n -e -E]`, `printf`, `export`, `unset`, `exit [N]`, `true`, `false`, `which`, `test`/`[`, `ls [-a -A -1 -r]`, `cat`, `head [-n N|-N]`, `tail [-n N|-N]`, `grep [-i -v -n -c -l -w -F -E]`, `find [-type f|d] [-name GLOB]`, `rm [-f -r -rf]`, `cp [-r|-R]`, `mv`, `mkdir [-p]`, `touch`, `wc [-l -w -c -m]`, `sort [-r -n -u -f]`, `uniq [-c -d -u -i]`, `cut -d/-f` or `-c`, `tr [-d -s -c]`, `basename`, `dirname`, `sed 's/RE/REPL/[g][i]'` (substitute only), `xargs [-0 -n -I]`. An unknown flag on a listed builtin, or any builtin/form not listed, returns a named `unsupported-flag`/`unsupported-builtin` refusal rather than a guess.
 
 ### Divergences from bash (intentional, documented)
 
@@ -60,6 +60,8 @@ Each of these fails closed with a named, actionable error instead of an approxim
 ### State and session semantics
 
 `cd`, `export`, and `unset` always route to the Python engine, the sole mutator of session state (working directory and environment). That state is held once per agent session and read by both tiers: the next call — whether it routes to the PowerShell floor or back to the engine — sees the updated cwd/env. A subshell `( … )` runs against an isolated copy and never leaks its `cd`/`export` back out; a brace group `{ …; }` shares and persists state like the top level.
+
+`exit [N]` is a controlled engine builtin: it stops the current shell boundary while still emitting Pi's terminal control frame. An `exit` inside a subshell remains local to that subshell.
 
 ### The `windowsShell.pythonEngine` setting and degradation
 

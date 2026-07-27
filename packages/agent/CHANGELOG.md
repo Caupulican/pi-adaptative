@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Replaced generic execution-repair guesses with bounded cause-bearing diagnostics and explicit next actions, retired the legacy generic guess when reopening persisted failures, retained both ends of long operation identities, and guaranteed matching successful retries clear the compact failure record.
+
 ## [0.81.41] - 2026-07-27
 
 ### Fixed

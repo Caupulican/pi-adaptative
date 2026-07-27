@@ -11,6 +11,8 @@ import type {
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
+export const INTERRUPTED_TOOL_RESULT_TEXT =
+	'[harness] {"state":"interrupted","outcome":"unknown","reason":"missing_terminal_result","next_action":"Inspect side effects before retrying; do not assume the operation failed."}';
 
 /** Reuse the original immutable string for the common single-text-block case. */
 export function joinTextContent(content: readonly (TextContent | ImageContent)[]): string {
@@ -209,7 +211,7 @@ export function transformMessages<TApi extends Api>(
 						role: "toolResult",
 						toolCallId: tc.id,
 						toolName: tc.name,
-						content: [{ type: "text", text: "No result provided" }],
+						content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
 						isError: true,
 						timestamp: Date.now(),
 					} as ToolResultMessage);

@@ -4,7 +4,7 @@ export type ShellContractRoute =
 	| { kind: "python-engine"; command: string }
 	| { kind: "unsupported"; error: string };
 
-const STATE_MUTATOR_BUILTINS = new Set(["cd", "export", "unset"]);
+const ENGINE_OWNED_BUILTINS = new Set(["cd", "export", "unset", "exit"]);
 
 interface TokenizeResult {
 	ok: boolean;
@@ -327,10 +327,16 @@ export function routeShellContract(
 		};
 	}
 
-	// State mutators route to the engine unconditionally when it is enabled: the engine is the
-	// sole state owner (D4), so `cd`/`export`/`unset` never execute against the PS floor.
-	if (pythonEngine && STATE_MUTATOR_BUILTINS.has(commandName)) {
-		return { kind: "python-engine", command };
+	// State mutators and controlled exit route to the engine unconditionally when enabled: the
+	// engine is the sole state owner and must frame `exit` instead of terminating the PS backend.
+	if (ENGINE_OWNED_BUILTINS.has(commandName)) {
+		if (pythonEngine) return { kind: "python-engine", command };
+		if (commandName === "exit") {
+			return {
+				kind: "unsupported",
+				error: "The Bash-like 'exit' builtin requires the Windows Python shell engine so Pi can preserve its terminal result protocol.",
+			};
+		}
 	}
 
 	if (BLOCKED_NESTED_SHELLS.has(commandName)) {

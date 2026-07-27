@@ -17,7 +17,7 @@ import exec as exec_module
 import parser as parser_module
 import tokens as tokens_module
 from context import ExecContext
-from errors import UnsupportedConstruct
+from errors import ShellExit, UnsupportedConstruct
 from expand import ParamExpansionError
 from state import ShellState
 
@@ -97,6 +97,9 @@ def main() -> int:
         tokens = tokens_module.tokenize(command)
         ast = parser_module.parse(tokens)
         exit_code = exec_module.execute(ast, ctx)
+    except ShellExit as exc:
+        _write_frame(exc.exit_code, state.cwd, state.delta(original_env), None)
+        return 0
     except UnsupportedConstruct as exc:
         output.write(exc.message.encode("utf-8", errors="replace"))
         _write_frame(

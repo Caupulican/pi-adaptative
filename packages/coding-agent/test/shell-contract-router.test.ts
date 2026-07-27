@@ -130,8 +130,8 @@ describe("stable Bash-like shell contract router", () => {
 			}
 		});
 
-		it("routes state mutators to the engine", () => {
-			for (const command of ["cd ..", "export FOO=bar", "unset FOO"]) {
+		it("routes state mutators and controlled exit to the engine", () => {
+			for (const command of ["cd ..", "export FOO=bar", "unset FOO", "exit 0"]) {
 				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({
 					kind: "python-engine",
 					command,
@@ -160,7 +160,7 @@ describe("stable Bash-like shell contract router", () => {
 		});
 
 		it("does not change classification when pythonEngine is explicitly false", () => {
-			for (const command of ["cat file | grep x", "FOO=bar node script.js", "ls --color=always"]) {
+			for (const command of ["cat file | grep x", "FOO=bar node script.js", "ls --color=always", "exit 0"]) {
 				expect(routeShellContract(command, "win32", { pythonEngine: false })).toMatchObject({
 					kind: "unsupported",
 				});

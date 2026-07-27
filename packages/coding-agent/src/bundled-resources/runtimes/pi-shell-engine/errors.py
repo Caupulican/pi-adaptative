@@ -47,3 +47,11 @@ class UnsupportedConstruct(Exception):
         self.code = "unsupported"
         self.construct = construct
         self.message = message
+
+
+class ShellExit(Exception):
+    """Controlled `exit` request carried to the nearest shell boundary."""
+
+    def __init__(self, exit_code: int) -> None:
+        super().__init__(exit_code)
+        self.exit_code = exit_code

@@ -64,6 +64,7 @@ class ShellState:
 
     cwd: str
     env: ShellEnvironment = field(default_factory=ShellEnvironment)
+    last_exit_code: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.env, ShellEnvironment):
@@ -71,7 +72,7 @@ class ShellState:
 
     def copy(self) -> "ShellState":
         """Return an independent copy (used for subshell isolation)."""
-        return ShellState(cwd=self.cwd, env=self.env.copy())
+        return ShellState(cwd=self.cwd, env=self.env.copy(), last_exit_code=self.last_exit_code)
 
     def chdir(self, path: str) -> None:
         """Validate `path` exists and is a directory, then update cwd + OLDPWD."""

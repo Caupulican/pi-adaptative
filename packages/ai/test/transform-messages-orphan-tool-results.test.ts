@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { transformMessages } from "../src/providers/transform-messages.ts";
+import { INTERRUPTED_TOOL_RESULT_TEXT, transformMessages } from "../src/providers/transform-messages.ts";
 import type { AssistantMessage, Message, Model, ToolCall, ToolResultMessage, UserMessage } from "../src/types.ts";
 
 const model: Model<"anthropic-messages"> = {
@@ -79,7 +79,7 @@ describe("transformMessages orphan tool results", () => {
 				role: "toolResult",
 				toolCallId: "missing",
 				toolName: "tool",
-				content: [{ type: "text", text: "No result provided" }],
+				content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
 				isError: true,
 				timestamp: expect.any(Number),
 			},

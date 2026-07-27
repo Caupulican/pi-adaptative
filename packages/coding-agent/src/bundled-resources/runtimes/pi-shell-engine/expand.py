@@ -97,6 +97,9 @@ def _resolve_param(name: str, op: str | None, arg: Word | None, ctx: "ExecContex
     split_and_glob_eligible is False here always; callers decide splitting based on
     quoting context (Raw vs DQ), not on the parameter's own nature.
     """
+    if name == "?" and op is None:
+        return str(ctx.state.last_exit_code), False
+
     env = ctx.state.env
     if op == "#len":
         value = env.get(name, "")

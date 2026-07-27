@@ -294,6 +294,8 @@ def _scan_dollar_form(src: str, pos: int) -> tuple[Segment, int]:
             )
         close = _find_closing_paren(src, pos + 2)
         return CmdSub(src=src[pos + 2 : close]), close + 1
+    if nxt == "?":
+        return Param(name="?", op=None, arg=None), pos + 2
     if nxt and (_IDENT_START_RE.match(nxt)):
         m = _IDENT_RE.match(src, pos + 1)
         assert m is not None
