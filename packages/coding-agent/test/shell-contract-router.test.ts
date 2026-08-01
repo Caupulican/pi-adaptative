@@ -17,6 +17,22 @@ describe("stable Bash-like shell contract router", () => {
 		expect(route.command).toContain("exit $LASTEXITCODE");
 	});
 
+	it("keeps native ripgrep on the lowest-overhead route for each command shape", () => {
+		const simple = routeShellContract('rg -n "TODO|FIXME" src/module.ts', "win32", { pythonEngine: true });
+		expect(simple).toMatchObject({
+			kind: "powershell",
+			argv: ["rg", "-n", "TODO|FIXME", "src/module.ts"],
+		});
+		if (simple.kind !== "powershell") throw new Error("Expected persistent PowerShell route for simple rg");
+		expect(simple.command).toContain("& 'rg' '-n' 'TODO|FIXME' 'src/module.ts'");
+
+		const combined = 'rg -n "TODO|FIXME" src | head -20';
+		expect(routeShellContract(combined, "win32", { pythonEngine: true })).toEqual({
+			kind: "python-engine",
+			command: combined,
+		});
+	});
+
 	it("converts common Bash-like builtins without model-authored PowerShell", () => {
 		const cases: Array<[string, string]> = [
 			["pwd", "(Get-Location).Path"],
@@ -102,6 +118,16 @@ describe("stable Bash-like shell contract router", () => {
 		]) {
 			expect(routeShellContract(command, "win32")).toMatchObject({ kind: "unsupported" });
 		}
+	});
+
+	it("teaches direct script invocation when rejecting a nested PowerShell host", () => {
+		const route = routeShellContract("powershell.exe -NoProfile -File D:/Temp/probe.ps1", "win32", {
+			pythonEngine: true,
+		});
+		expect(route).toMatchObject({ kind: "unsupported" });
+		if (route.kind !== "unsupported") throw new Error("Expected nested-shell refusal");
+		expect(route.error).toContain("Invoke the .ps1 path directly");
+		expect(route.error).toContain("without powershell.exe -File");
 	});
 
 	describe("engine tier (options.pythonEngine)", () => {

@@ -125,10 +125,12 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 			expect(res.stdout).toContain("No such file or directory");
 		});
 
-		it("-l is an unsupported-flag refusal", () => {
-			const res = p(python as string, "ls", ["ls", "-l"]);
-			expect(res.error).not.toBeNull();
-			expect(res.error?.construct).toBe("unsupported-flag");
+		it("-l is accepted as a compatibility no-op", () => {
+			writeFileSync(join(root, "a.txt"), "");
+			const res = p(python as string, "ls", ["ls", "-la"]);
+			expect(res.error).toBeNull();
+			expect(res.exitCode).toBe(0);
+			expect(res.stdout).toContain("a.txt\n");
 		});
 
 		it("out-of-matrix flag -> unsupported-flag", () => {

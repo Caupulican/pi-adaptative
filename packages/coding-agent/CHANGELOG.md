@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Added a native PowerShell incident collector, shipped beside `pi.exe`, that places its ZIP beside the script by default and packages the affected human session, recovery/orchestration/TUI evidence, runtime fingerprints, and bounded Windows event records while excluding credential and configuration stores.
+- Added bounded command-aware test-output projection for persistent shell sessions: passing chatter is collapsed, failure identity and summaries remain in context, exact raw bytes are handed off through a managed file, and unknown/error paths fall back to raw output without changing exit status.
+
+### Fixed
+
+- Fixed Windows Python-engine latency by keeping one serialized coordinator process per agent session instead of spawning Python for every complex command, with request-correlated output/control barriers and whole-process recovery after aborts, timeouts, crashes, or protocol faults.
+- Fixed incident collection to include the current session-owned orchestration namespace after its consolidation under `state/orchestration/sessions`.
+- Fixed native Windows incident correlation to derive its bounded Event Viewer window from the selected session and filter shared recovery/failure logs by session identity or timestamp.
+- Fixed Windows shell execution so quoted or piped ripgrep patterns retain their proven file/stdin scope, common `ls -la` works across both routing tiers, redirected `.ps1` commands use the selected PowerShell host, native combined commands skip unused PowerShell discovery, and host output no longer leaks duplicate CLIXML records.
+
 ## [0.81.42] - 2026-07-27
 
 ### Changed

@@ -45,6 +45,16 @@ const RG_META_FLAGS = new Set(["--generate", "--help", "--pcre2-version", "--typ
 
 type TargetScope = "current" | "global" | "narrow";
 
+export type ShellContentSearchTool = "rg" | "grep";
+
+export interface ShellSearchInvocationScope {
+	targets: string[];
+	positiveGlobs: string[];
+	hasScopeFilter: boolean;
+	readsStdin: boolean;
+	metaOnly: boolean;
+}
+
 function targetScope(target: string, cwd: string): TargetScope {
 	const normalized = target.trim().replace(/[\\/]+$/u, "") || target.trim();
 	if (
@@ -86,6 +96,7 @@ interface RgArguments {
 	hasScopeFilter: boolean;
 	metaOnly: boolean;
 	positionals: string[];
+	positiveGlobs: string[];
 }
 
 function parseRgArguments(args: string[]): RgArguments {
@@ -95,6 +106,7 @@ function parseRgArguments(args: string[]): RgArguments {
 		hasScopeFilter: false,
 		metaOnly: false,
 		positionals: [],
+		positiveGlobs: [],
 	};
 	let pastDoubleDash = false;
 
@@ -125,6 +137,18 @@ function parseRgArguments(args: string[]): RgArguments {
 			parsed.hasPatternOption = true;
 			continue;
 		}
+		if (arg === "--glob" || arg === "--iglob") {
+			parsed.hasScopeFilter = true;
+			const glob = args[++index];
+			if (glob && !glob.startsWith("!")) parsed.positiveGlobs.push(glob);
+			continue;
+		}
+		if (arg.startsWith("--glob=") || arg.startsWith("--iglob=")) {
+			parsed.hasScopeFilter = true;
+			const glob = arg.slice(arg.indexOf("=") + 1);
+			if (glob && !glob.startsWith("!")) parsed.positiveGlobs.push(glob);
+			continue;
+		}
 		if (arg.startsWith("--")) {
 			const flag = arg.split("=", 1)[0];
 			if (RG_SCOPE_LONG_FLAGS.has(flag)) parsed.hasScopeFilter = true;
@@ -137,6 +161,12 @@ function parseRgArguments(args: string[]): RgArguments {
 				const flag = cluster[flagIndex];
 				if (flag === "e" || flag === "f") parsed.hasPatternOption = true;
 				if (RG_SCOPE_SHORT_FLAGS.has(flag)) parsed.hasScopeFilter = true;
+				if (flag === "g") {
+					const attachedGlob = cluster.slice(flagIndex + 1);
+					const glob = attachedGlob || args[++index];
+					if (glob && !glob.startsWith("!")) parsed.positiveGlobs.push(glob);
+					break;
+				}
 				if (flag === "e" || RG_SHORT_VALUE_FLAGS.has(flag)) {
 					if (flagIndex === cluster.length - 1) index++;
 					break;
@@ -150,16 +180,119 @@ function parseRgArguments(args: string[]): RgArguments {
 	return parsed;
 }
 
-function assessRg(args: string[], cwd: string, readsPipe: boolean): SearchScopeAssessment {
-	const parsed = parseRgArguments(args);
-	if (parsed.metaOnly) return { kind: "scoped" };
-	const targets = parsed.filesMode
+function rgTargets(parsed: RgArguments): string[] {
+	return parsed.filesMode
 		? parsed.positionals
 		: parsed.hasPatternOption
 			? parsed.positionals
 			: parsed.positionals.slice(1);
-	if (readsPipe && targets.length === 0 && !parsed.filesMode) return { kind: "scoped" };
-	if (hasSafeTarget(targets, cwd, parsed.hasScopeFilter)) return { kind: "scoped" };
+}
+
+interface GrepArguments {
+	recursive: boolean;
+	hasScopeFilter: boolean;
+	targets: string[];
+	positiveGlobs: string[];
+}
+
+function parseGrepArguments(args: string[]): GrepArguments {
+	const recursive = args.some(
+		(arg) => arg === "-r" || arg === "-R" || arg === "--recursive" || /^-[^-]*[rR]/u.test(arg),
+	);
+	let hasPatternOption = false;
+	let hasScopeFilter = false;
+	const positiveGlobs: string[] = [];
+	const positionals: string[] = [];
+	const valueFlags = new Set(["-A", "-B", "-C", "-D", "-d", "-e", "-f", "-m", "--regexp", "--file"]);
+	let pastDoubleDash = false;
+
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (pastDoubleDash) {
+			positionals.push(arg);
+			continue;
+		}
+		if (arg === "--") {
+			pastDoubleDash = true;
+			continue;
+		}
+		if (arg === "--include") {
+			hasScopeFilter = true;
+			const glob = args[++index];
+			if (glob) positiveGlobs.push(glob);
+			continue;
+		}
+		if (arg.startsWith("--include=")) {
+			hasScopeFilter = true;
+			const glob = arg.slice("--include=".length);
+			if (glob) positiveGlobs.push(glob);
+			continue;
+		}
+		if (["--exclude", "--exclude-dir"].includes(arg)) {
+			hasScopeFilter = true;
+			index++;
+			continue;
+		}
+		if (arg.startsWith("--exclude=") || arg.startsWith("--exclude-dir=")) {
+			hasScopeFilter = true;
+			continue;
+		}
+		if (arg === "-e" || arg === "-f" || arg === "--regexp" || arg === "--file") {
+			hasPatternOption = true;
+			index++;
+			continue;
+		}
+		if (arg.startsWith("--regexp=") || arg.startsWith("--file=")) {
+			hasPatternOption = true;
+			continue;
+		}
+		if (valueFlags.has(arg)) {
+			index++;
+			continue;
+		}
+		if (!arg.startsWith("-")) positionals.push(arg);
+	}
+
+	return {
+		recursive,
+		hasScopeFilter,
+		targets: hasPatternOption ? positionals : positionals.slice(1),
+		positiveGlobs,
+	};
+}
+
+/** One owner for filesystem targets, include globs, and stdin across both shell search guards. */
+export function parseShellSearchInvocationScope(
+	searchTool: ShellContentSearchTool,
+	args: string[],
+	readsPipe: boolean,
+): ShellSearchInvocationScope {
+	if (searchTool === "rg") {
+		const parsed = parseRgArguments(args);
+		const targets = rgTargets(parsed);
+		return {
+			targets,
+			positiveGlobs: parsed.positiveGlobs,
+			hasScopeFilter: parsed.hasScopeFilter,
+			readsStdin: readsPipe && targets.length === 0 && !parsed.filesMode,
+			metaOnly: parsed.metaOnly,
+		};
+	}
+
+	const parsed = parseGrepArguments(args);
+	return {
+		targets: parsed.targets,
+		positiveGlobs: parsed.positiveGlobs,
+		hasScopeFilter: parsed.hasScopeFilter,
+		readsStdin: readsPipe && parsed.targets.length === 0,
+		metaOnly: false,
+	};
+}
+
+function assessRg(args: string[], cwd: string, readsPipe: boolean): SearchScopeAssessment {
+	const scope = parseShellSearchInvocationScope("rg", args, readsPipe);
+	if (scope.metaOnly || scope.readsStdin) return { kind: "scoped" };
+	if (hasSafeTarget(scope.targets, cwd, scope.hasScopeFilter)) return { kind: "scoped" };
 	return {
 		kind: "broad",
 		searchTool: "rg",
@@ -168,32 +301,10 @@ function assessRg(args: string[], cwd: string, readsPipe: boolean): SearchScopeA
 }
 
 function assessRecursiveGrep(args: string[], cwd: string, readsPipe: boolean): SearchScopeAssessment {
-	const recursive = args.some(
-		(arg) => arg === "-r" || arg === "-R" || arg === "--recursive" || /^-[^-]*[rR]/u.test(arg),
-	);
-	if (!recursive || readsPipe) return { kind: "scoped" };
-	const hasPatternOption = args.some((arg) => arg === "-e" || arg.startsWith("-e") || arg === "--regexp");
-	const hasScopeFilter = args.some(
-		(arg) =>
-			arg === "--include" ||
-			arg.startsWith("--include=") ||
-			arg === "--exclude" ||
-			arg.startsWith("--exclude=") ||
-			arg === "--exclude-dir" ||
-			arg.startsWith("--exclude-dir="),
-	);
-	const valueFlags = new Set(["-A", "-B", "-C", "-D", "-d", "-e", "-f", "-m", "--regexp"]);
-	const positionals: string[] = [];
-	let pastDoubleDash = false;
-	for (let index = 0; index < args.length; index++) {
-		const arg = args[index];
-		if (pastDoubleDash) positionals.push(arg);
-		else if (arg === "--") pastDoubleDash = true;
-		else if (valueFlags.has(arg) || ["--include", "--exclude", "--exclude-dir"].includes(arg)) index++;
-		else if (!arg.startsWith("-")) positionals.push(arg);
-	}
-	const targets = hasPatternOption ? positionals : positionals.slice(1);
-	if (hasSafeTarget(targets, cwd, hasScopeFilter)) return { kind: "scoped" };
+	const parsed = parseGrepArguments(args);
+	if (!parsed.recursive) return { kind: "scoped" };
+	const scope = parseShellSearchInvocationScope("grep", args, readsPipe);
+	if (scope.readsStdin || hasSafeTarget(scope.targets, cwd, scope.hasScopeFilter)) return { kind: "scoped" };
 	return {
 		kind: "broad",
 		searchTool: "grep",

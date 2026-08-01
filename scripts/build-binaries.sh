@@ -187,6 +187,7 @@ for platform in "${PLATFORMS[@]}"; do
         cp ../tui/native/darwin/prebuilds/$platform/darwin-modifiers.node "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform/"
     fi
     if [[ "$platform" == windows-* ]]; then
+        cp ../../scripts/collect-pi-incident.ps1 "$OUTPUT_DIR/$platform/"
         if [[ "$platform" == "windows-arm64" ]]; then
             win32_arch_dir="win32-arm64"
         else

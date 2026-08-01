@@ -31,6 +31,67 @@ describe("credential exposure guard", () => {
 		expect(credentialToolBlockReason("bash", { command: "npm run deploy" }, cwd)).toBeUndefined();
 	});
 
+	it("keeps quoted search alternation intact while proving an explicit file scope", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-secret-search-scope-"));
+		tempDirs.push(root);
+		const sourcePath = join(root, "module.psm1");
+		const secondSourcePath = join(root, "common.psm1");
+		const dotenvPath = join(root, ".env");
+		writeFileSync(sourcePath, "function Invoke-HBTool {}\n");
+		writeFileSync(secondSourcePath, "Start-Process tool\n");
+		writeFileSync(dotenvPath, "TOKEN=hidden\n");
+
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `rg -n "function Invoke-HBTool|Start-Process|ExitCode" ${sourcePath}` },
+				root,
+			),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{
+					command: `rg -n "function Invoke-HBTool|Start-Process|ExitCode" ${sourcePath} ${secondSourcePath}`,
+				},
+				root,
+			),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `cd ${root} && rg -n "Invoke-HBTool|Start-Process" ${sourcePath} | head -20` },
+				root,
+			),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason("bash", { command: `cat ${sourcePath} | rg "Invoke-HBTool|Start-Process"` }, root),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `cat ${sourcePath} | rg -A 3 "Invoke-HBTool|Start-Process"` },
+				root,
+			),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `cat ${sourcePath} | grep -E "Invoke-HBTool|Start-Process"` },
+				root,
+			),
+		).toBeUndefined();
+		expect(credentialToolBlockReason("bash", { command: 'rg -n "Invoke-HBTool|Start-Process"' }, root)).toContain(
+			"narrow non-dotenv",
+		);
+		expect(
+			credentialToolBlockReason("bash", { command: 'rg -n "Invoke-HBTool|Start-Process" . | head -20' }, root),
+		).toContain("narrow non-dotenv");
+		expect(credentialToolBlockReason("bash", { command: `rg -n "TOKEN|SECRET" ${dotenvPath}` }, root)).toContain(
+			"blocked",
+		);
+	});
+
 	it("resolves symlink aliases before read, shell, or Python inspection", () => {
 		if (process.platform === "win32") return;
 		const root = mkdtempSync(join(tmpdir(), "pi-secret-alias-"));

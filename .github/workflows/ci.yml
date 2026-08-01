@@ -52,3 +52,11 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Test native incident collector with Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: packages/coding-agent
+        run: |
+          $env:PI_TEST_POWERSHELL = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+          node ../../node_modules/vitest/dist/cli.js --run test/windows-incident-collector.test.ts

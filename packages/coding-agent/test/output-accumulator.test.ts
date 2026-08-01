@@ -87,6 +87,19 @@ describe("OutputAccumulator", () => {
 		expect(readFileSync(snapshot.fullOutputPath ?? "", "utf-8")).toBe("small output\n");
 	});
 
+	it("can persist a completed small output only when its final projection needs an exact handoff", async () => {
+		const output = new OutputAccumulator({ maxLines: 10, maxBytes: 1024, tempDirectory });
+		output.append(Buffer.from("small output\n", "utf-8"));
+		output.finish();
+
+		expect(output.snapshot().fullOutputPath).toBeUndefined();
+		const snapshot = output.snapshot({ persistAlways: true });
+		await output.closeTempFile();
+
+		expect(snapshot.fullOutputPath).toBeDefined();
+		expect(readFileSync(snapshot.fullOutputPath ?? "", "utf-8")).toBe("small output\n");
+	});
+
 	it("bounds explicitly persisted output and discloses discarded bytes", async () => {
 		const output = new OutputAccumulator({
 			maxLines: 10,

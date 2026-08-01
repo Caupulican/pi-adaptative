@@ -55,7 +55,10 @@ def _split_flags(argv: list[str], allowed: set[str], name: str) -> tuple[set[str
 
 
 def ls(ctx: "BuiltinContext") -> int:
-    flags, positional = _split_flags(ctx.argv[1:], {"a", "A", "1", "r"}, "ls")
+    # `-l` is a compatibility no-op: this bounded engine always emits one name per
+    # line, but accepting the ubiquitous `ls -la` spelling keeps the Python tier
+    # aligned with the PowerShell floor when chaining routes the command here.
+    flags, positional = _split_flags(ctx.argv[1:], {"a", "A", "1", "l", "r"}, "ls")
     if len(positional) > 1:
         if any(os.path.isdir(_resolve(ctx.cwd, p)) for p in positional):
             raise UnsupportedConstruct("unsupported-flag", "ls: only one directory operand is supported")

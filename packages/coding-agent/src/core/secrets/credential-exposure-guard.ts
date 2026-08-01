@@ -3,11 +3,27 @@ import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { redactKnownSecrets } from "../security/secret-text.ts";
+import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
+import { tokenizeShellCommand } from "../tools/shell-command-parser.ts";
 import type { SecretVault } from "./secret-vault.ts";
 
 const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls"]);
-const SHELL_INSPECTION_COMMAND_RE =
-	/\b(cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b([^\n;&|]*)/gi;
+const SHELL_INSPECTION_COMMANDS = new Set([
+	"cat",
+	"head",
+	"tail",
+	"less",
+	"more",
+	"sed",
+	"awk",
+	"grep",
+	"rg",
+	"ripgrep",
+	"type",
+	"get-content",
+	"select-string",
+	"source",
+]);
 const SHELL_SECRET_READ_RE =
 	/\b(?:cat|head|tail|less|more|sed|awk|grep|rg|type|get-content|select-string|source)\b[^\n;&|]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
 const PYTHON_SECRET_READ_RE = /\b(?:open|read_text|read_bytes)\s*\([^\n)]*(?:^|[\\/])?\.env(?:\.[A-Za-z0-9._-]+)?\b/i;
@@ -62,20 +78,62 @@ function shellCredentialRisk(
 	cwd: string,
 	vault?: SecretVault,
 ): "broad_search" | "credential_path" | undefined {
-	SHELL_INSPECTION_COMMAND_RE.lastIndex = 0;
-	for (const match of command.matchAll(SHELL_INSPECTION_COMMAND_RE)) {
-		const toolName = (match[1] ?? "").toLowerCase();
-		const tokens = (match[2] ?? "").match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
-		for (const rawToken of tokens) {
-			const token = rawToken.replace(/^["']|["']$/g, "");
-			if (!token || token.startsWith("-") || token === ".") continue;
-			if (isProtectedCredentialPath(token, cwd, vault)) return "credential_path";
+	const shellTokens = tokenizeShellCommand(command);
+	if (!shellTokens) return /\b(?:grep|rg)\b/iu.test(command) ? "broad_search" : undefined;
+
+	const assessInvocation = (
+		invocation: string[],
+		readsPipe: boolean,
+	): "broad_search" | "credential_path" | undefined => {
+		for (let commandIndex = 0; commandIndex < invocation.length; commandIndex++) {
+			const toolName = (invocation[commandIndex].split(/[\\/]/u).at(-1) ?? "").toLowerCase().replace(/\.exe$/u, "");
+			if (!SHELL_INSPECTION_COMMANDS.has(toolName)) continue;
+			const args = invocation.slice(commandIndex + 1);
+			const searchTool: ShellContentSearchTool | undefined =
+				toolName === "rg" || toolName === "ripgrep" ? "rg" : toolName === "grep" ? "grep" : undefined;
+			if (searchTool) {
+				const scope = parseShellSearchInvocationScope(searchTool, args, readsPipe);
+				if (scope.targets.some((target) => target !== "-" && isProtectedCredentialPath(target, cwd, vault))) {
+					return "credential_path";
+				}
+				const hasSafeGlob =
+					scope.positiveGlobs.length > 0 && scope.positiveGlobs.every((glob) => isCredentialSafeGlob(glob));
+				const hasOnlyExplicitFiles =
+					scope.targets.length > 0 &&
+					scope.targets.every((target) => target === "-" || isExistingRegularFile(target, cwd));
+				if (!scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles) return "broad_search";
+				continue;
+			}
+			for (const token of args) {
+				if (!token || token.startsWith("-") || token === ".") continue;
+				if (isProtectedCredentialPath(token, cwd, vault)) return "credential_path";
+			}
 		}
-		if ((toolName === "grep" || toolName === "rg") && !shellSearchHasCredentialSafeScope(tokens, cwd)) {
-			return "broad_search";
+		return undefined;
+	};
+
+	let invocation: string[] = [];
+	let skipRedirectTarget = false;
+	let readsPipe = false;
+	for (const token of shellTokens) {
+		if (token.kind === "arg") {
+			if (skipRedirectTarget) skipRedirectTarget = false;
+			else invocation.push(token.value);
+			continue;
 		}
+		if (token.kind === "redirect") {
+			// Descriptor duplication (`2>&1`) has no following path operand. Other
+			// redirects do, and that target must never count as search scope.
+			skipRedirectTarget = !/^\d*[<>]&[\d-]+$/u.test(token.value);
+			continue;
+		}
+		const risk = assessInvocation(invocation, readsPipe);
+		if (risk) return risk;
+		invocation = [];
+		skipRedirectTarget = false;
+		readsPipe = token.kind === "pipe";
 	}
-	return undefined;
+	return assessInvocation(invocation, readsPipe);
 }
 
 function isCredentialSafeGlob(glob: string): boolean {
@@ -91,33 +149,6 @@ function isExistingRegularFile(rawPath: string, cwd: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-function shellSearchHasCredentialSafeScope(rawTokens: readonly string[], cwd: string): boolean {
-	const tokens = rawTokens.map((token) => token.replace(/^["']|["']$/g, ""));
-	const positiveGlobs: string[] = [];
-	for (let index = 0; index < tokens.length; index++) {
-		const token = tokens[index] ?? "";
-		if (token === "-g" || token === "--glob") {
-			const glob = tokens[++index];
-			if (glob && !glob.startsWith("!")) positiveGlobs.push(glob);
-		} else if (token.startsWith("--glob=")) {
-			const glob = token.slice("--glob=".length);
-			if (glob && !glob.startsWith("!")) positiveGlobs.push(glob);
-		}
-	}
-	if (positiveGlobs.length > 0) return positiveGlobs.every(isCredentialSafeGlob);
-
-	let skippedPattern = false;
-	for (const token of tokens) {
-		if (!token || token.startsWith("-")) continue;
-		if (!skippedPattern) {
-			skippedPattern = true;
-			continue;
-		}
-		if (isExistingRegularFile(token, cwd)) return true;
-	}
-	return false;
 }
 
 function pythonInspectsCredentialPath(code: string, cwd: string, vault?: SecretVault): boolean {

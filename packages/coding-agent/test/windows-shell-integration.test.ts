@@ -1,9 +1,10 @@
-import { mkdtempSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
-import { disposeWindowsShellState } from "../src/core/tools/windows-shell-state.ts";
+import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
 
 /**
  * Cross-tier integration (WP-F §3): drives the REAL `bash` tool created by
@@ -23,6 +24,8 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		return `windows-shell-integration:${label}:${Math.random().toString(36).slice(2)}`;
 	}
 
+	const hasRipgrep = spawnSync("where", ["rg.exe"], { encoding: "utf8", windowsHide: true }).status === 0;
+
 	it("(a) a pipeline/redirection/expansion command executes through the engine tier with correct output", async () => {
 		const sessionKey = freshSessionKey("pipeline");
 		try {
@@ -40,7 +43,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			// output is not expected to be pre-trimmed.
 			expect(content.text).toBe("two\nthree\n");
 		} finally {
-			disposeWindowsShellState(sessionKey);
+			disposeShellExecutionSession(sessionKey);
 		}
 	});
 
@@ -60,7 +63,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			// spelling. `realpathSync.native` resolves both to one canonical form.
 			expect(realpathSync.native(content.text.trim()).toLowerCase()).toBe(realpathSync.native(sub).toLowerCase());
 		} finally {
-			disposeWindowsShellState(sessionKey);
+			disposeShellExecutionSession(sessionKey);
 		}
 	});
 
@@ -86,7 +89,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			if (content?.type !== "text") throw new Error("expected text output");
 			expect(content.text.trim()).toBe("carried");
 		} finally {
-			disposeWindowsShellState(sessionKey);
+			disposeShellExecutionSession(sessionKey);
 		}
 	});
 
@@ -98,7 +101,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				tool.execute("call-d", { command: "if true; then echo hi; fi" }, undefined, undefined, undefined as never),
 			).rejects.toThrow(/control-flow|not supported|if\/for\/while/i);
 		} finally {
-			disposeWindowsShellState(sessionKey);
+			disposeShellExecutionSession(sessionKey);
 		}
 	});
 
@@ -138,7 +141,83 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				),
 			).rejects.toThrow(/Windows shell engine \(Python\) is unavailable/);
 		} finally {
-			disposeWindowsShellState(sessionKey);
+			disposeShellExecutionSession(sessionKey);
+		}
+	});
+
+	it("(f) executes a .ps1 target through the selected PowerShell host when redirection requires the engine", async () => {
+		const sessionKey = freshSessionKey("powershell-script-adapter");
+		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-ps1-"));
+		const scriptPath = join(root, "probe.ps1");
+		const capturePath = join(root, "capture.txt");
+		writeFileSync(
+			scriptPath,
+			[
+				"param([string]$Value)",
+				'Write-Output "stdout:$Value"',
+				'[Console]::Error.WriteLine("stderr:$Value")',
+				"exit 7",
+				"",
+			].join("\r\n"),
+			"utf8",
+		);
+
+		try {
+			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
+			const script = scriptPath.replaceAll("\\", "/");
+			const capture = capturePath.replaceAll("\\", "/");
+			await tool.execute(
+				"call-f",
+				{ command: `'${script}' 'value with spaces' > '${capture}' 2>&1 || true` },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+
+			const captured = readFileSync(capturePath, "utf8");
+			expect(captured.match(/stdout:value with spaces/gu)).toHaveLength(1);
+			expect(captured.match(/stderr:value with spaces/gu)).toHaveLength(1);
+			expect(captured).not.toContain("WinError 193");
+		} finally {
+			disposeShellExecutionSession(sessionKey);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(!hasRipgrep)("(g) invokes native rg.exe through both the simple and combined routes", async () => {
+		const sessionKey = freshSessionKey("native-ripgrep");
+		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-rg-"));
+		const sourcePath = join(root, "source.txt");
+		writeFileSync(sourcePath, "needle\nother\nmiss\n", "utf8");
+
+		try {
+			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
+			const source = sourcePath.replaceAll("\\", "/");
+			const simple = await tool.execute(
+				"call-g1",
+				{ command: `rg -n 'needle|other' '${source}'` },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const simpleContent = simple.content[0];
+			if (simpleContent?.type !== "text") throw new Error("expected text output");
+			expect(simpleContent.text).toContain("1:needle");
+			expect(simpleContent.text).toContain("2:other");
+
+			const combined = await tool.execute(
+				"call-g2",
+				{ command: `cat '${source}' | rg 'needle|other'` },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const combinedContent = combined.content[0];
+			if (combinedContent?.type !== "text") throw new Error("expected text output");
+			expect(combinedContent.text).toBe("needle\nother\n");
+		} finally {
+			disposeShellExecutionSession(sessionKey);
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

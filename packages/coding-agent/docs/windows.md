@@ -14,7 +14,11 @@ The model always sees one stable `bash` tool contract. On Windows, a determinist
 
 1. **PowerShell floor** (always available): one simple command — a bounded set of builtin translations or a quoted external argv — converted deterministically to PowerShell, exactly as before this tier existed.
 2. **Bundled Python engine** (uv-provisioned Python 3.13, on by default): pipelines, redirection, chaining, quoting, expansion, globs, and the coreutils vocabulary below, plus every state-mutating command (`cd`, `export`, `unset`), which the engine always owns so there is a single mutator.
+
+External programs are not reimplemented. A simple `rg` call runs the installed native `rg.exe` through the persistent PowerShell floor; when a pipeline or chain requires the Python coordinator, it spawns that same `rg.exe` directly without resolving or starting PowerShell. A `.ps1` target in an engine-owned command is adapted through the same selected PowerShell executable as the floor, without starting a nested model-authored shell.
 3. **Named fail-closed refusal**: constructs outside the supported grammar (see below) return an actionable error naming the construct instead of guessing or downgrading silently.
+
+Shell persistence preserves process state; it does not require every raw command byte to remain in model context. Recognized single test-runner commands use a bounded command-aware projection after execution: passing/progress chatter is counted, failure blocks and summaries remain visible, exit status is unchanged, and exact raw bytes are saved to the reported managed path. Mixed commands and unknown nonzero formats stay raw, and Pi also falls back to raw output if it cannot create the exact-output handoff.
 
 The agent never selects a shell or emits native PowerShell or Python. Pi resolves the PowerShell executable in this order:
 
@@ -40,7 +44,7 @@ The PowerShell tier runs with `-NoLogo -NoProfile -NonInteractive -Command` and 
 | Glob | `*`, `?`, `[…]` | Case-sensitive, `/`-normalized, ordinal (`LC_ALL=C`) sort; final path segment only; no match falls back to the literal word. |
 | Assignment | `NAME=value` (standalone or prefixed to a command) | Standalone sets engine env for the session; prefixed applies only to that command. No shell-var/exported-env split — every assignment sets env. |
 
-Builtins: `cd`, `pwd`, `echo [-n -e -E]`, `printf`, `export`, `unset`, `exit [N]`, `true`, `false`, `which`, `test`/`[`, `ls [-a -A -1 -r]`, `cat`, `head [-n N|-N]`, `tail [-n N|-N]`, `grep [-i -v -n -c -l -w -F -E]`, `find [-type f|d] [-name GLOB]`, `rm [-f -r -rf]`, `cp [-r|-R]`, `mv`, `mkdir [-p]`, `touch`, `wc [-l -w -c -m]`, `sort [-r -n -u -f]`, `uniq [-c -d -u -i]`, `cut -d/-f` or `-c`, `tr [-d -s -c]`, `basename`, `dirname`, `sed 's/RE/REPL/[g][i]'` (substitute only), `xargs [-0 -n -I]`. An unknown flag on a listed builtin, or any builtin/form not listed, returns a named `unsupported-flag`/`unsupported-builtin` refusal rather than a guess.
+Builtins: `cd`, `pwd`, `echo [-n -e -E]`, `printf`, `export`, `unset`, `exit [N]`, `true`, `false`, `which`, `test`/`[`, `ls [-a -A -1 -l -r]`, `cat`, `head [-n N|-N]`, `tail [-n N|-N]`, `grep [-i -v -n -c -l -w -F -E]`, `find [-type f|d] [-name GLOB]`, `rm [-f -r -rf]`, `cp [-r|-R]`, `mv`, `mkdir [-p]`, `touch`, `wc [-l -w -c -m]`, `sort [-r -n -u -f]`, `uniq [-c -d -u -i]`, `cut -d/-f` or `-c`, `tr [-d -s -c]`, `basename`, `dirname`, `sed 's/RE/REPL/[g][i]'` (substitute only), `xargs [-0 -n -I]`. For `ls`, `-l` is an accepted compatibility no-op because both tiers intentionally emit one name per line. An unknown flag on a listed builtin, or any builtin/form not listed, returns a named `unsupported-flag`/`unsupported-builtin` refusal rather than a guess.
 
 ### Divergences from bash (intentional, documented)
 
@@ -62,6 +66,8 @@ Each of these fails closed with a named, actionable error instead of an approxim
 `cd`, `export`, and `unset` always route to the Python engine, the sole mutator of session state (working directory and environment). That state is held once per agent session and read by both tiers: the next call — whether it routes to the PowerShell floor or back to the engine — sees the updated cwd/env. A subshell `( … )` runs against an isolated copy and never leaks its `cd`/`export` back out; a brace group `{ …; }` shares and persists state like the top level.
 
 `exit [N]` is a controlled engine builtin: it stops the current shell boundary while still emitting Pi's terminal control frame. An `exit` inside a subshell remains local to that subshell.
+
+The Python interpreter and engine imports stay warm in one coordinator process per agent session. A coordinator and its cwd/environment state are keyed by that session's private identity and are never shared process-wide with another interactive, RPC, or embedded session. Commands within one session are serialized, and Node remains the only owner of cwd/environment state: it sends the current state with each request and applies a result only after matching output and control terminal signals arrive. An abort, hard timeout, coordinator crash, malformed frame, or stale request ID kills only that session's coordinator tree; the next command lazily starts a clean process from the last acknowledged Node-owned state. Command stdin remains EOF and cannot consume coordinator protocol input.
 
 ### The `windowsShell.pythonEngine` setting and degradation
 
@@ -89,6 +95,25 @@ pi
 ```
 
 Or download `pi-windows-x64.zip` or `pi-windows-arm64.zip` from the matching GitHub release, extract it, and run `pi.exe`.
+
+## Incident collection
+
+The Windows release archive includes `collect-pi-incident.ps1` beside `pi.exe`. Run it from native PowerShell on the machine and Windows account where the failure happened:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\collect-pi-incident.ps1
+```
+
+From a source checkout, use `-File .\scripts\collect-pi-incident.ps1`. The collector selects the latest human session by default and creates `pi-incident-<timestamp>.zip` beside the collector script. To select exact evidence or another destination:
+
+```powershell
+.\collect-pi-incident.ps1 `
+  -Session "$env:USERPROFILE\.pi\agent\sessions\project\affected-session.jsonl" `
+  -CommandLog "C:\Temp\pi-console.log" `
+  -OutputDir "C:\Temp"
+```
+
+The archive contains the selected session, its session-owned orchestration records, matching recovery/failure rows, bounded TUI evidence, environment and installed-runtime fingerprints, and relevant Windows events from the session window plus 15 minutes on each side. Global recovery and failure logs are filtered by session identity or timestamp instead of being copied wholesale. If the session has no usable timestamps, `-EventHours` supplies a collection-time fallback window (24 hours by default). It does not scan or copy `auth.json`, `settings.json`, dotenv files, or vault files. Session and diagnostic output may still contain prompts, source text, paths, and commands; review the ZIP before sharing it.
 
 ## Capability contract
 

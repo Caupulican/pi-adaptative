@@ -7,6 +7,7 @@
  * agent turn completion. Persists results through the session log via deps.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Agent, BashExecutionMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -37,11 +38,13 @@ export interface BashExecutionOptions {
 export class BashExecutionController {
 	private _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
+	private readonly shellSessionKey: string;
 
 	private readonly deps: BashExecutionControllerDeps;
 
 	constructor(deps: BashExecutionControllerDeps) {
 		this.deps = deps;
+		this.shellSessionKey = deps.getShellSessionKey?.() ?? `bash-controller:${randomUUID()}`;
 	}
 
 	async executeBash(
@@ -61,7 +64,7 @@ export class BashExecutionController {
 				shellPath,
 				commandPrefix,
 				operations: options?.operations,
-				sessionKey: this.deps.getShellSessionKey?.(),
+				sessionKey: this.shellSessionKey,
 				pythonEngine: options?.pythonEngine,
 			},
 			platform,

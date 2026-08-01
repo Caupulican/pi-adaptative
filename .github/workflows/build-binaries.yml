@@ -86,6 +86,7 @@ jobs:
 
           $required = @(
             "pi.exe",
+            "collect-pi-incident.ps1",
             "native\win32\prebuilds\win32-$arch\win32-console-mode.node",
             "node_modules\@mariozechner\clipboard-win32-$arch-msvc"
           )
@@ -93,6 +94,13 @@ jobs:
             if (-not (Test-Path (Join-Path $extractDir $relativePath))) {
               throw "Windows $arch archive is missing $relativePath"
             }
+          }
+
+          $incidentOutput = Join-Path $env:RUNNER_TEMP "pi-adaptative\incident-$arch"
+          & (Join-Path $extractDir "collect-pi-incident.ps1") -AgentDir $agentDir -OutputDir $incidentOutput -EventHours 1
+          $incidentArchives = @(Get-ChildItem -LiteralPath $incidentOutput -File -Filter "pi-incident-*.zip")
+          if ($incidentArchives.Count -ne 1) {
+            throw "Windows $arch incident collector did not create exactly one archive"
           }
 
           & $exe --version

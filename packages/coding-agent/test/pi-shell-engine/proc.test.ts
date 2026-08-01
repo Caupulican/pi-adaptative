@@ -133,6 +133,40 @@ sys.stdout.write("none" if resolved is None else resolved)
 		expect(result.stdout.trim()).toBe("none");
 	});
 
+	it("adapts PowerShell scripts through the selected host without changing native executable handling", () => {
+		const program = `
+import sys, json
+sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
+import proc
+
+payload = {
+    "ps1": proc.build_argv(
+        r"C:\\work dir\\probe.ps1",
+        [r"C:\\work dir\\probe.ps1", "value with spaces"],
+        r"C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    ),
+    "cmd": proc.build_argv(r"C:\\work\\probe.cmd", [r"C:\\work\\probe.cmd", "arg"], None),
+    "exe": proc.build_argv(r"C:\\work\\probe.exe", [r"C:\\work\\probe.exe", "arg"], None),
+}
+sys.stdout.write(json.dumps(payload))
+`;
+		const result = runProbe(python, program);
+		expect(result.status).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			ps1: [
+				"C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-File",
+				"C:\\work dir\\probe.ps1",
+				"value with spaces",
+			],
+			cmd: ["cmd", "/c", "C:\\work\\probe.cmd", "arg"],
+			exe: ["C:\\work\\probe.exe", "arg"],
+		});
+	});
+
 	it("resolve_external finds a bare name over a PATH-dirs list (manual resolution, not just absolute)", () => {
 		const program = `
 import sys, os

@@ -3,7 +3,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type BashOperations, type BashToolDetails, createBashTool } from "../src/core/tools/bash.ts";
-import { assessShellSearchScope } from "../src/core/tools/search-command-guard.ts";
+import { assessShellSearchScope, parseShellSearchInvocationScope } from "../src/core/tools/search-command-guard.ts";
+
+describe("shared shell search invocation scope", () => {
+	it("owns value-taking flags, explicit targets, positive globs, and piped stdin", () => {
+		expect(parseShellSearchInvocationScope("rg", ["-A", "3", "needle|other"], true)).toEqual({
+			targets: [],
+			positiveGlobs: [],
+			hasScopeFilter: false,
+			readsStdin: true,
+			metaOnly: false,
+		});
+		expect(parseShellSearchInvocationScope("rg", ["-g", "*.ts", "needle", "src"], false)).toEqual({
+			targets: ["src"],
+			positiveGlobs: ["*.ts"],
+			hasScopeFilter: true,
+			readsStdin: false,
+			metaOnly: false,
+		});
+		expect(parseShellSearchInvocationScope("grep", ["-E", "needle|other"], true)).toEqual({
+			targets: [],
+			positiveGlobs: [],
+			hasScopeFilter: false,
+			readsStdin: true,
+			metaOnly: false,
+		});
+	});
+});
 
 describe("shell search scope assessment", () => {
 	it.each([
@@ -20,6 +46,7 @@ describe("shell search scope assessment", () => {
 		["cd packages&&rg needle", "rg"],
 		["grep -R needle .", "grep"],
 		["grep -R needle / --include '*.ts'", "grep"],
+		["printf needle | grep -R needle /", "grep"],
 		["find . -type f", "find"],
 		["find / -name '*.ts'", "find"],
 		["find -L / -name '*.ts'", "find"],
@@ -40,6 +67,8 @@ describe("shell search scope assessment", () => {
 		"echo rg needle",
 		"printf 'needle\\n' | rg needle",
 		"printf 'needle\\n' |& rg needle",
+		"printf 'needle\\n' | rg -A 3 'needle|other'",
+		"printf 'needle\\n' | grep -E 'needle|other'",
 		"rg 'needle|other' packages/agent/src",
 		"rg needle packages/agent/src > matches.txt",
 		"rg --type-list",

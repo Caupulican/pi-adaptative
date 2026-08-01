@@ -199,6 +199,38 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		disposePersistentShellSession(key);
 		expect(acquirePersistentShellSession(key, "bash")).not.toBe(first);
 	});
+
+	it("rejects the active command when its owning session is disposed", async () => {
+		const session = makeSession("bash");
+		let reportStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			reportStarted = resolve;
+		});
+		// The protocol intentionally retains a 64-byte suffix while scanning for its
+		// sentinel, so emit enough data for the start marker to stream immediately.
+		const active = session.exec("printf 'started%080d' 0; sleep 30", cwd, {
+			onData: (data) => {
+				if (data.includes("started")) reportStarted?.();
+			},
+		});
+
+		await started;
+		session.dispose();
+
+		let pendingTimer: NodeJS.Timeout | undefined;
+		const outcome = await Promise.race([
+			active.then(
+				() => "resolved",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			),
+			new Promise<string>((resolve) => {
+				pendingTimer = setTimeout(() => resolve("pending"), 250);
+			}),
+		]);
+		if (pendingTimer) clearTimeout(pendingTimer);
+
+		expect(outcome).toContain("is disposed");
+	}, 1_500);
 });
 
 describe.skipIf(!HAS_POWERSHELL)("PersistentShellSession (powershell)", () => {
@@ -222,6 +254,17 @@ describe.skipIf(!HAS_POWERSHELL)("PersistentShellSession (powershell)", () => {
 		const session = makeSession("powershell");
 		expect((await run(session, "exit 5", cwd)).exitCode).toBe(5);
 		expect((await run(session, "Write-Output back", cwd)).output.trim()).toBe("back");
+	});
+
+	it("emits host and stderr text once without CLIXML serialization", async () => {
+		const session = makeSession("powershell");
+		const result = await run(session, "Write-Host 'pi-host-line'; [Console]::Error.WriteLine('pi-stderr-line')", cwd);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.match(/pi-host-line/gu)).toHaveLength(1);
+		expect(result.output.match(/pi-stderr-line/gu)).toHaveLength(1);
+		expect(result.output).not.toContain("#< CLIXML");
+		expect(result.output).not.toContain("<Objs Version=");
 	});
 });
 

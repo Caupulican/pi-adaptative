@@ -8,6 +8,7 @@ Usage: collect-pi-incident.sh [options]
 
 Collect the latest human Pi session and related local diagnostics into one ZIP.
 Run this inside the same WSL distribution where Pi runs.
+For a native Windows Pi incident, run collect-pi-incident.ps1 from PowerShell instead.
 
 Options:
   --agent-dir PATH   Pi agent directory (default: configured value or ~/.pi/agent)
@@ -159,13 +160,10 @@ for state_log in tool-recovery-events.jsonl failure-corpus.jsonl; do
 done
 
 if [[ -n "$session_id" && -d "$agent_dir/state/orchestration" ]]; then
-	orchestration_source=""
-	while IFS= read -r -d '' candidate; do
-		orchestration_source="$candidate"
-		break
-	done < <(find "$agent_dir/state/orchestration" -mindepth 1 -maxdepth 1 -type d -name "$session_id-*" -print0 2>/dev/null)
-	if [[ -n "$orchestration_source" ]]; then
-		copy_directory "$orchestration_source" "state/orchestration/$(basename "$orchestration_source")"
+	orchestration_key="${session_id:0:80}-$(printf '%s' "$session_id" | sha256sum | cut -c1-16)"
+	orchestration_source="$agent_dir/state/orchestration/sessions/$orchestration_key"
+	if [[ -d "$orchestration_source" ]]; then
+		copy_directory "$orchestration_source" "state/orchestration/sessions/$orchestration_key"
 	else
 		warnings+=("No orchestration records matched session $session_id")
 	fi

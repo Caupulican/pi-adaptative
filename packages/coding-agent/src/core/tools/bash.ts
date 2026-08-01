@@ -31,15 +31,15 @@ import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { assessShellSearchScope, BROAD_SEARCH_OUTPUT_ROUTE } from "./search-command-guard.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
+import {
+	createShellOutputProjector,
+	type ShellOutputProjection,
+	type ShellOutputProjectionDetails,
+} from "./shell-output-projection.ts";
 import { acquirePersistentShellSession } from "./shell-session.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWindowsShellEngineOperations, type WindowsShellEngineOptions } from "./windows-shell-engine.ts";
 import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
-
-/** Default per-session key for the engine tier when a caller does not pass an explicit sessionKey
- * (e.g. the RPC `createLocalPlatformShellOperations` path); a stable key keeps `cd`/`export` state
- * persisting across calls even without an agent-scoped session key. */
-const DEFAULT_WINDOWS_SHELL_ENGINE_SESSION_KEY = "platform-shell-operations";
 
 /** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
 const DEFAULT_COMMAND_SILENCE_MS = 600_000;
@@ -94,6 +94,7 @@ export interface BashToolDetails {
 		content: string;
 		skippedLines: number;
 	};
+	outputProjection?: ShellOutputProjectionDetails;
 }
 
 /**
@@ -247,7 +248,9 @@ export function createLocalPlatformShellOperations(
 			sessionKey: options.sessionKey,
 		});
 	const pythonEngineEnabled = options.pythonEngine !== false;
-	const engineSessionKey = options.sessionKey ?? DEFAULT_WINDOWS_SHELL_ENGINE_SESSION_KEY;
+	// One factory instance is one fallback tenant. Production agent sessions always pass their
+	// stable key; standalone callers that omit it must never collapse into a process-global engine.
+	const engineSessionKey = options.sessionKey ?? `platform-shell-operations:${randomUUID()}`;
 	const engineOperations = createWindowsShellEngineOperations(engineSessionKey, options.engineOptions);
 	return {
 		async exec(command, cwd, execOptions) {
@@ -470,7 +473,7 @@ function createShellToolDefinition(
 	return {
 		name: toolName,
 		label: toolName,
-		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
+		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
 		promptSnippet: routesWindowsContract
 			? "Execute Bash-like commands; Pi routes them deterministically to PowerShell or a bundled Python engine on Windows"
 			: "Execute Bash commands (ls, grep, find, etc.)",
@@ -504,6 +507,8 @@ function createShellToolDefinition(
 				);
 			}
 			const routeBroadSearchOutput = searchScope.kind === "broad";
+			let outputProjector =
+				routeBroadSearchOutput || commandPrefix || spawnHook ? undefined : createShellOutputProjector(command);
 			const output = new OutputAccumulator({
 				tempFilePrefix: `pi-${toolName}`,
 				tempDirectory: options?.outputDirectory,
@@ -579,17 +584,39 @@ function createShellToolDefinition(
 
 			const handleData = (data: Buffer) => {
 				output.append(data);
+				if (outputProjector) {
+					try {
+						outputProjector.append(data);
+					} catch {
+						// Projection is opportunistic. Raw output remains authoritative.
+						outputProjector = undefined;
+					}
+				}
 				scheduleOutputUpdate();
 			};
 
-			const finishOutput = async () => {
+			const finishOutput = async (persistAlways = false) => {
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				return output.snapshot({ persistIfTruncated: true });
+				return output.snapshot({ persistIfTruncated: true, persistAlways });
 			};
 
-			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
+			const finishProjection = (exitCode: number | null): ShellOutputProjection | undefined => {
+				if (!outputProjector) return undefined;
+				try {
+					return outputProjector.finish(exitCode);
+				} catch {
+					outputProjector = undefined;
+					return undefined;
+				}
+			};
+
+			const formatOutput = (
+				snapshot: Awaited<ReturnType<typeof finishOutput>>,
+				emptyText = "(no output)",
+				projection?: ShellOutputProjection,
+			) => {
 				const truncation = snapshot.truncation;
 				if (routeBroadSearchOutput) {
 					if (snapshot.fullOutputPath) {
@@ -615,15 +642,23 @@ function createShellToolDefinition(
 						},
 					};
 				}
-				let text = snapshot.content.replace(/\r/g, "") || emptyText;
+				let text = (projection?.content ?? snapshot.content).replace(/\r/g, "") || emptyText;
 				let details: BashToolDetails | undefined;
-				const preview = output.preview(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES);
+				const preview = projection
+					? (() => {
+							const lines = projection.content.split("\n");
+							return {
+								content: lines.slice(-BASH_PREVIEW_LINES).join("\n"),
+								skippedLines: Math.max(0, lines.length - BASH_PREVIEW_LINES),
+							};
+						})()
+					: output.preview(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES);
 				const fullOutputNotice = snapshot.fullOutputPath
 					? `Full output: ${snapshot.fullOutputPath}`
 					: snapshot.fullOutputError
 						? `Full output unavailable: ${snapshot.fullOutputError}`
 						: "Full output unavailable";
-				if (truncation.truncated || preview.skippedLines > 0) {
+				if (truncation.truncated || preview.skippedLines > 0 || projection) {
 					details = { preview };
 				}
 				if (snapshot.fullOutputPath || snapshot.fullOutputError) {
@@ -640,16 +675,37 @@ function createShellToolDefinition(
 						fullOutputPath: snapshot.fullOutputPath,
 						fullOutputError: snapshot.fullOutputError,
 					};
-					const startLine = truncation.totalLines - truncation.outputLines + 1;
-					const endLine = truncation.totalLines;
-					if (truncation.lastLinePartial) {
-						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). ${fullOutputNotice}]`;
-					} else if (truncation.truncatedBy === "lines") {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. ${fullOutputNotice}]`;
-					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). ${fullOutputNotice}]`;
+					if (!projection) {
+						const startLine = truncation.totalLines - truncation.outputLines + 1;
+						const endLine = truncation.totalLines;
+						if (truncation.lastLinePartial) {
+							const lastLineSize = formatSize(output.getLastLineBytes());
+							text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). ${fullOutputNotice}]`;
+						} else if (truncation.truncatedBy === "lines") {
+							text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. ${fullOutputNotice}]`;
+						} else {
+							text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). ${fullOutputNotice}]`;
+						}
 					}
+				}
+				if (projection) {
+					details = {
+						...(details ?? {}),
+						outputProjection: {
+							kind: projection.kind,
+							inputLines: projection.inputLines,
+							inputBytes: projection.inputBytes,
+							outputLines: projection.outputLines,
+							outputBytes: projection.outputBytes,
+							omittedLines: projection.omittedLines,
+							collapsedPassingLines: projection.collapsedPassingLines,
+						},
+					};
+					const passingNotice =
+						projection.collapsedPassingLines > 0
+							? ` ${projection.collapsedPassingLines} passing/progress lines collapsed.`
+							: "";
+					text += `\n\n[Test output filtered: retained ${projection.inputLines - projection.omittedLines} of ${projection.inputLines} lines.${passingNotice} ${fullOutputNotice}]`;
 				}
 				return { text, details };
 			};
@@ -763,8 +819,10 @@ function createShellToolDefinition(
 					throw err;
 				}
 
-				const snapshot = await finishOutput();
-				const { text: outputText, details } = formatOutput(snapshot);
+				const candidateProjection = finishProjection(exitCode);
+				const snapshot = await finishOutput(candidateProjection !== undefined);
+				const projection = candidateProjection && snapshot.fullOutputPath ? candidateProjection : undefined;
+				const { text: outputText, details } = formatOutput(snapshot, "(no output)", projection);
 				if (exitCode !== 0 && exitCode !== null) {
 					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
 				}

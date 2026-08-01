@@ -138,10 +138,10 @@ export class OutputAccumulator {
 		}
 	}
 
-	snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
+	snapshot(options: { persistIfTruncated?: boolean; persistAlways?: boolean } = {}): OutputSnapshot {
 		const snapshot = this.buildSnapshot(this.maxLines, this.maxBytes);
 
-		if (options.persistIfTruncated && snapshot.truncation.truncated) {
+		if (options.persistAlways || (options.persistIfTruncated && snapshot.truncation.truncated)) {
 			this.tryEnsureTempFile();
 		}
 

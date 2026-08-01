@@ -340,9 +340,12 @@ export function routeShellContract(
 	}
 
 	if (BLOCKED_NESTED_SHELLS.has(commandName)) {
+		const powershellGuidance = ["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(commandName)
+			? " Invoke the .ps1 path directly with its arguments, without powershell.exe -File or pwsh -File."
+			: " Invoke the target executable or supported script directly.";
 		return {
 			kind: "unsupported",
-			error: "Nested shell execution is not supported by the Windows shell contract router.",
+			error: `Nested shell execution is not supported by the Windows shell contract router.${powershellGuidance}`,
 		};
 	}
 	const builtIn = routeBuiltIn(argv);

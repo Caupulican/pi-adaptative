@@ -408,7 +408,11 @@ def _spawn_external_stage(
         r_in, r_out, r_err = _apply_redirects(command.redirects, ctx, stdin_stream, stdout_stream, stderr_base, tracker)
         argv = _expand_argv(command, ctx)
         env = _apply_transient_assignments(command, ctx)
-        scratch_state = ShellState(cwd=ctx.state.cwd, env=env)
+        scratch_state = ShellState(
+            cwd=ctx.state.cwd,
+            env=env,
+            powershell_path=ctx.state.powershell_path,
+        )
         try:
             child, in_prep, out_prep, err_prep = _spawn_with_bridges(
                 argv, scratch_state, r_in, r_out, r_err, ctx.deadline
@@ -548,7 +552,11 @@ def _dispatch_simple_command(
 
         # External command.
         env = _apply_transient_assignments(command, ctx)
-        scratch_state = ShellState(cwd=ctx.state.cwd, env=env)
+        scratch_state = ShellState(
+            cwd=ctx.state.cwd,
+            env=env,
+            powershell_path=ctx.state.powershell_path,
+        )
         try:
             child, in_prep, out_prep, err_prep = _spawn_with_bridges(argv, scratch_state, r_in, r_out, r_err, ctx.deadline)
         except FileNotFoundError:
@@ -705,7 +713,11 @@ def _run_xargs_batch(argv: list[str], ctx: ExecContext, out_stream: BinaryIO | i
         return ctx.builtins[name](builtin_ctx)
     if name in STATE_BUILTINS:
         return _run_state_builtin(name, argv, ctx, out_stream)
-    scratch_state = ShellState(cwd=ctx.state.cwd, env=ctx.state.env.copy())
+    scratch_state = ShellState(
+        cwd=ctx.state.cwd,
+        env=ctx.state.env.copy(),
+        powershell_path=ctx.state.powershell_path,
+    )
     try:
         child, in_prep, out_prep, err_prep = _spawn_with_bridges(
             argv, scratch_state, subprocess.DEVNULL, out_stream, out_stream, ctx.deadline

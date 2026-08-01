@@ -117,11 +117,10 @@ import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
-import { disposePersistentShellSession } from "./tools/shell-session.ts";
+import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-import { disposeWindowsShellState } from "./tools/windows-shell-state.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
@@ -404,8 +403,7 @@ export class RuntimeBuilder {
 			agentDir: deps.getAgentDir(),
 			onEnvironmentChanged: () => {
 				const sessionKey = deps.getShellSessionKey();
-				disposePersistentShellSession(sessionKey);
-				disposeWindowsShellState(sessionKey);
+				disposeShellExecutionSession(sessionKey);
 			},
 		});
 	}

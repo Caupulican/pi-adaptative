@@ -36,15 +36,9 @@
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import { createSilenceWatchdog } from "@caupulican/pi-agent-core";
-import { type ChildProcess, spawn } from "child_process";
-import {
-	getShellConfig,
-	getShellEnv,
-	killProcessTree,
-	type PlatformShellToolName,
-	trackDetachedChildPid,
-	untrackDetachedChildPid,
-} from "../../utils/shell.ts";
+import { spawn } from "child_process";
+import { getShellConfig, getShellEnv, type PlatformShellToolName } from "../../utils/shell.ts";
+import { PersistentProcessCoordinator } from "./persistent-process-coordinator.ts";
 
 const SENTINEL_BYTE = 0x1e;
 /** Longest possible sentinel: "\n" + 0x1e + 16-hex nonce + ":" + exit code digits + 0x1e. */
@@ -97,7 +91,10 @@ export function buildPowerShellWire(command: string, nonce: string, cdTo: string
 /**
  * PowerShell 5.1-compatible REPL bootstrap. Exit code mirrors `-Command` semantics as closely as
  * a loop can: a native command's $LASTEXITCODE wins, a terminating error forces 1, otherwise 0.
- * Passed via -EncodedCommand so quoting and newlines never touch the process command line.
+ * Passed as one direct `-Command` argument. `-EncodedCommand` makes PowerShell serialize host,
+ * warning, and progress records as CLIXML on stderr whenever pipes are attached; Pi then sees
+ * duplicate XML mixed into the same command's plain stdout. Node preserves this script as one
+ * argv entry without involving cmd.exe quoting.
  *
  * The command runs as a bare `Invoke-Expression` (no `2>&1 | Out-Default` capture pipeline) — see
  * the module doc header for why: a native command's stdio handles are inherited directly by its
@@ -145,11 +142,10 @@ interface ActiveExec {
 export class PersistentShellSession {
 	private readonly key: string;
 	private readonly kind: PlatformShellToolName;
-	private child: ChildProcess | null = null;
+	private readonly coordinator = new PersistentProcessCoordinator();
 	private childEnv: NodeJS.ProcessEnv | null = null;
 	private lastRequestedCwd: string | null = null;
 	private activeExec: ActiveExec | null = null;
-	private queue: Promise<void> = Promise.resolve();
 	private disposed = false;
 
 	constructor(key: string, kind: PlatformShellToolName) {
@@ -163,28 +159,15 @@ export class PersistentShellSession {
 
 	/** Serialized: one command at a time per session, later calls queue behind earlier ones. */
 	exec(command: string, cwd: string, options: ShellSessionExecOptions): Promise<{ exitCode: number | null }> {
-		const run = this.queue.then(() => this.execNow(command, cwd, options));
-		this.queue = run.then(
-			() => undefined,
-			() => undefined,
-		);
-		return run;
+		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
 		this.disposed = true;
-		this.killChild();
-	}
-
-	/** Synchronous best-effort kill for process-exit hooks (async spawn never runs during exit).
-	 * `killProcessTree` is itself synchronous (blocking `spawnSync` on Windows, `process.kill` on
-	 * POSIX), so it is safe to call directly from a `process.on("exit", ...)` handler. */
-	killForProcessExit(): void {
-		const pid = this.child?.pid;
-		this.child = null;
-		if (!pid) return;
-		untrackDetachedChildPid(pid);
-		killProcessTree(pid);
+		this.activeExec?.fail(new Error(`Shell session "${this.key}" is disposed`));
+		this.coordinator.dispose();
+		this.resetChildState();
 	}
 
 	private async execNow(
@@ -198,21 +181,21 @@ export class PersistentShellSession {
 		const resolvedEnv = env ?? getShellEnv();
 		// The environment is spawn-time shell config: an env that differs from the running
 		// session's (e.g. a spawn hook rewriting it per command) requires a fresh shell.
-		if (this.child && this.childEnv && !shallowEnvEquals(this.childEnv, resolvedEnv)) {
+		if (this.coordinator.child && this.childEnv && !shallowEnvEquals(this.childEnv, resolvedEnv)) {
 			this.killChild();
 		}
 
 		// Re-enter the host-requested cwd only when it CHANGES between calls; an unchanged
 		// request preserves the agent's own in-session `cd` (that persistence is the feature).
 		let cdTo: string | null = null;
-		if (!this.child) {
+		if (!this.coordinator.child) {
 			this.spawnChild(cwd, resolvedEnv);
 		} else if (this.lastRequestedCwd !== cwd) {
 			cdTo = cwd;
 		}
 		this.lastRequestedCwd = cwd;
 
-		const child = this.child;
+		const child = this.coordinator.child;
 		if (!child?.stdin || !child.stdout || !child.stderr) {
 			this.killChild();
 			throw new Error(`Failed to start ${this.kind} session`);
@@ -223,7 +206,7 @@ export class PersistentShellSession {
 			this.kind === "powershell" ? buildPowerShellWire(command, nonce, cdTo) : buildBashWire(command, nonce, cdTo);
 		const sentinelPrefix = Buffer.from(`\n\x1e${nonce}:`, "latin1");
 
-		this.setLoopRef(true);
+		this.coordinator.setLoopRef(true);
 		try {
 			return await new Promise<{ exitCode: number | null }>((resolve, reject) => {
 				let settled = false;
@@ -324,7 +307,7 @@ export class PersistentShellSession {
 				});
 			});
 		} finally {
-			this.setLoopRef(false);
+			this.coordinator.setLoopRef(false);
 		}
 	}
 
@@ -332,13 +315,7 @@ export class PersistentShellSession {
 		const { shell } = getShellConfig(undefined, this.kind);
 		const args =
 			this.kind === "powershell"
-				? [
-						"-NoLogo",
-						"-NoProfile",
-						"-NonInteractive",
-						"-EncodedCommand",
-						Buffer.from(POWERSHELL_BOOTSTRAP, "utf16le").toString("base64"),
-					]
+				? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_BOOTSTRAP]
 				: basename(shell).toLowerCase().includes("bash")
 					? ["--noprofile", "--norc"]
 					: [];
@@ -349,113 +326,37 @@ export class PersistentShellSession {
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		if (child.pid) trackDetachedChildPid(child.pid);
-		// Every listener gates on the child still being the session's current one: after a
-		// timeout/abort kill replaced it, the dead shell's late data/close events are stale noise
-		// that must never reach the NEXT command's handlers.
-		child.stdout?.on("data", (data: Buffer) => {
-			if (this.child === child) this.activeExec?.onStdout(data);
-		});
-		child.stderr?.on("data", (data: Buffer) => {
-			if (this.child === child) this.activeExec?.onStderr(data);
-		});
-		child.on("error", (error) => {
-			if (this.child !== child) return;
-			this.clearChild(child);
-			this.activeExec?.fail(error instanceof Error ? error : new Error(String(error)));
-		});
-		// Settle the shell-died path on "exit" (process death), not "close" (stdio streams ended):
-		// a live detached grandchild that inherited these pipes (e.g. `sleep 30 &` before `exit 3`)
-		// keeps them open indefinitely even though the shell itself is already gone, and Node only
-		// fires "close" once every stdio stream has ended. Waiting for "close" here would hang for
-		// as long as the grandchild lives. The per-command backend
-		// (waitForChildProcessWithTermination in ../../utils/child-process.ts) faces the identical
-		// hazard and settles on "exit" for the same reason.
-		//
-		// "exit" can fire before Node has delivered already-buffered stdout/stderr "data" events for
-		// bytes the kernel handed over just before the process died (e.g. the sentinel line itself).
-		// Defer the settlement by one setImmediate turn: Node drains the poll phase (which is where
-		// pending stream "data" events run) before the check phase (where setImmediate callbacks
-		// run), so by the time this callback executes, every "data" event for bytes already received
-		// has already reached onStdout/onStderr, and thus onData, before we resolve/reject. This is
-		// not a hang-fix timer — it never waits on anything and does not run if the grandchild is
-		// gone and "close" (or a replacement child) got there first.
-		child.on("exit", (code) => {
-			if (this.child !== child) return;
-			setImmediate(() => {
-				if (this.child !== child) return;
-				this.clearChild(child);
+		this.coordinator.attach(child, {
+			onStdout: (data) => this.activeExec?.onStdout(data),
+			onStderr: (data) => this.activeExec?.onStderr(data),
+			onError: (error) => {
+				this.resetChildState();
+				this.activeExec?.fail(error);
+			},
+			onClose: (code) => {
+				this.resetChildState();
 				this.activeExec?.onChildClose(code);
-			});
+			},
 		});
-		// Kept alongside "exit" for the genuine fast-close case (no lingering grandchild): whichever
-		// event reaches its guard first wins and nulls out this.child, making the other a no-op, so
-		// settlement stays idempotent regardless of which fires first or whether both fire.
-		child.on("close", (code) => {
-			if (this.child !== child) return;
-			this.clearChild(child);
-			this.activeExec?.onChildClose(code);
-		});
-		this.child = child;
 		this.childEnv = env;
 		this.lastRequestedCwd = cwd;
 	}
 
-	private clearChild(child: ChildProcess): void {
-		if (child.pid) untrackDetachedChildPid(child.pid);
-		this.child = null;
+	private resetChildState(): void {
 		this.childEnv = null;
 		this.lastRequestedCwd = null;
 	}
 
 	private killChild(): void {
-		const child = this.child;
-		if (!child) return;
-		this.clearChild(child);
-		if (child.pid) killProcessTree(child.pid);
-	}
-
-	/**
-	 * An idle session must not keep the Node event loop alive (one-shot modes have to exit
-	 * naturally); during a command the child and its pipes are re-referenced so the loop stays
-	 * alive even without an armed timer.
-	 */
-	private setLoopRef(active: boolean): void {
-		const child = this.child;
-		if (!child) return;
-		// Stdio pipes are Sockets at runtime (ref/unref exist) but are typed as plain streams.
-		const streams = [child.stdin, child.stdout, child.stderr] as unknown as Array<{
-			ref?: () => void;
-			unref?: () => void;
-		} | null>;
-		if (active) {
-			child.ref();
-			for (const stream of streams) stream?.ref?.();
-		} else {
-			child.unref();
-			for (const stream of streams) stream?.unref?.();
-		}
+		this.coordinator.kill();
+		this.resetChildState();
 	}
 }
 
 const shellSessions = new Map<string, PersistentShellSession>();
-let exitHookInstalled = false;
-
-function installExitHook(): void {
-	if (exitHookInstalled) return;
-	exitHookInstalled = true;
-	// Detached sessions outlive the parent on clean exits unless explicitly killed; shutdown
-	// signals are already covered by the tracked-detached-children mechanism.
-	process.on("exit", () => {
-		for (const session of shellSessions.values()) {
-			session.killForProcessExit();
-		}
-	});
-}
 
 /** Get or lazily create the persistent session for a key. A kind change replaces the session. */
 export function acquirePersistentShellSession(key: string, kind: PlatformShellToolName): PersistentShellSession {
-	installExitHook();
 	const existing = shellSessions.get(key);
 	if (existing && existing.sessionKind === kind) return existing;
 	existing?.dispose();

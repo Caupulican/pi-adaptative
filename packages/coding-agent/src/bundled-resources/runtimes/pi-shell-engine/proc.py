@@ -55,11 +55,18 @@ def resolve_external(name: str, env: dict[str, str], cwd: str | None = None) -> 
     return None
 
 
-def build_argv(resolved_path: str, argv: list[str]) -> list[str]:
-    """Wrap `.bat`/`.cmd` targets via `cmd /c`; direct-exec everything else."""
+def build_argv(
+    resolved_path: str,
+    argv: list[str],
+    powershell_path: str | None = None,
+) -> list[str]:
+    """Adapt Windows script targets; direct-exec native executables and POSIX files."""
     lower = resolved_path.lower()
     if lower.endswith(".bat") or lower.endswith(".cmd"):
         return ["cmd", "/c", resolved_path, *argv[1:]]
+    if lower.endswith(".ps1") and (powershell_path or os.name == "nt"):
+        host = powershell_path or "powershell.exe"
+        return [host, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", resolved_path, *argv[1:]]
     return [resolved_path, *argv[1:]]
 
 
@@ -78,7 +85,7 @@ def spawn_external(
     resolved = resolve_external(argv[0], state.env, state.cwd)
     if resolved is None:
         raise FileNotFoundError(argv[0])
-    full_argv = build_argv(resolved, argv)
+    full_argv = build_argv(resolved, argv, state.powershell_path)
     kwargs: dict = {}
     if os.name != "nt":
         kwargs["start_new_session"] = True
