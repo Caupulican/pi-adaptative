@@ -1485,6 +1485,7 @@ export class AgentSession {
 		return [
 			this._toolProtocol.formatRepairHealth(this._toolRecoveryLogger.getStats()),
 			formatToolSelectionReport(this._toolSelection.getReport()),
+			this._toolSelection.formatTimingReport(),
 		].join("\n\n");
 	}
 

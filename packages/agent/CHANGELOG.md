@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Lowered the default fractional compaction trigger from 70% to 60% of the model context window so long, tool-heavy sessions compact before repeated large-context turns dominate latency; explicit overrides, reserve headroom, recent-context retention, anti-thrash savings, and verification gates are unchanged.
+
 ## [0.81.42] - 2026-07-27
 
 ### Changed

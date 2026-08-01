@@ -225,7 +225,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
-	triggerPercent: 0.7,
+	triggerPercent: 0.6,
 };
 
 // ============================================================================

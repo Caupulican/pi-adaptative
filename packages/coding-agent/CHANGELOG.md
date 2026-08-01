@@ -7,6 +7,11 @@
 - Added session-core proactive memory reflection and provider lifecycle delivery across print, RPC, and interactive modes, using bounded semantic turn digests that exclude raw tool-result payloads.
 - Added high-confidence natural-language goal admission so explicit chat goals use the same durable continuation state as the goal command without treating ordinary tasks as persistent goals.
 
+### Changed
+
+- Reduced avoidable turn latency by batching independent read-only calls in one model turn, coalescing checklist transitions, reading tool-performance evidence once per decision, moving transcript recall indexing into one bounded worker owned by each session, and exposing bounded passive phase timings through `/toolhealth`.
+- Lowered the default fractional compaction trigger from 70% to 60% of the model window while preserving explicit overrides, reserve headroom, recent-context retention, anti-thrash savings, and summary verification.
+
 ### Fixed
 
 - Fixed Windows Python-engine latency by keeping one serialized coordinator process per agent session instead of spawning Python for every complex command, with request-correlated output/control barriers and whole-process recovery after aborts, timeouts, crashes, or protocol faults.

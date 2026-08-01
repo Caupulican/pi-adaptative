@@ -338,7 +338,7 @@ When enabled, Auto Learn keeps a small shared state file for visibility/cooldown
 | `compaction.model` | string | `"auto"` | Summarizer model pattern. `auto` follows router cheap when available, but always consults exhausted-provider state and the subtractive `digest` fitness surface before falling back visibly to the session model. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
-| `compaction.triggerPercent` | number | `0.7` | Context-efficiency trigger as a fraction of the model window; separate from the USD cost guard |
+| `compaction.triggerPercent` | number | `0.6` | Context-efficiency and latency trigger as a fraction of the model window; separate from the USD cost guard |
 
 ```json
 {

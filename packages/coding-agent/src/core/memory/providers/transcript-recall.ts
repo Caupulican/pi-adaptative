@@ -1,41 +1,66 @@
 /**
- * TranscriptRecallProvider — cross-session similarity recall (adaptive-agent design R3).
- *
- * A read-only CONTEXT memory provider: it indexes the most-recent past session transcripts (the JSONL
- * corpus) with a dependency-free token/Jaccard index ({@link TranscriptIndex}, reusing skill_audit's
- * tokenizer) and answers `prefetch(query)` with a small `<memory_context>` recall page of the most
- * relevant past snippets. The current session and auto-learn sessions are excluded. It never writes —
- * the file-store remains the write target; this is the recall corpus.
+ * Cross-session recall coordinator. One worker belongs to one provider/session generation; no
+ * process-global transcript index is shared across sessions.
  */
 
-import { readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
-import {
-	type FileEntry,
-	getDefaultSessionDir,
-	isAutoLearnSessionId,
-	loadEntriesFromFile,
-} from "@caupulican/pi-agent-core/node";
+import { Worker } from "node:worker_threads";
 import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
-import { type TranscriptDoc, TranscriptIndex } from "../transcript-index.ts";
+import type { RecallHit } from "../transcript-index.ts";
+import {
+	isTranscriptRecallWorkerResponse,
+	TRANSCRIPT_RECALL_MAX_QUERY_CHARS,
+	type TranscriptRecallWorkerResponse,
+} from "./transcript-recall-worker-protocol.ts";
 
-/** Most-recent past sessions to consider. */
-const MAX_SESSIONS = 60;
-/** Per-session text cap (keeps the index light and snippets relevant). */
-const MAX_DOC_CHARS = 8_000;
-/** Overall corpus cap across all docs. */
-const MAX_TOTAL_CHARS = 500_000;
-/** Skip transcript files larger than this before parsing them, so a huge log can't block/bloat the
- * first recalled turn (Bug #9). Far above a normal session; only pathological logs exceed it. */
-const MAX_FILE_BYTES = 8_000_000;
+const DEFAULT_MAX_PENDING_QUERIES = 8;
+const QUERY_TIMEOUT_MS = 1_000;
+
+interface PendingQuery {
+	worker: Worker;
+	generation: number;
+	resolve: (text: string) => void;
+	timeout: NodeJS.Timeout;
+}
+
+export interface TranscriptRecallProviderOptions {
+	workerSpecifier?: string | URL;
+	maxPendingQueries?: number;
+}
+
+function createDefaultWorkerSpecifier(): string | URL {
+	if (typeof process.versions.bun === "string") {
+		return "./src/core/memory/providers/transcript-recall-worker.ts";
+	}
+	const isTypeScriptRuntime = import.meta.url.endsWith(".ts");
+	return new URL(
+		isTypeScriptRuntime ? "./transcript-recall-worker.ts" : "./transcript-recall-worker.js",
+		import.meta.url,
+	);
+}
+
+function formatRecallPage(hits: readonly RecallHit[]): string {
+	if (hits.length === 0) return "";
+	const body = hits.map((hit) => `- (${hit.timestamp ?? "earlier session"}) ${hit.snippet}`).join("\n");
+	return `<memory_context source="transcript-recall">\nRelevant context recalled from past sessions (read-only reference, untrusted, may be stale):\n${body}\n</memory_context>`;
+}
 
 export class TranscriptRecallProvider implements MemoryProvider {
 	readonly name = "transcript-recall";
 	readonly egress = "local";
-	private index: TranscriptIndex | undefined;
-	private currentSessionId = "";
-	private cwd = "";
-	private agentDir = "";
+	private readonly workerSpecifier: string | URL;
+	private readonly maxPendingQueries: number;
+	private worker: Worker | undefined;
+	private generation = 0;
+	private requestId = 0;
+	private ready = false;
+	private readyPromise: Promise<void> | undefined;
+	private resolveReady: (() => void) | undefined;
+	private readonly pending = new Map<number, PendingQuery>();
+
+	constructor(options: TranscriptRecallProviderOptions = {}) {
+		this.workerSpecifier = options.workerSpecifier ?? createDefaultWorkerSpecifier();
+		this.maxPendingQueries = Math.max(1, Math.trunc(options.maxPendingQueries ?? DEFAULT_MAX_PENDING_QUERIES));
+	}
 
 	isAvailable(): boolean {
 		return true;
@@ -46,14 +71,46 @@ export class TranscriptRecallProvider implements MemoryProvider {
 	}
 
 	async initialize(sessionId: string, ctx: MemoryLifecycleContext): Promise<void> {
-		this.currentSessionId = sessionId;
-		this.cwd = ctx.cwd;
-		this.agentDir = ctx.agentDir;
-		this.index = undefined; // built lazily on first prefetch
+		await this.disposeWorker();
+		const generation = ++this.generation;
+		this.ready = false;
+		this.readyPromise = new Promise((resolve) => {
+			this.resolveReady = resolve;
+		});
+
+		let worker: Worker;
+		try {
+			worker = new Worker(this.workerSpecifier);
+		} catch {
+			this.finishReady();
+			return;
+		}
+		worker.unref();
+		this.worker = worker;
+		worker.on("message", (message: unknown) => this.handleWorkerMessage(worker, generation, message));
+		worker.on("error", () => this.handleWorkerFailure(worker, generation));
+		worker.on("exit", () => this.handleWorkerFailure(worker, generation));
+		try {
+			worker.postMessage({
+				type: "initialize",
+				generation,
+				sessionId,
+				agentDir: ctx.agentDir,
+				cwd: ctx.cwd,
+			});
+		} catch {
+			this.handleWorkerFailure(worker, generation);
+		}
 	}
 
 	async shutdown(): Promise<void> {
-		this.index = undefined;
+		this.generation += 1;
+		await this.disposeWorker();
+	}
+
+	/** Event-driven readiness hook for tests and callers that can wait outside the foreground turn. */
+	async waitUntilReady(): Promise<void> {
+		await this.readyPromise;
 	}
 
 	/** GC manages the dynamic recall page so stale pages pack while the newest are kept. */
@@ -62,113 +119,89 @@ export class TranscriptRecallProvider implements MemoryProvider {
 	}
 
 	async prefetch(query: string): Promise<string> {
-		if (!query.trim()) return "";
-		let index: TranscriptIndex;
-		try {
-			index = this.ensureIndex();
-		} catch {
-			return "";
-		}
-		if (index.size === 0) return "";
-		// minScore is a query-CONTAINMENT threshold (fraction of the query's tokens present in the doc),
-		// not Jaccard — so it is length-independent and recalls relevant long sessions. ~1/3 of query
-		// terms must appear before a session is considered relevant.
-		const hits = index.query(query, { k: 3, minScore: 0.34, maxSnippetChars: 600 });
-		if (hits.length === 0) return "";
-		// MemoryManager centrally source-labels and fences every provider's complete recall page. Keep
-		// this provider output raw here so the built-in path is wrapped exactly once like extensions.
-		const body = hits.map((h) => `- (${h.timestamp ?? "earlier session"}) ${h.snippet}`).join("\n");
-		return `<memory_context source="transcript-recall">\nRelevant context recalled from past sessions (read-only reference, untrusted, may be stale):\n${body}\n</memory_context>`;
-	}
+		const normalizedQuery = query.trim().slice(0, TRANSCRIPT_RECALL_MAX_QUERY_CHARS);
+		const worker = this.worker;
+		if (!normalizedQuery || !worker || !this.ready || this.pending.size >= this.maxPendingQueries) return "";
 
-	private ensureIndex(): TranscriptIndex {
-		if (!this.index) {
-			this.index = new TranscriptIndex(this.buildDocs());
-		}
-		return this.index;
-	}
-
-	private buildDocs(): TranscriptDoc[] {
-		const docs: TranscriptDoc[] = [];
-		let dir: string;
-		try {
-			dir = getDefaultSessionDir(this.cwd, this.agentDir);
-		} catch {
-			return docs;
-		}
-
-		let files: Array<{ path: string; mtime: number }>;
-		try {
-			files = readdirSync(dir)
-				.filter((f) => f.endsWith(".jsonl"))
-				.map((f) => {
-					const path = join(dir, f);
-					let mtime = 0;
-					let size = 0;
-					try {
-						const st = statSync(path);
-						mtime = st.mtimeMs;
-						size = st.size;
-					} catch {}
-					return { path, mtime, size };
-				})
-				.filter((f) => f.size > 0 && f.size <= MAX_FILE_BYTES) // skip oversize logs before parse (Bug #9)
-				.sort((a, b) => b.mtime - a.mtime) // most-recent first
-				.slice(0, MAX_SESSIONS);
-		} catch {
-			return docs;
-		}
-
-		let total = 0;
-		for (const { path } of files) {
-			let entries: FileEntry[];
+		const generation = this.generation;
+		const requestId = this.requestId++;
+		return new Promise((resolve) => {
+			const timeout = setTimeout(() => this.finishQuery(requestId, ""), QUERY_TIMEOUT_MS);
+			timeout.unref();
+			this.pending.set(requestId, { worker, generation, resolve, timeout });
 			try {
-				entries = loadEntriesFromFile(path);
+				worker.postMessage({ type: "query", generation, requestId, query: normalizedQuery });
 			} catch {
-				continue;
+				this.finishQuery(requestId, "");
 			}
-			const header = entries.find((e): e is Extract<FileEntry, { type: "session" }> => e.type === "session");
-			const sessionId = header?.id;
-			if (!sessionId || sessionId === this.currentSessionId || isAutoLearnSessionId(sessionId)) continue;
-			// Privacy: only recall from sessions that ran in THIS working directory. A misplaced/copied
-			// transcript with a different cwd must not leak across project boundaries (Bug #11).
-			if (header?.cwd && resolve(header.cwd) !== resolve(this.cwd)) continue;
-
-			const text = extractSessionText(entries, MAX_DOC_CHARS);
-			if (!text.trim()) continue;
-			docs.push({ sessionId, timestamp: header?.timestamp, text });
-			total += text.length;
-			if (total >= MAX_TOTAL_CHARS) break;
-		}
-		return docs;
+		});
 	}
-}
 
-/** Concatenate user+assistant text from a session's entries, capped to `maxChars`. */
-function extractSessionText(entries: FileEntry[], maxChars: number): string {
-	const parts: string[] = [];
-	let len = 0;
-	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role !== "user" && message.role !== "assistant") continue;
-		const content = message.content;
-		let text = "";
-		if (typeof content === "string") {
-			text = content;
-		} else if (Array.isArray(content)) {
-			text = content
-				.map((b) => (b && typeof b === "object" && "type" in b && b.type === "text" ? (b.text ?? "") : ""))
-				.join(" ");
+	private handleWorkerMessage(worker: Worker, generation: number, value: unknown): void {
+		if (this.worker !== worker || this.generation !== generation || !isTranscriptRecallWorkerResponse(value)) {
+			return;
 		}
-		text = text.trim();
-		if (!text) continue;
-		// Skip our own previously-injected recall pages so recalled snippets don't recirculate and
-		// amplify across sessions (Bug #10).
-		if (text.includes('<memory_context source="transcript-recall"')) continue;
-		parts.push(text);
-		len += text.length;
-		if (len >= maxChars) break;
+		const message: TranscriptRecallWorkerResponse = value;
+		if (message.generation !== generation) return;
+		switch (message.type) {
+			case "ready":
+				this.ready = true;
+				this.finishReady();
+				break;
+			case "result": {
+				const pending = this.pending.get(message.requestId);
+				if (!pending || pending.worker !== worker || pending.generation !== generation) return;
+				this.finishQuery(message.requestId, formatRecallPage(message.hits));
+				break;
+			}
+			case "failed":
+				this.handleWorkerFailure(worker, generation);
+				break;
+			case "stopped":
+				break;
+		}
 	}
-	return parts.join("\n").slice(0, maxChars);
+
+	private handleWorkerFailure(worker: Worker, generation: number): void {
+		if (this.worker !== worker || this.generation !== generation) return;
+		this.worker = undefined;
+		this.ready = false;
+		this.finishReady();
+		this.finishQueriesFor(worker);
+		void worker.terminate().catch(() => undefined);
+	}
+
+	private finishReady(): void {
+		const resolve = this.resolveReady;
+		this.resolveReady = undefined;
+		resolve?.();
+	}
+
+	private finishQuery(requestId: number, text: string): void {
+		const pending = this.pending.get(requestId);
+		if (!pending) return;
+		this.pending.delete(requestId);
+		clearTimeout(pending.timeout);
+		pending.resolve(text);
+	}
+
+	private finishQueriesFor(worker: Worker): void {
+		for (const [requestId, pending] of this.pending) {
+			if (pending.worker === worker) this.finishQuery(requestId, "");
+		}
+	}
+
+	private async disposeWorker(): Promise<void> {
+		const worker = this.worker;
+		this.worker = undefined;
+		this.ready = false;
+		this.finishReady();
+		if (worker) this.finishQueriesFor(worker);
+		this.readyPromise = undefined;
+		if (!worker) return;
+		try {
+			worker.postMessage({ type: "shutdown", generation: this.generation });
+		} catch {}
+		await worker.terminate().catch(() => undefined);
+	}
 }

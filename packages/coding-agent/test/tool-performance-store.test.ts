@@ -66,6 +66,18 @@ describe("ToolPerformanceStore", () => {
 		expect(second.get(key).sampleCount).toBe(0);
 	});
 
+	it("keeps snapshots fresh across independent session store instances", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-shared-"));
+		dirs.push(dir);
+		const first = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
+		const second = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
+
+		expect(first.getStatsForIntent("faux/model", "read")).toEqual([]);
+		second.recordExecution({ key, success: true, latencyMs: 10, selection });
+
+		expect(first.getStatsForIntent("faux/model", "read").map((entry) => entry.sampleCount)).toEqual([1]);
+	});
+
 	it("readOnly:true never creates the state dir/file, but still returns the normally-computed stats (D4)", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-readonly-"));
 		dirs.push(dir);
@@ -208,6 +220,13 @@ describe("ToolPerformanceStore", () => {
 			const readStats = store.getStatsForIntent("faux/model", "read");
 			expect(readStats.map((entry) => entry.tool)).toEqual(["read"]);
 			expect(store.getStatsForIntent("faux/model", "search")).toEqual([]);
+			expect(
+				store
+					.getStatsForModel("faux/model")
+					.map((entry) => entry.tool)
+					.sort(),
+			).toEqual(["edit", "read"]);
+			expect(store.getStatsForModel("other/model").map((entry) => entry.tool)).toEqual(["read"]);
 		});
 
 		it("tolerates a store file written before intentAgreement existed (backward-compatible schema)", () => {

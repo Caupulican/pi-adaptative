@@ -1,3 +1,4 @@
+import { DEFAULT_COMPACTION_SETTINGS } from "@caupulican/pi-agent-core/node";
 import type { Transport } from "@caupulican/pi-ai";
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "fs";
@@ -31,7 +32,7 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
-	triggerPercent?: number; // default: 0.7 — early context-efficiency threshold, separate from the USD cost guard
+	triggerPercent?: number; // default: 0.6 — early context-efficiency threshold, separate from the USD cost guard
 	model?: string; // default: "auto" — cheap auxiliary model for the summary; "auto" picks cheapest authed, else the session model
 }
 
@@ -2450,7 +2451,7 @@ export class SettingsManager {
 	}
 
 	getCompactionEnabled(): boolean {
-		return this.settings.compaction?.enabled ?? true;
+		return this.settings.compaction?.enabled ?? DEFAULT_COMPACTION_SETTINGS.enabled;
 	}
 
 	setCompactionEnabled(enabled: boolean): void {
@@ -2463,15 +2464,17 @@ export class SettingsManager {
 	}
 
 	getCompactionReserveTokens(): number {
-		return this.settings.compaction?.reserveTokens ?? 16384;
+		return this.settings.compaction?.reserveTokens ?? DEFAULT_COMPACTION_SETTINGS.reserveTokens;
 	}
 
 	getCompactionKeepRecentTokens(): number {
-		return this.settings.compaction?.keepRecentTokens ?? 20000;
+		return this.settings.compaction?.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens;
 	}
 
 	getCompactionTriggerPercent(): number {
-		return this.settings.compaction?.triggerPercent ?? 0.7;
+		const triggerPercent = this.settings.compaction?.triggerPercent ?? DEFAULT_COMPACTION_SETTINGS.triggerPercent;
+		if (triggerPercent === undefined) throw new Error("default compaction triggerPercent is not configured");
+		return triggerPercent;
 	}
 
 	/**

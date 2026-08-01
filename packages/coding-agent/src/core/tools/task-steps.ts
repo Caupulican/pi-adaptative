@@ -264,6 +264,8 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		promptSnippet: "Track and drain multi-step work with a native session checklist.",
 		promptGuidelines: [
 			"Use task_steps for complex work, explicit task-tracking requests, and harness/self-improvement work; keep exactly one step in_progress while actively working.",
+			"Skip task_steps for simple single-action work unless the user explicitly requests tracking.",
+			"Coalesce multiple checklist transitions into one set call when the complete next state is known; do not call task_steps only to narrate unchanged progress.",
 			"Always address the first open task step before unrelated work: start it, complete/block/cancel it with evidence, ask one clarifying question, or explicitly defer or reorder it.",
 			"Mark steps completed as soon as evidence is gathered, and attach concise evidence or a blocker reason through update.",
 			"Use action=intake with a complete steps array when preserving a raw multi-item dump; retain every item and do not silently drop entries.",

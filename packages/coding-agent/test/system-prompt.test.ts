@@ -28,6 +28,18 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("default tools", () => {
+		test("batches independent read-only calls without weakening ordered mutations", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "grep", "edit"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("Issue independent read-only tool calls together in one assistant turn");
+			expect(prompt).toContain("Keep dependent calls, mutations, and stateful commands ordered");
+		});
+
 		test("includes the adaptive operating posture guardrails", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],

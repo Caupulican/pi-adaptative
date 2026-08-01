@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDefaultSessionDir } from "@caupulican/pi-agent-core/node";
@@ -16,8 +16,13 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 	let cwd: string;
 	let sessionDir: string;
 
-	const writeSession = (id: string, turns: Array<{ role: "user" | "assistant"; text: string }>) => {
-		const header = { type: "session", id, timestamp: "2026-06-01T00:00:00.000Z", cwd, version: 2 };
+	const writeSession = (
+		id: string,
+		turns: Array<{ role: "user" | "assistant"; text: string }>,
+		sessionCwd = cwd,
+		targetSessionDir = sessionDir,
+	) => {
+		const header = { type: "session", id, timestamp: "2026-06-01T00:00:00.000Z", cwd: sessionCwd, version: 2 };
 		const lines = [JSON.stringify(header)];
 		let i = 0;
 		for (const turn of turns) {
@@ -32,7 +37,7 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 			);
 			i++;
 		}
-		writeFileSync(join(sessionDir, `${id}.jsonl`), `${lines.join("\n")}\n`, "utf-8");
+		writeFileSync(join(targetSessionDir, `${id}.jsonl`), `${lines.join("\n")}\n`, "utf-8");
 	};
 
 	beforeEach(() => {
@@ -49,11 +54,21 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	const newProvider = async (currentSessionId: string) => {
+	const newProvider = async (currentSessionId: string, waitForReady = true) => {
 		const provider = new TranscriptRecallProvider();
 		await provider.initialize(currentSessionId, { agentDir, cwd, isChildSession: false });
+		if (waitForReady) await provider.waitUntilReady();
 		return provider;
 	};
+
+	it("embeds the recall worker in local and release Bun binaries", () => {
+		const packageJson = readFileSync(join(process.cwd(), "package.json"), "utf8");
+		const releaseScript = readFileSync(join(process.cwd(), "../../scripts/build-binaries.sh"), "utf8");
+		const workerPath = "./src/core/memory/providers/transcript-recall-worker.ts";
+
+		expect(packageJson).toContain(workerPath);
+		expect(releaseScript).toContain(workerPath);
+	});
 
 	it("surfaces a relevant snippet from a past session", async () => {
 		writeSession("past-1", [
@@ -66,6 +81,50 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 
 		expect(page).toContain("<memory_context");
 		expect(page.toLowerCase()).toContain("kubernetes");
+		await provider.shutdown();
+	});
+
+	it("keeps a cold index off the foreground prefetch path and signals when recall is ready", async () => {
+		writeSession("past-1", [
+			{ role: "user", text: "How do I configure the kubernetes deployment pipeline for staging?" },
+		]);
+
+		const provider = await newProvider("current-session", false);
+		expect(await provider.prefetch("kubernetes deployment pipeline staging config")).toBe("");
+
+		await provider.waitUntilReady();
+		expect(await provider.prefetch("kubernetes deployment pipeline staging config")).toContain("<memory_context");
+		await provider.shutdown();
+	});
+
+	it("cancels an unfinished index generation during shutdown", async () => {
+		writeSession("past-1", [{ role: "user", text: "kubernetes deployment pipeline staging config" }]);
+
+		const provider = await newProvider("current-session", false);
+		await provider.shutdown();
+
+		expect(await provider.prefetch("kubernetes deployment pipeline staging config")).toBe("");
+	});
+
+	it("discards a stale worker generation when the provider is reinitialized", async () => {
+		writeSession("old-session", [
+			{ role: "user", text: "alphaquartz obsidianfalcon crimsonharbor old tenant context" },
+		]);
+		const nextAgentDir = join(tempDir, "next-agent");
+		const nextCwd = join(tempDir, "next-cwd");
+		mkdirSync(nextAgentDir, { recursive: true });
+		mkdirSync(nextCwd, { recursive: true });
+		const nextSessionDir = getDefaultSessionDir(nextCwd, nextAgentDir);
+		mkdirSync(nextSessionDir, { recursive: true });
+		writeSession("next-session", [{ role: "user", text: "betacobalt new tenant context" }], nextCwd, nextSessionDir);
+
+		const provider = new TranscriptRecallProvider();
+		await provider.initialize("current-old", { agentDir, cwd, isChildSession: false });
+		await provider.initialize("current-next", { agentDir: nextAgentDir, cwd: nextCwd, isChildSession: false });
+		await provider.waitUntilReady();
+
+		expect(await provider.prefetch("betacobalt new tenant context")).toContain("<memory_context");
+		expect(await provider.prefetch("alphaquartz obsidianfalcon crimsonharbor")).toBe("");
 		await provider.shutdown();
 	});
 
@@ -91,6 +150,18 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 		await provider.shutdown();
 	});
 
+	it("does not recall a copied transcript from another working directory", async () => {
+		writeSession(
+			"foreign-session",
+			[{ role: "user", text: "zephyrhydra foreign project secret" }],
+			join(tempDir, "other-cwd"),
+		);
+
+		const provider = await newProvider("current-session");
+		expect(await provider.prefetch("zephyrhydra foreign project secret")).toBe("");
+		await provider.shutdown();
+	});
+
 	it("recalls a relevant passage from a long, high-vocabulary session (containment, not Jaccard)", async () => {
 		// Regression: pure Jaccard misses here because the doc's large unique vocabulary dominates the
 		// union. Containment scoring (fraction of query terms present) must still surface the passage.
@@ -112,6 +183,19 @@ describe("TranscriptRecallProvider (cross-session recall)", () => {
 
 	it("returns nothing when there is no corpus", async () => {
 		const provider = await newProvider("current-session");
+		expect(await provider.prefetch("anything at all here")).toBe("");
+		await provider.shutdown();
+	});
+
+	it("fails closed without a synchronous fallback when its worker crashes", async () => {
+		const workerSpecifier = new URL(
+			`data:text/javascript,${encodeURIComponent('throw new Error("transcript worker failure")')}`,
+		);
+		const provider = new TranscriptRecallProvider({ workerSpecifier });
+
+		await provider.initialize("current-session", { agentDir, cwd, isChildSession: false });
+		await provider.waitUntilReady();
+
 		expect(await provider.prefetch("anything at all here")).toBe("");
 		await provider.shutdown();
 	});

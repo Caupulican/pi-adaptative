@@ -166,6 +166,10 @@ describe("task_steps tool", () => {
 		expect(harnessGuidelines(createHarness().tool)).toContain("first open task step");
 		expect(harnessGuidelines(createHarness().tool)).toContain("Drain task_steps");
 		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
+		expect(harnessGuidelines(createHarness().tool)).toContain("Skip task_steps for simple single-action work");
+		expect(harnessGuidelines(createHarness().tool)).toContain(
+			"Coalesce multiple checklist transitions into one set call",
+		);
 	});
 });
 

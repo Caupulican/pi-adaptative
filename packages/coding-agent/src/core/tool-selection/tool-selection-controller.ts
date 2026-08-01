@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import {
 	decideExpectedUtility,
 	type ExpectedUtilityCandidate,
@@ -7,10 +8,12 @@ import { evaluateToolPromotion, type ToolSelectionHint } from "./promotion.ts";
 import type {
 	ToolExecutionObservation,
 	ToolPerformanceKey,
+	ToolPerformanceStats,
 	ToolPerformanceStore,
 	ToolSelectionIntentClass,
 	ToolSelectionObservation,
 } from "./tool-performance-store.ts";
+import { ToolPhaseTimings } from "./tool-phase-timing.ts";
 
 export interface ToolSelectionTool {
 	name: string;
@@ -150,23 +153,20 @@ function modelToolKey(modelRef: string, intentClass: ToolSelectionIntentClass, t
 }
 
 function candidateFor(
-	store: ToolPerformanceStore,
-	modelRef: string,
 	intentClass: ToolSelectionIntentClass,
 	tool: ToolSelectionTool,
 	actualTool: string,
+	stats?: ToolPerformanceStats,
 ): ExpectedUtilityCandidate {
-	const key = modelToolKey(modelRef, intentClass, tool.name);
-	const stats = store.get(key);
 	return {
 		tool: tool.name,
 		value: intentValue(intentClass, classifyToolIntent(tool)),
-		alpha: stats.alpha,
-		beta: stats.beta,
-		sampleCount: stats.sampleCount,
-		latencyMs: stats.latencyEwmaMs,
+		alpha: stats?.alpha ?? 1,
+		beta: stats?.beta ?? 1,
+		sampleCount: stats?.sampleCount ?? 0,
+		latencyMs: stats?.latencyEwmaMs,
 		tokenEstimate:
-			stats.inputTokenEstimateEwma === undefined && stats.outputTokenEstimateEwma === undefined
+			stats?.inputTokenEstimateEwma === undefined && stats?.outputTokenEstimateEwma === undefined
 				? undefined
 				: (stats.inputTokenEstimateEwma ?? 0) + (stats.outputTokenEstimateEwma ?? 0),
 		riskCost: tool.riskCost,
@@ -179,6 +179,7 @@ function candidateFor(
 export class ToolSelectionController {
 	private readonly deps: ToolSelectionControllerDeps;
 	private readonly pending = new Map<string, ToolSelectionPendingObservation>();
+	private readonly timings = new ToolPhaseTimings();
 	private firstToolInTurn = true;
 	/** Kill switch: observe/stats recording, default ON. `PI_TOOL_SELECTION_OBSERVE=0` disables it. */
 	private readonly observeEnabled: boolean;
@@ -193,6 +194,7 @@ export class ToolSelectionController {
 	}
 
 	begin(toolCallId: string, toolName: string, args: unknown): ToolSelectionPendingObservation {
+		const selectionStartedAt = performance.now();
 		const modelRef = this.deps.getModelRef();
 		const activeTools = this.deps
 			.getActiveTools()
@@ -207,17 +209,18 @@ export class ToolSelectionController {
 			pathValidated: true,
 		};
 		const intentClass = classifyToolIntent(actualTool);
+		const intentStats = this.deps.store.getStatsForIntent(modelRef, intentClass);
+		const statsByTool = new Map(intentStats.map((stats) => [stats.tool, stats]));
 		const candidates = activeTools.map((tool) =>
 			candidateFor(
-				this.deps.store,
-				modelRef,
 				intentClass,
 				tool.name === toolName ? tool : { ...tool, pathValidated: false },
 				toolName,
+				statsByTool.get(tool.name),
 			),
 		);
 		if (!candidates.some((candidate) => candidate.tool === toolName)) {
-			candidates.push(candidateFor(this.deps.store, modelRef, intentClass, actualTool, toolName));
+			candidates.push(candidateFor(intentClass, actualTool, toolName, statsByTool.get(toolName)));
 		}
 		candidates.push({
 			tool: "no_tool",
@@ -237,14 +240,14 @@ export class ToolSelectionController {
 		// Evaluated BEFORE this call is recorded, so it reflects evidence up to (not including) this
 		// observation — captured now because complete() (later, async) can no longer distinguish
 		// "before" from "after" once the store has been written.
-		const hintActiveAtCallTime = this.observeEnabled
-			? this.evaluatePromotion(modelRef, intentClass).tool !== undefined
-			: false;
+		const hintActiveAtCallTime = this.observeEnabled ? evaluateToolPromotion(intentStats).tool !== undefined : false;
+		const selectionCompletedAt = performance.now();
+		this.timings.record("selection", selectionCompletedAt - selectionStartedAt);
 		const pending: ToolSelectionPendingObservation = {
 			id: toolCallId,
 			key: modelToolKey(modelRef, intentClass, toolName),
 			firstTool: this.firstToolInTurn,
-			startedAt: Date.now(),
+			startedAt: selectionCompletedAt,
 			inputTokenEstimate: estimateTokens(args),
 			selection,
 			hintActiveAtCallTime,
@@ -258,32 +261,37 @@ export class ToolSelectionController {
 		const pending = this.pending.get(toolCallId);
 		if (!pending) return;
 		this.pending.delete(toolCallId);
+		const completedAt = performance.now();
+		const latencyMs = Math.max(0, completedAt - pending.startedAt);
+		this.timings.record("execution", latencyMs);
 		if (!this.observeEnabled) return;
 		const execution: ToolExecutionObservation = {
 			key: pending.key,
 			success: succeeded,
-			latencyMs: Math.max(0, Date.now() - pending.startedAt),
+			latencyMs,
 			inputTokenEstimate: pending.inputTokenEstimate,
 			outputTokenEstimate: estimateContentTokens(content),
 			selection: pending.selection,
 			hintActiveAtCallTime: pending.hintActiveAtCallTime,
 		};
-		this.deps.store.recordExecution(execution);
+		const writeStartedAt = performance.now();
+		try {
+			this.deps.store.recordExecution(execution);
+		} finally {
+			this.timings.record("observation_write", performance.now() - writeStartedAt);
+		}
 	}
 
 	recordValidation(toolName: string, outcome: "repaired" | "bounced"): void {
 		if (!this.observeEnabled) return;
 		const modelRef = this.deps.getModelRef();
 		const tool = this.deps.getActiveTools().find((candidate) => candidate.name === toolName) ?? { name: toolName };
-		this.deps.store.recordValidation(modelToolKey(modelRef, classifyToolIntent(tool), toolName), outcome);
-	}
-
-	/**
-	 * Evidence-gated promotion for one (model,intent) bucket — see promotion.ts. Pure read, no
-	 * mutation; used both to stamp `hintActiveAtCallTime` and to build the live hint list below.
-	 */
-	private evaluatePromotion(modelRef: string, intentClass: ToolSelectionIntentClass) {
-		return evaluateToolPromotion(this.deps.store.getStatsForIntent(modelRef, intentClass));
+		const writeStartedAt = performance.now();
+		try {
+			this.deps.store.recordValidation(modelToolKey(modelRef, classifyToolIntent(tool), toolName), outcome);
+		} finally {
+			this.timings.record("validation_write", performance.now() - writeStartedAt);
+		}
 	}
 
 	/**
@@ -296,9 +304,16 @@ export class ToolSelectionController {
 	getActiveHints(modelRef: string = this.deps.getModelRef()): ToolSelectionHint[] {
 		if ((this.deps.env ?? process.env).PI_TOOL_SELECTION_HINTS === "0") return [];
 		if (!this.observeEnabled) return [];
+		const snapshotStartedAt = performance.now();
+		const statsByIntent = new Map<ToolSelectionIntentClass, ToolPerformanceStats[]>();
+		for (const stats of this.deps.store.getStatsForModel(modelRef)) {
+			const entries = statsByIntent.get(stats.intentClass) ?? [];
+			entries.push(stats);
+			statsByIntent.set(stats.intentClass, entries);
+		}
 		const hints: ToolSelectionHint[] = [];
 		for (const intentClass of INTENT_CLASSES) {
-			const promotion = this.evaluatePromotion(modelRef, intentClass);
+			const promotion = evaluateToolPromotion(statsByIntent.get(intentClass) ?? []);
 			if (!promotion.tool) continue;
 			hints.push({
 				modelRef,
@@ -309,7 +324,12 @@ export class ToolSelectionController {
 				entropy: promotion.entropy,
 			});
 		}
+		this.timings.record("hint_snapshot", performance.now() - snapshotStartedAt);
 		return hints;
+	}
+
+	formatTimingReport(): string {
+		return this.timings.formatReport();
 	}
 
 	/**

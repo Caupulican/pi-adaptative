@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
@@ -40,6 +40,25 @@ function makeController(
 }
 
 describe("ToolSelectionController", () => {
+	it("loads one intent snapshot instead of rereading durable state per candidate", () => {
+		const store = makeStore();
+		const get = vi.spyOn(store, "get");
+		const getStatsForIntent = vi.spyOn(store, "getStatsForIntent");
+		const controller = makeController(
+			Array.from({ length: 12 }, (_, index) => ({
+				name: index === 0 ? "read" : `read_${index}`,
+				description: "read a file",
+				pathValidated: true,
+			})),
+			{ store },
+		);
+
+		controller.begin("call-1", "read", {});
+
+		expect(get).not.toHaveBeenCalled();
+		expect(getStatsForIntent).toHaveBeenCalledTimes(1);
+	});
+
 	it("builds an intent-scoped observation and records successful/failing outcomes", () => {
 		const controller = makeController();
 		const pending = controller.begin("call-1", "read", { path: "/tmp/example.txt" });
@@ -71,6 +90,18 @@ describe("ToolSelectionController", () => {
 });
 
 describe("ToolSelectionController — observe/agreement/promotion loop", () => {
+	it("loads one model snapshot when evaluating every intent hint", () => {
+		const getStatsForModel = vi.fn(() => []);
+		const getStatsForIntent = vi.fn(() => []);
+		const controller = makeController(undefined, {
+			store: { getStatsForModel, getStatsForIntent } as unknown as ToolPerformanceStore,
+		});
+
+		expect(controller.getActiveHints()).toEqual([]);
+		expect(getStatsForModel).toHaveBeenCalledTimes(1);
+		expect(getStatsForIntent).not.toHaveBeenCalled();
+	});
+
 	it("records durable per-intent agreement and, once evidence clears the gate, a hint whose own efficacy is tracked separately", () => {
 		const tools: ToolSelectionTool[] = [{ name: "read_file", description: "read a file", pathValidated: true }];
 		const controller = makeController(tools);

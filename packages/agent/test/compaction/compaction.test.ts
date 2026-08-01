@@ -278,6 +278,14 @@ describe("shouldCompact", () => {
 		expect(shouldCompact(190000, 200000, settings)).toBe(true); // hard trigger (near-full)
 	});
 
+	it("compacts the incident-sized 272k session at the default latency guard", () => {
+		expect(DEFAULT_COMPACTION_SETTINGS.triggerPercent).toBe(0.6);
+		expect(shouldCompact(163200, 272000, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+		expect(shouldCompact(167830, 272000, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
+		// Explicit user overrides retain the prior 70% behavior.
+		expect(shouldCompact(167830, 272000, { ...DEFAULT_COMPACTION_SETTINGS, triggerPercent: 0.7 })).toBe(false);
+	});
+
 	it("suppresses the early trigger when projected savings are tiny (anti-thrashing #30)", () => {
 		// window 100k, hard trigger = 90000, fractional = 0.5*100k = 50000.
 		const base = { enabled: true, reserveTokens: 10000, triggerPercent: 0.5 };

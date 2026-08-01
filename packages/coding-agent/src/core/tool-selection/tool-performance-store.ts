@@ -313,6 +313,15 @@ export class ToolPerformanceStore {
 		return stats ? { ...stats } : emptyStats(key, new Date(0).toISOString());
 	}
 
+	/** One fresh durable snapshot of every per-tool track record for a model. */
+	getStatsForModel(modelRef: string): ToolPerformanceStats[] {
+		const host = this.storage.getHost();
+		if (!host) return [];
+		return Object.values(host.stats)
+			.filter((stats) => stats.modelRef === modelRef)
+			.map((stats) => ({ ...stats }));
+	}
+
 	/** Every per-tool track record recorded for a (model,intent) bucket — the promotion.ts input. */
 	getStatsForIntent(modelRef: string, intentClass: ToolSelectionIntentClass): ToolPerformanceStats[] {
 		const host = this.storage.getHost();

@@ -127,6 +127,11 @@ if [[ -n "$PLATFORM" ]]; then
 else
     PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
 fi
+BINARY_ENTRYPOINTS=(
+    ./dist/bun/cli.js
+    ./src/utils/image-resize-worker.ts
+    ./src/core/memory/providers/transcript-recall-worker.ts
+)
 
 for platform in "${PLATFORMS[@]}"; do
     echo "Building for $platform..."
@@ -134,9 +139,9 @@ for platform in "${PLATFORMS[@]}"; do
     # explicit build entrypoints. The runtime can still use new URL(...), but the
     # worker must be present in the compiled executable.
     if [[ "$platform" == windows-* ]]; then
-        bun build --compile --target=bun-$platform ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$OUTPUT_DIR/$platform/pi.exe"
+        bun build --compile --target=bun-$platform "${BINARY_ENTRYPOINTS[@]}" --outfile "$OUTPUT_DIR/$platform/pi.exe"
     else
-        bun build --compile --target=bun-$platform ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile "$OUTPUT_DIR/$platform/pi"
+        bun build --compile --target=bun-$platform "${BINARY_ENTRYPOINTS[@]}" --outfile "$OUTPUT_DIR/$platform/pi"
     fi
 done
 

@@ -165,6 +165,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
 	const hasRead = activeTools.includes("read");
+	const hasReadOnlyTools = hasRead || hasGrep || hasFind || hasLs;
 
 	// File exploration guidelines
 	if (hasPowerShell && !hasGrep && !hasFind && !hasLs) {
@@ -180,6 +181,11 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	if (hasPython) {
 		addGuideline(
 			"Prefer the python tool for bounded Python snippets and scripts when Python is clearer than shell pipelines; use read/edit/write for small exact source edits",
+		);
+	}
+	if (hasReadOnlyTools) {
+		addGuideline(
+			"Issue independent read-only tool calls together in one assistant turn to avoid unnecessary model round trips. Keep dependent calls, mutations, and stateful commands ordered",
 		);
 	}
 

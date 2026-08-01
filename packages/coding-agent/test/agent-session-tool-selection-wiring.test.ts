@@ -64,12 +64,16 @@ describe("AgentSession — tool-selection wiring", () => {
 			// Before any observation, the tool-selection section still renders (its own "no observations" line).
 			const before = harness.session.formatToolRepairHealthReport();
 			expect(before).toContain("Tool-selection loop: no observations recorded yet");
+			expect(before).toContain("hint snapshot: n=");
 
 			promoteReadHint(toolSelection);
 
 			const after = harness.session.formatToolRepairHealthReport();
 			expect(after).toContain("Tool-selection loop (observe -> agreement -> evidence-gated hint)");
 			expect(after).toContain("hint active: prefer `read`");
+			expect(after).toContain("selection: n=3");
+			expect(after).toContain("execution and result hooks: n=3");
+			expect(after).toContain("observation evidence write: n=3");
 		} finally {
 			harness.cleanup();
 		}
