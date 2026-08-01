@@ -173,66 +173,6 @@ function createAutoLearnHarness(
 	return harness;
 }
 
-interface NativeReflectionHarness extends Pick<AutoLearnController, "maybeRunNativeReflection"> {
-	deps: unknown;
-	isNativeReflectionEnabled: () => boolean;
-	getEffectiveAutoLearnSettings: () => { complexTaskToolCalls: number };
-	countAgentToolCalls: () => number;
-	hasCorrectionSignal: () => boolean;
-	getAgentMessagePlainText: (message: { content?: unknown }) => string;
-	_resolveReflectionModel: () => { model: undefined; thinkingLevel: undefined };
-	_pendingReflectionText: string[];
-	_nativeReflectionInFlight: boolean;
-	_lastNativeReflectionAt: number;
-}
-
-describe("Native reflection cost reports", () => {
-	it("uses a stable turn digest instead of an absent AgentMessage id", async () => {
-		const reportIds: Array<string | undefined> = [];
-		const mode = Object.create(AutoLearnController.prototype) as NativeReflectionHarness;
-		mode.deps = {
-			getSession: () => ({
-				model: { provider: "test", id: "model" },
-				getContextUsage: () => undefined,
-				// The task_steps contract nudge runs at the top of every native-reflection pass; an
-				// absent task_steps state is never a contract violation, so this keeps the nudge inert.
-				getTaskStepsStateSnapshot: () => undefined,
-				sendCustomMessage: () => Promise.resolve(),
-				runReflectionPass: ({ reportId }: { reportId?: string }) => {
-					reportIds.push(reportId);
-					return Promise.resolve();
-				},
-			}),
-		};
-		mode.isNativeReflectionEnabled = () => true;
-		mode.getEffectiveAutoLearnSettings = () => ({ complexTaskToolCalls: 1 });
-		mode.countAgentToolCalls = () => 1;
-		mode.hasCorrectionSignal = () => false;
-		mode.getAgentMessagePlainText = (message: { content?: unknown }) => String(message.content ?? "");
-		mode._resolveReflectionModel = () => ({ model: undefined, thinkingLevel: undefined });
-		mode._pendingReflectionText = [];
-		mode._nativeReflectionInFlight = false;
-		mode._lastNativeReflectionAt = 0;
-
-		const messages = [
-			{ role: "user", content: "Fix this", timestamp: 1000 },
-			{ role: "assistant", content: "Done", timestamp: 1001 },
-		] as Parameters<AutoLearnController["maybeRunNativeReflection"]>[0];
-
-		mode.maybeRunNativeReflection(messages);
-		await Promise.resolve();
-		await Promise.resolve();
-		mode._lastNativeReflectionAt = 0;
-		mode.maybeRunNativeReflection(messages);
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(reportIds).toHaveLength(2);
-		expect(reportIds[0]).toMatch(/^reflection:[a-f0-9]{24}$/);
-		expect(reportIds[1]).toBe(reportIds[0]);
-	});
-});
-
 describe("Auto Learn spawn args", () => {
 	it("passes the background learner prompt by @file instead of argv text", () => {
 		const promptWithNullByte = "Latest turn digest: abc\0def";
@@ -485,9 +425,6 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		mode.pruneAutoLearnHistoryFromState = (state: unknown) => state;
 		mode.getAutoLearnTenantKey = () => "tenant";
 		mode.getAutoLearnMessageCount = () => 3;
-		mode.countAgentToolCalls = () => 0;
-		mode.getAgentMessagePlainText = (message: { content: string }) => message.content;
-		mode.buildAutonomyReviewDigest = () => "digest";
 
 		const decision = mode.evaluateAutonomyReview([
 			{
@@ -524,11 +461,17 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		mode.pruneAutoLearnHistoryFromState = (state: unknown) => state;
 		mode.getAutoLearnTenantKey = () => "tenant";
 		mode.getAutoLearnMessageCount = () => 3;
-		mode.countAgentToolCalls = () => 5;
-		mode.getAgentMessagePlainText = (message: { content: string }) => message.content;
-		mode.buildAutonomyReviewDigest = () => "digest";
 
-		const decision = mode.evaluateAutonomyReview([{ role: "user", content: "Please solve this." }]);
+		const decision = mode.evaluateAutonomyReview([
+			{ role: "user", content: "Please solve this." },
+			...Array.from({ length: 5 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "read",
+				content: [{ type: "text", text: "raw output intentionally ignored" }],
+				isError: false,
+			})),
+		]);
 
 		expect(decision.shouldRun).toBe(true);
 		expect(decision.reason).toBe("reflection complex task learning signal (5/5 tool calls)");

@@ -42,7 +42,7 @@ import type { GoalState } from "./goals/goal-state.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
-import { FileStoreProvider } from "./memory/providers/file-store.ts";
+import { FILE_STORE_MEMORY_SYSTEM_NOTE, FileStoreProvider } from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -77,6 +77,15 @@ const ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY = {
 	allowedScopes: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY.allowedScopes,
 	allowExternalEgress: true,
 } as const;
+
+const MAX_PRE_COMPRESS_MEMORY_CHARS = 4_000;
+
+function boundPreCompressMemory(text: string): string {
+	const trimmed = text.trim();
+	if (trimmed.length <= MAX_PRE_COMPRESS_MEMORY_CHARS) return trimmed;
+	const suffix = "\n...[memory handoff truncated]";
+	return `${trimmed.slice(0, MAX_PRE_COMPRESS_MEMORY_CHARS - suffix.length).trimEnd()}${suffix}`;
+}
 
 export interface MemoryControllerDeps {
 	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
@@ -120,6 +129,9 @@ export class MemoryController {
 	private _pendingMemoryProviders: MemoryProvider[] = [];
 	/** Context-memory providers registered by extensions via pi.registerContextMemoryProvider. */
 	private _pendingContextMemoryProviders: ContextMemoryProvider[] = [];
+	/** Serializes provider write hooks without delaying the foreground turn. */
+	private _lifecycleTail: Promise<void> = Promise.resolve();
+	private _shutdownPromise: Promise<void> | undefined;
 
 	private readonly deps: MemoryControllerDeps;
 
@@ -130,6 +142,36 @@ export class MemoryController {
 	/** The live memory manager. Callers reach prefetch / tool-definitions / markers / shutdown through it. */
 	getMemoryManager(): MemoryManager {
 		return this._memoryManager;
+	}
+
+	/** Queue one completed turn for provider-owned durable synchronization. Raw tool output is excluded by the caller. */
+	scheduleTurnSync(userText: string, assistantText: string): void {
+		if (!userText.trim() && !assistantText.trim()) return;
+		const manager = this._memoryManager;
+		this._lifecycleTail = this._lifecycleTail
+			.then(() => manager.syncTurn(userText, assistantText))
+			.catch((error) => {
+				console.error(
+					"Memory turn synchronization failed:",
+					error instanceof Error ? error.message : String(error),
+				);
+			});
+	}
+
+	/** Wait for prior turn writes, then collect one bounded provider handoff for the whole compaction run. */
+	async onPreCompress(): Promise<string> {
+		await this._lifecycleTail;
+		return boundPreCompressMemory(await this._memoryManager.onPreCompress());
+	}
+
+	/** Flush write-side lifecycle hooks before releasing provider resources. Idempotent per session. */
+	shutdown(): Promise<void> {
+		this._shutdownPromise ??= (async () => {
+			await this._lifecycleTail;
+			await this._memoryManager.onSessionEnd();
+			await this._memoryManager.shutdownAll();
+		})();
+		return this._shutdownPromise;
 	}
 
 	/**
@@ -435,10 +477,7 @@ export class MemoryController {
 		const budget = this._memoryBudget(settings.maxResults);
 		const staticBlock = this._memoryManager
 			.buildSystemPromptBlockFresh(budget)
-			.replace(
-				"[System Note: Below is a snapshot of your persistent memory. You can update these using the 'memory' tool.]",
-				"[Read-only snapshot for a delegated worker.]",
-			);
+			.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, "[Read-only snapshot for a delegated worker.]");
 		const recalled = await this.prefetchRecall(query);
 		const combined = [staticBlock, recalled]
 			.filter((part) => part.trim().length > 0)
@@ -461,11 +500,20 @@ export class MemoryController {
 	 */
 	async initialize(): Promise<void> {
 		try {
+			await this._lifecycleTail;
 			// Release the previous generation's providers (locks/handles) before recreating, so a
 			// reload does not orphan the old MemoryManager. No-op on first init / for file-store.
 			await this._memoryManager.shutdownAll().catch(() => {});
 			const manager = new MemoryManager();
-			manager.registerProvider(new FileStoreProvider());
+			manager.registerProvider(
+				new FileStoreProvider({
+					onDurableMemoryChanged: () => {
+						// OKF providers cache one bounded directory load. A USER.md overflow can create or
+						// update a shard during this session, so discard only that read cache generation.
+						this._memoryOkfProvider = undefined;
+					},
+				}),
+			);
 			// Bundled read-only cross-session recall (R3): indexes past-session transcripts and answers
 			// prefetch() with a <memory_context> page. Never writes.
 			manager.registerProvider(new TranscriptRecallProvider());

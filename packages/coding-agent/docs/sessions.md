@@ -64,6 +64,12 @@ When available, pi uses the `trash` CLI for deletion instead of permanently remo
 Use `/goal resume` when you want to resume the blocked goal in the current session without switching
 sessions.
 
+An explicit goal stated in normal chat does not require `/goal`. Phrases such as `Set a persistent
+goal: ...`, `The goal is to ...`, or `Keep working until this is complete: ...` create the same durable
+goal record. Pi deliberately does not infer persistence from an ordinary multi-step request, and it
+will not replace an unfinished goal implicitly. Active chat-created goals use the normal bounded,
+hidden continuation trigger and survive compaction through one compact active-goal projection.
+
 ## Naming Sessions
 
 Use `/name <name>` to set a human-readable session name:

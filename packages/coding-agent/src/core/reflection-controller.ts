@@ -10,12 +10,14 @@
  * whole AgentSession.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type Agent,
 	type AgentContext,
 	type AgentLoopConfig,
+	type AgentMessage,
 	runAgentLoop,
 	startAgentProviderRequest,
 	type ThinkingLevel,
@@ -57,8 +59,15 @@ import {
 	type ReflectionResult,
 	type ReflectionWrite,
 } from "./learning/reflection-engine.ts";
+import {
+	analyzeReflectionTurn,
+	boundReflectionSemanticText,
+	type ReflectionTurnAnalysis,
+	reflectionTriggerPriority,
+} from "./learning/reflection-turn-analysis.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { resolveCliModel } from "./model-resolver.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { runSkillAudit } from "./tools/skill-audit.ts";
@@ -117,11 +126,126 @@ export const SKILL_OVERLAP_CONSOLIDATION_REASON_CODE = "skill_overlap_consolidat
 // rather than silently skipping the check.
 export const SKILL_AUDIT_UNAVAILABLE_REASON_CODE = "skill_audit_unavailable";
 
+const REFLECTION_MIN_INTERVAL_MS = 45_000;
+const REFLECTION_PENDING_MAX_CHARS = 12_000;
+const REFLECTION_DIGEST_HISTORY_SIZE = 64;
+
 export class ReflectionController {
 	private readonly deps: ReflectionControllerDeps;
+	private readonly pendingTurns: Array<{ analysis: ReflectionTurnAnalysis; contextHeadroomPct: number }> = [];
+	private readonly scheduledDigests = new Set<string>();
+	private activeScheduledPass: Promise<void> | undefined;
+	private scheduledTimer: NodeJS.Timeout | undefined;
+	private lastScheduledPassAt = 0;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
+	}
+
+	/** Analyze once, schedule bounded background reflection when warranted, and return filtered turn text for sync hooks. */
+	scheduleFromTurn(messages: AgentMessage[], contextHeadroomPct: number): ReflectionTurnAnalysis {
+		const settings = this.deps.getSettingsManager().getAutoLearnSettings();
+		const analysis = analyzeReflectionTurn(messages, settings.complexTaskToolCalls ?? 12);
+		const enabled =
+			settings.enabled !== false &&
+			settings.reflectionReview !== false &&
+			process.env.PI_NATIVE_REFLECTION !== "0" &&
+			process.env.PI_AUTO_LEARN_CHILD !== "1" &&
+			!this.deps.isChildSession() &&
+			!this.deps.isDisposed();
+		if (!enabled || analysis.trigger === "none" || this.scheduledDigests.has(analysis.digest)) return analysis;
+
+		this.scheduledDigests.add(analysis.digest);
+		while (this.scheduledDigests.size > REFLECTION_DIGEST_HISTORY_SIZE) {
+			const oldest = this.scheduledDigests.values().next().value;
+			if (typeof oldest !== "string") break;
+			this.scheduledDigests.delete(oldest);
+		}
+		this.pendingTurns.push({ analysis, contextHeadroomPct });
+		let pendingChars = this.pendingTurns.reduce((total, turn) => total + turn.analysis.recentTurnText.length, 0);
+		while (this.pendingTurns.length > 1 && pendingChars > REFLECTION_PENDING_MAX_CHARS) {
+			pendingChars -= this.pendingTurns.shift()?.analysis.recentTurnText.length ?? 0;
+		}
+		this.schedulePendingPass();
+		return analysis;
+	}
+
+	private schedulePendingPass(): void {
+		if (this.activeScheduledPass || this.scheduledTimer || this.pendingTurns.length === 0 || this.deps.isDisposed()) {
+			return;
+		}
+		const delay = Math.max(0, REFLECTION_MIN_INTERVAL_MS - (Date.now() - this.lastScheduledPassAt));
+		if (delay > 0) {
+			this.scheduledTimer = setTimeout(() => {
+				this.scheduledTimer = undefined;
+				this.startPendingPass();
+			}, delay);
+			this.scheduledTimer.unref?.();
+			return;
+		}
+		this.startPendingPass();
+	}
+
+	private startPendingPass(): void {
+		if (this.activeScheduledPass || this.pendingTurns.length === 0 || this.deps.isDisposed()) return;
+		const turns = this.pendingTurns.splice(0);
+		const trigger = turns.reduce<DemandSignals["trigger"]>(
+			(selected, turn) =>
+				reflectionTriggerPriority(turn.analysis.trigger) > reflectionTriggerPriority(selected)
+					? turn.analysis.trigger
+					: selected,
+			"none",
+		);
+		const recentTurnText = boundReflectionSemanticText(
+			turns.map((turn) => turn.analysis.recentTurnText).join("\n---\n"),
+			REFLECTION_PENDING_MAX_CHARS,
+		);
+		const reportDigest = createHash("sha256")
+			.update(turns.map((turn) => turn.analysis.digest).join("\0"))
+			.digest("hex")
+			.slice(0, 24);
+		const settings = this.deps.getSettingsManager().getAutoLearnSettings();
+		let model: Model<Api> | undefined;
+		if (settings.model && settings.model !== "active") {
+			const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this.deps.getModelRegistry() });
+			if (resolved.model && this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) model = resolved.model;
+		}
+		const toolCallCount = turns.reduce((total, turn) => total + turn.analysis.toolCallCount, 0);
+		const contextHeadroomPct = Math.min(...turns.map((turn) => turn.contextHeadroomPct));
+		this.lastScheduledPassAt = Date.now();
+		this.activeScheduledPass = (async () => {
+			try {
+				await this.runReflectionPass({
+					signals: {
+						trigger,
+						toolCallCount,
+						hadCorrection: turns.some((turn) => turn.analysis.hadCorrection),
+						contextHeadroomPct,
+						usefulLately: 0,
+					},
+					recentTurnText,
+					reportId: `reflection:${reportDigest}`,
+					model,
+					thinkingLevel: settings.thinkingLevel ?? "low",
+					explicitUserMemoryInstruction: turns.every((turn) => turn.analysis.explicitUserMemoryInstruction),
+				});
+			} catch {
+				// Best-effort background learning must never disrupt the foreground turn.
+			} finally {
+				this.activeScheduledPass = undefined;
+				this.schedulePendingPass();
+			}
+		})();
+	}
+
+	cancelScheduled(): void {
+		if (this.scheduledTimer) clearTimeout(this.scheduledTimer);
+		this.scheduledTimer = undefined;
+		this.pendingTurns.length = 0;
+	}
+
+	async waitForActivePass(): Promise<void> {
+		while (this.activeScheduledPass) await this.activeScheduledPass;
 	}
 
 	/**
@@ -383,6 +507,8 @@ export class ReflectionController {
 		signal?: AbortSignal;
 		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */
 		reportId?: string;
+		/** True only when every turn in this pass explicitly asked Pi to remember durable information. */
+		explicitUserMemoryInstruction?: boolean;
 	}): Promise<ReflectionResult | null> {
 		if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
 		const plan = decideDemand(input.signals);
@@ -422,7 +548,7 @@ export class ReflectionController {
 		if (this.deps.isDisposed()) return result;
 
 		// Learning apply policy: every durable write is converted to a proposal, decided by the
-		// learning gate, and audited with a rollback plan. With the policy disabled (default) the
+		// learning gate, and audited with a rollback plan. When the policy is explicitly disabled,
 		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
 		const policy = this.deps.getSettingsManager().getLearningPolicySettings();
 		// The audit id sequence counts STORED snapshots only: it reseeds from the stored count on
@@ -449,32 +575,43 @@ export class ReflectionController {
 					observations = 1;
 				}
 			}
-			const decision: LearningDecision = policy.enabled
-				? evaluateLearningDecision({
-						proposal,
-						confidence: policy.reflectionSourceConfidence,
-						observations,
-						// A replace/remove supersedes an existing durable fact — the reflection engine's
-						// confront-before-write conflict signal — so it routes through approval instead of
-						// silently overwriting prior memory. Additive writes contradict nothing.
-						contradictions: contradictionsForReflectionWrite(write),
-						settings: {
-							enabled: true,
-							autoApplyEnabled: policy.autoApplyEnabled,
-							confidenceThreshold: policy.confidenceThreshold,
-							minObservations: policy.minObservations,
-							allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
-							requireRollbackPlan: policy.requireRollbackPlan,
-							autoApplySupersessions: policy.autoApplySupersessions,
-						},
-					})
-				: {
+			const explicitUserMemoryWrite =
+				input.explicitUserMemoryInstruction === true &&
+				(write.kind === "memory_add" || write.kind === "memory_replace");
+			const decision: LearningDecision = explicitUserMemoryWrite
+				? {
 						kind: "apply",
-						reasonCode: "learning_policy_disabled_legacy_apply",
-						confidence: 0,
+						reasonCode: "explicit_user_memory_instruction",
+						confidence: 100,
 						summary: proposal.summary,
 						requiresApproval: false,
-					};
+					}
+				: policy.enabled
+					? evaluateLearningDecision({
+							proposal,
+							confidence: policy.reflectionSourceConfidence,
+							observations,
+							// A replace/remove supersedes an existing durable fact — the reflection engine's
+							// confront-before-write conflict signal — so it routes through approval instead of
+							// silently overwriting prior memory. Additive writes contradict nothing.
+							contradictions: contradictionsForReflectionWrite(write),
+							settings: {
+								enabled: true,
+								autoApplyEnabled: policy.autoApplyEnabled,
+								confidenceThreshold: policy.confidenceThreshold,
+								minObservations: policy.minObservations,
+								allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
+								requireRollbackPlan: policy.requireRollbackPlan,
+								autoApplySupersessions: policy.autoApplySupersessions,
+							},
+						})
+					: {
+							kind: "apply",
+							reasonCode: "learning_policy_disabled_legacy_apply",
+							confidence: 0,
+							summary: proposal.summary,
+							requiresApproval: false,
+						};
 
 			this.deps.saveLearningDecisionSnapshot(decision);
 			// G3: learning-gate outcome. Codes/numbers only — never the proposal summary/memory text.

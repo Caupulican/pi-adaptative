@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { classifyFailure } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage } from "@caupulican/pi-ai";
@@ -17,7 +18,9 @@ import {
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goal-runtime-snapshot.ts";
-import { applyGoalEvent, type GoalState } from "./goal-state.ts";
+import { applyGoalEvent, type GoalState, isGoalUnfinishedStatus } from "./goal-state.ts";
+import { applyGoalAction } from "./goal-tool-core.ts";
+import { parseExplicitChatGoal } from "./natural-language-goal.ts";
 import {
 	appendGoalClearedSnapshot,
 	appendGoalStateSnapshot,
@@ -34,6 +37,11 @@ export interface GoalSessionControllerDeps {
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	emitWarning(message: string): void;
 }
+
+export type ChatGoalAdmission =
+	| { status: "not_explicit" }
+	| { status: "started"; state: GoalState }
+	| { status: "unfinished_goal_exists"; state: GoalState };
 
 /**
  * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
@@ -90,6 +98,32 @@ export class GoalSessionController {
 
 	getState(): GoalState | undefined {
 		return getLatestGoalStateSnapshot(this.deps.getSessionManager());
+	}
+
+	/**
+	 * Promote high-confidence natural-language persistence into the same durable state written by the
+	 * goal tool. This is intentionally narrower than task detection: ordinary work never starts a
+	 * goal, and an unfinished goal is never replaced implicitly.
+	 */
+	admitExplicitChatGoal(text: string, now = new Date().toISOString()): ChatGoalAdmission {
+		const parsed = parseExplicitChatGoal(text);
+		if (!parsed) return { status: "not_explicit" };
+		const current = this.getState();
+		if (current && isGoalUnfinishedStatus(current.status)) {
+			return { status: "unfinished_goal_exists", state: current };
+		}
+		const digest = createHash("sha256")
+			.update(`${now}\0${current?.goalId ?? "none"}\0${parsed.objective}`)
+			.digest("hex")
+			.slice(0, 20);
+		const result = applyGoalAction(
+			current,
+			{ action: "start", goalId: `chat-${digest}`, userGoal: parsed.objective },
+			now,
+		);
+		if (!result.ok) throw new Error(result.error);
+		this.saveState(result.state, current ? getGoalStateRevision(current) : undefined);
+		return { status: "started", state: result.state };
 	}
 
 	recordContinuationPass(pass: { turns: number; wallClockMs: number; usageCursor: string | null }): void {

@@ -652,6 +652,7 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
 			buildPreDigest: () => this._buildCompactionPreDigest(),
+			getMemoryPreCompressInsight: () => this._memory.onPreCompress(),
 			refreshAfterCompaction: () => this._refreshAfterCompaction(),
 			getFailureCorpus: () => this._failureCorpus,
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
@@ -1805,6 +1806,11 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "agent_end" && !this._willRetryAfterAgentEnd(event)) {
+			const contextHeadroomPct = Math.max(0, 100 - (this.getContextUsage()?.percent ?? 0));
+			const reflectionTurn = this._reflection.scheduleFromTurn(event.messages, contextHeadroomPct);
+			// The shared projection excludes raw tool-result payloads and bounds both roles before any
+			// provider sees the turn. Synchronization is serialized in the background by MemoryController.
+			this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
 			this._humanInput.schedulePendingWorkerInputs();
 		}
 	};
@@ -2026,6 +2032,7 @@ export class AgentSession {
 		safely(() => this._cancelPrefixWarm());
 		safely(() => this.agent.abort());
 		track(() => this._gatewayRegistry.stop());
+		safely(() => this._reflection.cancelScheduled());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._backgroundLanes.abortInFlightLanes());
 		safely(() => {
@@ -2035,9 +2042,12 @@ export class AgentSession {
 		safely(() => this._extensionRunner.invalidate());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
-		// Best-effort memory cleanup (release locks/handles). Write-side onSessionEnd is wired on a
-		// true session-end hook; file-store shutdown is a no-op.
-		track(() => this._memory.getMemoryManager().shutdownAll());
+		// Let an aborted in-flight reflection reach its terminal state, then flush session-owned write
+		// hooks before releasing provider locks/handles. This prevents a late write racing shutdown.
+		track(async () => {
+			await this._reflection.waitForActivePass();
+			await this._memory.shutdown();
+		});
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));
 		// Best-effort final sweep for any grep/find artifact already released (reference
@@ -2467,6 +2477,16 @@ export class AgentSession {
 			if (expandPromptTemplates) {
 				expandedText = this._expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+			}
+
+			if (!options?.internalContextType) {
+				const admission = this._goals.admitExplicitChatGoal(expandedText);
+				if (admission.status === "unfinished_goal_exists") {
+					this._emit({
+						type: "warning",
+						message: `Explicit chat goal was not started because unfinished goal '${admission.state.goalId}' is ${admission.state.status}. Complete, clear, or explicitly replace it first.`,
+					});
+				}
 			}
 
 			// If streaming — or waiting out a retry backoff, which is still an active

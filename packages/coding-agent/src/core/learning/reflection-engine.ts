@@ -8,7 +8,7 @@ export interface IsolatedCompletionResult {
 	stopReason: StopReason;
 }
 
-export type ReflectionTrigger = "complex" | "corrective" | "session-end" | "none";
+export type ReflectionTrigger = "complex" | "corrective" | "durable" | "session-end" | "none";
 
 export interface DemandSignals {
 	trigger: ReflectionTrigger;
@@ -42,6 +42,9 @@ export function decideDemand(signals: DemandSignals): DemandPlan {
 
 	if (signals.hadCorrection) {
 		return { act: "reflect", reason: "Correction detected in the turn", tokenBudget };
+	}
+	if (signals.trigger === "durable") {
+		return { act: "reflect", reason: "Durable fact or preference detected in the turn", tokenBudget };
 	}
 	if (signals.trigger === "session-end") {
 		return { act: "reflect", reason: "Session end reflection triggered", tokenBudget };

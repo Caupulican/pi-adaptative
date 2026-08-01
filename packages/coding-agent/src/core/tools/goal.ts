@@ -349,7 +349,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			"Read or update the compact durable goal record for explicitly requested long-running work. Planning belongs to task_steps, workers to delegate, and evidence to current tools/artifacts. Pause, resume, edit, clear, and budget stops are owner/system controlled.",
 		promptSnippet: "Read or update the compact durable goal record.",
 		promptGuidelines: [
-			"Call action 'start' only when the user or system explicitly requests a persistent goal. Do not infer a goal from an ordinary multi-step task. Set tokenBudget only when the user explicitly requested a token budget.",
+			"Call action 'start' only when the user or system explicitly requests a persistent goal; that request may be ordinary chat and does not require a slash command. The host may already have admitted high-confidence chat wording, so use 'get' before starting when uncertain. Do not infer a goal from an ordinary multi-step task or replace an unfinished goal implicitly. Set tokenBudget only when the user explicitly requested a token budget.",
 			"Use 'get' when the current objective or status is uncertain. Use task_steps for decomposition and delegate for workers; detailed ledger actions exist only for goals that already use the legacy ledger.",
 			"Mark 'complete' only after current authoritative evidence proves the full objective and no required work remains. Mark 'block_goal' only after the same genuine impasse persists for three goal turns.",
 		],

@@ -53,7 +53,9 @@ straggler:
 ```text
 ~/.pi/agent/
   auth.json settings.json models.json keybindings.json MEMORY.md USER.md SYSTEM.md …   user config/memory (root)
-  okf-memory/                                                                          authored memory (root)
+  okf-memory/                                                                          authored/indexed memory (root)
+    user-preferences/index.okf.md                                                       USER.md overflow index
+    user-preferences/user-preferences-<digest>.okf.md                                  bounded preference shards
   skills/ extensions/ prompts/ themes/ profiles/                                       user resources (root)
     profiles/directories/<workspace-hash>/settings.json                                directory overlays
   state/     durable machine state: model adaptation/fitness, tool-performance,        -- stateDir/stateFile
@@ -77,5 +79,11 @@ preserved under `state/legacy-layout/`, where they cannot compete with live conf
 roots move atomically when possible; literal Windows `auth.json:Zone.Identifier` sidecars move there
 too. Partial migrations scan a bounded number of top-level entries and preserve collisions under
 `state/migration-conflicts/` instead of overwriting either copy.
+
+`USER.md` is the bounded hot profile shown in the static prompt. When a memory-tool mutation would
+exceed that budget, Pi moves the complete profile into deterministic OKF shards, replaces `USER.md`
+with a small link to the generated index, and keeps future replace/remove operations working across
+those shards. The shards are written before the pointer, so retrying an interrupted migration reuses
+the same identities instead of losing or duplicating facts.
 
 `pi doctor` performs a bounded, read-only scan of the agent directory root. It stays silent for the canonical config, memory, resource, and storage entries above and warns about external or legacy root writers. The audit never relocates or deletes unknown data.

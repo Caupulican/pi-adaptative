@@ -292,7 +292,7 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8").trim()).toBe("");
 	});
 
-	it("should reject memory add operations that exceed character budget limits", async () => {
+	it("should keep the bounded MEMORY.md hot store and reject oversized project-memory writes", async () => {
 		const provider = new FileStoreProvider();
 		const ctx: MemoryLifecycleContext = {
 			agentDir,
@@ -304,11 +304,11 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		const tools = provider.getToolDefinitions();
 		const memoryTool = tools.find((t) => t.name === "memory");
 
-		// Over budget test: limit is 1375 for USER.md
-		const hugeContent = "x".repeat(1500);
+		// USER.md overflow migrates to OKF shards; MEMORY.md remains a deliberately bounded hot store.
+		const hugeContent = "x".repeat(2300);
 		const result = await memoryTool!.execute(
 			"call-huge",
-			{ action: "add", target: "user", content: hugeContent },
+			{ action: "add", target: "memory", content: hugeContent },
 			undefined,
 			undefined,
 			{} as any,
@@ -316,7 +316,7 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 
 		expect((result as any).details.success).toBe(false);
 		expect((result as any).details.error).toContain("Memory budget exceeded");
-		expect(readFileSync(join(agentDir, "USER.md"), "utf-8").trim()).toBe("");
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8").trim()).toBe("");
 	});
 
 	it("should detect out-of-band drift, back up the file, and refuse to overwrite", async () => {

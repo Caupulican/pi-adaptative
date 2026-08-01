@@ -7,6 +7,7 @@ import type { ToolDefinition } from "../../extensions/types.ts";
 import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../../resource-loader.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
+import { UserMemoryArchive } from "./user-memory-archive.ts";
 
 /**
  * Confront-before-write (anti append-rot): if `content` is a near-duplicate of an existing
@@ -52,6 +53,13 @@ const memorySchema = Type.Object({
 
 type MemoryParams = Static<typeof memorySchema>;
 
+export interface FileStoreProviderOptions {
+	onDurableMemoryChanged?: () => void;
+}
+
+export const FILE_STORE_MEMORY_SYSTEM_NOTE =
+	"[System Note: Below is a snapshot of persistent memory. Proactively record verified reusable project facts and user preferences with the 'memory' tool; never store transient noise.]";
+
 export class FileStoreProvider implements MemoryProvider {
 	public readonly name = "file-store";
 	public readonly egress = "local";
@@ -62,10 +70,16 @@ export class FileStoreProvider implements MemoryProvider {
 
 	private lastWrittenMemory = "";
 	private lastWrittenUser = "";
+	private userArchive?: UserMemoryArchive;
+	private readonly options: FileStoreProviderOptions;
 
 	// Character budgets
 	private static readonly BUDGET_MEMORY = 2200;
 	private static readonly BUDGET_USER = 1375;
+
+	constructor(options: FileStoreProviderOptions = {}) {
+		this.options = options;
+	}
 
 	public isAvailable(): boolean {
 		return true;
@@ -79,6 +93,7 @@ export class FileStoreProvider implements MemoryProvider {
 		this.ctx = ctx;
 		this.memoryFilePath = configFile(ctx.agentDir, "MEMORY.md");
 		this.userFilePath = configFile(ctx.agentDir, "USER.md");
+		this.userArchive = new UserMemoryArchive(ctx.agentDir);
 
 		// Ensure agentDir exists
 		if (!existsSync(ctx.agentDir)) {
@@ -137,7 +152,7 @@ export class FileStoreProvider implements MemoryProvider {
 			return "";
 		}
 
-		const block = `=== Persistent Memory (file-store) ===\n[System Note: Below is a snapshot of your persistent memory. You can update these using the 'memory' tool.]\n\n${blocks.join("\n\n")}`;
+		const block = `=== Persistent Memory (file-store) ===\n${FILE_STORE_MEMORY_SYSTEM_NOTE}\n\n${blocks.join("\n\n")}`;
 		if (budget?.compact && (block.split("\n").length > budget.maxLines || block.length > budget.maxChars)) {
 			return "";
 		}
@@ -162,7 +177,8 @@ export class FileStoreProvider implements MemoryProvider {
 			{
 				name: "memory",
 				label: "Persistent Memory Manager",
-				description: "Add, replace, or remove contents in persistent memory files (MEMORY.md/USER.md).",
+				description:
+					"Add, replace, or remove durable project facts and user preferences. Proactively store newly verified reusable facts; USER.md overflow is migrated into indexed OKF shards.",
 				parameters: memorySchema,
 				execute: async (_toolCallId, params: MemoryParams, _signal, _onUpdate, _execCtx) => {
 					if (this.ctx?.isChildSession) {
@@ -236,7 +252,44 @@ export class FileStoreProvider implements MemoryProvider {
 						}
 
 						let newContent = currentOnDisk;
-						if (action === "add") {
+						let archiveChanged = false;
+						if (target === "user") {
+							if (!this.userArchive) throw new Error("User memory archive is not initialized.");
+							if (action === "add") {
+								if (content === undefined) throw new Error("Parameter 'content' is required for action 'add'.");
+								const result = await this.userArchive.apply(
+									currentOnDisk,
+									{ action, content },
+									budget,
+									supersedeNearDuplicateLine,
+								);
+								newContent = result.userContent;
+								archiveChanged = result.archiveChanged;
+							} else if (action === "replace") {
+								if (content === undefined || oldContent === undefined) {
+									throw new Error("Parameters 'content' and 'oldContent' are required for action 'replace'.");
+								}
+								const result = await this.userArchive.apply(
+									currentOnDisk,
+									{ action, content, oldContent },
+									budget,
+									supersedeNearDuplicateLine,
+								);
+								newContent = result.userContent;
+								archiveChanged = result.archiveChanged;
+							} else {
+								if (oldContent === undefined)
+									throw new Error("Parameter 'oldContent' is required for action 'remove'.");
+								const result = await this.userArchive.apply(
+									currentOnDisk,
+									{ action, oldContent },
+									budget,
+									supersedeNearDuplicateLine,
+								);
+								newContent = result.userContent;
+								archiveChanged = result.archiveChanged;
+							}
+						} else if (action === "add") {
 							if (content === undefined) {
 								throw new Error("Parameter 'content' is required for action 'add'.");
 							}
@@ -269,7 +322,8 @@ export class FileStoreProvider implements MemoryProvider {
 							newContent = currentOnDisk.replace(oldContent, "");
 						}
 
-						// Budget check
+						// MEMORY.md remains a bounded hot document. USER.md overflow is handled above by
+						// the archive owner, which returns a bounded index instead of rejecting the write.
 						if (newContent.length > budget) {
 							return {
 								content: [
@@ -293,6 +347,7 @@ export class FileStoreProvider implements MemoryProvider {
 						} else {
 							this.lastWrittenUser = newContent;
 						}
+						if (archiveChanged || newContent !== currentOnDisk) this.options.onDurableMemoryChanged?.();
 
 						return {
 							content: [

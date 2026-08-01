@@ -4,6 +4,8 @@
 
 - Added a native PowerShell incident collector, shipped beside `pi.exe`, that places its ZIP beside the script by default and packages the affected human session, recovery/orchestration/TUI evidence, runtime fingerprints, and bounded Windows event records while excluding credential and configuration stores.
 - Added bounded command-aware test-output projection for persistent shell sessions: passing chatter is collapsed, failure identity and summaries remain in context, exact raw bytes are handed off through a managed file, and unknown/error paths fall back to raw output without changing exit status.
+- Added session-core proactive memory reflection and provider lifecycle delivery across print, RPC, and interactive modes, using bounded semantic turn digests that exclude raw tool-result payloads.
+- Added high-confidence natural-language goal admission so explicit chat goals use the same durable continuation state as the goal command without treating ordinary tasks as persistent goals.
 
 ### Fixed
 
@@ -11,6 +13,8 @@
 - Fixed incident collection to include the current session-owned orchestration namespace after its consolidation under `state/orchestration/sessions`.
 - Fixed native Windows incident correlation to derive its bounded Event Viewer window from the selected session and filter shared recovery/failure logs by session identity or timestamp.
 - Fixed Windows shell execution so quoted or piped ripgrep patterns retain their proven file/stdin scope, common `ls -la` works across both routing tiers, redirected `.ps1` commands use the selected PowerShell host, native combined commands skip unused PowerShell discovery, and host output no longer leaks duplicate CLIXML records.
+- Fixed oversized `USER.md` writes by migrating the full profile into deterministic bounded OKF shards with a compact index, including retry-safe multi-shard migration, archived fact updates, and pre-write rejection of redirected archive directories.
+- Fixed compaction to collect provider memory handoff once per run, reuse its bounded result across retries, and preserve the existing compact active-goal projection for automatic continuation.
 
 ## [0.81.42] - 2026-07-27
 

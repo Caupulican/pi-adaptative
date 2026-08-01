@@ -3,7 +3,7 @@
  *
  * Extracted verbatim from interactive-mode.ts (god-file decomposition). Owns the disk-backed
  * Auto Learn run-state machine (state.json + lockfile), the background-learner spawn/prune
- * lifecycle, and the in-process native reflection pass. It takes narrow deps (a live session
+ * lifecycle, and the interactive task-contract nudge. It takes narrow deps (a live session
  * accessor, a self-modification-source resolver that stays in the host, and a small UI callback
  * surface) rather than the whole InteractiveMode instance.
  */
@@ -20,7 +20,7 @@ import lockfile from "proper-lockfile";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
-import { resolveCliModel } from "../../core/model-resolver.ts";
+import { analyzeReflectionTurn } from "../../core/learning/reflection-turn-analysis.ts";
 import {
 	describeInFlightWorkUnit,
 	getInFlightWorkUnits,
@@ -365,18 +365,6 @@ export interface AutoLearnControllerDeps {
 }
 
 export class AutoLearnController {
-	// Native-reflection debounce: prevents back-to-back/overlapping background reflection passes (cost
-	// guard). `_nativeReflectionInFlight` blocks a second pass while one runs; `_lastNativeReflectionAt`
-	// enforces a minimum gap between passes. A debounce-skipped turn's text is BUFFERED in
-	// `_pendingReflectionText` (not dropped) and folded into the next pass, so no corrective feedback is
-	// lost — reflection sees only the current turn's messages, so dropping a skipped turn would lose its
-	// learning entirely (bug #29).
-	private _nativeReflectionInFlight = false;
-	private _lastNativeReflectionAt = 0;
-	private _pendingReflectionText: string[] = [];
-	private static readonly NATIVE_REFLECTION_MIN_INTERVAL_MS = 45_000;
-	private static readonly PENDING_REFLECTION_MAX_CHARS = 12_000;
-
 	// Cheap turn-boundary task_steps contract nudge. Tracks the consecutive-violation streak
 	// across turns so `checkTaskStepsContractNudge` (invoked from the existing per-turn `agent_end`
 	// pass below) can fire exactly one advisory harness note per sustained-violation streak. No model
@@ -1109,78 +1097,11 @@ export class AutoLearnController {
 		return `Auto Learn started. Log: ${logPath}`;
 	}
 
-	private sanitizeAutoLearnDigestText(text: string): string {
-		return text
-			.replace(
-				/-----BEGIN [A-Z ]*(?:PRIVATE|OPENSSH|RSA|DSA|EC) KEY-----[\s\S]*?-----END [A-Z ]*(?:PRIVATE|OPENSSH|RSA|DSA|EC) KEY-----/g,
-				"[redacted-private-key]",
-			)
-			.replace(/\b(?:sk|pk)-(?:proj-)?[A-Za-z0-9_-]{12,}/g, "[redacted-api-key]")
-			.replace(/\bsk-ant-[A-Za-z0-9_-]{12,}/g, "[redacted-api-key]")
-			.replace(/\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}/g, "[redacted-github-token]")
-			.replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted-aws-access-key]")
-			.replace(/(?:Bearer\s+)[A-Za-z0-9._-]{16,}/gi, "Bearer [redacted]")
-			.replace(/([?&](?:key|token|api_key|access_token|secret|password)=)[^&\s]+/gi, "$1[redacted]")
-			.replace(
-				/((?:access|refresh|token|apiKey|api_key|password|secret|authorization|auth)\s*[:=]\s*)[^\s,'"}]{8,}/gi,
-				"$1[redacted]",
-			);
-	}
-
-	private capAutoLearnDigestText(text: string, maxChars: number): string {
-		const compact = this.sanitizeAutoLearnDigestText(text).replace(/\s+/g, " ").trim();
-		if (compact.length <= maxChars) return compact;
-		return `${compact.slice(0, Math.max(0, maxChars - 20)).trimEnd()} …[truncated]`;
-	}
-
-	private getAgentMessagePlainText(message: AgentMessage): string {
-		const raw = message as unknown as Record<string, unknown>;
-		const content = raw.content;
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return "";
-		const parts: string[] = [];
-		for (const block of content) {
-			if (!block || typeof block !== "object") continue;
-			const item = block as Record<string, unknown>;
-			if (item.type === "text" && typeof item.text === "string") parts.push(item.text);
-			if (item.type === "toolCall" && typeof item.name === "string") parts.push(`[tool call: ${item.name}]`);
-		}
-		return parts.join("\n");
-	}
-
-	private countAgentToolCalls(messages: AgentMessage[]): number {
-		let toolCalls = 0;
-		let toolResults = 0;
-		for (const message of messages) {
-			const raw = message as unknown as Record<string, unknown>;
-			const role = String(raw.role ?? "");
-			if (role === "toolResult" || role === "bashExecution") toolResults++;
-			const content = raw.content;
-			if (!Array.isArray(content)) continue;
-			for (const block of content) {
-				if (block && typeof block === "object" && (block as Record<string, unknown>).type === "toolCall") {
-					toolCalls++;
-				}
-			}
-		}
-		return Math.max(toolCalls, toolResults);
-	}
-
-	private buildAutonomyReviewDigest(messages: AgentMessage[]): string {
-		const lines: string[] = [];
-		for (const message of messages.slice(-18)) {
-			const raw = message as unknown as Record<string, unknown>;
-			const role = String(raw.role ?? "message");
-			const label = role === "toolResult" && typeof raw.toolName === "string" ? `toolResult:${raw.toolName}` : role;
-			const text = this.capAutoLearnDigestText(this.getAgentMessagePlainText(message), 700);
-			if (text) lines.push(`${label}: ${text}`);
-		}
-		const digest = lines.join("\n---\n");
-		return this.capAutoLearnDigestText(digest || "[No textual turn digest available.]", 6000);
-	}
-
 	private evaluateAutonomyReview(messages: AgentMessage[]): AutonomyReviewDecision {
 		const settings = this.getEffectiveAutoLearnSettings();
+		const complexTaskThreshold = Math.max(1, settings.complexTaskToolCalls ?? 12);
+		const turn = analyzeReflectionTurn(messages, complexTaskThreshold);
+		const digest = turn.recentTurnText || "[No textual turn digest available.]";
 		const state = this.withAutoLearnStateLock((current) => {
 			const pruned = this.pruneAutoLearnHistoryFromState(current);
 			return { result: pruned, next: pruned };
@@ -1193,15 +1114,9 @@ export class AutoLearnController {
 		const cooldownRemainingMs = Math.max(0, lastReflection + cooldownMs - now);
 		const messageCount = this.getAutoLearnMessageCount();
 		const contextPercent = this.session.getContextUsage()?.percent ?? null;
-		const toolCalls = this.countAgentToolCalls(messages);
-		const userText = messages
-			.filter((message) => String((message as unknown as Record<string, unknown>).role ?? "") === "user")
-			.map((message) => this.getAgentMessagePlainText(message))
-			.join("\n");
-		const correctionSignal =
-			/\b(next time|for future|from now on|remember this|don't|do not|avoid|instead|you should|should have|you forgot|you missed|not what i asked|wrong again)\b/i.test(
-				userText,
-			);
+		const toolCalls = turn.toolCallCount;
+		const userText = turn.userText;
+		const correctionSignal = turn.hadCorrection;
 		const behavioralSelfImprovementSignal =
 			/\b(harness|pi|agent|autonomy|autonomous|self[- ]?improv(?:e|ement|ing)?|steer(?:ing)?|trigger(?:s)?|skill(?:s)?|code[- ]?bak(?:e|ed)|bake(?:d)? into code|not (?:automata|memory)|reference agent|hermes)\b/i.test(
 				userText,
@@ -1209,7 +1124,6 @@ export class AutoLearnController {
 			/\b(improve|automatic(?:ally)?|autonomous|trigger|fire|skill|steer|self[- ]?improv(?:e|ement|ing)?|code[- ]?bak(?:e|ed)|bake(?:d)?|too much|less)\b/i.test(
 				userText,
 			);
-		const complexTaskThreshold = Math.max(1, settings.complexTaskToolCalls ?? 12);
 		const complexTaskSignal = toolCalls >= complexTaskThreshold;
 		const bypassCooldown = correctionSignal || behavioralSelfImprovementSignal || complexTaskSignal;
 		const base = { messageCount, contextPercent, cooldownRemainingMs, runningCount, toolCalls };
@@ -1230,7 +1144,7 @@ export class AutoLearnController {
 				...base,
 				shouldRun: true,
 				reason: "reflection behavioral self-improvement signal",
-				digest: this.buildAutonomyReviewDigest(messages),
+				digest,
 				bypassCooldown: true,
 			};
 		}
@@ -1239,7 +1153,7 @@ export class AutoLearnController {
 				...base,
 				shouldRun: true,
 				reason: "reflection correction signal",
-				digest: this.buildAutonomyReviewDigest(messages),
+				digest,
 				bypassCooldown: true,
 			};
 		}
@@ -1248,7 +1162,7 @@ export class AutoLearnController {
 				...base,
 				shouldRun: true,
 				reason: `reflection complex task learning signal (${toolCalls}/${complexTaskThreshold} tool calls)`,
-				digest: this.buildAutonomyReviewDigest(messages),
+				digest,
 				bypassCooldown: true,
 			};
 		}
@@ -1258,7 +1172,7 @@ export class AutoLearnController {
 				...base,
 				shouldRun: true,
 				reason: `reflection tool trigger (${toolCalls}/${settings.reflectionMinToolCalls})`,
-				digest: this.buildAutonomyReviewDigest(messages),
+				digest,
 			};
 		}
 		return { ...base, shouldRun: false, reason: "reflection thresholds not met" };
@@ -1272,56 +1186,6 @@ export class AutoLearnController {
 		if (process.env.PI_NATIVE_REFLECTION === "0") return false;
 		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
 		return this.getEffectiveAutoLearnSettings().enabled;
-	}
-
-	/** Heuristic: does the user's turn text read like a correction/steer worth learning from? */
-	private hasCorrectionSignal(userText: string): boolean {
-		return /\b(next time|for future|from now on|remember this|don't|do not|avoid|instead|you should|should have|you forgot|you missed|not what i asked|wrong again)\b/i.test(
-			userText,
-		);
-	}
-
-	/**
-	 * End-of-loop native reflection: demand-gate the just-finished turn (zero-I/O) and, when
-	 * warranted, run the in-process {@link AgentSession.runReflectionPass} as a fire-and-forget
-	 * background microtask. No subprocess, no blocking of the UI.
-	 */
-	/**
-	 * Resolve the model + thinking level the native reflection pass should use, from auto-learn
-	 * settings (`model`, `thinkingLevel`). The configured model is honored only when its provider is
-	 * AVAILABLE (api key / logged in) — otherwise we fall back to the session model (undefined). This
-	 * lets the user pick a balanced/cheaper reflection model without risking an unusable one.
-	 */
-	private _resolveReflectionModel(settings: Required<AutoLearnSettings>) {
-		let model: Model<any> | undefined;
-		if (settings.model && settings.model !== "active") {
-			const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this.session.modelRegistry });
-			if (resolved.model && this.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
-				model = resolved.model;
-			}
-		}
-		const thinkingLevel = settings.thinkingLevel ?? "low";
-		return { model, thinkingLevel };
-	}
-
-	/** Buffer a debounce-skipped turn's text so its learning is folded into the next pass (bug #29). */
-	private _bufferPendingReflection(text: string): void {
-		const t = text.trim();
-		if (!t) return;
-		this._pendingReflectionText.push(t);
-		// Bound the buffer so a long skipped streak can't grow unbounded; drop oldest past the budget
-		// (the most recent corrections matter most).
-		let total = this._pendingReflectionText.reduce((n, s) => n + s.length + 1, 0);
-		while (this._pendingReflectionText.length > 1 && total > AutoLearnController.PENDING_REFLECTION_MAX_CHARS) {
-			total -= (this._pendingReflectionText.shift()?.length ?? 0) + 1;
-		}
-	}
-
-	private _drainPendingReflection(): string {
-		if (this._pendingReflectionText.length === 0) return "";
-		const joined = this._pendingReflectionText.join("\n");
-		this._pendingReflectionText = [];
-		return joined;
 	}
 
 	/**
@@ -1354,91 +1218,10 @@ export class AutoLearnController {
 
 	maybeRunNativeReflection(messages: AgentMessage[]): void {
 		this.checkTaskStepsContractNudge();
-		if (!this.isNativeReflectionEnabled()) return;
-
-		const settings = this.getEffectiveAutoLearnSettings();
-		const toolCallCount = this.countAgentToolCalls(messages);
-		const contextPercent = this.session.getContextUsage()?.percent ?? 0;
-		const contextHeadroomPct = Math.max(0, 100 - contextPercent);
-
-		const userText = messages
-			.filter((m) => String((m as unknown as Record<string, unknown>).role ?? "") === "user")
-			.map((m) => this.getAgentMessagePlainText(m))
-			.join("\n");
-		const hadCorrection = this.hasCorrectionSignal(userText);
-
-		// A correction is worth learning from even on a short turn; otherwise require a complex turn.
-		const trigger: "complex" | "corrective" | "none" = hadCorrection
-			? "corrective"
-			: toolCallCount >= Math.max(1, settings.complexTaskToolCalls ?? 12)
-				? "complex"
-				: "none";
-		if (trigger === "none") return;
-
-		const recentTurnText = messages
-			.map((m) =>
-				`${String((m as unknown as Record<string, unknown>).role ?? "")}: ${this.getAgentMessagePlainText(m)}`.trim(),
-			)
-			.filter(Boolean)
-			.join("\n");
-
-		// Debounce (cost guard): never run two background reflection passes at once, and never start one
-		// within the min interval of the last — a multi-turn correction session would otherwise spawn
-		// overlapping passes that re-reason the same task. A skipped turn is NOT dropped: its text is
-		// buffered and folded into the next pass, so the corrective feedback is still learned (bug #29).
-		const now = Date.now();
-		const debounced =
-			this._nativeReflectionInFlight ||
-			now - this._lastNativeReflectionAt < AutoLearnController.NATIVE_REFLECTION_MIN_INTERVAL_MS;
-		if (debounced) {
-			this._bufferPendingReflection(recentTurnText);
-			return;
-		}
-
-		// Fold any buffered (previously debounced) turns into this pass so nothing learned is lost.
-		const pending = this._drainPendingReflection();
-		const reflectionText = pending ? `${pending}\n${recentTurnText}` : recentTurnText;
-
-		// Stable per-turn id so a duplicate scheduling/retry can't double-count the reflection cost.
-		// AgentMessage does not guarantee a top-level id on the real path, so derive a digest from fields
-		// that are present on persisted user/assistant messages and stable across duplicate agent_end calls.
-		const turnDigest = crypto
-			.createHash("sha256")
-			.update(
-				messages
-					.map((message) =>
-						[
-							message.role,
-							"timestamp" in message ? String(message.timestamp ?? "") : "",
-							this.getAgentMessagePlainText(message),
-						].join("\0"),
-					)
-					.join("\n"),
-			)
-			.digest("hex")
-			.slice(0, 24);
-		const reportId = `reflection:${turnDigest}`;
-
-		// User-configurable reflection model + thinking (auto-learn settings), restricted to AVAILABLE
-		// (authed) models — falls back to the session model when unset or unavailable.
-		const { model, thinkingLevel } = this._resolveReflectionModel(settings);
-
-		this._nativeReflectionInFlight = true;
-		this._lastNativeReflectionAt = now;
-		void this.session
-			.runReflectionPass({
-				signals: { trigger, toolCallCount, hadCorrection, contextHeadroomPct, usefulLately: 0 },
-				recentTurnText: reflectionText,
-				reportId,
-				model,
-				thinkingLevel,
-			})
-			.catch(() => {
-				// best-effort background learning; never disrupt the session
-			})
-			.finally(() => {
-				this._nativeReflectionInFlight = false;
-			});
+		// Reflection scheduling is session-owned in AgentSession/ReflectionController so print, RPC,
+		// and interactive modes share one deduplicated lifecycle. This interactive hook only owns the
+		// task-contract nudge; keeping the argument preserves the host interface without a parallel path.
+		void messages;
 	}
 
 	maybeStartAutoLearn(): boolean {

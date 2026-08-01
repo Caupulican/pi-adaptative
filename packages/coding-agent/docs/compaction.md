@@ -40,9 +40,10 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 
 1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`) is reached
 2. **Extract messages**: Collect messages from the previous kept boundary (or session start) up to the cut point
-3. **Generate summary**: Call LLM to summarize with structured format, passing the previous summary as iterative context when present
-4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
-5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards
+3. **Collect memory handoff**: Drain completed-turn provider sync, then collect one bounded pre-compression memory handoff for the full retry ladder
+4. **Generate summary**: Call LLM to summarize with structured format, passing the previous summary as iterative context when present
+5. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
+6. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards
 
 ```
 Before compaction:
@@ -77,6 +78,13 @@ What the LLM sees:
 ```
 
 On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Pi also recalculates `tokensBefore` from the rebuilt session context before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced.
+
+Memory providers receive `onPreCompress` once per manual or automatic compaction run. Pi caps the
+combined handoff at 4,000 characters and reuses it for extension handling and every summarizer retry,
+so a retry ladder does not repeat provider work or grow the prompt. Durable goals do not depend on the
+summary model recalling a large ledger: the next provider context contains exactly one bounded
+`<active_goal>` projection, while the hidden continuation trigger remains transient and is never
+stored as fake user history.
 
 ### Split Turns
 

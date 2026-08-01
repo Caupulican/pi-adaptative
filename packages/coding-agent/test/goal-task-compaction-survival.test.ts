@@ -17,9 +17,15 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@caupulican/pi-agent-core";
+import { Agent, convertToLlm } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@caupulican/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	type Context,
+	EventStream,
+	getModel,
+} from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -68,10 +74,12 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let tempDir: string;
+	let capturedContexts: Context[];
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-goal-task-compaction-survival-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
+		capturedContexts = [];
 	});
 
 	afterEach(() => {
@@ -83,9 +91,11 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
+			convertToLlm,
 			initialState: { model, systemPrompt: "Test", tools: [] },
 			// Real trigger -> prepare -> summarize -> apply pipeline; only the LLM wire is faked.
-			streamFn: () => {
+			streamFn: (_model, context) => {
+				capturedContexts.push(context);
 				const stream = new MockAssistantStream();
 				const compacting = session?.isCompacting === true;
 				queueMicrotask(() => {
@@ -192,5 +202,37 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 		expect(reloaded.getLeafId()).toBe(compactionEntry.id);
 		expect(getLatestGoalStateSnapshot(reloaded)).toEqual(goalState);
 		expect(getLatestTaskStepsStateSnapshot(reloaded)).toEqual(taskState);
+	}, 30_000);
+
+	it("chat admission survives real compaction and resumes through one compact hidden projection", async () => {
+		createSession();
+		const objective = "preserve efficient compaction delivery and goal continuation.";
+		await session.prompt(`Set a persistent goal: ${objective}`, { autoContinueGoal: false });
+		await session.agent.waitForIdle();
+		await session.prompt("Generate history that can be summarized.", { autoContinueGoal: false });
+		await session.agent.waitForIdle();
+
+		await session.compact();
+		expect(session.getGoalStateSnapshot()).toMatchObject({ status: "active", userGoal: objective });
+
+		const continued = await session.continueGoalOnce({ maxStallTurns: 20 });
+		expect(continued.submitted).toBe(true);
+		const providerContext = capturedContexts.at(-1);
+		if (!providerContext) throw new Error("Expected captured continuation context");
+		const providerText = providerContext.messages
+			.map((message) =>
+				typeof message.content === "string"
+					? message.content
+					: message.content
+							.filter((part) => part.type === "text")
+							.map((part) => part.text)
+							.join("\n"),
+			)
+			.join("\n");
+		expect(providerText.match(/<active_goal\b/g)).toHaveLength(1);
+		expect(providerText).toContain(objective);
+		const activeGoalBlock = providerText.match(/<active_goal\b[\s\S]*?<\/active_goal>/)?.[0];
+		expect(activeGoalBlock?.length).toBeLessThan(1_000);
+		expect(providerText).not.toContain("Continue working toward the active goal.");
 	}, 30_000);
 });
