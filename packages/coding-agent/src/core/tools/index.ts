@@ -52,6 +52,18 @@ export {
 	type ExtensionifyToolDetails,
 	type ExtensionifyToolOptions,
 } from "./extensionify.ts";
+export {
+	type FileContentReference,
+	FileMutationIntentController,
+	type FileMutationIntentControllerOptions,
+	type FileMutationIntentOperations,
+	type FileMutationKind,
+	type FileMutationLease,
+	type FilePathIdentity,
+	type FilePathInspection,
+	localFileMutationIntentOperations,
+	type PreparedFileMutation,
+} from "./file-mutation-intent.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
@@ -128,6 +140,7 @@ export {
 	createWriteTool,
 	createWriteToolDefinition,
 	type WriteOperations,
+	type WriteToolDetails,
 	type WriteToolInput,
 	type WriteToolOptions,
 } from "./write.ts";
@@ -146,6 +159,7 @@ import {
 	createExtensionifyToolDefinition,
 	type ExtensionifyToolOptions,
 } from "./extensionify.ts";
+import { FileMutationIntentController } from "./file-mutation-intent.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
@@ -198,6 +212,23 @@ export interface ToolsOptions {
 	skillify?: SkillifyToolOptions;
 	extensionify?: ExtensionifyToolOptions;
 	artifact_retrieve?: ArtifactRetrieveToolOptions;
+}
+
+function withSharedFileMutationIntents(options?: ToolsOptions): ToolsOptions {
+	const writeController = options?.write?.intentController;
+	const editController = options?.edit?.intentController;
+	if ((options?.write?.operations || options?.edit?.operations) && !writeController && !editController) {
+		throw new Error("Custom file operations require an explicit shared file mutation intent controller.");
+	}
+	if (writeController && editController && writeController !== editController) {
+		throw new Error("Write and edit tools in one surface must share one file mutation intent controller.");
+	}
+	const intentController = writeController ?? editController ?? new FileMutationIntentController();
+	return {
+		...options,
+		write: { ...options?.write, intentController },
+		edit: { ...options?.edit, intentController },
+	};
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -267,13 +298,14 @@ export function createCodingToolDefinitions(
 	options?: ToolsOptions,
 	platform: NodeJS.Platform = process.platform,
 ): ToolDef[] {
+	const sharedOptions = withSharedFileMutationIntents(options);
 	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return [
 		createReadToolDefinition(cwd, options?.read),
 		createBashToolDefinition(cwd, bashOptions),
 		createPythonToolDefinition(cwd, options?.python),
-		createEditToolDefinition(cwd, options?.edit),
-		createWriteToolDefinition(cwd, options?.write),
+		createEditToolDefinition(cwd, sharedOptions.edit),
+		createWriteToolDefinition(cwd, sharedOptions.write),
 	];
 }
 
@@ -291,13 +323,14 @@ export function createAllToolDefinitions(
 	options?: ToolsOptions,
 	platform: NodeJS.Platform = process.platform,
 ): Partial<Record<ToolName, ToolDef>> {
+	const sharedOptions = withSharedFileMutationIntents(options);
 	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, bashOptions),
 		python: createPythonToolDefinition(cwd, options?.python),
-		edit: createEditToolDefinition(cwd, options?.edit),
-		write: createWriteToolDefinition(cwd, options?.write),
+		edit: createEditToolDefinition(cwd, sharedOptions.edit),
+		write: createWriteToolDefinition(cwd, sharedOptions.write),
 		grep: createGrepToolDefinition(cwd, options?.grep),
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
@@ -313,13 +346,14 @@ export function createCodingTools(
 	options?: ToolsOptions,
 	platform: NodeJS.Platform = process.platform,
 ): Tool[] {
+	const sharedOptions = withSharedFileMutationIntents(options);
 	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return [
 		createReadTool(cwd, options?.read),
 		createBashTool(cwd, bashOptions),
 		createPythonTool(cwd, options?.python),
-		createEditTool(cwd, options?.edit),
-		createWriteTool(cwd, options?.write),
+		createEditTool(cwd, sharedOptions.edit),
+		createWriteTool(cwd, sharedOptions.write),
 	];
 }
 
@@ -337,13 +371,14 @@ export function createAllTools(
 	options?: ToolsOptions,
 	platform: NodeJS.Platform = process.platform,
 ): Partial<Record<ToolName, Tool>> {
+	const sharedOptions = withSharedFileMutationIntents(options);
 	const bashOptions: BashToolOptions = { ...options?.bash, platform };
 	return {
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, bashOptions),
 		python: createPythonTool(cwd, options?.python),
-		edit: createEditTool(cwd, options?.edit),
-		write: createWriteTool(cwd, options?.write),
+		edit: createEditTool(cwd, sharedOptions.edit),
+		write: createWriteTool(cwd, sharedOptions.write),
 		grep: createGrepTool(cwd, options?.grep),
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),

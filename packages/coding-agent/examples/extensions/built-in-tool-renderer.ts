@@ -26,7 +26,13 @@
  */
 
 import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "@caupulican/pi-adaptative";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@caupulican/pi-adaptative";
+import {
+	createBashTool,
+	createEditTool,
+	createReadTool,
+	createWriteTool,
+	FileMutationIntentController,
+} from "@caupulican/pi-adaptative";
 import { Text } from "@caupulican/pi-tui";
 
 export default function (pi: ExtensionAPI) {
@@ -151,7 +157,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- Edit tool: show path and diff stats ---
-	const originalEdit = createEditTool(cwd);
+	const fileMutationIntents = new FileMutationIntentController();
+	const originalEdit = createEditTool(cwd, { intentController: fileMutationIntents });
 	pi.registerTool({
 		name: "edit",
 		label: "edit",
@@ -216,7 +223,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- Write tool: show path and size ---
-	const originalWrite = createWriteTool(cwd);
+	const originalWrite = createWriteTool(cwd, { intentController: fileMutationIntents });
 	pi.registerTool({
 		name: "write",
 		label: "write",
@@ -230,8 +237,8 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, _context) {
 			let text = theme.fg("toolTitle", theme.bold("write "));
 			text += theme.fg("accent", args.path);
-			const lineCount = args.content.split("\n").length;
-			text += theme.fg("dim", ` (${lineCount} lines)`);
+			const writeContent = args.action === "commit" && "content" in args ? args.content : undefined;
+			if (writeContent) text += theme.fg("dim", ` (${writeContent.length} characters)`);
 			return new Text(text, 0, 0);
 		},
 

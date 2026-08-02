@@ -102,6 +102,7 @@ import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { createDelegateStatusToolDefinition } from "./tools/delegate-status.ts";
+import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
@@ -381,6 +382,7 @@ export class RuntimeBuilder {
 	private _reloadPromise: Promise<void> | undefined;
 	private _reloadRequested = false;
 	private readonly _secretVault: SecretVault;
+	private readonly _fileMutationIntents: FileMutationIntentController;
 
 	private readonly deps: RuntimeBuilderDeps;
 
@@ -393,6 +395,7 @@ export class RuntimeBuilder {
 				disposeShellExecutionSession(sessionKey);
 			},
 		});
+		this._fileMutationIntents = new FileMutationIntentController();
 	}
 
 	/**
@@ -785,6 +788,8 @@ export class RuntimeBuilder {
 				}),
 			},
 			python: { environment: (cwd) => this._secretVault.getEnvironmentForCwd(cwd) },
+			write: { intentController: this._fileMutationIntents },
+			edit: { intentController: this._fileMutationIntents },
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },

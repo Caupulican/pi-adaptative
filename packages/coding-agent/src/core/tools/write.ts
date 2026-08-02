@@ -1,21 +1,57 @@
+import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { Container, Text } from "@caupulican/pi-tui";
-import { mkdir as fsMkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
-import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { applyEncodingPreservation, isValidUTF8, utf8ByteLength } from "./file-encoding-policy.ts";
+import { type FileContentReference, FileMutationIntentController } from "./file-mutation-intent.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-const writeSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
-	content: Type.String({ description: "Content to write to the file" }),
+const writePathSchema = Type.String({
+	description: "Path to the new file (relative or absolute)",
+	minLength: 1,
 });
+const writeCommitProperties = {
+	action: Type.Literal("commit", { description: "Create a destination accepted by a prior prepare call." }),
+	path: writePathSchema,
+	intentId: Type.String({
+		description: "Intent id returned by write action=prepare for this exact path.",
+		minLength: 1,
+	}),
+};
+const writeSchema = Type.Union([
+	Type.Object(
+		{
+			action: Type.Literal("prepare", {
+				description: "Validate and reserve the destination before generating file content.",
+			}),
+			path: writePathSchema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			...writeCommitProperties,
+			content: Type.String({ description: "New file content." }),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			...writeCommitProperties,
+			contentRef: Type.String({
+				description: "Exact session-local content handle returned by an earlier write or edit.",
+				minLength: 1,
+			}),
+		},
+		{ additionalProperties: false },
+	),
+]);
 
 export type WriteToolInput = Static<typeof writeSchema>;
 
@@ -24,31 +60,40 @@ export type WriteToolInput = Static<typeof writeSchema>;
  * Override these to delegate file writing to remote systems (for example SSH).
  */
 export interface WriteOperations {
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Read existing file contents when available for encoding preservation */
-	readFile?: (absolutePath: string) => Promise<Buffer>;
+	/** Atomically create a new file and fail if any entry already occupies the path. */
+	createFile: (absolutePath: string, content: string) => Promise<void>;
 	/** Create directory recursively */
 	mkdir: (dir: string) => Promise<void>;
 }
 
 const defaultWriteOperations: WriteOperations = {
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
-	readFile: (path) => fsReadFile(path),
+	createFile: (path, content) => fsWriteFile(path, content, { encoding: "utf-8", flag: "wx" }),
 	mkdir: (dir) => fsMkdir(dir, { recursive: true }).then(() => {}),
 };
 
 export interface WriteToolOptions {
 	/** Custom operations for file writing. Default: local filesystem */
 	operations?: WriteOperations;
+	/** Session-owned two-phase intent and exact-content-reference authority. */
+	intentController?: FileMutationIntentController;
+}
+
+export interface WriteToolDetails {
+	phase: "prepared" | "committed";
+	intentId?: string;
+	contentRef?: string;
+	byteCount?: number;
 }
 
 type WriteHighlightCache = {
+	argsRef: unknown;
 	rawPath: string | null;
-	lang: string;
-	rawContent: string;
-	normalizedLines: string[];
-	highlightedLines: string[];
+	countCompleteLines: boolean;
+	expanded: boolean;
+	renderedLines: string[];
+	totalLines?: number;
+	cappedByCharacters: boolean;
+	cappedByLines: boolean;
 };
 
 class WriteCallRenderComponent extends Text {
@@ -59,69 +104,23 @@ class WriteCallRenderComponent extends Text {
 	}
 }
 
-const WRITE_PARTIAL_FULL_HIGHLIGHT_LINES = 50;
+const WRITE_COLLAPSED_PREVIEW_LINES = 10;
+const WRITE_COLLAPSED_PREVIEW_CHARS = 8_192;
 
-function highlightSingleLine(line: string, lang: string): string {
-	const highlighted = highlightCode(line, lang);
-	return highlighted[0] ?? "";
-}
-
-function refreshWriteHighlightPrefix(cache: WriteHighlightCache): void {
-	const prefixCount = Math.min(WRITE_PARTIAL_FULL_HIGHLIGHT_LINES, cache.normalizedLines.length);
-	if (prefixCount === 0) return;
-	const prefixSource = cache.normalizedLines.slice(0, prefixCount).join("\n");
-	const prefixHighlighted = highlightCode(prefixSource, cache.lang);
-	for (let i = 0; i < prefixCount; i++) {
-		cache.highlightedLines[i] =
-			prefixHighlighted[i] ?? highlightSingleLine(cache.normalizedLines[i] ?? "", cache.lang);
+function countWriteDisplayLines(fileContent: string): number {
+	let lastContentIndex = fileContent.length - 1;
+	while (lastContentIndex >= 0) {
+		const code = fileContent.charCodeAt(lastContentIndex);
+		if (code !== 10 && code !== 13) break;
+		lastContentIndex--;
 	}
-}
+	if (lastContentIndex < 0) return 0;
 
-function rebuildWriteHighlightCacheFull(rawPath: string | null, fileContent: string): WriteHighlightCache | undefined {
-	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-	if (!lang) return undefined;
-	const displayContent = normalizeDisplayText(fileContent);
-	const normalized = replaceTabs(displayContent);
-	return {
-		rawPath,
-		lang,
-		rawContent: fileContent,
-		normalizedLines: normalized.split("\n"),
-		highlightedLines: highlightCode(normalized, lang),
-	};
-}
-
-function updateWriteHighlightCacheIncremental(
-	cache: WriteHighlightCache | undefined,
-	rawPath: string | null,
-	fileContent: string,
-): WriteHighlightCache | undefined {
-	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-	if (!lang) return undefined;
-	if (!cache) return rebuildWriteHighlightCacheFull(rawPath, fileContent);
-	if (cache.lang !== lang || cache.rawPath !== rawPath) return rebuildWriteHighlightCacheFull(rawPath, fileContent);
-	if (!fileContent.startsWith(cache.rawContent)) return rebuildWriteHighlightCacheFull(rawPath, fileContent);
-	if (fileContent.length === cache.rawContent.length) return cache;
-
-	const deltaRaw = fileContent.slice(cache.rawContent.length);
-	const deltaDisplay = normalizeDisplayText(deltaRaw);
-	const deltaNormalized = replaceTabs(deltaDisplay);
-	cache.rawContent = fileContent;
-	if (cache.normalizedLines.length === 0) {
-		cache.normalizedLines.push("");
-		cache.highlightedLines.push("");
+	let lines = 1;
+	for (let i = 0; i <= lastContentIndex; i++) {
+		if (fileContent.charCodeAt(i) === 10) lines++;
 	}
-
-	const segments = deltaNormalized.split("\n");
-	const lastIndex = cache.normalizedLines.length - 1;
-	cache.normalizedLines[lastIndex] += segments[0];
-	cache.highlightedLines[lastIndex] = highlightSingleLine(cache.normalizedLines[lastIndex], cache.lang);
-	for (let i = 1; i < segments.length; i++) {
-		cache.normalizedLines.push(segments[i]);
-		cache.highlightedLines.push(highlightSingleLine(segments[i], cache.lang));
-	}
-	refreshWriteHighlightPrefix(cache);
-	return cache;
+	return lines;
 }
 
 function trimTrailingEmptyLines(lines: string[]): string[] {
@@ -132,8 +131,92 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 	return lines.slice(0, end);
 }
 
+function buildCollapsedWriteSource(fileContent: string): {
+	source: string;
+	cappedByCharacters: boolean;
+	cappedByLines: boolean;
+} {
+	const rawPrefix = fileContent.slice(0, WRITE_COLLAPSED_PREVIEW_CHARS);
+	const normalizedPrefix = replaceTabs(normalizeDisplayText(rawPrefix));
+	let end = normalizedPrefix.length;
+	let newlineCount = 0;
+	for (let i = 0; i < normalizedPrefix.length; i++) {
+		if (normalizedPrefix.charCodeAt(i) !== 10) continue;
+		newlineCount++;
+		if (newlineCount === WRITE_COLLAPSED_PREVIEW_LINES) {
+			end = i;
+			break;
+		}
+	}
+	const cappedByLines = end < normalizedPrefix.length;
+	return {
+		source: normalizedPrefix.slice(0, end),
+		cappedByCharacters: !cappedByLines && rawPrefix.length < fileContent.length,
+		cappedByLines,
+	};
+}
+
+function buildWriteHighlightCache(
+	argsRef: unknown,
+	rawPath: string | null,
+	fileContent: string,
+	countCompleteLines: boolean,
+	expanded: boolean,
+): WriteHighlightCache {
+	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
+	if (expanded) {
+		const source = replaceTabs(normalizeDisplayText(fileContent));
+		const renderedLines = trimTrailingEmptyLines(lang ? highlightCode(source, lang) : source.split("\n"));
+		return {
+			argsRef,
+			rawPath,
+			countCompleteLines,
+			expanded,
+			renderedLines,
+			totalLines: renderedLines.length,
+			cappedByCharacters: false,
+			cappedByLines: false,
+		};
+	}
+
+	const preview = buildCollapsedWriteSource(fileContent);
+	const renderedLines = trimTrailingEmptyLines(
+		lang ? highlightCode(preview.source, lang) : preview.source.split("\n"),
+	);
+	return {
+		argsRef,
+		rawPath,
+		countCompleteLines,
+		expanded,
+		renderedLines,
+		totalLines: countCompleteLines ? countWriteDisplayLines(fileContent) : undefined,
+		cappedByCharacters: preview.cappedByCharacters,
+		cappedByLines: preview.cappedByLines,
+	};
+}
+
+function getWriteHighlightCache(
+	cache: WriteHighlightCache | undefined,
+	argsRef: unknown,
+	rawPath: string | null,
+	fileContent: string,
+	countCompleteLines: boolean,
+	expanded: boolean,
+): WriteHighlightCache {
+	if (
+		cache &&
+		cache.argsRef === argsRef &&
+		cache.rawPath === rawPath &&
+		cache.countCompleteLines === countCompleteLines &&
+		cache.expanded === expanded
+	) {
+		return cache;
+	}
+	return buildWriteHighlightCache(argsRef, rawPath, fileContent, countCompleteLines, expanded);
+}
+
 function formatWriteCall(
-	args: { path?: string; file_path?: string; content?: string } | undefined,
+	args: { action?: string; path?: string; file_path?: string; content?: string; contentRef?: string } | undefined,
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	cache: WriteHighlightCache | undefined,
@@ -141,25 +224,33 @@ function formatWriteCall(
 ): string {
 	const rawPath = str(args?.file_path ?? args?.path);
 	const fileContent = str(args?.content);
+	const hasContent = typeof args?.content === "string";
 	const pathDisplay = renderToolPath(rawPath, theme, cwd);
-	let text = `${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}`;
+	const action = args?.action === "prepare" ? "prepare" : args?.action === "commit" ? "commit" : undefined;
+	let text = `${theme.fg("toolTitle", theme.bold("write"))}${action ? ` ${theme.fg("muted", action)}` : ""} ${pathDisplay}`;
 
-	if (fileContent === null) {
+	if (args?.action === "commit" && !hasContent && typeof args.contentRef !== "string") {
 		text += `\n\n${theme.fg("error", "[invalid content arg - expected string]")}`;
-	} else if (fileContent) {
+	} else if (hasContent && fileContent) {
 		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-		const renderedLines = lang
-			? (cache?.highlightedLines ?? highlightCode(replaceTabs(normalizeDisplayText(fileContent)), lang))
-			: normalizeDisplayText(fileContent).split("\n");
-		const lines = trimTrailingEmptyLines(renderedLines);
-		const totalLines = lines.length;
-		const maxLines = options.expanded ? lines.length : 10;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
+		const displayLines = cache?.renderedLines ?? [];
 		text += `\n\n${displayLines.map((line) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines, ${totalLines} total,`)} ${keyHint("app.tools.expand", "to expand")})`;
+		if (!options.expanded && cache && (cache.cappedByCharacters || cache.cappedByLines)) {
+			const total = cache.totalLines;
+			if (cache.cappedByCharacters) {
+				const totalSuffix = total === undefined ? "" : `; ${total} total line${total === 1 ? "" : "s"}`;
+				text += `${theme.fg("muted", `\n... (preview capped at ${WRITE_COLLAPSED_PREVIEW_CHARS} characters${totalSuffix},`)} ${keyHint("app.tools.expand", "to expand")})`;
+			} else if (total === undefined) {
+				text += `${theme.fg("muted", "\n... (preview capped,")} ${keyHint("app.tools.expand", "to expand")})`;
+			} else {
+				const remaining = Math.max(0, total - displayLines.length);
+				if (remaining > 0) {
+					text += `${theme.fg("muted", `\n... (${remaining} more lines, ${total} total,`)} ${keyHint("app.tools.expand", "to expand")})`;
+				}
+			}
 		}
+	} else if (args?.contentRef) {
+		text += `\n\n${theme.fg("muted", `reuse ${args.contentRef}`)}`;
 	}
 
 	return text;
@@ -185,25 +276,28 @@ function formatWriteResult(
 export function createWriteToolDefinition(
 	cwd: string,
 	options?: WriteToolOptions,
-): ToolDefinition<typeof writeSchema, undefined> {
+): ToolDefinition<typeof writeSchema, WriteToolDetails> {
 	const ops = options?.operations ?? defaultWriteOperations;
+	if (options?.operations && !options.intentController) {
+		throw new Error("Custom write operations require a matching file mutation intent controller.");
+	}
+	const intentController = options?.intentController ?? new FileMutationIntentController();
 	return {
 		name: "write",
 		label: "write",
 		description:
-			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
-		promptSnippet: "Create or overwrite files",
-		promptGuidelines: ["Use write only for new files or complete rewrites."],
+			"Create a new file without overwriting. Always call action=prepare with only path first. If preparation succeeds, call action=commit with its intentId and exactly one of content or contentRef. Preparation rejects collisions before content is generated; commit rechecks atomically. Parent directories are created during commit.",
+		promptSnippet: "Create new files through path-only preflight; never overwrite existing paths",
+		promptGuidelines: [
+			"Before generating content, call write with action=prepare and only the destination path.",
+			"After preparation succeeds, call write action=commit with the returned intentId and exactly one of content or contentRef.",
+			"Use edit for existing files. Write is create-only and rejects every existing file, directory, or symlink.",
+			"Reuse a returned contentRef when exact bytes should be copied to another prepared destination; never resend identical content.",
+		],
 		parameters: writeSchema,
-		async execute(
-			_toolCallId,
-			{ path, content }: { path: string; content: string },
-			signal?: AbortSignal,
-			_onUpdate?,
-			_ctx?,
-		) {
+		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
+			const { path } = input;
 			const absolutePath = resolveToCwd(path, cwd);
-			const dir = dirname(absolutePath);
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the
 				// mutation queue while an in-flight filesystem operation may still finish.
@@ -214,49 +308,80 @@ export function createWriteToolDefinition(
 				};
 
 				throwIfAborted();
-				// Create parent directories if needed.
-				await ops.mkdir(dir);
+				if (input.action === "prepare") {
+					const prepared = await intentController.prepare("write", absolutePath, signal, path);
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Write path accepted. Commit ${path} with intentId ${prepared.intentId}.`,
+							},
+						],
+						details: { phase: "prepared" as const, intentId: prepared.intentId },
+					};
+				}
+
+				const content = "content" in input && typeof input.content === "string" ? input.content : undefined;
+				const contentRef =
+					"contentRef" in input && typeof input.contentRef === "string" ? input.contentRef : undefined;
+				if ((content === undefined) === (contentRef === undefined)) {
+					throw new Error("Write commit requires exactly one of content or contentRef.");
+				}
+				const lease = intentController.consume(input.intentId, "write", absolutePath);
+				await intentController.assertCurrent(lease, signal);
+				await ops.mkdir(dirname(absolutePath));
 				throwIfAborted();
 
-				// Read existing file if available to preserve UTF-8 BOM and CRLF style.
-				let existingContent: string | undefined;
-				if (ops.readFile) {
-					try {
-						const existingBuffer = await ops.readFile(absolutePath);
-						if (isValidUTF8(existingBuffer)) {
-							existingContent = existingBuffer.toString("utf-8");
-						}
-					} catch {
-						// Ignore: file does not exist, is unreadable, or remote operations do not expose reads.
+				let contentReference: FileContentReference;
+				try {
+					if (content !== undefined) {
+						await ops.createFile(absolutePath, content);
+						contentReference = intentController.rememberContent(absolutePath, content);
+					} else {
+						if (contentRef === undefined) throw new Error("Write commit requires content or contentRef.");
+						contentReference = await intentController.copyReferencedContent(contentRef, absolutePath, signal);
 					}
+				} catch (error) {
+					if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") {
+						throw new Error(`Write collision: ${path} already exists; no content was overwritten.`);
+					}
+					throw error;
 				}
-
-				let finalContent = content;
-				if (existingContent !== undefined) {
-					finalContent = applyEncodingPreservation(existingContent, content);
-				}
-
-				// Write the file contents.
-				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
-				const byteCount = utf8ByteLength(finalContent);
+				const byteCount = contentReference.byteLength;
 				return {
-					content: [{ type: "text", text: `Successfully wrote ${byteCount} bytes to ${path}` }],
-					details: undefined,
+					content: [
+						{
+							type: "text" as const,
+							text: `Successfully wrote ${byteCount} bytes to ${path}. Reuse exact bytes with contentRef ${contentReference.contentRef}.`,
+						},
+					],
+					details: {
+						phase: "committed" as const,
+						contentRef: contentReference.contentRef,
+						byteCount,
+					},
 				};
 			});
 		},
 		renderCall(args, theme, context) {
-			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;
+			const renderArgs = args as
+				| { action?: string; path?: string; file_path?: string; content?: string; contentRef?: string }
+				| undefined;
 			const rawPath = str(renderArgs?.file_path ?? renderArgs?.path);
 			const fileContent = str(renderArgs?.content);
 			const component =
 				(context.lastComponent as WriteCallRenderComponent | undefined) ?? new WriteCallRenderComponent();
 			if (fileContent !== null) {
-				component.cache = context.argsComplete
-					? rebuildWriteHighlightCacheFull(rawPath, fileContent)
-					: updateWriteHighlightCacheIncremental(component.cache, rawPath, fileContent);
+				component.cache = getWriteHighlightCache(
+					component.cache,
+					args,
+					rawPath,
+					fileContent,
+					context.argsComplete && !context.toolGroupSummary,
+					context.expanded,
+				);
 			} else {
 				component.cache = undefined;
 			}

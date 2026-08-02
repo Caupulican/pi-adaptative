@@ -4,7 +4,17 @@ import {
 	type ToolCallRepairInfo,
 } from "@caupulican/pi-agent-core";
 import { truncateHead } from "@caupulican/pi-agent-core/node";
-import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	getCapabilities,
+	Image,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+} from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
@@ -24,6 +34,72 @@ interface ToolExecutionResult {
 	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 	isError: boolean;
 	details?: unknown;
+}
+
+type MonotonicClock = () => number;
+
+function monotonicNow(): number {
+	return performance.now();
+}
+
+function formatToolDuration(durationMs: number): string {
+	if (durationMs < 1) return "<1ms";
+	if (durationMs < 1_000) return `${Math.round(durationMs)}ms`;
+	if (durationMs < 10_000) return `${(durationMs / 1_000).toFixed(2)}s`;
+	if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)}s`;
+	const totalSeconds = Math.round(durationMs / 1_000);
+	if (totalSeconds < 3_600) return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+	return `${Math.floor(totalSeconds / 3_600)}h ${Math.floor((totalSeconds % 3_600) / 60)}m`;
+}
+
+/** One allocation per tool panel; render reads the monotonic clock without scheduling per-tool timers. */
+class ToolTimingComponent implements Component {
+	private readonly clock: MonotonicClock;
+	private startedAt: number | undefined;
+	private endedAt: number | undefined;
+
+	constructor(clock: MonotonicClock) {
+		this.clock = clock;
+	}
+
+	start(): void {
+		if (this.startedAt !== undefined) return;
+		const now = this.clock();
+		if (!Number.isFinite(now)) return;
+		this.startedAt = now;
+		this.endedAt = undefined;
+	}
+
+	finish(): void {
+		if (this.startedAt === undefined || this.endedAt !== undefined) return;
+		const now = this.clock();
+		if (!Number.isFinite(now)) return;
+		this.endedAt = Math.max(this.startedAt, now);
+	}
+
+	reset(): void {
+		this.startedAt = undefined;
+		this.endedAt = undefined;
+	}
+
+	hasStarted(): boolean {
+		return this.startedAt !== undefined;
+	}
+
+	getText(): string | undefined {
+		if (this.startedAt === undefined) return undefined;
+		const current = this.endedAt ?? this.clock();
+		if (!Number.isFinite(current)) return undefined;
+		const label = this.endedAt === undefined ? "Elapsed" : "Took";
+		return `${label} ${formatToolDuration(Math.max(0, current - this.startedAt))}`;
+	}
+
+	render(width: number): string[] {
+		const text = this.getText();
+		return text ? [truncateToWidth(theme.fg("muted", text), Math.max(0, width), "...")] : [];
+	}
+
+	invalidate(): void {}
 }
 
 // Components only use built-in definitions for display (renderers, grouping), so one
@@ -77,6 +153,7 @@ export class ToolExecutionComponent extends Container {
 	private materializedResult?: ToolExecutionResult;
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
+	private readonly timing = new ToolTimingComponent(monotonicNow);
 
 	constructor(
 		toolName: string,
@@ -228,6 +305,7 @@ export class ToolExecutionComponent extends Container {
 		this.resultRendererComponent = undefined;
 		this.rendererState = {};
 		this.convertedImages.clear();
+		this.timing.reset();
 		this.updateDisplay();
 	}
 
@@ -274,6 +352,7 @@ export class ToolExecutionComponent extends Container {
 
 	markExecutionStarted(repair?: ToolCallRepairInfo): void {
 		this.repair = repair;
+		this.timing.start();
 		this.executionStarted = true;
 		this.updateDisplay();
 		this.ui.requestRender();
@@ -289,7 +368,10 @@ export class ToolExecutionComponent extends Container {
 		// Final results live in the chat scrollback for the rest of the process.
 		// Oversized details would pin large payloads per tool call, so retain the
 		// same compacted form a resumed session would see.
-		if (!isPartial) compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
+		if (!isPartial) {
+			this.timing.finish();
+			compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
+		}
 		this.result = result;
 		this.materializedResult = undefined;
 		this.isPartial = isPartial;
@@ -383,7 +465,14 @@ export class ToolExecutionComponent extends Container {
 				component = this.createCallFallback();
 			}
 		}
-		return component.render(width);
+		const lines = [...component.render(width)];
+		const timing = this.timing.getText();
+		if (!timing) return lines;
+		const prefix = theme.fg("dim", `${timing} · `);
+		const firstContentLine = lines.findIndex((line) => line.trim().length > 0);
+		if (firstContentLine === -1) return this.timing.render(width);
+		lines[firstContentLine] = truncateToWidth(`${prefix}${lines[firstContentLine]}`, Math.max(0, width), "...");
+		return lines;
 	}
 
 	override render(width: number): string[] {
@@ -459,6 +548,10 @@ export class ToolExecutionComponent extends Container {
 					}
 				}
 			}
+			if (this.timing.hasStarted()) {
+				renderContainer.addChild(this.timing);
+				hasContent = true;
+			}
 		} else {
 			this.contentText.setCustomBgFn(bgFn);
 			this.contentText.setText(this.formatToolExecution(materializedResult));
@@ -532,6 +625,8 @@ export class ToolExecutionComponent extends Container {
 				text += `\n${output}`;
 			}
 		}
+		const timing = this.timing.getText();
+		if (timing) text += `\n${theme.fg("muted", timing)}`;
 		return text;
 	}
 }

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevented large tool arguments from being serialized or retained by loop/failure signatures, and made change-approach failures expire after one payload-free directive.
+
 ## [0.84.1] - 2026-08-02
 
 ## [0.84.0] - 2026-08-02

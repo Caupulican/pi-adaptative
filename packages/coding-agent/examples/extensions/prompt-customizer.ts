@@ -37,12 +37,14 @@ function addToolGuidance(options: BuildSystemPromptOptions, basePrompt: string):
 
 	if (hasTool("edit")) {
 		parts.push(
-			"• Use the `edit` tool for precise text replacements in files. Match exact content including whitespace.",
+			"• Use `edit` action=prepare before generating precise replacements, then commit with the returned intent. Match exact content including whitespace.",
 		);
 	}
 
 	if (hasTool("write")) {
-		parts.push("• Use the `write` tool to create new files or overwrite existing ones completely.");
+		parts.push(
+			"• Use `write` action=prepare before generating content; commit creates a new file and never overwrites.",
+		);
 	}
 
 	if (options.skills && options.skills.length > 0) {

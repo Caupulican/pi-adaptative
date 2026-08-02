@@ -324,12 +324,6 @@ const BASH_PREVIEW_BYTES = 8 * 1024;
 const BASH_UPDATE_THROTTLE_MS = 100;
 const BROAD_SEARCH_MAX_PERSISTED_BYTES = 8 * 1024 * 1024;
 
-type BashRenderState = {
-	startedAt: number | undefined;
-	endedAt: number | undefined;
-	interval: NodeJS.Timeout | undefined;
-};
-
 type BashResultRenderState = {
 	cachedWidth: number | undefined;
 	cachedLines: string[] | undefined;
@@ -342,10 +336,6 @@ class BashResultRenderComponent extends Container {
 		cachedLines: undefined,
 		cachedSkipped: undefined,
 	};
-}
-
-function formatDuration(ms: number): string {
-	return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function formatBashCall(
@@ -368,8 +358,6 @@ function rebuildBashResultRenderComponent(
 	},
 	options: ToolRenderResultOptions,
 	showImages: boolean,
-	startedAt: number | undefined,
-	endedAt: number | undefined,
 ): void {
 	const state = component.state;
 	component.clear();
@@ -437,12 +425,6 @@ function rebuildBashResultRenderComponent(
 		}
 		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
 	}
-
-	if (startedAt !== undefined) {
-		const label = options.isPartial ? "Elapsed" : "Took";
-		const endTime = endedAt ?? Date.now();
-		component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
-	}
 }
 
 function createShellToolDefinition(
@@ -450,7 +432,7 @@ function createShellToolDefinition(
 	backendShell: PlatformShellToolName,
 	contractPlatform: NodeJS.Platform,
 	options?: BashToolOptions,
-): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
+): ToolDefinition<typeof bashSchema, BashToolDetails | undefined> {
 	const toolName = "bash";
 	const sessionKey = options?.sessionKey ?? `bash-tool:${randomUUID()}`;
 	const ops =
@@ -833,37 +815,14 @@ function createShellToolDefinition(
 			}
 		},
 		renderCall(args, _theme, context) {
-			const state = context.state;
-			if (context.executionStarted && state.startedAt === undefined) {
-				state.startedAt = Date.now();
-				state.endedAt = undefined;
-			}
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			text.setText(formatBashCall(args, toolName));
 			return text;
 		},
 		renderResult(result, options, _theme, context) {
-			const state = context.state;
-			if (state.startedAt !== undefined && options.isPartial && !state.interval) {
-				state.interval = setInterval(() => context.invalidate(), 1000);
-			}
-			if (!options.isPartial || context.isError) {
-				state.endedAt ??= Date.now();
-				if (state.interval) {
-					clearInterval(state.interval);
-					state.interval = undefined;
-				}
-			}
 			const component =
 				(context.lastComponent as BashResultRenderComponent | undefined) ?? new BashResultRenderComponent();
-			rebuildBashResultRenderComponent(
-				component,
-				result as any,
-				options,
-				context.showImages,
-				state.startedAt,
-				state.endedAt,
-			);
+			rebuildBashResultRenderComponent(component, result as any, options, context.showImages);
 			component.invalidate();
 			return component;
 		},
@@ -873,7 +832,7 @@ function createShellToolDefinition(
 export function createBashToolDefinition(
 	cwd: string,
 	options?: BashToolOptions,
-): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
+): ToolDefinition<typeof bashSchema, BashToolDetails | undefined> {
 	const platform = options?.platform ?? process.platform;
 	return createShellToolDefinition(cwd, getPlatformShellToolName(platform), platform, options);
 }

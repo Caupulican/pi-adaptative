@@ -2,7 +2,7 @@
 
 Pi validates every model-emitted tool call against its TypeBox schema before execution. Valid calls run unchanged. Invalid calls either pass through a named deterministic repair and then execute with the repaired arguments, or they bounce with schema feedback when no safe repair applies.
 
-Execution failures are not argument repairs. Pi removes their potentially large failed protocol turns from provider context and retains one bounded failure record: stable operation identity, occurrence count, failure code, a cause-bearing diagnostic when available, and `next_action`. A matching successful retry clears the record. Pi uses `repair` only for argument/protocol rejections with a concrete call correction; policy, preflight, abort, and execution failures use `next_action`. It never invents a deterministic repair from an unknown nonzero exit.
+Execution failures are not argument repairs. Pi removes their potentially large failed protocol turns from provider context and normally retains one bounded failure record: constant-size operation fingerprint, bounded operation preview, occurrence count, failure code, a cause-bearing diagnostic when available, and `next_action`. A matching successful retry clears the record. Change-approach classes such as non-UTF-8 text edits are different: Pi discards the complete attempted operation, exposes one bounded reason/directive for the next assistant response, then expires it. Pi uses `repair` only for argument/protocol rejections with a concrete call correction; policy, preflight, abort, and execution failures use `next_action`. It never invents a deterministic repair from an unknown nonzero exit.
 
 ## Runtime behavior
 

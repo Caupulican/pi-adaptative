@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Changed `write` and `edit` to path-first `prepare`/`commit` protocols; `write` is now create-only, and custom file adapters must provide a shared mutation-intent controller plus `createFile` no-clobber semantics.
+
+### Added
+
+- Added session-bounded exact-content references so successful writes and edits can copy unchanged bytes without retransmitting content.
+- Added live and terminal elapsed time to every interactive tool panel, including read, Python, extension, error, and replay paths.
+
+### Fixed
+
+- Rejected write collisions, missing edit targets, and stale prepared edits before mutation; non-UTF-8 edits now fail through the centralized change-approach workflow.
+- Removed full edit-argument serialization from asynchronous TUI preview rendering.
+- Bounded collapsed streamed write previews so growing content is neither rescanned nor fully split and highlighted on each update.
+
 ## [0.84.1] - 2026-08-02
 
 ## [0.84.0] - 2026-08-02

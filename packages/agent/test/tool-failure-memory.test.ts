@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	assessToolFailure,
 	createToolFailureResult,
+	normalizeToolSignature,
+	rememberToolFailure,
 	sanitizeToolFailureContext,
 	type ToolFailureMemoryRecord,
 } from "../src/tool-failure-memory.ts";
@@ -24,6 +26,42 @@ function record(
 }
 
 describe("tool failure memory", () => {
+	it("fingerprints large operations without retaining or serializing their payload", () => {
+		const largeTail = "x".repeat(1024 * 1024);
+		const firstArgs = {
+			path: "large.txt",
+			startedAt: 1_723_000_000_000,
+			content: `nonce 123e4567-e89b-12d3-a456-426614174000 ${largeTail}`,
+		};
+		const secondArgs = {
+			path: "large.txt",
+			startedAt: 1_724_000_000_000,
+			content: `nonce 123e4567-e89b-12d3-a456-426614174111 ${largeTail}`,
+		};
+		const firstPairs: Array<[string, unknown]> = [["write", firstArgs]];
+		const secondPairs: Array<[string, unknown]> = [["write", secondArgs]];
+		const stringify = vi.spyOn(JSON, "stringify");
+
+		const firstSignature = normalizeToolSignature(firstPairs);
+		const secondSignature = normalizeToolSignature(secondPairs);
+		expect(firstSignature).toBe(secondSignature);
+		expect(firstSignature).toMatch(/^[0-9a-f]{32}$/);
+		expect(stringify.mock.calls.some(([value]) => value === firstPairs || value === secondPairs)).toBe(false);
+
+		const tracker = new Map();
+		const failure = rememberToolFailure(
+			tracker,
+			"write",
+			firstArgs,
+			"failed",
+			"tool_error",
+			"Choose another destination.",
+		);
+		expect(failure.operation.length).toBeLessThanOrEqual(240);
+		expect(failure.operation).not.toContain(largeTail.slice(0, 1_000));
+		expect(stringify.mock.calls.some(([value]) => value === firstArgs)).toBe(false);
+	});
+
 	it("retains the cause-bearing diagnostic instead of verbose execution output", () => {
 		const assessment = assessToolFailure(
 			`${"progress\n".repeat(10_000)}svn: invalid option: --stat\nCommand exited with code 1`,
@@ -77,6 +115,105 @@ describe("tool failure memory", () => {
 		expect(assessment.failureCode).toBe("enoent");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toContain("list the parent directory or re-read the path");
+	});
+
+	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {
+		const assessment = assessToolFailure(
+			"PI_FILE_ENCODING_CORRUPTION: corrupt.dat is not valid UTF-8 text",
+			"failed",
+			"Error",
+		);
+		expect(assessment).toEqual({
+			failureCode: "encoding_corruption",
+			guidance:
+				"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
+			attemptMemory: "discard",
+		});
+
+		const tracker = new Map();
+		const failure = rememberToolFailure(
+			tracker,
+			"edit",
+			{ path: "corrupt.dat", intentId: "secret-attempt", edits: [{ oldText: "payload", newText: "next" }] },
+			"failed",
+			assessment.failureCode,
+			assessment.guidance,
+		);
+		expect(tracker.size).toBe(0);
+		const result = createToolFailureResult(failure);
+		expect(result.details).toHaveProperty("piToolFailureDirective");
+		expect(result.details).not.toHaveProperty("piToolFailureMemory");
+
+		const failedTurn: AgentMessage[] = [
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "encoding-call",
+						name: "edit",
+						arguments: {
+							path: "corrupt.dat",
+							intentId: "secret-attempt",
+							edits: [{ oldText: "payload", newText: "next" }],
+						},
+					},
+				],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "encoding-call",
+				toolName: "edit",
+				content: result.content,
+				isError: true,
+				timestamp: 2,
+				details: result.details,
+			},
+		];
+		const nextRequest = sanitizeToolFailureContext(failedTurn, "base");
+		expect(nextRequest.messages).toEqual([]);
+		expect(nextRequest.systemPrompt).toContain("Change approach");
+		expect(nextRequest.systemPrompt).not.toContain("secret-attempt");
+		expect(nextRequest.systemPrompt).not.toContain("payload");
+		expect(nextRequest.systemPrompt).not.toContain("corrupt.dat");
+
+		const afterAgentChangedApproach = sanitizeToolFailureContext(
+			[
+				...failedTurn,
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "I will use a byte-safe workflow." }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 3,
+				},
+			],
+			"base",
+		);
+		expect(afterAgentChangedApproach.systemPrompt).toBe("base");
 	});
 
 	it("labels rejected-argument guidance as repair and execution guidance as next_action", () => {

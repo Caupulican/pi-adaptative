@@ -25,6 +25,7 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
+	FileMutationIntentController,
 } from "@caupulican/pi-adaptative";
 import { Text } from "@caupulican/pi-tui";
 import { homedir } from "os";
@@ -44,11 +45,12 @@ function shortenPath(path: string): string {
 const toolCache = new Map<string, ReturnType<typeof createBuiltInTools>>();
 
 function createBuiltInTools(cwd: string) {
+	const fileMutationIntents = new FileMutationIntentController();
 	return {
 		read: createReadTool(cwd),
 		bash: createBashTool(cwd),
-		edit: createEditTool(cwd),
-		write: createWriteTool(cwd),
+		edit: createEditTool(cwd, { intentController: fileMutationIntents }),
+		write: createWriteTool(cwd, { intentController: fileMutationIntents }),
 		find: createFindTool(cwd),
 		grep: createGrepTool(cwd),
 		ls: createLsTool(cwd),
@@ -167,8 +169,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "write",
 		label: "write",
-		description:
-			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+		description: "Create a new file through path-only preflight. Existing paths are never overwritten.",
 		parameters: getBuiltInTools(process.cwd()).write.parameters,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -179,10 +180,10 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, _context) {
 			const path = shortenPath(args.path || "");
 			const pathDisplay = path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-			const lineCount = args.content ? args.content.split("\n").length : 0;
-			const lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} lines)`) : "";
+			const writeContent = args.action === "commit" && "content" in args ? args.content : undefined;
+			const sizeInfo = writeContent ? theme.fg("muted", ` (${writeContent.length} characters)`) : "";
 
-			return new Text(`${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}${lineInfo}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}${sizeInfo}`, 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme, _context) {

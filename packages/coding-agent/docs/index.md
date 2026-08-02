@@ -86,3 +86,4 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Development
 
 - [Development](development.md) - local setup, project structure, and debugging.
+- [Tool boundary performance roadmap](tool-boundary-performance-roadmap-2026-08-02.md) - evidence ledger for preflight, payload ownership, Python coordination, and remaining latency/memory work.

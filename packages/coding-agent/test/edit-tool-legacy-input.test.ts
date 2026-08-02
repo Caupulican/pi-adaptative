@@ -20,19 +20,27 @@ afterEach(async () => {
 describe("edit tool prepareArguments", () => {
 	it("keeps legacy fields out of the public schema", () => {
 		const definition = createEditToolDefinition(process.cwd());
-		expect(definition.parameters.properties).not.toHaveProperty("oldText");
-		expect(definition.parameters.properties).not.toHaveProperty("newText");
+		const variants = (definition.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> }).anyOf;
+		expect(variants).toBeDefined();
+		for (const variant of variants ?? []) {
+			expect(variant.properties).not.toHaveProperty("oldText");
+			expect(variant.properties).not.toHaveProperty("newText");
+		}
 	});
 
 	it("folds top-level oldText/newText into edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			oldText: "before",
 			newText: "after",
 		});
 		expect(prepared).toEqual({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: [{ oldText: "before", newText: "after" }],
 		});
 	});
@@ -40,13 +48,17 @@ describe("edit tool prepareArguments", () => {
 	it("appends legacy replacement to existing edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: [{ oldText: "a", newText: "b" }],
 			oldText: "c",
 			newText: "d",
 		});
 		expect(prepared).toEqual({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: [
 				{ oldText: "a", newText: "b" },
 				{ oldText: "c", newText: "d" },
@@ -57,7 +69,9 @@ describe("edit tool prepareArguments", () => {
 	it("passes through valid input unchanged", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const input = {
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: [{ oldText: "a", newText: "b" }],
 		};
 		const prepared = definition.prepareArguments!(input);
@@ -77,14 +91,29 @@ describe("edit tool prepareArguments", () => {
 		await writeFile(filePath, "before\n", "utf8");
 
 		const definition = createEditToolDefinition(dir);
+		const preparation = await definition.execute(
+			"tool-prepare",
+			{ action: "prepare", path: "legacy.txt" },
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		);
+		const intentId = preparation.details?.intentId;
+		if (!intentId) throw new Error("Expected edit preparation to return an intent id.");
 		const prepared = definition.prepareArguments!({
+			action: "commit",
 			path: "legacy.txt",
+			intentId,
 			oldText: "before",
 			newText: "after",
 		});
 
 		const result = await definition.execute("tool-1", prepared, undefined, undefined, {} as ExtensionContext);
-		expect(result.content).toEqual([{ type: "text", text: "Successfully replaced 1 block(s) in legacy.txt." }]);
+		const resultText = result.content[0];
+		if (resultText?.type !== "text") throw new Error("Expected edit result text.");
+		expect(result.details?.contentRef).toMatch(/^file-content:/);
+		expect(resultText.text).toContain("Successfully replaced 1 block(s) in legacy.txt.");
+		expect(resultText.text).toContain(`contentRef ${result.details?.contentRef}`);
 		expect(await readFile(filePath, "utf8")).toBe("after\n");
 	});
 });
@@ -93,11 +122,15 @@ describe("edit tool stringified edits", () => {
 	it("leaves JSON-string edits for the shared validation repair layer", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
 		});
 		expect(prepared).toEqual({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
 		});
 	});
@@ -105,11 +138,15 @@ describe("edit tool stringified edits", () => {
 	it("leaves edits alone when the string is not valid JSON", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: "not json",
 		});
 		expect(prepared).toEqual({
+			action: "commit",
 			path: "file.txt",
+			intentId: "intent-1",
 			edits: "not json",
 		});
 	});

@@ -1,7 +1,6 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import { readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
@@ -20,6 +19,7 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { isValidUTF8 } from "./file-encoding-policy.ts";
+import { FileMutationIntentController } from "./file-mutation-intent.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { renderToolPath, str } from "./render-utils.ts";
@@ -36,34 +36,63 @@ const replaceEditSchema = Type.Object(
 		oldText: Type.String({
 			description:
 				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+			minLength: 1,
 		}),
 		newText: Type.String({ description: "Replacement text for this targeted edit." }),
 	},
 	{ additionalProperties: false },
 );
 
-const editSchema = Type.Object(
-	{
-		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-		edits: Type.Array(replaceEditSchema, {
-			description:
-				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
-		}),
-	},
-	{ additionalProperties: false },
-);
+const editPathSchema = Type.String({
+	description: "Path to the existing file to edit (relative or absolute)",
+	minLength: 1,
+});
+const editSchema = Type.Union([
+	Type.Object(
+		{
+			action: Type.Literal("prepare", {
+				description: "Validate the target before generating replacement text.",
+			}),
+			path: editPathSchema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			action: Type.Literal("commit", { description: "Apply edits accepted by a prior prepare call." }),
+			path: editPathSchema,
+			intentId: Type.String({
+				description: "Intent id returned by edit action=prepare for this exact path.",
+				minLength: 1,
+			}),
+			edits: Type.Array(replaceEditSchema, {
+				description:
+					"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+				minItems: 1,
+			}),
+		},
+		{ additionalProperties: false },
+	),
+]);
 
 export type EditToolInput = Static<typeof editSchema>;
-type LegacyEditToolInput = EditToolInput & {
+type LegacyEditToolInput = {
+	action?: unknown;
+	path?: unknown;
+	intentId?: unknown;
+	edits?: unknown;
 	oldText?: unknown;
 	newText?: unknown;
 };
 
 export interface EditToolDetails {
+	phase: "prepared" | "committed";
+	intentId?: string;
+	contentRef?: string;
 	/** Display-oriented diff of the changes made */
-	diff: string;
+	diff?: string;
 	/** Standard unified patch of the changes made */
-	patch: string;
+	patch?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
 }
@@ -77,19 +106,18 @@ export interface EditOperations {
 	readFile: (absolutePath: string) => Promise<Buffer>;
 	/** Write content to a file */
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Check if file is readable and writable (throw if not) */
-	access: (absolutePath: string) => Promise<void>;
 }
 
 const defaultEditOperations: EditOperations = {
 	readFile: (path) => fsReadFile(path),
 	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
-	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
 };
 
 export interface EditToolOptions {
 	/** Custom operations for file editing. Default: local filesystem */
 	operations?: EditOperations;
+	/** Session-owned two-phase intent and exact-content-reference authority. */
+	intentController?: FileMutationIntentController;
 }
 
 function prepareEditArguments(input: unknown): EditToolInput {
@@ -110,16 +138,21 @@ function prepareEditArguments(input: unknown): EditToolInput {
 	return { ...rest, edits } as EditToolInput;
 }
 
-function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] } {
+function validateEditInput(
+	input: EditToolInput,
+): { action: "prepare"; path: string } | { action: "commit"; path: string; intentId: string; edits: Edit[] } {
+	if (input.action === "prepare") return input;
 	if (!Array.isArray(input.edits) || input.edits.length === 0) {
 		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
 	}
-	return { path: input.path, edits: input.edits };
+	return { action: "commit", path: input.path, intentId: input.intentId, edits: input.edits };
 }
 
 type RenderableEditArgs = {
+	action?: string;
 	path?: string;
 	file_path?: string;
+	intentId?: string;
 	edits?: Edit[];
 	oldText?: string;
 	newText?: string;
@@ -132,7 +165,7 @@ type EditToolResultLike = {
 
 type EditCallRenderComponent = Box & {
 	preview?: EditPreview;
-	previewArgsKey?: string;
+	previewRequestId: number;
 	previewPending?: boolean;
 	settledError?: boolean;
 };
@@ -140,7 +173,7 @@ type EditCallRenderComponent = Box & {
 function createEditCallRenderComponent(): EditCallRenderComponent {
 	return Object.assign(new Box(1, 1, (text: string) => text), {
 		preview: undefined as EditPreview | undefined,
-		previewArgsKey: undefined as string | undefined,
+		previewRequestId: 0,
 		previewPending: false,
 		settledError: false,
 	});
@@ -164,6 +197,7 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 	if (!args) {
 		return null;
 	}
+	if (args.action !== "commit") return null;
 
 	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
 	if (!path) {
@@ -187,7 +221,8 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 
 function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
 	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
-	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
+	const action = args?.action === "prepare" ? "prepare" : args?.action === "commit" ? "commit" : undefined;
+	return `${theme.fg("toolTitle", theme.bold("edit"))}${action ? ` ${theme.fg("muted", action)}` : ""} ${pathDisplay}`;
 }
 
 function formatEditResult(
@@ -257,11 +292,7 @@ function buildEditCallComponent(
 	return component;
 }
 
-function setEditPreview(
-	component: EditCallRenderComponent,
-	preview: EditPreview,
-	argsKey: string | undefined,
-): boolean {
+function setEditPreview(component: EditCallRenderComponent, preview: EditPreview): boolean {
 	const current = component.preview;
 	const changed =
 		current === undefined ||
@@ -272,7 +303,6 @@ function setEditPreview(
 			!("error" in preview) &&
 			(current.diff !== preview.diff || current.firstChangedLine !== preview.firstChangedLine));
 	component.preview = preview;
-	component.previewArgsKey = argsKey;
 	component.previewPending = false;
 	return changed;
 }
@@ -282,14 +312,19 @@ export function createEditToolDefinition(
 	options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
 	const ops = options?.operations ?? defaultEditOperations;
+	if (options?.operations && !options.intentController) {
+		throw new Error("Custom edit operations require a matching file mutation intent controller.");
+	}
+	const intentController = options?.intentController ?? new FileMutationIntentController();
 	return {
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
-		promptSnippet:
-			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+			"Edit one existing file using exact text replacement. Always call action=prepare with only path before generating edits. If preparation succeeds, call action=commit with its intentId and edits. Commit rejects stale targets changed after preparation. Every edits[].oldText must match a unique, non-overlapping region of the prepared file.",
+		promptSnippet: "Preflight existing files, then make precise exact-text edits with one stale-safe commit",
 		promptGuidelines: [
+			"Before generating replacement text, call edit with action=prepare and only the file path.",
+			"After preparation succeeds, call edit action=commit with the returned intentId and all replacements.",
 			"Use edit for precise changes (edits[].oldText must match exactly)",
 			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
 			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
@@ -299,7 +334,8 @@ export function createEditToolDefinition(
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
-			const { path, edits } = validateEditInput(input);
+			const validated = validateEditInput(input);
+			const { path } = validated;
 			const absolutePath = resolveToCwd(path, cwd);
 
 			return withFileMutationQueue(absolutePath, async () => {
@@ -312,23 +348,29 @@ export function createEditToolDefinition(
 				};
 
 				throwIfAborted();
-
-				// Check if file exists.
-				try {
-					await ops.access(absolutePath);
-				} catch (error: unknown) {
-					throwIfAborted();
-					const errorMessage =
-						error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
-					throw new Error(`Could not edit file: ${path}. ${errorMessage}.`);
+				if (validated.action === "prepare") {
+					const prepared = await intentController.prepare("edit", absolutePath, signal, path);
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Edit target accepted. Commit ${path} with intentId ${prepared.intentId}.`,
+							},
+						],
+						details: { phase: "prepared" as const, intentId: prepared.intentId },
+					};
 				}
+
+				const { edits, intentId } = validated;
+				const lease = intentController.consume(intentId, "edit", absolutePath);
+				await intentController.assertCurrent(lease, signal);
 				throwIfAborted();
 
 				// Read the file.
 				const buffer = await ops.readFile(absolutePath);
 				if (!isValidUTF8(buffer)) {
 					throw new Error(
-						`Could not edit file: ${path}. Binary or non-UTF-8 text cannot be safely edited by the text edit tool.`,
+						`PI_FILE_ENCODING_CORRUPTION: ${path} is not valid UTF-8 text; exact text replacement is unsafe and could corrupt its bytes.`,
 					);
 				}
 				const rawContent = buffer.toString("utf-8");
@@ -344,6 +386,7 @@ export function createEditToolDefinition(
 				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
+				const contentReference = intentController.rememberContent(absolutePath, finalContent);
 
 				const diffResult = generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
@@ -351,33 +394,36 @@ export function createEditToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
+							text: `Successfully replaced ${edits.length} block(s) in ${path}. Reuse exact bytes with contentRef ${contentReference.contentRef}.`,
 						},
 					],
-					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+					details: {
+						phase: "committed" as const,
+						contentRef: contentReference.contentRef,
+						diff: diffResult.diff,
+						patch,
+						firstChangedLine: diffResult.firstChangedLine,
+					},
 				};
 			});
 		},
 		renderCall(args, theme, context) {
 			const component = getEditCallRenderComponent(context.state, context.lastComponent);
 			const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
 
-			if (component.previewArgsKey !== argsKey) {
+			if ((!context.argsComplete || !previewInput) && (component.preview || component.previewPending)) {
 				component.preview = undefined;
-				component.previewArgsKey = argsKey;
 				component.previewPending = false;
 				component.settledError = false;
+				component.previewRequestId++;
 			}
 
 			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
-				const requestKey = argsKey;
+				const requestId = ++component.previewRequestId;
 				void computeEditsDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
-					if (component.previewArgsKey === requestKey) {
-						setEditPreview(component, preview, requestKey);
+					if (component.previewRequestId === requestId) {
+						setEditPreview(component, preview);
 						context.invalidate();
 					}
 				});
@@ -387,21 +433,17 @@ export function createEditToolDefinition(
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
-			const previewInput = getRenderablePreviewInput(context.args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
 			const typedResult = result as EditToolResultLike;
 			const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
 			let changed = false;
 			if (callComponent) {
+				callComponent.previewRequestId++;
 				if (typeof resultDiff === "string") {
 					changed =
-						setEditPreview(
-							callComponent,
-							{ diff: resultDiff, firstChangedLine: typedResult.details?.firstChangedLine },
-							argsKey,
-						) || changed;
+						setEditPreview(callComponent, {
+							diff: resultDiff,
+							firstChangedLine: typedResult.details?.firstChangedLine,
+						}) || changed;
 				}
 				if (callComponent.settledError !== context.isError) {
 					callComponent.settledError = context.isError;

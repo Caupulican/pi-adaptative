@@ -15,6 +15,7 @@ import type { NormalizedProfile } from "../profile-registry.ts";
 import { wrapToolWithCredentialExposureGuard } from "../secrets/credential-exposure-guard.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createEditTool } from "../tools/edit.ts";
+import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { createFindTool } from "../tools/find.ts";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
@@ -97,13 +98,14 @@ function createLaneTools(
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 ): AgentTool[] {
+	const fileMutationIntents = new FileMutationIntentController();
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
 		["grep", () => createGrepTool(cwd)],
 		["find", () => createFindTool(cwd)],
 		["ls", () => createLsTool(cwd)],
-		["write", () => createWriteTool(cwd)],
-		["edit", () => createEditTool(cwd)],
+		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
+		["edit", () => createEditTool(cwd, { intentController: fileMutationIntents })],
 	]);
 	if (executionPolicy) {
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>

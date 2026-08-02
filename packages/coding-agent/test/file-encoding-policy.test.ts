@@ -9,6 +9,7 @@ import {
 	utf8ByteLength,
 } from "../src/core/tools/file-encoding-policy.ts";
 import { createEditTool, createWriteTool } from "../src/index.ts";
+import { withPreparedEdit, withPreparedWrite } from "./helpers/file-mutation-tools.ts";
 
 describe("File Encoding Policy - Unit Tests", () => {
 	describe("isValidUTF8", () => {
@@ -69,14 +70,14 @@ describe("File Encoding Policy - Unit Tests", () => {
 
 describe("File Encoding Policy - Tool Integration Tests", () => {
 	let testDir: string;
-	let editTool: ReturnType<typeof createEditTool>;
-	let writeTool: ReturnType<typeof createWriteTool>;
+	let editTool: ReturnType<typeof withPreparedEdit>;
+	let writeTool: ReturnType<typeof withPreparedWrite>;
 
 	beforeEach(() => {
 		testDir = join(tmpdir(), `pi-encoding-integration-test-${Date.now()}`);
 		mkdirSync(testDir, { recursive: true });
-		editTool = createEditTool(testDir);
-		writeTool = createWriteTool(testDir);
+		editTool = withPreparedEdit(createEditTool(testDir));
+		writeTool = withPreparedWrite(createWriteTool(testDir));
 	});
 
 	afterEach(() => {
@@ -92,7 +93,7 @@ describe("File Encoding Policy - Tool Integration Tests", () => {
 				path: "binary.dat",
 				edits: [{ oldText: "test", newText: "best" }],
 			}),
-		).rejects.toThrow(/Binary or non-UTF-8 text cannot be safely edited/);
+		).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION.*exact text replacement.*unsafe/is);
 	});
 
 	it("edit tool should preserve BOM", async () => {
@@ -122,31 +123,35 @@ describe("File Encoding Policy - Tool Integration Tests", () => {
 		expect(content).toBe("line1\r\nline3\r\n");
 	});
 
-	it("write tool should preserve BOM when overwriting", async () => {
+	it("write tool should reject a BOM-bearing existing file without changing it", async () => {
 		const filePath = join(testDir, "write-bom.txt");
 		writeFileSync(filePath, "\uFEFFinitial\n", "utf-8");
 
-		await writeTool.execute("test-call-4", {
-			path: "write-bom.txt",
-			content: "overwrite content",
-		});
+		await expect(
+			writeTool.execute("test-call-4", {
+				path: "write-bom.txt",
+				content: "overwrite content",
+			}),
+		).rejects.toThrow(/already exists|collision/i);
 
 		const content = readFileSync(filePath, "utf-8");
 		expect(content.startsWith("\uFEFF")).toBe(true);
-		expect(content).toBe("\uFEFFoverwrite content");
+		expect(content).toBe("\uFEFFinitial\n");
 	});
 
-	it("write tool should preserve CRLF when overwriting with LF content", async () => {
+	it("write tool should reject a CRLF existing file without changing it", async () => {
 		const filePath = join(testDir, "write-crlf.txt");
 		writeFileSync(filePath, "line1\r\nline2\r\n", "utf-8");
 
-		await writeTool.execute("test-call-5", {
-			path: "write-crlf.txt",
-			content: "new1\nnew2\n",
-		});
+		await expect(
+			writeTool.execute("test-call-5", {
+				path: "write-crlf.txt",
+				content: "new1\nnew2\n",
+			}),
+		).rejects.toThrow(/already exists|collision/i);
 
 		const content = readFileSync(filePath, "utf-8");
-		expect(content).toBe("new1\r\nnew2\r\n");
+		expect(content).toBe("line1\r\nline2\r\n");
 	});
 
 	it("write tool should report UTF-8 byte count", async () => {

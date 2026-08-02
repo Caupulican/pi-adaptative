@@ -77,8 +77,8 @@ Summarize this repository and tell me how to run its checks.
 By default, pi gives the model four tools:
 
 - `read` - read files
-- `write` - create or overwrite files
-- `edit` - patch files
+- `write` - preflight and create new files without overwriting existing paths
+- `edit` - preflight and patch existing files with stale-target checks
 - `bash` - run shell commands
 
 Additional built-in read-only tools (`grep`, `find`, `ls`) are available through tool options. Pi runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.

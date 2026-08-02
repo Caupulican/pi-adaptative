@@ -77,8 +77,8 @@ interface ResourceItem {
 const TOOL_DESCRIPTIONS: Record<string, string> = {
 	read: "Read files from the filesystem.",
 	bash: "Execute arbitrary commands in the shell.",
-	edit: "Edit files surgically.",
-	write: "Create new files or overwrite existing files.",
+	edit: "Preflight and edit existing files surgically.",
+	write: "Preflight and create new files without overwriting.",
 	grep: "Search for text patterns using ripgrep.",
 	find: "Locate files matching a search query.",
 	ls: "List files and directories.",

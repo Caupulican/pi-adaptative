@@ -12,6 +12,10 @@ import {
 	createLocalBashOperations,
 } from "../src/core/tools/bash.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
+import {
+	FileMutationIntentController,
+	localFileMutationIntentOperations,
+} from "../src/core/tools/file-mutation-intent.ts";
 import { disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
 import {
 	createEditTool,
@@ -22,10 +26,11 @@ import {
 	createWriteTool,
 } from "../src/index.ts";
 import * as shellModule from "../src/utils/shell.ts";
+import { withPreparedEdit, withPreparedWrite } from "./helpers/file-mutation-tools.ts";
 
 const readTool = createReadTool(process.cwd());
-const writeTool = createWriteTool(process.cwd());
-const editTool = createEditTool(process.cwd());
+const writeTool = withPreparedWrite(createWriteTool(process.cwd()));
+const editTool = withPreparedEdit(createEditTool(process.cwd()));
 const bashTool = createBashTool(process.cwd());
 const grepTool = createGrepTool(process.cwd());
 const findTool = createFindTool(process.cwd());
@@ -291,7 +296,8 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 			expect(getTextOutput(result)).toContain(testFile);
-			expect(result.details).toBeUndefined();
+			expect(result.details?.phase).toBe("committed");
+			expect(result.details?.contentRef).toMatch(/^file-content:/);
 		});
 
 		it("should create parent directories", async () => {
@@ -480,15 +486,24 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should include the original error message for unknown edit access errors", async () => {
-			const genericFailureTool = createEditTool(testDir, {
+			writeFileSync(join(testDir, "broken.txt"), "hello\n", "utf8");
+			const intentController = new FileMutationIntentController({
 				operations: {
+					...localFileMutationIntentOperations,
 					access: async () => {
 						throw new Error("disk offline");
 					},
-					readFile: async () => Buffer.from("hello\n", "utf-8"),
-					writeFile: async () => {},
 				},
 			});
+			const genericFailureTool = withPreparedEdit(
+				createEditTool(testDir, {
+					operations: {
+						readFile: async () => Buffer.from("hello\n", "utf-8"),
+						writeFile: async () => {},
+					},
+					intentController,
+				}),
+			);
 
 			await expect(
 				genericFailureTool.execute("test-call-16", {

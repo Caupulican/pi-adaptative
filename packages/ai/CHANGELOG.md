@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Added centralized execution-error disposition metadata so change-approach failures can discard attempted operation memory while returning bounded guidance.
+
 ## [0.84.1] - 2026-08-02
 
 ### Fixed

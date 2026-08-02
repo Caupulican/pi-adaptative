@@ -2,9 +2,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { createEditToolDefinition } from "../src/core/tools/edit.ts";
+import { createEditTool } from "../src/core/tools/edit.ts";
 import { generateDiffString, normalizeToLF } from "../src/core/tools/edit-diff.ts";
+import { withPreparedEdit } from "./helpers/file-mutation-tools.ts";
 
 const tempDirs: string[] = [];
 
@@ -25,14 +25,11 @@ describe("edit tool fuzzy matching", () => {
 		const before = "target — line\nunrelated “quote”  \n";
 		await writeFile(filePath, before, "utf8");
 
-		const definition = createEditToolDefinition(dir);
-		const result = await definition.execute(
-			"tool-1",
-			{ path: "fuzzy.txt", edits: [{ oldText: "target - line", newText: "target - changed" }] },
-			undefined,
-			undefined,
-			{} as ExtensionContext,
-		);
+		const tool = withPreparedEdit(createEditTool(dir));
+		const result = await tool.execute("tool-1", {
+			path: "fuzzy.txt",
+			edits: [{ oldText: "target - line", newText: "target - changed" }],
+		});
 
 		const after = await readFile(filePath, "utf8");
 		expect(after).toBe("target - changed\nunrelated “quote”  \n");
@@ -44,14 +41,11 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "exact.txt");
 		await writeFile(filePath, "target - line\nunrelated “quote”  \n", "utf8");
 
-		const definition = createEditToolDefinition(dir);
-		await definition.execute(
-			"tool-1",
-			{ path: "exact.txt", edits: [{ oldText: "target - line", newText: "target - changed" }] },
-			undefined,
-			undefined,
-			{} as ExtensionContext,
-		);
+		const tool = withPreparedEdit(createEditTool(dir));
+		await tool.execute("tool-1", {
+			path: "exact.txt",
+			edits: [{ oldText: "target - line", newText: "target - changed" }],
+		});
 
 		expect(await readFile(filePath, "utf8")).toBe("target - changed\nunrelated “quote”  \n");
 	});
@@ -61,14 +55,11 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "crlf.txt");
 		await writeFile(filePath, "alpha — one\r\nbeta\r\n", "utf8");
 
-		const definition = createEditToolDefinition(dir);
-		await definition.execute(
-			"tool-1",
-			{ path: "crlf.txt", edits: [{ oldText: "alpha - one", newText: "alpha - two" }] },
-			undefined,
-			undefined,
-			{} as ExtensionContext,
-		);
+		const tool = withPreparedEdit(createEditTool(dir));
+		await tool.execute("tool-1", {
+			path: "crlf.txt",
+			edits: [{ oldText: "alpha - one", newText: "alpha - two" }],
+		});
 
 		expect(await readFile(filePath, "utf8")).toBe("alpha - two\r\nbeta\r\n");
 	});
@@ -78,14 +69,11 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "duplicates.txt");
 		await writeFile(filePath, "x - y\nx — y\n", "utf8");
 
-		const definition = createEditToolDefinition(dir);
-		await definition.execute(
-			"tool-1",
-			{ path: "duplicates.txt", edits: [{ oldText: "x - y", newText: "ascii changed" }] },
-			undefined,
-			undefined,
-			{} as ExtensionContext,
-		);
+		const tool = withPreparedEdit(createEditTool(dir));
+		await tool.execute("tool-1", {
+			path: "duplicates.txt",
+			edits: [{ oldText: "x - y", newText: "ascii changed" }],
+		});
 
 		expect(await readFile(filePath, "utf8")).toBe("ascii changed\nx — y\n");
 	});
@@ -95,15 +83,12 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "fuzzy-duplicates.txt");
 		await writeFile(filePath, "x — y\nx – y\n", "utf8");
 
-		const definition = createEditToolDefinition(dir);
+		const tool = withPreparedEdit(createEditTool(dir));
 		await expect(
-			definition.execute(
-				"tool-1",
-				{ path: "fuzzy-duplicates.txt", edits: [{ oldText: "x - y", newText: "changed" }] },
-				undefined,
-				undefined,
-				{} as ExtensionContext,
-			),
+			tool.execute("tool-1", {
+				path: "fuzzy-duplicates.txt",
+				edits: [{ oldText: "x - y", newText: "changed" }],
+			}),
 		).rejects.toThrow("Found 2 occurrences");
 	});
 });

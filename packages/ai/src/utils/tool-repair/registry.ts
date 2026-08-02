@@ -123,12 +123,32 @@ export function formatToolRepairStandingRule(name: ToolRepairModeName): string {
 	return getToolRepairRegistryEntry(name).standingRule;
 }
 
+export type ToolExecutionAttemptMemory = "retain" | "discard";
+
+interface ToolExecutionErrorCatalogueEntry {
+	name: string;
+	guidance: string;
+	failureCode?: string;
+	attemptMemory?: ToolExecutionAttemptMemory;
+	matches(message: string): boolean;
+}
+
 export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "commandNotFound",
 		guidance: "Command was not found; check the command name or available tools before retrying.",
 		matches(message: string): boolean {
 			return /^spawn \S+ ENOENT\b/i.test(message) || /(?:^|\n|:)\s*command not found\b/i.test(message);
+		},
+	},
+	{
+		name: "encodingCorruption",
+		failureCode: "encoding_corruption",
+		attemptMemory: "discard",
+		guidance:
+			"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
+		matches(message: string): boolean {
+			return /\bPI_FILE_ENCODING_CORRUPTION\b/i.test(message);
 		},
 	},
 	{
@@ -152,10 +172,34 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 			return /outside (?:the )?(?:current working directory|cwd|workspace|root)/i.test(message);
 		},
 	},
-] as const;
+] as const satisfies readonly ToolExecutionErrorCatalogueEntry[];
 
 export type ToolExecutionErrorClass = (typeof TOOL_EXECUTION_ERROR_CATALOGUE)[number]["name"];
+const executionErrorCatalogue: readonly ToolExecutionErrorCatalogueEntry[] = TOOL_EXECUTION_ERROR_CATALOGUE;
+
+export interface ToolExecutionErrorPolicy {
+	name: ToolExecutionErrorClass;
+	guidance: string;
+	failureCode?: string;
+	attemptMemory: ToolExecutionAttemptMemory;
+}
+
+export function getToolExecutionErrorPolicy(errorMessage: string): ToolExecutionErrorPolicy | undefined {
+	const entry = executionErrorCatalogue.find((candidate) => candidate.matches(errorMessage));
+	if (!entry) return undefined;
+	return {
+		name: entry.name as ToolExecutionErrorClass,
+		guidance: entry.guidance,
+		...(entry.failureCode ? { failureCode: entry.failureCode } : {}),
+		attemptMemory: entry.attemptMemory ?? "retain",
+	};
+}
+
+export function getToolExecutionAttemptMemory(failureCode: string): ToolExecutionAttemptMemory {
+	const entry = executionErrorCatalogue.find((candidate) => candidate.failureCode === failureCode);
+	return entry?.attemptMemory ?? "retain";
+}
 
 export function getToolExecutionErrorGuidance(errorMessage: string): string | undefined {
-	return TOOL_EXECUTION_ERROR_CATALOGUE.find((entry) => entry.matches(errorMessage))?.guidance;
+	return getToolExecutionErrorPolicy(errorMessage)?.guidance;
 }

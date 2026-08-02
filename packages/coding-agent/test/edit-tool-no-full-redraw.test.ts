@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Container, type Terminal, Text, TUI } from "@caupulican/pi-tui";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -73,6 +73,7 @@ describe("edit tool TUI rendering", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 	});
 
@@ -103,7 +104,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-1",
-			{ path: filePath, edits },
+			{ action: "commit", path: filePath, intentId: "render-only", edits },
 			{},
 			createEditToolDefinition(process.cwd()),
 			tui,
@@ -114,6 +115,7 @@ describe("edit tool TUI rendering", () => {
 		tui.start();
 		await waitForRender();
 
+		const stringify = vi.spyOn(JSON, "stringify");
 		component.setArgsComplete();
 		tui.requestRender();
 		await waitForRender();
@@ -126,13 +128,22 @@ describe("edit tool TUI rendering", () => {
 		);
 		expect(callOnlyRender).toContain("edit");
 		expect(callOnlyRender).toContain("line 950 changed");
+		expect(
+			stringify.mock.calls.some(
+				([value]) =>
+					typeof value === "object" &&
+					value !== null &&
+					"edits" in value &&
+					(value as { edits?: unknown }).edits === edits,
+			),
+		).toBe(false);
 
 		const redrawsBeforeResult = tui.fullRedraws;
 		const clearsBeforeResult = terminal.fullClearCount;
 		component.updateResult(
 			{
 				content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
-				details: diff,
+				details: { ...diff, phase: "committed" },
 				isError: false,
 			},
 			false,
@@ -172,7 +183,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-replay",
-			{ path: filePath, edits },
+			{ action: "commit", path: filePath, intentId: "render-only", edits },
 			{},
 			createEditToolDefinition(process.cwd()),
 			tui,
@@ -185,7 +196,7 @@ describe("edit tool TUI rendering", () => {
 		component.updateResult(
 			{
 				content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
-				details: diff,
+				details: { ...diff, phase: "committed" },
 				isError: false,
 			},
 			false,
@@ -209,7 +220,12 @@ describe("edit tool TUI rendering", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-2",
-			{ path: filePath, edits: [{ oldText: "does not exist", newText: "replacement" }] },
+			{
+				action: "commit",
+				path: filePath,
+				intentId: "render-only",
+				edits: [{ oldText: "does not exist", newText: "replacement" }],
+			},
 			{},
 			createEditToolDefinition(process.cwd()),
 			tui,

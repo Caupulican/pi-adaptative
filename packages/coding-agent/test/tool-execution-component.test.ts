@@ -1,10 +1,11 @@
 import { join, resolve } from "node:path";
 import { Text, type TUI, visibleWidth } from "@caupulican/pi-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { createAllToolDefinitions } from "../src/core/tools/index.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -39,6 +40,142 @@ function createFakeTui(): TUI {
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
 		initTheme("dark");
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	test("shows elapsed and final wall time for every built-in tool", () => {
+		const now = vi.spyOn(performance, "now");
+		const toolNames = Object.keys(createAllToolDefinitions(process.cwd()));
+		expect(toolNames).toEqual(expect.arrayContaining(["read", "python"]));
+
+		for (const toolName of toolNames) {
+			now.mockReturnValue(1_000);
+			const component = new ToolExecutionComponent(
+				toolName,
+				`timed-${toolName}`,
+				{},
+				{},
+				undefined,
+				createFakeTui(),
+				process.cwd(),
+			);
+			expect(stripAnsi(component.render(120).join("\n")), toolName).not.toMatch(/Elapsed|Took/);
+
+			component.markExecutionStarted();
+			now.mockReturnValue(2_250);
+			expect(stripAnsi(component.render(120).join("\n")), toolName).toContain("Elapsed 1.25s");
+
+			now.mockReturnValue(2_500);
+			component.updateResult({ content: [], details: undefined, isError: false });
+			const completed = stripAnsi(component.render(120).join("\n"));
+			expect(completed, toolName).toContain("Took 1.50s");
+			expect(completed.match(/Took 1\.50s/g), toolName).toHaveLength(1);
+		}
+	});
+
+	test("shows final wall time for extension, self-rendered, and unavailable-definition tool errors", () => {
+		const now = vi.spyOn(performance, "now");
+		const definitions: Array<[string, ToolDefinition | undefined]> = [
+			["extension_default", createBaseToolDefinition("extension_default")],
+			[
+				"extension_self",
+				{
+					...createBaseToolDefinition("extension_self"),
+					renderShell: "self",
+					renderCall: () => new Text("self call", 0, 0),
+					renderResult: () => new Text("self result", 0, 0),
+				},
+			],
+			["unavailable_tool", undefined],
+		];
+
+		for (const [toolName, definition] of definitions) {
+			now.mockReturnValue(100);
+			const component = new ToolExecutionComponent(
+				toolName,
+				`timed-${toolName}`,
+				{},
+				{},
+				definition,
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.markExecutionStarted();
+			now.mockReturnValue(223);
+			component.updateResult({ content: [{ type: "text", text: "failed" }], isError: true });
+
+			const rendered = stripAnsi(component.render(120).join("\n"));
+			expect(rendered, toolName).toContain("Took 123ms");
+			expect(rendered.match(/Took 123ms/g), toolName).toHaveLength(1);
+		}
+	});
+
+	test("resets timing when a reusable panel starts a new invocation", () => {
+		const now = vi.spyOn(performance, "now");
+		const component = new ToolExecutionComponent(
+			"first_tool",
+			"timed-first",
+			{},
+			{},
+			createBaseToolDefinition("first_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		now.mockReturnValue(100);
+		component.markExecutionStarted();
+		now.mockReturnValue(300);
+		component.updateResult({ content: [], isError: false });
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("Took 200ms");
+
+		component.resetInvocation("second_tool", "timed-second", {}, createBaseToolDefinition("second_tool"));
+		expect(stripAnsi(component.render(120).join("\n"))).not.toMatch(/Elapsed|Took/);
+		now.mockReturnValue(1_000);
+		component.markExecutionStarted();
+		now.mockReturnValue(1_000.4);
+		component.updateResult({ content: [], isError: false });
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("Took <1ms");
+	});
+
+	test("keeps timing visible in collapsed grouped tool summaries", () => {
+		const now = vi.spyOn(performance, "now");
+		const component = new ToolExecutionComponent(
+			"summary_tool",
+			"timed-summary",
+			{},
+			{},
+			{ ...createBaseToolDefinition("summary_tool"), toolGroup: "summary" },
+			createFakeTui(),
+			process.cwd(),
+		);
+		now.mockReturnValue(100);
+		component.markExecutionStarted();
+		now.mockReturnValue(223);
+		component.updateResult({ content: [], isError: false });
+
+		expect(stripAnsi(component.renderCallSummary(120).join("\n"))).toContain("Took 123ms · [Summary Tool]");
+	});
+
+	test("does not schedule a timer per running tool", () => {
+		vi.useFakeTimers();
+		try {
+			for (const toolName of Object.keys(createAllToolDefinitions(process.cwd()))) {
+				const component = new ToolExecutionComponent(
+					toolName,
+					`timer-${toolName}`,
+					{},
+					{},
+					undefined,
+					createFakeTui(),
+					process.cwd(),
+				);
+				component.markExecutionStarted();
+				component.updateResult({ content: [], details: undefined, isError: false }, true);
+				component.render(120);
+			}
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("bounds built-in tool definition caches across repeated cwd/session switches", () => {
@@ -685,6 +822,74 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 		expect(rendered).toContain("one");
 		expect(rendered).toContain("two");
 		expect(rendered).not.toContain("two\n\n");
+	});
+
+	test("bounds collapsed streamed write previews without accumulated-prefix scans", () => {
+		const originalStartsWith = String.prototype.startsWith;
+		const originalSplit = String.prototype.split;
+		const originalCharCodeAt = String.prototype.charCodeAt;
+		let largePrefixChecks = 0;
+		let largeSplits = 0;
+		let largeCodeUnitReads = 0;
+		let readsAfterFinalCount = 0;
+		vi.spyOn(String.prototype, "startsWith").mockImplementation(function (
+			this: string,
+			searchString: string,
+			position?: number,
+		): boolean {
+			if (searchString.length > 16_384) largePrefixChecks++;
+			return originalStartsWith.call(this, searchString, position);
+		});
+		vi.spyOn(String.prototype, "charCodeAt").mockImplementation(function (this: string, index: number): number {
+			if (this.length > 16_384) largeCodeUnitReads++;
+			return originalCharCodeAt.call(this, index);
+		});
+		const boundedSplitProbe = function (this: string, separator?: unknown, limit?: number): string[] {
+			if (this.length > 16_384) largeSplits++;
+			return Reflect.apply(originalSplit, this, [separator, limit]) as string[];
+		};
+		Object.defineProperty(String.prototype, "split", {
+			configurable: true,
+			writable: true,
+			value: boundedSplitProbe,
+		});
+
+		let rendered = "";
+		try {
+			const content = `const marker = "${"x".repeat(32_768)}";`;
+			const component = new ToolExecutionComponent(
+				"write",
+				"tool-write-bounded-preview",
+				{ action: "commit", path: "preview.ts", intentId: "intent", content },
+				{},
+				createWriteToolDefinition(process.cwd()),
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.updateArgs({
+				action: "commit",
+				path: "preview.ts",
+				intentId: "intent",
+				content: `${content}\nconst done = true;`,
+			});
+			component.setArgsComplete();
+			readsAfterFinalCount = largeCodeUnitReads;
+			component.renderCallSummary(120);
+			component.renderCallSummary(120);
+			rendered = stripAnsi(component.render(120).join("\n"));
+		} finally {
+			Object.defineProperty(String.prototype, "split", {
+				configurable: true,
+				writable: true,
+				value: originalSplit,
+			});
+		}
+
+		expect(largePrefixChecks).toBe(0);
+		expect(largeSplits).toBe(0);
+		expect(readsAfterFinalCount).toBeGreaterThan(0);
+		expect(largeCodeUnitReads).toBe(readsAfterFinalCount);
+		expect(rendered).toContain("preview capped");
 	});
 
 	test("trims trailing blank display lines from read results", () => {
