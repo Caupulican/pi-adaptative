@@ -162,14 +162,12 @@ describe("task_steps tool", () => {
 	});
 
 	it("declares native orchestration guidelines", () => {
-		expect(harnessGuidelines(createHarness().tool)).toContain("exactly one step in_progress");
-		expect(harnessGuidelines(createHarness().tool)).toContain("first open task step");
-		expect(harnessGuidelines(createHarness().tool)).toContain("Drain task_steps");
+		expect(harnessGuidelines(createHarness().tool)).toContain("one step in_progress");
+		expect(harnessGuidelines(createHarness().tool)).toContain("first open step");
+		expect(harnessGuidelines(createHarness().tool)).toContain("Before final output");
 		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
-		expect(harnessGuidelines(createHarness().tool)).toContain("Skip task_steps for simple single-action work");
-		expect(harnessGuidelines(createHarness().tool)).toContain(
-			"Coalesce multiple checklist transitions into one set call",
-		);
+		expect(harnessGuidelines(createHarness().tool)).toContain("skip simple one-step work");
+		expect(harnessGuidelines(createHarness().tool)).toContain("Batch known transitions");
 	});
 });
 

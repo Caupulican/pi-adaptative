@@ -211,6 +211,22 @@ describe("profile_writer", () => {
 });
 
 describe("session task profile store", () => {
+	it("degrades reads explicitly and blocks writes when branch storage is unavailable", () => {
+		const partialSessionManager = {
+			appendCustomEntry: () => "entry-1",
+		} as unknown as SessionManager;
+		const store = new SessionTaskProfileStore(partialSessionManager);
+
+		expect(store.load()).toEqual({
+			records: [],
+			registry: new Map(),
+			diagnostics: ["session task profiles require branch-aware session storage"],
+		});
+		expect(() => store.append({ baseProfileId: "base-profile", profile: taskProfile("task-blocked") })).toThrow(
+			"session task profiles require branch-aware session storage",
+		);
+	});
+
 	it("rehydrates immutable profiles on the active branch and excludes abandoned branches", () => {
 		const sessionManager = SessionManager.inMemory();
 		const branchPoint = sessionManager.appendCustomEntry("branch-point", { ok: true });

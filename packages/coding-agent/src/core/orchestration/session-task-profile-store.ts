@@ -4,6 +4,7 @@ import { parseOrchestrationProfile } from "./profile-registry.ts";
 
 export const SESSION_TASK_PROFILE_CUSTOM_TYPE = "session_task_profile";
 export const MAX_SESSION_TASK_PROFILES = 32;
+const BRANCH_STORAGE_REQUIRED = "session task profiles require branch-aware session storage";
 
 export interface SessionTaskProfileRecord {
 	baseProfileId: string;
@@ -72,6 +73,15 @@ export class SessionTaskProfileStore {
 	}
 
 	load(): SessionTaskProfileLoadResult {
+		if (typeof this.sessionManager.getLeafId !== "function" || typeof this.sessionManager.getEntry !== "function") {
+			this.cachedLeafId = undefined;
+			this.cachedResult = {
+				records: [],
+				registry: new Map(),
+				diagnostics: [BRANCH_STORAGE_REQUIRED],
+			};
+			return this.cloneResult(this.cachedResult);
+		}
 		const leafId = this.sessionManager.getLeafId();
 		if (this.cachedLeafId === leafId) return this.cloneResult(this.cachedResult);
 
@@ -118,6 +128,13 @@ export class SessionTaskProfileStore {
 	}
 
 	append(input: SessionTaskProfileRecord): SessionTaskProfileRecord {
+		if (
+			typeof this.sessionManager.getLeafId !== "function" ||
+			typeof this.sessionManager.getEntry !== "function" ||
+			typeof this.sessionManager.appendCustomEntry !== "function"
+		) {
+			throw new Error(BRANCH_STORAGE_REQUIRED);
+		}
 		const loaded = this.load();
 		if (loaded.records.length >= MAX_SESSION_TASK_PROFILES) {
 			throw new Error(`session task profile limit (${MAX_SESSION_TASK_PROFILES}) reached`);

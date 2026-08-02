@@ -12825,9 +12825,9 @@ export const MODELS = {
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
-				output: 0.6000000000000001,
+				output: 0.6,
 				cacheRead: 0.01,
-				cacheWrite: 0.12500000000000003,
+				cacheWrite: 0.125,
 			},
 			contextWindow: 1050000,
 			maxTokens: 128000,
@@ -12878,7 +12878,7 @@ export const MODELS = {
 			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
-				input: 1.0000000000000002,
+				input: 1,
 				output: 6,
 				cacheRead: 0.09999999999999999,
 				cacheWrite: 1.25,
@@ -12896,7 +12896,7 @@ export const MODELS = {
 			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
-				input: 1.0000000000000002,
+				input: 1,
 				output: 6,
 				cacheRead: 0.09999999999999999,
 				cacheWrite: 1.25,

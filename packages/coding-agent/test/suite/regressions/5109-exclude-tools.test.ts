@@ -60,6 +60,7 @@ describe("regression #5109: exclude tools", () => {
 				"edit",
 				"goal",
 				"memory",
+				"profile_writer",
 				"python",
 				"run_toolkit_script",
 				"secret_store",

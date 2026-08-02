@@ -15,6 +15,7 @@
 
 - Edit commits can bind anchors to inclusive read-line ranges, prove uniqueness globally without occurrence arrays, and reuse a compact preview match plan and diff during execution.
 - The core agent contract now treats the user's desired outcome as authoritative over suggested methods and requires evidence-backed disagreement when a method may undermine that outcome.
+- Compacted the always-loaded core, goal, checklist, profile-writer, and trust-boundary instructions while preserving their behavioral and security invariants.
 
 ### Fixed
 
@@ -22,6 +23,7 @@
 - Removed full edit-argument serialization from asynchronous TUI preview rendering.
 - Bounded collapsed streamed write previews so growing content is neither rescanned nor fully split and highlighted on each update.
 - Kept native delegation available when tmux is missing or unsupported, validated tmux before worktree/process side effects, and prevented regular agents from overriding the owner's worker profile at dispatch time.
+- Kept base-profile delegation working with branch-unaware session adapters while explicitly blocking session task-profile persistence on that unsupported boundary.
 
 ## [0.84.1] - 2026-08-02
 

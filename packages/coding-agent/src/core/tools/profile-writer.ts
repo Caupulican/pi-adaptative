@@ -59,12 +59,11 @@ export function createProfileWriterToolDefinition(writer: TaskProfileWriterPort)
 		name: "profile_writer",
 		label: "profile_writer",
 		description:
-			"Inspect owner-authorized worker bases and create one immutable, session-scoped task profile by narrowing a base. The harness assigns the profile id. Tools, resources, and budgets cannot expand; the selected model must be configured, authenticated, healthy, and support the exact thinking level.",
-		promptSnippet: "Create a bounded session worker profile from an authorized owner base",
+			"Inspect authorized worker bases or create an immutable session profile that only narrows a base. Pi assigns its id; model and thinking must be available.",
+		promptSnippet: "Inspect or narrow a session worker profile",
 		promptGuidelines: [
-			"Inspect when the authorized bases or available model/thinking combinations are unknown.",
-			"Create only the smallest task-specific patch, then pass the returned profileId unchanged to delegate.",
-			"Never invent task profile ids or write orchestration profile files for one-off work.",
+			"Inspect when bases or models are unknown; create only a task-specific narrowing.",
+			"Pass the returned profileId unchanged to delegate; never invent ids or write one-off profile files.",
 		],
 		parameters: profileWriterSchema,
 		execute(_toolCallId, input: ProfileWriterToolInput) {

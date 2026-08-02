@@ -45,8 +45,7 @@ const goalSchema = Type.Object(
 		),
 		requirementId: Type.Optional(
 			Type.String({
-				description:
-					"Requirement id for add_requirement/satisfy_requirement/block_requirement/reopen_requirement/dispatch_worker.",
+				description: "Requirement id for requirement actions.",
 			}),
 		),
 		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
@@ -54,7 +53,7 @@ const goalSchema = Type.Object(
 		evidenceId: Type.Optional(Type.String({ description: "Evidence id. Required for add_evidence." })),
 		evidenceIds: Type.Optional(
 			Type.Array(Type.String(), {
-				description: "Evidence ids supporting a satisfy_requirement action. Each must already be recorded.",
+				description: "Existing evidence ids for satisfy_requirement.",
 			}),
 		),
 		kind: Type.Optional(
@@ -73,15 +72,13 @@ const goalSchema = Type.Object(
 		summary: Type.Optional(Type.String({ description: "Evidence summary. Required for add_evidence." })),
 		uri: Type.Optional(
 			Type.String({
-				description:
-					"Optional evidence locator (path/URL for kind 'file', a toolCallId for kind 'tool', a laneId for kind 'worker').",
+				description: "Optional file/URL, toolCallId, or laneId evidence locator.",
 			}),
 		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 		dispatchTarget: Type.Optional(
 			Type.Union([Type.Literal("in_process"), Type.Literal("tmux")], {
-				description:
-					"Legacy worker target. Native in-process dispatch is the default; select tmux only for an owner-requested persistent interactive pane. An unavailable tmux backend falls back to native dispatch.",
+				description: "Legacy target. Native is default; use tmux only for an owner-requested persistent pane.",
 			}),
 		),
 	},
@@ -351,12 +348,12 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		name: "goal",
 		label: "goal",
 		description:
-			"Read or update the compact durable goal record for explicitly requested long-running work. Planning belongs to task_steps, workers to delegate, and evidence to current tools/artifacts. Pause, resume, edit, clear, and budget stops are owner/system controlled.",
-		promptSnippet: "Read or update the compact durable goal record.",
+			"Read or update the durable goal for explicitly persistent work. Use task_steps for plans and delegate for workers; owner or system controls lifecycle and budget stops.",
+		promptSnippet: "Read or update the durable goal.",
 		promptGuidelines: [
-			"Call action 'start' only when the user or system explicitly requests a persistent goal; that request may be ordinary chat and does not require a slash command. The host may already have admitted high-confidence chat wording, so use 'get' before starting when uncertain. Do not infer a goal from an ordinary multi-step task or replace an unfinished goal implicitly. Set tokenBudget only when the user explicitly requested a token budget.",
-			"Use 'get' when the current objective or status is uncertain. Use task_steps for decomposition and delegate for workers; detailed ledger actions exist only for goals that already use the legacy ledger.",
-			"Mark 'complete' only after current authoritative evidence proves the full objective and no required work remains. Mark 'block_goal' only after the same genuine impasse persists for three goal turns.",
+			"Start only for an explicit persistent goal from chat or system; no slash command is needed. Use get when uncertain, never replace an unfinished goal, and set tokenBudget only when explicitly requested.",
+			"Use task_steps for plans and delegate for workers; use legacy actions only on legacy goals.",
+			"Complete only with current authoritative evidence and no remaining work; block_goal only after the same real impasse lasts three goal turns.",
 		],
 		parameters: goalSchema,
 		renderShell: "self",
