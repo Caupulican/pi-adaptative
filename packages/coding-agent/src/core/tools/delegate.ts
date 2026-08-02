@@ -26,7 +26,7 @@ function createDelegateSchema() {
 				Type.String({
 					maxLength: 512,
 					description:
-						"Owner-authored orchestration profile to use. The profile fixes role, model, thinking, tools, resources, budget, and concurrency. Omit only when the owner configured a default workerDelegation.orchestrationProfile.",
+						"Owner-authored orchestration profile to use. The profile fixes role, model, thinking, tools, resources, budget, and concurrency. Regular sessions must omit this field and use the owner's configured default; only an active owner-authored orchestrator may select an allowlisted profile.",
 				}),
 			),
 			instructions: Type.Optional(
@@ -203,7 +203,7 @@ function orchestrationProfileGuideline(
 	profiles: readonly { profileId: string; role: string; description: string }[] | undefined,
 ): string {
 	if (!profiles || profiles.length === 0) {
-		return "Delegation requires an owner-authored orchestration profile. Select its profileId, or rely on the owner's configured default; model and thinking overrides do not exist.";
+		return "Delegation requires an owner-authored orchestration profile. Regular sessions must rely on the owner's configured default; only an active owner-authored orchestrator may select a profileId. Never invent, create, or edit profiles during delegation.";
 	}
 	const visibleProfiles = profiles.slice(0, MAX_VISIBLE_ORCHESTRATION_PROFILES);
 	const entries = visibleProfiles.map((profile) => {
@@ -216,7 +216,7 @@ function orchestrationProfileGuideline(
 	return [
 		`Available owner-authored orchestration profiles: ${profiles.length} configured; ${entries.join("; ")}`,
 		...(omitted > 0 ? [`${omitted} omitted from this prompt; use the owner profile catalog to select them.`] : []),
-		"Select by profileId; never infer or request a model/thinking override.",
+		"Only an active owner-authored orchestrator may select an allowlisted profileId; regular sessions must omit it and use the owner's configured default. Never invent, create, or edit profiles during delegation, and never infer or request a model/thinking override.",
 	]
 		.join(" ")
 		.slice(0, MAX_PROFILE_GUIDELINE_CHARS);

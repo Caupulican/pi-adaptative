@@ -25,10 +25,13 @@ describe("delegate tool capability description", () => {
 		const parameters = definition.parameters as unknown as {
 			properties?: {
 				instructions?: { description?: string };
+				profileId?: { description?: string };
 			};
 		};
 		expect(parameters.properties?.instructions?.description).toContain("workerDelegation.writeEnabled");
 		expect(parameters.properties?.instructions?.description).toContain("path-scoped");
+		expect(parameters.properties?.profileId?.description).toContain("Regular sessions must omit");
+		expect((definition.promptGuidelines ?? []).join("\n")).toContain("Never invent, create, or edit profiles");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 

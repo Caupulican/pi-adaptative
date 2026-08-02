@@ -35,13 +35,25 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 
 const fauxCtx = { signal: undefined } as unknown as ExtensionContext;
 
-function fauxTmuxTool(execute: ToolDefinition["execute"]): ToolDefinition {
+function fauxTmuxTool(
+	execute: ToolDefinition["execute"],
+	guard: { allowed: boolean; onCall?: () => void } = { allowed: true },
+): ToolDefinition {
 	return {
 		name: "tmux_agent_manager",
 		label: "tmux_agent_manager",
 		description: "faux tmux_agent_manager for the dispatch-adapter spike",
 		parameters: {} as ToolDefinition["parameters"],
-		execute,
+		execute(toolCallId, params, signal, onUpdate, ctx) {
+			if ((params as { action?: string }).action === "guard") {
+				guard.onCall?.();
+				return Promise.resolve({
+					content: [{ type: "text" as const, text: guard.allowed ? "tmux is available" : "tmux is unavailable" }],
+					details: { action: "guard", guard: { allowed: guard.allowed } },
+				});
+			}
+			return execute(toolCallId, params, signal, onUpdate, ctx);
+		},
 	};
 }
 
@@ -146,6 +158,64 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
 		expect(outcome.skipReason).toBe("tmux_extension_not_loaded");
 		expect(outcome.laneId).toBeUndefined();
+	});
+
+	it("native Windows refuses tmux before extension lookup, context creation, or worktree side effects", async () => {
+		let toolLookedUp = false;
+		let contextCreated = false;
+		let worktreeCreated = false;
+		const deps = {
+			platform: "win32" as NodeJS.Platform,
+			getToolDefinition: () => {
+				toolLookedUp = true;
+				return fauxTmuxTool(async () => ({ content: [], details: {} }));
+			},
+			createExtensionContext: () => {
+				contextCreated = true;
+				return fauxCtx;
+			},
+			resolveManagedLaneId: () => undefined,
+			getGoalId: () => "g1",
+			createLaneWorktree: async () => {
+				worktreeCreated = true;
+				return { laneKey: "g1-1", worktreePath: "/repo/.worktrees/g1-1" };
+			},
+		} as TmuxDispatchDeps & { platform: NodeJS.Platform };
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+
+		expect(outcome).toEqual({ skipReason: "tmux_unavailable" });
+		expect(toolLookedUp).toBe(false);
+		expect(contextCreated).toBe(false);
+		expect(worktreeCreated).toBe(false);
+	});
+
+	it("guards tmux availability before creating a worktree or launching a pane", async () => {
+		const actions: string[] = [];
+		let worktreeCreated = false;
+		const toolDef = fauxTmuxTool(
+			async (_toolCallId, params) => {
+				actions.push((params as { action: string }).action);
+				return { content: [], details: {} };
+			},
+			{ allowed: false, onCall: () => actions.push("guard") },
+		);
+		const deps: TmuxDispatchDeps = {
+			getToolDefinition: () => toolDef,
+			createExtensionContext: () => fauxCtx,
+			resolveManagedLaneId: () => undefined,
+			getGoalId: () => "g1",
+			createLaneWorktree: async () => {
+				worktreeCreated = true;
+				return { laneKey: "g1-1", worktreePath: "/repo/.worktrees/g1-1" };
+			},
+		};
+
+		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
+
+		expect(outcome).toEqual({ skipReason: "tmux_unavailable" });
+		expect(actions).toEqual(["guard"]);
+		expect(worktreeCreated).toBe(false);
 	});
 
 	it("a non-grant launch failure classifies as tmux_dispatch_failed -- still an honest surfaced skip, never a crash", async () => {

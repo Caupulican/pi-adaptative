@@ -178,6 +178,37 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("keeps the owner-selected default profile authoritative when a regular agent invents a profile id", async () => {
+		const ownerDefault = workerProfile("owner-default-worker");
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "owner-default-worker", contextWindow: 128_000 },
+			],
+			workerOrchestrationProfile: ownerDefault,
+		});
+		let selectedModelId = "";
+		try {
+			harness.setResponses([
+				(_context, _options, _state, model) => {
+					selectedModelId = model.id;
+					return fauxAssistantMessage(WORKER_JSON);
+				},
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Use the owner-selected worker.",
+				profileId: "invented-at-runtime",
+			});
+
+			expect(run.started).toBe(true);
+			expect(selectedModelId).toBe("owner-default-worker");
+			expect(run.record?.profileId).toBe(ownerDefault.profileId);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("enforces concurrency per worker profile under the global worker ceiling", async () => {
 		const now = new Date().toISOString();
 		const architect: OrchestrationProfile = {

@@ -7,6 +7,8 @@ import type { LaneWorkerRefusal } from "../model-capability.ts";
  * with no direct dependency on `AgentSession`/`ExtensionRunner`/`BackgroundLaneController`.
  */
 export interface TmuxDispatchDeps {
+	/** Runtime platform seam. Native Windows has no supported tmux backend; WSL reports `linux`. */
+	platform?: NodeJS.Platform;
 	/** Look up a registered tool by name -- the SAME seam the model's own tool calls resolve
 	 * through (`AgentSession.getToolDefinition` -> `RuntimeBuilder.getToolDefinition`). `undefined`
 	 * when the tmux extension is not loaded in this session -- an honest, non-fatal skip, not a
@@ -73,6 +75,10 @@ interface FireTaskResultDetails {
 	};
 }
 
+interface TmuxGuardResultDetails {
+	guard?: { allowed?: boolean };
+}
+
 /**
  * Structurally dispatch ONE persistent tmux worker agent for a single goal requirement, by
  * invoking the SAME `tmux_agent_manager` `fire_task` tool call the model itself would make. Core
@@ -94,14 +100,26 @@ export async function dispatchTmuxWorker(
 	if (deps.evaluateWorkerLaneRefusal?.() !== undefined) {
 		return { skipReason: "worker_capability_insufficient" };
 	}
+	if ((deps.platform ?? process.platform) === "win32") return { skipReason: "tmux_unavailable" };
 
 	const toolDef = deps.getToolDefinition("tmux_agent_manager");
 	if (!toolDef) return { skipReason: "tmux_extension_not_loaded" };
 
 	const goalId = deps.getGoalId();
 	const ctx = deps.createExtensionContext();
+	const toolCallId = `goal-dispatch:${goalId ?? "?"}:${args.requirementId}`;
+	try {
+		const guardResult = await toolDef.execute(`${toolCallId}:guard`, { action: "guard" }, ctx.signal, undefined, ctx);
+		const guard = (guardResult.details as TmuxGuardResultDetails | undefined)?.guard;
+		if (guard?.allowed !== true) return { skipReason: "tmux_unavailable" };
+	} catch {
+		// A guard failure is side-effect free. Treat it as backend unavailability so the goal owner can
+		// safely choose its native worker fallback without fabricating a tmux lane.
+		return { skipReason: "tmux_unavailable" };
+	}
 
-	// Lane-first: when worktree-sync is wired, create the lane BEFORE any fire_task call so a
+	// Availability first, then lane-first: when worktree-sync is wired, create the lane only after
+	// tmux's pure guard succeeds and BEFORE any fire_task call so a
 	// creation refusal (max lanes, invalid key, git error, ...) aborts cleanly with no tmux/pane side
 	// effect ever having run. The specific engine refusal code is deliberately collapsed onto the one
 	// stable `worktree_create_failed` skip reason -- same narrow `{laneId?, skipReason?}` contract
@@ -133,8 +151,6 @@ export async function dispatchTmuxWorker(
 				: { provider: "pi", name: "goal-worker" },
 		],
 	};
-	const toolCallId = `goal-dispatch:${goalId ?? "?"}:${args.requirementId}`;
-
 	let result: Awaited<ReturnType<ToolDefinition["execute"]>>;
 	try {
 		result = await toolDef.execute(toolCallId, params, ctx.signal, undefined, ctx);

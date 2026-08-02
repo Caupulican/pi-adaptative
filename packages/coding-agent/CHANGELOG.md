@@ -14,6 +14,7 @@
 - Rejected write collisions, missing edit targets, and stale prepared edits before mutation; non-UTF-8 edits now fail through the centralized change-approach workflow.
 - Removed full edit-argument serialization from asynchronous TUI preview rendering.
 - Bounded collapsed streamed write previews so growing content is neither rescanned nor fully split and highlighted on each update.
+- Kept native delegation available when tmux is missing or unsupported, validated tmux before worktree/process side effects, and prevented regular agents from overriding the owner's worker profile at dispatch time.
 
 ## [0.84.1] - 2026-08-02
 

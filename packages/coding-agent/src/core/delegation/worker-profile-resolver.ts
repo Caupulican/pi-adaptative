@@ -63,7 +63,15 @@ export class WorkerProfileResolver {
 		request: WorkerDelegationRequest,
 		defaultProfileId: string | undefined,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
-		const profileId = request.profileId?.trim() || defaultProfileId;
+		const requestedProfileId = request.profileId?.trim();
+		const activeProfile = this.options.getActiveOrchestrationProfile();
+		// A regular session uses the owner's fixed default even if the model invents or mistypes a
+		// profile id. Only an owner-authored orchestrator is a routing authority, and its selections
+		// remain constrained by dispatchProfileIds in resolveProfileId().
+		const profileId =
+			activeProfile?.role === "orchestrator"
+				? requestedProfileId || defaultProfileId
+				: defaultProfileId || requestedProfileId;
 		if (!profileId) return { ok: false, reason: "orchestration_profile_required" };
 		const selected = this.resolveProfileId(profileId);
 		if (!selected.ok) return selected;

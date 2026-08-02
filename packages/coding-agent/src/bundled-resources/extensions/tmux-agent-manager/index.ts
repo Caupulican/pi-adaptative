@@ -592,25 +592,29 @@ function formatDetection(d: TmuxDetection): string {
 }
 function setupHelp(d: TmuxDetection): string {
 	if (d.cliAvailable)
-		return `tmux CLI available: ${d.tmuxBin || "tmux"}\nUse tmux_agent_manager action=workspace_plan or fire_task. Set dryRun=true only when a preview is useful.`;
+		return `tmux CLI available: ${d.tmuxBin || "tmux"}\nUse native delegate for ordinary subagents. Use tmux_agent_manager only for an owner-requested persistent interactive pane; set dryRun=true only when a preview is useful.`;
 	return [
 		"tmux CLI not found.",
-		"Install tmux for your environment, then reload Pi:",
+		"Ordinary subagents remain available through native delegate; do not abort delegation.",
+		"Install tmux only if persistent interactive provider panes are required, then reload Pi:",
 		"- Debian/Ubuntu/WSL: sudo apt-get install tmux",
 		"- Fedora: sudo dnf install tmux",
 		"- Arch: sudo pacman -S tmux",
 		"- macOS: brew install tmux",
-		"- Windows: use WSL/MSYS2/Cygwin where a real tmux binary is available on PATH.",
+		"- Native Windows: use native delegate. WSL may use tmux when it is installed on PATH.",
 		"cmux is macOS-only and intentionally not used by this tmux manager.",
 	].join("\n");
 }
 async function guardTmux(_ctx: ExtensionContext, detection: TmuxDetection, purpose: string) {
 	if (detection.cliAvailable) return { allowed: true, text: `tmux available for ${purpose}.` };
-	return { allowed: false, text: `${setupHelp(detection)}\n\nCannot run tmux-managed work until tmux is on PATH.` };
+	return {
+		allowed: false,
+		text: `${setupHelp(detection)}\n\nTmux route unavailable. Continue ordinary subagent work with native delegate.`,
+	};
 }
 function tmuxManagerInstructions(toolName: string, detection: TmuxDetection): string {
 	return [
-		`tmux is available (${detection.version || detection.tmuxBin || "tmux"}). For managed ${toolName} work, use tmux_agent_manager instead of direct foreground/background dispatch.`,
+		`tmux is available (${detection.version || detection.tmuxBin || "tmux"}). Native delegate remains the standard subagent route. Use tmux_agent_manager for managed ${toolName} panes only when the owner explicitly requested persistent interactive provider processes.`,
 		"Suggested next call:",
 		'tmux_agent_manager({ action: "fire_task", teamTemplate: "builder-validator", task: "<objective>" })',
 		"The launch returns immediately after panes, event watchers, and prompt handoffs are armed.",
@@ -2195,11 +2199,13 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 		name: "tmux_agent_manager",
 		label: "tmux Agent Manager",
 		description:
-			"tmux-exclusive interactive agent/workspace manager for Windows/Linux/macOS environments where tmux is on PATH. Opens real provider CLIs in panes, injects prompts, captures output, and replaces cmux outside iOS/macOS cmux use.",
+			"Specialized tmux-backed interactive provider/workspace manager. Native delegate is the standard cross-platform subagent path. Use this tool only when the owner explicitly requests persistent interactive CLI panes and tmux is available.",
 		promptSnippet:
-			"Use tmux to launch managed interactive agent/provider panes with prompt injection, captured output, completion markers, shared variables, and final notifications.",
+			"Use native delegate for ordinary subagents. Use tmux only for owner-requested persistent interactive provider panes after action=guard confirms availability.",
 		promptGuidelines: [
-			"Use tmux_agent_manager for Windows/Linux tmux-managed workers. Do not use cmux on Windows/Linux; cmux is macOS-only and manual-disabled there.",
+			"Use native delegate/delegate_status for ordinary subagent work on every OS. Use tmux_agent_manager only when the owner explicitly requests persistent interactive provider panes and action=guard confirms tmux is available.",
+			"On native Windows, do not attempt tmux dispatch. Native delegate is the supported backend; WSL may use tmux only when installed and explicitly requested.",
+			"Never create or edit orchestration profiles during dispatch; native delegation's owner-configured profile resolver is authoritative.",
 			"Prefer action=fire_task for interactive worker batches. It returns after event watchers and prompts are armed; do not wait, poll, or peek for completion.",
 			"Use action=list_templates/show_template before assembling repeated teams; pass teamTemplate when a built-in team fits.",
 			"Use action=workspace_plan before launch_workspace when designing a pane layout.",

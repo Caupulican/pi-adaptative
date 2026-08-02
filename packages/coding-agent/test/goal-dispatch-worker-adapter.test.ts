@@ -80,7 +80,7 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("lane-for-r1");
 		expect(getState()?.requirements.find((r) => r.id === "r1")?.status).toBe("open");
 		expect(firstText(result.content)).toContain("Dispatched in-process worker lane 'lane-for-r1'");
-		expect(firstText(result.content)).toContain("tmux dispatch is not available from this tool yet");
+		expect(firstText(result.content)).toContain("native default");
 	});
 
 	it("reports a real decline from a wired starter distinctly from an unwired dependency", async () => {
@@ -211,7 +211,7 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 		expect(result.details.dispatchedLaneId).toBe("lane-for-r1");
 		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("lane-for-r1");
 		expect(firstText(result.content)).toContain("Dispatched in-process worker lane 'lane-for-r1'");
-		expect(firstText(result.content)).toContain("tmux dispatch is not available from this tool yet");
+		expect(firstText(result.content)).toContain("native default");
 	});
 
 	it("dispatchTarget:'tmux' with the dep UNWIRED falls back to the in-process path (honest, not a silent tmux fake)", async () => {
@@ -257,20 +257,34 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 		expect(firstText(result.content)).toContain("no_standing_grant");
 	});
 
-	it("surfaces 'tmux_extension_not_loaded' the same honest way", async () => {
-		const { run } = createProducer({
-			dispatchTmuxWorker: async () => ({ skipReason: "tmux_extension_not_loaded" }),
-		});
+	it.each(["tmux_extension_not_loaded", "tmux_unavailable"])(
+		"falls back to the native worker when the explicit tmux route returns %s",
+		async (tmuxSkipReason) => {
+			let nativeCalls = 0;
+			const dispatchTmuxWorker = async () => ({ skipReason: tmuxSkipReason });
+			const producer = createProducer({
+				dispatchTmuxWorker,
+				startWorkerDelegation: ({ requirementId }) => {
+					nativeCalls++;
+					return { laneId: `native-worker-for-${requirementId}` };
+				},
+			});
 
-		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
-		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
-		const result = await run({
-			action: "dispatch_worker",
-			requirementId: "r1",
-			instructions: "go do it",
-			dispatchTarget: "tmux",
-		});
+			await producer.run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+			await producer.run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+			const result = await producer.run({
+				action: "dispatch_worker",
+				requirementId: "r1",
+				instructions: "go do it",
+				dispatchTarget: "tmux",
+			});
 
-		expect(result.details.dispatchSkipReason).toBe("tmux_extension_not_loaded");
-	});
+			expect(nativeCalls).toBe(1);
+			expect(result.details.dispatchSkipReason).toBeUndefined();
+			expect(result.details.dispatchedLaneId).toBe("native-worker-for-r1");
+			expect(producer.getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBe("native-worker-for-r1");
+			expect(firstText(result.content)).toContain(tmuxSkipReason);
+			expect(firstText(result.content)).toContain("native fallback");
+		},
+	);
 });

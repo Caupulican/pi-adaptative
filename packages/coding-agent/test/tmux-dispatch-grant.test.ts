@@ -138,6 +138,9 @@ describe("dispatch-grant pure logic", () => {
 // ---------------------------------------------------------------------------
 
 type RegisteredTool = {
+	description?: string;
+	promptSnippet?: string;
+	promptGuidelines?: readonly string[];
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
@@ -418,6 +421,28 @@ function installExtension(
 		seedCustomEntry: appendEntry,
 	};
 }
+
+describe("tmux extension routing guidance", () => {
+	it("keeps native delegate as the standard cross-platform subagent route", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tmux-guidance-"));
+		try {
+			const { registeredTool } = installExtension(tempDir);
+			const guidance = [
+				registeredTool.description,
+				registeredTool.promptSnippet,
+				...(registeredTool.promptGuidelines ?? []),
+			]
+				.filter((value): value is string => value !== undefined)
+				.join("\n");
+			expect(guidance).toContain("native delegate");
+			expect(guidance).toContain("explicitly requests");
+			expect(guidance).toContain("Never create or edit orchestration profiles during dispatch");
+			expect(guidance).not.toContain("Use tmux_agent_manager for Windows/Linux tmux-managed workers");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
 
 describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-gated launch", () => {
 	let tempDir: string;

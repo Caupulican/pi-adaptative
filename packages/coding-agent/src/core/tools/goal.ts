@@ -80,7 +80,8 @@ const goalSchema = Type.Object(
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 		dispatchTarget: Type.Optional(
 			Type.Union([Type.Literal("in_process"), Type.Literal("tmux")], {
-				description: "Legacy worker target. Prefer the delegate tool for new work.",
+				description:
+					"Legacy worker target. Native in-process dispatch is the default; select tmux only for an owner-requested persistent interactive pane. An unavailable tmux backend falls back to native dispatch.",
 			}),
 		),
 	},
@@ -184,6 +185,10 @@ export interface GoalToolDependencies {
 	 * task state itself; this is the only place that supplies it.
 	 */
 	getOpenTaskSteps?: () => readonly OpenTaskStepRef[];
+}
+
+function allowsNativeTmuxFallback(reason: string | undefined): boolean {
+	return reason === "tmux_unavailable" || reason === "tmux_extension_not_loaded";
 }
 
 /**
@@ -440,25 +445,45 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 				}
 			}
 			if (action.action === "dispatch_worker" && !dispatchGuardRefused) {
-				const useTmux = input.dispatchTarget === "tmux" && deps.dispatchTmuxWorker !== undefined;
-				const dispatched = useTmux
-					? await deps.dispatchTmuxWorker?.({
-							requirementId: action.requirementId,
-							instructions: action.instructions,
-						})
-					: deps.startWorkerDelegation?.({
+				const tmuxRequested = input.dispatchTarget === "tmux";
+				let useTmux = tmuxRequested && deps.dispatchTmuxWorker !== undefined;
+				let tmuxFallbackReason: string | undefined;
+				let dispatched: { laneId?: string; skipReason?: string } | undefined;
+				if (useTmux) {
+					dispatched = await deps.dispatchTmuxWorker?.({
+						requirementId: action.requirementId,
+						instructions: action.instructions,
+					});
+					if (
+						!dispatched?.laneId &&
+						allowsNativeTmuxFallback(dispatched?.skipReason) &&
+						deps.startWorkerDelegation
+					) {
+						tmuxFallbackReason = dispatched?.skipReason;
+						useTmux = false;
+						dispatched = deps.startWorkerDelegation({
 							requirementId: action.requirementId,
 							instructions: action.instructions,
 						});
+					}
+				} else {
+					if (tmuxRequested) tmuxFallbackReason = "tmux_extension_not_loaded";
+					dispatched = deps.startWorkerDelegation?.({
+						requirementId: action.requirementId,
+						instructions: action.instructions,
+					});
+				}
 				action = { ...action, laneId: dispatched?.laneId };
 				if (dispatched?.laneId) {
-					dispatchNote = useTmux
-						? `Dispatched tmux worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
-						: `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (tmux dispatch is not available from this tool yet).`;
+					dispatchNote = tmuxFallbackReason
+						? `Tmux route returned ${tmuxFallbackReason}; dispatched native fallback worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+						: useTmux
+							? `Dispatched tmux worker lane '${dispatched.laneId}' for requirement '${action.requirementId}'.`
+							: `Dispatched in-process worker lane '${dispatched.laneId}' for requirement '${action.requirementId}' (native default).`;
 				} else {
 					const wired = useTmux ? deps.dispatchTmuxWorker : deps.startWorkerDelegation;
 					dispatchSkipReason = dispatched?.skipReason ?? (wired ? "declined" : "dependency_unwired");
-					dispatchNote = `No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
+					dispatchNote = `${tmuxFallbackReason ? `Tmux route returned ${tmuxFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
 				}
 			}
 
