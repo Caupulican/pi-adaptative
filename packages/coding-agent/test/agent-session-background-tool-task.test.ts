@@ -35,6 +35,9 @@ describe("AgentSession background tool tasks", () => {
 				"background completion acknowledged",
 			],
 		});
+		// A base-tool override is an explicit surface: request session background control instead
+		// of relying on it to bypass that surface as an implicit companion.
+		harness.session.setActiveToolsByName(["slow", "tool_task"]);
 		harness.agent.backgroundToolCallAfterMs = 5;
 
 		let sawRunningLevel = false;

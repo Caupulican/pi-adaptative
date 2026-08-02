@@ -22,7 +22,9 @@ describe("AgentSession context window warnings and compaction adaptation", () =>
 		};
 
 		const harness = await createHarness({
-			models: [{ id: "small-model", contextWindow: 2000 }],
+			// Keep the characterized base configuration inside the 70–100% warning band. A
+			// 2k window instead exercises the separate, stronger "cannot process" branch.
+			models: [{ id: "small-model", contextWindow: 3000 }],
 			tools: [dummyTool],
 			resourceLoader: customLoader,
 			settings: {
@@ -44,6 +46,7 @@ describe("AgentSession context window warnings and compaction adaptation", () =>
 			expect(warningEvents.length).toBeGreaterThanOrEqual(1);
 			expect(warningEvents[0].message).toContain("Base configuration");
 			expect(warningEvents[0].message).toContain("leaves very little room");
+			expect(warningEvents[0].message).not.toContain("cannot process any prompts");
 		} finally {
 			harness.cleanup();
 		}

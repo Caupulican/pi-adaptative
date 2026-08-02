@@ -112,7 +112,8 @@ describe("AgentSession worker delegation", () => {
 		try {
 			expect(harness.session.model?.id).toBe("operator-worker");
 			expect(harness.session.thinkingLevel).toBe("off");
-			expect(harness.session.getActiveToolNames()).toEqual(["read", "run_process", "tool_task"]);
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "run_process"]);
+			expect(harness.session.getToolDefinition("tool_task")).toBeUndefined();
 			expect(harness.session.getToolDefinition("run_process")).toBeDefined();
 			expect(harness.session.getToolDefinition("bash")).toBeUndefined();
 			expect(harness.session.getToolDefinition("delegate")).toBeUndefined();

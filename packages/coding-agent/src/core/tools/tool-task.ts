@@ -9,13 +9,12 @@ const schema = Type.Object(
 	{
 		action: Type.String({
 			enum: ["list", "wait", "cancel"],
-			description:
-				'Use "list" for one bounded snapshot, "wait" once when a task result is a dependency, or "cancel" to abort one session task. Never poll.',
+			description: "List once, wait once for a dependency, or cancel. Never poll.",
 		}),
 		taskId: Type.Optional(
 			Type.String({
 				maxLength: MAX_TASK_ID_CHARS,
-				description: "Session-local task id returned by a backgrounded tool call; required for wait/cancel.",
+				description: "Task id; required for wait/cancel.",
 			}),
 		),
 	},
@@ -61,12 +60,8 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 		name: "tool_task",
 		label: "tool_task",
 		description:
-			"List, wait for, or cancel tool calls automatically moved into this session's background after 15 seconds or by a manual handoff. Continue independent work when possible. If a result is required, call wait once; completion is event-driven, so never poll.",
-		promptSnippet: "Wait for or cancel session-owned background tool calls without polling.",
-		promptGuidelines: [
-			"A slow tool result names its session task. Continue independent work; if that result blocks progress, call tool_task with action=wait exactly once.",
-			"Background tool completion is event-driven and wakes this session. Never poll tool_task list or repeatedly wait.",
-		],
+			"List, wait for, or cancel this session's background tool calls. Continue other work; wait is event-driven, never poll.",
+		promptSnippet: "Event-driven background tool control; wait once, never poll.",
 		parameters: schema,
 		async execute(_toolCallId, input: Input, signal) {
 			if (input.action === "list") {

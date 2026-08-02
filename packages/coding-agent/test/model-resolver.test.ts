@@ -1,4 +1,4 @@
-import type { Model } from "@caupulican/pi-ai";
+import { getModels, type Model } from "@caupulican/pi-ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -533,10 +533,17 @@ describe("default model selection", () => {
 	});
 
 	test("zai, minimax, and cerebras defaults track current models", () => {
-		expect(defaultModelPerProvider.zai).toBe("glm-5.1");
+		expect(defaultModelPerProvider.zai).toBe("glm-5.2");
 		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
 		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
 		expect(defaultModelPerProvider.cerebras).toBe("zai-glm-4.7");
+	});
+
+	test("direct zai default belongs to the generated catalog", () => {
+		const directZaiModelIds = getModels("zai").map((model) => model.id);
+
+		expect(directZaiModelIds).toContain(defaultModelPerProvider.zai);
+		expect(directZaiModelIds).not.toContain("glm-5.1");
 	});
 
 	test("ai-gateway default tracks current model", () => {

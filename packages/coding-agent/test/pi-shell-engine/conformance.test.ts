@@ -403,6 +403,17 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			});
 		});
 
+		it("ls -la accepts the ubiquitous long/all spelling without leaving the Python tier", () => {
+			withTmpDir((dir) => {
+				writeFileSync(join(dir, ".hidden"), "");
+				writeFileSync(join(dir, "visible"), "");
+				const { frame, stdout } = runEngine(python, "ls -la", dir);
+				expect(frame.exitCode).toBe(0);
+				expect(frame.unsupported).toBeNull();
+				expect(stdout).toBe("./\n../\n.hidden\nvisible\n");
+			});
+		});
+
 		it("cat byte-exact concatenation", () => {
 			withTmpDir((dir) => {
 				writeFileSync(join(dir, "f1.txt"), "one\n");
@@ -549,7 +560,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			["control-flow", "if true; then echo hi; fi"],
 			["extended-glob", "foo @(a|b)"],
 			["unsupported-builtin", "eval foo"],
-			["unsupported-flag", "ls -l"],
+			["unsupported-flag", "ls -Z"],
 			["posix-script", "foo.sh"],
 			["tilde-user", "echo ~someuser"],
 			["malformed-syntax", ")"],

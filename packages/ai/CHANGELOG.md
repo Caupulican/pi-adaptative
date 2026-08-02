@@ -7,6 +7,7 @@
 ### Changed
 
 - Centralized provider-neutral request lifecycle, Google streaming, OpenAI client construction, OAuth authorization input, model capability, and usage initialization ownership without changing provider-specific I/O.
+- Refreshed the generated provider catalog with current model availability, capabilities, and pricing, including direct zAI GLM 5.2 models.
 
 ### Fixed
 

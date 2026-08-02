@@ -253,7 +253,7 @@ export interface RuntimeBuilderDeps {
 
 	/** Currently-active tool names (reads agent.state.tools; the pre-filter fallback for a rebuild). */
 	getActiveToolNames(): string[];
-	/** Apply the recomputed active set (capability filter + companion auto-activation live here). */
+	/** Apply the recomputed active set (capability filter + required artifact/delegation companions live here). */
 	setActiveToolsByName(toolNames: string[]): void;
 	/** Normalize a tool's prompt snippet / guidelines through the system-prompt builder. */
 	normalizePromptSnippet(text: string | undefined): string | undefined;
@@ -421,17 +421,12 @@ export class RuntimeBuilder {
 			allowedToolNames,
 			toolProfileFilter,
 			allows: (name) => {
-				const sessionControlCompanion = name === "tool_task";
 				// Strict worker UAC ceiling wins over every explicit grant.
 				if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
-				if (allowedToolNames && !allowedToolNames.has(name) && !sessionControlCompanion) return false;
+				if (allowedToolNames && !allowedToolNames.has(name)) return false;
 				if (excludedToolNames?.has(name)) return false;
 				if (!toolProfileFilter) return true;
-				if (
-					toolProfileFilter.allow.length > 0 &&
-					!matchesResourceProfilePattern(name, toolProfileFilter.allow) &&
-					!sessionControlCompanion
-				) {
+				if (toolProfileFilter.allow.length > 0 && !matchesResourceProfilePattern(name, toolProfileFilter.allow)) {
 					return false;
 				}
 				if (matchesResourceProfilePattern(name, toolProfileFilter.block)) return false;

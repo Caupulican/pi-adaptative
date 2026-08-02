@@ -39,7 +39,7 @@ describe("regression #5109: exclude tools", () => {
 
 	it("filters built-in and extension tools from available and active tools", async () => {
 		const harness = await createHarness({
-			excludedToolNames: ["read", "ask_question"],
+			excludedToolNames: ["read", "ask_question", "tool_task"],
 			extensionFactories,
 		});
 		try {

@@ -77,7 +77,8 @@ describe("SDK default tool surface", () => {
 			resourceProfiles: ["sdk-review"],
 		});
 		try {
-			expect(session.getActiveToolNames()).toEqual(["read", "delegate", "tool_task"]);
+			expect(session.getActiveToolNames()).toEqual(["read", "delegate"]);
+			expect(session.getToolDefinition("tool_task")).toBeUndefined();
 			expect(session.thinkingLevel).toBe("high");
 			expect(session.systemPrompt).toContain("Review this workspace without editing it.");
 			expect(session.settingsManager.getModelRouterSettings()).toMatchObject({
@@ -133,7 +134,8 @@ describe("SDK default tool surface", () => {
 		try {
 			expect(session.model?.id).toBe(model.id);
 			expect(session.thinkingLevel).toBe("off");
-			expect(session.getActiveToolNames()).toEqual(["read", "run_process", "tool_task"]);
+			expect(session.getActiveToolNames()).toEqual(["read", "run_process"]);
+			expect(session.getToolDefinition("tool_task")).toBeUndefined();
 			expect(session.getToolDefinition("bash")).toBeUndefined();
 		} finally {
 			session.dispose();

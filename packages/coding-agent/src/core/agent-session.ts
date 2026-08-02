@@ -2215,6 +2215,8 @@ export class AgentSession {
 	 * end up active while still being handed an artifact store (gated on "allowed" in
 	 * `_buildRuntime`) with no active tool able to resolve the resulting
 	 * "Full output: artifact tool-output:<id>" handle.
+	 * Other tools, including tool_task, activate only when explicitly requested (or present in the
+	 * shared default request) and after surviving model-capability filtering.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		// Model capability: small-window models get a reduced tool surface derived from the model's
@@ -2248,9 +2250,6 @@ export class AgentSession {
 		}
 		if (validToolNames.includes("delegate")) {
 			addIfRegistered("delegate_status");
-		}
-		if (validToolNames.length > 0) {
-			addIfRegistered("tool_task");
 		}
 
 		this.agent.state.tools = tools;

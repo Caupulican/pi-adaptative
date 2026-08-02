@@ -5,7 +5,7 @@ import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { LocalRuntimeDeps } from "../src/core/models/local-runtime.ts";
 import type { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.ts";
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
-import { ExtensionUiHost } from "../src/modes/interactive/extension-ui-host.ts";
+import { ExtensionUiHost, type ExtensionUiHostUi } from "../src/modes/interactive/extension-ui-host.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createHarness } from "./suite/harness.ts";
 
@@ -143,14 +143,11 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 		const editorContainer = new Container();
 		const editor = new Text("", 0, 0);
 		const statusCalls: Array<string | undefined> = [];
-		// showExtensionConfirm's own body calls `this.showExtensionSelector(...)`, whose own callbacks
-		// call `this.hideExtensionSelector()` -- both need to be real, callable own-properties on
-		// fakeThis (not just Reflect-bound at the call site) so that internal `this.foo(...)` dispatch
-		// inside those private methods resolves to the real implementation, not undefined.
-		const fakeThis = {
-			extensionSelector: undefined as ExtensionSelectorComponent | undefined,
-			// Mirror the real ExtensionUiHost collaborator surface: showExtensionSelector/
-			// hideExtensionSelector reach the TUI, the editor, and the container swap through this.ui.
+		// Use the real dialog owner. A partial prototype mirror is brittle whenever selector/input
+		// lifecycle logic is consolidated behind another private owner, and can fail before mounting
+		// even though a production ExtensionUiHost instance is healthy.
+		const extensionUiHost = new ExtensionUiHost({
+			getSession: () => harness.session,
 			ui: {
 				tui: ui,
 				overlayHost: new EditorOverlayHost(editorContainer, ui),
@@ -159,37 +156,31 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 				footerDataProvider: {
 					setExtensionStatus: (_key: string, text: string | undefined) => statusCalls.push(text),
 				},
-			},
-			showExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "showExtensionSelector"),
-			hideExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "hideExtensionSelector"),
+			} as unknown as ExtensionUiHostUi,
+		});
+		const extensionUiState = extensionUiHost as unknown as {
+			extensionSelector?: ExtensionSelectorComponent;
 		};
-
-		const showExtensionConfirm = Reflect.get(ExtensionUiHost.prototype, "showExtensionConfirm") as (
-			this: typeof fakeThis,
-			title: string,
-			message: string,
-			opts?: { signal?: AbortSignal; timeout?: number },
-		) => Promise<boolean>;
-		const setExtensionStatus = Reflect.get(ExtensionUiHost.prototype, "setExtensionStatus") as (
-			this: typeof fakeThis,
-			key: string,
-			text: string | undefined,
-		) => void;
-
-		// The real ExtensionUIContext.confirm/setStatus, bound to real ExtensionUiHost dialog methods.
-		const realUIContext = {
-			confirm: (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) =>
-				showExtensionConfirm.call(fakeThis, title, message, opts),
-			setStatus: (key: string, text: string | undefined) => setExtensionStatus.call(fakeThis, key, text),
-		} as unknown as ExtensionUIContext;
+		const realUIContext = extensionUiHost.createExtensionUIContext();
 		(harness.session as unknown as { _extensionUIContext?: ExtensionUIContext })._extensionUIContext = realUIContext;
 
 		try {
+			// Negative control: a pre-aborted request must settle without mounting or displacing a dialog.
+			const aborted = new AbortController();
+			aborted.abort();
+			await expect(realUIContext.confirm("Ignored", "Already aborted", { signal: aborted.signal })).resolves.toBe(
+				false,
+			);
+			expect(extensionUiState.extensionSelector).toBeUndefined();
+
 			const promptPromise = harness.session.prompt("Explain this code block");
 
 			// Wait for the REAL confirm dialog to actually mount (set by the real showExtensionSelector).
-			await waitFor(() => fakeThis.extensionSelector !== undefined, "the install-ollama confirm dialog to render");
-			const selector = fakeThis.extensionSelector;
+			await waitFor(
+				() => extensionUiState.extensionSelector !== undefined,
+				"the install-ollama confirm dialog to render",
+			);
+			const selector = extensionUiState.extensionSelector;
 			if (!selector) throw new Error("unreachable — waitFor guarantees this is set");
 
 			// Real render() call on the real component -- proves the actual confirm text is what's drawn,

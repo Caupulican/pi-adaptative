@@ -24,6 +24,8 @@
 
 ### Fixed
 
+- Fixed background task control bypassing explicit tool allowlists, resource and orchestration profiles, custom tool surfaces, and model-capability filtering while preserving it on the default session surface.
+- Fixed the direct zAI default selecting the retired `glm-5.1` model by resolving to current `glm-5.2` and verifying the default against the generated catalog.
 - Fixed large piped stdin ingestion repeatedly copying the accumulated prefix by retaining UTF-8 chunks and joining once after end-of-stream.
 - Fixed oversized-file line scanning repeatedly copying newline-free prefixes by assembling decoded fragments through the shared linear line owner.
 - Fixed Windows Python-engine latency by keeping one serialized coordinator process per agent session instead of spawning Python for every complex command, with request-correlated output/control barriers and whole-process recovery after aborts, timeouts, crashes, or protocol faults.
