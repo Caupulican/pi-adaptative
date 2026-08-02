@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Exposed allocation-bounded editor change summaries so structural observers can inspect the first non-whitespace character without flattening the full document on every edit.
+
+### Fixed
+
+- Fixed multiline clipboard input on Windows consoles without bracketed-paste framing by inserting each raw multiline chunk atomically, preserving embedded newlines, and rendering large pastes as compact character-count markers.
+
 ## [0.81.42] - 2026-07-27
 
 ## [0.81.41] - 2026-07-27

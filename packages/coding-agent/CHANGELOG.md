@@ -2,6 +2,11 @@
 
 ### Added
 
+- Added provider-neutral `deduplicate-by-evidence` and `evidence-gated-tdd` bundled skills, including evidence scoring and authorized security-scanner references.
+- Added bundled `authorized-web-security-audit`, `secure-agent-tool-surfaces`, and `skill-creator` skills for evidence-scored exploit awareness, least-privilege tool design, and portable specialization authoring across providers.
+- Added a pinned strict production clone gate that covers all owned TypeScript, JavaScript, Python, shell, PowerShell, CSS, and markup sources, rejects scanner omissions, and requires zero verified 50-token clones.
+- Added per-session background tool tasks: calls still running after 15 seconds, or manually transferred with Ctrl+B, return a task ID immediately, persist bounded output, emit event-driven completion, and support one-shot wait or cancellation without polling or cross-session sharing.
+- Added a live transcript pager on Shift+PageUp that preserves the viewed position while output continues and resumes tail following only after an explicit jump back to the bottom.
 - Added a native PowerShell incident collector, shipped beside `pi.exe`, that places its ZIP beside the script by default and packages the affected human session, recovery/orchestration/TUI evidence, runtime fingerprints, and bounded Windows event records while excluding credential and configuration stores.
 - Added bounded command-aware test-output projection for persistent shell sessions: passing chatter is collapsed, failure identity and summaries remain in context, exact raw bytes are handed off through a managed file, and unknown/error paths fall back to raw output without changing exit status.
 - Added session-core proactive memory reflection and provider lifecycle delivery across print, RPC, and interactive modes, using bounded semantic turn digests that exclude raw tool-result payloads.
@@ -9,11 +14,18 @@
 
 ### Changed
 
+- Bounded tool-selection observation history by both count and encoded bytes, and compacted machine-owned host-state serialization to reduce rewrite and parse cost in long-lived installations.
+- Updated the core agent prompt with a compact, language-agnostic adaptive systems posture: explicit lifetime grouping, zero-valid states where safe, benign stubs at suitable internal boundaries, linear execution, and mandatory correctness/security/API-boundary exceptions.
+- Moved the repository to the stable TypeScript 7 compiler through one no-fallback execution path and upgraded the fixed test/build toolchain while retaining exact dependency pins.
+- Reduced source and packaged startup transformation by importing lean AI entry points and preferring compiled JavaScript for Pi-owned bundled extensions while preserving TypeScript-first user extension loading.
+- Consolidated provider, resource, session, selection, export, process, and TUI lifecycle ownership behind focused systems, with strict clone evidence proving no verified production clones remain.
 - Reduced avoidable turn latency by batching independent read-only calls in one model turn, coalescing checklist transitions, reading tool-performance evidence once per decision, moving transcript recall indexing into one bounded worker owned by each session, and exposing bounded passive phase timings through `/toolhealth`.
 - Lowered the default fractional compaction trigger from 70% to 60% of the model window while preserving explicit overrides, reserve headroom, recent-context retention, anti-thrash savings, and summary verification.
 
 ### Fixed
 
+- Fixed large piped stdin ingestion repeatedly copying the accumulated prefix by retaining UTF-8 chunks and joining once after end-of-stream.
+- Fixed oversized-file line scanning repeatedly copying newline-free prefixes by assembling decoded fragments through the shared linear line owner.
 - Fixed Windows Python-engine latency by keeping one serialized coordinator process per agent session instead of spawning Python for every complex command, with request-correlated output/control barriers and whole-process recovery after aborts, timeouts, crashes, or protocol faults.
 - Fixed incident collection to include the current session-owned orchestration namespace after its consolidation under `state/orchestration/sessions`.
 - Fixed native Windows incident correlation to derive its bounded Event Viewer window from the selected session and filter shared recovery/failure logs by session identity or timestamp.

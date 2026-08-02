@@ -1,8 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Added host-controlled automatic and manual handoff of still-running tool calls so the foreground model loop can continue while detached execution retains task-local cancellation and crosses `afterToolCall` exactly once.
+
 ### Changed
 
 - Lowered the default fractional compaction trigger from 70% to 60% of the model context window so long, tool-heavy sessions compact before repeated large-context turns dominate latency; explicit overrides, reserve headroom, recent-context retention, anti-thrash savings, and verification gates are unchanged.
+
+### Fixed
+
+- Fixed compaction verification to score exact read-path and open-error identities, retain bounded failed-attempt evidence through deterministic fallback, and use one retry/telemetry path for split and non-split summaries.
+- Fixed proxy streaming of fragmented text, thinking, tool arguments, and SSE lines to avoid accumulated-prefix reconstruction, geometrically bound partial JSON projections, and finalize retained chunks on every terminal path.
 
 ## [0.81.42] - 2026-07-27
 

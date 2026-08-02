@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Added lean package entry points for shared stream, usage, validation, retry, protocol, and type owners so consumers can avoid loading the provider-heavy root barrel.
+
+### Changed
+
+- Centralized provider-neutral request lifecycle, Google streaming, OpenAI client construction, OAuth authorization input, model capability, and usage initialization ownership without changing provider-specific I/O.
+
+### Fixed
+
+- Fixed streamed text-tool envelopes leaking raw protocol fragments by filtering deltas incrementally with bounded pending state instead of repeatedly rescanning the accumulated text.
+- Fixed OpenAI flex and priority service-tier cost accounting so Responses and Codex transports apply the same model-aware multipliers to every cost category.
+- Fixed malformed JSON repair repeatedly copying its accumulated prefix by retaining unchanged spans and joining replacements once.
+
 ## [0.81.42] - 2026-07-27
 
 ### Changed
