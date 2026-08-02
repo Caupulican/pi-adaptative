@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Node.js 24 release-gate type compatibility for Responses provider request-header coverage.
+
 ## [0.84.0] - 2026-08-02
 
 ### Breaking Changes
