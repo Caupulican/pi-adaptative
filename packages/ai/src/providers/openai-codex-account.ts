@@ -112,7 +112,7 @@ async function readBoundedResponseText(response: Response): Promise<string> {
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let bytes = 0;
-	let text = "";
+	const textParts: string[] = [];
 	while (true) {
 		const next = await reader.read();
 		if (next.done) break;
@@ -121,9 +121,10 @@ async function readBoundedResponseText(response: Response): Promise<string> {
 			await reader.cancel().catch(() => {});
 			throw new OpenAICodexAccountError("OpenAI Codex account response exceeded the 256 KiB limit", response.status);
 		}
-		text += decoder.decode(next.value, { stream: true });
+		textParts.push(decoder.decode(next.value, { stream: true }));
 	}
-	return text + decoder.decode();
+	textParts.push(decoder.decode());
+	return textParts.join("");
 }
 
 async function requestAccountJson(

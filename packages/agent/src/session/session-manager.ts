@@ -16,7 +16,8 @@ import { readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
-import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai";
+import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
+import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -26,7 +27,6 @@ import {
 } from "../messages.ts";
 import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
-import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { uuidv7 } from "../uuid.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 

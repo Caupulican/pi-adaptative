@@ -33,23 +33,29 @@ const statusSchema = Type.Union([
 
 const prioritySchema = Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")]);
 
-const stepInputSchema = Type.Object(
-	{
-		content: Type.String({ minLength: 1, maxLength: 2_000, description: "Imperative task step text." }),
-		activeForm: Type.Optional(
-			Type.String({ minLength: 1, maxLength: 2_000, description: "Short present-progress label for active UI." }),
-		),
+function optionalTaskStepFields(requirementIdsDescription: string) {
+	return {
 		status: Type.Optional(statusSchema),
 		priority: Type.Optional(prioritySchema),
 		owner: Type.Optional(Type.String({ maxLength: 200 })),
 		requirementIds: Type.Optional(
 			Type.Array(Type.String({ minLength: 1, maxLength: 200 }), {
 				maxItems: 32,
-				description: "Goal requirement ids this foreground step advances.",
+				description: requirementIdsDescription,
 			}),
 		),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
+	};
+}
+
+const stepInputSchema = Type.Object(
+	{
+		content: Type.String({ minLength: 1, maxLength: 2_000, description: "Imperative task step text." }),
+		activeForm: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 2_000, description: "Short present-progress label for active UI." }),
+		),
+		...optionalTaskStepFields("Goal requirement ids this foreground step advances."),
 	},
 	{ additionalProperties: false },
 );
@@ -81,17 +87,7 @@ const taskStepsSchema = Type.Object(
 		),
 		content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
 		activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
-		status: Type.Optional(statusSchema),
-		priority: Type.Optional(prioritySchema),
-		owner: Type.Optional(Type.String({ maxLength: 200 })),
-		requirementIds: Type.Optional(
-			Type.Array(Type.String({ minLength: 1, maxLength: 200 }), {
-				maxItems: 32,
-				description: "Goal requirement ids this foreground step advances; [] clears existing links.",
-			}),
-		),
-		note: Type.Optional(Type.String({ maxLength: 4_000 })),
-		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
+		...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
 		clearCompleted: Type.Optional(
 			Type.Boolean({ description: "For list: compact completed and cancelled steps before rendering." }),
 		),

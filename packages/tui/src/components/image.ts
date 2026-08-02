@@ -21,6 +21,15 @@ export interface ImageOptions {
 	imageId?: number;
 }
 
+function reserveImageRows(sequence: string, rows: number, restoreCursor: boolean): string[] {
+	const rowOffset = Math.max(0, rows - 1);
+	const lines = new Array<string>(rowOffset).fill("");
+	const moveUp = rowOffset > 0 ? `\x1b[${rowOffset}A` : "";
+	const moveDown = restoreCursor && rowOffset > 0 ? `\x1b[${rowOffset}B` : "";
+	lines.push(moveUp + sequence + moveDown);
+	return lines;
+}
+
 export class Image implements Component {
 	private base64Data: string;
 	private _renderRevision = 0;
@@ -93,31 +102,9 @@ export class Image implements Component {
 					this.imageId = result.imageId;
 				}
 
-				if (caps.images === "kitty") {
-					// Reserve the image rows before drawing. This prevents later clear/redraw
-					// operations from erasing an inline Kitty image that was emitted on the
-					// first reserved line.
-					lines = [];
-					for (let i = 0; i < result.rows - 1; i++) {
-						lines.push("");
-					}
-					const rowOffset = result.rows - 1;
-					const moveUp = rowOffset > 0 ? `\x1b[${rowOffset}A` : "";
-					const moveDown = rowOffset > 0 ? `\x1b[${rowOffset}B` : "";
-					lines.push(moveUp + result.sequence + moveDown);
-				} else {
-					// Return `rows` lines so TUI accounts for image height.
-					// First (rows-1) lines are empty and cleared before the image is drawn.
-					// Last line: move cursor back up, draw the image, then move back down
-					// so TUI cursor accounting stays inside the scroll area.
-					lines = [];
-					for (let i = 0; i < result.rows - 1; i++) {
-						lines.push("");
-					}
-					const rowOffset = result.rows - 1;
-					const moveUp = rowOffset > 0 ? `\x1b[${rowOffset}A` : "";
-					lines.push(moveUp + result.sequence);
-				}
+				// Reserve rows before drawing so differential clears do not erase an inline
+				// image. Kitty also restores the logical cursor after emitting the image.
+				lines = reserveImageRows(result.sequence, result.rows, caps.images === "kitty");
 			} else {
 				const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
 				lines = [this.theme.fallbackColor(fallback)];

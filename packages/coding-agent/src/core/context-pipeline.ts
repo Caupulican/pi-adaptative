@@ -23,8 +23,7 @@
  * the pipeline — keeping the transform the one place the two subsystems meet.
  */
 
-import { createHash } from "node:crypto";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { type AgentMessage, addUsage, createEmptyUsage } from "@caupulican/pi-agent-core";
 import {
 	type CompactionEntry,
 	calculateContextTokens,
@@ -58,62 +57,18 @@ import {
 	getContextStoreDir,
 	migrateLegacyContextStores,
 } from "./context/context-store-retention.ts";
+import { latestUserPromptText, textContentPrefix } from "./context/message-text.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
+import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
+import { resolveSessionEntryIndex } from "./session-entry-index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-
-/**
- * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
- * (never `Date.now`/random). Same identity on a retry of the same logical work unit yields the same
- * id, so the ledger's `seenSubagentReportIds` dedupe catches a duplicate report instead of
- * double-counting spend.
- */
-function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
-	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-	return `${kind}:${sessionId}:${digest}`;
-}
-
-function joinTextPrefix(content: readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
-	let found = false;
-	let text = "";
-	for (const part of content) {
-		if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "text") continue;
-		const blockText = (part as { text?: unknown }).text;
-		if (typeof blockText !== "string") continue;
-		if (!found) {
-			found = true;
-			if (blockText.length >= maxChars) return blockText.slice(0, maxChars);
-			text = blockText;
-			continue;
-		}
-		const available = maxChars - text.length;
-		if (available <= 0) return text;
-		if (available === 1) return `${text}\n`;
-		const remaining = available - 1;
-		text += `\n${blockText.slice(0, remaining)}`;
-		if (blockText.length >= remaining) return text;
-	}
-	return text;
-}
-
-/** Latest user prompt text in the provider-visible array. */
-export function latestUserPromptText(messages: AgentMessage[], maxChars = Number.POSITIVE_INFINITY): string {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (!message || message.role !== "user") continue;
-		if (typeof message.content === "string") {
-			return message.content.length > maxChars ? message.content.slice(0, maxChars) : message.content;
-		}
-		const text = joinTextPrefix(message.content, maxChars);
-		if (text.length > 0) return text;
-	}
-	return "";
-}
+import { reportSpawnedUsage } from "./spawned-usage.ts";
 
 /** Read a packed artifact-producing tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
@@ -307,17 +262,11 @@ export class ContextPipeline {
 	 */
 	private _getLatestCompactionEntry(): CompactionEntry | null {
 		const sessionManager = this.deps.getSessionManager();
-		const indexedSessionManager = sessionManager as unknown as {
-			getLeafId?: () => string | null;
-			getEntry?: (id: string) => SessionEntry | undefined;
-		};
-		const getLeafId = indexedSessionManager.getLeafId?.bind(sessionManager);
-		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
-		const leafId = getLeafId?.();
-		if (getLeafId && getEntry && leafId !== undefined) {
-			let currentId = leafId;
+		const index = resolveSessionEntryIndex(sessionManager);
+		if (index) {
+			let currentId = index.leafId;
 			while (currentId !== null) {
-				const entry = getEntry(currentId);
+				const entry = index.getEntry(currentId);
 				if (!entry) break;
 				if (entry.type === "compaction") return entry;
 				currentId = entry.parentId;
@@ -331,20 +280,15 @@ export class ContextPipeline {
 		wantedToolCallIds: ReadonlySet<string>,
 	): (toolCallId: string) => string | undefined {
 		const sessionManager = this.deps.getSessionManager();
-		const indexedSessionManager = sessionManager as unknown as {
-			getLeafId?: () => string | null;
-			getEntry?: (id: string) => SessionEntry | undefined;
-		};
-		const getLeafId = indexedSessionManager.getLeafId?.bind(sessionManager);
-		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
-		const leafId = getLeafId?.();
+		const index = resolveSessionEntryIndex(sessionManager);
+		const leafId = index?.leafId;
 		const cached = this._sessionEntryLookupCache;
 		if (cached) {
 			for (const toolCallId of cached.byToolCallId.keys()) {
 				if (!wantedToolCallIds.has(toolCallId)) cached.byToolCallId.delete(toolCallId);
 			}
 		}
-		if (getLeafId && getEntry && leafId !== undefined) {
+		if (index && leafId !== undefined) {
 			if (cached?.leafId === leafId) {
 				return (toolCallId) => cached.byToolCallId.get(toolCallId);
 			}
@@ -352,7 +296,7 @@ export class ContextPipeline {
 				const appendedEntries: SessionEntry[] = [];
 				let cursor = leafId;
 				while (cursor !== null && cursor !== cached.leafId) {
-					const entry = getEntry(cursor);
+					const entry = index.getEntry(cursor);
 					if (!entry) break;
 					appendedEntries.push(entry);
 					cursor = entry.parentId;
@@ -553,7 +497,7 @@ export class ContextPipeline {
 					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }
 					| undefined;
 				if (details?.contextGc?.packed === true || details?.promptPolicy?.enforced === true) continue;
-				const text = joinTextPrefix(message.content, 4000);
+				const text = textContentPrefix(message.content, 4000);
 				if (text.length === 0) continue;
 				this._brainCurator.enqueue({ kind: "relevance", key: item.itemId, content: text, goal });
 			}
@@ -659,10 +603,10 @@ export class ContextPipeline {
 					text,
 					signal,
 					chunkChars,
-					complete: async ({ systemPrompt, userPrompt, signal: chunkSignal }) => {
-						const completion = await this.deps.runIsolatedCompletion({
+					complete: ({ systemPrompt, userPrompt, signal: chunkSignal }) =>
+						runIsolatedTextCompletion(this.deps, {
 							systemPrompt,
-							messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+							userPrompt,
 							model,
 							thinkingLevel: "off",
 							maxTokens: 512,
@@ -671,13 +615,7 @@ export class ContextPipeline {
 							// Stable per-lane synthetic affinity key so repeat pre-digest chunk
 							// calls hit the same cache-warm backend.
 							laneKind: "curation",
-						});
-						return {
-							text: completion.text,
-							costUsd: completion.usage.cost.total,
-							stopReason: String(completion.stopReason),
-						};
-					},
+						}),
 				});
 				if (!this.deps.isDisposed() && result.totalChunks > 0) {
 					this.deps.getSessionManager().appendCustomEntry("brain-curation-predigest", {
@@ -700,13 +638,13 @@ export class ContextPipeline {
 		try {
 			// ACCUMULATE across all drained jobs (the drain runs the completer once PER job) —
 			// keeping only the last job's usage would under-report every multi-job drain.
-			let spentUsage: AssistantMessage["usage"] | undefined;
+			const spentUsage = createEmptyUsage();
 			const results = await this._brainCurator.drain({
 				maxJobs,
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
-					const completion = await this.deps.runIsolatedCompletion({
+					const completion = await runIsolatedTextCompletion(this.deps, {
 						systemPrompt,
-						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+						userPrompt,
 						model,
 						thinkingLevel: "off",
 						maxTokens: 256,
@@ -717,39 +655,18 @@ export class ContextPipeline {
 						// same cache-warm backend.
 						laneKind: "curation",
 					});
-					const usage = completion.usage;
-					if (!spentUsage) {
-						spentUsage = structuredClone(usage);
-					} else {
-						spentUsage.input += usage.input;
-						spentUsage.output += usage.output;
-						spentUsage.cacheRead += usage.cacheRead;
-						spentUsage.cacheWrite += usage.cacheWrite;
-						spentUsage.totalTokens += usage.totalTokens;
-						spentUsage.cost.input += usage.cost.input;
-						spentUsage.cost.output += usage.cost.output;
-						spentUsage.cost.cacheRead += usage.cost.cacheRead;
-						spentUsage.cost.cacheWrite += usage.cost.cacheWrite;
-						spentUsage.cost.total += usage.cost.total;
-					}
-					return {
-						text: completion.text,
-						costUsd: completion.usage.cost.total,
-						stopReason: String(completion.stopReason),
-					};
+					addUsage(spentUsage, completion.usage);
+					return completion;
 				},
 			});
 			// Honest accounting even for free local models: token visibility is the contract.
-			if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-				// `reportId` keyed on the drained jobs' own idempotency keys — stable across a
-				// retry of the same drain batch, distinct across genuinely different batches.
-				const reportId = deriveSpawnedUsageReportId(
-					"context-curator",
-					this.deps.getSessionManager().getSessionId(),
-					results.map((result) => result.key).join(" "),
-				);
-				this.deps.addSpawnedUsage(spentUsage, { label: "context-curator", reportId });
-			}
+			reportSpawnedUsage(this.deps, spentUsage, {
+				kind: "context-curator",
+				label: "context-curator",
+				sessionId: this.deps.getSessionManager().getSessionId(),
+				// Preserve the previous space-joined report identity without allocating it.
+				identity: results.map((result) => result.key),
+			});
 			if (this.deps.isDisposed() || results.length === 0) return;
 			this.deps.getSessionManager().appendCustomEntry("brain-curation", {
 				version: 1,

@@ -24,6 +24,7 @@ import { migrateKeybindingsConfig } from "./core/keybindings.ts";
 import { isLegacyEnvVarNameConfigValue } from "./core/resolve-config-value.ts";
 import { withFileLockSync, writeFileAtomicSync } from "./core/util/atomic-file.ts";
 import { stripJsonComments } from "./utils/json.ts";
+import { waitForStdinEvent } from "./utils/stdin-events.ts";
 
 const MIGRATION_GUIDE_URL =
 	"https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/CHANGELOG.md#extensions-migration";
@@ -629,24 +630,11 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
 	}
 	console.log(chalk.dim(`\nPress any key to continue...`));
 
-	await new Promise<void>((resolve) => {
-		let settled = false;
-		const finish = () => {
-			if (settled) return;
-			settled = true;
-			process.stdin.removeListener("data", finish);
-			process.stdin.removeListener("end", finish);
-			process.stdin.removeListener("error", finish);
-			process.stdin.setRawMode?.(false);
-			process.stdin.pause();
-			resolve();
-		};
-		process.stdin.setRawMode?.(true);
-		process.stdin.resume();
-		process.stdin.once("data", finish);
-		process.stdin.once("end", finish);
-		process.stdin.once("error", finish);
-	});
+	process.stdin.setRawMode?.(true);
+	process.stdin.resume();
+	await waitForStdinEvent();
+	process.stdin.setRawMode?.(false);
+	process.stdin.pause();
 	console.log();
 }
 

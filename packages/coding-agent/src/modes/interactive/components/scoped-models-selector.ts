@@ -2,9 +2,8 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import {
 	Container,
 	type Focusable,
-	fuzzyFilter,
 	getKeybindings,
-	Input,
+	type Input,
 	Key,
 	matchesKey,
 	Spacer,
@@ -13,6 +12,13 @@ import {
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText } from "./keybinding-hints.ts";
+import {
+	clearSelectorSearchOrCancel,
+	formatDirtySelectorFooter,
+	SearchableListSurface,
+	SelectorListState,
+	SelectorStatusFooter,
+} from "./selector-list.ts";
 
 // EnabledIds: null = all enabled (no filter), string[] = explicit ordered list
 type EnabledIds = string[] | null;
@@ -91,18 +97,16 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	private modelsById: Map<string, Model<Api>> = new Map();
 	private allIds: string[] = [];
 	private enabledIds: EnabledIds = null;
-	private filteredItems: ModelItem[] = [];
-	private selectedIndex = 0;
+	private readonly listState = new SelectorListState<ModelItem>(() => this.updateList());
 	private searchInput: Input;
+	private searchSurface: SearchableListSurface;
 
-	// Focusable implementation - propagate to searchInput for IME cursor positioning
-	private _focused = false;
+	// Focusable implementation - propagate to search input for IME cursor positioning
 	get focused(): boolean {
-		return this._focused;
+		return this.searchSurface.focused;
 	}
 	set focused(value: boolean) {
-		this._focused = value;
-		this.searchInput.focused = value;
+		this.searchSurface.focused = value;
 	}
 	private listContainer: Container;
 	private footerText: Text;
@@ -121,7 +125,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		}
 
 		this.enabledIds = config.enabledModelIds === null ? null : [...config.enabledModelIds];
-		this.filteredItems = this.buildItems();
+		this.listState.items = this.buildItems();
 
 		// Header
 		this.addChild(new DynamicBorder());
@@ -132,21 +136,13 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		);
 		this.addChild(new Spacer(1));
 
-		// Search input
-		this.searchInput = new Input();
-		this.addChild(this.searchInput);
-		this.addChild(new Spacer(1));
+		this.searchSurface = SearchableListSurface.mount(this);
+		this.searchInput = this.searchSurface.searchInput;
+		this.listContainer = this.searchSurface.listContainer;
 
-		// List container
-		this.listContainer = new Container();
-		this.addChild(this.listContainer);
-
-		// Footer hint
-		this.addChild(new Spacer(1));
-		this.footerText = new Text(this.getFooterText(), 0, 0);
-		this.addChild(this.footerText);
-
-		this.addChild(new DynamicBorder());
+		const statusFooter = new SelectorStatusFooter(this.getFooterText());
+		this.footerText = statusFooter.footerText;
+		this.addChild(statusFooter);
 		this.updateList();
 	}
 
@@ -174,20 +170,13 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			`${keyText("app.models.save")} save`,
 			countText,
 		];
-		return this.isDirty
-			? theme.fg("dim", `  ${parts.join(" · ")} `) + theme.fg("warning", "(unsaved)")
-			: theme.fg("dim", `  ${parts.join(" · ")}`);
+		return formatDirtySelectorFooter(parts, this.isDirty);
 	}
 
 	private refresh(): void {
-		const query = this.searchInput.getValue();
-		const items = this.buildItems();
-		this.filteredItems = query
-			? fuzzyFilter(items, query, (item) =>
-					item.model ? `${item.model.id} ${item.model.provider} ${item.model.name}` : item.fullId,
-				)
-			: items;
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.listState.refresh(this.buildItems(), this.searchInput.getValue(), (item) =>
+			item.model ? `${item.model.id} ${item.model.provider} ${item.model.name}` : item.fullId,
+		);
 		this.updateList();
 		this.footerText.setText(this.getFooterText());
 	}
@@ -199,21 +188,14 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	private updateList(): void {
 		this.listContainer.clear();
 
-		if (this.filteredItems.length === 0) {
+		if (this.listState.items.length === 0) {
 			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
 			return;
 		}
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
 		const allEnabled = this.enabledIds === null;
 
-		for (let i = startIndex; i < endIndex; i++) {
-			const item = this.filteredItems[i]!;
-			const isSelected = i === this.selectedIndex;
+		const range = this.listState.visitVisible(this.maxVisible, (item, _index, isSelected) => {
 			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
 			const id = item.model?.id ?? item.fullId;
 			const modelText = isSelected ? theme.fg("accent", id) : id;
@@ -226,17 +208,12 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 						: theme.fg("dim", " ✗")
 				: theme.fg("dim", " ✗");
 			this.listContainer.addChild(new Text(`${prefix}${modelText}${providerBadge}${status}`, 0, 0));
-		}
+		});
 
-		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredItems.length) {
-			this.listContainer.addChild(
-				new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredItems.length})`), 0, 0),
-			);
-		}
+		this.listState.appendScrollInfo(this.listContainer, range);
 
-		if (this.filteredItems.length > 0) {
-			const selected = this.filteredItems[this.selectedIndex];
+		if (this.listState.items.length > 0) {
+			const selected = this.listState.items[this.listState.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
 			this.listContainer.addChild(
 				new Text(
@@ -250,27 +227,14 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-
-		// Navigation
-		if (kb.matches(data, "tui.select.up")) {
-			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
-			this.updateList();
-			return;
-		}
-		if (kb.matches(data, "tui.select.down")) {
-			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
-			this.updateList();
-			return;
-		}
+		if (this.listState.handleNavigation(data, "wrap", kb)) return;
 
 		// Reorder enabled models
 		const reorderUp = kb.matches(data, "app.models.reorderUp");
 		const reorderDown = kb.matches(data, "app.models.reorderDown");
 		if (reorderUp || reorderDown) {
 			if (this.enabledIds === null) return;
-			const item = this.filteredItems[this.selectedIndex];
+			const item = this.listState.items[this.listState.selectedIndex];
 			if (item && isEnabled(this.enabledIds, item.fullId)) {
 				const delta = reorderUp ? -1 : 1;
 				const currentIndex = this.enabledIds.indexOf(item.fullId);
@@ -279,7 +243,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 				if (newIndex >= 0 && newIndex < this.enabledIds.length) {
 					this.enabledIds = move(this.enabledIds, item.fullId, delta);
 					this.isDirty = true;
-					this.selectedIndex += delta;
+					this.listState.selectedIndex += delta;
 					this.refresh();
 					this.notifyChange();
 				}
@@ -289,7 +253,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		// Toggle on Enter
 		if (kb.matches(data, "tui.select.confirm")) {
-			const item = this.filteredItems[this.selectedIndex];
+			const item = this.listState.items[this.listState.selectedIndex];
 			if (item) {
 				this.enabledIds = toggle(this.enabledIds, item.fullId);
 				this.isDirty = true;
@@ -301,7 +265,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		// Enable all (filtered if search active, otherwise all)
 		if (kb.matches(data, "app.models.enableAll")) {
-			const targetIds = this.searchInput.getValue() ? this.filteredItems.map((i) => i.fullId) : undefined;
+			const targetIds = this.searchInput.getValue() ? this.listState.items.map((item) => item.fullId) : undefined;
 			this.enabledIds = enableAll(this.enabledIds, this.allIds, targetIds);
 			this.isDirty = true;
 			this.refresh();
@@ -311,7 +275,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		// Clear all (filtered if search active, otherwise all)
 		if (kb.matches(data, "app.models.clearAll")) {
-			const targetIds = this.searchInput.getValue() ? this.filteredItems.map((i) => i.fullId) : undefined;
+			const targetIds = this.searchInput.getValue() ? this.listState.items.map((item) => item.fullId) : undefined;
 			this.enabledIds = clearAll(this.enabledIds, this.allIds, targetIds);
 			this.isDirty = true;
 			this.refresh();
@@ -321,7 +285,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		// Toggle provider of current item
 		if (kb.matches(data, "app.models.toggleProvider")) {
-			const item = this.filteredItems[this.selectedIndex];
+			const item = this.listState.items[this.listState.selectedIndex];
 			if (item?.model) {
 				const provider = item.model.provider;
 				const providerIds = this.allIds.filter((id) => this.modelsById.get(id)?.provider === provider);
@@ -346,12 +310,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		// Ctrl+C - clear search or cancel if empty
 		if (matchesKey(data, Key.ctrl("c"))) {
-			if (this.searchInput.getValue()) {
-				this.searchInput.setValue("");
-				this.refresh();
-			} else {
-				this.callbacks.onCancel();
-			}
+			clearSelectorSearchOrCancel(this.searchInput, () => this.refresh(), this.callbacks.onCancel);
 			return;
 		}
 

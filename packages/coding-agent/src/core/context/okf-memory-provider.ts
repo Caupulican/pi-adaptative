@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, type Stats, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { MemoryScope } from "./context-item.ts";
+import { fetchLocalMemoryItem, searchLocalMemoryItems, tokenOverlapScore } from "./local-memory-search.ts";
 import type {
 	MemoryItem,
 	MemoryItemKind,
@@ -87,26 +88,8 @@ function walkFiles(rootDir: string, maxDocuments: number): string[] {
 	return files;
 }
 
-function tokenSet(text: string): Set<string> {
-	return new Set(text.toLowerCase().match(/[a-z0-9_/-]+/g) ?? []);
-}
-
-function scoreItem(queryTokens: Set<string>, item: MemoryItem): number {
-	if (queryTokens.size === 0) return 0;
-	const haystack = tokenSet(
-		[item.title, item.summary, item.content].filter((part): part is string => part !== undefined).join("\n"),
-	);
-	let overlap = 0;
-	for (const token of queryTokens) {
-		if (haystack.has(token)) overlap++;
-	}
-	return overlap / queryTokens.size;
-}
-
-function matchesRequest(item: MemoryItem, request: MemorySearchRequest): boolean {
-	if (request.scope !== undefined && item.scope !== request.scope) return false;
-	if (request.kinds !== undefined && !request.kinds.includes(item.kind)) return false;
-	return true;
+function scoreItem(queryTokens: ReadonlySet<string>, item: MemoryItem): number {
+	return tokenOverlapScore(queryTokens, [item.title, item.summary, item.content]);
 }
 
 function reasonForMatch(score: number, item: MemoryItem): string {
@@ -168,19 +151,11 @@ export function createOkfMemoryProvider(options: OkfMemoryProviderOptions): Memo
 		capabilities: OKF_PROVIDER_CAPABILITIES,
 
 		async search(request: MemorySearchRequest): Promise<MemorySearchResult[]> {
-			const queryTokens = tokenSet(request.query);
-			return items()
-				.filter((item) => matchesRequest(item, request))
-				.map((item) => ({ item, score: scoreItem(queryTokens, item) }))
-				.filter((result) => result.score > 0)
-				.sort((left, right) => right.score - left.score || left.item.id.localeCompare(right.item.id))
-				.slice(0, request.maxResults)
-				.map((result) => ({ ...result, reason: reasonForMatch(result.score, result.item) }));
+			return searchLocalMemoryItems(items(), request, { score: scoreItem, reason: reasonForMatch });
 		},
 
 		async fetch(ref: MemoryRef): Promise<MemoryItem | undefined> {
-			if (ref.providerId !== (options.providerId ?? PI_OKF_PROVIDER_ID)) return undefined;
-			return items().find((item) => item.id === ref.itemId && item.scope === ref.scope && item.kind === ref.kind);
+			return fetchLocalMemoryItem(items(), options.providerId ?? PI_OKF_PROVIDER_ID, ref);
 		},
 	};
 }

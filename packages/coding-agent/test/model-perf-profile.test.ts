@@ -2,16 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type StreamFn, type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core";
-import {
-	type Api,
-	type AssistantMessage,
-	type Context,
-	createAssistantMessageEventStream,
-	type Model,
-} from "@caupulican/pi-ai";
+import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
+import type { Api, AssistantMessage, Context, Model } from "@caupulican/pi-ai/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import {
+	estimateContextPromptTokens,
 	resolveAdaptiveStreamIdleOptions,
 	updateModelPerfProfile,
 	withModelPerfProfile,
@@ -134,6 +130,31 @@ describe("model perf profile", () => {
 				ceilingMs: 20_000,
 			}),
 		).toEqual({ quietIdleMs: 6_000 });
+	});
+
+	it("estimates the serialized context without materializing one accumulated prompt string", () => {
+		let contentReads = 0;
+		const content = {
+			get text() {
+				contentReads++;
+				return `line\n${"x".repeat(32_000)}\ud800`;
+			},
+			type: "text",
+		};
+		const context = {
+			systemPrompt: "system\tprompt",
+			messages: [{ role: "user", content: [content], timestamp: 1 }],
+			tools: [{ name: "read", description: "read", parameters: { type: "object" } }],
+		} as unknown as Context;
+		const baseline = JSON.stringify({
+			systemPrompt: context.systemPrompt,
+			messages: context.messages,
+			tools: context.tools,
+		});
+		contentReads = 0;
+
+		expect(estimateContextPromptTokens(context)).toBe(Math.ceil(baseline.length / 4));
+		expect(contentReads).toBe(1);
 	});
 
 	it("records a successful stream sample so the next request uses profiled bounds", async () => {

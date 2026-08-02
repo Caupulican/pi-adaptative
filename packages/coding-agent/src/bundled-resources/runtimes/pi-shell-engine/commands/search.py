@@ -6,41 +6,27 @@ Pure builtins per windows-shell-workpackages-2026-07-19.md §2.2. Regex dialect 
 
 from __future__ import annotations
 
-import os
 import re
 
 from context import BuiltinContext
 from errors import UnsupportedConstruct
+from paths import resolve_request_path
+from shell_args import split_leading_short_options
 
 _GREP_FLAGS = set("ivnclwFE")
-
-
-def _resolve(cwd: str, path: str) -> str:
-    """Resolve `path` against `cwd` (see commands/fs.py's `_resolve`: main.py never os.chdir()s
-    to the request cwd, so every relative FILE operand must resolve against ctx.cwd here too)."""
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    return os.path.normpath(os.path.join(cwd, path))
 
 
 def cmd_grep(ctx: BuiltinContext) -> int:
     args = ctx.argv[1:]
     flags: set[str] = set()
-    idx = 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg == "--":
-            idx += 1
-            break
-        if arg.startswith("-") and arg != "-" and len(arg) > 1:
-            for c in arg[1:]:
-                if c not in _GREP_FLAGS:
-                    raise UnsupportedConstruct("unsupported-flag", f"grep: unsupported flag '-{c}'")
-                flags.add(c)
-            idx += 1
-            continue
-        break
-    remaining = args[idx:]
+    option_args, remaining = split_leading_short_options(args)
+    for option in option_args:
+        for char in option[1:]:
+            if char not in _GREP_FLAGS:
+                raise UnsupportedConstruct(
+                    "unsupported-flag", f"grep: unsupported flag '-{char}'"
+                )
+            flags.add(char)
     if not remaining:
         raise UnsupportedConstruct("unsupported-flag", "grep: PATTERN operand required")
     pattern = remaining[0]
@@ -118,7 +104,7 @@ def cmd_grep(ctx: BuiltinContext) -> int:
     else:
         for name in files:
             try:
-                with open(_resolve(ctx.cwd, name), "rb") as fh:
+                with open(resolve_request_path(ctx.cwd, name), "rb") as fh:
                     data = fh.read()
             except OSError as exc:
                 out_lines_msg = f"grep: {name}: {exc.strerror or exc}"
@@ -246,7 +232,7 @@ def cmd_sed(ctx: BuiltinContext) -> int:
         ctx.stdout.write(transform(ctx.stdin.read()))
         return 0
     for name in files:
-        with open(_resolve(ctx.cwd, name), "rb") as fh:
+        with open(resolve_request_path(ctx.cwd, name), "rb") as fh:
             data = fh.read()
         ctx.stdout.write(transform(data))
     return 0

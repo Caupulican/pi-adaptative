@@ -177,6 +177,15 @@ export class OrchestrationPanelComponent implements Component {
 	}
 }
 
+export function renderOrchestrationToolResult(
+	theme: Theme,
+	model: OrchestrationPanelModel,
+	options: { isPartial: boolean; collapse: boolean; expanded: boolean },
+): Component {
+	if (options.isPartial || options.collapse) return emptyOrchestrationCall();
+	return new OrchestrationPanelComponent(theme, model, options.expanded);
+}
+
 export function emptyOrchestrationCall(): Component {
 	return {
 		render: () => [],

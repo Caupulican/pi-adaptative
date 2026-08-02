@@ -33,6 +33,8 @@ function hasDefaultModelProvider(providerId: string): providerId is keyof typeof
 }
 
 const BEDROCK_PROVIDER_ID = "amazon-bedrock";
+const LOGIN_CANCELLATION_MESSAGES = ["Login cancelled"] as const;
+const BEDROCK_CANCELLATION_MESSAGES = ["Login cancelled", "AWS SSO login was cancelled"] as const;
 
 const BUILT_IN_MODEL_PROVIDERS = new Set<string>(getProviders());
 
@@ -139,6 +141,24 @@ export class AuthDialogsController {
 		return true;
 	}
 
+	private async runMountedLoginDialog(
+		dialog: LoginDialogComponent,
+		authenticate: () => Promise<void>,
+		onAuthenticated: () => Promise<void>,
+		errorPrefix: string,
+		cancellationMessages: readonly string[] = LOGIN_CANCELLATION_MESSAGES,
+	): Promise<void> {
+		try {
+			await authenticate();
+			if (!this.restoreEditorFromDialog(dialog)) return;
+			await onAuthenticated();
+		} catch (error: unknown) {
+			if (!this.restoreEditorFromDialog(dialog)) return;
+			const message = error instanceof Error ? error.message : String(error);
+			if (!cancellationMessages.includes(message)) this.ui.showError(`${errorPrefix}${message}`);
+		}
+	}
+
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
 		const authStorage = this.session.modelRegistry.authStorage;
 		const oauthProviders = authStorage.getOAuthProviders();
@@ -214,6 +234,21 @@ export class AuthDialogsController {
 		}
 	}
 
+	private async logoutProvider(providerOption: AuthSelectorProvider): Promise<void> {
+		try {
+			this.session.modelRegistry.authStorage.logout(providerOption.id);
+			this.session.modelRegistry.refresh();
+			await this.ui.updateAvailableProviderCount();
+			const message =
+				providerOption.authType === "oauth"
+					? `Logged out of ${providerOption.name}`
+					: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
+			this.ui.showStatus(message);
+		} catch (error: unknown) {
+			this.ui.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private showLoginAuthTypeSelector(): void {
 		const subscriptionLabel = "Use a subscription";
 		const apiKeyLabel = "Use an API key";
@@ -244,26 +279,41 @@ export class AuthDialogsController {
 			return;
 		}
 
+		this.showProviderSelector(
+			"login",
+			providerOptions,
+			(providerOption) => this.startProviderLogin(providerOption),
+			() => this.showLoginAuthTypeSelector(),
+		);
+	}
+
+	private showProviderSelector(
+		mode: "login" | "logout",
+		providerOptions: AuthSelectorProvider[],
+		onSelect: (providerOption: AuthSelectorProvider) => Promise<void>,
+		onCancel: () => void,
+	): void {
 		this.ui.showSelector((done) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return false;
+				settled = true;
+				done();
+				return true;
+			};
 			const selector = new OAuthSelectorComponent(
-				"login",
+				mode,
 				this.session.modelRegistry.authStorage,
 				providerOptions,
 				async (providerId: string) => {
-					done();
-
+					if (!finish()) return;
 					const providerOption = providerOptions.find((provider) => provider.id === providerId);
-					if (!providerOption) {
-						return;
-					}
-
-					await this.startProviderLogin(providerOption);
+					if (providerOption) await onSelect(providerOption);
 				},
 				() => {
-					done();
-					this.showLoginAuthTypeSelector();
+					if (finish()) onCancel();
 				},
-				(providerId) => this.session.modelRegistry.getProviderAuthStatus(providerId),
+				mode === "login" ? (providerId) => this.session.modelRegistry.getProviderAuthStatus(providerId) : undefined,
 			);
 			return { component: selector, focus: selector };
 		});
@@ -303,54 +353,16 @@ export class AuthDialogsController {
 				);
 				return;
 			}
-			try {
-				this.session.modelRegistry.authStorage.logout(providerOption.id);
-				this.session.modelRegistry.refresh();
-				await this.ui.updateAvailableProviderCount();
-				const message =
-					providerOption.authType === "oauth"
-						? `Logged out of ${providerOption.name}`
-						: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-				this.ui.showStatus(message);
-			} catch (error: unknown) {
-				this.ui.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
-			}
+			await this.logoutProvider(providerOption);
 			return;
 		}
 
-		this.ui.showSelector((done) => {
-			const selector = new OAuthSelectorComponent(
-				mode,
-				this.session.modelRegistry.authStorage,
-				providerOptions,
-				async (providerId: string) => {
-					done();
-
-					const providerOption = providerOptions.find((provider) => provider.id === providerId);
-					if (!providerOption) {
-						return;
-					}
-
-					try {
-						this.session.modelRegistry.authStorage.logout(providerOption.id);
-						this.session.modelRegistry.refresh();
-						await this.ui.updateAvailableProviderCount();
-						const message =
-							providerOption.authType === "oauth"
-								? `Logged out of ${providerOption.name}`
-								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-						this.ui.showStatus(message);
-					} catch (error: unknown) {
-						this.ui.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
-					}
-				},
-				() => {
-					done();
-					this.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector };
-		});
+		this.showProviderSelector(
+			mode,
+			providerOptions,
+			(providerOption) => this.logoutProvider(providerOption),
+			() => this.ui.requestRender(),
+		);
 	}
 
 	private async completeProviderAuthentication(
@@ -462,37 +474,34 @@ export class AuthDialogsController {
 			"Amazon Bedrock SSO",
 		);
 		this.mountLoginDialog(dialog);
-		const restoreEditor = () => this.restoreEditorFromDialog(dialog);
+		let profile = "";
+		await this.runMountedLoginDialog(
+			dialog,
+			async () => {
+				const configuredProfile = process.env.AWS_PROFILE?.trim();
+				profile = configuredProfile ?? (await dialog.showPrompt("AWS SSO profile name:", "my-work-profile")).trim();
+				if (!profile) throw new Error("AWS profile name cannot be empty.");
 
-		try {
-			const configuredProfile = process.env.AWS_PROFILE?.trim();
-			const profile =
-				configuredProfile ?? (await dialog.showPrompt("AWS SSO profile name:", "my-work-profile")).trim();
-			if (!profile) throw new Error("AWS profile name cannot be empty.");
-
-			if (configuredProfile) {
-				dialog.showInfo([
-					theme.fg("text", `Using AWS profile: ${profile}`),
-					theme.fg("muted", "Complete the IAM Identity Center sign-in in your browser."),
-				]);
-			}
-			dialog.showProgress("Waiting for AWS SSO authentication...");
-			await (this.deps.loginBedrockSso ?? loginBedrockSsoProfile)(profile, { signal: dialog.signal });
-			process.env.AWS_PROFILE = profile;
-
-			if (!restoreEditor()) return;
-			this.session.modelRegistry.refresh();
-			await this.ui.updateAvailableProviderCount();
-			this.ui.invalidateFooter();
-			this.ui.updateEditorBorderColor();
-			this.ui.showStatus(`Signed in with AWS profile "${profile}". The AWS SSO session is ready.`);
-		} catch (error: unknown) {
-			if (!restoreEditor()) return;
-			const message = error instanceof Error ? error.message : String(error);
-			if (message !== "Login cancelled" && message !== "AWS SSO login was cancelled") {
-				this.ui.showError(`Failed to sign in to ${providerName}: ${message}`);
-			}
-		}
+				if (configuredProfile) {
+					dialog.showInfo([
+						theme.fg("text", `Using AWS profile: ${profile}`),
+						theme.fg("muted", "Complete the IAM Identity Center sign-in in your browser."),
+					]);
+				}
+				dialog.showProgress("Waiting for AWS SSO authentication...");
+				await (this.deps.loginBedrockSso ?? loginBedrockSsoProfile)(profile, { signal: dialog.signal });
+				process.env.AWS_PROFILE = profile;
+			},
+			async () => {
+				this.session.modelRegistry.refresh();
+				await this.ui.updateAvailableProviderCount();
+				this.ui.invalidateFooter();
+				this.ui.updateEditorBorderColor();
+				this.ui.showStatus(`Signed in with AWS profile "${profile}". The AWS SSO session is ready.`);
+			},
+			`Failed to sign in to ${providerName}: `,
+			BEDROCK_CANCELLATION_MESSAGES,
+		);
 	}
 
 	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
@@ -509,26 +518,16 @@ export class AuthDialogsController {
 		);
 
 		this.mountLoginDialog(dialog);
-
-		const restoreEditor = () => this.restoreEditorFromDialog(dialog);
-
-		try {
-			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
-			if (!apiKey) {
-				throw new Error("API key cannot be empty.");
-			}
-
-			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
-
-			if (!restoreEditor()) return;
-			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
-		} catch (error: unknown) {
-			if (!restoreEditor()) return;
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (errorMsg !== "Login cancelled") {
-				this.ui.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
-			}
-		}
+		await this.runMountedLoginDialog(
+			dialog,
+			async () => {
+				const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
+				if (!apiKey) throw new Error("API key cannot be empty.");
+				this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+			},
+			() => this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel),
+			`Failed to save API key for ${providerName}: `,
+		);
 	}
 
 	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
@@ -593,63 +592,54 @@ export class AuthDialogsController {
 			manualCodeReject = reject;
 		});
 
-		// Restore editor helper
-		const restoreEditor = () => this.restoreEditorFromDialog(dialog);
+		await this.runMountedLoginDialog(
+			dialog,
+			() =>
+				this.session.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
+					onAuth: (info: { url: string; instructions?: string }) => {
+						dialog.showAuth(info.url, info.instructions);
 
-		try {
-			await this.session.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
-				onAuth: (info: { url: string; instructions?: string }) => {
-					dialog.showAuth(info.url, info.instructions);
+						if (usesCallbackServer) {
+							// Show input for manual paste, racing with callback
+							dialog
+								.showManualInput("Paste redirect URL below, or complete login in browser:")
+								.then((value) => {
+									if (value && manualCodeResolve) {
+										manualCodeResolve(value);
+										manualCodeResolve = undefined;
+									}
+								})
+								.catch(() => {
+									if (manualCodeReject) {
+										manualCodeReject(new Error("Login cancelled"));
+										manualCodeReject = undefined;
+									}
+								});
+						}
+						// For Anthropic: onPrompt is called immediately after
+					},
 
-					if (usesCallbackServer) {
-						// Show input for manual paste, racing with callback
-						dialog
-							.showManualInput("Paste redirect URL below, or complete login in browser:")
-							.then((value) => {
-								if (value && manualCodeResolve) {
-									manualCodeResolve(value);
-									manualCodeResolve = undefined;
-								}
-							})
-							.catch(() => {
-								if (manualCodeReject) {
-									manualCodeReject(new Error("Login cancelled"));
-									manualCodeReject = undefined;
-								}
-							});
-					}
-					// For Anthropic: onPrompt is called immediately after
-				},
+					onDeviceCode: (info) => {
+						dialog.showDeviceCode(info);
+						dialog.showWaiting("Waiting for authentication...");
+					},
 
-				onDeviceCode: (info) => {
-					dialog.showDeviceCode(info);
-					dialog.showWaiting("Waiting for authentication...");
-				},
+					onPrompt: async (prompt: { message: string; placeholder?: string }) => {
+						return dialog.showPrompt(prompt.message, prompt.placeholder);
+					},
 
-				onPrompt: async (prompt: { message: string; placeholder?: string }) => {
-					return dialog.showPrompt(prompt.message, prompt.placeholder);
-				},
+					onProgress: (message: string) => {
+						dialog.showProgress(message);
+					},
 
-				onProgress: (message: string) => {
-					dialog.showProgress(message);
-				},
+					onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialog, prompt),
 
-				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialog, prompt),
+					onManualCodeInput: () => manualCodePromise,
 
-				onManualCodeInput: () => manualCodePromise,
-
-				signal: dialog.signal,
-			});
-
-			// Success
-			if (!restoreEditor()) return;
-			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
-		} catch (error: unknown) {
-			if (!restoreEditor()) return;
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (errorMsg !== "Login cancelled") {
-				this.ui.showError(`Failed to login to ${providerName}: ${errorMsg}`);
-			}
-		}
+					signal: dialog.signal,
+				}),
+			() => this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel),
+			`Failed to login to ${providerName}: `,
+		);
 	}
 }

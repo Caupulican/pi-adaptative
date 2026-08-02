@@ -1,5 +1,10 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
-import type { EvidenceRef, Finding, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import type { EvidenceRef, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import {
+	type EvidenceFindingDraft,
+	normalizeEvidenceFinding,
+	projectEvidenceFindings,
+} from "../autonomy/evidence-finding-projection.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
 import {
@@ -140,7 +145,7 @@ export interface ParsedWorkerOutput {
 	summary: string;
 	status: "completed" | "blocked";
 	blockers: string[];
-	findings: Array<{ summary: string; confidence?: number }>;
+	findings: EvidenceFindingDraft[];
 	actions: WorkerAction[];
 	/** Present when the model emitted an action list that cannot safely reach execution. */
 	actionRejection?: RejectedWorkerActions;
@@ -249,18 +254,11 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 					.slice(0, MAX_WORKER_CLAIM_BLOCKERS)
 					.map((blocker) => blocker.trim().slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS))
 			: [];
-		const findings: Array<{ summary: string; confidence?: number }> = [];
+		const findings: EvidenceFindingDraft[] = [];
 		if (Array.isArray(record.findings)) {
-			for (const item of record.findings.slice(0, MAX_WORKER_FINDINGS)) {
-				if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-				const findingSummary = (item as { summary?: unknown }).summary;
-				if (typeof findingSummary !== "string" || findingSummary.trim().length === 0) continue;
-				const confidenceRaw = (item as { confidence?: unknown }).confidence;
-				const confidence =
-					typeof confidenceRaw === "number" && Number.isFinite(confidenceRaw)
-						? Math.min(Math.max(confidenceRaw, 0), 1)
-						: undefined;
-				findings.push({ summary: findingSummary.trim().slice(0, MAX_WORKER_FINDING_CHARS), confidence });
+			for (let index = 0; index < record.findings.length && index < MAX_WORKER_FINDINGS; index++) {
+				const finding = normalizeEvidenceFinding(record.findings[index], MAX_WORKER_FINDING_CHARS);
+				if (finding) findings.push(finding);
 			}
 		}
 		const verdict = record.verdict === "accepted" || record.verdict === "rejected" ? record.verdict : undefined;
@@ -302,16 +300,10 @@ function buildWorkerEvidence(request: WorkerRequest, findings: ParsedWorkerOutpu
 		title: "Delegated worker synthesis",
 		trusted: false,
 	};
-	const bundleFindings: Finding[] = findings.map((finding, index) => ({
-		id: `finding-${index + 1}`,
-		summary: finding.summary,
-		evidenceIds: [synthesisRef.id],
-		...(finding.confidence !== undefined ? { confidence: finding.confidence } : {}),
-	}));
 	return createEvidenceBundle({
 		query: `worker:${request.id}`,
 		sources: [instructionsRef, synthesisRef],
-		findings: bundleFindings,
+		findings: projectEvidenceFindings(findings, synthesisRef.id),
 	});
 }
 

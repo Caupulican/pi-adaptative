@@ -30,14 +30,19 @@ function escapeControlCharacter(char: string): string {
  * - doubling backslashes before invalid escape characters
  */
 export function repairJson(json: string): string {
-	let repaired = "";
+	const repaired: string[] = [];
+	let unchangedStart = 0;
 	let inString = false;
+	const replaceCharacter = (index: number, replacement: string) => {
+		if (unchangedStart < index) repaired.push(json.slice(unchangedStart, index));
+		repaired.push(replacement);
+		unchangedStart = index + 1;
+	};
 
 	for (let index = 0; index < json.length; index++) {
 		const char = json[index];
 
 		if (!inString) {
-			repaired += char;
 			if (char === '"') {
 				inString = true;
 			}
@@ -45,7 +50,6 @@ export function repairJson(json: string): string {
 		}
 
 		if (char === '"') {
-			repaired += char;
 			inString = false;
 			continue;
 		}
@@ -53,35 +57,35 @@ export function repairJson(json: string): string {
 		if (char === "\\") {
 			const nextChar = json[index + 1];
 			if (nextChar === undefined) {
-				repaired += "\\\\";
+				replaceCharacter(index, "\\\\");
 				continue;
 			}
 
 			if (nextChar === "u") {
 				const unicodeDigits = json.slice(index + 2, index + 6);
 				if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
-					repaired += `\\u${unicodeDigits}`;
 					index += 5;
 					continue;
 				}
-				repaired += "\\\\";
+				replaceCharacter(index, "\\\\");
 				continue;
 			}
 
 			if (VALID_JSON_ESCAPES.has(nextChar)) {
-				repaired += `\\${nextChar}`;
 				index += 1;
 				continue;
 			}
 
-			repaired += "\\\\";
+			replaceCharacter(index, "\\\\");
 			continue;
 		}
 
-		repaired += isControlCharacter(char) ? escapeControlCharacter(char) : char;
+		if (isControlCharacter(char)) replaceCharacter(index, escapeControlCharacter(char));
 	}
 
-	return repaired;
+	if (repaired.length === 0) return json;
+	if (unchangedStart < json.length) repaired.push(json.slice(unchangedStart));
+	return repaired.join("");
 }
 
 export function parseJsonWithRepair<T>(json: string): T {

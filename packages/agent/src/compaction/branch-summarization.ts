@@ -5,8 +5,8 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
-import { completeSimple } from "@caupulican/pi-ai";
+import { completeSimple } from "@caupulican/pi-ai/stream";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai/types";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -19,6 +19,7 @@ import type { AgentMessage, StreamFn } from "../types.ts";
 import { addUsage, createEmptyUsage } from "../usage.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
+	addPersistedFileOperations,
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
@@ -198,16 +199,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	// Only extract from pi-generated summaries (fromHook !== true), not extension-generated ones
 	for (const entry of entries) {
 		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
-			const details = entry.details as BranchSummaryDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				// Modified files go into both edited and written for proper deduplication
-				for (const f of details.modifiedFiles) {
-					fileOps.edited.add(f);
-				}
-			}
+			addPersistedFileOperations(fileOps, entry.details as BranchSummaryDetails);
 		}
 	}
 

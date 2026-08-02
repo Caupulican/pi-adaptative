@@ -2,7 +2,7 @@ import type { FauxProviderRegistration } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall, registerFauxProvider } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { Agent, type AgentEvent, type AgentTool } from "../src/index.ts";
+import { Agent, type AgentEvent, type AgentTool, type AgentToolCall, getToolCallRepairInfo } from "../src/index.ts";
 
 const registrations: FauxProviderRegistration[] = [];
 
@@ -29,6 +29,29 @@ const countTool: AgentTool<typeof countSchema, undefined> = {
 };
 
 describe("tool repair visibility", () => {
+	it("projects repair details through one provider-neutral owner", () => {
+		const plainCall = {
+			type: "toolCall",
+			id: "plain",
+			name: "count",
+			arguments: { count: 1 },
+		} as AgentToolCall;
+		expect(getToolCallRepairInfo(plainCall)).toBeUndefined();
+
+		const repairedCall = {
+			...plainCall,
+			rawArguments: { count: "1" },
+			repairNotes: ["converted count"],
+		};
+		expect(getToolCallRepairInfo(repairedCall)).toEqual({
+			repaired: true,
+			rawArguments: { count: "1" },
+			notes: ["converted count"],
+		});
+
+		expect(getToolCallRepairInfo({ ...plainCall, repairNotes: [] })).toBeUndefined();
+	});
+
 	it("can disable repair teaching notes without disabling repair", async () => {
 		const faux = createFauxRegistration();
 		faux.setResponses([

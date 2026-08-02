@@ -185,20 +185,20 @@ function readCommandOutput(
 	return undefined;
 }
 
+function getBunGlobalPackageRoots(command = "bun", args: string[] = [], requireSuccess = false): string[] {
+	const bunBin = readCommandOutput(command, [...args, "pm", "bin", "-g"], { requireSuccess });
+	const roots = [join(homedir(), ".bun", "install", "global", "node_modules")];
+	if (bunBin) roots.push(join(dirname(bunBin), "install", "global", "node_modules"));
+	return roots;
+}
+
 function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmCommand?: string[]): string[] {
 	switch (method) {
 		case "npm": {
 			const configured = !!npmCommand?.length;
 			const [command = "npm", ...npmArgs] = npmCommand ?? [];
 			if (configured && command === "bun") {
-				const bunBin = readCommandOutput(command, [...npmArgs, "pm", "bin", "-g"], {
-					requireSuccess: true,
-				});
-				const roots = [join(homedir(), ".bun", "install", "global", "node_modules")];
-				if (bunBin) {
-					roots.push(join(dirname(bunBin), "install", "global", "node_modules"));
-				}
-				return roots;
+				return getBunGlobalPackageRoots(command, npmArgs, true);
 			}
 			const root = readCommandOutput(command, [...npmArgs, "root", "-g"], {
 				requireSuccess: configured,
@@ -215,12 +215,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			return dir ? [dir, join(dir, "node_modules")] : [];
 		}
 		case "bun": {
-			const bunBin = readCommandOutput("bun", ["pm", "bin", "-g"]);
-			const roots = [join(homedir(), ".bun", "install", "global", "node_modules")];
-			if (bunBin) {
-				roots.push(join(dirname(bunBin), "install", "global", "node_modules"));
-			}
-			return roots;
+			return getBunGlobalPackageRoots();
 		}
 		case "bun-binary":
 		case "unknown":

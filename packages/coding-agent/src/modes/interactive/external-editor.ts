@@ -14,6 +14,7 @@ import * as path from "node:path";
 import type { EditorComponent, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import { runExternalEditor } from "../../utils/external-editor-command.ts";
+import { waitForStdinEvent } from "../../utils/stdin-events.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 
 export interface ExternalEditorHost {
@@ -112,20 +113,7 @@ export async function openEditorForPath(host: ExternalEditorHost, filePath: stri
 			process.stdout.write(`Please set the $EDITOR or $VISUAL environment variable to edit inline.\n`);
 			process.stdout.write(`Absolute file path: ${filePath}\n\nPress Enter to return to Pi...`);
 			// Wait for enter, but do not remain pending if stdin closes during shutdown.
-			await new Promise<void>((resolve) => {
-				let settled = false;
-				const finish = () => {
-					if (settled) return;
-					settled = true;
-					process.stdin.removeListener("data", finish);
-					process.stdin.removeListener("end", finish);
-					process.stdin.removeListener("error", finish);
-					resolve();
-				};
-				process.stdin.once("data", finish);
-				process.stdin.once("end", finish);
-				process.stdin.once("error", finish);
-			});
+			await waitForStdinEvent();
 		}
 
 		return status === 0;

@@ -1,18 +1,8 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import { clampThinkingLevel } from "../models.ts";
-import type {
-	Api,
-	AssistantMessage,
-	Context,
-	Model,
-	SimpleStreamOptions,
-	StreamFunction,
-	StreamOptions,
-} from "../types.ts";
+import type { Context, Model, SimpleStreamOptions, StreamFunction, StreamOptions } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { headersToRecord } from "../utils/headers.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -22,7 +12,16 @@ import {
 	createOpenAIResponsesToolNameMap,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
-import { buildBaseOptions } from "./simple-options.ts";
+import {
+	applyProviderPayloadHook,
+	beginAssistantResponseStream,
+	buildClampedSimpleOptions,
+	completeAssistantStream,
+	createAssistantMessage,
+	createProviderRetryOptions,
+	createRetryFreeRequestOptions,
+	terminateAssistantStreamWithError,
+} from "./provider-runtime.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure-openai-responses"]);
@@ -75,24 +74,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	// Start async processing
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
-
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "azure-openai-responses" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output = createAssistantMessage(model);
 
 		try {
 			// Create Azure OpenAI client
@@ -102,49 +84,26 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			}
 			const client = createClient(model, apiKey, options);
 			const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
-			let params = buildParams(model, context, options, deploymentName);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: 0,
-			};
+			const params = await applyProviderPayloadHook(
+				buildParams(model, context, options, deploymentName),
+				model,
+				options?.onPayload,
+			);
+			const requestOptions = createRetryFreeRequestOptions(options);
 			const { data: openaiStream, response } = await retryProviderRequest(
 				() => client.responses.create(params, requestOptions).withResponse(),
-				{
-					maxRetries: options?.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: options?.signal,
-				},
+				createProviderRetryOptions(options),
 			);
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			await processResponsesStream(openaiStream, output, stream, model, { toolNameMap });
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatAzureOpenAIError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
+				formatError: formatAzureOpenAIError,
+				scratchFields: ["index", "partialJson"],
+			});
 		}
 	})();
 
@@ -156,13 +115,7 @@ export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-resp
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
-
-	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	const { base, clampedReasoning } = buildClampedSimpleOptions(model, options);
 	const reasoningEffort =
 		clampedReasoning === "off" ? undefined : clampedReasoning === "ultra" ? "max" : clampedReasoning;
 

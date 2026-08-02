@@ -55,6 +55,103 @@ function isPrintableAscii(str: string): boolean {
 	return true;
 }
 
+function findTextRunEnd(text: string, start: number): number {
+	let end = start;
+	while (end < text.length && !extractAnsiCode(text, end)) end++;
+	return end;
+}
+
+function movePendingParts(target: string[], pending: string[]): void {
+	for (const part of pending) target.push(part);
+	pending.length = 0;
+}
+
+interface PrefixScanResult {
+	text: string;
+	width: number;
+	totalWidth: number;
+	overflowed: boolean;
+}
+
+function scanTerminalPrefix(text: string, keepWidth: number, stopAfterWidth: number): PrefixScanResult {
+	const parts: string[] = [];
+	let width = 0;
+	let totalWidth = 0;
+	let keepContiguousPrefix = true;
+	let overflowed = false;
+
+	if (!text.includes("\x1b") && !text.includes("\t")) {
+		for (const { segment } of graphemeSegmenter.segment(text)) {
+			const segmentWidth = graphemeWidth(segment);
+			if (keepContiguousPrefix && width + segmentWidth <= keepWidth) {
+				parts.push(segment);
+				width += segmentWidth;
+			} else {
+				keepContiguousPrefix = false;
+			}
+			totalWidth += segmentWidth;
+			if (totalWidth > stopAfterWidth) {
+				overflowed = true;
+				break;
+			}
+		}
+		return { text: parts.join(""), width, totalWidth, overflowed };
+	}
+
+	const pendingAnsi: string[] = [];
+	let index = 0;
+
+	while (index < text.length) {
+		const ansi = extractAnsiCode(text, index);
+		if (ansi) {
+			pendingAnsi.push(ansi.code);
+			index += ansi.length;
+			continue;
+		}
+
+		if (text[index] === "\t") {
+			if (keepContiguousPrefix && width + 3 <= keepWidth) {
+				movePendingParts(parts, pendingAnsi);
+				parts.push("\t");
+				width += 3;
+			} else {
+				keepContiguousPrefix = false;
+				pendingAnsi.length = 0;
+			}
+			totalWidth += 3;
+			index++;
+			if (totalWidth > stopAfterWidth) {
+				overflowed = true;
+				break;
+			}
+			continue;
+		}
+
+		const end = findTextRunEnd(text, index);
+		for (const { segment } of graphemeSegmenter.segment(text.slice(index, end))) {
+			const segmentWidth = graphemeWidth(segment);
+			if (keepContiguousPrefix && width + segmentWidth <= keepWidth) {
+				movePendingParts(parts, pendingAnsi);
+				parts.push(segment);
+				width += segmentWidth;
+			} else {
+				keepContiguousPrefix = false;
+				pendingAnsi.length = 0;
+			}
+
+			totalWidth += segmentWidth;
+			if (totalWidth > stopAfterWidth) {
+				overflowed = true;
+				break;
+			}
+		}
+		if (overflowed) break;
+		index = end;
+	}
+
+	return { text: parts.join(""), width, totalWidth, overflowed };
+}
+
 function truncateFragmentToWidth(text: string, maxWidth: number): { text: string; width: number } {
 	if (maxWidth <= 0 || text.length === 0) {
 		return { text: "", width: 0 };
@@ -65,74 +162,8 @@ function truncateFragmentToWidth(text: string, maxWidth: number): { text: string
 		return { text: clipped, width: clipped.length };
 	}
 
-	const hasAnsi = text.includes("\x1b");
-	const hasTabs = text.includes("\t");
-	if (!hasAnsi && !hasTabs) {
-		let result = "";
-		let width = 0;
-		for (const { segment } of graphemeSegmenter.segment(text)) {
-			const w = graphemeWidth(segment);
-			if (width + w > maxWidth) {
-				break;
-			}
-			result += segment;
-			width += w;
-		}
-		return { text: result, width };
-	}
-
-	let result = "";
-	let width = 0;
-	let i = 0;
-	let pendingAnsi = "";
-
-	while (i < text.length) {
-		const ansi = extractAnsiCode(text, i);
-		if (ansi) {
-			pendingAnsi += ansi.code;
-			i += ansi.length;
-			continue;
-		}
-
-		if (text[i] === "\t") {
-			if (width + 3 > maxWidth) {
-				break;
-			}
-			if (pendingAnsi) {
-				result += pendingAnsi;
-				pendingAnsi = "";
-			}
-			result += "\t";
-			width += 3;
-			i++;
-			continue;
-		}
-
-		let end = i;
-		while (end < text.length && text[end] !== "\t") {
-			const nextAnsi = extractAnsiCode(text, end);
-			if (nextAnsi) {
-				break;
-			}
-			end++;
-		}
-
-		for (const { segment } of graphemeSegmenter.segment(text.slice(i, end))) {
-			const w = graphemeWidth(segment);
-			if (width + w > maxWidth) {
-				return { text: result, width };
-			}
-			if (pendingAnsi) {
-				result += pendingAnsi;
-				pendingAnsi = "";
-			}
-			result += segment;
-			width += w;
-		}
-		i = end;
-	}
-
-	return { text: result, width };
+	const result = scanTerminalPrefix(text, maxWidth, maxWidth);
+	return { text: result.text, width: result.width };
 }
 
 function finalizeTruncatedResult(
@@ -235,18 +266,19 @@ export function visibleWidth(str: string): number {
 		// Strip supported ANSI/OSC/APC escape sequences in one pass.
 		// This covers CSI styling/cursor codes, OSC hyperlinks and prompt markers,
 		// and APC sequences like CURSOR_MARKER.
-		let stripped = "";
-		let i = 0;
-		while (i < clean.length) {
-			const ansi = extractAnsiCode(clean, i);
+		const strippedParts: string[] = [];
+		let index = 0;
+		while (index < clean.length) {
+			const ansi = extractAnsiCode(clean, index);
 			if (ansi) {
-				i += ansi.length;
+				index += ansi.length;
 				continue;
 			}
-			stripped += clean[i];
-			i++;
+			const end = findTextRunEnd(clean, index);
+			strippedParts.push(clean.slice(index, end));
+			index = end;
 		}
-		clean = stripped;
+		clean = strippedParts.join("");
 	}
 
 	// Calculate width
@@ -286,19 +318,20 @@ export function normalizeTerminalOutput(str: string): string {
 	}
 	if (!normalized.includes("\t")) return normalized;
 
-	let result = "";
-	let i = 0;
-	while (i < normalized.length) {
-		const ansi = extractAnsiCode(normalized, i);
+	const parts: string[] = [];
+	let index = 0;
+	while (index < normalized.length) {
+		const ansi = extractAnsiCode(normalized, index);
 		if (ansi) {
-			result += ansi.code;
-			i += ansi.length;
+			parts.push(ansi.code);
+			index += ansi.length;
 			continue;
 		}
-		result += normalized[i] === "\t" ? "   " : normalized[i];
-		i++;
+		const end = findTextRunEnd(normalized, index);
+		parts.push(normalized.slice(index, end).replace(/\t/g, "   "));
+		index = end;
 	}
-	return result;
+	return parts.join("");
 }
 
 /**
@@ -320,30 +353,21 @@ export function extractAnsiCode(str: string, pos: number): { code: string; lengt
 		return null;
 	}
 
-	// OSC sequence: ESC ] ... BEL or ESC ] ... ST (ESC \)
-	// Used for hyperlinks (OSC 8), window titles, etc.
-	if (next === "]") {
-		let j = pos + 2;
-		while (j < str.length) {
-			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
-			j++;
-		}
-		return null;
-	}
+	// OSC and APC strings both terminate with BEL or ST (ESC \).
+	if (next === "]" || next === "_") return extractTerminatedAnsiString(str, pos);
 
-	// APC sequence: ESC _ ... BEL or ESC _ ... ST (ESC \)
-	// Used for cursor marker and application-specific commands
-	if (next === "_") {
-		let j = pos + 2;
-		while (j < str.length) {
-			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
-			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
-			j++;
-		}
-		return null;
-	}
+	return null;
+}
 
+function extractTerminatedAnsiString(str: string, pos: number): { code: string; length: number } | null {
+	let end = pos + 2;
+	while (end < str.length) {
+		if (str[end] === "\x07") return { code: str.substring(pos, end + 1), length: end + 1 - pos };
+		if (str[end] === "\x1b" && str[end + 1] === "\\") {
+			return { code: str.substring(pos, end + 2), length: end + 2 - pos };
+		}
+		end++;
+	}
 	return null;
 }
 
@@ -626,8 +650,8 @@ function updateTrackerFromText(text: string, tracker: AnsiCodeTracker): void {
  */
 function splitIntoTokensWithAnsi(text: string): string[] {
 	const tokens: string[] = [];
-	let current = "";
-	let pendingAnsi = ""; // ANSI codes waiting to be attached to next visible content
+	let currentParts: string[] = [];
+	const pendingAnsi: string[] = []; // ANSI codes waiting to be attached to next visible content
 	let inWhitespace = false;
 	let i = 0;
 
@@ -635,7 +659,7 @@ function splitIntoTokensWithAnsi(text: string): string[] {
 		const ansiResult = extractAnsiCode(text, i);
 		if (ansiResult) {
 			// Hold ANSI codes separately - they'll be attached to the next visible char
-			pendingAnsi += ansiResult.code;
+			pendingAnsi.push(ansiResult.code);
 			i += ansiResult.length;
 			continue;
 		}
@@ -643,31 +667,27 @@ function splitIntoTokensWithAnsi(text: string): string[] {
 		const char = text[i];
 		const charIsSpace = char === " ";
 
-		if (charIsSpace !== inWhitespace && current) {
+		if (charIsSpace !== inWhitespace && currentParts.length > 0) {
 			// Switching between whitespace and non-whitespace, push current token
-			tokens.push(current);
-			current = "";
+			tokens.push(currentParts.join(""));
+			currentParts = [];
 		}
 
 		// Attach any pending ANSI codes to this visible character
-		if (pendingAnsi) {
-			current += pendingAnsi;
-			pendingAnsi = "";
-		}
+		movePendingParts(currentParts, pendingAnsi);
 
 		inWhitespace = charIsSpace;
-		current += char;
-		i++;
+		let runEnd = i + 1;
+		while (runEnd < text.length && text[runEnd] !== "\x1b" && (text[runEnd] === " ") === charIsSpace) {
+			runEnd++;
+		}
+		currentParts.push(text.slice(i, runEnd));
+		i = runEnd;
 	}
 
 	// Handle any remaining pending ANSI codes (attach to last token)
-	if (pendingAnsi) {
-		current += pendingAnsi;
-	}
-
-	if (current) {
-		tokens.push(current);
-	}
+	movePendingParts(currentParts, pendingAnsi);
+	if (currentParts.length > 0) tokens.push(currentParts.join(""));
 
 	return tokens;
 }
@@ -734,7 +754,7 @@ function wrapSingleLine(line: string, width: number): string[] {
 	const tracker = new AnsiCodeTracker();
 	const tokens = splitIntoTokensWithAnsi(line);
 
-	let currentLine = "";
+	const currentParts: string[] = [];
 	let currentVisibleLength = 0;
 
 	for (const token of tokens) {
@@ -743,14 +763,12 @@ function wrapSingleLine(line: string, width: number): string[] {
 
 		// Token itself is too long - break it character by character
 		if (tokenVisibleLength > width && !isWhitespace) {
-			if (currentLine) {
+			if (currentParts.length > 0) {
 				// Add specific reset for underline only (preserves background)
 				const lineEndReset = tracker.getLineEndReset();
-				if (lineEndReset) {
-					currentLine += lineEndReset;
-				}
-				wrapped.push(currentLine);
-				currentLine = "";
+				if (lineEndReset) currentParts.push(lineEndReset);
+				wrapped.push(currentParts.join(""));
+				currentParts.length = 0;
 				currentVisibleLength = 0;
 			}
 
@@ -759,8 +777,9 @@ function wrapSingleLine(line: string, width: number): string[] {
 			for (let i = 0; i < broken.length - 1; i++) {
 				wrapped.push(broken[i]!);
 			}
-			currentLine = broken[broken.length - 1];
-			currentVisibleLength = visibleWidth(currentLine);
+			const finalBrokenLine = broken[broken.length - 1] ?? "";
+			currentParts.push(finalBrokenLine);
+			currentVisibleLength = visibleWidth(finalBrokenLine);
 			continue;
 		}
 
@@ -769,29 +788,34 @@ function wrapSingleLine(line: string, width: number): string[] {
 
 		if (totalNeeded > width && currentVisibleLength > 0) {
 			// Trim trailing whitespace, then add underline reset (not full reset, to preserve background)
-			let lineToWrap = currentLine.trimEnd();
+			let lineToWrap = currentParts.join("").trimEnd();
 			const lineEndReset = tracker.getLineEndReset();
 			if (lineEndReset) {
 				lineToWrap += lineEndReset;
 			}
 			wrapped.push(lineToWrap);
+			currentParts.length = 0;
 			if (isWhitespace) {
 				// Don't start new line with whitespace
-				currentLine = tracker.getActiveCodes();
+				const activeCodes = tracker.getActiveCodes();
+				if (activeCodes) currentParts.push(activeCodes);
 				currentVisibleLength = 0;
 			} else {
-				currentLine = tracker.getActiveCodes() + token;
+				const activeCodes = tracker.getActiveCodes();
+				if (activeCodes) currentParts.push(activeCodes);
+				currentParts.push(token);
 				currentVisibleLength = tokenVisibleLength;
 			}
 		} else {
 			// Add to current line
-			currentLine += token;
+			currentParts.push(token);
 			currentVisibleLength += tokenVisibleLength;
 		}
 
 		updateTrackerFromText(token, tracker);
 	}
 
+	const currentLine = currentParts.join("");
 	if (currentLine) {
 		// No reset at end of final line - let caller handle it
 		wrapped.push(currentLine);
@@ -830,7 +854,8 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 	}
 
 	const lines: string[] = [];
-	let currentLine = tracker.getActiveCodes();
+	const initialCodes = tracker.getActiveCodes();
+	let currentParts = initialCodes ? [initialCodes] : [];
 	let currentWidth = 0;
 
 	// First, separate ANSI codes from visible content
@@ -844,13 +869,7 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 			segments.push({ type: "ansi", value: ansiResult.code });
 			i += ansiResult.length;
 		} else {
-			// Find the next ANSI code or end of string
-			let end = i;
-			while (end < word.length) {
-				const nextAnsi = extractAnsiCode(word, end);
-				if (nextAnsi) break;
-				end++;
-			}
+			const end = findTextRunEnd(word, i);
 			// Segment this non-ANSI portion into graphemes
 			const textPortion = word.slice(i, end);
 			for (const seg of graphemeSegmenter.segment(textPortion)) {
@@ -863,7 +882,7 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 	// Now process segments
 	for (const seg of segments) {
 		if (seg.type === "ansi") {
-			currentLine += seg.value;
+			currentParts.push(seg.value);
 			tracker.process(seg.value);
 			continue;
 		}
@@ -877,18 +896,18 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 		if (currentWidth + graphemeWidth > width) {
 			// Add specific reset for underline only (preserves background)
 			const lineEndReset = tracker.getLineEndReset();
-			if (lineEndReset) {
-				currentLine += lineEndReset;
-			}
-			lines.push(currentLine);
-			currentLine = tracker.getActiveCodes();
+			if (lineEndReset) currentParts.push(lineEndReset);
+			lines.push(currentParts.join(""));
+			const activeCodes = tracker.getActiveCodes();
+			currentParts = activeCodes ? [activeCodes] : [];
 			currentWidth = 0;
 		}
 
-		currentLine += grapheme;
+		currentParts.push(grapheme);
 		currentWidth += graphemeWidth;
 	}
 
+	const currentLine = currentParts.join("");
 	if (currentLine) {
 		// No reset at end of final segment - caller handles continuation
 		lines.push(currentLine);
@@ -964,105 +983,12 @@ export function truncateToWidth(
 	}
 
 	const targetWidth = maxWidth - ellipsisWidth;
-	let result = "";
-	let pendingAnsi = "";
-	let visibleSoFar = 0;
-	let keptWidth = 0;
-	let keepContiguousPrefix = true;
-	let overflowed = false;
-	let exhaustedInput = false;
-	const hasAnsi = text.includes("\x1b");
-	const hasTabs = text.includes("\t");
-
-	if (!hasAnsi && !hasTabs) {
-		for (const { segment } of graphemeSegmenter.segment(text)) {
-			const width = graphemeWidth(segment);
-			if (keepContiguousPrefix && keptWidth + width <= targetWidth) {
-				result += segment;
-				keptWidth += width;
-			} else {
-				keepContiguousPrefix = false;
-			}
-			visibleSoFar += width;
-			if (visibleSoFar > maxWidth) {
-				overflowed = true;
-				break;
-			}
-		}
-		exhaustedInput = !overflowed;
-	} else {
-		let i = 0;
-		while (i < text.length) {
-			const ansi = extractAnsiCode(text, i);
-			if (ansi) {
-				pendingAnsi += ansi.code;
-				i += ansi.length;
-				continue;
-			}
-
-			if (text[i] === "\t") {
-				if (keepContiguousPrefix && keptWidth + 3 <= targetWidth) {
-					if (pendingAnsi) {
-						result += pendingAnsi;
-						pendingAnsi = "";
-					}
-					result += "\t";
-					keptWidth += 3;
-				} else {
-					keepContiguousPrefix = false;
-					pendingAnsi = "";
-				}
-				visibleSoFar += 3;
-				if (visibleSoFar > maxWidth) {
-					overflowed = true;
-					break;
-				}
-				i++;
-				continue;
-			}
-
-			let end = i;
-			while (end < text.length && text[end] !== "\t") {
-				const nextAnsi = extractAnsiCode(text, end);
-				if (nextAnsi) {
-					break;
-				}
-				end++;
-			}
-
-			for (const { segment } of graphemeSegmenter.segment(text.slice(i, end))) {
-				const width = graphemeWidth(segment);
-				if (keepContiguousPrefix && keptWidth + width <= targetWidth) {
-					if (pendingAnsi) {
-						result += pendingAnsi;
-						pendingAnsi = "";
-					}
-					result += segment;
-					keptWidth += width;
-				} else {
-					keepContiguousPrefix = false;
-					pendingAnsi = "";
-				}
-
-				visibleSoFar += width;
-				if (visibleSoFar > maxWidth) {
-					overflowed = true;
-					break;
-				}
-			}
-			if (overflowed) {
-				break;
-			}
-			i = end;
-		}
-		exhaustedInput = i >= text.length;
+	const scanned = scanTerminalPrefix(text, targetWidth, maxWidth);
+	if (!scanned.overflowed) {
+		return pad ? text + " ".repeat(Math.max(0, maxWidth - scanned.totalWidth)) : text;
 	}
 
-	if (!overflowed && exhaustedInput) {
-		return pad ? text + " ".repeat(Math.max(0, maxWidth - visibleSoFar)) : text;
-	}
-
-	return finalizeTruncatedResult(result, keptWidth, ellipsis, ellipsisWidth, maxWidth, pad);
+	return finalizeTruncatedResult(scanned.text, scanned.width, ellipsis, ellipsisWidth, maxWidth, pad);
 }
 
 /**
@@ -1082,34 +1008,30 @@ export function sliceWithWidth(
 ): { text: string; width: number } {
 	if (length <= 0) return { text: "", width: 0 };
 	const endCol = startCol + length;
-	let result = "",
-		resultWidth = 0,
+	const resultParts: string[] = [];
+	const pendingAnsi: string[] = [];
+	let resultWidth = 0,
 		currentCol = 0,
-		i = 0,
-		pendingAnsi = "";
+		i = 0;
 
 	while (i < line.length) {
 		const ansi = extractAnsiCode(line, i);
 		if (ansi) {
-			if (currentCol >= startCol && currentCol < endCol) result += ansi.code;
-			else if (currentCol < startCol) pendingAnsi += ansi.code;
+			if (currentCol >= startCol && currentCol < endCol) resultParts.push(ansi.code);
+			else if (currentCol < startCol) pendingAnsi.push(ansi.code);
 			i += ansi.length;
 			continue;
 		}
 
-		let textEnd = i;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		const textEnd = findTextRunEnd(line, i);
 
 		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
 			const w = graphemeWidth(segment);
 			const inRange = currentCol >= startCol && currentCol < endCol;
 			const fits = !strict || currentCol + w <= endCol;
 			if (inRange && fits) {
-				if (pendingAnsi) {
-					result += pendingAnsi;
-					pendingAnsi = "";
-				}
-				result += segment;
+				movePendingParts(resultParts, pendingAnsi);
+				resultParts.push(segment);
 				resultWidth += w;
 			}
 			currentCol += w;
@@ -1118,7 +1040,7 @@ export function sliceWithWidth(
 		i = textEnd;
 		if (currentCol >= endCol) break;
 	}
-	return { text: result, width: resultWidth };
+	return { text: resultParts.join(""), width: resultWidth };
 }
 
 // Pooled tracker instance for extractSegments (avoids allocation per call)
@@ -1136,13 +1058,13 @@ export function extractSegments(
 	afterLen: number,
 	strictAfter = false,
 ): { before: string; beforeWidth: number; after: string; afterWidth: number } {
-	let before = "",
-		beforeWidth = 0,
-		after = "",
+	const beforeParts: string[] = [];
+	const afterParts: string[] = [];
+	const pendingAnsiBefore: string[] = [];
+	let beforeWidth = 0,
 		afterWidth = 0;
 	let currentCol = 0,
 		i = 0;
-	let pendingAnsiBefore = "";
 	let afterStarted = false;
 	const afterEnd = afterStart + afterLen;
 
@@ -1156,37 +1078,33 @@ export function extractSegments(
 			pooledStyleTracker.process(ansi.code);
 			// Include ANSI codes in their respective segments
 			if (currentCol < beforeEnd) {
-				pendingAnsiBefore += ansi.code;
+				pendingAnsiBefore.push(ansi.code);
 			} else if (currentCol >= afterStart && currentCol < afterEnd && afterStarted) {
 				// Only include after we've started "after" (styling already prepended)
-				after += ansi.code;
+				afterParts.push(ansi.code);
 			}
 			i += ansi.length;
 			continue;
 		}
 
-		let textEnd = i;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		const textEnd = findTextRunEnd(line, i);
 
 		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
 			const w = graphemeWidth(segment);
 
 			if (currentCol < beforeEnd) {
-				if (pendingAnsiBefore) {
-					before += pendingAnsiBefore;
-					pendingAnsiBefore = "";
-				}
-				before += segment;
+				movePendingParts(beforeParts, pendingAnsiBefore);
+				beforeParts.push(segment);
 				beforeWidth += w;
 			} else if (currentCol >= afterStart && currentCol < afterEnd) {
 				const fits = !strictAfter || currentCol + w <= afterEnd;
 				if (fits) {
 					// On first "after" grapheme, prepend inherited styling from before overlay
 					if (!afterStarted) {
-						after += pooledStyleTracker.getActiveCodes();
+						afterParts.push(pooledStyleTracker.getActiveCodes());
 						afterStarted = true;
 					}
-					after += segment;
+					afterParts.push(segment);
 					afterWidth += w;
 				}
 			}
@@ -1199,5 +1117,5 @@ export function extractSegments(
 		if (afterLen <= 0 ? currentCol >= beforeEnd : currentCol >= afterEnd) break;
 	}
 
-	return { before, beforeWidth, after, afterWidth };
+	return { before: beforeParts.join(""), beforeWidth, after: afterParts.join(""), afterWidth };
 }

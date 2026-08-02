@@ -58,6 +58,14 @@ import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHis
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
+import {
+	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
+	BackgroundToolTaskController,
+	type BackgroundToolTaskRecord,
+	createBackgroundToolTerminalMessage,
+	DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
+	loadBackgroundToolTaskRecordsNewestFirst,
+} from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
@@ -84,6 +92,7 @@ import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evalua
 import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import type {
+	CompactOptions,
 	ContextUsage,
 	ExtensionCommandContextActions,
 	ExtensionContext,
@@ -307,6 +316,8 @@ export class AgentSession {
 	 * background-lane-controller.ts); owns the lane timers/guards, the last research-lane skip
 	 * reason, the live LaneTracker, and the in-flight research/worker abort controllers. */
 	private readonly _backgroundLanes: BackgroundLaneController;
+	/** Session-local ownership of tool calls transferred after the foreground latency budget. */
+	private readonly _backgroundToolTasks: BackgroundToolTaskController;
 	private readonly _humanInput: HumanInputController;
 	/** Plug-and-play memory subsystem (see memory-controller.ts); owns the OKF retrieval provider, the
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
@@ -624,6 +635,26 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 		});
+		this._backgroundToolTasks = new BackgroundToolTaskController({
+			getSessionId: () => this.sessionManager.getSessionId(),
+			getArtifactStore: () => this._getToolArtifactStore(),
+			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
+			persist: (record) => this.sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
+			notifyTerminal: (record, options) => this._notifyBackgroundToolTerminal(record, options.wakeParent),
+			onLiveTasksChanged: (tasks) => this._emit({ type: "background_tools", tasks }),
+			recordUsage: (taskId, usage) => {
+				this.addSpawnedUsage(usage, {
+					label: "background-tool",
+					sourceSessionId: this.sessionManager.getSessionId(),
+					reportId: `background-tool:${this.sessionManager.getSessionId()}:${taskId}`,
+				});
+			},
+			onError: (message, error) =>
+				this._emit({
+					type: "warning",
+					message: `${message}: ${error instanceof Error ? error.message : String(error)}`,
+				}),
+		});
 		const failureCorpusPath = stateFile(this._agentDir, "failure-corpus.jsonl");
 		this._toolRecoveryEventLogPath = stateFile(this._agentDir, TOOL_RECOVERY_EVENT_LOG_FILE);
 		const toolRepairSettings = this._toolProtocol.getRepairSettings();
@@ -797,6 +828,7 @@ export class AgentSession {
 			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
+			getToolTaskDependencies: () => this._backgroundToolTasks,
 			getSessionImageStore: () => this._getSessionImageStore(),
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
@@ -1564,6 +1596,11 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = this._toolGate.beforeToolCall;
 		this.agent.afterToolCall = this._toolGate.afterToolCall;
+		this.agent.backgroundToolCallAfterMs = DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS;
+		this.agent.handoffToolCall = (context) =>
+			this.getActiveToolNames().includes("tool_task") ? this._backgroundToolTasks.handoff(context) : undefined;
+		this.agent.subscribeToolCallHandoffRequest = (toolCallId, request) =>
+			this._backgroundToolTasks.subscribeHandoffRequest(toolCallId, request);
 		this.agent.onRunawayStop = (info) => this._handleRunawayStop(info);
 		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
 	}
@@ -1698,6 +1735,17 @@ export class AgentSession {
 			},
 			{ triggerTurn: !ownerQuestionWillWakeParent, deliverAs: "followUp" },
 		);
+	}
+
+	private async _notifyBackgroundToolTerminal(record: BackgroundToolTaskRecord, wakeParent: boolean): Promise<void> {
+		if (!wakeParent) return;
+		if (this._disposed) throw new Error("Session disposed before background tool terminal handoff was delivered");
+		await this.agent.waitForIdle();
+		if (this._disposed) throw new Error("Session disposed before background tool terminal handoff was delivered");
+		await this.sendCustomMessage(createBackgroundToolTerminalMessage(record), {
+			triggerTurn: true,
+			deliverAs: "followUp",
+		});
 	}
 
 	private _emitQueueUpdate(): void {
@@ -2033,11 +2081,14 @@ export class AgentSession {
 		safely(() => this._cancelPrefixWarm());
 		safely(() => this.agent.abort());
 		track(() => this._gatewayRegistry.stop());
+		track(() => this._backgroundToolTasks.shutdown());
 		safely(() => this._reflection.cancelScheduled());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._backgroundLanes.abortInFlightLanes());
 		safely(() => {
 			this.agent.afterToolCall = undefined;
+			this.agent.handoffToolCall = undefined;
+			this.agent.subscribeToolCallHandoffRequest = undefined;
 			this.agent.transformContext = undefined;
 		});
 		safely(() => this._extensionRunner.invalidate());
@@ -2198,6 +2249,9 @@ export class AgentSession {
 		if (validToolNames.includes("delegate")) {
 			addIfRegistered("delegate_status");
 		}
+		if (validToolNames.length > 0) {
+			addIfRegistered("tool_task");
+		}
 
 		this.agent.state.tools = tools;
 
@@ -2206,6 +2260,12 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 
 		this._checkContextWindowUsageWarning();
+	}
+
+	/** Request immediate transfer of one or all currently-running foreground tool calls. */
+	backgroundRunningToolCalls(toolCallId?: string): number {
+		if (!this.getActiveToolNames().includes("tool_task")) return 0;
+		return this._backgroundToolTasks.requestHandoff(toolCallId);
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -2806,6 +2866,14 @@ export class AgentSession {
 		}
 	}
 
+	/** Reject extension commands, then expand a queued message through the shared skill/template path. */
+	private _prepareQueuedMessageText(text: string): string {
+		if (text.startsWith("/")) {
+			this._throwIfExtensionCommand(text);
+		}
+		return expandPromptTemplate(this._expandSkillCommand(text), [...this.promptTemplates]);
+	}
+
 	/**
 	 * Queue a steering message while the agent is running.
 	 * Delivered after the current assistant turn finishes executing its tool calls,
@@ -2815,16 +2883,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-
-		await this._queueSteer(expandedText, images);
+		await this._queueSteer(this._prepareQueuedMessageText(text), images);
 	}
 
 	/**
@@ -2835,16 +2894,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		// Check for extension commands (cannot be queued)
-		if (text.startsWith("/")) {
-			this._throwIfExtensionCommand(text);
-		}
-
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-
-		await this._queueFollowUp(expandedText, images);
+		await this._queueFollowUp(this._prepareQueuedMessageText(text), images);
 	}
 
 	/**
@@ -3133,6 +3183,19 @@ export class AgentSession {
 		return this._compaction.compact(customInstructions);
 	}
 
+	/** Start extension-requested compaction without blocking its event or shortcut handler. */
+	compactForExtension(options?: CompactOptions): void {
+		void (async () => {
+			try {
+				const result = await this.compact(options?.customInstructions);
+				options?.onComplete?.(result);
+			} catch (error) {
+				const err = error instanceof Error ? error : new Error(String(error));
+				options?.onError?.(err);
+			}
+		})();
+	}
+
 	/**
 	 * Cancel in-progress compaction (manual or auto).
 	 */
@@ -3410,17 +3473,7 @@ export class AgentSession {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
-				compact: (options) => {
-					void (async () => {
-						try {
-							const result = await this.compact(options?.customInstructions);
-							options?.onComplete?.(result);
-						} catch (error) {
-							const err = error instanceof Error ? error : new Error(String(error));
-							options?.onError?.(err);
-						}
-					})();
-				},
+				compact: (options) => this.compactForExtension(options),
 				reload: () => {
 					if (this.isStreaming) {
 						return Promise.reject(

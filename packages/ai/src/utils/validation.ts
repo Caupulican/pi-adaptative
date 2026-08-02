@@ -8,6 +8,7 @@ import {
 	type ToolRepairModeName,
 } from "./tool-repair/registry.ts";
 import { repairToolArguments } from "./tool-repair/repairer.ts";
+import { formatValidationPath } from "./validation-path.ts";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const EXPECTED_FRAGMENT_MAX_LENGTH = 320;
@@ -103,19 +104,6 @@ export function getValidator(schema: Tool["parameters"]): ReturnType<typeof Comp
 	const validator = Compile(schema);
 	validatorCache.set(key, validator);
 	return validator;
-}
-
-function formatValidationPath(error: TLocalizedValidationError): string {
-	if (error.keyword === "required") {
-		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
-		const requiredProperty = requiredProperties?.[0];
-		if (requiredProperty) {
-			const basePath = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-			return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
-		}
-	}
-	const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-	return path || "root";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

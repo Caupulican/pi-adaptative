@@ -1,16 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	type Context,
-	EventStream,
-	type Message,
-	type Model,
-	type SimpleStreamOptions,
-	type Usage,
-} from "@caupulican/pi-ai";
+import { EventStream } from "@caupulican/pi-ai/event-stream";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	Usage,
+} from "@caupulican/pi-ai/types";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider, stream } from "../src/index.ts";
 import type { AssistantMessage, AssistantMessageEvent, Tool } from "../src/types.ts";
 import { parseTextToolCalls } from "../src/utils/tool-repair/text-protocol.ts";
@@ -105,6 +105,53 @@ describe("text tool-call protocol streaming (live-leak guard)", () => {
 
 		expect((deltasByIndex.get(0) ?? []).join("")).toBe(rawText);
 		expect(finalMessage?.content).toMatchObject([{ type: "text", text: rawText }]);
+	});
+
+	it("scans protocol-looking prose in bounded incremental windows", async () => {
+		const registration = registerFauxProvider({ tokenSize: { min: 1, max: 1 } });
+		registrations.push(registration);
+		const tools = [makeTool("echo")];
+		const rawText = "ordinary <x> prose. ".repeat(250);
+		registration.setResponses([fauxAssistantMessage(rawText)]);
+		const protocolOpeners = new Set(["<pi:call", "<tool_call", "```tool_call", "```tool", "```json", "<function"]);
+		const originalIndexOf = String.prototype.indexOf;
+		let scannedChars = 0;
+		let scanCalls = 0;
+		let maxScanWindow = 0;
+		const indexOfSpy = vi.spyOn(String.prototype, "indexOf").mockImplementation(function (
+			this: string,
+			searchString: string,
+			position?: number,
+		): number {
+			if (protocolOpeners.has(searchString)) {
+				const length = String(this).length;
+				scannedChars += length;
+				scanCalls += 1;
+				maxScanWindow = Math.max(maxScanWindow, length);
+			}
+			return originalIndexOf.call(this, searchString, position);
+		});
+		let restored = false;
+		let streamedProse = "";
+
+		try {
+			for await (const event of stream(
+				registration.getModel(),
+				{ systemPrompt: "base", messages: [], tools },
+				{ textToolCallProtocol: true },
+			)) {
+				if (event.type === "text_delta") streamedProse += event.delta;
+				if (event.type === "text_end") {
+					indexOfSpy.mockRestore();
+					restored = true;
+				}
+			}
+			expect(streamedProse).toBe(rawText);
+		} finally {
+			if (!restored) indexOfSpy.mockRestore();
+		}
+
+		expect(scannedChars, `scanCalls=${scanCalls} maxScanWindow=${maxScanWindow}`).toBeLessThan(rawText.length * 80);
 	});
 
 	it("resumes live streaming for prose that follows a closed envelope in the same block", async () => {

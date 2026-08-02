@@ -1,5 +1,7 @@
 import { MODELS } from "./models.generated.ts";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.ts";
+import type { Api, KnownProvider, Model, Usage } from "./types.ts";
+
+export { clampThinkingLevel, getSupportedThinkingLevels, resolveModelThinkingLevel } from "./model-capabilities.ts";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
@@ -56,63 +58,6 @@ export function calculateCost<TApi extends Api>(
 		usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	}
 	return usage.cost;
-}
-
-const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = [
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-	"ultra",
-];
-
-export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
-	if (!model.reasoning) return ["off"];
-
-	return EXTENDED_THINKING_LEVELS.filter((level) => {
-		const mapped = model.thinkingLevelMap?.[level];
-		if (mapped === null) return false;
-		if (level === "xhigh" || level === "max" || level === "ultra") return mapped !== undefined;
-		return true;
-	});
-}
-
-export function clampThinkingLevel<TApi extends Api>(
-	model: Model<TApi>,
-	level: ModelThinkingLevel,
-): ModelThinkingLevel {
-	const availableLevels = getSupportedThinkingLevels(model);
-	if (availableLevels.includes(level)) return level;
-
-	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
-	if (requestedIndex === -1) return availableLevels[0] ?? "off";
-
-	for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
-		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
-	}
-	for (let i = requestedIndex - 1; i >= 0; i--) {
-		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
-	}
-	return availableLevels[0] ?? "off";
-}
-
-/**
- * Resolve the effective thinking level for a model through one provider-neutral contract.
- * Explicit caller intent wins, then model metadata, then the caller's harness fallback. The
- * selected level is always clamped to the model's advertised capabilities before it leaves this
- * function, so non-reasoning models cannot carry a transient reasoning level.
- */
-export function resolveModelThinkingLevel<TApi extends Api>(
-	model: Model<TApi>,
-	requestedLevel: ModelThinkingLevel | undefined,
-	fallbackLevel: ModelThinkingLevel = "medium",
-): ModelThinkingLevel {
-	return clampThinkingLevel(model, requestedLevel ?? model.defaultThinkingLevel ?? fallbackLevel);
 }
 
 /**

@@ -121,6 +121,7 @@ function buildCompletionValue(
 }
 
 const FD_WALK_TIMEOUT_MS = 5_000;
+const FD_OUTPUT_MAX_CHARS = 4 * 1024 * 1024;
 const ARGUMENT_COMPLETION_TIMEOUT_MS = 5_000;
 
 // Use fd to walk directory tree (fast, respects .gitignore)
@@ -167,7 +168,8 @@ async function walkDirectoryWithFd(
 		const child = spawn(fdPath, args, {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		let stdout = "";
+		const stdoutChunks: string[] = [];
+		let stdoutLength = 0;
 		let resolved = false;
 		let timeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -193,17 +195,25 @@ async function walkDirectoryWithFd(
 		timeout.unref();
 		child.stdout.setEncoding("utf-8");
 		child.stdout.on("data", (chunk: string) => {
-			stdout += chunk;
+			if (resolved) return;
+			stdoutLength += chunk.length;
+			if (stdoutLength > FD_OUTPUT_MAX_CHARS) {
+				child.kill(process.platform === "win32" ? undefined : "SIGKILL");
+				finish([]);
+				return;
+			}
+			stdoutChunks.push(chunk);
 		});
 		child.on("error", () => {
 			finish([]);
 		});
 		child.on("close", (code) => {
-			if (signal.aborted || code !== 0 || !stdout) {
+			if (signal.aborted || code !== 0 || stdoutLength === 0) {
 				finish([]);
 				return;
 			}
 
+			const stdout = stdoutChunks.join("");
 			const lines = stdout.trim().split("\n").filter(Boolean);
 			const results: Array<{ path: string; isDirectory: boolean }> = [];
 
@@ -450,26 +460,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			};
 		}
 
-		// Check if we're in a slash command context (beforePrefix contains "/command ")
-		const textBeforeCursor = currentLine.slice(0, cursorCol);
-		if (textBeforeCursor.includes("/") && textBeforeCursor.includes(" ")) {
-			// This is likely a command argument completion
-			const newLine = beforePrefix + item.value + adjustedAfterCursor;
-			const newLines = [...lines];
-			newLines[cursorLine] = newLine;
-
-			const isDirectory = item.label.endsWith("/");
-			const hasTrailingQuote = item.value.endsWith('"');
-			const cursorOffset = isDirectory && hasTrailingQuote ? item.value.length - 1 : item.value.length;
-
-			return {
-				lines: newLines,
-				cursorLine,
-				cursorCol: beforePrefix.length + cursorOffset,
-			};
-		}
-
-		// For file paths, complete the path
+		// Command arguments and file paths share the same replacement contract.
 		const newLine = beforePrefix + item.value + adjustedAfterCursor;
 		const newLines = [...lines];
 		newLines[cursorLine] = newLine;

@@ -1,3 +1,5 @@
+import { sleepWithAbortError } from "../abort-signals.ts";
+
 const CANCEL_MESSAGE = "Login cancelled";
 const TIMEOUT_MESSAGE = "Device flow timed out";
 const SLOW_DOWN_TIMEOUT_MESSAGE =
@@ -21,26 +23,6 @@ export type OAuthDeviceCodePollOptions<T> = {
 	poll: () => Promise<OAuthDeviceCodePollResult<T>>;
 	signal?: AbortSignal;
 };
-
-function abortableSleep(ms: number, signal: AbortSignal | undefined, cancelMessage: string): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(new Error(cancelMessage));
-			return;
-		}
-
-		const onAbort = () => {
-			clearTimeout(timeout);
-			reject(new Error(cancelMessage));
-		};
-		const timeout = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
-
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
 
 export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodePollOptions<T>): Promise<T> {
 	const deadline =
@@ -76,7 +58,7 @@ export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodePollOpt
 			break;
 		}
 
-		await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
+		await sleepWithAbortError(Math.min(intervalMs, remainingMs), options.signal, () => new Error(CANCEL_MESSAGE));
 	}
 
 	throw new Error(slowDownResponses > 0 ? SLOW_DOWN_TIMEOUT_MESSAGE : TIMEOUT_MESSAGE);

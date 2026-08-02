@@ -46,45 +46,31 @@ if (versions.size > 1) {
 
 console.log('\n✅ All packages at same version (lockstep)');
 
+function syncDependencyGroup(pkg, field) {
+	const dependencies = pkg.data[field];
+	if (!dependencies) return 0;
+	let updates = 0;
+	for (const [depName, currentVersion] of Object.entries(dependencies)) {
+		if (!versionMap[depName]) continue;
+		const newVersion = `^${versionMap[depName]}`;
+		if (currentVersion === newVersion) continue;
+		console.log(`\n${pkg.data.name}:`);
+		const suffix = field === 'devDependencies' ? ' (devDependencies)' : '';
+		console.log(`  ${depName}: ${currentVersion} → ${newVersion}${suffix}`);
+		dependencies[depName] = newVersion;
+		updates++;
+	}
+	return updates;
+}
+
 // Update all inter-package dependencies
 let totalUpdates = 0;
-for (const [dir, pkg] of Object.entries(packages)) {
-	let updated = false;
-	
-	// Check dependencies
-	if (pkg.data.dependencies) {
-		for (const [depName, currentVersion] of Object.entries(pkg.data.dependencies)) {
-			if (versionMap[depName]) {
-				const newVersion = `^${versionMap[depName]}`;
-				if (currentVersion !== newVersion) {
-					console.log(`\n${pkg.data.name}:`);
-					console.log(`  ${depName}: ${currentVersion} → ${newVersion}`);
-					pkg.data.dependencies[depName] = newVersion;
-					updated = true;
-					totalUpdates++;
-				}
-			}
-		}
-	}
-	
-	// Check devDependencies
-	if (pkg.data.devDependencies) {
-		for (const [depName, currentVersion] of Object.entries(pkg.data.devDependencies)) {
-			if (versionMap[depName]) {
-				const newVersion = `^${versionMap[depName]}`;
-				if (currentVersion !== newVersion) {
-					console.log(`\n${pkg.data.name}:`);
-					console.log(`  ${depName}: ${currentVersion} → ${newVersion} (devDependencies)`);
-					pkg.data.devDependencies[depName] = newVersion;
-					updated = true;
-					totalUpdates++;
-				}
-			}
-		}
-	}
+for (const pkg of Object.values(packages)) {
+	const packageUpdates = syncDependencyGroup(pkg, 'dependencies') + syncDependencyGroup(pkg, 'devDependencies');
+	totalUpdates += packageUpdates;
 	
 	// Write if updated
-	if (updated) {
+	if (packageUpdates > 0) {
 		writeFileSync(pkg.path, JSON.stringify(pkg.data, null, '\t') + '\n');
 	}
 }

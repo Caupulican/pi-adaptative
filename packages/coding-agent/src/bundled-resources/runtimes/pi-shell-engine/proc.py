@@ -1,6 +1,7 @@
 """External-command spawn: PATHEXT-aware resolution, pipe wiring, deadline-safe kill.
 
-Owned by WP-C. Pure stdlib. See windows-shell-workpackages-2026-07-19.md §3 (WP-C spec).
+WP-C owns this pure-stdlib process boundary; its contract is §3 of
+windows-shell-workpackages-2026-07-19.md.
 """
 
 from __future__ import annotations

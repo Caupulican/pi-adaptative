@@ -21,6 +21,7 @@ import type { PackageSource, SettingsManager } from "../../../core/settings-mana
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { rawKeyHint } from "./keybinding-hints.ts";
+import { getCenteredVisibleRange } from "./selector-list.ts";
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
@@ -54,6 +55,17 @@ interface ResourceGroup {
 	origin: "package" | "top-level";
 	source: string;
 	subgroups: ResourceSubgroup[];
+}
+
+export function replaceResourceFilterPattern(current: string[], pattern: string, enabled: boolean): string[] {
+	const updated: string[] = [];
+	for (const entry of current) {
+		const first = entry[0];
+		const stripped = first === "!" || first === "+" || first === "-" ? entry.slice(1) : entry;
+		if (stripped !== pattern) updated.push(entry);
+	}
+	updated.push(`${enabled ? "+" : "-"}${pattern}`);
+	return updated;
 }
 
 function formatBaseDir(baseDir: string): string {
@@ -350,11 +362,11 @@ class ResourceList implements Component, Focusable {
 		}
 
 		// Calculate visible range
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+		const { startIndex, endIndex } = getCenteredVisibleRange(
+			this.selectedIndex,
+			this.filteredItems.length,
+			this.maxVisible,
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const entry = this.filteredItems[i];
@@ -464,20 +476,7 @@ class ResourceList implements Component, Focusable {
 
 		// Generate pattern for this resource
 		const pattern = this.getResourcePattern(item);
-		const disablePattern = `-${pattern}`;
-		const enablePattern = `+${pattern}`;
-
-		// Filter out existing patterns for this resource
-		const updated = current.filter((p) => {
-			const stripped = p.startsWith("!") || p.startsWith("+") || p.startsWith("-") ? p.slice(1) : p;
-			return stripped !== pattern;
-		});
-
-		if (enabled) {
-			updated.push(enablePattern);
-		} else {
-			updated.push(disablePattern);
-		}
+		const updated = replaceResourceFilterPattern(current, pattern, enabled);
 
 		if (scope === "project") {
 			if (arrayKey === "extensions") {
@@ -529,20 +528,7 @@ class ResourceList implements Component, Focusable {
 
 		// Generate pattern relative to package root
 		const pattern = this.getPackageResourcePattern(item);
-		const disablePattern = `-${pattern}`;
-		const enablePattern = `+${pattern}`;
-
-		// Filter out existing patterns for this resource
-		const updated = current.filter((p) => {
-			const stripped = p.startsWith("!") || p.startsWith("+") || p.startsWith("-") ? p.slice(1) : p;
-			return stripped !== pattern;
-		});
-
-		if (enabled) {
-			updated.push(enablePattern);
-		} else {
-			updated.push(disablePattern);
-		}
+		const updated = replaceResourceFilterPattern(current, pattern, enabled);
 
 		(pkg as Record<string, unknown>)[arrayKey] = updated.length > 0 ? updated : undefined;
 

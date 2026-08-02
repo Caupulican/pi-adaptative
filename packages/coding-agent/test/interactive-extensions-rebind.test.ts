@@ -4,6 +4,10 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 type RebindHarness = {
 	unsubscribe?: () => void;
 	unsubscribeExtensionsChanged?: () => void;
+	clipboardQueue: {
+		pendingClipboardImages: unknown[];
+		clipboardImageCounter: number;
+	};
 	runtimeHost: {
 		session: {
 			onExtensionsChanged(callback: () => void): () => void;
@@ -28,6 +32,7 @@ function createModeHarness(): { mode: RebindHarness; fireExtensionsChanged: () =
 	const mode = Object.create(InteractiveMode.prototype) as RebindHarness;
 	mode.unsubscribe = vi.fn();
 	mode.unsubscribeExtensionsChanged = vi.fn();
+	mode.clipboardQueue = { pendingClipboardImages: [], clipboardImageCounter: 0 };
 	mode.runtimeHost = {
 		session: {
 			onExtensionsChanged: (callback: () => void) => {

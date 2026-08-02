@@ -11,6 +11,7 @@ type FakeSession = {
 	isStreaming: boolean;
 	isBashRunning: boolean;
 	abortBash: () => void;
+	backgroundRunningToolCalls: () => number;
 };
 
 type FakeSettingsManager = {
@@ -22,8 +23,10 @@ type FakeDefaultEditor = {
 	onAction: (action: string, handler: () => void) => void;
 	onCtrlD?: () => void;
 	onChange?: (text: string) => void;
+	onChangeSummary?: (summary: { firstNonWhitespace: string | undefined }) => void;
 	onPasteImage?: () => void;
 	onRecallQueued?: () => boolean;
+	onBackgroundTool?: () => boolean;
 };
 
 type KeyHandlersHostThis = {
@@ -46,6 +49,7 @@ type KeyHandlersHostThis = {
 	handleDebugCommand: () => void;
 	showModelSelector: (initialSearchInput?: string) => Promise<void>;
 	loadTuiHistoryOnDemand: () => void;
+	showTranscriptPager: () => void;
 	toggleThinkingBlockVisibility: () => Promise<void>;
 	openExternalEditor: () => Promise<void>;
 	handleFollowUp: () => Promise<void>;
@@ -60,7 +64,12 @@ function makeFakeThis(overrides: Partial<KeyHandlersHostThis> = {}): KeyHandlers
 		defaultEditor: { onAction: vi.fn() },
 		editor: { getText: () => "", setText: vi.fn() },
 		ui: {},
-		session: { isStreaming: false, isBashRunning: false, abortBash: vi.fn() },
+		session: {
+			isStreaming: false,
+			isBashRunning: false,
+			abortBash: vi.fn(),
+			backgroundRunningToolCalls: vi.fn(() => 0),
+		},
 		settingsManager: { getDoubleEscapeAction: () => "tree" },
 		isBashMode: false,
 		lastEscapeTime: 0,
@@ -76,6 +85,7 @@ function makeFakeThis(overrides: Partial<KeyHandlersHostThis> = {}): KeyHandlers
 		handleDebugCommand: vi.fn(),
 		showModelSelector: vi.fn(async () => undefined),
 		loadTuiHistoryOnDemand: vi.fn(),
+		showTranscriptPager: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(async () => undefined),
 		openExternalEditor: vi.fn(async () => undefined),
 		handleFollowUp: vi.fn(async () => undefined),
@@ -93,14 +103,24 @@ const keyHandlersHost = Reflect.get(InteractiveMode.prototype, "keyHandlersHost"
 
 describe("InteractiveMode.keyHandlersHost live bindings", () => {
 	test("Escape aborts bash on the session swapped in after a reload, not the one at setup time", () => {
-		const staleSession: FakeSession = { isStreaming: false, isBashRunning: false, abortBash: vi.fn() };
+		const staleSession: FakeSession = {
+			isStreaming: false,
+			isBashRunning: false,
+			abortBash: vi.fn(),
+			backgroundRunningToolCalls: vi.fn(() => 0),
+		};
 		const fakeThis = makeFakeThis({ session: staleSession });
 
 		const host = keyHandlersHost.call(fakeThis);
 		keyHandlers.setupKeyHandlers(host);
 
 		// Simulate /reload swapping in a new session via the runtimeHost.
-		const reloadedSession: FakeSession = { isStreaming: false, isBashRunning: true, abortBash: vi.fn() };
+		const reloadedSession: FakeSession = {
+			isStreaming: false,
+			isBashRunning: true,
+			abortBash: vi.fn(),
+			backgroundRunningToolCalls: vi.fn(() => 0),
+		};
 		fakeThis.session = reloadedSession;
 
 		fakeThis.defaultEditor.onEscape?.();
@@ -123,5 +143,43 @@ describe("InteractiveMode.keyHandlersHost live bindings", () => {
 		fakeThis.defaultEditor.onEscape?.();
 
 		expect(fakeThis.showTreeSelector).toHaveBeenCalledTimes(1);
+	});
+
+	test("bash-mode detection consumes the structural editor summary instead of full text", () => {
+		const fakeThis = makeFakeThis();
+		const host = keyHandlersHost.call(fakeThis);
+		keyHandlers.setupKeyHandlers(host);
+
+		fakeThis.defaultEditor.onChangeSummary?.({ firstNonWhitespace: "!" });
+		expect(fakeThis.isBashMode).toBe(true);
+		fakeThis.defaultEditor.onChangeSummary?.({ firstNonWhitespace: "x" });
+		expect(fakeThis.isBashMode).toBe(false);
+		expect(fakeThis.defaultEditor.onChange).toBeUndefined();
+		expect(fakeThis.updateEditorBorderColor).toHaveBeenCalledTimes(2);
+	});
+
+	test("manual background action reaches only the live session and consumes the key only when a call moved", () => {
+		const staleSession: FakeSession = {
+			isStreaming: true,
+			isBashRunning: false,
+			abortBash: vi.fn(),
+			backgroundRunningToolCalls: vi.fn(() => 0),
+		};
+		const fakeThis = makeFakeThis({ session: staleSession });
+		const host = keyHandlersHost.call(fakeThis);
+		keyHandlers.setupKeyHandlers(host);
+		const liveSession: FakeSession = {
+			isStreaming: true,
+			isBashRunning: false,
+			abortBash: vi.fn(),
+			backgroundRunningToolCalls: vi.fn(() => 1),
+		};
+		fakeThis.session = liveSession;
+
+		expect(fakeThis.defaultEditor.onBackgroundTool?.()).toBe(true);
+		expect(liveSession.backgroundRunningToolCalls).toHaveBeenCalledOnce();
+		expect(staleSession.backgroundRunningToolCalls).not.toHaveBeenCalled();
+		vi.mocked(liveSession.backgroundRunningToolCalls).mockReturnValue(0);
+		expect(fakeThis.defaultEditor.onBackgroundTool?.()).toBe(false);
 	});
 });

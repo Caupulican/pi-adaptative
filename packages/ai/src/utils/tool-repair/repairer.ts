@@ -41,64 +41,58 @@ export interface RepairToolArgumentsOptions {
 	onPass?: (pass: number) => void;
 }
 
-function setValueAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): boolean {
-	if (path.length === 0) return false;
+type RepairPathTarget = { container: unknown[]; key: number } | { container: Record<string, unknown>; key: string };
+
+function resolveRepairPathTarget(
+	target: Record<string, unknown>,
+	path: readonly string[],
+): RepairPathTarget | undefined {
+	if (path.length === 0) return undefined;
 	let cursor: unknown = target;
 	for (let index = 0; index < path.length - 1; index++) {
 		const segment = path[index];
 		if (Array.isArray(cursor)) {
 			const arrayIndex = Number(segment);
-			if (!Number.isInteger(arrayIndex)) return false;
+			if (!Number.isInteger(arrayIndex)) return undefined;
 			cursor = cursor[arrayIndex];
 		} else if (isRecord(cursor)) {
 			cursor = cursor[segment];
 		} else {
-			return false;
+			return undefined;
 		}
 	}
 
 	const finalSegment = path[path.length - 1];
 	if (Array.isArray(cursor)) {
 		const arrayIndex = Number(finalSegment);
-		if (!Number.isInteger(arrayIndex)) return false;
-		cursor[arrayIndex] = value;
-		return true;
+		return Number.isInteger(arrayIndex) ? { container: cursor, key: arrayIndex } : undefined;
 	}
 	if (isRecord(cursor)) {
-		cursor[finalSegment] = value;
-		return true;
+		return { container: cursor, key: finalSegment };
 	}
-	return false;
+	return undefined;
+}
+
+function setValueAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): boolean {
+	const resolved = resolveRepairPathTarget(target, path);
+	if (!resolved) return false;
+	if (Array.isArray(resolved.container)) {
+		resolved.container[resolved.key as number] = value;
+	} else {
+		resolved.container[resolved.key as string] = value;
+	}
+	return true;
 }
 
 function deleteValueAtPath(target: Record<string, unknown>, path: readonly string[]): boolean {
-	if (path.length === 0) return false;
-	let cursor: unknown = target;
-	for (let index = 0; index < path.length - 1; index++) {
-		const segment = path[index];
-		if (Array.isArray(cursor)) {
-			const arrayIndex = Number(segment);
-			if (!Number.isInteger(arrayIndex)) return false;
-			cursor = cursor[arrayIndex];
-		} else if (isRecord(cursor)) {
-			cursor = cursor[segment];
-		} else {
-			return false;
-		}
+	const resolved = resolveRepairPathTarget(target, path);
+	if (!resolved) return false;
+	if (Array.isArray(resolved.container)) {
+		resolved.container.splice(resolved.key as number, 1);
+	} else {
+		delete resolved.container[resolved.key as string];
 	}
-
-	const finalSegment = path[path.length - 1];
-	if (Array.isArray(cursor)) {
-		const arrayIndex = Number(finalSegment);
-		if (!Number.isInteger(arrayIndex)) return false;
-		cursor.splice(arrayIndex, 1);
-		return true;
-	}
-	if (isRecord(cursor)) {
-		delete cursor[finalSegment];
-		return true;
-	}
-	return false;
+	return true;
 }
 
 function normalizeEnumValue(value: string): string {

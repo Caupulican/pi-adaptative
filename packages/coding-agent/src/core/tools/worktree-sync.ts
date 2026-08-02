@@ -184,6 +184,13 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 					const message = `active lane '${laneKey}' is not available`;
 					return respond([`[lane_not_found] ${message}`], { code: "lane_not_found", message });
 				}
+				const execInLane = (command: string, args: string[], timeout: number) =>
+					engineDeps.exec(command, args, {
+						cwd: lane.worktreePath,
+						timeout,
+						signal: engineDeps.signal,
+						maxBuffer: 1024 * 1024,
+					});
 
 				const requestedPaths = input.paths ?? [];
 				const gitPaths: string[] = [];
@@ -235,12 +242,7 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 						}
 						const shell = process.platform === "win32" ? "cmd" : "sh";
 						const shellFlag = process.platform === "win32" ? "/c" : "-c";
-						const result = await engineDeps.exec(shell, [shellFlag, trustedCommand], {
-							cwd: lane.worktreePath,
-							timeout: 900_000,
-							signal: engineDeps.signal,
-							maxBuffer: 1024 * 1024,
-						});
+						const result = await execInLane(shell, [shellFlag, trustedCommand], 900_000);
 						const output = `${result.stdout}\n${result.stderr}`.trim().slice(-8000);
 						if (result.code !== 0) {
 							return respond([`[gate_failed] ${output || `trusted check exited ${result.code}`}`], {
@@ -254,12 +256,7 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 						return respond(["typed lane action is unavailable for this request"], { code: "role_forbidden" });
 				}
 
-				const result = await engineDeps.exec(command, args, {
-					cwd: lane.worktreePath,
-					timeout: 60_000,
-					signal: engineDeps.signal,
-					maxBuffer: 1024 * 1024,
-				});
+				const result = await execInLane(command, args, 60_000);
 				const output = `${result.stdout}\n${result.stderr}`.trim().slice(-8000);
 				if (result.code !== 0) {
 					return respond([`[git_failed] ${output || `${command} exited ${result.code}`}`], {

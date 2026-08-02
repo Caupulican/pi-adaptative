@@ -11,51 +11,7 @@
  * - Reset (0)
  */
 
-// Standard ANSI color palette (0-15)
-const ANSI_COLORS = [
-	"#000000", // 0: black
-	"#800000", // 1: red
-	"#008000", // 2: green
-	"#808000", // 3: yellow
-	"#000080", // 4: blue
-	"#800080", // 5: magenta
-	"#008080", // 6: cyan
-	"#c0c0c0", // 7: white
-	"#808080", // 8: bright black
-	"#ff0000", // 9: bright red
-	"#00ff00", // 10: bright green
-	"#ffff00", // 11: bright yellow
-	"#0000ff", // 12: bright blue
-	"#ff00ff", // 13: bright magenta
-	"#00ffff", // 14: bright cyan
-	"#ffffff", // 15: bright white
-];
-
-/**
- * Convert 256-color index to hex.
- */
-function color256ToHex(index: number): string {
-	// Standard colors (0-15)
-	if (index < 16) {
-		return ANSI_COLORS[index];
-	}
-
-	// Color cube (16-231): 6x6x6 = 216 colors
-	if (index < 232) {
-		const cubeIndex = index - 16;
-		const r = Math.floor(cubeIndex / 36);
-		const g = Math.floor((cubeIndex % 36) / 6);
-		const b = cubeIndex % 6;
-		const toComponent = (n: number) => (n === 0 ? 0 : 55 + n * 40);
-		const toHex = (n: number) => toComponent(n).toString(16).padStart(2, "0");
-		return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-	}
-
-	// Grayscale (232-255): 24 shades
-	const gray = 8 + (index - 232) * 10;
-	const grayHex = gray.toString(16).padStart(2, "0");
-	return `#${grayHex}${grayHex}${grayHex}`;
-}
+import { ANSI_BASIC_COLORS, ansi256ToHex } from "../../utils/ansi-colors.ts";
 
 /**
  * Escape HTML special characters.
@@ -104,6 +60,21 @@ function hasStyle(style: TextStyle): boolean {
 	return style.fg !== null || style.bg !== null || style.bold || style.dim || style.italic || style.underline;
 }
 
+function applyExtendedColor(params: number[], index: number, style: TextStyle, target: "fg" | "bg"): number {
+	if (params[index + 1] === 5 && params.length > index + 2) {
+		style[target] = ansi256ToHex(params[index + 2]);
+		return index + 2;
+	}
+	if (params[index + 1] === 2 && params.length > index + 4) {
+		const red = params[index + 2];
+		const green = params[index + 3];
+		const blue = params[index + 4];
+		style[target] = `rgb(${red},${green},${blue})`;
+		return index + 4;
+	}
+	return index;
+}
+
 /**
  * Parse ANSI SGR (Select Graphic Rendition) codes and update style.
  */
@@ -138,50 +109,26 @@ function applySgrCode(params: number[], style: TextStyle): void {
 			style.underline = false;
 		} else if (code >= 30 && code <= 37) {
 			// Standard foreground colors
-			style.fg = ANSI_COLORS[code - 30];
+			style.fg = ANSI_BASIC_COLORS[code - 30];
 		} else if (code === 38) {
-			// Extended foreground color
-			if (params[i + 1] === 5 && params.length > i + 2) {
-				// 256-color: 38;5;N
-				style.fg = color256ToHex(params[i + 2]);
-				i += 2;
-			} else if (params[i + 1] === 2 && params.length > i + 4) {
-				// RGB: 38;2;R;G;B
-				const r = params[i + 2];
-				const g = params[i + 3];
-				const b = params[i + 4];
-				style.fg = `rgb(${r},${g},${b})`;
-				i += 4;
-			}
+			i = applyExtendedColor(params, i, style, "fg");
 		} else if (code === 39) {
 			// Default foreground
 			style.fg = null;
 		} else if (code >= 40 && code <= 47) {
 			// Standard background colors
-			style.bg = ANSI_COLORS[code - 40];
+			style.bg = ANSI_BASIC_COLORS[code - 40];
 		} else if (code === 48) {
-			// Extended background color
-			if (params[i + 1] === 5 && params.length > i + 2) {
-				// 256-color: 48;5;N
-				style.bg = color256ToHex(params[i + 2]);
-				i += 2;
-			} else if (params[i + 1] === 2 && params.length > i + 4) {
-				// RGB: 48;2;R;G;B
-				const r = params[i + 2];
-				const g = params[i + 3];
-				const b = params[i + 4];
-				style.bg = `rgb(${r},${g},${b})`;
-				i += 4;
-			}
+			i = applyExtendedColor(params, i, style, "bg");
 		} else if (code === 49) {
 			// Default background
 			style.bg = null;
 		} else if (code >= 90 && code <= 97) {
 			// Bright foreground colors
-			style.fg = ANSI_COLORS[code - 90 + 8];
+			style.fg = ANSI_BASIC_COLORS[code - 90 + 8];
 		} else if (code >= 100 && code <= 107) {
 			// Bright background colors
-			style.bg = ANSI_COLORS[code - 100 + 8];
+			style.bg = ANSI_BASIC_COLORS[code - 100 + 8];
 		}
 		// Ignore unrecognized codes
 

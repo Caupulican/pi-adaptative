@@ -1,0 +1,19 @@
+{
+	"absolute": true,
+	"format": ["typescript", "tsx", "javascript", "jsx", "python", "bash", "powershell", "css", "markup"],
+	"ignore": [
+		"**/*.test.*",
+		"**/*.spec.*",
+		"packages/ai/src/models.generated.ts",
+		"packages/ai/src/image-models.generated.ts",
+		"packages/coding-agent/src/core/export-html/vendor/highlight.min.js",
+		"packages/coding-agent/src/core/export-html/vendor/marked.min.js"
+	],
+	"maxLines": 20000,
+	"maxSize": "2mb",
+	"minLines": 5,
+	"minTokens": 50,
+	"mode": "strict",
+	"reporters": ["json"],
+	"threshold": 0
+}

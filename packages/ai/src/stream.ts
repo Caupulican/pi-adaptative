@@ -20,6 +20,7 @@ import {
 	normalizeTextToolProtocolOptions,
 	parseTextToolCalls,
 } from "./utils/tool-repair/text-protocol.ts";
+import { TextProtocolLiveFilter } from "./utils/tool-repair/text-protocol-live-filter.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
 
@@ -100,85 +101,6 @@ async function notifyTextToolProtocolParse(
 	}
 }
 
-interface TextProtocolEnvelopePattern {
-	opener: string;
-	closer: string;
-}
-
-// Priority order matters: a fenced "```tool_call" block must be matched before the shorter
-// "```tool" opener it starts with, or the scanner would treat "_call" as the fence body.
-const TEXT_PROTOCOL_ENVELOPE_PATTERNS: readonly TextProtocolEnvelopePattern[] = [
-	{ opener: "<pi:call", closer: "</pi:call>" },
-	{ opener: "<tool_call", closer: "</tool_call>" },
-	{ opener: "```tool_call", closer: "```" },
-	{ opener: "```tool", closer: "```" },
-	{ opener: "```json", closer: "```" },
-	{ opener: "<function", closer: "</function>" },
-];
-
-// All recognized openers start with one of these characters; texts without either can never
-// contain (or be growing into) an envelope, so the scan can short-circuit immediately.
-const TEXT_PROTOCOL_ENVELOPE_TRIGGER = /[<`]/;
-
-function findEarliestEnvelopeOpener(
-	text: string,
-	fromIndex: number,
-): { index: number; pattern: TextProtocolEnvelopePattern } | undefined {
-	let best: { index: number; pattern: TextProtocolEnvelopePattern } | undefined;
-	for (const pattern of TEXT_PROTOCOL_ENVELOPE_PATTERNS) {
-		const index = text.indexOf(pattern.opener, fromIndex);
-		if (index === -1) continue;
-		if (!best || index < best.index) best = { index, pattern };
-	}
-	return best;
-}
-
-// The tail of `text` (from fromIndex to the end) is where new streamed characters land next.
-// If that tail is itself a strict prefix of some opener, it might still grow into a full
-// envelope tag, so it is not yet safe to reveal.
-function longestPendingOpenerPrefixLength(text: string, fromIndex: number): number {
-	const tail = text.slice(fromIndex);
-	let longest = 0;
-	for (const pattern of TEXT_PROTOCOL_ENVELOPE_PATTERNS) {
-		const maxLength = Math.min(tail.length, pattern.opener.length - 1);
-		for (let length = maxLength; length > 0; length--) {
-			if (pattern.opener.startsWith(tail.slice(tail.length - length))) {
-				longest = Math.max(longest, length);
-				break;
-			}
-		}
-	}
-	return longest;
-}
-
-// Walks confirmed prose/envelope spans left to right over the FULL text seen so far and
-// returns the PROSE-ONLY text that is safe to reveal live: a closed envelope span is
-// permanently dropped (never later flushed as its own raw markup), while a still-open or
-// merely-pending span halts the scan, leaving everything from there on unrevealed until the
-// stream proves what it is. Recomputing over the whole text on every event (rather than
-// tracking incremental cursor state) makes the scan self-correcting: a false-positive opener
-// candidate (e.g. "```typescript") is released the moment more characters prove it does not
-// match, and the result is always a prefix-extension of the previous call's result, so a
-// simple length-based diff against the last computed value yields the next delta to forward.
-function computeVisibleProseText(text: string): string {
-	if (!TEXT_PROTOCOL_ENVELOPE_TRIGGER.test(text)) return text;
-	let pos = 0;
-	let visible = "";
-	while (pos < text.length) {
-		const match = findEarliestEnvelopeOpener(text, pos);
-		if (!match) {
-			const pendingLength = longestPendingOpenerPrefixLength(text, pos);
-			return visible + text.slice(pos, text.length - pendingLength);
-		}
-		visible += text.slice(pos, match.index);
-		const bodyStart = match.index + match.pattern.opener.length;
-		const closerIndex = text.indexOf(match.pattern.closer, bodyStart);
-		if (closerIndex === -1) return visible; // envelope still open: nothing further confirmed
-		pos = closerIndex + match.pattern.closer.length; // envelope resolved+suppressed: keep scanning
-	}
-	return visible;
-}
-
 // Rewrites any text content block whose revealed prose is still behind its true streamed text
 // so a forwarded event's `partial` snapshot never exposes held-back or suppressed envelope
 // markup, even on events unrelated to the block being held (e.g. a later thinking/toolcall
@@ -204,6 +126,7 @@ function forwardTextProtocolStreamEvent(
 	wrapped: AssistantMessageEventStream,
 	event: Exclude<AssistantMessageEvent, { type: "done" }>,
 	revealedText: Map<number, string>,
+	liveFilters: Map<number, TextProtocolLiveFilter>,
 ): void {
 	if (event.type === "error") {
 		wrapped.push(event);
@@ -211,14 +134,15 @@ function forwardTextProtocolStreamEvent(
 	}
 	if (event.type === "text_start") {
 		revealedText.set(event.contentIndex, "");
+		liveFilters.set(event.contentIndex, new TextProtocolLiveFilter());
 		wrapped.push({ ...event, partial: redactHeldText(event.partial, revealedText) });
 		return;
 	}
 	if (event.type === "text_delta") {
-		const block = event.partial.content[event.contentIndex];
-		const fullText = block?.type === "text" ? block.text : "";
 		const flushed = revealedText.get(event.contentIndex) ?? "";
-		const visible = computeVisibleProseText(fullText);
+		const filter = liveFilters.get(event.contentIndex) ?? new TextProtocolLiveFilter();
+		liveFilters.set(event.contentIndex, filter);
+		const visible = filter.advance(event.delta);
 		if (visible.length <= flushed.length) return; // held: possibly-envelope text never streams live
 		revealedText.set(event.contentIndex, visible);
 		wrapped.push({
@@ -230,7 +154,9 @@ function forwardTextProtocolStreamEvent(
 	}
 	if (event.type === "text_end") {
 		const flushed = revealedText.get(event.contentIndex) ?? "";
-		const visible = computeVisibleProseText(event.content);
+		const filter = liveFilters.get(event.contentIndex) ?? new TextProtocolLiveFilter();
+		liveFilters.set(event.contentIndex, filter);
+		const visible = filter.finish(event.content);
 		if (visible.length > flushed.length) {
 			// Catch up any newly-provable-safe tail (e.g. a suspected opener prefix that never
 			// completed) so the deltas actually forwarded still sum to what text_end reports.
@@ -265,9 +191,10 @@ function withTextToolProtocolResult(
 	const wrapped = new AssistantMessageEventStream();
 	void (async () => {
 		const revealedText = new Map<number, string>();
+		const liveFilters = new Map<number, TextProtocolLiveFilter>();
 		for await (const event of stream) {
 			if (event.type !== "done") {
-				forwardTextProtocolStreamEvent(wrapped, event, revealedText);
+				forwardTextProtocolStreamEvent(wrapped, event, revealedText, liveFilters);
 				continue;
 			}
 			const message = event.message;

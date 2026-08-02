@@ -330,6 +330,8 @@ export interface HarnessOptions {
 	systemPrompt?: string;
 	/** Custom tools to register on the agent. */
 	tools?: AgentTool[];
+	/** Existing session state to resume. Defaults to a fresh in-memory session. */
+	sessionManager?: SessionManager;
 	/** Base tools override (replaces built-in read/bash/edit/write). */
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Optional resource loader override. */
@@ -381,7 +383,7 @@ function createHarnessWithResourceLoader(
 		streamFn,
 	});
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 
 	if (options.settings) {

@@ -1,6 +1,6 @@
 import { appendFileSync, promises as fsPromises, type Stats, statSync } from "node:fs";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "./atomic-file.ts";
-import { readBoundedTextFile, readBoundedTextFileSync } from "./bounded-file.ts";
+import { readBoundedTextFile, readBoundedTextFileSync, sameFileVersion } from "./bounded-file.ts";
 
 export interface BoundedJsonlLimits {
 	maxBytes: number;
@@ -18,19 +18,9 @@ interface JsonlFileState {
 
 const fileStates = new Map<string, JsonlFileState>();
 
-function sameFileState(left: Stats, right: Stats): boolean {
-	return (
-		left.dev === right.dev &&
-		left.ino === right.ino &&
-		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
-	);
-}
-
 function cachedRecordCount(filePath: string, stats: Stats): number | undefined {
 	const cached = fileStates.get(filePath);
-	if (!cached || !sameFileState(cached.stats, stats)) return undefined;
+	if (!cached || !sameFileVersion(cached.stats, stats)) return undefined;
 	fileStates.delete(filePath);
 	fileStates.set(filePath, cached);
 	return cached.recordCount;

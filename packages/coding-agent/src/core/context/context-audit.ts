@@ -30,6 +30,7 @@ import {
 	estimateTokensFromText,
 } from "./context-item.ts";
 import { evaluateRetentionEligibility, type RetentionEligibility } from "./context-retention.ts";
+import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
 import { evaluateHardConstraints } from "./policy-engine.ts";
 import type { HardConstraintFlags, PolicyFeatures, PolicyHardConstraintCode } from "./policy-types.ts";
 
@@ -64,21 +65,6 @@ export interface ContextAuditReport {
 	items: ContextAuditItemReport[];
 }
 
-function extractToolResultArtifactId(message: ToolResultMessage): string | undefined {
-	const details = message.details;
-	if (typeof details !== "object" || details === null) return undefined;
-	const artifactId = (details as { artifactId?: unknown }).artifactId;
-	return typeof artifactId === "string" ? artifactId : undefined;
-}
-
-function toolResultText(message: ToolResultMessage): string {
-	const parts: string[] = [];
-	for (const part of message.content) {
-		if (part.type === "text") parts.push(part.text);
-	}
-	return parts.join("\n");
-}
-
 export interface BuiltToolOutputItem {
 	item: ContextItem;
 	/** True only if an artifact ref was found AND resolved against a live store. */
@@ -107,8 +93,8 @@ function buildToolOutputItem(
 	messageIndex: number,
 	options: ContextAuditOptions,
 ): BuiltToolOutputItem {
-	const text = toolResultText(message);
-	const artifactId = extractToolResultArtifactId(message);
+	const text = getToolResultText(message);
+	const artifactId = getToolResultArtifactId(message.details);
 	const sessionEntryId = options.sessionEntryIdForToolCallId?.(message.toolCallId);
 
 	let primaryRef: ContextEvidenceRef | undefined;

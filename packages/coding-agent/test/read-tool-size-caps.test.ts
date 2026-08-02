@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -36,6 +36,19 @@ describe("read tool sliced reads for oversized files", () => {
 		expect(text).toContain("line-00000");
 		expect(text).not.toContain("line-04999");
 		expect(text).toMatch(/Use offset=\d+ to continue/);
+	});
+
+	it("assembles fragmented lines through the shared linear decoder", async () => {
+		const source = readFileSync(new URL("../src/core/tools/read.ts", import.meta.url), "utf8");
+		expect(source).toContain('from "@caupulican/pi-ai/streaming-lines"');
+		expect(source).not.toMatch(/pending\s*\+=/);
+
+		const file = join(tempDir, "fragmented-line.log");
+		writeFileSync(file, `${"x".repeat(3 * 1024 * 1024)}\nafter\n`);
+		const tool = createReadTool(tempDir, { maxTextReadBytes: 1 });
+		const result = await tool.execute("read-fragmented-line", { path: file, offset: 2, limit: 1 });
+
+		expect(textOf(result)).toContain("after");
 	});
 
 	it("reaches a deep slice of an oversized file via offset without loading the whole file", async () => {

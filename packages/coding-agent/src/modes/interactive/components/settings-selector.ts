@@ -7,7 +7,6 @@ import {
 	Input,
 	type SelectItem,
 	SelectList,
-	type SelectListLayoutOptions,
 	type SettingItem,
 	SettingsList,
 	Spacer,
@@ -48,11 +47,7 @@ import {
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
-
-const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
-	minPrimaryColumnWidth: 12,
-	maxPrimaryColumnWidth: 32,
-};
+import { COMPACT_SELECTOR_LIST_LAYOUT, SelectorHeading } from "./selector-list.ts";
 
 const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
 const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
@@ -467,12 +462,7 @@ class TextInputSubmenu extends Container {
 	) {
 		super();
 
-		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
-		if (description) {
-			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("muted", description), 0, 0));
-		}
-		this.addChild(new Spacer(1));
+		this.addChild(new SelectorHeading(title, description));
 
 		this.input = new Input();
 		this.input.setValue(currentValue);
@@ -519,10 +509,7 @@ class ModelSelectionSubmenu extends Container {
 	) {
 		super();
 
-		this.addChild(new Text(theme.bold(theme.fg("accent", labels.title)), 0, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", labels.description), 0, 0));
-		this.addChild(new Spacer(1));
+		this.addChild(new SelectorHeading(labels.title, labels.description));
 
 		this.searchInput = new Input();
 		this.searchInput.focused = true;
@@ -533,7 +520,7 @@ class ModelSelectionSubmenu extends Container {
 			options,
 			Math.min(options.length, 10),
 			getSelectListTheme(),
-			SETTINGS_SUBMENU_SELECT_LIST_LAYOUT,
+			COMPACT_SELECTOR_LIST_LAYOUT,
 		);
 
 		const currentIndex = options.findIndex((option) => option.value === currentValue);
@@ -596,8 +583,30 @@ class ModelSelectionSubmenu extends Container {
 	}
 }
 
-class SelfModificationSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class SettingsListSubmenu extends Container {
+	private settingsList!: SettingsList;
+
+	protected mountSettingsList(
+		items: SettingItem[],
+		onChange: (id: string, newValue: string) => void,
+		onCancel: () => void,
+	): void {
+		this.settingsList = new SettingsList(
+			items,
+			Math.min(items.length, 10),
+			getSettingsListTheme(),
+			onChange,
+			onCancel,
+		);
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
+	}
+}
+
+class SelfModificationSettingsSubmenu extends SettingsListSubmenu {
 	private state: SelfModificationSettings;
 	private scope: SettingsScope;
 
@@ -649,10 +658,8 @@ class SelfModificationSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "self-modification-scope":
@@ -667,17 +674,10 @@ class SelfModificationSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class AutonomySettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class AutonomySettingsSubmenu extends SettingsListSubmenu {
 	private state: AutonomySettings;
 	private scope: SettingsScope;
 
@@ -751,10 +751,8 @@ class AutonomySettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "autonomy-scope":
@@ -785,17 +783,10 @@ class AutonomySettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class ResearchLaneSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class ResearchLaneSettingsSubmenu extends SettingsListSubmenu {
 	private state: ResearchLaneSettings;
 	private scope: SettingsScope;
 
@@ -862,10 +853,8 @@ class ResearchLaneSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "research-lane-scope":
@@ -893,17 +882,10 @@ class ResearchLaneSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class LearningPolicySettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 	private state: LearningPolicySettings;
 	private scope: SettingsScope;
 
@@ -962,10 +944,8 @@ class LearningPolicySettingsSubmenu extends Container {
 				values: ["1", "2", "3", "5"],
 			},
 		];
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "learning-policy-scope":
@@ -993,16 +973,10 @@ class LearningPolicySettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class ModelCapabilitySettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class ModelCapabilitySettingsSubmenu extends SettingsListSubmenu {
 	private state: ModelCapabilitySettings;
 	private scope: SettingsScope;
 
@@ -1032,10 +1006,8 @@ class ModelCapabilitySettingsSubmenu extends Container {
 				values: ["auto", "off", "full", "lean", "minimal", "chat"],
 			},
 		];
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "model-capability-scope":
@@ -1051,16 +1023,10 @@ class ModelCapabilitySettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class ContextCurationSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class ContextCurationSettingsSubmenu extends SettingsListSubmenu {
 	private state: ContextCurationSettings;
 	private scope: SettingsScope;
 
@@ -1113,10 +1079,8 @@ class ContextCurationSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "context-curation-scope":
@@ -1138,17 +1102,10 @@ class ContextCurationSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class WorkerDelegationSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 	private state: WorkerDelegationSettings;
 	private scope: SettingsScope;
 
@@ -1214,10 +1171,8 @@ class WorkerDelegationSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "worker-delegation-scope":
@@ -1245,17 +1200,10 @@ class WorkerDelegationSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class AutoLearnSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 	private state: AutoLearnSettings;
 	private scope: SettingsScope;
 
@@ -1386,10 +1334,8 @@ class AutoLearnSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "auto-learn-scope":
@@ -1432,17 +1378,10 @@ class AutoLearnSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class ContextPolicyEnforcementSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class ContextPolicyEnforcementSettingsSubmenu extends SettingsListSubmenu {
 	private state: ContextPromptEnforcementSettings;
 	private scope: SettingsScope;
 
@@ -1494,10 +1433,8 @@ class ContextPolicyEnforcementSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "context-policy-scope":
@@ -1519,17 +1456,10 @@ class ContextPolicyEnforcementSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class ContextMemoryRetrievalSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class ContextMemoryRetrievalSettingsSubmenu extends SettingsListSubmenu {
 	private state: MemoryRetrievalSettings;
 	private scope: SettingsScope;
 
@@ -1597,10 +1527,8 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "context-memory-scope":
@@ -1625,17 +1553,10 @@ class ContextMemoryRetrievalSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
-class ModelRouterSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 	private state: ModelRouterSettings;
 	private scope: SettingsScope;
 
@@ -2047,10 +1968,8 @@ class ModelRouterSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "model-router-scope":
@@ -2069,20 +1988,13 @@ class ModelRouterSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
 /**
  * A submenu component for selecting from a list of options.
  */
-class WarningSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+class WarningSettingsSubmenu extends SettingsListSubmenu {
 	private state: WarningSettings;
 
 	constructor(warnings: WarningSettings, onChange: (warnings: WarningSettings) => void, onCancel: () => void) {
@@ -2100,10 +2012,8 @@ class WarningSettingsSubmenu extends Container {
 			},
 		];
 
-		this.settingsList = new SettingsList(
+		this.mountSettingsList(
 			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "anthropic-extra-usage":
@@ -2114,12 +2024,6 @@ class WarningSettingsSubmenu extends Container {
 			},
 			onCancel,
 		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
 	}
 }
 
@@ -2141,24 +2045,14 @@ export class SelectSubmenu extends Container {
 	) {
 		super();
 
-		// Title
-		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
-
-		// Description
-		if (description) {
-			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("muted", description), 0, 0));
-		}
-
-		// Spacer
-		this.addChild(new Spacer(1));
+		this.addChild(new SelectorHeading(title, description));
 
 		// Select list
 		this.selectList = new SelectList(
 			options,
 			Math.min(options.length, 10),
 			getSelectListTheme(),
-			SETTINGS_SUBMENU_SELECT_LIST_LAYOUT,
+			COMPACT_SELECTOR_LIST_LAYOUT,
 		);
 
 		// Pre-select current value

@@ -1,12 +1,9 @@
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { setKittyProtocolActive } from "./keys.ts";
+import { loadNativeAddon } from "./native-loader.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
-
-const cjsRequire = createRequire(import.meta.url);
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
@@ -20,6 +17,18 @@ const KITTY_KEYBOARD_PROTOCOL_QUERY = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_F
 export type KeyboardProtocolNegotiationSequence =
 	| { type: "kitty-flags"; flags: number }
 	| { type: "device-attributes" };
+
+type WindowsConsoleModeHelper = {
+	enableVirtualTerminalInput: () => boolean;
+};
+
+function isWindowsConsoleModeHelper(value: unknown): value is WindowsConsoleModeHelper {
+	if (typeof value !== "object" || value === null) return false;
+	return (
+		"enableVirtualTerminalInput" in value &&
+		typeof (value as { enableVirtualTerminalInput?: unknown }).enableVirtualTerminalInput === "function"
+	);
+}
 
 export function parseKeyboardProtocolNegotiationSequence(
 	sequence: string,
@@ -176,7 +185,7 @@ export class ProcessTerminal implements Terminal {
 	 * to handle the case where the response arrives split across multiple events.
 	 */
 	private setupStdinBuffer(): void {
-		this.stdinBuffer = new StdinBuffer({ timeout: 10 });
+		this.stdinBuffer = new StdinBuffer({ timeout: 10, detectUnframedPaste: process.platform === "win32" });
 
 		// Forward individual sequences to the input handler
 		this.stdinBuffer.on("data", (sequence) => {
@@ -372,21 +381,10 @@ export class ProcessTerminal implements Terminal {
 			// Dynamic require so non-Windows and bundled/browser paths never load the
 			// native helper. In the npm package native/ is next to dist/; in compiled
 			// binary archives native/ is copied next to the executable.
-			const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 			const nativePath = path.join("native", "win32", "prebuilds", `win32-${arch}`, "win32-console-mode.node");
-			const candidates = [
-				path.join(moduleDir, "..", nativePath),
-				path.join(moduleDir, nativePath),
-				path.join(path.dirname(process.execPath), nativePath),
-			];
-			for (const modulePath of candidates) {
-				try {
-					const helper = cjsRequire(modulePath) as { enableVirtualTerminalInput?: () => boolean };
-					helper.enableVirtualTerminalInput?.();
-					return;
-				} catch {
-					// Try the next possible packaging location.
-				}
+			const helper = loadNativeAddon(nativePath, isWindowsConsoleModeHelper);
+			if (helper) {
+				helper.enableVirtualTerminalInput();
 			}
 		} catch {
 			// Native helper not available — Shift+Tab won't be distinguishable from Tab.
@@ -394,24 +392,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
-		const shouldDisableKittyProtocol =
-			this.keyboardProtocolPushed || this._kittyProtocolActive || this.keyboardProtocolNegotiationPending;
-		this.keyboardProtocolLateResponsePending = false;
-		this.clearKeyboardProtocolNegotiationBuffer();
-		this.clearKeyboardProtocolFallbackTimer();
-		if (shouldDisableKittyProtocol) {
-			// Disable Kitty keyboard protocol first so any late key releases
-			// do not generate new Kitty escape sequences.
-			process.stdout.write("\x1b[<u");
-			this.keyboardProtocolPushed = false;
-			this._kittyProtocolActive = false;
-			setKittyProtocolActive(false);
-		}
-		this.keyboardProtocolNegotiationPending = false;
-		if (this._modifyOtherKeysActive) {
-			process.stdout.write("\x1b[>4;0m");
-			this._modifyOtherKeysActive = false;
-		}
+		this.disableKeyboardProtocols();
 
 		const previousHandler = this.inputHandler;
 		this.inputHandler = undefined;
@@ -438,22 +419,15 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
-	stop(): void {
-		if (this.clearProgressInterval()) {
-			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
-		}
-
-		// Disable bracketed paste mode
-		process.stdout.write("\x1b[?2004l");
-
+	private disableKeyboardProtocols(): void {
 		const shouldDisableKittyProtocol =
 			this.keyboardProtocolPushed || this._kittyProtocolActive || this.keyboardProtocolNegotiationPending;
 		this.keyboardProtocolLateResponsePending = false;
 		this.clearKeyboardProtocolNegotiationBuffer();
 		this.clearKeyboardProtocolFallbackTimer();
-
-		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (shouldDisableKittyProtocol) {
+			// Disable Kitty keyboard protocol first so any late key releases
+			// do not generate new Kitty escape sequences.
 			process.stdout.write("\x1b[<u");
 			this.keyboardProtocolPushed = false;
 			this._kittyProtocolActive = false;
@@ -464,6 +438,17 @@ export class ProcessTerminal implements Terminal {
 			process.stdout.write("\x1b[>4;0m");
 			this._modifyOtherKeysActive = false;
 		}
+	}
+
+	stop(): void {
+		if (this.clearProgressInterval()) {
+			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+		}
+
+		// Disable bracketed paste mode
+		process.stdout.write("\x1b[?2004l");
+
+		this.disableKeyboardProtocols();
 
 		// Clean up StdinBuffer
 		if (this.stdinBuffer) {

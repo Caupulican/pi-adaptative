@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR, toEnvVarName } from "../src/config.ts";
 
@@ -28,5 +30,13 @@ describe("toEnvVarName", () => {
 		expect(ENV_SESSION_DIR).toMatch(POSIX_ENV_NAME);
 		expect(ENV_AGENT_DIR).not.toContain("-");
 		expect(ENV_SESSION_DIR).not.toContain("-");
+	});
+
+	it("keeps the startup profiler on the package-specific agent directory contract", () => {
+		const profilerPath = fileURLToPath(new URL("../../../scripts/profile-coding-agent-node.mjs", import.meta.url));
+		const result = spawnSync(process.execPath, [profilerPath, "--help"], { encoding: "utf8" });
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain(`Use a specific ${ENV_AGENT_DIR} for the benchmark run`);
 	});
 });

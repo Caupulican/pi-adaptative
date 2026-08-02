@@ -1,14 +1,14 @@
-import {
-	type ImageContent,
-	type Message,
-	type Model,
-	type SimpleStreamOptions,
-	streamSimple,
-	type TextContent,
-	type ThinkingBudgets,
-	type ToolArgumentValidationTelemetryEvent,
-	type Transport,
-} from "@caupulican/pi-ai";
+import { streamSimple } from "@caupulican/pi-ai/stream";
+import type {
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+	ThinkingBudgets,
+	Transport,
+} from "@caupulican/pi-ai/types";
+import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import type {
 	AfterToolCallContext,
@@ -99,6 +99,9 @@ export interface AgentOptions {
 	onTextToolProtocolParse?: SimpleStreamOptions["onTextToolProtocolParse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
+	handoffToolCall?: AgentLoopConfig["handoffToolCall"];
+	subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	toolArgumentTeachEnabled?: boolean;
 	toolValidationEscalationThreshold?: number;
@@ -188,6 +191,9 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
+	public handoffToolCall?: AgentLoopConfig["handoffToolCall"];
+	public subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
 	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	public toolArgumentTeachEnabled?: boolean;
 	public toolValidationEscalationThreshold?: number;
@@ -224,6 +230,9 @@ export class Agent {
 		this.onTextToolProtocolParse = options.onTextToolProtocolParse;
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
+		this.backgroundToolCallAfterMs = options.backgroundToolCallAfterMs;
+		this.handoffToolCall = options.handoffToolCall;
+		this.subscribeToolCallHandoffRequest = options.subscribeToolCallHandoffRequest;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
 		this.toolArgumentTeachEnabled = options.toolArgumentTeachEnabled;
 		this.toolValidationEscalationThreshold = options.toolValidationEscalationThreshold;
@@ -464,6 +473,9 @@ export class Agent {
 			onToolValidationEscalation: this.onToolValidationEscalation,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
+			backgroundToolCallAfterMs: this.backgroundToolCallAfterMs,
+			handoffToolCall: this.handoffToolCall,
+			subscribeToolCallHandoffRequest: this.subscribeToolCallHandoffRequest,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,

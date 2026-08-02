@@ -151,6 +151,22 @@ function applyFuguUltraPricing<TApi extends Api>(model: Model<TApi>, usage: Usag
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead;
 }
 
+export function applyOpenAIServiceTierPricing<TApi extends Api>(
+	usage: Usage,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	model: Pick<Model<TApi>, "id">,
+): void {
+	const multiplier =
+		serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? (model.id === "gpt-5.5" ? 2.5 : 2) : 1;
+	if (multiplier === 1) return;
+
+	usage.cost.input *= multiplier;
+	usage.cost.output *= multiplier;
+	usage.cost.cacheRead *= multiplier;
+	usage.cost.cacheWrite *= multiplier;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+}
+
 // =============================================================================
 // Message conversion
 // =============================================================================

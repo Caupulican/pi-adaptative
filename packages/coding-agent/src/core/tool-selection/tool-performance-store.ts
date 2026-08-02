@@ -6,6 +6,8 @@ import { isRecordObject } from "../util/value-guards.ts";
 const STORE_VERSION = 1;
 const MAX_STATS_PER_HOST = 500;
 const MAX_OBSERVATIONS_PER_HOST = 1_000;
+const MAX_OBSERVATION_BYTES_PER_HOST = 256 * 1024;
+const TARGET_OBSERVATION_BYTES_PER_HOST = 192 * 1024;
 const MAX_INTENT_AGREEMENT_PER_HOST = 500;
 const EWMA_ALPHA = 0.25;
 
@@ -88,6 +90,7 @@ interface HostToolPerformanceData {
 	host: HostFingerprint;
 	stats: Record<string, ToolPerformanceStats>;
 	observations: ToolSelectionObservation[];
+	observationBytes: number;
 	intentAgreement: Record<string, ToolSelectionIntentAgreement>;
 }
 
@@ -234,6 +237,35 @@ function updateDeviation(
 	return updateEwma(previousDeviation, deviation);
 }
 
+function encodedObservationBytes(observation: ToolSelectionObservation): number {
+	return Buffer.byteLength(JSON.stringify(observation), "utf8");
+}
+
+function trimObservations(observations: ToolSelectionObservation[]): {
+	observations: ToolSelectionObservation[];
+	bytes: number;
+} {
+	let bytes = 2;
+	for (const observation of observations) {
+		bytes += encodedObservationBytes(observation) + (bytes > 2 ? 1 : 0);
+	}
+	if (observations.length <= MAX_OBSERVATIONS_PER_HOST && bytes <= MAX_OBSERVATION_BYTES_PER_HOST) {
+		return { observations, bytes };
+	}
+
+	const retained: ToolSelectionObservation[] = [];
+	bytes = 2;
+	for (let index = observations.length - 1; index >= 0 && retained.length < MAX_OBSERVATIONS_PER_HOST; index -= 1) {
+		const observation = observations[index]!;
+		const addition = encodedObservationBytes(observation) + (retained.length > 0 ? 1 : 0);
+		if (bytes + addition > TARGET_OBSERVATION_BYTES_PER_HOST) break;
+		retained.push(observation);
+		bytes += addition;
+	}
+	retained.reverse();
+	return { observations: retained, bytes };
+}
+
 function parseHost(value: unknown, hostId: string): HostToolPerformanceData | undefined {
 	if (
 		!isRecordObject(value) ||
@@ -244,6 +276,7 @@ function parseHost(value: unknown, hostId: string): HostToolPerformanceData | un
 	)
 		return undefined;
 	const host = value.host;
+	const observations = trimObservations(value.observations.filter(isObservation));
 	// intentAgreement is a purely additive field (older store files predate it) — tolerate absence
 	// rather than bumping STORE_VERSION, same as any other backward-compatible default-empty field.
 	const intentAgreementRaw = isRecordObject(value.intentAgreement) ? value.intentAgreement : {};
@@ -252,7 +285,8 @@ function parseHost(value: unknown, hostId: string): HostToolPerformanceData | un
 		stats: Object.fromEntries(
 			Object.entries(value.stats).filter((entry): entry is [string, ToolPerformanceStats] => isStats(entry[1])),
 		),
-		observations: value.observations.filter(isObservation),
+		observations: observations.observations,
+		observationBytes: observations.bytes,
 		intentAgreement: Object.fromEntries(
 			Object.entries(intentAgreementRaw).filter((entry): entry is [string, ToolSelectionIntentAgreement] =>
 				isIntentAgreement(entry[1]),
@@ -304,7 +338,7 @@ export class ToolPerformanceStore {
 	}
 
 	private createHostData(host: HostFingerprint): HostToolPerformanceData {
-		return { host, stats: {}, observations: [], intentAgreement: {} };
+		return { host, stats: {}, observations: [], observationBytes: 2, intentAgreement: {} };
 	}
 
 	get(key: ToolPerformanceKey): ToolPerformanceStats {
@@ -397,7 +431,7 @@ export class ToolPerformanceStore {
 				};
 				host.stats[storageKey] = next;
 				host.stats = trimStats(host.stats);
-				host.observations.push({
+				const selectionObservation: ToolSelectionObservation = {
 					...observation.selection,
 					at,
 					modelRef: observation.key.modelRef,
@@ -409,9 +443,17 @@ export class ToolPerformanceStore {
 					latencyMs,
 					inputTokenEstimate,
 					outputTokenEstimate,
-				});
-				if (host.observations.length > MAX_OBSERVATIONS_PER_HOST) {
-					host.observations = host.observations.slice(-MAX_OBSERVATIONS_PER_HOST);
+				};
+				host.observations.push(selectionObservation);
+				host.observationBytes +=
+					encodedObservationBytes(selectionObservation) + (host.observations.length > 1 ? 1 : 0);
+				if (
+					host.observations.length > MAX_OBSERVATIONS_PER_HOST ||
+					host.observationBytes > MAX_OBSERVATION_BYTES_PER_HOST
+				) {
+					const trimmed = trimObservations(host.observations);
+					host.observations = trimmed.observations;
+					host.observationBytes = trimmed.bytes;
 				}
 
 				// Observe-mode agreement: did the RAW ranking's top pick (before any actual-tool-only

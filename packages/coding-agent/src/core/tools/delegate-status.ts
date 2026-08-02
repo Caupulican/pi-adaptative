@@ -5,9 +5,9 @@ import type { WorkerAgentControlPort } from "../delegation/worker-agent-control.
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	emptyOrchestrationCall,
-	OrchestrationPanelComponent,
 	type OrchestrationPanelModel,
 	type OrchestrationPanelRow,
+	renderOrchestrationToolResult,
 } from "./orchestration-panel.ts";
 
 const MAX_WORKER_CONTROL_ID_CHARS = 512;
@@ -233,12 +233,16 @@ export function createDelegateStatusToolDefinition(deps: DelegateStatusDependenc
 			return emptyOrchestrationCall();
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) return emptyOrchestrationCall();
 			const details = result.details as DelegateStatusToolDetails | undefined;
-			if (!expanded && details && details.kind !== "error" && !(details.kind === "review" && !details.reviewed)) {
-				return emptyOrchestrationCall();
-			}
-			return new OrchestrationPanelComponent(theme, delegateStatusPanelModel(details), expanded);
+			return renderOrchestrationToolResult(theme, delegateStatusPanelModel(details), {
+				isPartial,
+				collapse:
+					!expanded &&
+					details !== undefined &&
+					details.kind !== "error" &&
+					!(details.kind === "review" && !details.reviewed),
+				expanded,
+			});
 		},
 		async execute(_toolCallId, input: Input) {
 			if (input.action !== undefined && input.action.length > 16) {

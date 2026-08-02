@@ -53,14 +53,9 @@ export function createSilenceWatchdog(opts: SilenceWatchdogOptions): SilenceWatc
 
 // --- Stream-idle watchdog (wraps a StreamFn) -------------------------------
 
-import {
-	type Api,
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	createAssistantMessageEventStream,
-	type Model,
-	type ProviderResponse,
-} from "@caupulican/pi-ai";
+import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
+import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderResponse } from "@caupulican/pi-ai/types";
+import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import type { StreamFn } from "../types.ts";
 
 export type StallPhase = "connect" | "quiet" | "active";
@@ -163,14 +158,7 @@ export function withStreamIdleWatchdog(
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
+			usage: createEmptyUsage(),
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
@@ -179,6 +167,24 @@ export function withStreamIdleWatchdog(
 		let transportConfirmed = false;
 		let streamSetupSettled = false;
 		let terminalPushed = false;
+		const pushFailure = (error?: unknown) => {
+			if (terminalPushed || stalled) return;
+			const stopReason = callerAborted ? "aborted" : "error";
+			const detail = error instanceof Error ? `: ${error.message}` : error === undefined ? "" : `: ${String(error)}`;
+			terminalPushed = true;
+			outer.push({
+				type: "error",
+				reason: stopReason,
+				error: {
+					...latest,
+					stopReason,
+					errorMessage: callerAborted
+						? `stream aborted before terminal event${detail}`
+						: `stream ended without terminal event${detail}`,
+				},
+			});
+			settleReady();
+		};
 
 		// The idle bound adapts per event: quiet while nothing/thinking, active while
 		// text/toolCall content is flowing. Mutable so the onSilence closure always
@@ -271,21 +277,7 @@ export function withStreamIdleWatchdog(
 					if (terminalPushed || stalled) return;
 					watchdog.disarm();
 					callerSignal?.removeEventListener("abort", onCallerAbort);
-					const stopReason = callerAborted ? "aborted" : "error";
-					const detail = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
-					terminalPushed = true;
-					outer.push({
-						type: "error",
-						reason: stopReason,
-						error: {
-							...latest,
-							stopReason,
-							errorMessage: callerAborted
-								? `stream aborted before terminal event${detail}`
-								: `stream ended without terminal event${detail}`,
-						},
-					});
-					settleReady();
+					pushFailure(error);
 					return;
 				}
 
@@ -335,23 +327,7 @@ export function withStreamIdleWatchdog(
 					});
 				}
 			} catch (error) {
-				if (!terminalPushed && !stalled) {
-					const stopReason = callerAborted ? "aborted" : "error";
-					const detail = error instanceof Error ? `: ${error.message}` : `: ${String(error)}`;
-					terminalPushed = true;
-					outer.push({
-						type: "error",
-						reason: stopReason,
-						error: {
-							...latest,
-							stopReason,
-							errorMessage: callerAborted
-								? `stream aborted before terminal event${detail}`
-								: `stream ended without terminal event${detail}`,
-						},
-					});
-					settleReady();
-				}
+				pushFailure(error);
 			} finally {
 				watchdog.disarm();
 				callerSignal?.removeEventListener("abort", onCallerAbort);

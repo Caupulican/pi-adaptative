@@ -25,7 +25,6 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import type { BuildMiddleware, DocumentType, MetadataBearer } from "@smithy/types";
 import { calculateCost } from "../models.ts";
 import type {
-	Api,
 	AssistantMessage,
 	CacheRetention,
 	Context,
@@ -50,6 +49,13 @@ import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { getRecoverableBedrockSsoError } from "./bedrock-sso.ts";
+import {
+	applyProviderPayloadHook,
+	createAssistantMessage,
+	mapStandardThinkingEffort,
+	resolveCacheRetention,
+	terminateAssistantStreamWithError,
+} from "./provider-runtime.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -102,23 +108,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 	(async () => {
 		const toolNameMap = createToolNameMap(context.tools ?? []);
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "bedrock-converse-stream" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output = createAssistantMessage(model);
 
 		const blocks = output.content as Block[];
 
@@ -193,22 +183,22 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		try {
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
-			let commandInput = {
-				modelId: model.id,
-				messages: convertMessages(context, model, cacheRetention, toolNameMap),
-				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
-				inferenceConfig: {
-					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-					...(options.temperature !== undefined && { temperature: options.temperature }),
+			const commandInput = await applyProviderPayloadHook(
+				{
+					modelId: model.id,
+					messages: convertMessages(context, model, cacheRetention, toolNameMap),
+					system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
+					inferenceConfig: {
+						...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
+						...(options.temperature !== undefined && { temperature: options.temperature }),
+					},
+					toolConfig: convertToolConfig(context.tools, options.toolChoice, toolNameMap),
+					additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
+					...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 				},
-				toolConfig: convertToolConfig(context.tools, options.toolChoice, toolNameMap),
-				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
-				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
-			};
-			const nextCommandInput = await options?.onPayload?.(commandInput, model);
-			if (nextCommandInput !== undefined) {
-				commandInput = nextCommandInput as typeof commandInput;
-			}
+				model,
+				options.onPayload,
+			);
 			let ssoRecoveryAttempted = false;
 			while (true) {
 				let receivedResponse = false;
@@ -303,15 +293,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				}
 			}
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as Block).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as Block).partialJson;
-			}
-			output.stopReason = options.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatBedrockError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			terminateAssistantStreamWithError(stream, output, options.signal, error, {
+				formatError: formatBedrockError,
+				scratchFields: ["index", "partialJson"],
+			});
 		}
 	})();
 
@@ -610,35 +595,7 @@ function mapThinkingLevelToEffort(
 	level: SimpleStreamOptions["reasoning"],
 ): "low" | "medium" | "high" | "xhigh" | "max" {
 	if (level === "xhigh" && supportsNativeXhighEffort(model)) return "xhigh";
-
-	const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
-	if (typeof mapped === "string") return mapped as "low" | "medium" | "high" | "xhigh" | "max";
-
-	switch (level) {
-		case "minimal":
-		case "low":
-			return "low";
-		case "medium":
-			return "medium";
-		case "high":
-			return "high";
-		default:
-			return "high";
-	}
-}
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
+	return mapStandardThinkingEffort(model, level) as "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 /**

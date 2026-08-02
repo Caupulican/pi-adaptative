@@ -1,19 +1,13 @@
-import type { AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { AssistantMessage, Model } from "@caupulican/pi-ai/types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { generateSummary } from "../../src/compaction/index.ts";
+import { generateSummary } from "../../src/compaction/compaction.ts";
 import type { AgentMessage } from "../../src/types.ts";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
 }));
 
-vi.mock("@caupulican/pi-ai", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("@caupulican/pi-ai")>();
-	return {
-		...actual,
-		completeSimple: completeSimpleMock,
-	};
-});
+vi.mock("@caupulican/pi-ai/stream", () => ({ completeSimple: completeSimpleMock }));
 
 function createModel(contextWindow: number, maxTokens = 2048): Model<"anthropic-messages"> {
 	return {

@@ -55,25 +55,40 @@ export interface RollingOutputBuffer {
 
 /** Bounded child-process output accumulator: keeps a rolling tail of at most maxUnits UTF-16 units. */
 export function createRollingOutputBuffer(maxUnits: number): RollingOutputBuffer {
+	const maximum = Number.isFinite(maxUnits) && maxUnits > 0 ? Math.floor(maxUnits) : 1;
 	const chunks: string[] = [];
+	let head = 0;
+	let headOffset = 0;
 	let units = 0;
 	let truncated = false;
 	return {
 		push(chunk: string): void {
+			if (chunk.length === 0) return;
 			chunks.push(chunk);
 			units += chunk.length;
-			while (units > maxUnits && chunks.length > 1) {
-				units -= chunks.shift()?.length ?? 0;
+			while (units > maximum) {
+				const excess = units - maximum;
+				const available = (chunks[head]?.length ?? 0) - headOffset;
+				if (excess < available) {
+					headOffset += excess;
+					units -= excess;
+				} else {
+					units -= available;
+					head++;
+					headOffset = 0;
+				}
 				truncated = true;
 			}
-			if (units > maxUnits) {
-				chunks[0] = chunks[0].slice(-maxUnits);
-				units = chunks[0].length;
-				truncated = true;
+			if (head >= 1024 && head * 2 >= chunks.length) {
+				chunks.splice(0, head);
+				head = 0;
 			}
 		},
 		text(): string {
-			return chunks.join("");
+			if (head >= chunks.length) return "";
+			const retained = chunks.slice(head);
+			if (headOffset > 0) retained[0] = retained[0].slice(headOffset);
+			return retained.join("");
 		},
 		truncated(): boolean {
 			return truncated;

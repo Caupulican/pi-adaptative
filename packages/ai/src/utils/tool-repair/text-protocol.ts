@@ -19,6 +19,24 @@ export const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = [
 	"function-xml",
 ];
 
+const PI_CALL_TAG = "pi:call";
+const TOOL_CALL_TAG = "tool_call";
+const FUNCTION_TAG = "function";
+const FENCED_JSON_LABELS = ["tool_call", "tool", "json"] as const;
+
+export interface TextToolProtocolEnvelopeDelimiter {
+	opener: string;
+	closer: string;
+}
+
+/** Conservative streaming delimiters for every envelope dialect accepted by this parser. */
+export const TEXT_TOOL_PROTOCOL_ENVELOPE_DELIMITERS: readonly TextToolProtocolEnvelopeDelimiter[] = [
+	{ opener: `<${PI_CALL_TAG}`, closer: `</${PI_CALL_TAG}>` },
+	{ opener: `<${TOOL_CALL_TAG}`, closer: `</${TOOL_CALL_TAG}>` },
+	...FENCED_JSON_LABELS.map((label) => ({ opener: `\`\`\`${label}`, closer: "```" })),
+	{ opener: `<${FUNCTION_TAG}`, closer: `</${FUNCTION_TAG}>` },
+];
+
 export function isTextToolProtocolVariant(value: unknown): value is TextToolProtocolVariant {
 	return typeof value === "string" && TEXT_TOOL_PROTOCOL_VARIANTS.includes(value as TextToolProtocolVariant);
 }
@@ -113,18 +131,20 @@ function isInsideMatch(index: number, matches: readonly EnvelopeMatch[]): boolea
 
 function findToolEnvelopes(text: string): EnvelopeMatch[] {
 	const matches: EnvelopeMatch[] = [];
-	const openPiCallEnvelope = /<pi:call\s+name=(["'])(.*?)\1\s*>/g;
+	const openPiCallEnvelope = new RegExp(`<${PI_CALL_TAG}\\s+name=(["'])(.*?)\\1\\s*>`, "g");
 	for (const match of text.matchAll(openPiCallEnvelope)) {
 		if (isInsideMatch(match.index, matches)) continue;
 		const bodyStart = match.index + match[0].length;
 		const jsonEnd = findJsonObjectEnd(text, bodyStart);
-		const closePattern = /<\/pi:call\s*>/g;
+		const closePattern = new RegExp(`</${PI_CALL_TAG}\\s*>`, "g");
 		closePattern.lastIndex = jsonEnd ?? bodyStart;
 		const candidateClose = closePattern.exec(text);
 		const textBeforeClose = candidateClose ? text.slice(jsonEnd ?? bodyStart, candidateClose.index) : undefined;
 		const closeMatch =
 			candidateClose &&
-			(jsonEnd !== undefined ? textBeforeClose?.trim() === "" : !/<pi:call\b/.test(textBeforeClose ?? ""))
+			(jsonEnd !== undefined
+				? textBeforeClose?.trim() === ""
+				: !new RegExp(`<${PI_CALL_TAG}\\b`).test(textBeforeClose ?? ""))
 				? candidateClose
 				: undefined;
 		const bodyEnd = closeMatch?.index ?? jsonEnd;
@@ -138,7 +158,7 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 		});
 	}
 
-	const toolCallEnvelope = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+	const toolCallEnvelope = new RegExp(`<${TOOL_CALL_TAG}>([\\s\\S]*?)</${TOOL_CALL_TAG}>`, "g");
 	for (const match of text.matchAll(toolCallEnvelope)) {
 		matches.push({
 			kind: "tool_call",
@@ -148,7 +168,7 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 		});
 	}
 
-	const fence = /```(?:tool|tool_call|json)\s*\n([\s\S]*?)\n?```/gi;
+	const fence = new RegExp(`\`\`\`(?:${FENCED_JSON_LABELS.join("|")})\\s*\\n([\\s\\S]*?)\\n?\`\`\``, "gi");
 	for (const match of text.matchAll(fence)) {
 		matches.push({
 			kind: "fenced_json",
@@ -158,7 +178,10 @@ function findToolEnvelopes(text: string): EnvelopeMatch[] {
 		});
 	}
 
-	const functionEnvelope = /<function\s+name=(["'])(.*?)\1\s*>([\s\S]*?)<\/function\s*>/g;
+	const functionEnvelope = new RegExp(
+		`<${FUNCTION_TAG}\\s+name=(["'])(.*?)\\1\\s*>([\\s\\S]*?)</${FUNCTION_TAG}\\s*>`,
+		"g",
+	);
 	for (const match of text.matchAll(functionEnvelope)) {
 		matches.push({
 			kind: "function_xml",
@@ -314,7 +337,7 @@ function parsePiCallEnvelope(match: EnvelopeMatch, names: readonly string[], ind
 
 function parseFunctionXmlEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
 	if (!match.name) return undefined;
-	if (/<\/?function\b/i.test(match.body)) return undefined;
+	if (new RegExp(`<\\/?${FUNCTION_TAG}\\b`, "i").test(match.body)) return undefined;
 	const params: Record<string, string> = {};
 	let cursor = 0;
 	let sawParam = false;
@@ -396,7 +419,7 @@ function formatFunctionXmlEnvelope(toolName: string, argsJson: string): string {
 				`<param name="${escapeAttribute(name)}">${escapeXmlText(functionXmlParamValue(value))}</param>`,
 		)
 		.join("");
-	return `<function name="${escapeAttribute(toolName)}">${params}</function>`;
+	return `<${FUNCTION_TAG} name="${escapeAttribute(toolName)}">${params}</${FUNCTION_TAG}>`;
 }
 
 /**
@@ -405,10 +428,14 @@ function formatFunctionXmlEnvelope(toolName: string, argsJson: string): string {
  * exact dialect the primer taught it, instead of a second parallel formatting path.
  */
 export function formatVariantEnvelope(variant: TextToolProtocolVariant, toolName: string, argsJson: string): string {
-	if (variant === "tool-call") return `<tool_call>{"name":"${toolName}","arguments":${argsJson}}</tool_call>`;
-	if (variant === "fenced-json") return `\`\`\`tool_call\n{"name":"${toolName}","arguments":${argsJson}}\n\`\`\``;
+	if (variant === "tool-call") {
+		return `<${TOOL_CALL_TAG}>{"name":"${toolName}","arguments":${argsJson}}</${TOOL_CALL_TAG}>`;
+	}
+	if (variant === "fenced-json") {
+		return `\`\`\`${FENCED_JSON_LABELS[0]}\n{"name":"${toolName}","arguments":${argsJson}}\n\`\`\``;
+	}
 	if (variant === "function-xml") return formatFunctionXmlEnvelope(toolName, argsJson);
-	return `<pi:call name="${escapeAttribute(toolName)}">${argsJson}</pi:call>`;
+	return `<${PI_CALL_TAG} name="${escapeAttribute(toolName)}">${argsJson}</${PI_CALL_TAG}>`;
 }
 
 function schemaRecord(value: unknown): Record<string, unknown> | undefined {

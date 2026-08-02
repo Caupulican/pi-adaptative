@@ -90,22 +90,37 @@ function Write-Utf8Lines {
     [IO.File]::WriteAllLines($Path, $Lines, $script:utf8WithoutBom)
 }
 
+function Initialize-EvidenceCopy {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [string]$PathType
+    )
+
+    if (-not (Test-Path -LiteralPath $Source -PathType $PathType)) {
+        return $null
+    }
+    $resolvedSource = (Resolve-Path -LiteralPath $Source).ProviderPath
+    $target = Join-Path $script:staging $Destination
+    [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target))
+    return [pscustomobject]@{
+        Source = $resolvedSource
+        Target = $target
+    }
+}
+
 function Copy-EvidenceFile {
     param(
         [string]$Source,
         [string]$Destination
     )
 
-    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+    $copy = Initialize-EvidenceCopy -Source $Source -Destination $Destination -PathType Leaf
+    if ($null -eq $copy) {
         return $false
     }
-
-    $resolvedSource = (Resolve-Path -LiteralPath $Source).ProviderPath
-    $target = Join-Path $script:staging $Destination
-    $targetParent = Split-Path -Parent $target
-    [void](New-Item -ItemType Directory -Force -Path $targetParent)
-    Copy-Item -LiteralPath $resolvedSource -Destination $target -Force
-    [void]$script:collectedSources.Add($resolvedSource)
+    Copy-Item -LiteralPath $copy.Source -Destination $copy.Target -Force
+    [void]$script:collectedSources.Add($copy.Source)
     [void]$script:collectedDestinations.Add($Destination.Replace("\", "/"))
     return $true
 }
@@ -116,15 +131,12 @@ function Copy-EvidenceDirectory {
         [string]$Destination
     )
 
-    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+    $copy = Initialize-EvidenceCopy -Source $Source -Destination $Destination -PathType Container
+    if ($null -eq $copy) {
         return $false
     }
-
-    $resolvedSource = (Resolve-Path -LiteralPath $Source).ProviderPath
-    $target = Join-Path $script:staging $Destination
-    [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target))
-    Copy-Item -LiteralPath $resolvedSource -Destination $target -Recurse -Force
-    [void]$script:collectedSources.Add($resolvedSource)
+    Copy-Item -LiteralPath $copy.Source -Destination $copy.Target -Recurse -Force
+    [void]$script:collectedSources.Add($copy.Source)
     [void]$script:collectedDestinations.Add(($Destination.TrimEnd("\", "/") + "/"))
     return $true
 }

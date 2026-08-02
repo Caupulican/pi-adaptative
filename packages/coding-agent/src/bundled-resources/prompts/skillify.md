@@ -10,7 +10,7 @@ $ARGUMENTS
 
 Steps:
 
-1. Use the `skill-architect` skill (bundled in Pi) to design the skill structure. Verify `pi-harness-learning` is available (bundled) for the store-vs-implement decision.
+1. Use the bundled `skill-architect` skill to design the instructions and `skill-creator` to scaffold and validate the provider-neutral package. Verify `pi-harness-learning` is available for the store-vs-implement decision.
 2. Identify the repeatable goal, inputs, outputs, success criteria, and user corrections from the session.
 3. Draft a `SKILL.md` with valid frontmatter: `name` (kebab-case, ≤64 chars) and `description` (≤1024 chars).
 4. Call the `skillify` tool with your draft to validate and audit it. The tool returns validity, errors, near-duplicate audit (prefer refining an existing skill), and proposedPath. If the tool is unavailable, use the installed skill audit/validator or bounded structural checks and disclose the missing optional check rather than blocking.

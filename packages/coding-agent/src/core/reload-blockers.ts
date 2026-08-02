@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
+import { isProcessAlive } from "./process-liveness.ts";
 import { isRecordObject } from "./util/value-guards.ts";
 
 export const ACTIVE_TURN_TTL_MS = 5 * 60_000;
@@ -100,17 +101,7 @@ function parseSession(value: unknown): ParsedSession | undefined {
 	};
 }
 
-export function isReloadSessionProcessAlive(pid: number | undefined): boolean {
-	if (pid === undefined || !Number.isFinite(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		const code =
-			error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
-		return code === "EPERM";
-	}
-}
+export { isProcessAlive as isReloadSessionProcessAlive };
 
 function isOwnSession(key: string, session: ParsedSession, options: ReloadBlockerOptions): boolean {
 	if (options.ownKey && key === options.ownKey) return true;
@@ -146,7 +137,7 @@ function activeTurnBlockers(options: ReloadBlockerOptions): ReloadSessionRecord[
 	const agentDir = options.agentDir ?? getAgentDir();
 	const now = options.now ?? Date.now();
 	const ttl = options.activeTurnTtlMs ?? ACTIVE_TURN_TTL_MS;
-	const isAlive = options.isProcessAlive ?? isReloadSessionProcessAlive;
+	const isAlive = options.isProcessAlive ?? isProcessAlive;
 	const registry = readJsonFile(join(getReloadCoordinationDir(agentDir), "active-turns.json"));
 	if (!isRecordObject(registry) || !isRecordObject(registry.sessions)) return [];
 
@@ -166,7 +157,7 @@ function coordinatorBlockers(options: ReloadBlockerOptions): { blockers: ReloadS
 	const agentDir = options.agentDir ?? getAgentDir();
 	const now = options.now ?? Date.now();
 	const ttl = options.coordinatorTtlMs ?? AUTO_RELOAD_COORDINATOR_TTL_MS;
-	const isAlive = options.isProcessAlive ?? isReloadSessionProcessAlive;
+	const isAlive = options.isProcessAlive ?? isProcessAlive;
 	const coordinator = readJsonFile(join(getReloadCoordinationDir(agentDir), "auto-reload-state.json"));
 	if (!isRecordObject(coordinator) || !isRecordObject(coordinator.changes)) return { blockers: [], reason: "" };
 

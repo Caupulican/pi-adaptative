@@ -18,6 +18,7 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 }
 
 import { getOpenAICodexAccountId } from "../../providers/openai-codex-auth.ts";
+import { parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
@@ -67,36 +68,6 @@ function createState(): string {
 		throw new Error("OpenAI Codex OAuth is only available in Node.js environments");
 	}
 	return _randomBytes(16).toString("hex");
-}
-
-function parseAuthorizationInput(input: string): { code?: string; state?: string } {
-	const value = input.trim();
-	if (!value) return {};
-
-	try {
-		const url = new URL(value);
-		return {
-			code: url.searchParams.get("code") ?? undefined,
-			state: url.searchParams.get("state") ?? undefined,
-		};
-	} catch {
-		// not a URL
-	}
-
-	if (value.includes("#")) {
-		const [code, state] = value.split("#", 2);
-		return { code, state };
-	}
-
-	if (value.includes("code=")) {
-		const params = new URLSearchParams(value);
-		return {
-			code: params.get("code") ?? undefined,
-			state: params.get("state") ?? undefined,
-		};
-	}
-
-	return { code: value };
 }
 
 async function fetchWithLoginCancellation(input: string, init: RequestInit): Promise<Response> {
@@ -451,53 +422,14 @@ export async function loginOpenAICodex(options: {
 	let code: string | undefined;
 	try {
 		if (options.onManualCodeInput) {
-			// Race between browser callback and manual input
-			let manualCode: string | undefined;
-			let manualError: Error | undefined;
-			const manualPromise = options
-				.onManualCodeInput()
-				.then((input) => {
-					manualCode = input;
-					server.cancelWait();
-				})
-				.catch((err) => {
-					manualError = err instanceof Error ? err : new Error(String(err));
-					server.cancelWait();
-				});
-
-			const result = await server.waitForCode();
-
-			// If manual input was cancelled, throw that error
-			if (manualError) {
-				throw manualError;
-			}
-
-			if (result?.code) {
-				// Browser callback won
-				code = result.code;
-			} else if (manualCode) {
-				// Manual input won (or callback timed out and user had entered code)
-				const parsed = parseAuthorizationInput(manualCode);
-				if (parsed.state && parsed.state !== state) {
-					throw new Error("State mismatch");
-				}
-				code = parsed.code;
-			}
-
-			// If still no code, wait for manual promise to complete and try that
-			if (!code) {
-				await manualPromise;
-				if (manualError) {
-					throw manualError;
-				}
-				if (manualCode) {
-					const parsed = parseAuthorizationInput(manualCode);
-					if (parsed.state && parsed.state !== state) {
-						throw new Error("State mismatch");
-					}
-					code = parsed.code;
-				}
-			}
+			const authorization = await raceAuthorizationInput({
+				manualInput: options.onManualCodeInput,
+				waitForCallback: server.waitForCode,
+				cancelWait: server.cancelWait,
+				expectedState: state,
+				stateMismatchMessage: "State mismatch",
+			});
+			code = authorization?.code;
 		} else {
 			// Original flow: wait for callback, then prompt if needed
 			const result = await server.waitForCode();

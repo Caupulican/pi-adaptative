@@ -26,7 +26,8 @@ Choose one mode before acting:
 
 Load the narrow specialist when the candidate enters its domain. In particular,
 use `pi-harness-learning` for after-action classification and durable learning,
-`skill-architect` when authoring instructions, `tool-call-repair` for model tool
+`skill-architect` when designing instructions, `skill-creator` when packaging a
+Pi skill, `tool-call-repair` for model tool
 argument/protocol failures, and `source-grounded-docs` for codebase documentation.
 This skill owns the adaptation loop, not those domain procedures.
 
@@ -290,7 +291,8 @@ record it only under the granted scope. A transient formatting correction remain
 **Successful repeatable workflow**
 
 Two tasks benefit from the same non-obvious review sequence. Audit existing
-skills first. If no existing owner fits, use `skill-architect` to create one
+skills first. If no existing owner fits, use `skill-architect` to design one and
+`skill-creator` to scaffold and validate it
 narrow skill with an oracle and known gaps; otherwise refine the existing skill.
 
 ## Self-Check

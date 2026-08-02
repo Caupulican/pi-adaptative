@@ -162,6 +162,10 @@ describe("wrapTextWithAnsi", () => {
 			assert.ok(visibleWidth(twoSpacesWrappedToWidth1[0]) <= 1);
 		});
 
+		it("does not insert an empty row between discarded whitespace and a long word", () => {
+			assert.deepStrictEqual(wrapTextWithAnsi("a  bc", 1), ["a", "b", "c"]);
+		});
+
 		it("should preserve color codes across wraps", () => {
 			const red = "\x1b[31m";
 			const reset = "\x1b[0m";

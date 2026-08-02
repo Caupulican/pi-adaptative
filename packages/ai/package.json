@@ -46,6 +46,66 @@
 			"types": "./dist/oauth.d.ts",
 			"import": "./dist/oauth.js"
 		},
+		"./event-stream": {
+			"types": "./dist/utils/event-stream.d.ts",
+			"import": "./dist/utils/event-stream.js"
+		},
+		"./json-parse": {
+			"types": "./dist/utils/json-parse.d.ts",
+			"import": "./dist/utils/json-parse.js"
+		},
+		"./overflow": {
+			"types": "./dist/utils/overflow.d.ts",
+			"import": "./dist/utils/overflow.js"
+		},
+		"./provider-retry": {
+			"types": "./dist/utils/provider-retry.d.ts",
+			"import": "./dist/utils/provider-retry.js"
+		},
+		"./stream": {
+			"types": "./dist/stream.d.ts",
+			"import": "./dist/stream.js"
+		},
+		"./streaming-lines": {
+			"types": "./dist/utils/streaming-lines.d.ts",
+			"import": "./dist/utils/streaming-lines.js"
+		},
+		"./text-tool-protocol": {
+			"types": "./dist/utils/tool-repair/text-protocol.d.ts",
+			"import": "./dist/utils/tool-repair/text-protocol.js"
+		},
+		"./tool-repair-registry": {
+			"types": "./dist/utils/tool-repair/registry.d.ts",
+			"import": "./dist/utils/tool-repair/registry.js"
+		},
+		"./typebox-helpers": {
+			"types": "./dist/utils/typebox-helpers.d.ts",
+			"import": "./dist/utils/typebox-helpers.js"
+		},
+		"./types": {
+			"types": "./dist/types.d.ts",
+			"import": "./dist/types.js"
+		},
+		"./usage": {
+			"types": "./dist/usage.d.ts",
+			"import": "./dist/usage.js"
+		},
+		"./validation": {
+			"types": "./dist/utils/validation.d.ts",
+			"import": "./dist/utils/validation.js"
+		},
+		"./validation-path": {
+			"types": "./dist/utils/validation-path.d.ts",
+			"import": "./dist/utils/validation-path.js"
+		},
+		"./uuid": {
+			"types": "./dist/utils/uuid.d.ts",
+			"import": "./dist/utils/uuid.js"
+		},
+		"./abort-signals": {
+			"types": "./dist/utils/abort-signals.d.ts",
+			"import": "./dist/utils/abort-signals.js"
+		},
 		"./bedrock-provider": {
 			"types": "./dist/bedrock-provider.d.ts",
 			"import": "./dist/bedrock-provider.js"
@@ -62,7 +122,7 @@
 		"clean": "shx rm -rf dist",
 		"generate-models": "node scripts/generate-models.ts",
 		"generate-image-models": "node scripts/generate-image-models.ts",
-		"build": "npm run generate-models && npm run generate-image-models && node ../../scripts/tsgo-or-tsc.mjs -p tsconfig.build.json",
+		"build": "npm run generate-models && npm run generate-image-models && node ../../scripts/run-tsc.mjs -p tsconfig.build.json",
 		"test": "vitest --run",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
@@ -101,6 +161,6 @@
 	"devDependencies": {
 		"@types/node": "24.12.4",
 		"canvas": "3.2.3",
-		"vitest": "3.2.4"
+		"vitest": "3.2.7"
 	}
 }

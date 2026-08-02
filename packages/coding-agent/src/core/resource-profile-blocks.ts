@@ -1,4 +1,8 @@
-import type { ResourceProfileKind, ResourceProfileSettings } from "./settings-manager.ts";
+import type {
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+} from "./settings-manager.ts";
 
 const RESOURCE_PROFILE_TAG_RE = /<resource-profile\b([^>]*)>([\s\S]*?)<\/resource-profile>/gi;
 const RESOURCE_PROFILE_NAME_RE = /\bname\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
@@ -61,6 +65,14 @@ function asStringArray(value: unknown): string[] | undefined {
 	return values.length > 0 ? values : undefined;
 }
 
+/** Normalize one already-validated filter object; callers retain their own invalid-input policy. */
+export function normalizeResourceProfileFilter(filter: Record<string, unknown>): ResourceProfileFilterSettings {
+	return {
+		allow: asStringArray(filter.allow),
+		block: asStringArray(filter.block),
+	};
+}
+
 function normalizeResourceProfileSettings(value: unknown): ResourceProfileSettings {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error("resource profile JSON must be an object");
@@ -70,11 +82,7 @@ function normalizeResourceProfileSettings(value: unknown): ResourceProfileSettin
 	for (const [kind, filterValue] of Object.entries(input)) {
 		if (!RESOURCE_PROFILE_KINDS.has(kind as ResourceProfileKind)) continue;
 		if (!filterValue || typeof filterValue !== "object" || Array.isArray(filterValue)) continue;
-		const filter = filterValue as Record<string, unknown>;
-		result[kind as ResourceProfileKind] = {
-			allow: asStringArray(filter.allow),
-			block: asStringArray(filter.block),
-		};
+		result[kind as ResourceProfileKind] = normalizeResourceProfileFilter(filterValue as Record<string, unknown>);
 	}
 	return result;
 }

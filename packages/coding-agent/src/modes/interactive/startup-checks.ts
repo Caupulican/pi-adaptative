@@ -197,6 +197,16 @@ export function renderProjectTrustWarningIfNeeded(host: StartupChecksHost): void
 	);
 }
 
+function beginWarningNotification(host: StartupChecksHost): void {
+	host.chatContainer.addChild(new Spacer(1));
+	host.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+}
+
+function finishWarningNotification(host: StartupChecksHost): void {
+	host.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+	host.ui.requestRender();
+}
+
 export function showNewVersionNotification(host: StartupChecksHost, release: LatestPiRelease): void {
 	const action = theme.fg("accent", `${APP_NAME} update`);
 	const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
@@ -207,8 +217,7 @@ export function showNewVersionNotification(host: StartupChecksHost, release: Lat
 	const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
 	const note = release.note?.trim();
 
-	host.chatContainer.addChild(new Spacer(1));
-	host.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+	beginWarningNotification(host);
 	host.chatContainer.addChild(
 		new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0),
 	);
@@ -222,8 +231,7 @@ export function showNewVersionNotification(host: StartupChecksHost, release: Lat
 		host.chatContainer.addChild(new Spacer(1));
 	}
 	host.chatContainer.addChild(new Text(changelogLine, 1, 0));
-	host.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-	host.ui.requestRender();
+	finishWarningNotification(host);
 }
 
 export function showPackageUpdateNotification(host: StartupChecksHost, packages: string[]): void {
@@ -231,8 +239,7 @@ export function showPackageUpdateNotification(host: StartupChecksHost, packages:
 	const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
 	const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 
-	host.chatContainer.addChild(new Spacer(1));
-	host.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+	beginWarningNotification(host);
 	host.chatContainer.addChild(
 		new Text(
 			`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
@@ -240,6 +247,5 @@ export function showPackageUpdateNotification(host: StartupChecksHost, packages:
 			0,
 		),
 	);
-	host.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-	host.ui.requestRender();
+	finishWarningNotification(host);
 }

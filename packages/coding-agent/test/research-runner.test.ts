@@ -67,6 +67,12 @@ describe("parseResearchFindings", () => {
 		expect(parsed?.findings[1]).toEqual({ summary: "two", confidence: 0 });
 	});
 
+	it("keeps research summaries outside the worker-specific character bound", () => {
+		const summary = "r".repeat(2_500);
+		const parsed = parseResearchFindings(JSON.stringify({ findings: [{ summary }] }), 1);
+		expect(parsed?.findings[0]?.summary).toBe(summary);
+	});
+
 	it("accepts an explicitly empty findings array", () => {
 		expect(parseResearchFindings('{"findings":[]}', 10)?.findings).toEqual([]);
 	});

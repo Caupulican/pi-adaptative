@@ -73,6 +73,9 @@ describe("system prompt cache-stability invariant", () => {
 		const second = buildSystemPrompt(customOptions);
 
 		expect(second).toBe(first);
+		expect(first).toContain("You are a custom assistant.");
+		expect(first).toContain("N+2 ARCHITECTURE");
+		expect(first.match(/N\+2 ARCHITECTURE/g)).toHaveLength(1);
 	});
 
 	it("rebuilds to a different prompt when the tool surface changes", () => {

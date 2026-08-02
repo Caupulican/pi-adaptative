@@ -6,9 +6,9 @@ import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	emptyOrchestrationCall,
-	OrchestrationPanelComponent,
 	type OrchestrationPanelModel,
 	type OrchestrationRowStatus,
+	renderOrchestrationToolResult,
 } from "./orchestration-panel.ts";
 
 function createDelegateSchema() {
@@ -240,10 +240,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			return emptyOrchestrationCall();
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) return emptyOrchestrationCall();
 			const details = result.details as DelegateToolDetails | undefined;
-			if (!expanded && details?.started) return emptyOrchestrationCall();
-			return new OrchestrationPanelComponent(theme, delegatePanelModel(details), expanded);
+			return renderOrchestrationToolResult(theme, delegatePanelModel(details), {
+				isPartial,
+				collapse: !expanded && details?.started === true,
+				expanded,
+			});
 		},
 		async execute(
 			_toolCallId,

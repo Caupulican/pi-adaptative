@@ -1,6 +1,16 @@
 import type { AutocompleteProvider } from "./autocomplete.ts";
 import type { Component } from "./tui.ts";
 
+/** Allocation-bounded structural projection for observers that do not need the full document. */
+export interface EditorChangeSummary {
+	firstNonWhitespace: string | undefined;
+}
+
+export function firstNonWhitespaceCharacter(text: string): string | undefined {
+	const index = text.search(/\S/u);
+	return index === -1 ? undefined : text[index];
+}
+
 /**
  * Interface for custom editor components.
  *
@@ -31,6 +41,12 @@ export interface EditorComponent extends Component {
 
 	/** Called when text changes */
 	onChange?: (text: string) => void;
+
+	/** Explicit capability flag for structural change notifications. */
+	readonly supportsChangeSummary?: true;
+
+	/** Called without materializing the full document when supported. */
+	onChangeSummary?: (summary: EditorChangeSummary) => void;
 
 	// =========================================================================
 	// History support (optional)

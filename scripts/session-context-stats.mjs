@@ -1,36 +1,28 @@
 #!/usr/bin/env node
 
-import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
+import { assistantToolCalls, DEFAULT_SESSIONS_DIR, escapeHtml, formatReportDay as formatDay, median, parseSessionStatsArgs, REPORT_TIME_ZONE, runMain, scanSessionJsonl } from "./session-stats-common.mjs";
 
-const DEFAULT_SESSIONS_DIR = path.join(homedir(), ".pi/agent/sessions");
 const MODELS_GENERATED_PATH = path.join(process.cwd(), "packages/ai/src/models.generated.ts");
 const MODELS_CONFIG_PATH = path.join(homedir(), ".pi/agent/models.json");
-const REPORT_TIME_ZONE = "Europe/Berlin";
 const CHART_WIDTH = 40;
 
 function parseArgs(argv) {
 	const options = { sessionsDir: DEFAULT_SESSIONS_DIR, json: false, text: false, allSessions: false, since: undefined, modelFilter: undefined, modelPrefixes: [], bashContains: [], cwd: process.cwd(), help: false };
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i];
-		if (arg === "--help" || arg === "-h") options.help = true;
-		else if (arg === "--json") options.json = true;
-		else if (arg === "--text") options.text = true;
-		else if (arg === "--sessions-dir") options.sessionsDir = argv[++i];
-		else if (arg === "--since") options.since = argv[++i];
-		else if (arg === "--all-sessions") options.allSessions = true;
-		else if (arg === "--model") options.modelFilter = argv[++i];
-		else if (arg === "--model-prefix") options.modelPrefixes.push(argv[++i]);
-		else if (arg === "--bash-contains") options.bashContains.push(argv[++i]);
-		else if (arg === "--git-commit-or-push") options.bashContains.push("git commit", "git push");
-		else if (arg === "--cwd") options.cwd = argv[++i];
-		else if (arg === "--all-cwds") options.cwd = undefined;
-		else throw new Error(`Unknown argument: ${arg}`);
-	}
-	return options;
+	return parseSessionStatsArgs(argv, options, parseContextStatsArg);
+}
+
+function parseContextStatsArg(arg, index, argv, options) {
+	if (arg === "--model") options.modelFilter = argv[++index];
+	else if (arg === "--model-prefix") options.modelPrefixes.push(argv[++index]);
+	else if (arg === "--bash-contains") options.bashContains.push(argv[++index]);
+	else if (arg === "--git-commit-or-push") options.bashContains.push("git commit", "git push");
+	else if (arg === "--cwd") options.cwd = argv[++index];
+	else if (arg === "--all-cwds") options.cwd = undefined;
+	else return null;
+	return index;
 }
 
 function printHelp() {
@@ -52,28 +44,6 @@ Options:
 `);
 }
 
-function parseSessionFileTimestamp(sessionFile) {
-	const rawTimestamp = path.basename(sessionFile).split("_")[0];
-	if (!rawTimestamp) return null;
-	const ms = Date.parse(rawTimestamp.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z"));
-	return Number.isFinite(ms) ? ms : null;
-}
-
-function getTimeZoneParts(ms) {
-	const parts = new Intl.DateTimeFormat("en-CA", {
-		timeZone: REPORT_TIME_ZONE,
-		year: "numeric",
-		month: "2-digit",
-		day: "2-digit",
-	}).formatToParts(new Date(ms));
-	return Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
-}
-
-function formatDay(ms) {
-	const parts = getTimeZoneParts(ms);
-	return `${parts.year}-${parts.month}-${parts.day}`;
-}
-
 function formatInt(value) {
 	return new Intl.NumberFormat("en-US").format(Math.round(value));
 }
@@ -90,23 +60,6 @@ function bar(percent) {
 	const clamped = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
 	const filled = Math.round((clamped / 100) * CHART_WIDTH);
 	return `${"█".repeat(filled)}${"░".repeat(CHART_WIDTH - filled)}`;
-}
-
-function median(values) {
-	const finite = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
-	if (finite.length === 0) return null;
-	const middle = Math.floor(finite.length / 2);
-	return finite.length % 2 === 0 ? (finite[middle - 1] + finite[middle]) / 2 : finite[middle];
-}
-
-async function* walkJsonlFiles(dir) {
-	const entries = await fs.readdir(dir, { withFileTypes: true });
-	entries.sort((a, b) => a.name.localeCompare(b.name));
-	for (const entry of entries) {
-		const fullPath = path.join(dir, entry.name);
-		if (entry.isDirectory()) yield* walkJsonlFiles(fullPath);
-		else if (entry.isFile() && entry.name.endsWith(".jsonl")) yield fullPath;
-	}
 }
 
 async function loadContextWindows() {
@@ -168,16 +121,10 @@ function contextTokens(usage) {
 async function scanSessions(sessionsDir, sinceMs, contextWindows, cwdFilter) {
 	const windows = contextWindows.windows;
 	const sessions = [];
-	const meta = { sessionsDir, sessionFilesScanned: 0, sessionFilesIncluded: 0, sessionFilesSkippedOlderThanSince: 0, malformedLines: 0 };
-	for await (const sessionFile of walkJsonlFiles(sessionsDir)) {
-		meta.sessionFilesScanned++;
-		const fileTimestampMs = parseSessionFileTimestamp(sessionFile);
-		if (sinceMs !== null && fileTimestampMs !== null && fileTimestampMs < sinceMs) {
-			meta.sessionFilesSkippedOlderThanSince++;
-			continue;
-		}
-		meta.sessionFilesIncluded++;
-		const session = {
+	const { meta } = await scanSessionJsonl({
+		sessionsDir,
+		sinceMs,
+		createSession: (sessionFile, fileTimestampMs) => ({
 			sessionFile,
 			cwd: null,
 			startMs: fileTimestampMs ?? 0,
@@ -196,18 +143,8 @@ async function scanSessions(sessionsDir, sinceMs, contextWindows, cwdFilter) {
 			over80: false,
 			over90: false,
 			over100: false,
-		};
-		const input = createReadStream(sessionFile, { encoding: "utf8" });
-		const rl = createInterface({ input, crlfDelay: Infinity });
-		for await (const line of rl) {
-			if (!line.trim()) continue;
-			let entry;
-			try {
-				entry = JSON.parse(line);
-			} catch {
-				meta.malformedLines++;
-				continue;
-			}
+		}),
+		onEntry: (entry, session) => {
 			if (entry.type === "session" && typeof entry.cwd === "string") session.cwd = entry.cwd;
 			const entryMs = Date.parse(entry.timestamp ?? "");
 			if (Number.isFinite(entryMs)) {
@@ -221,19 +158,17 @@ async function scanSessions(sessionsDir, sinceMs, contextWindows, cwdFilter) {
 					if (!session.seenCompaction) session.preFirstCompactionTokens = entry.tokensBefore;
 				}
 				session.seenCompaction = true;
-				continue;
+				return;
 			}
-			if (entry.type !== "message" || !entry.message) continue;
+			if (entry.type !== "message" || !entry.message) return;
 			const message = entry.message;
-			if (message.role === "assistant" && Array.isArray(message.content)) {
-				for (const block of message.content) {
-					if (block?.type !== "toolCall" || block.name !== "bash") continue;
-					const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
-					if (command) session.bashCommands.push(command);
-				}
+			for (const block of assistantToolCalls(message)) {
+				if (block?.type !== "toolCall" || block.name !== "bash") continue;
+				const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
+				if (command) session.bashCommands.push(command);
 			}
 			if (message.role === "user") session.userMessages++;
-			if (message.role !== "assistant") continue;
+			if (message.role !== "assistant") return;
 			session.assistantMessages++;
 			const provider = typeof message.provider === "string" ? message.provider : "[unknown]";
 			const model = typeof message.model === "string" ? message.model : "[unknown]";
@@ -245,18 +180,20 @@ async function scanSessions(sessionsDir, sinceMs, contextWindows, cwdFilter) {
 				session.maxPromptTokens = Math.max(session.maxPromptTokens ?? 0, tokens);
 				if (!session.seenCompaction) session.preFirstCompactionTokens = tokens;
 			}
-		}
-		if (session.maxPromptTokens !== null && session.contextWindow !== null) {
-			session.maxContextUsagePercent = (session.maxPromptTokens / session.contextWindow) * 100;
-			session.over80 = session.maxContextUsagePercent >= 80;
-			session.over90 = session.maxContextUsagePercent >= 90;
-			session.over100 = session.maxContextUsagePercent >= 100;
-		}
-		if (session.preFirstCompactionTokens !== null && session.contextWindow !== null) {
-			session.preFirstCompactionUsagePercent = (session.preFirstCompactionTokens / session.contextWindow) * 100;
-		}
-		if (!cwdFilter || path.resolve(session.cwd ?? "") === cwdFilter) sessions.push(session);
-	}
+		},
+		onSessionEnd: (session) => {
+			if (session.maxPromptTokens !== null && session.contextWindow !== null) {
+				session.maxContextUsagePercent = (session.maxPromptTokens / session.contextWindow) * 100;
+				session.over80 = session.maxContextUsagePercent >= 80;
+				session.over90 = session.maxContextUsagePercent >= 90;
+				session.over100 = session.maxContextUsagePercent >= 100;
+			}
+			if (session.preFirstCompactionTokens !== null && session.contextWindow !== null) {
+				session.preFirstCompactionUsagePercent = (session.preFirstCompactionTokens / session.contextWindow) * 100;
+			}
+			if (!cwdFilter || path.resolve(session.cwd ?? "") === cwdFilter) sessions.push(session);
+		},
+	});
 	return { sessions, meta };
 }
 
@@ -367,10 +304,6 @@ function buildTextReport(summary) {
 	return `${lines.join("\n")}\n`;
 }
 
-function escapeHtml(text) {
-	return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
 function printHtmlReport(summary) {
 	console.log(`<!doctype html>
 <meta charset="utf-8">
@@ -399,7 +332,4 @@ async function main() {
 	else printHtmlReport(summary);
 }
 
-main().catch((error) => {
-	console.error(error instanceof Error ? error.message : String(error));
-	process.exit(1);
-});
+runMain(main);

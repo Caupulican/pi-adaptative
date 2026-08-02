@@ -395,6 +395,14 @@ export function createGoalState(args: {
 	};
 }
 
+function updateRequirement(state: GoalState, id: string, update: (requirement: Requirement) => Requirement): void {
+	const index = state.requirements.findIndex((requirement) => requirement.id === id);
+	if (index < 0) return;
+	const requirements = [...state.requirements];
+	requirements[index] = update(requirements[index]);
+	state.requirements = requirements;
+}
+
 export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 	const newState: GoalState = {
 		...state,
@@ -444,19 +452,13 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 
 		case "satisfy_requirement": {
-			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
-			if (existingIndex >= 0) {
-				const requirement = newState.requirements[existingIndex];
-				const updatedRequirements = [...newState.requirements];
-				updatedRequirements[existingIndex] = {
-					...requirement,
-					status: "satisfied",
-					evidenceIds: [...event.evidenceIds],
-					updatedAt: event.now,
-					blockedReason: undefined,
-				};
-				newState.requirements = updatedRequirements;
-			}
+			updateRequirement(newState, event.id, (requirement) => ({
+				...requirement,
+				status: "satisfied",
+				evidenceIds: [...event.evidenceIds],
+				updatedAt: event.now,
+				blockedReason: undefined,
+			}));
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
 			newState.progressRevision = (state.progressRevision ?? 0) + 1;
@@ -464,34 +466,22 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 		}
 
 		case "block_requirement": {
-			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
-			if (existingIndex >= 0) {
-				const requirement = newState.requirements[existingIndex];
-				const updatedRequirements = [...newState.requirements];
-				updatedRequirements[existingIndex] = {
-					...requirement,
-					status: "blocked",
-					blockedReason: event.blockedReason,
-					updatedAt: event.now,
-				};
-				newState.requirements = updatedRequirements;
-			}
+			updateRequirement(newState, event.id, (requirement) => ({
+				...requirement,
+				status: "blocked",
+				blockedReason: event.blockedReason,
+				updatedAt: event.now,
+			}));
 			break;
 		}
 
 		case "reopen_requirement": {
-			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
-			if (existingIndex >= 0) {
-				const requirement = newState.requirements[existingIndex];
-				const updatedRequirements = [...newState.requirements];
-				updatedRequirements[existingIndex] = {
-					...requirement,
-					status: "open",
-					blockedReason: undefined,
-					updatedAt: event.now,
-				};
-				newState.requirements = updatedRequirements;
-			}
+			updateRequirement(newState, event.id, (requirement) => ({
+				...requirement,
+				status: "open",
+				blockedReason: undefined,
+				updatedAt: event.now,
+			}));
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
 			break;
@@ -501,20 +491,14 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			// Records the requirement<->lane binding ONLY -- never satisfies the requirement and never
 			// touches lastProgressAt/stallTurns. The worker's own completion later populates "worker"
 			// evidence and prompts an explicit satisfy_requirement pass through the existing gate.
-			const existingIndex = newState.requirements.findIndex((requirement) => requirement.id === event.id);
-			if (existingIndex >= 0) {
-				const requirement = newState.requirements[existingIndex];
-				const updatedRequirements = [...newState.requirements];
-				updatedRequirements[existingIndex] = {
-					...requirement,
-					boundLaneId: event.laneId,
-					// Start (or keep) the wait-timeout clock ONLY when this dispatch actually bound a real
-					// lane -- a declined dispatch (no laneId) preserves whatever boundAt was already there.
-					boundAt: event.laneId ? event.now : requirement.boundAt,
-					updatedAt: event.now,
-				};
-				newState.requirements = updatedRequirements;
-			}
+			updateRequirement(newState, event.id, (requirement) => ({
+				...requirement,
+				boundLaneId: event.laneId,
+				// Start (or keep) the wait-timeout clock ONLY when this dispatch actually bound a real
+				// lane -- a declined dispatch (no laneId) preserves whatever boundAt was already there.
+				boundAt: event.laneId ? event.now : requirement.boundAt,
+				updatedAt: event.now,
+			}));
 			break;
 		}
 

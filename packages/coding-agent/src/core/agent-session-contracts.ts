@@ -11,6 +11,7 @@ import type {
 import type { CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, CacheRetention, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
+import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
 	ContextUsage,
@@ -35,25 +36,7 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
 
-/** Parsed skill block from a user message. */
-export interface ParsedSkillBlock {
-	name: string;
-	location: string;
-	content: string;
-	userMessage: string | undefined;
-}
-
-/** Parse a skill block from message text, or return null when none is present. */
-export function parseSkillBlock(text: string): ParsedSkillBlock | null {
-	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-	if (!match) return null;
-	return {
-		name: match[1],
-		location: match[2],
-		content: match[3],
-		userMessage: match[4]?.trim() || undefined,
-	};
-}
+export { type ParsedSkillBlock, parseSkillBlock } from "./skill-block.mjs";
 
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
@@ -69,6 +52,7 @@ export type AgentSessionEvent =
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "warning"; message: string }
+	| { type: "background_tools"; tasks: readonly BackgroundToolTaskLiveView[] }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";

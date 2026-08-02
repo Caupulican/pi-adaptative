@@ -13,9 +13,9 @@ import type { Container, TUI } from "@caupulican/pi-tui";
 import { Spacer, Text } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { formatAutonomyDiagnostics } from "../../core/autonomy/status.ts";
-import { formatModelFitnessReport } from "../../core/research/model-fitness.ts";
 import type { AutoLearnSettings, AutonomyMode, SettingsManager, SettingsScope } from "../../core/settings-manager.ts";
 import { AUTONOMY_MODES, type AutoLearnState } from "./auto-learn-controller.ts";
+import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
 
 export interface AutonomyHost {
 	readonly session: AgentSession;
@@ -127,13 +127,7 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 		void host.session
 			.runModelFitness({ model: modelPattern, trials: Number.isFinite(trials) ? trials : undefined })
 			.then((outcome) => {
-				if (!outcome.started) {
-					host.showStatus(`Model fitness skipped: ${outcome.skipReason}`);
-					return;
-				}
-				host.chatContainer.addChild(new Spacer(1));
-				host.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
-				host.ui.requestRender();
+				presentModelFitnessOutcome(host, outcome);
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);

@@ -31,7 +31,6 @@
  * ModelRouterControllerDeps.getToolProbeVerdict}).
  */
 
-import { createHash } from "node:crypto";
 import type { Agent, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
@@ -43,7 +42,8 @@ import type {
 } from "./agent-session-contracts.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
-import { latestUserPromptText } from "./context-pipeline.ts";
+import { latestUserPromptText } from "./context/message-text.ts";
+import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
@@ -75,11 +75,8 @@ import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./mo
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import {
-	buildReflexUserPrompt,
-	parseReflexPlan,
-	REFLEX_INTERPRETER_SYSTEM_PROMPT,
-} from "./toolkit/reflex-interpreter.ts";
+import { reportSpawnedUsage } from "./spawned-usage.ts";
+import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 
 /** Canonical `provider/id` label for a routed/resolved model, as it appears in decisions and status. */
 export function formatModelRouterModel(model: Model<Api>): string {
@@ -113,17 +110,6 @@ function persistModelRouterDecision(
 	decision: ModelRouterDecisionStatus,
 ): void {
 	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
-}
-
-/**
- * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
- * (the text driving the call — never `Date.now`/random). Same identity on a retry of the same
- * logical work unit yields the same id, so the ledger's `seenSubagentReportIds` dedupe catches a
- * duplicate report instead of double-counting spend.
- */
-function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
-	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-	return `${kind}:${sessionId}:${digest}`;
 }
 
 export interface ModelRouterControllerDeps {
@@ -392,36 +378,20 @@ export class ModelRouterController {
 			const model = this.deps.resolveCurationModelIfFit();
 			if (!model) return undefined;
 			const list = Array.isArray(messages) ? messages : [messages];
-			const request = latestUserPromptText(list.filter((m): m is AgentMessage => true));
+			const request = latestUserPromptText(list);
 			if (!request) return undefined;
 			const scripts = this.deps.getSettingsManager().getToolkitScripts();
-			const completion = await this.deps.runIsolatedCompletion({
-				systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
-				messages: [
-					{
-						role: "user",
-						content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
-						timestamp: Date.now(),
-					},
-				],
+			const plan = await runReflexInterpreterCompletion({
+				request,
+				scripts,
 				model,
-				thinkingLevel: "off",
-				maxTokens: 256,
-				cacheRetention: "short",
-				// Stable per-lane synthetic affinity key for repeat executor-brain warmups.
 				laneKind: "executor",
+				usageKind: "executor-brain",
+				usageLabel: "executor-brain-warmup",
+				sessionId: this.deps.getSessionManager().getSessionId(),
+				completionRunner: this.deps,
+				usageReporter: this.deps,
 			});
-			if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-				// `reportId` keyed on the request text driving THIS refinement — stable across a
-				// retry of the same routed turn, distinct across genuinely different requests.
-				const reportId = deriveSpawnedUsageReportId(
-					"executor-brain",
-					this.deps.getSessionManager().getSessionId(),
-					request,
-				);
-				this.deps.addSpawnedUsage(completion.usage, { label: "executor-brain-warmup", reportId });
-			}
-			const plan = parseReflexPlan(completion.text);
 			if (!plan || plan.script === "none") return undefined;
 			const argHint = plan.args.length > 0 ? ` with args ${JSON.stringify(plan.args)}` : "";
 			return `Run the toolkit script "${plan.script}"${argHint} using run_toolkit_script, then report its result exactly.`;
@@ -625,9 +595,9 @@ export class ModelRouterController {
 			baseline: baseline.decision,
 			signal: this.deps.getReflectionSignal(),
 			complete: async ({ systemPrompt, userPrompt, signal }) => {
-				const completion = await this.deps.runIsolatedCompletion({
+				const completion = await runIsolatedTextCompletion(this.deps, {
 					systemPrompt,
-					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+					userPrompt,
 					model: judgeModel,
 					// Per-tier thinking: judgeThinking overrides the judge's own completion; unset
 					// keeps today's "off" (the judge is a cheap classification call by default).
@@ -641,22 +611,16 @@ export class ModelRouterController {
 					laneKind: "route-judge",
 				});
 				spentUsage = completion.usage;
-				return {
-					text: completion.text,
-					costUsd: completion.usage.cost.total,
-					stopReason: String(completion.stopReason),
-				};
+				return completion;
 			},
 		});
-		if (spentUsage && (spentUsage.cost.total > 0 || spentUsage.totalTokens > 0)) {
-			// `reportId` keyed on the routed prompt text — stable across a retry of the same
-			// judged turn, distinct across genuinely different prompts.
-			const reportId = deriveSpawnedUsageReportId(
-				"route-judge",
-				this.deps.getSessionManager().getSessionId(),
-				prompt,
-			);
-			this.deps.addSpawnedUsage(spentUsage, { label: "router-judge", reportId });
+		if (spentUsage) {
+			reportSpawnedUsage(this.deps, spentUsage, {
+				kind: "route-judge",
+				label: "router-judge",
+				sessionId: this.deps.getSessionManager().getSessionId(),
+				identity: prompt,
+			});
 		}
 
 		if (!judged.verdict || judged.decision.tier === baseline.decision.tier) {

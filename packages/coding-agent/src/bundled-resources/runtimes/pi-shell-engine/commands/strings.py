@@ -11,124 +11,31 @@ import os
 
 from context import BuiltinContext
 from errors import UnsupportedConstruct
+from escapes import ECHO_ESCAPES, PRINTF_ESCAPES, decode_backslash_escapes
+from paths import resolve_request_path
+from shell_args import split_leading_short_options
 
 
 def _write(ctx: BuiltinContext, data: str) -> None:
     ctx.stdout.write(data.encode("utf-8"))
 
 
-def _decode_backslash_escapes(text: str, *, allow_c: bool) -> tuple[str, bool]:
-    """Decode the echo/printf escape set. Returns (decoded, stop_output_early)."""
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if ch != "\\" or i + 1 >= n:
-            out.append(ch)
-            i += 1
-            continue
-        nxt = text[i + 1]
-        if nxt == "\\":
-            out.append("\\")
-            i += 2
-        elif nxt == "a":
-            out.append("\a")
-            i += 2
-        elif nxt == "b":
-            out.append("\b")
-            i += 2
-        elif nxt == "c":
-            if allow_c:
-                return "".join(out), True
-            out.append("\\c")
-            i += 2
-        elif nxt == "e":
-            out.append("\x1b")
-            i += 2
-        elif nxt == "f":
-            out.append("\f")
-            i += 2
-        elif nxt == "n":
-            out.append("\n")
-            i += 2
-        elif nxt == "r":
-            out.append("\r")
-            i += 2
-        elif nxt == "t":
-            out.append("\t")
-            i += 2
-        elif nxt == "v":
-            out.append("\v")
-            i += 2
-        elif nxt == "0":
-            j = i + 2
-            digits = ""
-            while j < n and len(digits) < 3 and text[j] in "01234567":
-                digits += text[j]
-                j += 1
-            if digits:
-                out.append(chr(int(digits, 8) & 0xFF))
-                i = j
-            else:
-                out.append("\0")
-                i += 2
-        elif nxt == "x":
-            j = i + 2
-            digits = ""
-            while j < n and len(digits) < 2 and text[j] in "0123456789abcdefABCDEF":
-                digits += text[j]
-                j += 1
-            if digits:
-                out.append(chr(int(digits, 16) & 0xFF))
-                i = j
-            else:
-                out.append("\\x")
-                i += 2
-        else:
-            out.append("\\")
-            out.append(nxt)
-            i += 2
-    return "".join(out), False
-
-
 def cmd_echo(ctx: BuiltinContext) -> int:
     args = ctx.argv[1:]
     newline = True
     interpret = False
-    idx = 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg == "--":
-            idx += 1
-            break
-        if arg == "-n":
-            newline = False
-            idx += 1
-            continue
-        if arg == "-e":
-            interpret = True
-            idx += 1
-            continue
-        if arg == "-E":
-            interpret = False
-            idx += 1
-            continue
-        if arg.startswith("-") and arg != "-" and all(c in "neE" for c in arg[1:]) and len(arg) > 1:
-            for c in arg[1:]:
-                if c == "n":
-                    newline = False
-                elif c == "e":
-                    interpret = True
-                elif c == "E":
-                    interpret = False
-            idx += 1
-            continue
-        break
-    words = args[idx:]
+    option_args, words = split_leading_short_options(args, "neE")
+    for option in option_args:
+        for char in option[1:]:
+            if char == "n":
+                newline = False
+            elif char == "e":
+                interpret = True
+            else:
+                interpret = False
     text = " ".join(words)
     if interpret:
-        decoded, stop = _decode_backslash_escapes(text, allow_c=True)
+        decoded, stop = decode_backslash_escapes(text, ECHO_ESCAPES)
         text = decoded
         if stop:
             _write(ctx, text)
@@ -137,11 +44,6 @@ def cmd_echo(ctx: BuiltinContext) -> int:
         text += "\n"
     _write(ctx, text)
     return 0
-
-
-def _printf_format_escapes(fmt: str) -> str:
-    decoded, _ = _decode_backslash_escapes(fmt, allow_c=False)
-    return decoded
 
 
 def _printf_one(fmt: str, args: list[str]) -> tuple[str, list[str], bool]:
@@ -210,7 +112,7 @@ def cmd_printf(ctx: BuiltinContext) -> int:
     if not args:
         raise UnsupportedConstruct("unsupported-flag", "printf: FORMAT operand required")
     fmt_raw = args[0]
-    fmt = _printf_format_escapes(fmt_raw)
+    fmt, _ = decode_backslash_escapes(fmt_raw, PRINTF_ESCAPES)
     remaining = args[1:]
     had_error = False
     if not remaining:
@@ -321,17 +223,9 @@ _INT_BINARY = {"-eq", "-ne", "-lt", "-le", "-gt", "-ge"}
 _PATH_UNARY_OPS = {"-e", "-f", "-d", "-r", "-w", "-x", "-s"}
 
 
-def _resolve(cwd: str, path: str) -> str:
-    """Resolve `path` against `cwd` (see commands/fs.py's `_resolve`: main.py never os.chdir()s
-    to the request cwd, so every relative path operand must resolve against ctx.cwd here too)."""
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    return os.path.normpath(os.path.join(cwd, path))
-
-
 def _eval_unary(op: str, operand: str, cwd: str) -> bool:
     if op in _PATH_UNARY_OPS:
-        operand = _resolve(cwd, operand)
+        operand = resolve_request_path(cwd, operand)
     if op == "-e":
         return os.path.exists(operand)
     if op == "-f":

@@ -232,6 +232,32 @@ export async function resolveRepoContext(
 	};
 }
 
+type RepoContextRefusal = WorktreeSyncRefusal<"not_a_git_repo" | "default_branch_unresolved" | "git_error">;
+type ActiveLaneRefusal = WorktreeSyncRefusal<"lane_not_found">;
+
+async function withRepoLifecycleLock<Result>(
+	deps: WorktreeSyncEngineDeps,
+	operation: (ctx: RepoContext) => Promise<Result>,
+): Promise<Result | RepoContextRefusal> {
+	const ctx = await resolveRepoContext(deps);
+	if ("code" in ctx) return ctx;
+	return withFileLock(ctx.paths.lifecycleLockFile, () => operation(ctx));
+}
+
+async function withActiveLaneLifecycleLock<Result>(
+	deps: WorktreeSyncEngineDeps,
+	laneKey: string,
+	operation: (ctx: RepoContext, lane: LaneRegistration) => Promise<Result>,
+): Promise<Result | RepoContextRefusal | ActiveLaneRefusal> {
+	return withRepoLifecycleLock<Result | ActiveLaneRefusal>(deps, async (ctx) => {
+		const lane = await readLane(ctx.paths, laneKey);
+		if (!lane || lane.status === "released") {
+			return { code: "lane_not_found", message: `no active lane '${laneKey}'` };
+		}
+		return operation(ctx, lane);
+	});
+}
+
 /**
  * Live git facts for one lane. `fresh` is THE freshness definition of the whole subsystem
  * (G3/G9): current main is an ancestor of the lane tip. Everything is re-derived; nothing is
@@ -465,10 +491,7 @@ export interface ReleaseLaneArgs {
 }
 
 export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLaneArgs): Promise<ReleaseLaneResult> {
-	const ctx = await resolveRepoContext(deps);
-	if ("code" in ctx) return ctx;
-
-	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
+	return withRepoLifecycleLock<ReleaseLaneResult>(deps, async (ctx) => {
 		const lane = await readLane(ctx.paths, args.laneKey);
 		if (!lane) return { code: "lane_not_found", message: `no registered lane '${args.laneKey}'` };
 		if (lane.status === "released") return { code: "released", laneKey: lane.laneKey };
@@ -950,13 +973,7 @@ export interface SyncLaneArgs {
  * and return a structured worklist; `continueSync` verifies and drives on.
  */
 export async function syncLane(deps: WorktreeSyncEngineDeps, args: SyncLaneArgs): Promise<SyncLaneResult> {
-	const ctx = await resolveRepoContext(deps);
-	if ("code" in ctx) return ctx;
-	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
-		const lane = await readLane(ctx.paths, args.laneKey);
-		if (!lane || lane.status === "released") {
-			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-		}
+	return withActiveLaneLifecycleLock<SyncLaneResult>(deps, args.laneKey, async (ctx, lane) => {
 		const facts = await deriveLaneFacts(deps, ctx, lane);
 		if (!facts.worktreePresent) {
 			return {
@@ -1014,13 +1031,7 @@ export interface ContinueSyncArgs {
  * next worklist; completion returns sync_clean.
  */
 export async function continueSync(deps: WorktreeSyncEngineDeps, args: ContinueSyncArgs): Promise<ContinueSyncResult> {
-	const ctx = await resolveRepoContext(deps);
-	if ("code" in ctx) return ctx;
-	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
-		const lane = await readLane(ctx.paths, args.laneKey);
-		if (!lane || lane.status === "released") {
-			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-		}
+	return withActiveLaneLifecycleLock<ContinueSyncResult>(deps, args.laneKey, async (ctx, lane) => {
 		if (!fileExists(deps, lane.worktreePath)) {
 			return {
 				code: "worktree_missing",
@@ -1071,13 +1082,7 @@ export interface AbortSyncArgs {
 /** Abort an in-progress sync rebase: the lane returns to its pre-sync tip -- still stale, and
  * honestly reported as such by status. */
 export async function abortSync(deps: WorktreeSyncEngineDeps, args: AbortSyncArgs): Promise<AbortSyncResult> {
-	const ctx = await resolveRepoContext(deps);
-	if ("code" in ctx) return ctx;
-	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
-		const lane = await readLane(ctx.paths, args.laneKey);
-		if (!lane || lane.status === "released") {
-			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-		}
+	return withActiveLaneLifecycleLock<AbortSyncResult>(deps, args.laneKey, async (ctx, lane) => {
 		if (!(await isRebaseActive(deps, lane.worktreePath))) {
 			return { code: "no_rebase_in_progress", message: `lane '${lane.laneKey}' has no rebase in progress` };
 		}
@@ -1106,13 +1111,7 @@ const DEFAULT_GATE_TIMEOUT_MS = 900_000;
  * broadcasts in the same critical section.
  */
 export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs): Promise<LandResult> {
-	const ctx = await resolveRepoContext(deps);
-	if ("code" in ctx) return ctx;
-	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
-		const lane = await readLane(ctx.paths, args.laneKey);
-		if (!lane || lane.status === "released") {
-			return { code: "lane_not_found", message: `no active lane '${args.laneKey}'` };
-		}
+	return withActiveLaneLifecycleLock<LandResult>(deps, args.laneKey, async (ctx, lane) => {
 		if (ownerConflicts(deps, lane)) {
 			return {
 				code: "lane_owner_conflict",

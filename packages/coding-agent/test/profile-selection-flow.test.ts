@@ -34,6 +34,14 @@ const prototype = ProfileMenuController.prototype as unknown as {
 	isProfileSettingsEnabled(this: unknown): boolean;
 	selectProfileModel(this: unknown, profileModel?: string): Promise<string | null | undefined>;
 	rollbackValidatedProfileMutation(this: unknown, snapshot: unknown, definition?: unknown): Promise<unknown>;
+	reportProfileMutationFailure(
+		this: unknown,
+		error: unknown,
+		snapshot: unknown,
+		runtimeWasApplied: boolean,
+		definition?: unknown,
+		restoreAdditional?: () => void,
+	): Promise<void>;
 	applyProfile(this: unknown, profileName: string): Promise<void>;
 	deleteProfileFromSource(this: unknown, profileName: string): Promise<void>;
 	refreshAfterProfileMutation(this: unknown, profileName: string): Promise<void>;
@@ -103,6 +111,7 @@ describe("profile selection persistence", () => {
 		return {
 			settingsManager,
 			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			reportProfileMutationFailure: prototype.reportProfileMutationFailure,
 			scopeForProfileSource: prototype.scopeForProfileSource,
 			session: {
 				sessionManager: { appendCustomEntry: vi.fn() },
@@ -457,6 +466,7 @@ describe("active profile library edits", () => {
 			settingsManager,
 			saveProfileResources: prototype.saveProfileResources,
 			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			reportProfileMutationFailure: prototype.reportProfileMutationFailure,
 			sessionManager: { getCwd: () => "/workspace" },
 			getProfileResourceKinds: vi.fn(async () => [
 				{
@@ -513,6 +523,7 @@ describe("active profile library edits", () => {
 			settingsManager,
 			saveProfileResources: prototype.saveProfileResources,
 			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			reportProfileMutationFailure: prototype.reportProfileMutationFailure,
 			sessionManager: { getCwd: () => "/workspace" },
 			getProfileResourceKinds: vi.fn(async () => [{ kind: "tools", label: "Tools", items: [] }]),
 			ui: {
@@ -569,6 +580,7 @@ describe("active profile library edits", () => {
 				settingsManager,
 				saveProfileResources: prototype.saveProfileResources,
 				rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+				reportProfileMutationFailure: prototype.reportProfileMutationFailure,
 				sessionManager: { getCwd: () => projectDir },
 				getProfileResourceKinds: vi.fn(async () => [{ kind: "tools", label: "Tools", items: [] }]),
 				ui: {
@@ -695,6 +707,7 @@ describe("profile model editing", () => {
 			settingsManager,
 			refreshAfterProfileMutation: prototype.refreshAfterProfileMutation,
 			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			reportProfileMutationFailure: prototype.reportProfileMutationFailure,
 			ui: {
 				handleReloadCommand,
 				footerDataProvider: { setExtensionStatus: vi.fn() },
@@ -743,6 +756,7 @@ describe("profile model editing", () => {
 			settingsManager,
 			refreshAfterProfileMutation: prototype.refreshAfterProfileMutation,
 			rollbackValidatedProfileMutation: prototype.rollbackValidatedProfileMutation,
+			reportProfileMutationFailure: prototype.reportProfileMutationFailure,
 			ui: {
 				handleReloadCommand,
 				footerDataProvider: { setExtensionStatus: vi.fn() },

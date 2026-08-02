@@ -4,9 +4,8 @@ import { isAbsolute, resolve } from "node:path";
 import {
 	Container,
 	type Focusable,
-	fuzzyFilter,
 	getKeybindings,
-	Input,
+	type Input,
 	Key,
 	matchesKey,
 	Spacer,
@@ -28,6 +27,13 @@ import {
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyText } from "./keybinding-hints.ts";
+import {
+	clearSelectorSearchOrCancel,
+	formatDirtySelectorFooter,
+	SearchableListSurface,
+	SelectorListState,
+	SelectorStatusFooter,
+} from "./selector-list.ts";
 
 export interface ProfileResourceItem {
 	/** Collision-safe value persisted into the profile filter. */
@@ -193,24 +199,21 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 	private agentDir: string;
 	private externalResourceRoots: string[];
 
-	private filteredItems: ResourceItem[] = [];
-	private selectedIndex = 0;
+	private readonly listState = new SelectorListState<ResourceItem>(() => this.updateList());
 	private searchInput: Input;
 	private kindHeaderText: Text;
 	private listContainer: Container;
 	private descriptionText: Text;
 	private footerText: Text;
+	private searchSurface: SearchableListSurface;
 	private isDirty = false;
 	private maxVisible = 8;
 
-	private _focused = false;
-
 	get focused(): boolean {
-		return this._focused;
+		return this.searchSurface.focused;
 	}
 	set focused(value: boolean) {
-		this._focused = value;
-		this.searchInput.focused = value;
+		this.searchSurface.focused = value;
 	}
 
 	private onSave: (resources: ResourceProfileSettings) => void;
@@ -276,27 +279,14 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		this.addChild(this.kindHeaderText);
 		this.addChild(new Spacer(1));
 
-		// Search input
-		this.searchInput = new Input();
-		this.addChild(this.searchInput);
-		this.addChild(new Spacer(1));
+		this.searchSurface = SearchableListSurface.mount(this);
+		this.searchInput = this.searchSurface.searchInput;
+		this.listContainer = this.searchSurface.listContainer;
 
-		// List container
-		this.listContainer = new Container();
-		this.addChild(this.listContainer);
-
-		// Description area
 		this.descriptionText = new Text("", 0, 0);
-		this.addChild(new Spacer(1));
-		this.addChild(this.descriptionText);
-
-		// Footer hint
-		this.addChild(new Spacer(1));
-		this.footerText = new Text(this.getFooterText(), 0, 0);
-		this.addChild(this.footerText);
-
-		this.addChild(new DynamicBorder());
-
+		const statusFooter = new SelectorStatusFooter(this.getFooterText(), this.descriptionText);
+		this.footerText = statusFooter.footerText;
+		this.addChild(statusFooter);
 		this.refresh();
 	}
 
@@ -391,18 +381,15 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			`${theme.fg("accent", "Ctrl+Q")}/${keyText("app.interrupt")} cancel`,
 			countText,
 		];
-		return this.isDirty
-			? theme.fg("dim", `  ${parts.join(" · ")} `) + theme.fg("warning", "(unsaved)")
-			: theme.fg("dim", `  ${parts.join(" · ")}`);
+		return formatDirtySelectorFooter(parts, this.isDirty);
 	}
 
 	private refresh(): void {
-		const query = this.searchInput.getValue();
-		const items = this.buildItems();
-		this.filteredItems = query
-			? fuzzyFilter(items, query, (item) => `${item.label} ${item.id} ${item.description ?? ""}`)
-			: items;
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.listState.refresh(
+			this.buildItems(),
+			this.searchInput.getValue(),
+			(item) => `${item.label} ${item.id} ${item.description ?? ""}`,
+		);
 		this.updateList();
 		this.footerText.setText(this.getFooterText());
 	}
@@ -422,21 +409,13 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			return;
 		}
 
-		if (this.filteredItems.length === 0) {
+		if (this.listState.items.length === 0) {
 			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching resources"), 0, 0));
 			this.descriptionText.setText(theme.fg("muted", "  No description available"));
 			return;
 		}
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
-
-		for (let i = startIndex; i < endIndex; i++) {
-			const item = this.filteredItems[i]!;
-			const isSelected = i === this.selectedIndex;
+		const range = this.listState.visitVisible(this.maxVisible, (item, _index, isSelected) => {
 			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
 			let resourceText = isSelected ? theme.fg("accent", item.label) : item.label;
 
@@ -457,17 +436,12 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 
 			const status = item.enabled ? theme.fg("success", " ✓") : theme.fg("dim", " ✗");
 			this.listContainer.addChild(new Text(`${prefix}${resourceText}${status}`, 0, 0));
-		}
+		});
 
-		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredItems.length) {
-			this.listContainer.addChild(
-				new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredItems.length})`), 0, 0),
-			);
-		}
+		this.listState.appendScrollInfo(this.listContainer, range);
 
 		// Update description area for current selection
-		const selectedItem = this.filteredItems[this.selectedIndex];
+		const selectedItem = this.listState.items[this.listState.selectedIndex];
 		if (selectedItem?.description) {
 			this.descriptionText.setText(theme.fg("muted", `  Description: ${selectedItem.description}`));
 		} else if (selectedItem && selectedItem.label !== selectedItem.id) {
@@ -479,25 +453,12 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-
-		// Navigation within list
-		if (kb.matches(data, "tui.select.up")) {
-			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
-			this.updateList();
-			return;
-		}
-		if (kb.matches(data, "tui.select.down")) {
-			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
-			this.updateList();
-			return;
-		}
+		if (this.listState.handleNavigation(data, "wrap", kb)) return;
 
 		// Switch kind with Tab (cycles forward)
 		if (kb.matches(data, "tui.input.tab")) {
 			this.currentKindIndex = (this.currentKindIndex + 1) % this.kinds.length;
-			this.selectedIndex = 0;
+			this.listState.selectedIndex = 0;
 			this.searchInput.setValue("");
 			this.kindHeaderText.setText(this.getKindHeaderText());
 			this.refresh();
@@ -524,7 +485,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 
 		// Edit highlighted resource
 		if (data === "e" && this.searchInput.getValue() === "") {
-			const item = this.filteredItems[this.selectedIndex];
+			const item = this.listState.items[this.listState.selectedIndex];
 			if (item && !item.isMissing && item.path) {
 				const kind = this.getCurrentKind().kind;
 				if (this.onEdit) {
@@ -544,7 +505,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 
 		// Toggle on space/enter
 		if (kb.matches(data, "tui.select.confirm")) {
-			const item = this.filteredItems[this.selectedIndex];
+			const item = this.listState.items[this.listState.selectedIndex];
 			if (item) {
 				const enabledSet = this.getCurrentEnabledSet();
 				if (enabledSet.has(item.id)) {
@@ -566,12 +527,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 
 		// Ctrl+C - clear search or cancel if empty
 		if (matchesKey(data, Key.ctrl("c"))) {
-			if (this.searchInput.getValue()) {
-				this.searchInput.setValue("");
-				this.refresh();
-			} else {
-				this.onCancel();
-			}
+			clearSelectorSearchOrCancel(this.searchInput, () => this.refresh(), this.onCancel);
 			return;
 		}
 
@@ -590,7 +546,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		// query is active, otherwise the whole kind including missing entries).
 		if (kb.matches(data, "app.profiles.enableAll")) {
 			const enabledSet = this.getCurrentEnabledSet();
-			for (const item of this.filteredItems) {
+			for (const item of this.listState.items) {
 				enabledSet.add(item.id);
 			}
 			this.isDirty = true;
@@ -600,7 +556,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		}
 		if (kb.matches(data, "app.profiles.clearAll")) {
 			const enabledSet = this.getCurrentEnabledSet();
-			for (const item of this.filteredItems) {
+			for (const item of this.listState.items) {
 				enabledSet.delete(item.id);
 			}
 			this.isDirty = true;

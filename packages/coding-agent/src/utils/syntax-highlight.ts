@@ -79,17 +79,18 @@ function isSpanOpenTagStart(html: string, index: number): boolean {
 }
 
 export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}): string {
-	let output = "";
-	let textBuffer = "";
+	const outputParts: string[] = [];
+	let textParts: string[] = [];
+	let textStart = 0;
 	const scopes: Array<string | undefined> = [];
 
-	const flushText = () => {
-		if (!textBuffer) {
-			return;
-		}
+	const flushText = (end: number) => {
+		if (textStart < end) textParts.push(html.slice(textStart, end));
+		if (textParts.length === 0) return;
+		const text = textParts.length === 1 ? textParts[0] : textParts.join("");
 		const formatter = getActiveFormatter(scopes, theme);
-		output += formatter ? formatter(textBuffer) : textBuffer;
-		textBuffer = "";
+		outputParts.push(formatter ? formatter(text) : text);
+		textParts = [];
 	};
 
 	let index = 0;
@@ -97,39 +98,42 @@ export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}):
 		if (isSpanOpenTagStart(html, index)) {
 			const tagEndIndex = html.indexOf(">", index + 5);
 			if (tagEndIndex !== -1) {
-				flushText();
+				flushText(index);
 				const tag = html.slice(index, tagEndIndex + 1);
 				const scope = getScopeFromSpanTag(tag);
 				scopes.push(scope);
 				index = tagEndIndex + 1;
+				textStart = index;
 				continue;
 			}
 		}
 
 		if (html.startsWith(SPAN_CLOSE, index)) {
-			flushText();
+			flushText(index);
 			if (scopes.length > 0) {
 				scopes.pop();
 			}
 			index += SPAN_CLOSE.length;
+			textStart = index;
 			continue;
 		}
 
 		if (html[index] === "&") {
 			const decoded = decodeHtmlEntityAt(html, index);
 			if (decoded) {
-				textBuffer += decoded.text;
+				if (textStart < index) textParts.push(html.slice(textStart, index));
+				textParts.push(decoded.text);
 				index += decoded.length;
+				textStart = index;
 				continue;
 			}
 		}
 
-		textBuffer += html[index];
 		index++;
 	}
 
-	flushText();
-	return output;
+	flushText(html.length);
+	return outputParts.join("");
 }
 
 let allLanguagesRegistered = false;

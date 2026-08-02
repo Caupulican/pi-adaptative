@@ -20,11 +20,11 @@ import {
 	type SimpleStreamOptions,
 } from "@caupulican/pi-ai";
 import { registerOAuthProvider, resetOAuthProviders } from "@caupulican/pi-ai/oauth";
+import { formatValidationPath } from "@caupulican/pi-ai/validation-path";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
-import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.ts";
 import { warnDeprecation } from "../utils/deprecation.ts";
 import { stripJsonComments } from "../utils/json.ts";
@@ -112,6 +112,13 @@ const ModelDefaultThinkingLevelSchema = Type.Union([
 	Type.Literal("ultra"),
 ]);
 
+const SessionAffinityCompatFields = {
+	sessionAffinityFormat: Type.Optional(
+		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
+	),
+	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
+};
+
 const OpenAICompletionsCompatSchema = Type.Object({
 	supportsStore: Type.Optional(Type.Boolean()),
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
@@ -138,18 +145,10 @@ const OpenAICompletionsCompatSchema = Type.Object({
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
 	supportsStrictMode: Type.Optional(Type.Boolean()),
 	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
-	sessionAffinityFormat: Type.Optional(
-		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
-	),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
+	...SessionAffinityCompatFields,
 });
 
-const OpenAIResponsesCompatSchema = Type.Object({
-	sessionAffinityFormat: Type.Optional(
-		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
-	),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-});
+const OpenAIResponsesCompatSchema = Type.Object(SessionAffinityCompatFields);
 
 const AnthropicMessagesCompatSchema = Type.Object({
 	supportsEagerToolInputStreaming: Type.Optional(Type.Boolean()),
@@ -169,52 +168,38 @@ const ProviderCompatSchema = Type.Union([
 // Schema for custom model definition
 const DEFAULT_MODEL_CONTEXT_WINDOW = 128000;
 const DEFAULT_MODEL_MAX_TOKENS = 16384;
+const ModelCostSchema = Type.Object({
+	input: Type.Number(),
+	output: Type.Number(),
+	cacheRead: Type.Number(),
+	cacheWrite: Type.Number(),
+});
+const SharedModelConfigurationFields = {
+	name: Type.Optional(Type.String({ minLength: 1 })),
+	reasoning: Type.Optional(Type.Boolean()),
+	defaultThinkingLevel: Type.Optional(ModelDefaultThinkingLevelSchema),
+	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
+	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
+	contextWindow: Type.Optional(Type.Number()),
+	textToolCallProtocol: Type.Optional(Type.Boolean()),
+	maxTokens: Type.Optional(Type.Number()),
+	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+	compat: Type.Optional(ProviderCompatSchema),
+};
 
 // Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
-	name: Type.Optional(Type.String({ minLength: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
-	reasoning: Type.Optional(Type.Boolean()),
-	defaultThinkingLevel: Type.Optional(ModelDefaultThinkingLevelSchema),
-	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
-	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
-	cost: Type.Optional(
-		Type.Object({
-			input: Type.Number(),
-			output: Type.Number(),
-			cacheRead: Type.Number(),
-			cacheWrite: Type.Number(),
-		}),
-	),
-	contextWindow: Type.Optional(Type.Number()),
-	textToolCallProtocol: Type.Optional(Type.Boolean()),
-	maxTokens: Type.Optional(Type.Number()),
-	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
-	compat: Type.Optional(ProviderCompatSchema),
+	...SharedModelConfigurationFields,
+	cost: Type.Optional(ModelCostSchema),
 });
 
 // Schema for per-model overrides (all fields optional, merged with built-in model)
 const ModelOverrideSchema = Type.Object({
-	name: Type.Optional(Type.String({ minLength: 1 })),
-	reasoning: Type.Optional(Type.Boolean()),
-	defaultThinkingLevel: Type.Optional(ModelDefaultThinkingLevelSchema),
-	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
-	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
-	cost: Type.Optional(
-		Type.Object({
-			input: Type.Optional(Type.Number()),
-			output: Type.Optional(Type.Number()),
-			cacheRead: Type.Optional(Type.Number()),
-			cacheWrite: Type.Optional(Type.Number()),
-		}),
-	),
-	contextWindow: Type.Optional(Type.Number()),
-	textToolCallProtocol: Type.Optional(Type.Boolean()),
-	maxTokens: Type.Optional(Type.Number()),
-	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
-	compat: Type.Optional(ProviderCompatSchema),
+	...SharedModelConfigurationFields,
+	cost: Type.Optional(Type.Partial(ModelCostSchema)),
 });
 
 type ModelOverride = Static<typeof ModelOverrideSchema>;
@@ -238,19 +223,6 @@ const ModelsConfigSchema = Type.Object({
 const validateModelsConfig = Compile(ModelsConfigSchema);
 
 type ModelsConfig = Static<typeof ModelsConfigSchema>;
-
-function formatValidationPath(error: TLocalizedValidationError): string {
-	if (error.keyword === "required") {
-		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
-		const requiredProperty = requiredProperties?.[0];
-		if (requiredProperty) {
-			const basePath = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-			return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
-		}
-	}
-	const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-	return path || "root";
-}
 
 /** Provider override config (baseUrl, compat) without request auth/headers */
 interface ProviderOverride {

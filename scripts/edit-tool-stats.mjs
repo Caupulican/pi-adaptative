@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 
-import { createReadStream } from "node:fs";
-import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
+import {
+	assistantRecordIdentity,
+	assistantToolCalls,
+	DEFAULT_SESSIONS_DIR,
+	formatInt,
+	formatPartPercent as formatPercent,
+	groupBy,
+	runMain,
+	runToolStatsCli,
+	scanSessionJsonl,
+	sessionScanHeaderLines,
+} from "./session-stats-common.mjs";
 
-const DEFAULT_SESSIONS_DIR = path.join(homedir(), ".pi/agent/sessions");
 const DEFAULT_ACTIVE_EDIT_EXTENSION_PATH = path.join(homedir(), ".pi/agent/extensions/edit.ts");
 const DEFAULT_TOP = 20;
 
@@ -79,52 +87,8 @@ Options:
 `);
 }
 
-function parseSessionFileTimestamp(sessionFile) {
-	const base = path.basename(sessionFile);
-	const rawTimestamp = base.split("_")[0];
-	if (!rawTimestamp) return null;
-	const isoTimestamp = rawTimestamp.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z");
-	const ms = Date.parse(isoTimestamp);
-	if (!Number.isFinite(ms)) return null;
-	return ms;
-}
-
 function formatIso(ms) {
 	return new Date(ms).toISOString();
-}
-
-async function resolveAutoSinceMs(options) {
-	if (options.allSessions) return null;
-	if (options.since) {
-		const ms = Date.parse(options.since);
-		if (!Number.isFinite(ms)) {
-			throw new Error(`Invalid --since value: ${options.since}`);
-		}
-		return { ms, source: `--since ${options.since}` };
-	}
-	if (!options.autoSincePath) return null;
-	try {
-		const stats = await fs.stat(options.autoSincePath);
-		const birthtimeMs = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? stats.birthtimeMs : stats.mtimeMs;
-		if (!Number.isFinite(birthtimeMs) || birthtimeMs <= 0) return null;
-		return { ms: birthtimeMs, source: `birth time of ${options.autoSincePath}` };
-	} catch {
-		return null;
-	}
-}
-
-async function* walkJsonlFiles(dir) {
-	const entries = await fs.readdir(dir, { withFileTypes: true });
-	entries.sort((a, b) => a.name.localeCompare(b.name));
-
-	for (const entry of entries) {
-		const fullPath = path.join(dir, entry.name);
-		if (entry.isDirectory()) {
-			yield* walkJsonlFiles(fullPath);
-		} else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-			yield fullPath;
-		}
-	}
 }
 
 function getPathExtension(filePath) {
@@ -206,15 +170,6 @@ function quantile(numbers, q) {
 	if (lower === upper) return finite[lower];
 	const weight = position - lower;
 	return finite[lower] * (1 - weight) + finite[upper] * weight;
-}
-
-function formatInt(value) {
-	return new Intl.NumberFormat("en-US").format(value);
-}
-
-function formatPercent(part, total) {
-	if (total === 0) return "n/a";
-	return `${((part / total) * 100).toFixed(1)}%`;
 }
 
 function formatRatio(value) {
@@ -350,14 +305,7 @@ function collectInflations(records) {
 }
 
 function summarizeGroups(records, keyFn) {
-	const groups = new Map();
-	for (const record of records) {
-		const key = keyFn(record);
-		if (!groups.has(key)) groups.set(key, []);
-		groups.get(key).push(record);
-	}
-
-	return [...groups.entries()]
+	return [...groupBy(records, keyFn).entries()]
 		.map(([key, group]) => {
 			const resolved = group.filter((record) => record.success !== null);
 			const success = resolved.filter((record) => record.success).length;
@@ -582,11 +530,7 @@ function printGroupTable(title, groups, formatter) {
 
 function printHumanReport(summary) {
 	const { scan, counts, modeStats, multiEditLengthBuckets, argStyles, providerStats, extensionStats, inflation, sameFileClusters, failureKinds, worstExamples, filters } = summary;
-	console.log(`Scanned ${formatInt(scan.sessionFilesIncluded)} session files in ${scan.sessionsDir}`);
-	if (scan.since) {
-		console.log(`Session filter: files created at or after ${scan.since.iso} (${scan.since.source})`);
-		console.log(`Skipped older session files: ${formatInt(scan.sessionFilesSkippedOlderThanSince)} of ${formatInt(scan.sessionFilesScanned)}`);
-	}
+	for (const line of sessionScanHeaderLines(scan)) console.log(line);
 	console.log(`Found ${formatInt(counts.totalEditCalls)} edit tool calls in ${formatInt(counts.assistantMessagesWithEditCalls)} assistant messages`);
 	if (filters.model || filters.extension || filters.failedOnly) {
 		const filterParts = [];
@@ -697,75 +641,41 @@ function printHumanReport(summary) {
 
 async function scanSessions(sessionsDir, since) {
 	const records = [];
-	const meta = {
+	let sessionFilesWithEditCalls = 0;
+	let unmatchedToolResults = 0;
+	const { meta } = await scanSessionJsonl({
 		sessionsDir,
-		sessionFilesScanned: 0,
-		sessionFilesIncluded: 0,
-		sessionFilesSkippedOlderThanSince: 0,
-		sessionFilesWithEditCalls: 0,
-		since,
-		malformedLines: 0,
-		unmatchedToolResults: 0,
-	};
-
-	for await (const sessionFile of walkJsonlFiles(sessionsDir)) {
-		meta.sessionFilesScanned++;
-		const sessionTimestampMs = parseSessionFileTimestamp(sessionFile);
-		if (since && sessionTimestampMs !== null && sessionTimestampMs < since.ms) {
-			meta.sessionFilesSkippedOlderThanSince++;
-			continue;
-		}
-		meta.sessionFilesIncluded++;
-		const pending = new Map();
-		let fileHadEditCall = false;
-		const input = createReadStream(sessionFile, { encoding: "utf8" });
-		const rl = createInterface({ input, crlfDelay: Infinity });
-
-		for await (const line of rl) {
-			if (!line.trim()) continue;
-			let entry;
-			try {
-				entry = JSON.parse(line);
-			} catch {
-				meta.malformedLines++;
-				continue;
-			}
-
-			if (entry?.type !== "message" || !entry.message) continue;
+		sinceMs: since?.ms ?? null,
+		createSession: () => ({ pending: new Map(), fileHadEditCall: false }),
+		onEntry: (entry, session, sessionFile) => {
+			if (entry?.type !== "message" || !entry.message) return;
 			const message = entry.message;
 
-			if (message.role === "assistant" && Array.isArray(message.content)) {
-				for (const block of message.content) {
-					if (block?.type !== "toolCall" || block.name !== "edit") continue;
-					fileHadEditCall = true;
-					const analysis = analyzeToolArguments(block.arguments);
-					const record = {
+			for (const block of assistantToolCalls(message)) {
+				if (block?.type !== "toolCall" || block.name !== "edit") continue;
+				session.fileHadEditCall = true;
+				const analysis = analyzeToolArguments(block.arguments);
+				const record = {
 						sessionFile,
-						assistantEntryId: entry.id,
 						toolCallId: typeof block.id === "string" ? block.id : "",
-						timestamp: entry.timestamp,
-						api: typeof message.api === "string" ? message.api : null,
-						provider: typeof message.provider === "string" ? message.provider : "[unknown]",
-						model: typeof message.model === "string" ? message.model : "[unknown]",
-						providerModel: `${typeof message.provider === "string" ? message.provider : "[unknown]"}/${typeof message.model === "string" ? message.model : "[unknown]"}`,
+						...assistantRecordIdentity(entry, message),
 						success: null,
 						errorKind: null,
 						errorText: "",
 						resultSummary: "",
 						matchedResult: false,
 						...analysis,
-					};
-					records.push(record);
-					if (record.toolCallId) pending.set(record.toolCallId, record);
-				}
+				};
+				records.push(record);
+				if (record.toolCallId) session.pending.set(record.toolCallId, record);
 			}
 
 			if (message.role === "toolResult" && message.toolName === "edit") {
 				const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
-				const record = pending.get(toolCallId);
+				const record = session.pending.get(toolCallId);
 				if (!record) {
-					meta.unmatchedToolResults++;
-					continue;
+					unmatchedToolResults++;
+					return;
 				}
 				const text = extractTextContent(message.content);
 				record.matchedResult = true;
@@ -773,20 +683,20 @@ async function scanSessions(sessionsDir, since) {
 				record.resultSummary = text;
 				record.errorText = message.isError === true ? text : "";
 				record.errorKind = classifyErrorKind(text, message.isError === true, true);
-				pending.delete(toolCallId);
+				session.pending.delete(toolCallId);
 			}
-		}
+		},
+		onSessionEnd: (session) => {
+			for (const record of session.pending.values()) {
+				record.matchedResult = false;
+				record.success = null;
+				record.errorKind = classifyErrorKind("", false, false);
+			}
+			if (session.fileHadEditCall) sessionFilesWithEditCalls++;
+		},
+	});
 
-		for (const record of pending.values()) {
-			record.matchedResult = false;
-			record.success = null;
-			record.errorKind = classifyErrorKind("", false, false);
-		}
-
-		if (fileHadEditCall) meta.sessionFilesWithEditCalls++;
-	}
-
-	return { records, meta };
+	return { records, meta: { ...meta, sessionFilesWithEditCalls, since, unmatchedToolResults } };
 }
 
 function applyFilters(records, options) {
@@ -804,23 +714,9 @@ function applyFilters(records, options) {
 	});
 }
 
-async function main() {
-	const options = parseArgs(process.argv.slice(2));
-	if (options.help) {
-		printHelp();
-		return;
-	}
-
-	const sessionsDir = path.resolve(options.sessionsDir);
-	await fs.access(sessionsDir);
-	const since = await resolveAutoSinceMs(options);
-
-	const { records, meta } = await scanSessions(sessionsDir, since);
-	const filteredRecords = applyFilters(records, options);
-	const summary = buildSummary(filteredRecords, meta, options);
-
+function printRun({ options, records, summary }) {
 	if (options.json) {
-		const output = options.includeRecords ? { summary, records: filteredRecords } : { summary };
+		const output = options.includeRecords ? { summary, records } : { summary };
 		console.log(JSON.stringify(output, null, 2));
 		return;
 	}
@@ -828,7 +724,4 @@ async function main() {
 	printHumanReport(summary);
 }
 
-main().catch((error) => {
-	console.error(error instanceof Error ? error.message : String(error));
-	process.exit(1);
-});
+runMain(() => runToolStatsCli(process.argv.slice(2), { parseArgs, printHelp, scanSessions, applyFilters, buildSummary }, printRun));

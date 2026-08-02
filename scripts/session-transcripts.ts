@@ -9,13 +9,14 @@
  *   cwd            Working directory to extract sessions for (defaults to current)
  */
 
-import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync } from "fs";
 import { spawn } from "child_process";
 import { createInterface } from "node:readline";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { parseSessionEntries, type SessionMessageEntry } from "../packages/coding-agent/src/core/session-manager.ts";
 import chalk from "chalk";
+import { writeTranscriptShards } from "./lib/transcript-shards.ts";
 
 const MAX_CHARS_PER_FILE = 100_000; // ~20k tokens, leaving room for prompt + analysis + output
 
@@ -56,6 +57,7 @@ function parseSession(filePath: string): string[] {
 }
 
 const MAX_DISPLAY_WIDTH = 100;
+const MAX_DISPLAY_BUFFER_CHARS = MAX_DISPLAY_WIDTH * 4;
 
 function truncateLine(text: string, maxWidth: number): string {
 	const singleLine = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
@@ -82,7 +84,23 @@ function runSubagent(prompt: string, cwd: string): Promise<{ success: boolean }>
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 
-		let textBuffer = "";
+		const textParts: string[] = [];
+		let textChars = 0;
+		const appendText = (delta: string) => {
+			const remaining = MAX_DISPLAY_BUFFER_CHARS - textChars;
+			if (remaining <= 0) return;
+			const part = delta.length <= remaining ? delta : delta.slice(0, remaining);
+			textParts.push(part);
+			textChars += part.length;
+		};
+		const printText = () => {
+			if (textChars > 0) {
+				const text = textParts.join("");
+				if (text.trim()) console.log(chalk.dim("  " + truncateLine(text, MAX_DISPLAY_WIDTH)));
+			}
+			textParts.length = 0;
+			textChars = 0;
+		};
 
 		const rl = createInterface({ input: child.stdout });
 
@@ -93,14 +111,10 @@ function runSubagent(prompt: string, cwd: string): Promise<{ success: boolean }>
 				if (event.type === "message_update" && event.assistantMessageEvent) {
 					const msgEvent = event.assistantMessageEvent;
 					if (msgEvent.type === "text_delta" && msgEvent.delta) {
-						textBuffer += msgEvent.delta;
+						appendText(msgEvent.delta);
 					}
 				} else if (event.type === "tool_execution_start" && event.toolName) {
-					// Print accumulated text before tool starts
-					if (textBuffer.trim()) {
-						console.log(chalk.dim("  " + truncateLine(textBuffer, MAX_DISPLAY_WIDTH)));
-						textBuffer = "";
-					}
+					printText();
 					// Format tool call with args
 					let argsStr = "";
 					if (event.args) {
@@ -114,11 +128,7 @@ function runSubagent(prompt: string, cwd: string): Promise<{ success: boolean }>
 					}
 					console.log(chalk.cyan(`  [${event.toolName}] ${argsStr}`));
 				} else if (event.type === "turn_end") {
-					// Print any remaining text at turn end
-					if (textBuffer.trim()) {
-						console.log(chalk.dim("  " + truncateLine(textBuffer, MAX_DISPLAY_WIDTH)));
-					}
-					textBuffer = "";
+					printText();
 				}
 			} catch {
 				// Ignore malformed JSON
@@ -178,67 +188,25 @@ async function main() {
 
 	console.log(`Found ${sessionFiles.length} session files in ${sessionDir}`);
 
-	// Collect all transcripts
-	const allTranscripts: string[] = [];
-	for (const file of sessionFiles) {
-		const filePath = join(sessionDir, file);
-		const messages = parseSession(filePath);
-		if (messages.length > 0) {
-			allTranscripts.push(`=== SESSION: ${file} ===\n${messages.join("\n---\n")}\n=== END SESSION ===`);
+	function* transcripts(): Generator<string> {
+		for (const file of sessionFiles) {
+			const messages = parseSession(join(sessionDir, file));
+			if (messages.length > 0) yield `=== SESSION: ${file} ===\n${messages.join("\n---\n")}\n=== END SESSION ===`;
 		}
 	}
-
-	if (allTranscripts.length === 0) {
+	const shards = writeTranscriptShards(transcripts(), {
+		outputDir,
+		maxChars: MAX_CHARS_PER_FILE,
+		onWrite: ({ name, chars, oversized }) => {
+			const line = `Wrote ${name} (${chars} chars)${oversized ? " - oversized" : ""}`;
+			console.log(oversized ? chalk.yellow(line) : line);
+		},
+	});
+	if (shards.transcripts === 0) {
 		console.error("No transcripts found");
 		process.exit(1);
 	}
-
-	// Split into files respecting MAX_CHARS_PER_FILE
-	const outputFiles: string[] = [];
-	let currentContent = "";
-	let fileIndex = 0;
-
-	for (const transcript of allTranscripts) {
-		// If adding this transcript would exceed limit, write current and start new
-		if (currentContent.length > 0 && currentContent.length + transcript.length + 2 > MAX_CHARS_PER_FILE) {
-			const filename = `session-transcripts-${String(fileIndex).padStart(3, "0")}.txt`;
-			writeFileSync(join(outputDir, filename), currentContent);
-			outputFiles.push(filename);
-			console.log(`Wrote ${filename} (${currentContent.length} chars)`);
-			currentContent = "";
-			fileIndex++;
-		}
-
-		// If this single transcript exceeds limit, write it to its own file
-		if (transcript.length > MAX_CHARS_PER_FILE) {
-			// Write any pending content first
-			if (currentContent.length > 0) {
-				const filename = `session-transcripts-${String(fileIndex).padStart(3, "0")}.txt`;
-				writeFileSync(join(outputDir, filename), currentContent);
-				outputFiles.push(filename);
-				console.log(`Wrote ${filename} (${currentContent.length} chars)`);
-				currentContent = "";
-				fileIndex++;
-			}
-			// Write the large transcript to its own file
-			const filename = `session-transcripts-${String(fileIndex).padStart(3, "0")}.txt`;
-			writeFileSync(join(outputDir, filename), transcript);
-			outputFiles.push(filename);
-			console.log(chalk.yellow(`Wrote ${filename} (${transcript.length} chars) - oversized`));
-			fileIndex++;
-			continue;
-		}
-
-		currentContent += (currentContent ? "\n\n" : "") + transcript;
-	}
-
-	// Write remaining content
-	if (currentContent.length > 0) {
-		const filename = `session-transcripts-${String(fileIndex).padStart(3, "0")}.txt`;
-		writeFileSync(join(outputDir, filename), currentContent);
-		outputFiles.push(filename);
-		console.log(`Wrote ${filename} (${currentContent.length} chars)`);
-	}
+	const outputFiles = shards.files.map((file) => file.name);
 
 	console.log(`\nCreated ${outputFiles.length} transcript file(s) in ${outputDir}`);
 
@@ -298,18 +266,14 @@ Rules:
 - Do not include any other text outside this format`;
 
 	console.log("\nSpawning subagents for analysis...");
-	for (const file of outputFiles) {
-		const summaryFile = file.replace(".txt", ".summary.txt");
-		const filePath = join(outputDir, file);
+	for (const shard of shards.files) {
+		const summaryFile = shard.name.replace(".txt", ".summary.txt");
+		const filePath = join(outputDir, shard.name);
 		const summaryPath = join(outputDir, summaryFile);
 
-		const fileContent = readFileSync(filePath, "utf8");
-		const fileSize = fileContent.length;
+		console.log(`Analyzing ${shard.name} (${shard.chars} chars)...`);
 
-		console.log(`Analyzing ${file} (${fileSize} chars)...`);
-
-		const lineCount = fileContent.split("\n").length;
-		const fullPrompt = `${analysisPrompt}\n\nThe file ${filePath} has ${lineCount} lines. Read it in full using chunked reads, then write your analysis to ${summaryPath}`;
+		const fullPrompt = `${analysisPrompt}\n\nThe file ${filePath} has ${shard.lines} lines. Read it in full using chunked reads, then write your analysis to ${summaryPath}`;
 
 		const result = await runSubagent(fullPrompt, outputDir);
 
@@ -318,7 +282,7 @@ Rules:
 		} else if (result.success) {
 			console.error(chalk.yellow(`  Agent finished but did not write ${summaryFile}`));
 		} else {
-			console.error(chalk.red(`  Failed to analyze ${file}`));
+			console.error(chalk.red(`  Failed to analyze ${shard.name}`));
 		}
 	}
 

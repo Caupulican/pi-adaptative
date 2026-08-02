@@ -6,7 +6,7 @@ import type {
 	ContentChunk,
 	FunctionTool,
 } from "@mistralai/mistralai/models/components";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { calculateCost } from "../models.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -26,7 +26,14 @@ import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
-import { buildBaseOptions } from "./simple-options.ts";
+import {
+	applyProviderPayloadHook,
+	buildClampedSimpleOptions,
+	completeAssistantStream,
+	createAssistantMessage,
+	finishTextOrThinkingBlock,
+	terminateAssistantStreamWithError,
+} from "./provider-runtime.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
@@ -72,34 +79,21 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
 			const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
 
-			let payload = buildChatPayload(model, context, transformedMessages, toolNameMap, options);
-			const nextPayload = await options?.onPayload?.(payload, model);
-			if (nextPayload !== undefined) {
-				payload = nextPayload as ChatCompletionStreamRequest;
-			}
+			const payload = await applyProviderPayloadHook(
+				buildChatPayload(model, context, transformedMessages, toolNameMap, options),
+				model,
+				options?.onPayload,
+			);
 			const mistralStream = await mistral.chat.stream(payload, buildRequestOptions(model, options));
 			stream.push({ type: "start", partial: output });
 			await consumeChatStream(model, output, stream, mistralStream, toolNameMap);
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
-			for (const block of output.content) {
-				// partialArgs is only a streaming scratch buffer; never persist it.
-				delete (block as { partialArgs?: string }).partialArgs;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatMistralError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
+				formatError: formatMistralError,
+				scratchFields: ["partialArgs"],
+			});
 		}
 	})();
 
@@ -114,13 +108,7 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
-
-	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	const { base, clampedReasoning } = buildClampedSimpleOptions(model, options);
 	const reasoning = clampedReasoning === "off" ? undefined : clampedReasoning;
 	const shouldUseReasoning = model.reasoning && reasoning !== undefined;
 
@@ -133,23 +121,7 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 };
 
 function createOutput(model: Model<"mistral-conversations">): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
+	return createAssistantMessage(model);
 }
 
 function createMistralToolCallIdNormalizer(): (id: string) => string {
@@ -282,24 +254,22 @@ async function consumeChatStream(
 	const toolBlocksByKey = new Map<string, number>();
 
 	const finishCurrentBlock = (block?: typeof currentBlock) => {
-		if (!block) return;
-		if (block.type === "text") {
-			stream.push({
-				type: "text_end",
-				contentIndex: blockIndex(),
-				content: block.text,
-				partial: output,
-			});
-			return;
+		finishTextOrThinkingBlock(stream, output, block, blockIndex());
+	};
+	const appendTextDelta = (textDelta: string) => {
+		if (!currentBlock || currentBlock.type !== "text") {
+			finishCurrentBlock(currentBlock);
+			currentBlock = { type: "text", text: "" };
+			output.content.push(currentBlock);
+			stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
 		}
-		if (block.type === "thinking") {
-			stream.push({
-				type: "thinking_end",
-				contentIndex: blockIndex(),
-				content: block.thinking,
-				partial: output,
-			});
-		}
+		currentBlock.text += textDelta;
+		stream.push({
+			type: "text_delta",
+			contentIndex: blockIndex(),
+			delta: textDelta,
+			partial: output,
+		});
 	};
 
 	for await (const event of mistralStream) {
@@ -329,20 +299,7 @@ async function consumeChatStream(
 			const contentItems = typeof delta.content === "string" ? [delta.content] : delta.content;
 			for (const item of contentItems) {
 				if (typeof item === "string") {
-					const textDelta = sanitizeSurrogates(item);
-					if (!currentBlock || currentBlock.type !== "text") {
-						finishCurrentBlock(currentBlock);
-						currentBlock = { type: "text", text: "" };
-						output.content.push(currentBlock);
-						stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-					}
-					currentBlock.text += textDelta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: textDelta,
-						partial: output,
-					});
+					appendTextDelta(sanitizeSurrogates(item));
 					continue;
 				}
 
@@ -370,20 +327,7 @@ async function consumeChatStream(
 				}
 
 				if (item.type === "text") {
-					const textDelta = sanitizeSurrogates(item.text);
-					if (!currentBlock || currentBlock.type !== "text") {
-						finishCurrentBlock(currentBlock);
-						currentBlock = { type: "text", text: "" };
-						output.content.push(currentBlock);
-						stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-					}
-					currentBlock.text += textDelta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: textDelta,
-						partial: output,
-					});
+					appendTextDelta(sanitizeSurrogates(item.text));
 				}
 			}
 		}

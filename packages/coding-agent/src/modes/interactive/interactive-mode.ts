@@ -5,9 +5,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core";
+import { type AgentMessage, getToolCallRepairInfo, type ToolCallRepairInfo } from "@caupulican/pi-agent-core";
 import type { SessionContext, SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, ImageContent, Message, Model, ToolCall } from "@caupulican/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
 import {
 	type Component,
@@ -45,6 +45,7 @@ import type {
 	SelfModificationSettings,
 	SettingsScope,
 } from "../../core/settings-manager.ts";
+import { collectSelfModificationSourceCandidates } from "../../core/system-prompt-builder.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -76,6 +77,7 @@ import {
 	shouldReuseToolPanelInPlace,
 	ToolPanelRegistry,
 } from "./components/tool-panel-registry.ts";
+import { TranscriptPager } from "./components/transcript-pager.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
@@ -115,11 +117,6 @@ const STREAMING_UI_UPDATE_INTERVAL_MS = 80;
 type UserInputSubmission = {
 	text: string;
 	images?: ImageContent[];
-};
-
-type PendingClipboardImage = {
-	label: string;
-	content: ImageContent;
 };
 
 type CompactionQueuedMessage = {
@@ -202,8 +199,10 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (submission: UserInputSubmission) => void;
 	private pendingUserInputs: UserInputSubmission[] = [];
-	private pendingClipboardImages: PendingClipboardImage[] = [];
-	private clipboardImageCounter = 0;
+	private readonly clipboardQueue: clipboardInput.ClipboardQueueState = {
+		pendingClipboardImages: [],
+		clipboardImageCounter: 0,
+	};
 	private clipboardImageStore: SessionImageStore | undefined;
 	private loadingAnimation: Loader | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
@@ -349,15 +348,18 @@ export class InteractiveMode {
 				requestRender: () => this.ui.requestRender(),
 			},
 		});
+		const sharedControllerUi = {
+			showSelector: (create: Parameters<typeof this.showSelector>[0]) => this.showSelector(create),
+			showStatus: (message: string) => this.showStatus(message),
+			showError: (message: string) => this.showError(message),
+			requestRender: () => this.ui.requestRender(),
+			tui: this.ui,
+		};
 		this.profileMenu = new ProfileMenuController({
 			getSession: () => this.runtimeHost.session,
 			ui: {
-				showSelector: (create) => this.showSelector(create),
-				showStatus: (message) => this.showStatus(message),
-				showError: (message) => this.showError(message),
+				...sharedControllerUi,
 				showWarning: (message) => this.showWarning(message),
-				requestRender: () => this.ui.requestRender(),
-				tui: this.ui,
 				footerDataProvider: this.footerDataProvider,
 				invalidateFooter: () => this.footer.invalidate(),
 				updateEditorBorderColor: () => this.updateEditorBorderColor(),
@@ -373,11 +375,7 @@ export class InteractiveMode {
 		this.authDialogs = new AuthDialogsController({
 			getSession: () => this.runtimeHost.session,
 			ui: {
-				showSelector: (create) => this.showSelector(create),
-				showStatus: (message) => this.showStatus(message),
-				showError: (message) => this.showError(message),
-				requestRender: () => this.ui.requestRender(),
-				tui: this.ui,
+				...sharedControllerUi,
 				overlayHost: this.overlayHost,
 				getEditor: () => this.editor,
 				updateAvailableProviderCount: () => this.updateAvailableProviderCount(),
@@ -957,6 +955,10 @@ export class InteractiveMode {
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
+		this.applyEditorPresentationSettings();
+	}
+
+	private applyEditorPresentationSettings(): void {
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor.setPaddingX(editorPaddingX);
@@ -967,11 +969,26 @@ export class InteractiveMode {
 		}
 	}
 
+	private refreshExtensionPresentation(): void {
+		const activeHeader = this.extensionUiHost.getCustomHeader() ?? this.builtInHeader;
+		if (isExpandable(activeHeader)) {
+			activeHeader.setExpanded(this.toolOutputExpanded);
+		}
+		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+		const themeName = this.settingsManager.getTheme();
+		const themeResult = themeName ? setTheme(themeName, true) : { success: true };
+		if (!themeResult.success) {
+			this.showError(`Failed to load theme "${themeName}": ${themeResult.error}\nFell back to dark theme.`);
+		}
+		this.applyEditorPresentationSettings();
+	}
+
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		this.pendingClipboardImages = [];
-		this.clipboardImageCounter = 0;
+		this.clipboardQueue.pendingClipboardImages = [];
+		this.clipboardQueue.clipboardImageCounter = 0;
 		const clipboardImageDirectory = this.settingsManager.getClipboardImageDirectory();
 		this.clipboardImageStore =
 			this.sessionManager.isPersisted() || clipboardImageDirectory
@@ -1314,6 +1331,7 @@ export class InteractiveMode {
 			handleDebugCommand: () => this.handleDebugCommand(),
 			showModelSelector: (input) => this.showModelSelector(input),
 			loadTuiHistoryOnDemand: () => this.loadTuiHistoryOnDemand(),
+			showTranscriptPager: () => this.showTranscriptPager(),
 			toggleThinkingBlockVisibility: () => this.toggleThinkingBlockVisibility(),
 			openExternalEditor: () => this.openExternalEditor(),
 			handleFollowUp: () => this.handleFollowUp(),
@@ -1325,53 +1343,29 @@ export class InteractiveMode {
 	}
 
 	private handleClipboardImagePaste(): Promise<void> {
-		const self = this;
 		const selectedModel = this.session?.model;
 		const modelCannotSeeImages = selectedModel ? !selectedModel.input.includes("image") : false;
-		return clipboardInput.handleClipboardImagePaste({
-			get pendingClipboardImages() {
-				return self.pendingClipboardImages;
-			},
-			set pendingClipboardImages(value) {
-				self.pendingClipboardImages = value;
-			},
-			get clipboardImageCounter() {
-				return self.clipboardImageCounter;
-			},
-			set clipboardImageCounter(value) {
-				self.clipboardImageCounter = value;
-			},
-			editor: this.editor,
-			ui: this.ui,
-			autoResizeImages: this.settingsManager.getImageAutoResize(),
-			blockImages: this.settingsManager.getBlockImages() || modelCannotSeeImages,
-			blockImagesReason: modelCannotSeeImages
-				? "The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker."
-				: undefined,
-			imageStore: this.clipboardImageStore,
-			showStatus: (message) => this.showStatus(message),
-			showWarning: (message) => this.showWarning(message),
-		});
+		return clipboardInput.handleClipboardImagePaste(
+			clipboardInput.bindClipboardQueue(this.clipboardQueue, {
+				editor: this.editor,
+				ui: this.ui,
+				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				blockImages: this.settingsManager.getBlockImages() || modelCannotSeeImages,
+				blockImagesReason: modelCannotSeeImages
+					? "The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker."
+					: undefined,
+				imageStore: this.clipboardImageStore,
+				showStatus: (message) => this.showStatus(message),
+				showWarning: (message) => this.showWarning(message),
+			}),
+		);
 	}
 
 	private takeClipboardImagesForText(text: string): ImageContent[] | undefined {
-		const self = this;
 		return clipboardInput.takeClipboardImagesForText(
-			{
-				get pendingClipboardImages() {
-					return self.pendingClipboardImages;
-				},
-				set pendingClipboardImages(value) {
-					self.pendingClipboardImages = value;
-				},
-				get clipboardImageCounter() {
-					return self.clipboardImageCounter;
-				},
-				set clipboardImageCounter(value) {
-					self.clipboardImageCounter = value;
-				},
+			clipboardInput.bindClipboardQueue(this.clipboardQueue, {
 				clipboardImageStore: this.clipboardImageStore,
-			},
+			}),
 			text,
 		);
 	}
@@ -1810,19 +1804,26 @@ export class InteractiveMode {
 		})();
 	}
 
-	private getToolCallRepairInfo(toolCall: ToolCall): ToolCallRepairInfo | undefined {
-		if (!toolCall.rawArguments && !toolCall.repairNotes?.length) return undefined;
-		return {
-			repaired: true,
-			...(toolCall.rawArguments ? { rawArguments: toolCall.rawArguments } : {}),
-			...(toolCall.repairNotes?.length ? { notes: toolCall.repairNotes } : {}),
-		};
+	private showTranscriptPager(): void {
+		let handle: ReturnType<TUI["showOverlay"]> | undefined;
+		const pager = new TranscriptPager({
+			source: this.chatContainer,
+			viewportRows: () => this.ui.terminal.rows,
+			keybindings: this.keybindings,
+			onClose: () => handle?.hide(),
+		});
+		handle = this.ui.showOverlay(pager, {
+			width: "100%",
+			maxHeight: "100%",
+			row: 0,
+			col: 0,
+		});
 	}
 
 	private attachStreamingToolPanels(message: AssistantMessage): void {
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
-			const repair = this.getToolCallRepairInfo(content);
+			const repair = getToolCallRepairInfo(content);
 			if (!this.toolPanels.hasActive(content.id)) {
 				this.attachToolExecutionComponent(content.name, content.id, content.arguments, repair);
 			} else {
@@ -2711,15 +2712,6 @@ export class InteractiveMode {
 		return this.autoLearnController.validateAutoLearnModelValue(value);
 	}
 
-	private collectSelfModificationCandidates(settings: { sourcePath?: string; sourcePaths?: string[] }): string[] {
-		return [
-			...(Array.isArray(settings.sourcePaths) ? settings.sourcePaths : []),
-			...(settings.sourcePath ? [settings.sourcePath] : []),
-		]
-			.map((candidate) => candidate?.trim())
-			.filter((candidate): candidate is string => Boolean(candidate));
-	}
-
 	private getCurrentCwdForSettings(): string {
 		return this.runtimeHost?.session?.sessionManager?.getCwd?.() || process.cwd();
 	}
@@ -2729,7 +2721,7 @@ export class InteractiveMode {
 		sourcePaths?: string[];
 	}): string | undefined {
 		const cwd = this.getCurrentCwdForSettings();
-		const resolved = this.collectSelfModificationCandidates(settings).map((candidate) =>
+		const resolved = collectSelfModificationSourceCandidates(settings).map((candidate) =>
 			resolvePath(candidate, cwd, { trim: true }),
 		);
 		if (resolved.length === 0) return undefined;
@@ -2743,7 +2735,7 @@ export class InteractiveMode {
 	private validateSelfModificationSource(settings: SelfModificationSettings): string | undefined {
 		if (!settings.enabled) return undefined;
 		const cwd = this.getCurrentCwdForSettings();
-		const resolved = this.collectSelfModificationCandidates(settings).map((candidate) =>
+		const resolved = collectSelfModificationSourceCandidates(settings).map((candidate) =>
 			resolvePath(candidate, cwd, { trim: true }),
 		);
 		if (resolved.length === 0) return "Self modification is enabled, but no pi-adaptative source path is set.";
@@ -3109,25 +3101,7 @@ export class InteractiveMode {
 			await this.session.reload();
 			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 			this.keybindings.reload();
-			const activeHeader = this.extensionUiHost.getCustomHeader() ?? this.builtInHeader;
-			if (isExpandable(activeHeader)) {
-				activeHeader.setExpanded(this.toolOutputExpanded);
-			}
-			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
-			const themeName = this.settingsManager.getTheme();
-			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
-			if (!themeResult.success) {
-				this.showError(`Failed to load theme "${themeName}": ${themeResult.error}\nFell back to dark theme.`);
-			}
-			const editorPaddingX = this.settingsManager.getEditorPaddingX();
-			const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
-			this.defaultEditor.setPaddingX(editorPaddingX);
-			this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
-			if (this.editor !== this.defaultEditor) {
-				this.editor.setPaddingX?.(editorPaddingX);
-				this.editor.setAutocompleteMaxVisible?.(autocompleteMaxVisible);
-			}
+			this.refreshExtensionPresentation();
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 			this.setupAutocompleteProvider();
@@ -3162,28 +3136,7 @@ export class InteractiveMode {
 			this.keybindings.reload();
 			this.setupAutocompleteProvider();
 
-			// Refresh themes
-			const activeHeader = this.extensionUiHost.getCustomHeader() ?? this.builtInHeader;
-			if (isExpandable(activeHeader)) {
-				activeHeader.setExpanded(this.toolOutputExpanded);
-			}
-			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
-			const themeName = this.settingsManager.getTheme();
-			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
-			if (!themeResult.success) {
-				this.showError(`Failed to load theme "${themeName}": ${themeResult.error}\nFell back to dark theme.`);
-			}
-
-			// Refresh editor settings
-			const editorPaddingX = this.settingsManager.getEditorPaddingX();
-			const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
-			this.defaultEditor.setPaddingX(editorPaddingX);
-			this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
-			if (this.editor !== this.defaultEditor) {
-				this.editor.setPaddingX?.(editorPaddingX);
-				this.editor.setAutocompleteMaxVisible?.(autocompleteMaxVisible);
-			}
+			this.refreshExtensionPresentation();
 
 			// Refresh extension shortcuts
 			const runner = this.session.extensionRunner;

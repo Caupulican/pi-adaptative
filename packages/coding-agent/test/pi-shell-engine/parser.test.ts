@@ -378,6 +378,25 @@ print("tilde-user" in UNSUPPORTED_CONSTRUCTS)
 	});
 
 	describe("Windows absolute-path backslashes (CI lane fix)", () => {
+		it("scans a long drive path without rebuilding the accumulated prefix per backslash", () => {
+			const program = `
+import sys
+sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
+from tokens import tokenize
+tokens = tokenize(sys.stdin.read())
+print(tokens[0].segments[0].text)
+`;
+			const command = `C:${"\\segment".repeat(20_000)}`;
+			const result = spawnSync(python, ["-B", "-c", program], {
+				encoding: "utf-8",
+				input: command,
+				timeout: 3_000,
+			});
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(result.stdout?.trim()).toBe(command);
+		});
+
 		it("drive-letter path in a command word keeps its backslashes literal", () => {
 			const ast = parseToDict(python, "cat C:\\Users\\me\\file.txt") as any;
 			const word = ast.entries[0].pipelines[0].elements[0].words[1];

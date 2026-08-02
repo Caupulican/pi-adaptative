@@ -1,5 +1,6 @@
 import { type AgentMessage, createCustomMessage } from "@caupulican/pi-agent-core";
 import type { TextContent } from "@caupulican/pi-ai";
+import { escapePromptXmlText } from "../prompt-markup.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import { projectGoalRecord } from "./goal-record.ts";
 import type { GoalState } from "./goal-state.ts";
@@ -26,10 +27,6 @@ function isGoalContextMessage(message: AgentMessage): boolean {
 	return messageText(message).startsWith(LEGACY_GOAL_CONTINUATION_PREFIX);
 }
 
-function escapeXmlText(value: string): string {
-	return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
 export function formatCompactGoalContext(state: GoalState, continuationTurn: boolean): string {
 	const record = projectGoalRecord(state);
 	const budgetText = record.tokenBudget === undefined ? "unbounded" : String(record.tokenBudget);
@@ -40,7 +37,7 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 	return [
 		`<active_goal tokens_used="${record.tokensUsed}" token_budget="${budgetText}" tokens_remaining="${remainingText}">`,
 		"<objective>",
-		escapeXmlText(record.objective),
+		escapePromptXmlText(record.objective),
 		"</objective>",
 		instruction,
 		"Use task_steps for decomposition, delegate for workers, and current tool/artifact results as evidence. Keep the goal active unless completion is proven or the same genuine blocker persists for three goal turns.",

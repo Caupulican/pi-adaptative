@@ -94,7 +94,7 @@ export class HostStateStore<THostData> {
 			file.hosts[host.id] = data;
 			const mutation = mutate(data, host);
 			if (mutation.changed && !this.readOnly) {
-				writeFileAtomicSync(this.filePath, `${JSON.stringify(file, null, "\t")}\n`);
+				writeFileAtomicSync(this.filePath, `${JSON.stringify(file)}\n`);
 			}
 			return mutation.result;
 		};

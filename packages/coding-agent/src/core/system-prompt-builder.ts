@@ -59,6 +59,22 @@ export interface SystemPromptBuilderDeps {
 	getThinkingLevel(): ThinkingLevel;
 }
 
+export function collectSelfModificationSourceCandidates(settings: {
+	sourcePath?: string;
+	sourcePaths?: string[];
+}): string[] {
+	const candidates: string[] = [];
+	if (Array.isArray(settings.sourcePaths)) {
+		for (const candidate of settings.sourcePaths) {
+			const normalized = candidate?.trim();
+			if (normalized) candidates.push(normalized);
+		}
+	}
+	const legacyCandidate = settings.sourcePath?.trim();
+	if (legacyCandidate) candidates.push(legacyCandidate);
+	return candidates;
+}
+
 export class SystemPromptBuilder {
 	private readonly deps: SystemPromptBuilderDeps;
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
@@ -114,12 +130,7 @@ export class SystemPromptBuilder {
 
 		// Resolve from an ordered candidate list first (portable WSL/Termux switching
 		// from settings alone), then fall back to the legacy single sourcePath.
-		const rawCandidates = [
-			...(Array.isArray(settings.sourcePaths) ? settings.sourcePaths : []),
-			...(settings.sourcePath ? [settings.sourcePath] : []),
-		]
-			.map((candidate) => candidate?.trim())
-			.filter((candidate): candidate is string => Boolean(candidate));
+		const rawCandidates = collectSelfModificationSourceCandidates(settings);
 
 		if (rawCandidates.length === 0) {
 			return `Pi self-modification guardrails (local setting active, source missing):

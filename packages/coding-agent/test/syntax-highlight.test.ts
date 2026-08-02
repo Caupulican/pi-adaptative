@@ -1,6 +1,7 @@
 import { resetCapabilitiesCache, setCapabilities } from "@caupulican/pi-tui";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { highlightCode, initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getMarkdownTheme, highlightCode, initTheme } from "../src/modes/interactive/theme/theme.ts";
+import * as syntaxHighlight from "../src/utils/syntax-highlight.ts";
 import { highlight, renderHighlightedHtml, supportsLanguage } from "../src/utils/syntax-highlight.ts";
 
 describe("syntax highlight renderer", () => {
@@ -90,6 +91,7 @@ describe("theme syntax highlighting", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		resetCapabilitiesCache();
 	});
 
@@ -106,5 +108,21 @@ describe("theme syntax highlighting", () => {
 		);
 		expect(highlightCode("@decorator", "python")[0]).toBe("\x1b[38;2;128;128;128m@decorator\x1b[39m");
 		expect(highlightCode("<div></div>", "html")[0]).toContain("\x1b[38;2;86;156;214mdiv\x1b[39m");
+	});
+
+	it("preserves the distinct plain and themed fallbacks when highlighting fails", () => {
+		vi.spyOn(syntaxHighlight, "highlight").mockImplementation(() => {
+			throw new Error("forced highlight failure");
+		});
+
+		const code = "first\nsecond";
+		expect(highlightCode(code, "typescript")).toEqual(["first", "second"]);
+		const markdownHighlight = getMarkdownTheme().highlightCode;
+		expect(markdownHighlight).toBeTypeOf("function");
+		if (!markdownHighlight) throw new Error("markdown theme did not provide a code highlighter");
+		expect(markdownHighlight(code, "typescript")).toEqual([
+			"\x1b[38;2;181;189;104mfirst\x1b[39m",
+			"\x1b[38;2;181;189;104msecond\x1b[39m",
+		]);
 	});
 });

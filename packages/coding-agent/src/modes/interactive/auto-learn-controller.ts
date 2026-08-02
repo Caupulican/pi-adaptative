@@ -21,6 +21,7 @@ import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
 import { analyzeReflectionTurn } from "../../core/learning/reflection-turn-analysis.ts";
+import { isProcessAlive } from "../../core/process-liveness.ts";
 import {
 	describeInFlightWorkUnit,
 	getInFlightWorkUnits,
@@ -174,6 +175,43 @@ function getAutoLearnSessionIdFromFileName(fileName: string): string | undefined
 	return fileName.match(/_(auto-learn-[A-Za-z0-9._-]+)\.jsonl$/)?.[1];
 }
 
+function readAutoLearnDirectoryEntries(dir: string): fs.Dirent[] {
+	try {
+		return fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+}
+
+function visitAutoLearnFiles(root: string, visit: (filePath: string, fileName: string) => void): void {
+	const pendingDirectories = [root];
+	while (pendingDirectories.length > 0) {
+		const dir = pendingDirectories.pop()!;
+		for (const entry of readAutoLearnDirectoryEntries(dir)) {
+			const filePath = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				pendingDirectories.push(filePath);
+			} else if (entry.isFile()) {
+				visit(filePath, entry.name);
+			}
+		}
+	}
+}
+
+function shouldPruneAutoLearnArtifact(
+	filePath: string,
+	now: number,
+	retentionMs: number,
+	result: AutoLearnHistoryPruneResult,
+): boolean {
+	try {
+		return isOldAutoLearnArtifact(filePath, now, retentionMs);
+	} catch {
+		result.errors++;
+		return false;
+	}
+}
+
 function pruneAutoLearnSessionFiles(
 	dir: string,
 	activeSessionIds: ReadonlySet<string>,
@@ -181,32 +219,12 @@ function pruneAutoLearnSessionFiles(
 	retentionMs: number,
 	result: AutoLearnHistoryPruneResult,
 ): void {
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return;
-	}
-
-	for (const entry of entries) {
-		const filePath = path.join(dir, entry.name);
-		if (entry.isDirectory()) {
-			pruneAutoLearnSessionFiles(filePath, activeSessionIds, now, retentionMs, result);
-			continue;
-		}
-		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-		let shouldPrune = false;
-		try {
-			shouldPrune = isOldAutoLearnArtifact(filePath, now, retentionMs);
-		} catch {
-			result.errors++;
-			continue;
-		}
-		if (!shouldPrune) continue;
-		const sessionId = readAutoLearnSessionIdFromFile(filePath) ?? getAutoLearnSessionIdFromFileName(entry.name);
-		if (!sessionId || !isAutoLearnSessionId(sessionId) || activeSessionIds.has(sessionId)) continue;
+	visitAutoLearnFiles(dir, (filePath, fileName) => {
+		if (!fileName.endsWith(".jsonl") || !shouldPruneAutoLearnArtifact(filePath, now, retentionMs, result)) return;
+		const sessionId = readAutoLearnSessionIdFromFile(filePath) ?? getAutoLearnSessionIdFromFileName(fileName);
+		if (!sessionId || !isAutoLearnSessionId(sessionId) || activeSessionIds.has(sessionId)) return;
 		removeOldAutoLearnArtifact(filePath, result, "sessionFiles");
-	}
+	});
 }
 
 function pruneAutoLearnRunArtifacts(
@@ -216,34 +234,14 @@ function pruneAutoLearnRunArtifacts(
 	retentionMs: number,
 	result: AutoLearnHistoryPruneResult,
 ): void {
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return;
-	}
-
-	for (const entry of entries) {
-		const filePath = path.join(dir, entry.name);
-		if (entry.isDirectory()) {
-			pruneAutoLearnRunArtifacts(filePath, activeRunIds, now, retentionMs, result);
-			continue;
-		}
-		if (!entry.isFile()) continue;
-		const promptRunId = entry.name.endsWith(".prompt.md") ? entry.name.slice(0, -".prompt.md".length) : undefined;
-		const logRunId = entry.name.endsWith(".log") ? entry.name.slice(0, -".log".length) : undefined;
+	visitAutoLearnFiles(dir, (filePath, fileName) => {
+		const promptRunId = fileName.endsWith(".prompt.md") ? fileName.slice(0, -".prompt.md".length) : undefined;
+		const logRunId = fileName.endsWith(".log") ? fileName.slice(0, -".log".length) : undefined;
 		const runId = promptRunId ?? logRunId;
-		if (!runId || activeRunIds.has(runId)) continue;
-		let shouldPrune = false;
-		try {
-			shouldPrune = isOldAutoLearnArtifact(filePath, now, retentionMs);
-		} catch {
-			result.errors++;
-			continue;
-		}
-		if (!shouldPrune) continue;
+		if (!runId || activeRunIds.has(runId) || !shouldPruneAutoLearnArtifact(filePath, now, retentionMs, result))
+			return;
 		removeOldAutoLearnArtifact(filePath, result, promptRunId ? "promptFiles" : "logFiles");
-	}
+	});
 }
 
 export function pruneAutoLearnConversationHistory(options: AutoLearnHistoryPruneOptions): AutoLearnHistoryPruneResult {
@@ -380,15 +378,6 @@ export class AutoLearnController {
 
 	private get session(): AgentSession {
 		return this.deps.getSession();
-	}
-	private get sessionManager() {
-		return this.deps.getSession().sessionManager;
-	}
-	private get settingsManager() {
-		return this.deps.getSession().settingsManager;
-	}
-	private get ui(): AutoLearnControllerUi {
-		return this.deps.ui;
 	}
 
 	private getAutoLearnModelAuthPriority(model: Model<any>): number {
@@ -548,15 +537,7 @@ export class AutoLearnController {
 	}
 
 	private isAutoLearnPidAlive(pid: number | undefined): boolean {
-		if (typeof pid !== "number" || pid <= 0) return false;
-		try {
-			process.kill(pid, 0);
-			return true;
-		} catch (error) {
-			const code =
-				error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
-			return code === "EPERM";
-		}
+		return isProcessAlive(pid);
 	}
 
 	private pruneAutoLearnState(state: AutoLearnState, now = Date.now()): AutoLearnState {
@@ -600,8 +581,11 @@ export class AutoLearnController {
 	}
 
 	getEffectiveAutoLearnSettings(): Required<AutoLearnSettings> {
-		const settings = this.settingsManager.getAutoLearnSettings();
-		const preset = this.getAutoLearnPresetForAutonomyMode(this.settingsManager.getAutonomySettings().mode, settings);
+		const settings = this.session.settingsManager.getAutoLearnSettings();
+		const preset = this.getAutoLearnPresetForAutonomyMode(
+			this.session.settingsManager.getAutonomySettings().mode,
+			settings,
+		);
 		return {
 			enabled: settings.enabled ?? preset.enabled,
 			model: settings.model?.trim() || preset.model,
@@ -624,11 +608,15 @@ export class AutoLearnController {
 	}
 
 	getAutoLearnTenantKey(): string {
-		return `${this.sessionManager.getCwd()}::${this.session.sessionId}`;
+		return `${this.session.sessionManager.getCwd()}::${this.session.sessionId}`;
 	}
 
 	private getAutoLearnTenantId(): string {
-		const cwdHash = crypto.createHash("sha256").update(this.sessionManager.getCwd()).digest("hex").slice(0, 8);
+		const cwdHash = crypto
+			.createHash("sha256")
+			.update(this.session.sessionManager.getCwd())
+			.digest("hex")
+			.slice(0, 8);
 		const sessionPart = sanitizeAutoLearnPathPart(this.session.sessionId, "session");
 		return `${sessionPart}-${cwdHash}`;
 	}
@@ -638,7 +626,7 @@ export class AutoLearnController {
 	}
 
 	private getAutoLearnMessageCount(): number {
-		return this.sessionManager.getBranch().filter((entry) => entry.type === "message").length;
+		return this.session.sessionManager.getBranch().filter((entry) => entry.type === "message").length;
 	}
 
 	private buildAutoLearnDecisionFromState(
@@ -767,8 +755,8 @@ export class AutoLearnController {
 	}
 
 	private buildAutonomyAuthorityPrompt(): string {
-		const autonomy = this.settingsManager.getAutonomySettings();
-		const selfModification = this.settingsManager.getSelfModificationSettings();
+		const autonomy = this.session.settingsManager.getAutonomySettings();
+		const selfModification = this.session.settingsManager.getSelfModificationSettings();
 		if (autonomy.mode !== "full") {
 			return [
 				"Authority mode: proposal-gated.",
@@ -851,15 +839,15 @@ export class AutoLearnController {
 				reason: params.reason,
 				startedAt: now,
 				expiresAt: now + AUTO_LEARN_RESERVATION_MS,
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.session.sessionManager.getCwd(),
 				logPath: params.logPath,
 				sessionDir: params.sessionDir,
 				sessionId: params.sessionId,
 				promptPath: params.promptPath,
 				kind: params.kind,
-				autonomyMode: this.settingsManager.getAutonomySettings().mode,
+				autonomyMode: this.session.settingsManager.getAutonomySettings().mode,
 				authority:
-					this.settingsManager.getAutonomySettings().mode === "full"
+					this.session.settingsManager.getAutonomySettings().mode === "full"
 						? "standing-full-autonomous"
 						: "proposal-gated",
 				status: "reserved",
@@ -1044,9 +1032,9 @@ export class AutoLearnController {
 		let outFd: number | undefined;
 		try {
 			outFd = fs.openSync(logPath, "a");
-			const sourceSessionFile = this.sessionManager.getSessionFile();
+			const sourceSessionFile = this.session.sessionManager.getSessionFile();
 			child = spawn(spawnTarget.command, args, {
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.session.sessionManager.getCwd(),
 				detached: true,
 				stdio: ["ignore", outFd, outFd],
 				env: {
@@ -1235,7 +1223,7 @@ export class AutoLearnController {
 			return false;
 		}
 		const message = this.launchAutoLearn(decision.reason, false);
-		if (!message.startsWith("Auto Learn started")) this.ui.showStatus(message);
+		if (!message.startsWith("Auto Learn started")) this.deps.ui.showStatus(message);
 		return message.startsWith("Auto Learn started");
 	}
 
@@ -1249,14 +1237,14 @@ export class AutoLearnController {
 			turnDigest: decision.digest,
 			bypassReflectionCooldown: decision.bypassCooldown,
 		});
-		if (!message.startsWith("Auto Learn started")) this.ui.showStatus(message);
+		if (!message.startsWith("Auto Learn started")) this.deps.ui.showStatus(message);
 		return message.startsWith("Auto Learn started");
 	}
 
 	updateAutoLearnFooter(): void {
 		const settings = this.getEffectiveAutoLearnSettings();
 		if (!settings.enabled) {
-			this.ui.footerDataProvider.setExtensionStatus("auto-learn", undefined);
+			this.deps.ui.footerDataProvider.setExtensionStatus("auto-learn", undefined);
 			return;
 		}
 		const tenant = this.getAutoLearnTenantKey();
@@ -1264,12 +1252,12 @@ export class AutoLearnController {
 		const hasActiveRun = Object.values(state.runs ?? {}).some(
 			(run) => run.tenant === tenant && this.isAutoLearnPidAlive(run.pid),
 		);
-		this.ui.footerDataProvider.setExtensionStatus(
+		this.deps.ui.footerDataProvider.setExtensionStatus(
 			"auto-learn",
 			hasActiveRun ? theme.fg("warning", "(learning)") : undefined,
 		);
-		this.ui.invalidateFooter();
-		this.ui.requestRender();
+		this.deps.ui.invalidateFooter();
+		this.deps.ui.requestRender();
 	}
 
 	formatAutoLearnStatus(): string {
@@ -1298,8 +1286,8 @@ export class AutoLearnController {
 			: "- none";
 		const reloadBlockers = getPendingReloadBlockers({
 			ownPid: process.pid,
-			ownSessionId: this.sessionManager.getSessionId(),
-			ownSessionFile: this.sessionManager.getSessionFile(),
+			ownSessionId: this.session.sessionManager.getSessionId(),
+			ownSessionFile: this.session.sessionManager.getSessionFile(),
 		});
 		const reloadBlockerLines = reloadBlockers.pending
 			? reloadBlockers.descriptions.map((description) => `- ${description}`).join("\n")

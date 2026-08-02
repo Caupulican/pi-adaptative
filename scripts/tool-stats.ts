@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { estimateStringTokens } from "@caupulican/pi-agent-core/node";
 import { getAgentDir } from "../packages/coding-agent/src/config.ts";
 import { getProcessWorkRun } from "../packages/coding-agent/src/utils/work-directory.ts";
 
@@ -59,10 +60,6 @@ function createToolStats(): ToolStats {
 
 function createBashStats(): BashCommandStats {
 	return { calls: 0, estimatedTokens: 0, samples: [] };
-}
-
-function estimateTokenCount(text: string): number {
-	return Math.ceil(text.length / 4);
 }
 
 function contentText(content: Message["content"]): string {
@@ -133,7 +130,7 @@ for (const file of files) {
 			}
 		} else if (message.role === "toolResult" && message.toolName) {
 			const text = contentText(message.content);
-			const tokens = estimateTokenCount(text);
+			const tokens = estimateStringTokens(text);
 			const stats = getStats(tools, message.toolName, createToolStats);
 			stats.results++;
 			stats.estimatedTokens += tokens;

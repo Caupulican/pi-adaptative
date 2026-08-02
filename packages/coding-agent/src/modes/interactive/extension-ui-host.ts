@@ -23,7 +23,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 } from "@caupulican/pi-tui";
-import { Container, Editor, matchesKey, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { Container, Editor, firstNonWhitespaceCharacter, matchesKey, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -186,17 +186,7 @@ export class ExtensionUiHost {
 				this.ui.markShutdownRequested();
 			},
 			getContextUsage: () => this.session.getContextUsage(),
-			compact: (options) => {
-				void (async () => {
-					try {
-						const result = await this.session.compact(options?.customInstructions);
-						options?.onComplete?.(result);
-					} catch (error) {
-						const err = error instanceof Error ? error : new Error(String(error));
-						options?.onError?.(err);
-					}
-				})();
-			},
+			compact: (options) => this.session.compactForExtension(options),
 			reload: async () => {
 				await this.ui.reload();
 			},
@@ -577,34 +567,19 @@ export class ExtensionUiHost {
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
-		if (opts?.signal?.aborted) return Promise.resolve(undefined);
-		// Replacing an overlay without settling its promise strands the extension handler forever.
-		this.activeExtensionDialogCancel?.();
-		return new Promise((resolve) => {
-			let settled = false;
-			let selector: ExtensionSelectorComponent;
-			const finish = (value: string | undefined, restoreEditor = true) => {
-				if (settled) return;
-				settled = true;
-				opts?.signal?.removeEventListener("abort", cancel);
-				if (this.activeExtensionDialogCancel === cancel) {
-					this.activeExtensionDialogCancel = undefined;
-				}
-				this.hideExtensionSelector(selector, restoreEditor);
-				resolve(value);
-			};
-			const cancel = () => finish(undefined);
-
-			selector = new ExtensionSelectorComponent(title, options, (option) => finish(option), cancel, {
-				tui: this.ui.tui,
-				timeout: opts?.timeout,
-				onToggleToolsExpanded: () => this.ui.toggleToolsExpanded(),
-			});
-			this.extensionSelector = selector;
-			this.activeExtensionDialogCancel = cancel;
-			this.ui.overlayHost.swap(selector, { onUnmount: () => finish(undefined, false) });
-			opts?.signal?.addEventListener("abort", cancel, { once: true });
-		});
+		return this.showExtensionDialog(
+			opts,
+			(finish, cancel) =>
+				new ExtensionSelectorComponent(title, options, finish, cancel, {
+					tui: this.ui.tui,
+					timeout: opts?.timeout,
+					onToggleToolsExpanded: () => this.ui.toggleToolsExpanded(),
+				}),
+			(selector) => {
+				this.extensionSelector = selector;
+			},
+			(selector, restoreEditor) => this.hideExtensionSelector(selector, restoreEditor),
+		);
 	}
 
 	/**
@@ -634,31 +609,49 @@ export class ExtensionUiHost {
 		placeholder?: string,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
+		return this.showExtensionDialog(
+			opts,
+			(finish, cancel) =>
+				new ExtensionInputComponent(title, placeholder, finish, cancel, {
+					tui: this.ui.tui,
+					timeout: opts?.timeout,
+					sensitive: opts?.sensitive,
+				}),
+			(input) => {
+				this.extensionInput = input;
+			},
+			(input, restoreEditor) => this.hideExtensionInput(input, restoreEditor),
+		);
+	}
+
+	private showExtensionDialog<T, C extends Component>(
+		opts: ExtensionUIDialogOptions | undefined,
+		create: (finish: (value: T) => void, cancel: () => void) => C,
+		activate: (component: C) => void,
+		hide: (component: C, restoreEditor: boolean) => void,
+	): Promise<T | undefined> {
 		if (opts?.signal?.aborted) return Promise.resolve(undefined);
+		// Replacing an overlay without settling its promise strands the extension handler forever.
 		this.activeExtensionDialogCancel?.();
 		return new Promise((resolve) => {
 			let settled = false;
-			let input: ExtensionInputComponent;
-			const finish = (value: string | undefined, restoreEditor = true) => {
+			let component: C;
+			const finish = (value: T | undefined, restoreEditor = true) => {
 				if (settled) return;
 				settled = true;
 				opts?.signal?.removeEventListener("abort", cancel);
 				if (this.activeExtensionDialogCancel === cancel) {
 					this.activeExtensionDialogCancel = undefined;
 				}
-				this.hideExtensionInput(input, restoreEditor);
+				hide(component, restoreEditor);
 				resolve(value);
 			};
 			const cancel = () => finish(undefined);
 
-			input = new ExtensionInputComponent(title, placeholder, (value) => finish(value), cancel, {
-				tui: this.ui.tui,
-				timeout: opts?.timeout,
-				sensitive: opts?.sensitive,
-			});
-			this.extensionInput = input;
+			component = create((value) => finish(value), cancel);
+			activate(component);
 			this.activeExtensionDialogCancel = cancel;
-			this.ui.overlayHost.swap(input, { onUnmount: () => finish(undefined, false) });
+			this.ui.overlayHost.swap(component, { onUnmount: () => finish(undefined, false) });
 			opts?.signal?.addEventListener("abort", cancel, { once: true });
 		});
 	}
@@ -732,7 +725,17 @@ export class ExtensionUiHost {
 
 			// Wire up callbacks from the default editor
 			newEditor.onSubmit = this.ui.defaultEditor.onSubmit;
-			newEditor.onChange = this.ui.defaultEditor.onChange;
+			if (newEditor.supportsChangeSummary) {
+				newEditor.onChange = this.ui.defaultEditor.onChange;
+				newEditor.onChangeSummary = this.ui.defaultEditor.onChangeSummary;
+			} else {
+				const onChangeSummary = this.ui.defaultEditor.onChangeSummary;
+				newEditor.onChange =
+					this.ui.defaultEditor.onChange ??
+					(onChangeSummary
+						? (text) => onChangeSummary({ firstNonWhitespace: firstNonWhitespaceCharacter(text) })
+						: undefined);
+			}
 
 			// Copy text from previous editor
 			newEditor.setText(currentText);

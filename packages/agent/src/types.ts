@@ -114,6 +114,34 @@ export interface AfterToolCallContext {
 	context: AgentContext;
 }
 
+/** Policy-finalized result of a tool call that outlived its foreground turn. */
+export interface BackgroundToolCallCompletion {
+	/** Original tool call identity. */
+	toolCall: AgentToolCall;
+	/** Result after the normal `afterToolCall` policy boundary has run. */
+	result: AgentToolResult<any>;
+	/** Final error classification after policy overrides. */
+	isError: boolean;
+}
+
+/** Context offered to a host when a prepared tool call crosses its foreground latency budget. */
+export interface BackgroundToolCallContext extends BeforeToolCallContext {
+	/** Configured foreground latency budget that elapsed. */
+	elapsedMs: number;
+	/** Event-driven terminal signal for the real, policy-finalized execution. */
+	completion: Promise<BackgroundToolCallCompletion>;
+	/** Abort only this detached execution. */
+	cancel(): void;
+}
+
+/** Immediate foreground result returned when the host accepts ownership of a slow tool call. */
+export interface BackgroundToolCallHandoff {
+	/** Bounded result telling the model how to address the session-owned task. */
+	result: AgentToolResult<any>;
+	/** Optional foreground error classification. Defaults to `result.isError === true`. */
+	isError?: boolean;
+}
+
 /** Context passed to `shouldStopAfterTurn`. */
 export interface ShouldStopAfterTurnContext {
 	/** The assistant message that completed the turn. */
@@ -367,6 +395,25 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+
+	/**
+	 * Foreground latency budget for prepared tool calls. When it elapses, `handoffToolCall` may
+	 * transfer the still-running execution to a host-owned task. Disabled unless both fields exist.
+	 */
+	backgroundToolCallAfterMs?: number;
+
+	/**
+	 * Synchronously accept ownership of a slow call. Returning a handoff lets the provider loop
+	 * continue with its bounded placeholder while `completion` still crosses `afterToolCall` once.
+	 * Returning `undefined` keeps waiting in the foreground.
+	 */
+	handoffToolCall?: (context: BackgroundToolCallContext) => BackgroundToolCallHandoff | undefined;
+
+	/**
+	 * Register a one-shot host request that asks an in-flight foreground call to cross the same
+	 * `handoffToolCall` boundary before its automatic latency budget elapses.
+	 */
+	subscribeToolCallHandoffRequest?: (toolCallId: string, request: () => void) => () => void;
 }
 
 /**

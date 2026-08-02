@@ -95,6 +95,11 @@ function shouldPollGitHead(repoDir: string): boolean {
 	return isWslEnvironment() && isWindowsMountedRepoPath(repoDir);
 }
 
+function readHeadBranch(paths: GitPaths): string {
+	const content = readFileSync(paths.headPath, "utf8").trim();
+	return content.startsWith("ref: refs/heads/") ? content.slice(16) : "detached";
+}
+
 /**
  * Provides git branch and extension statuses - data not otherwise accessible to extensions.
  * Token stats, model info available via ctx.sessionManager and ctx.model.
@@ -264,12 +269,8 @@ export class FooterDataProvider {
 	private resolveGitBranchSync(): string | null {
 		try {
 			if (!this.gitPaths) return null;
-			const content = readFileSync(this.gitPaths.headPath, "utf8").trim();
-			if (content.startsWith("ref: refs/heads/")) {
-				const branch = content.slice(16);
-				return branch === ".invalid" ? (resolveBranchWithGitSync(this.gitPaths.repoDir) ?? "detached") : branch;
-			}
-			return "detached";
+			const branch = readHeadBranch(this.gitPaths);
+			return branch === ".invalid" ? (resolveBranchWithGitSync(this.gitPaths.repoDir) ?? "detached") : branch;
 		} catch {
 			return null;
 		}
@@ -278,14 +279,10 @@ export class FooterDataProvider {
 	private async resolveGitBranchAsync(): Promise<string | null> {
 		try {
 			if (!this.gitPaths) return null;
-			const content = readFileSync(this.gitPaths.headPath, "utf8").trim();
-			if (content.startsWith("ref: refs/heads/")) {
-				const branch = content.slice(16);
-				return branch === ".invalid"
-					? ((await resolveBranchWithGitAsync(this.gitPaths.repoDir)) ?? "detached")
-					: branch;
-			}
-			return "detached";
+			const branch = readHeadBranch(this.gitPaths);
+			return branch === ".invalid"
+				? ((await resolveBranchWithGitAsync(this.gitPaths.repoDir)) ?? "detached")
+				: branch;
 		} catch {
 			return null;
 		}

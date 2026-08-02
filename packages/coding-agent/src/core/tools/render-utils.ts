@@ -3,10 +3,12 @@ import { relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
-import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@caupulican/pi-tui";
+import { getCapabilities, getImageDimensions, hyperlink, imageFallback, Text } from "@caupulican/pi-tui";
+import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import type { ToolRenderResultOptions } from "../extensions/types.ts";
 
 function toDisplaySeparators(path: string): string {
 	return path.split(sep).join("/");
@@ -96,6 +98,54 @@ export type ToolRenderResultLike<TDetails> = {
 	content: (TextContent | ImageContent)[];
 	details: TDetails;
 };
+
+export function formatCollapsibleToolResult<TDetails>(args: {
+	result: {
+		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		details?: TDetails;
+	};
+	options: ToolRenderResultOptions;
+	theme: Theme;
+	showImages: boolean;
+	collapsedLineLimit: number;
+	warnings: (details: TDetails | undefined) => string[];
+}): string {
+	const output = getTextOutput(args.result, args.showImages).trim();
+	let text = "";
+	if (output) {
+		const lines = output.split("\n");
+		const maxLines = args.options.expanded ? lines.length : args.collapsedLineLimit;
+		const displayLines = lines.slice(0, maxLines);
+		const remaining = lines.length - maxLines;
+		text += `\n${displayLines.map((line) => args.theme.fg("toolOutput", line)).join("\n")}`;
+		if (remaining > 0) {
+			text += `${args.theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+		}
+	}
+
+	const warnings = args.warnings(args.result.details);
+	if (warnings.length > 0) text += `\n${args.theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
+	return text;
+}
+
+export function toolTextResult<TDetails extends object>(formatted: {
+	text: string;
+	details: TDetails;
+}): {
+	content: [{ type: "text"; text: string }];
+	details: TDetails | undefined;
+} {
+	return {
+		content: [{ type: "text", text: formatted.text }],
+		details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
+	};
+}
+
+export function renderTextComponent(lastComponent: unknown, content: string): Text {
+	const text = lastComponent instanceof Text ? lastComponent : new Text("", 0, 0);
+	text.setText(content);
+	return text;
+}
 
 export function invalidArgText(theme: Theme): string {
 	return theme.fg("error", "[invalid arg]");

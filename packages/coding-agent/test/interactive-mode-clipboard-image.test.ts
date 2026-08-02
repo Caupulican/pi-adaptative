@@ -21,8 +21,10 @@ vi.mock("../src/utils/image-resize.ts", () => ({
 }));
 
 type ClipboardPasteContext = {
-	pendingClipboardImages: unknown[];
-	clipboardImageCounter: number;
+	clipboardQueue: {
+		pendingClipboardImages: unknown[];
+		clipboardImageCounter: number;
+	};
 	clipboardImageStore?: {
 		write: ReturnType<typeof vi.fn>;
 		resolveReferences: ReturnType<typeof vi.fn>;
@@ -41,8 +43,10 @@ type InteractiveModePrivate = {
 describe("InteractiveMode clipboard image paste", () => {
 	function createContext(): ClipboardPasteContext {
 		return {
-			pendingClipboardImages: [],
-			clipboardImageCounter: 0,
+			clipboardQueue: {
+				pendingClipboardImages: [],
+				clipboardImageCounter: 0,
+			},
 			clipboardImageStore: {
 				write: vi.fn((bytes: Uint8Array, mimeType: string) => ({
 					sequence: 3,
@@ -91,7 +95,7 @@ describe("InteractiveMode clipboard image paste", () => {
 
 		expect(context.clipboardImageStore?.write).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), "image/png");
 		expect(context.editor.insertTextAtCursor).toHaveBeenCalledWith("[Image #3] ");
-		expect(context.pendingClipboardImages).toEqual([
+		expect(context.clipboardQueue.pendingClipboardImages).toEqual([
 			{ label: "[Image #3]", content: { type: "image", data: "AQID", mimeType: "image/png" } },
 		]);
 		expect(context.showStatus).toHaveBeenCalledWith("Attached [Image #3] · PNG · 1 KiB");

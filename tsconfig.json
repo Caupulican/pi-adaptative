@@ -6,7 +6,14 @@
 			"*": ["./*"],
 			"@caupulican/pi-ai": ["./packages/ai/src/index.ts"],
 			"@caupulican/pi-ai/oauth": ["./packages/ai/src/oauth.ts"],
-			"@caupulican/pi-ai/*": ["./packages/ai/src/*.ts", "./packages/ai/src/providers/*.ts"],
+			"@caupulican/pi-ai/tool-repair-registry": [
+				"./packages/ai/src/utils/tool-repair/registry.ts"
+			],
+			"@caupulican/pi-ai/*": [
+				"./packages/ai/src/*.ts",
+				"./packages/ai/src/providers/*.ts",
+				"./packages/ai/src/utils/*.ts"
+			],
 			"@caupulican/pi-ai/dist/*": ["./packages/ai/src/*"],
 			"@caupulican/pi-agent-core": ["./packages/agent/src/index.ts"],
 			"@caupulican/pi-agent-core/node": ["./packages/agent/src/node.ts"],

@@ -14,6 +14,7 @@ import type { Container, Keybinding, MarkdownTheme, TUI } from "@caupulican/pi-t
 import { Markdown, Spacer, Text, visibleWidth } from "@caupulican/pi-tui";
 import { getDebugLogPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { hasSubagentCostSignal, type SessionCostSummary } from "../../core/cost/cost-summary.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { AutoLearnSettings } from "../../core/settings-manager.ts";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.ts";
@@ -51,6 +52,22 @@ export interface DebugReportHost extends ReportRenderHost {
 	readonly session: AgentSession;
 }
 
+export function formatCostReport(costs: SessionCostSummary, usingSubscription = false): string {
+	const lines = [
+		`${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}${usingSubscription ? " (sub)" : ""}`,
+	];
+	if (hasSubagentCostSignal(costs)) {
+		lines.push(
+			`${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)`,
+		);
+	}
+	lines.push(
+		`${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}`,
+		`${theme.fg("dim", "Today rollover:")} local midnight`,
+	);
+	return lines.join("\n");
+}
+
 export function handleUsageCommand(host: UsageReportHost): void {
 	const stats = host.session.getSessionStats();
 	const costs = host.session.getCostSummary();
@@ -70,12 +87,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n\n`;
 
 	info += `${theme.bold("Cost")}\n`;
-	info += `${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}${usingSubscription ? " (sub)" : ""}\n`;
-	if (costs.subagentReports > 0 || costs.subagentCost > 0) {
-		info += `${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)\n`;
-	}
-	info += `${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}\n`;
-	info += `${theme.fg("dim", "Today rollover:")} local midnight\n\n`;
+	info += `${formatCostReport(costs, usingSubscription)}\n\n`;
 
 	const processMemory = getProcessMemoryMb();
 	info += `${theme.bold("Process")}\n`;

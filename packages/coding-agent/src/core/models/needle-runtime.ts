@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { platform as osPlatform } from "node:os";
 import { join } from "node:path";
 import { type Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
-import type { RuntimeCommandResult, RuntimeCommandRunner } from "./local-runtime.ts";
+import {
+	createRuntimeCommandRunner,
+	fetchRuntimeDownload,
+	type RuntimeCommandRunner,
+	removePartialDownload,
+	runtimeCommandAvailable,
+	tryFileSizeBytes,
+	writeRuntimeDownload,
+} from "./runtime-process.ts";
 
 /**
  * Managed runtime for needle (https://github.com/cactus-compute/needle), a 26M-parameter single-shot
@@ -213,51 +219,10 @@ function hashingPassThrough(hash: ReturnType<typeof createHash>): Transform {
 	});
 }
 
-async function defaultRunCommand(
-	command: string,
-	args: string[],
-	options: { env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void } = {},
-): Promise<RuntimeCommandResult> {
-	try {
-		const proc = spawnProcess(command, args, {
-			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
-			env: options.env ? { ...process.env, ...options.env } : process.env,
-		});
-		let stdout = "";
-		let stderr = "";
-		proc.stdout.setEncoding("utf8");
-		proc.stderr.setEncoding("utf8");
-		proc.stdout.on("data", (chunk: string) => {
-			stdout = `${stdout}${chunk}`.slice(-1024 * 1024);
-			options.onOutput?.(chunk);
-		});
-		proc.stderr.on("data", (chunk: string) => {
-			stderr = `${stderr}${chunk}`.slice(-1024 * 1024);
-			options.onOutput?.(chunk);
-		});
-		const terminal = await waitForChildProcessWithTermination(proc, {
-			timeoutMs: NEEDLE_COMMAND_TIMEOUT_MS,
-			killGraceMs: NEEDLE_KILL_GRACE_MS,
-		});
-		const timedOut = terminal.reason === "timeout";
-		return {
-			ok: terminal.code === 0,
-			stdout,
-			stderr,
-			code: terminal.code,
-			...(terminal.code === 0
-				? {}
-				: {
-						error: timedOut
-							? `${command} timed out after ${NEEDLE_COMMAND_TIMEOUT_MS}ms`
-							: stderr.trim() || stdout.trim() || `exit code ${terminal.code ?? "unknown"}`,
-					}),
-		};
-	} catch (error) {
-		return { ok: false, stdout: "", stderr: "", error: error instanceof Error ? error.message : String(error) };
-	}
-}
+const defaultRunCommand = createRuntimeCommandRunner({
+	timeoutMs: NEEDLE_COMMAND_TIMEOUT_MS,
+	killGraceMs: NEEDLE_KILL_GRACE_MS,
+});
 
 export class NeedleRuntime {
 	private readonly _agentDir: string;
@@ -274,10 +239,7 @@ export class NeedleRuntime {
 		this._exists = args.deps?.existsFn ?? existsSync;
 		this._fetch = args.deps?.fetchFn ?? fetch;
 		this._runCommand = args.deps?.runCommand ?? defaultRunCommand;
-		this._hasCommand =
-			args.deps?.hasCommand ??
-			((command) =>
-				spawnProcessSync(command, ["--version"], { encoding: "utf8", timeout: 5_000 }).error === undefined);
+		this._hasCommand = args.deps?.hasCommand ?? runtimeCommandAvailable;
 		this._hasNvidiaGpu = args.deps?.hasNvidiaGpu ?? (() => this._hasCommand("nvidia-smi"));
 		this._platform = args.deps?.platform ?? osPlatform;
 		this._weightsIntegrity = args.deps?.weightsIntegrity ?? {
@@ -463,7 +425,7 @@ export class NeedleRuntime {
 		const url = `https://huggingface.co/${NEEDLE_HF_MODEL_REPO}/resolve/main/${NEEDLE_CHECKPOINT_FILENAME}`;
 		mkdirSync(this.modelsDir(), { recursive: true });
 
-		if (this._exists(destPath) && this._fileSizeBytes(destPath) === this._weightsIntegrity.bytes) {
+		if (this._exists(destPath) && tryFileSizeBytes(destPath) === this._weightsIntegrity.bytes) {
 			onProgress?.(
 				`${NEEDLE_CHECKPOINT_FILENAME} already downloaded (${this._weightsIntegrity.bytes} bytes) — skipping.`,
 			);
@@ -471,28 +433,21 @@ export class NeedleRuntime {
 		}
 
 		onProgress?.(`Downloading ${NEEDLE_CHECKPOINT_FILENAME} from ${NEEDLE_HF_MODEL_REPO}…`);
-		let response: Response;
-		try {
-			response = await this._fetch(url);
-		} catch (error) {
-			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
-		}
-		if (!response.ok || !response.body) {
-			return { ok: false, error: `download-fail: HTTP ${response.status}` };
-		}
+		const download = await fetchRuntimeDownload(this._fetch, url);
+		if (!download.ok) return download;
 
 		const hash = createHash("sha256");
-		try {
-			await pipeline(response.body as unknown as Readable, hashingPassThrough(hash), createWriteStream(destPath));
-		} catch (error) {
-			this._cleanupPartial(destPath);
-			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
-		}
+		const written = await writeRuntimeDownload(
+			download.body as unknown as Readable,
+			destPath,
+			hashingPassThrough(hash),
+		);
+		if (!written.ok) return written;
 
-		const actualBytes = this._fileSizeBytes(destPath);
+		const actualBytes = tryFileSizeBytes(destPath);
 		const actualSha256 = hash.digest("hex");
 		if (actualBytes !== this._weightsIntegrity.bytes || actualSha256 !== this._weightsIntegrity.sha256) {
-			this._cleanupPartial(destPath);
+			removePartialDownload(destPath);
 			return {
 				ok: false,
 				error: `integrity-fail: downloaded ${NEEDLE_CHECKPOINT_FILENAME} does not match the pinned checksum — expected sha256 ${this._weightsIntegrity.sha256} (${this._weightsIntegrity.bytes} bytes), got ${actualSha256} (${actualBytes ?? 0} bytes). Refusing to keep a pickle file that failed integrity verification.`,
@@ -501,22 +456,6 @@ export class NeedleRuntime {
 
 		onProgress?.(`${NEEDLE_CHECKPOINT_FILENAME} downloaded and verified (sha256 ${actualSha256}).`);
 		return { ok: true, path: destPath };
-	}
-
-	private _fileSizeBytes(path: string): number | undefined {
-		try {
-			return statSync(path).size;
-		} catch {
-			return undefined;
-		}
-	}
-
-	private _cleanupPartial(path: string): void {
-		try {
-			rmSync(path, { force: true });
-		} catch {
-			// best-effort cleanup
-		}
 	}
 
 	/**

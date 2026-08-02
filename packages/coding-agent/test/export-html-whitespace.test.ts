@@ -1,7 +1,7 @@
 import type { Component } from "@caupulican/pi-tui";
 import { readFileSync } from "fs";
 import { describe, expect, it } from "vitest";
-import { ansiLinesToHtml } from "../src/core/export-html/ansi-to-html.ts";
+import { ansiLinesToHtml, ansiToHtml } from "../src/core/export-html/ansi-to-html.ts";
 import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import type { Theme } from "../src/modes/interactive/theme/theme.ts";
@@ -19,6 +19,12 @@ describe("export HTML tool output whitespace", () => {
 
 	it("does not insert source whitespace between ANSI-rendered lines", () => {
 		expect(ansiLinesToHtml(["one", "two"])).toBe('<div class="ansi-line">one</div><div class="ansi-line">two</div>');
+	});
+
+	it("preserves exact foreground and background output for indexed and RGB SGR colors", () => {
+		expect(ansiToHtml("\x1b[38;5;24mindexed\x1b[48;2;1;2;3mrgb\x1b[0mplain")).toBe(
+			'<span style="color:#005f87">indexed</span><span style="color:#005f87;background-color:rgb(1,2,3)">rgb</span>plain',
+		);
 	});
 
 	it("trims TUI spacing lines from custom tool result HTML", () => {

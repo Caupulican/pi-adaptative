@@ -4,10 +4,16 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "@caupulican/pi-agent-core";
-import { type CompactionEntry, estimateTokens, type SessionEntry } from "@caupulican/pi-agent-core/node";
+import {
+	type CompactionEntry,
+	estimateStringTokens,
+	estimateTokens,
+	type SessionEntry,
+} from "@caupulican/pi-agent-core/node";
 import { Type } from "typebox";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
+import { boundedTextPreview } from "../text-preview.ts";
 import type { ToolDefinition, ToolInfo } from "./types.ts";
 
 type ContextAuditParams = {
@@ -30,17 +36,7 @@ type AuditRow = {
 
 const DEFAULT_MAX_ITEMS = 40;
 const MAX_MAX_ITEMS = 200;
-const DEFAULT_PREVIEW_CHARS = 220;
 const MAX_PREVIEW_CHARS = 600;
-
-function estimateTextTokens(text: string): number {
-	return Math.ceil(text.length / 4);
-}
-
-function cap(text: string, limit = DEFAULT_PREVIEW_CHARS): string {
-	const compact = text.replace(/\s+/g, " ").trim();
-	return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1))}…` : compact;
-}
 
 function contentText(content: unknown): string {
 	if (typeof content === "string") return content;
@@ -100,7 +96,7 @@ function addRow(rows: AuditRow[], entry: SessionEntry, message: AgentMessage, ki
 		tokens: estimateTokens(message),
 		chars: preview.length,
 		label: messageLabel(message),
-		preview: cap(preview),
+		preview: boundedTextPreview(preview),
 	});
 }
 
@@ -123,44 +119,30 @@ function latestCompaction(entries: SessionEntry[]): CompactionEntry | undefined 
 	return undefined;
 }
 
-function activeContextMessages(entries: SessionEntry[]): AgentMessage[] {
-	const messages: AgentMessage[] = [];
-	const compaction = latestCompaction(entries);
-	if (!compaction) {
-		for (const entry of entries) {
-			const message = messageFromEntry(entry);
-			if (message) messages.push(message);
-		}
-		return messages;
-	}
+type ActiveContextAudit = {
+	messages: AgentMessage[];
+	rows: AuditRow[];
+};
 
-	messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
-	const compactionIndex = entries.findIndex((entry) => entry.id === compaction.id);
-	let foundFirstKept = false;
-	for (let index = 0; index < compactionIndex; index++) {
-		const entry = entries[index];
-		if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
-		if (!foundFirstKept) continue;
-		const message = messageFromEntry(entry);
-		if (message) messages.push(message);
-	}
-	for (let index = compactionIndex + 1; index < entries.length; index++) {
-		const entry = entries[index];
-		const message = messageFromEntry(entry);
-		if (message) messages.push(message);
-	}
-	return messages;
+function addActiveContextEntry(
+	audit: ActiveContextAudit,
+	entry: SessionEntry,
+	message: AgentMessage,
+	kindOverride?: string,
+): void {
+	audit.messages.push(message);
+	addRow(audit.rows, entry, message, kindOverride);
 }
 
-function activeContextRows(entries: SessionEntry[]): AuditRow[] {
-	const rows: AuditRow[] = [];
+export function collectActiveContextAudit(entries: SessionEntry[]): ActiveContextAudit {
+	const audit: ActiveContextAudit = { messages: [], rows: [] };
 	const compaction = latestCompaction(entries);
 	if (!compaction) {
 		for (const entry of entries) {
 			const message = messageFromEntry(entry);
-			if (message) addRow(rows, entry, message);
+			if (message) addActiveContextEntry(audit, entry, message);
 		}
-		return rows;
+		return audit;
 	}
 
 	const compactionMessage = createCompactionSummaryMessage(
@@ -168,7 +150,7 @@ function activeContextRows(entries: SessionEntry[]): AuditRow[] {
 		compaction.tokensBefore,
 		compaction.timestamp,
 	);
-	addRow(rows, compaction, compactionMessage, "compaction");
+	addActiveContextEntry(audit, compaction, compactionMessage, "compaction");
 
 	const compactionIndex = entries.findIndex((entry) => entry.id === compaction.id);
 	let foundFirstKept = false;
@@ -177,14 +159,14 @@ function activeContextRows(entries: SessionEntry[]): AuditRow[] {
 		if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
 		if (!foundFirstKept) continue;
 		const message = messageFromEntry(entry);
-		if (message) addRow(rows, entry, message);
+		if (message) addActiveContextEntry(audit, entry, message);
 	}
 	for (let index = compactionIndex + 1; index < entries.length; index++) {
 		const entry = entries[index];
 		const message = messageFromEntry(entry);
-		if (message) addRow(rows, entry, message);
+		if (message) addActiveContextEntry(audit, entry, message);
 	}
-	return rows;
+	return audit;
 }
 
 function groupRows(rows: AuditRow[]): Array<[string, { count: number; tokens: number; chars: number }]> {
@@ -264,8 +246,7 @@ export function createCoreDiagnosticsToolDefinitions(
 				const query = params.query?.trim().toLowerCase();
 
 				const branch = ctx.sessionManager.getBranch();
-				const rows = activeContextRows(branch);
-				const activeMessages = activeContextMessages(branch);
+				const { rows, messages: activeMessages } = collectActiveContextAudit(branch);
 				const contextGcReport = getContextGcReport?.(activeMessages);
 				const memoryDiagnostics = getMemoryDiagnostics?.();
 				const contextUsage = ctx.getContextUsage();
@@ -273,7 +254,7 @@ export function createCoreDiagnosticsToolDefinitions(
 				const activeTools = new Set(getActiveTools());
 				const allTools = getAllTools();
 				const activeToolInfos = allTools.filter((tool) => activeTools.has(tool.name));
-				const systemTokens = estimateTextTokens(systemPrompt);
+				const systemTokens = estimateStringTokens(systemPrompt);
 				const toolSchemaChars = JSON.stringify(
 					activeToolInfos.map((tool) => ({
 						name: tool.name,
@@ -307,7 +288,7 @@ export function createCoreDiagnosticsToolDefinitions(
 				const rowLines = heaviest.map((row, index) => {
 					const base = `${index + 1}. ${row.tokens} est tok · ${row.label} · ${row.entryId ?? "no-entry"}`;
 					return includePreviews
-						? `${base}\n   ${cap(row.preview, MAX_PREVIEW_CHARS) || "(no text preview)"}`
+						? `${base}\n   ${boundedTextPreview(row.preview, MAX_PREVIEW_CHARS) || "(no text preview)"}`
 						: base;
 				});
 
@@ -345,7 +326,7 @@ export function createCoreDiagnosticsToolDefinitions(
 						systemPrompt: {
 							chars: systemPrompt.length,
 							estimatedTokens: systemTokens,
-							preview: cap(systemPrompt, MAX_PREVIEW_CHARS),
+							preview: boundedTextPreview(systemPrompt, MAX_PREVIEW_CHARS),
 						},
 						activeTools: activeToolInfos.map((tool) => tool.name),
 						toolSchemaEstimate: { chars: toolSchemaChars, estimatedTokens: toolSchemaTokens },

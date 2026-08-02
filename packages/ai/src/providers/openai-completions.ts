@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import type OpenAI from "openai";
 import type {
 	ChatCompletionAssistantMessageParam,
 	ChatCompletionChunk,
@@ -32,7 +32,6 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
-import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJsonState } from "../utils/json-parse.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -42,10 +41,18 @@ import {
 	renderTextProtocolAssistantCall,
 	renderTextProtocolToolResult,
 } from "../utils/tool-repair/text-protocol-history.ts";
-import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { createOpenAIClient } from "./openai-client.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { detectOpenRouterCacheControlFormat } from "./openrouter-cache.ts";
+import {
+	applyProviderPayloadHook,
+	beginAssistantResponseStream,
+	createAssistantMessage,
+	createProviderRetryOptions,
+	createRetryFreeRequestOptions,
+	resolveCacheRetention,
+	terminateAssistantStreamWithError,
+} from "./provider-runtime.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
@@ -148,16 +155,6 @@ type ChatCompletionToolWithCacheControl = OpenAI.Chat.Completions.ChatCompletion
 	cache_control?: OpenAICompatCacheControl;
 };
 
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
-}
-
 export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
 	model: Model<"openai-completions">,
 	context: Context,
@@ -166,50 +163,36 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output = createAssistantMessage(model);
 
 		try {
 			const apiKey = getOpenAICompletionsApiKey(model, options?.apiKey);
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
-			let params = buildParams(model, context, options, compat, cacheRetention);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: 0,
-			};
+			const client = createOpenAIClient(model, apiKey, {
+				context,
+				callerHeaders: options?.headers,
+				session:
+					cacheSessionId && compat.sendSessionAffinityHeaders
+						? {
+								id: cacheSessionId,
+								format: compat.sessionAffinityFormat,
+								includeLegacyAffinity: true,
+							}
+						: undefined,
+			});
+			const params = await applyProviderPayloadHook(
+				buildParams(model, context, options, compat, cacheRetention),
+				model,
+				options?.onPayload,
+			);
+			const requestOptions = createRetryFreeRequestOptions(options);
 			const { data: openaiStream, response } = await retryProviderRequest(
 				() => client.chat.completions.create(params, requestOptions).withResponse(),
-				{
-					maxRetries: options?.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: options?.signal,
-				},
+				createProviderRetryOptions(options),
 			);
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			interface StreamingToolCallBlock extends ToolCall {
 				partialArgs?: string;
@@ -498,22 +481,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// Streaming scratch buffers are only used during parsing; never persist them.
-				delete (block as { partialArgs?: string }).partialArgs;
-				delete (block as { partialArgsComplete?: boolean }).partialArgsComplete;
-				delete (block as { streamIndex?: number }).streamIndex;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatOpenAICompletionsProviderError(error, model);
-			// Some providers via OpenRouter give additional information in this field.
-			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata && !output.errorMessage.includes(String(rawMetadata))) {
-				output.errorMessage += `\n${rawMetadata}`;
-			}
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
+				formatError: (caught) => {
+					const formatted = formatOpenAICompletionsProviderError(caught, model);
+					const rawMetadata = (caught as { error?: { metadata?: { raw?: unknown } } })?.error?.metadata?.raw;
+					return rawMetadata && !formatted.includes(String(rawMetadata))
+						? `${formatted}\n${rawMetadata}`
+						: formatted;
+				},
+				scratchFields: ["index", "partialArgs", "partialArgsComplete", "streamIndex"],
+			});
 		}
 	})();
 
@@ -539,58 +516,6 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
-
-function createClient(
-	model: Model<"openai-completions">,
-	context: Context,
-	apiKey: string,
-	optionsHeaders?: Record<string, string>,
-	sessionId?: string,
-	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
-) {
-	const headers = { ...model.headers };
-	if (model.provider === "github-copilot") {
-		const hasImages = hasCopilotVisionInput(context.messages);
-		const copilotHeaders = buildCopilotDynamicHeaders({
-			messages: context.messages,
-			hasImages,
-		});
-		Object.assign(headers, copilotHeaders);
-	}
-
-	if (sessionId && compat.sendSessionAffinityHeaders) {
-		if (compat.sessionAffinityFormat === "openrouter") {
-			headers["x-session-id"] = sessionId;
-		} else {
-			if (compat.sessionAffinityFormat === "openai") {
-				headers.session_id = sessionId;
-			}
-			headers["x-client-request-id"] = sessionId;
-			headers["x-session-affinity"] = sessionId;
-		}
-	}
-
-	// Merge options headers last so they can override defaults
-	if (optionsHeaders) {
-		Object.assign(headers, optionsHeaders);
-	}
-
-	const defaultHeaders =
-		model.provider === "cloudflare-ai-gateway"
-			? {
-					...headers,
-					Authorization: headers.Authorization ?? null,
-					"cf-aig-authorization": `Bearer ${apiKey}`,
-				}
-			: headers;
-
-	return new OpenAI({
-		apiKey,
-		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
-		dangerouslyAllowBrowser: true,
-		defaultHeaders,
-	});
-}
 
 function buildParams(
 	model: Model<"openai-completions">,

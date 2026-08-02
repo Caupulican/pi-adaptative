@@ -1,4 +1,5 @@
-import { type AssistantMessage, getToolExecutionErrorGuidance, type ToolResultMessage } from "@caupulican/pi-ai";
+import { getToolExecutionErrorGuidance } from "@caupulican/pi-ai/tool-repair-registry";
+import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
 

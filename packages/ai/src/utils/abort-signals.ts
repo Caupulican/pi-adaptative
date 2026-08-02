@@ -15,14 +15,22 @@ export function createAbortError(message = "Request aborted"): Error {
  * listeners for the signal's lifetime.
  */
 export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return sleepWithAbortError(ms, signal, createAbortError);
+}
+
+export function sleepWithAbortError(
+	ms: number,
+	signal: AbortSignal | undefined,
+	createError: () => Error,
+): Promise<void> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) {
-			reject(createAbortError());
+			reject(createError());
 			return;
 		}
 		const onAbort = () => {
 			clearTimeout(timeout);
-			reject(createAbortError());
+			reject(createError());
 		};
 		const timeout = setTimeout(() => {
 			signal?.removeEventListener("abort", onAbort);

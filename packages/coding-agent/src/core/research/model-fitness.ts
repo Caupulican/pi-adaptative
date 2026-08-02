@@ -2,6 +2,7 @@ import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { CURATION_DIGEST_SYSTEM_PROMPT } from "../context/brain-curator.ts";
 import { runWorker } from "../delegation/worker-runner.ts";
+import { parseModelOutputJsonObject } from "../model-output-json.ts";
 import { runRouteJudge } from "../model-router/route-judge.ts";
 import { runResearch } from "./research-runner.ts";
 
@@ -178,7 +179,7 @@ const DIGEST_PROBE_TASKS: readonly { chunk: string; nonce: string }[] = [
 ];
 
 function parseDigest(text: string, nonce: string): boolean {
-	const parsed = extractJsonObject(text);
+	const parsed = parseModelOutputJsonObject(text);
 	if (!parsed) return false;
 	const digest = (parsed as { digest?: unknown }).digest;
 	if (typeof digest !== "string") return false;
@@ -194,7 +195,7 @@ const TOOL_CALL_PROBE_TASKS: readonly string[] = [
 ];
 
 function parseSearchPlan(text: string): boolean {
-	const parsed = extractJsonObject(text);
+	const parsed = parseModelOutputJsonObject(text);
 	if (!parsed) return false;
 	const queries = (parsed as { queries?: unknown }).queries;
 	if (!Array.isArray(queries) || queries.length === 0 || queries.length > 8) return false;
@@ -208,7 +209,7 @@ function parseSearchPlan(text: string): boolean {
 }
 
 function parseToolCall(text: string): boolean {
-	const parsed = extractJsonObject(text);
+	const parsed = parseModelOutputJsonObject(text);
 	if (!parsed) return false;
 	const record = parsed as { tool?: unknown; arguments?: unknown };
 	if (record.tool !== "grep") return false;
@@ -219,25 +220,6 @@ function parseToolCall(text: string): boolean {
 	return (
 		typeof pattern === "string" && pattern.trim().length > 0 && typeof path === "string" && path.trim().length > 0
 	);
-}
-
-function extractJsonObject(text: string): unknown | undefined {
-	const trimmed = text.trim();
-	const candidates: string[] = [trimmed];
-	const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-	if (fenced?.[1]) candidates.push(fenced[1].trim());
-	const start = trimmed.indexOf("{");
-	const end = trimmed.lastIndexOf("}");
-	if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
-	for (const candidate of candidates) {
-		try {
-			const parsed = JSON.parse(candidate);
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-		} catch {
-			// try next candidate
-		}
-	}
-	return undefined;
 }
 
 function fitnessEnvelope(): CapabilityEnvelope {

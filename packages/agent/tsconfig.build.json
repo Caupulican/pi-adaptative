@@ -4,7 +4,12 @@
 		"outDir": "./dist",
 		"paths": {
 			"@caupulican/pi-ai": ["../ai/dist/index.d.ts"],
-			"@caupulican/pi-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"]
+			"@caupulican/pi-ai/tool-repair-registry": ["../ai/dist/utils/tool-repair/registry.d.ts"],
+			"@caupulican/pi-ai/*": [
+				"../ai/dist/*.d.ts",
+				"../ai/dist/providers/*.d.ts",
+				"../ai/dist/utils/*.d.ts"
+			]
 		},
 		"rootDir": "./src"
 	},

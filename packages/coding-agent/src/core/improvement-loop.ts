@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { StringEnum } from "@caupulican/pi-ai";
+import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { Type } from "typebox";
 import { getAgentDir } from "../config.ts";
 import { getProcessWorkRun, getWorkRoot, getWorkRunDir, getWorkTenantDir } from "../utils/work-directory.ts";
@@ -659,6 +659,18 @@ async function runGit(
 	return exec("git", args, { cwd, timeout: 60_000, signal, maxBuffer: 64 * 1024 });
 }
 
+function requireActiveSandbox(
+	state: ImprovementLoopState,
+	sandboxId: string | undefined,
+	errorMessage: string,
+): ImprovementSandboxRecord {
+	const sandbox = sandboxId
+		? state.sandboxes.find((candidate) => candidate.sandboxId === normalizeLoopId(sandboxId))
+		: state.activeSandbox;
+	if (!sandbox || sandbox.status !== "active") throw new Error(errorMessage);
+	return sandbox;
+}
+
 export async function createImprovementSandbox(input: ImprovementSandboxCreateInput): Promise<ImprovementLoopState> {
 	const state = await readImprovementLoopState(input);
 	if (!state) throw new Error("Improvement loop is not initialized; call init first.");
@@ -702,10 +714,7 @@ export async function exportImprovementSandboxPatch(
 ): Promise<ImprovementLoopState> {
 	const state = await readImprovementLoopState(input);
 	if (!state) throw new Error("Improvement loop is not initialized; call init first.");
-	const sandbox = input.sandboxId
-		? state.sandboxes.find((candidate) => candidate.sandboxId === normalizeLoopId(input.sandboxId))
-		: state.activeSandbox;
-	if (!sandbox || sandbox.status !== "active") throw new Error("No active sandbox found to export.");
+	const sandbox = requireActiveSandbox(state, input.sandboxId, "No active sandbox found to export.");
 	const diff = await runGit(input.exec, sandbox.worktreePath, ["diff", "--binary", "HEAD"], input.signal);
 	if (diff.code !== 0) throw new Error(`Failed to export sandbox patch: ${(diff.stderr || diff.stdout).trim()}`);
 	if (!diff.stdout.trim() && !input.allowEmptyPatch) throw new Error("Sandbox has no changes to export.");
@@ -724,10 +733,7 @@ export async function exportImprovementSandboxPatch(
 export async function cleanupImprovementSandbox(input: ImprovementSandboxCleanupInput): Promise<ImprovementLoopState> {
 	const state = await readImprovementLoopState(input);
 	if (!state) throw new Error("Improvement loop is not initialized; call init first.");
-	const sandbox = input.sandboxId
-		? state.sandboxes.find((candidate) => candidate.sandboxId === normalizeLoopId(input.sandboxId))
-		: state.activeSandbox;
-	if (!sandbox || sandbox.status !== "active") throw new Error("No active sandbox found to clean up.");
+	const sandbox = requireActiveSandbox(state, input.sandboxId, "No active sandbox found to clean up.");
 	const remove = await runGit(
 		input.exec,
 		sandbox.repoPath,

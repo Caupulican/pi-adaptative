@@ -1,9 +1,6 @@
-import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
 import type {
-	Api,
-	AssistantMessage,
 	CacheRetention,
 	Context,
 	Model,
@@ -11,22 +8,31 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
-	Usage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { headersToRecord } from "../utils/headers.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { createOpenAIClient } from "./openai-client.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
+	applyOpenAIServiceTierPricing,
 	buildResponsesInstructions,
 	convertResponsesMessages,
 	convertResponsesTools,
 	createOpenAIResponsesToolNameMap,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
+import {
+	applyProviderPayloadHook,
+	beginAssistantResponseStream,
+	completeAssistantStream,
+	createAssistantMessage,
+	createProviderRetryOptions,
+	createRetryFreeRequestOptions,
+	resolveCacheRetention,
+	terminateAssistantStreamWithError,
+} from "./provider-runtime.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "fugu"]);
@@ -35,20 +41,6 @@ const FUGU_DEFAULT_MAX_RETRIES = 4;
 
 function detectSessionAffinityFormat(model: Pick<Model<"openai-responses">, "provider" | "baseUrl">) {
 	return model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai") ? "openrouter" : "openai";
-}
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
 }
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
@@ -89,23 +81,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 
 	// Start async processing
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output = createAssistantMessage(model);
 
 		try {
 			// Create OpenAI client
@@ -115,32 +91,26 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			}
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			const compat = getCompat(model);
+			const client = createOpenAIClient(model, apiKey, {
+				baseUrl: resolveBaseUrl(model),
+				context,
+				callerHeaders: options?.headers,
+				session: cacheSessionId
+					? { id: cacheSessionId, format: compat.sessionAffinityFormat, includeLegacyAffinity: false }
+					: undefined,
+			});
 			const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
-			let params = buildParams(model, context, options);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined
-					? { timeout: options.timeoutMs }
-					: model.provider === "fugu"
-						? { timeout: FUGU_DEFAULT_TIMEOUT_MS }
-						: {}),
-				maxRetries: 0,
-			};
+			const params = await applyProviderPayloadHook(buildParams(model, context, options), model, options?.onPayload);
+			const requestOptions = createRetryFreeRequestOptions(
+				options,
+				model.provider === "fugu" ? FUGU_DEFAULT_TIMEOUT_MS : undefined,
+			);
 			const { data: openaiStream, response } = await retryProviderRequest(
 				() => client.responses.create(params, requestOptions).withResponse(),
-				{
-					maxRetries: options?.maxRetries ?? (model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0),
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: options?.signal,
-				},
+				createProviderRetryOptions(options, model.provider === "fugu" ? FUGU_DEFAULT_MAX_RETRIES : 0),
 			);
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			await processResponsesStream(openaiStream, output, stream, model, {
 				toolNameMap,
@@ -148,29 +118,15 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				applyServiceTierPricing:
 					model.provider === "fugu"
 						? undefined
-						: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+						: (usage, serviceTier) => applyOpenAIServiceTierPricing(usage, serviceTier, model),
 			});
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatOpenAIResponsesError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
+				formatError: formatOpenAIResponsesError,
+				scratchFields: ["index", "partialJson"],
+			});
 		}
 	})();
 
@@ -210,57 +166,6 @@ function resolveBaseUrl(model: Model<"openai-responses">): string {
 	if (isCloudflareProvider(model.provider)) return resolveCloudflareBaseUrl(model);
 	if (model.provider === "fugu") return resolveFuguBaseUrl() ?? model.baseUrl;
 	return model.baseUrl;
-}
-
-function createClient(
-	model: Model<"openai-responses">,
-	context: Context,
-	apiKey: string,
-	optionsHeaders?: Record<string, string>,
-	sessionId?: string,
-) {
-	const compat = getCompat(model);
-	const headers = { ...model.headers };
-	if (model.provider === "github-copilot") {
-		const hasImages = hasCopilotVisionInput(context.messages);
-		const copilotHeaders = buildCopilotDynamicHeaders({
-			messages: context.messages,
-			hasImages,
-		});
-		Object.assign(headers, copilotHeaders);
-	}
-
-	if (sessionId) {
-		if (compat.sessionAffinityFormat === "openrouter") {
-			headers["x-session-id"] = sessionId;
-		} else {
-			if (compat.sessionAffinityFormat === "openai") {
-				headers.session_id = sessionId;
-			}
-			headers["x-client-request-id"] = sessionId;
-		}
-	}
-
-	// Merge options headers last so they can override defaults
-	if (optionsHeaders) {
-		Object.assign(headers, optionsHeaders);
-	}
-
-	const defaultHeaders =
-		model.provider === "cloudflare-ai-gateway"
-			? {
-					...headers,
-					Authorization: headers.Authorization ?? null,
-					"cf-aig-authorization": `Bearer ${apiKey}`,
-				}
-			: headers;
-
-	return new OpenAI({
-		apiKey,
-		baseURL: resolveBaseUrl(model),
-		dangerouslyAllowBrowser: true,
-		defaultHeaders,
-	});
 }
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
@@ -339,33 +244,4 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	return params;
-}
-
-function getServiceTierCostMultiplier(
-	model: Pick<Model<"openai-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): number {
-	switch (serviceTier) {
-		case "flex":
-			return 0.5;
-		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
-		default:
-			return 1;
-	}
-}
-
-function applyServiceTierPricing(
-	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	model: Pick<Model<"openai-responses">, "id">,
-) {
-	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
-	if (multiplier === 1) return;
-
-	usage.cost.input *= multiplier;
-	usage.cost.output *= multiplier;
-	usage.cost.cacheRead *= multiplier;
-	usage.cost.cacheWrite *= multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }

@@ -98,6 +98,15 @@ describe("ToolPerformanceStore", () => {
 		expect(existsSync(filePath)).toBe(true);
 	});
 
+	it("writes machine-owned state without indentation amplification", () => {
+		const store = storeFor();
+		store.recordExecution({ key, success: true, latencyMs: 1, selection });
+
+		const serialized = readFileSync(join(dirs[0]!, "state/tool-performance.json"), "utf8");
+		expect(serialized.endsWith("\n")).toBe(true);
+		expect(serialized).not.toContain("\n\t");
+	});
+
 	it("bounds observations and statistics", () => {
 		const store = storeFor();
 		for (let index = 0; index < 1_020; index += 1) {
@@ -109,12 +118,100 @@ describe("ToolPerformanceStore", () => {
 			});
 		}
 		const observations = store.getObservations();
-		expect(observations).toHaveLength(1_000);
+		expect(observations.length).toBeGreaterThan(0);
+		expect(observations.length).toBeLessThanOrEqual(1_000);
+		expect(Buffer.byteLength(JSON.stringify(observations), "utf8")).toBeLessThanOrEqual(256 * 1024);
+		expect(observations.at(-1)?.actualTool).toBe("tool-1019");
 		const file = JSON.parse(readFileSync(join(dirs[0]!, "state/tool-performance.json"), "utf8")) as {
 			hosts: Record<string, { stats: Record<string, unknown> }>;
 		};
 		expect(Object.keys(Object.values(file.hosts)[0]!.stats)).toHaveLength(500);
 	}, 120_000);
+
+	it("bounds observation history by encoded bytes without losing cumulative evidence", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-byte-bound-"));
+		dirs.push(dir);
+		const path = join(dir, "state", "tool-performance.json");
+		const seededAt = "2026-08-01T00:00:00.000Z";
+		const longToolName = "candidate-".concat("x".repeat(600));
+		const observations = Array.from({ length: 120 }, (_, index) => ({
+			at: `2026-08-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+			modelRef: key.modelRef,
+			intentClass: key.intentClass,
+			actualTool: key.tool,
+			firstTool: true,
+			succeeded: true,
+			disposition: "recommend",
+			recommendation: key.tool,
+			shortlist: Array.from({ length: 3 }, (_, candidate) => `${longToolName}-shortlist-${candidate}`),
+			entropy: 0.1,
+			margin: 0.2,
+			ranked: Array.from({ length: 6 }, (_, candidate) => ({
+				tool: `${longToolName}-ranked-${candidate}`,
+				utility: 0.8,
+				probability: 0.7,
+			})),
+			latencyMs: index,
+		}));
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(
+			path,
+			JSON.stringify({
+				version: 1,
+				hosts: {
+					[hosts[0].id]: {
+						host: hosts[0],
+						stats: {
+							[`${key.modelRef}\0${key.intentClass}\0${key.tool}`]: {
+								...key,
+								alpha: 121,
+								beta: 1,
+								sampleCount: 120,
+								repairCount: 0,
+								bounceCount: 0,
+								failureCount: 0,
+								lastUsedAt: seededAt,
+							},
+						},
+						observations,
+						intentAgreement: {
+							[`${key.modelRef}\0${key.intentClass}`]: {
+								modelRef: key.modelRef,
+								intentClass: key.intentClass,
+								sampleCount: 120,
+								agreementCount: 120,
+								hintActiveSampleCount: 0,
+								hintActiveAgreementCount: 0,
+								lastUpdatedAt: seededAt,
+							},
+						},
+					},
+				},
+			}),
+			"utf8",
+		);
+
+		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
+		const newestAt = "2026-08-01T00:02:00.000Z";
+		store.recordExecution({ key, success: true, latencyMs: 1, selection, at: newestAt });
+
+		const file = JSON.parse(readFileSync(path, "utf8")) as {
+			hosts: Record<
+				string,
+				{
+					observations: Array<{ at: string }>;
+					stats: Record<string, { sampleCount: number }>;
+					intentAgreement: Record<string, { sampleCount: number }>;
+				}
+			>;
+		};
+		const host = file.hosts[hosts[0].id]!;
+		expect(Buffer.byteLength(JSON.stringify(host.observations), "utf8")).toBeLessThanOrEqual(256 * 1024);
+		expect(host.observations.length).toBeLessThan(observations.length);
+		expect(host.observations.at(-1)?.at).toBe(newestAt);
+		expect(host.stats[`${key.modelRef}\0${key.intentClass}\0${key.tool}`]?.sampleCount).toBe(121);
+		expect(host.intentAgreement[`${key.modelRef}\0${key.intentClass}`]?.sampleCount).toBe(121);
+	});
 
 	it("fails closed on corrupt storage and overwrites it on the next valid save", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-"));

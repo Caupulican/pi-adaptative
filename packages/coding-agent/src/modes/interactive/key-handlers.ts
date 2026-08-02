@@ -17,7 +17,7 @@ export interface KeyHandlersHost {
 	readonly defaultEditor: CustomEditor;
 	readonly editor: EditorComponent;
 	readonly ui: TUI;
-	readonly session: Pick<AgentSession, "isStreaming" | "isBashRunning" | "abortBash">;
+	readonly session: Pick<AgentSession, "isStreaming" | "isBashRunning" | "abortBash" | "backgroundRunningToolCalls">;
 	readonly settingsManager: Pick<SettingsManager, "getDoubleEscapeAction">;
 	isBashMode: boolean;
 	lastEscapeTime: number;
@@ -33,6 +33,7 @@ export interface KeyHandlersHost {
 	handleDebugCommand(): void;
 	showModelSelector(initialSearchInput?: string): Promise<void>;
 	loadTuiHistoryOnDemand(): void;
+	showTranscriptPager(): void;
 	toggleThinkingBlockVisibility(): Promise<void>;
 	openExternalEditor(): Promise<void>;
 	handleFollowUp(): Promise<void>;
@@ -85,6 +86,8 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	host.ui.onDebug = () => host.handleDebugCommand();
 	host.defaultEditor.onAction("app.model.select", () => void host.showModelSelector());
 	host.defaultEditor.onAction("app.tools.expand", () => host.loadTuiHistoryOnDemand());
+	host.defaultEditor.onBackgroundTool = () => host.session.backgroundRunningToolCalls() > 0;
+	host.defaultEditor.onAction("app.transcript.open", () => host.showTranscriptPager());
 	host.defaultEditor.onAction("app.thinking.toggle", () => void host.toggleThinkingBlockVisibility());
 	host.defaultEditor.onAction("app.editor.external", () => host.openExternalEditor());
 	host.defaultEditor.onAction("app.message.followUp", () => host.handleFollowUp());
@@ -98,9 +101,9 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	host.defaultEditor.onAction("app.session.fork", () => host.showUserMessageSelector());
 	host.defaultEditor.onAction("app.session.resume", () => host.showSessionSelector());
 
-	host.defaultEditor.onChange = (text: string) => {
+	host.defaultEditor.onChangeSummary = ({ firstNonWhitespace }) => {
 		const wasBashMode = host.isBashMode;
-		host.isBashMode = text.trimStart().startsWith("!");
+		host.isBashMode = firstNonWhitespace === "!";
 		if (wasBashMode !== host.isBashMode) {
 			host.updateEditorBorderColor();
 		}

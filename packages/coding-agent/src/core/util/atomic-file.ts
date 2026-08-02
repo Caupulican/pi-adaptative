@@ -101,10 +101,18 @@ export interface AtomicFileLockOptions {
 	 *   the existing execution model rather than introducing a new one.
 	 */
 	retries?: number;
+	/** Initial delay between sync/async acquisition attempts; defaults to 25ms. */
+	minRetryDelayMs?: number;
+	/** Maximum delay between sync/async acquisition attempts; defaults to 500ms. */
+	maxRetryDelayMs?: number;
+	/** Retry-delay multiplier; defaults to 2. Set max=min for a fixed delay. */
+	retryFactor?: number;
 	/** Resolve symlinks before locking (proper-lockfile `realpath`); false matches file-store.ts. */
 	realpath?: boolean;
 	/** Lock staleness window in ms (proper-lockfile `stale`); omitted = proper-lockfile's own default. */
 	stale?: number;
+	/** Explicit proper-lockfile directory path; defaults to `${filePath}.lock`. */
+	lockfilePath?: string;
 }
 
 export interface AtomicFileWriteOptions {
@@ -123,12 +131,27 @@ const DEFAULT_REALPATH = false;
  */
 const RETRY_MIN_TIMEOUT_MS = 25;
 const RETRY_MAX_TIMEOUT_MS = 500;
-function ensureLockDirSync(filePath: string): void {
-	mkdirSync(dirname(filePath), { recursive: true });
+
+/**
+ * Existing auth/settings/trust paths historically used 10 total attempts separated by 20ms. Keep
+ * that low-latency user-facing policy explicit while routing the mechanism through this module.
+ */
+export const LOW_LATENCY_FILE_LOCK_OPTIONS: Readonly<AtomicFileLockOptions> = Object.freeze({
+	retries: 9,
+	minRetryDelayMs: 20,
+	maxRetryDelayMs: 20,
+});
+
+function lockDirectory(filePath: string, lockfilePath?: string): string {
+	return dirname(lockfilePath ?? filePath);
 }
 
-async function ensureLockDir(filePath: string): Promise<void> {
-	await fsPromises.mkdir(dirname(filePath), { recursive: true });
+function ensureLockDirSync(filePath: string, lockfilePath?: string): void {
+	mkdirSync(lockDirectory(filePath, lockfilePath), { recursive: true });
+}
+
+async function ensureLockDir(filePath: string, lockfilePath?: string): Promise<void> {
+	await fsPromises.mkdir(lockDirectory(filePath, lockfilePath), { recursive: true });
 }
 
 function isLockedError(err: unknown): boolean {
@@ -169,16 +192,40 @@ function blockingSleepMs(ms: number): void {
  * and surfaced as spurious ELOCKED failures under real contention (e.g. two OS threads hammering
  * the same file, or mkdir/rmdir lock-directory churn on a loaded Windows CI runner).
  */
-function lockSyncWithRetry(filePath: string, options: AtomicFileLockOptions): () => void {
-	const attempts = Math.max(1, options.retries ?? DEFAULT_RETRIES) + 1;
-	const lockOptions = { realpath: options.realpath ?? DEFAULT_REALPATH, stale: options.stale };
+function retryCount(options: AtomicFileLockOptions): number {
+	const configured = options.retries ?? DEFAULT_RETRIES;
+	return Number.isFinite(configured) ? Math.max(0, Math.floor(configured)) : DEFAULT_RETRIES;
+}
+
+function retryDelayMs(options: AtomicFileLockOptions, attempt: number): number {
+	const configuredMin = options.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS;
+	const minDelay = Number.isFinite(configuredMin) ? Math.max(0, configuredMin) : RETRY_MIN_TIMEOUT_MS;
+	const configuredMax = options.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS;
+	const maxDelay = Number.isFinite(configuredMax) ? Math.max(minDelay, configuredMax) : RETRY_MAX_TIMEOUT_MS;
+	const configuredFactor = options.retryFactor ?? 2;
+	const factor = Number.isFinite(configuredFactor) ? Math.max(1, configuredFactor) : 2;
+	return Math.min(minDelay * factor ** (attempt - 1), maxDelay);
+}
+
+/**
+ * Acquire a synchronous advisory file lock and return its release function. This is the shared
+ * mechanism for coordinators that must hold several locks in a deterministic order before entering
+ * one critical section; callers retain ownership of release ordering and release-error semantics.
+ */
+export function acquireFileLockSync(filePath: string, options: AtomicFileLockOptions = {}): () => void {
+	ensureLockDirSync(filePath, options.lockfilePath);
+	const attempts = retryCount(options) + 1;
+	const lockOptions = {
+		lockfilePath: options.lockfilePath,
+		realpath: options.realpath ?? DEFAULT_REALPATH,
+		stale: options.stale,
+	};
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
 			return lockfile.lockSync(filePath, lockOptions);
 		} catch (err) {
 			if (!isLockedError(err) || attempt === attempts) throw err;
-			const backoffMs = Math.min(RETRY_MIN_TIMEOUT_MS * 2 ** (attempt - 1), RETRY_MAX_TIMEOUT_MS);
-			blockingSleepMs(backoffMs);
+			blockingSleepMs(retryDelayMs(options, attempt));
 		}
 	}
 	// Unreachable (the loop always returns or throws), but keeps the function's return type honest.
@@ -190,8 +237,7 @@ function lockSyncWithRetry(filePath: string, options: AtomicFileLockOptions): ()
  * including when `fn` throws.
  */
 export function withFileLockSync<T>(filePath: string, fn: () => T, options?: AtomicFileLockOptions): T {
-	ensureLockDirSync(filePath);
-	const release = lockSyncWithRetry(filePath, options ?? {});
+	const release = acquireFileLockSync(filePath, options);
 	try {
 		return fn();
 	} finally {
@@ -211,13 +257,15 @@ export async function withFileLock<T>(
 	fn: () => Promise<T> | T,
 	options?: AtomicFileLockOptions,
 ): Promise<T> {
-	await ensureLockDir(filePath);
+	await ensureLockDir(filePath, options?.lockfilePath);
 	const release = await lockfile.lock(filePath, {
+		lockfilePath: options?.lockfilePath,
 		realpath: options?.realpath ?? DEFAULT_REALPATH,
 		retries: {
-			retries: options?.retries ?? DEFAULT_RETRIES,
-			minTimeout: RETRY_MIN_TIMEOUT_MS,
-			maxTimeout: RETRY_MAX_TIMEOUT_MS,
+			retries: retryCount(options ?? {}),
+			factor: options?.retryFactor ?? 2,
+			minTimeout: options?.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS,
+			maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
 		},
 		stale: options?.stale,
 	});

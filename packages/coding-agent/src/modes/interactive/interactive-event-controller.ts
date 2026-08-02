@@ -87,6 +87,17 @@ export interface InteractiveEventHost {
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 }
 
+function clearRetryControls(host: InteractiveEventHost): void {
+	if (host.retryEscapeHandler) {
+		host.defaultEditor.onEscape = host.retryEscapeHandler;
+		host.retryEscapeHandler = undefined;
+	}
+	if (host.retryCountdown) {
+		host.retryCountdown.dispose();
+		host.retryCountdown = undefined;
+	}
+}
+
 /** Single owner for AgentSessionEvent -> terminal UI state transitions. */
 export async function handleInteractiveEvent(host: InteractiveEventHost, event: AgentSessionEvent): Promise<void> {
 	if (!host.isInitialized) await host.init();
@@ -113,14 +124,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 		case "agent_start":
 			host.clearActiveToolCalls();
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(true);
-			if (host.retryEscapeHandler) {
-				host.defaultEditor.onEscape = host.retryEscapeHandler;
-				host.retryEscapeHandler = undefined;
-			}
-			if (host.retryCountdown) {
-				host.retryCountdown.dispose();
-				host.retryCountdown = undefined;
-			}
+			clearRetryControls(host);
 			host.activityLane?.remove("runtime:retry");
 			host.stopWorkingLoader();
 			if (host.workingVisible) {
@@ -163,6 +167,18 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			host.footerDataProvider.setExtensionStatus("delegate", undefined);
 			host.refreshActivityLane();
 			host.footer.invalidate();
+			break;
+
+		case "background_tools":
+			host.activityLane?.removeByPrefix("background-tool:");
+			for (const task of event.tasks) {
+				host.activityLane?.start({
+					id: `background-tool:${task.taskId}`,
+					kind: "tool",
+					label: `${task.toolName} · ${task.taskId}`,
+				});
+			}
+			host.ui.requestRender();
 			break;
 
 		case "message_start":
@@ -407,14 +423,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 		}
 
 		case "auto_retry_end":
-			if (host.retryEscapeHandler) {
-				host.defaultEditor.onEscape = host.retryEscapeHandler;
-				host.retryEscapeHandler = undefined;
-			}
-			if (host.retryCountdown) {
-				host.retryCountdown.dispose();
-				host.retryCountdown = undefined;
-			}
+			clearRetryControls(host);
 			host.activityLane?.finish("runtime:retry", event.success ? "success" : "failure", {
 				id: "runtime:retry",
 				kind: "runtime",

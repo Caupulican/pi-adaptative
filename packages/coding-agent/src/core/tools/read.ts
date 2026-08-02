@@ -9,6 +9,7 @@ import {
 	truncateHead,
 } from "@caupulican/pi-agent-core/node";
 import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
+import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import { Text } from "@caupulican/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
@@ -103,28 +104,27 @@ async function scanLines(
 ): Promise<void> {
 	const handle = await fsOpen(absolutePath, "r");
 	try {
-		const decoder = new StringDecoder("utf8");
+		const byteDecoder = new StringDecoder("utf8");
+		const lineDecoder = new StreamingLineDecoder(Number.MAX_SAFE_INTEGER, { lineEndings: "lf" });
 		const buffer = Buffer.allocUnsafe(SLICE_SCAN_CHUNK_BYTES);
-		let pending = "";
 		let index = 0;
 		let emittedAnyLine = false;
 		while (true) {
 			const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
-			pending += decoder.write(buffer.subarray(0, bytesRead));
-			let lineStart = 0;
-			let newlineIndex = pending.indexOf("\n", lineStart);
-			while (newlineIndex !== -1) {
+			const lines = lineDecoder.push(byteDecoder.write(buffer.subarray(0, bytesRead)));
+			for (const line of lines) {
 				emittedAnyLine = true;
-				if (!onLine(pending.slice(lineStart, newlineIndex), index++)) return;
-				lineStart = newlineIndex + 1;
-				newlineIndex = pending.indexOf("\n", lineStart);
+				if (!onLine(line, index++)) return;
 			}
-			pending = pending.slice(lineStart);
 		}
-		pending += decoder.end();
-		if (pending.length > 0 || !emittedAnyLine) {
-			onLine(pending, index);
+		for (const line of lineDecoder.push(byteDecoder.end())) {
+			emittedAnyLine = true;
+			if (!onLine(line, index++)) return;
+		}
+		const finalLine = lineDecoder.finish();
+		if (finalLine !== undefined || !emittedAnyLine) {
+			onLine(finalLine ?? "", index);
 		}
 	} finally {
 		await handle.close();

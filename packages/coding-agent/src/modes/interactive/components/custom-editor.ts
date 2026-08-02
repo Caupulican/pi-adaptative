@@ -12,6 +12,8 @@ export class CustomEditor extends Editor {
 	public onEscape?: () => void;
 	public onCtrlD?: () => void;
 	public onPasteImage?: () => void;
+	/** Return true only when an active foreground tool accepted the handoff. */
+	public onBackgroundTool?: () => boolean;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 
@@ -67,6 +69,10 @@ export class CustomEditor extends Editor {
 		}
 
 		// Check all other app actions
+		if (this.keybindings.matches(data, "app.tools.background") && this.onBackgroundTool?.()) {
+			return;
+		}
+
 		for (const [action, handler] of this.actionHandlers) {
 			if (action !== "app.interrupt" && action !== "app.exit" && this.keybindings.matches(data, action)) {
 				handler();

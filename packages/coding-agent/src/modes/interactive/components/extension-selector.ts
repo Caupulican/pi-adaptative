@@ -7,7 +7,7 @@ import { Container, getKeybindings, Spacer, Text, type TUI } from "@caupulican/p
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { advanceSelectorIndex, SelectorNavigationFooter } from "./selector-list.ts";
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
@@ -59,20 +59,7 @@ export class ExtensionSelectorComponent extends Container {
 
 		this.listContainer = new Container();
 		this.addChild(this.listContainer);
-		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(
-				rawKeyHint("↑↓", "navigate") +
-					"  " +
-					keyHint("tui.select.confirm", "select") +
-					"  " +
-					keyHint("tui.select.cancel", "cancel"),
-				1,
-				0,
-			),
-		);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.addChild(new SelectorNavigationFooter("select"));
 
 		this.updateList();
 	}
@@ -93,10 +80,10 @@ export class ExtensionSelectorComponent extends Container {
 		if (kb.matches(keyData, "app.tools.expand")) {
 			this.onToggleToolsExpanded?.();
 		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, this.options.length, -1, "clamp");
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, this.options.length, 1, "clamp");
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const selected = this.options[this.selectedIndex];

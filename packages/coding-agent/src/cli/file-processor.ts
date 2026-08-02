@@ -26,7 +26,7 @@ export interface ProcessFileOptions {
 /** Process @file arguments into text content and image attachments */
 export async function processFileArguments(fileArgs: string[], options?: ProcessFileOptions): Promise<ProcessedFiles> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
-	let text = "";
+	const textParts: string[] = [];
 	const images: ImageContent[] = [];
 
 	for (const fileArg of fileArgs) {
@@ -53,7 +53,9 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		if (mimeType) {
 			// Pathology guard only: real screenshots/photos sit far below this.
 			if (stats.size > MAX_ATTACHMENT_IMAGE_BYTES) {
-				text += `<file name="${absolutePath}">[Image is ${Math.round(stats.size / (1024 * 1024))}MB, beyond the inline decode guard; not attached.]</file>\n`;
+				textParts.push(
+					`<file name="${absolutePath}">[Image is ${Math.round(stats.size / (1024 * 1024))}MB, beyond the inline decode guard; not attached.]</file>\n`,
+				);
 				continue;
 			}
 			// Handle image file
@@ -65,7 +67,9 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			if (autoResizeImages) {
 				const resized = await resizeImage(content, mimeType);
 				if (!resized) {
-					text += `<file name="${absolutePath}">[Image omitted: could not be resized below the inline image size limit.]</file>\n`;
+					textParts.push(
+						`<file name="${absolutePath}">[Image omitted: could not be resized below the inline image size limit.]</file>\n`,
+					);
 					continue;
 				}
 				dimensionNote = formatDimensionNote(resized);
@@ -86,9 +90,9 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 
 			// Add text reference to image with optional dimension note
 			if (dimensionNote) {
-				text += `<file name="${absolutePath}">${dimensionNote}</file>\n`;
+				textParts.push(`<file name="${absolutePath}">${dimensionNote}</file>\n`);
 			} else {
-				text += `<file name="${absolutePath}"></file>\n`;
+				textParts.push(`<file name="${absolutePath}"></file>\n`);
 			}
 		} else {
 			// Handle text file
@@ -108,11 +112,13 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 					}
 					const lastNewline = head.lastIndexOf("\n");
 					if (lastNewline > 0) head = head.slice(0, lastNewline);
-					text += `<file name="${absolutePath}">\n${head}\n[File is ${Math.round(stats.size / (1024 * 1024))}MB; attached the leading window only. Read further slices with the read tool using offset.]\n</file>\n`;
+					textParts.push(
+						`<file name="${absolutePath}">\n${head}\n[File is ${Math.round(stats.size / (1024 * 1024))}MB; attached the leading window only. Read further slices with the read tool using offset.]\n</file>\n`,
+					);
 					continue;
 				}
 				const content = await readFile(absolutePath, "utf-8");
-				text += `<file name="${absolutePath}">\n${content}\n</file>\n`;
+				textParts.push(`<file name="${absolutePath}">\n${content}\n</file>\n`);
 			} catch (error: unknown) {
 				const message = error instanceof Error ? error.message : String(error);
 				console.error(chalk.red(`Error: Could not read file ${absolutePath}: ${message}`));
@@ -121,5 +127,5 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		}
 	}
 
-	return { text, images };
+	return { text: textParts.join(""), images };
 }

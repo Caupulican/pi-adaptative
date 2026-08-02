@@ -9,7 +9,12 @@ import {
 	wrapTextWithAnsi,
 } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
-import type { ClipboardInputHost, PendingClipboardImage } from "../../modes/interactive/clipboard-input.ts";
+import {
+	bindClipboardQueue,
+	type ClipboardInputHost,
+	type ClipboardQueueState,
+	type PendingClipboardImage,
+} from "../../modes/interactive/clipboard-input.ts";
 import { formatKeyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
@@ -258,8 +263,10 @@ export class AskQuestionDialog implements Component {
 	private readonly createAnswerEditor: CreateAskQuestionAnswerEditor;
 	private readonly selections: QuestionSelection[];
 	private readonly cursors: number[];
-	private pendingClipboardImages: PendingClipboardImage[] = [];
-	private clipboardImageCounter = 0;
+	private readonly clipboardQueue: ClipboardQueueState = {
+		pendingClipboardImages: [],
+		clipboardImageCounter: 0,
+	};
 	private currentIndex = 0;
 	private input: AskQuestionAnswerEditor | undefined;
 	private inputError: string | undefined;
@@ -303,7 +310,7 @@ export class AskQuestionDialog implements Component {
 
 	private result(cancelled: boolean, reason?: AskQuestionStopReason): AskQuestionDialogResult {
 		const answers = this.questions.map((question, index) =>
-			answerFor(question, this.selections[index]!, this.pendingClipboardImages),
+			answerFor(question, this.selections[index]!, this.clipboardQueue.pendingClipboardImages),
 		);
 		const referencedLabels = new Set(answers.flatMap((answer) => answer.images?.map((image) => image.label) ?? []));
 		return {
@@ -311,7 +318,7 @@ export class AskQuestionDialog implements Component {
 			cancelled,
 			imageContents: cancelled
 				? []
-				: this.pendingClipboardImages
+				: this.clipboardQueue.pendingClipboardImages
 						.filter((attachment) => referencedLabels.has(attachment.label))
 						.map((attachment) => attachment.content),
 			...(reason ? { reason } : {}),
@@ -376,20 +383,7 @@ export class AskQuestionDialog implements Component {
 		this.inputStatus = "Reading clipboard…";
 		this.refresh();
 		let reported = false;
-		const self = this;
-		const host: ClipboardInputHost = {
-			get pendingClipboardImages() {
-				return self.pendingClipboardImages;
-			},
-			set pendingClipboardImages(value) {
-				self.pendingClipboardImages = value;
-			},
-			get clipboardImageCounter() {
-				return self.clipboardImageCounter;
-			},
-			set clipboardImageCounter(value) {
-				self.clipboardImageCounter = value;
-			},
+		const host: ClipboardInputHost = bindClipboardQueue(this.clipboardQueue, {
 			editor: {
 				handleInput: (data) => input.handleInput(data),
 				insertTextAtCursor: (text) => input.insertTextAtCursor(text),
@@ -410,7 +404,7 @@ export class AskQuestionDialog implements Component {
 				this.inputError = message;
 				this.refresh();
 			},
-		};
+		});
 		try {
 			await this.pasteClipboardImage(host);
 		} finally {

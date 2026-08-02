@@ -2,6 +2,7 @@ import { Container } from "@caupulican/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { AuthDialogsController } from "../src/modes/interactive/auth-dialogs-controller.ts";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.ts";
+import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.ts";
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -10,11 +11,99 @@ beforeAll(() => initTheme("dark"));
 const originalAwsProfile = process.env.AWS_PROFILE;
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	if (originalAwsProfile === undefined) delete process.env.AWS_PROFILE;
 	else process.env.AWS_PROFILE = originalAwsProfile;
 });
 
 describe("authentication dialog liveness", () => {
+	it("closes and focuses the provider selector before dispatching its selected action", async () => {
+		const order: string[] = [];
+		let mounted: { component: unknown; focus: unknown } | undefined;
+		const done = vi.fn(() => order.push("done"));
+		const logout = vi.fn(() => order.push("logout"));
+		const controller = new AuthDialogsController({
+			getSession: () =>
+				({
+					modelRegistry: {
+						authStorage: {
+							list: () => ["test-provider"],
+							get: () => ({ type: "api_key", key: "secret" }),
+							getAuthStatus: () => ({ configured: true, source: "stored" }),
+							logout,
+						},
+						getProviderDisplayName: () => "Test Provider",
+						refresh: vi.fn(),
+					},
+				}) as never,
+			ui: {
+				showSelector: (create: (done: () => void) => { component: unknown; focus: unknown }) => {
+					mounted = create(done);
+				},
+				updateAvailableProviderCount: vi.fn(async () => {}),
+				showStatus: vi.fn(),
+			} as never,
+		});
+
+		await controller.showOAuthSelector("logout");
+		expect(mounted?.component).toBeInstanceOf(OAuthSelectorComponent);
+		expect(mounted?.focus).toBe(mounted?.component);
+		if (!(mounted?.component instanceof OAuthSelectorComponent)) throw new Error("expected provider selector");
+		mounted.component.handleInput("\r");
+		await vi.waitFor(() => expect(logout).toHaveBeenCalledOnce());
+
+		expect(order).toEqual(["done", "logout"]);
+	});
+
+	it("reports API-key and OAuth failures only after restoring the editor", async () => {
+		const editor = { render: () => [] };
+		const events: string[] = [];
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("api-key");
+		const controller = new AuthDialogsController({
+			getSession: () =>
+				({
+					model: { provider: "test-provider", id: "test-model" },
+					modelRegistry: {
+						authStorage: {
+							set: () => {
+								throw new Error("write failed");
+							},
+							getOAuthProviders: () => [{ id: "test-provider", usesCallbackServer: false }],
+							login: async () => {
+								throw new Error("provider unavailable");
+							},
+						},
+					},
+				}) as never,
+			ui: {
+				tui: { requestRender: vi.fn() },
+				overlayHost: {
+					swap: (component: unknown) => {
+						events.push(component === editor ? "restore" : "mount");
+					},
+				},
+				getEditor: () => editor,
+				showError: (message: string) => events.push(message),
+			} as never,
+		});
+		const privateController = controller as unknown as {
+			showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void>;
+			showLoginDialog(providerId: string, providerName: string): Promise<void>;
+		};
+
+		await privateController.showApiKeyLoginDialog("test-provider", "Test Provider");
+		await privateController.showLoginDialog("test-provider", "Test Provider");
+
+		expect(events).toEqual([
+			"mount",
+			"restore",
+			"Failed to save API key for Test Provider: write failed",
+			"mount",
+			"restore",
+			"Failed to login to Test Provider: provider unavailable",
+		]);
+	});
+
 	it("cancels a pending prompt exactly once", async () => {
 		const onComplete = vi.fn();
 		const dialog = new LoginDialogComponent({ requestRender: vi.fn() } as never, "test-provider", onComplete);

@@ -19,11 +19,10 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import type { NormalizedProfile } from "../../core/profile-registry.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
-import type { SettingsReloadSnapshot } from "../../core/settings-manager.ts";
+import type { ResourceProfileKind, SettingsReloadSnapshot } from "../../core/settings-manager.ts";
 import { validateSkillName } from "../../core/skills.ts";
 import { allToolNames } from "../../core/tools/index.ts";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
-import { ExtensionInputComponent } from "./components/extension-input.ts";
 import {
 	ProfileResourceEditorComponent,
 	type ProfileResourceEditorKind,
@@ -32,9 +31,21 @@ import {
 import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
 import { captureProfileFiles, restoreProfileFiles } from "./config-backup.ts";
+import { confirmExternalResourceTrust, promptForTextInput } from "./interactive-selection-prompts.ts";
 import { getAvailableThemesWithPaths } from "./theme/theme.ts";
 
 type WritableProfileScope = "session" | "directory" | "project" | "global" | "reusable-file";
+
+const PROFILE_SCOPE_OPTIONS: SelectItem[] = [
+	{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
+	{
+		value: "directory",
+		label: "directory",
+		description: "~/.pi/agent/profiles/directories/<hash>/settings.json",
+	},
+	{ value: "project", label: "project", description: ".pi/settings.json" },
+	{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
+];
 
 export const NO_ACTIVE_PROFILE_DESCRIPTION =
 	"Baseline resources; inline SDK extensions load, discovered extensions stay withheld";
@@ -65,6 +76,14 @@ interface ProfileDefinitionRollbackTarget {
 	profileName: string;
 	scope: WritableProfileScope;
 	profileFilesSnapshot?: ReturnType<typeof captureProfileFiles>;
+}
+
+function profileSelectionItems(profiles: NormalizedProfile[]): SelectItem[] {
+	return profiles.map((profile) => ({
+		value: profile.name,
+		label: profile.name,
+		description: profile.description || profile.source,
+	}));
 }
 
 export interface ProfileMenuControllerUi {
@@ -158,11 +177,7 @@ export class ProfileMenuController {
 
 		const options = [
 			{ value: "(none)", label: "(none)", description: NO_ACTIVE_PROFILE_DESCRIPTION },
-			...profiles.map((p) => ({
-				value: p.name,
-				label: p.name,
-				description: p.description || p.source,
-			})),
+			...profileSelectionItems(profiles),
 		];
 
 		this.ui.showSelector((done) => {
@@ -189,11 +204,7 @@ export class ProfileMenuController {
 	private async openManageProfilesFlow(): Promise<void> {
 		const registry = this.settingsManager.getProfileRegistry();
 		const profiles = registry.listProfiles();
-		const editableProfiles = profiles.map((p) => ({
-			value: p.name,
-			label: p.name,
-			description: p.description || p.source,
-		}));
+		const editableProfiles = profileSelectionItems(profiles);
 
 		const options = [
 			{
@@ -324,22 +335,11 @@ export class ProfileMenuController {
 	}
 
 	private async openPersistProfileSelector(): Promise<void> {
-		const scopeOptions = [
-			{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
-			{
-				value: "directory",
-				label: "directory",
-				description: "~/.pi/agent/profiles/directories/<hash>/settings.json",
-			},
-			{ value: "project", label: "project", description: ".pi/settings.json" },
-			{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
-		];
-
 		this.ui.showSelector((done) => {
 			const selector = new SelectSubmenu(
 				"Persist Active Profile / Situation",
 				"Choose where to write the active profile/situation selection.",
-				scopeOptions,
+				PROFILE_SCOPE_OPTIONS,
 				"directory",
 				(value) => {
 					done();
@@ -357,11 +357,7 @@ export class ProfileMenuController {
 
 	private async openDeleteProfileSelector(): Promise<void> {
 		const registry = this.settingsManager.getProfileRegistry();
-		const editableProfiles = registry.listProfiles().map((p) => ({
-			value: p.name,
-			label: p.name,
-			description: p.description || p.source,
-		}));
+		const editableProfiles = profileSelectionItems(registry.listProfiles());
 
 		this.ui.showSelector((done) => {
 			const selector = new SelectSubmenu(
@@ -484,24 +480,7 @@ export class ProfileMenuController {
 	}
 
 	private async createProfileAndOpenLibraryFlow(): Promise<void> {
-		const name = await new Promise<string | undefined>((resolve) => {
-			this.ui.showSelector((done) => {
-				const input = new ExtensionInputComponent(
-					"Create Profile / Situation",
-					"Enter profile/situation name",
-					(value) => {
-						done();
-						resolve(value);
-					},
-					() => {
-						done();
-						resolve(undefined);
-					},
-					{ tui: this.ui.tui },
-				);
-				return { component: input, focus: input, onSuperseded: () => resolve(undefined) };
-			});
-		});
+		const name = await promptForTextInput(this.ui, "Create Profile / Situation", "Enter profile/situation name");
 
 		if (name === undefined) {
 			void this.openLibraryManagerFlow();
@@ -541,11 +520,7 @@ export class ProfileMenuController {
 	private async selectProfileAndOpenLibraryFlow(): Promise<void> {
 		const registry = this.settingsManager.getProfileRegistry();
 		const profiles = registry.listProfiles();
-		const editableProfiles = profiles.map((p) => ({
-			value: p.name,
-			label: p.name,
-			description: p.description || p.source,
-		}));
+		const editableProfiles = profileSelectionItems(profiles);
 
 		if (editableProfiles.length === 0) {
 			this.ui.showWarning("No existing profiles/situations to select. Please create one.");
@@ -722,6 +697,28 @@ export class ProfileMenuController {
 		];
 	}
 
+	private async editProfileResource(
+		id: string,
+		pathValue: string,
+		kind: ResourceProfileKind,
+		reopen: () => void,
+	): Promise<void> {
+		const resolvedEditPath = resolveResourceEditPath(id, pathValue, kind);
+		if (!resolvedEditPath) {
+			this.ui.showWarning(`Resource "${id}" of kind "${kind}" has no editable file path.`);
+			reopen();
+			return;
+		}
+		if (!fs.existsSync(resolvedEditPath)) {
+			this.ui.showError(`Resolved path for "${id}" does not exist: ${resolvedEditPath}`);
+			reopen();
+			return;
+		}
+		await this.ui.openEditorForPath(resolvedEditPath);
+		await this.ui.handleReloadCommand();
+		reopen();
+	}
+
 	private async openLibraryEditorForProfile(
 		profileName: string,
 		initialScope: "session" | "directory" | "project" | "global" | "reusable-file",
@@ -761,20 +758,9 @@ export class ProfileMenuController {
 				},
 				onEdit: async (id, pathValue, kind) => {
 					done();
-					const resolvedEditPath = resolveResourceEditPath(id, pathValue, kind);
-					if (!resolvedEditPath) {
-						this.ui.showWarning(`Resource "${id}" of kind "${kind}" has no editable file path.`);
+					await this.editProfileResource(id, pathValue, kind, () => {
 						void this.openLibraryEditorForProfile(profileName, currentScope);
-						return;
-					}
-					if (!fs.existsSync(resolvedEditPath)) {
-						this.ui.showError(`Resolved path for "${id}" does not exist: ${resolvedEditPath}`);
-						void this.openLibraryEditorForProfile(profileName, currentScope);
-						return;
-					}
-					await this.ui.openEditorForPath(resolvedEditPath);
-					await this.ui.handleReloadCommand();
-					void this.openLibraryEditorForProfile(profileName, currentScope);
+					});
 				},
 			});
 
@@ -840,20 +826,11 @@ export class ProfileMenuController {
 			this.ui.updateEditorBorderColor();
 			this.ui.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
 		} catch (error) {
-			const rollbackError = stagedRuntimeApplied
-				? await this.rollbackValidatedProfileMutation(settingsSnapshot, {
-						profileName: profile.name,
-						scope,
-						profileFilesSnapshot,
-					})
-				: undefined;
-			if (!stagedRuntimeApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
-			const message = error instanceof Error ? error.message : String(error);
-			this.ui.showError(
-				rollbackError
-					? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-					: message,
-			);
+			await this.reportProfileMutationFailure(error, settingsSnapshot, stagedRuntimeApplied, {
+				profileName: profile.name,
+				scope,
+				profileFilesSnapshot,
+			});
 		}
 	}
 
@@ -895,30 +872,39 @@ export class ProfileMenuController {
 		return errors.length > 0 ? new Error(errors.join("; ")) : undefined;
 	}
 
+	private async reportProfileMutationFailure(
+		error: unknown,
+		settingsSnapshot: SettingsReloadSnapshot,
+		runtimeWasApplied: boolean,
+		definition?: ProfileDefinitionRollbackTarget,
+		restoreAdditional?: () => void,
+	): Promise<void> {
+		const rollbackError = runtimeWasApplied
+			? await this.rollbackValidatedProfileMutation(settingsSnapshot, definition)
+			: undefined;
+		if (!runtimeWasApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+		restoreAdditional?.();
+		const message = error instanceof Error ? error.message : String(error);
+		this.ui.showError(
+			rollbackError
+				? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+				: message,
+		);
+	}
+
 	private async promptScopeChangeForProfile(
 		profileName: string,
 		currentScope: "session" | "directory" | "project" | "global" | "reusable-file",
 	): Promise<void> {
-		const scopeOptions = [
-			{ value: "session", label: "session", description: "Runtime only (not written to disk)" },
-			{
-				value: "directory",
-				label: "directory",
-				description: "~/.pi/agent/profiles/directories/<hash>/settings.json",
-			},
-			{ value: "project", label: "project", description: ".pi/settings.json" },
-			{ value: "global", label: "global", description: "~/.pi/agent/settings.json" },
-		];
-
 		this.ui.showSelector((done) => {
 			const selector = new SelectSubmenu(
 				"Change Profile / Situation Scope",
 				`Select new scope for profile/situation "${profileName}".`,
-				scopeOptions,
+				PROFILE_SCOPE_OPTIONS,
 				currentScope,
 				(value) => {
 					done();
-					void this.openLibraryEditorForProfile(profileName, value as any);
+					void this.openLibraryEditorForProfile(profileName, value as WritableProfileScope);
 				},
 				() => {
 					done();
@@ -986,16 +972,7 @@ export class ProfileMenuController {
 				this.ui.updateEditorBorderColor();
 				this.ui.showStatus(`Profile: ${activeProfileName}`);
 			} catch (error) {
-				const rollbackError = stagedRuntimeApplied
-					? await this.rollbackValidatedProfileMutation(settingsSnapshot)
-					: undefined;
-				if (!stagedRuntimeApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
-				const message = error instanceof Error ? error.message : String(error);
-				this.ui.showError(
-					rollbackError
-						? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-						: message,
-				);
+				await this.reportProfileMutationFailure(error, settingsSnapshot, stagedRuntimeApplied);
 			}
 			return;
 		}
@@ -1058,17 +1035,9 @@ export class ProfileMenuController {
 				this.ui.checkDaxnutsEasterEgg(requestedModel);
 			}
 		} catch (error) {
-			const rollbackError = stagedRuntimeApplied
-				? await this.rollbackValidatedProfileMutation(settingsSnapshot)
-				: undefined;
-			if (!stagedRuntimeApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
-			if (modelRegistrySnapshot) this.session.modelRegistry.restoreReloadSnapshot(modelRegistrySnapshot);
-			const message = error instanceof Error ? error.message : String(error);
-			this.ui.showError(
-				rollbackError
-					? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-					: message,
-			);
+			await this.reportProfileMutationFailure(error, settingsSnapshot, stagedRuntimeApplied, undefined, () => {
+				if (modelRegistrySnapshot) this.session.modelRegistry.restoreReloadSnapshot(modelRegistrySnapshot);
+			});
 		}
 	}
 
@@ -1100,24 +1069,7 @@ export class ProfileMenuController {
 	}
 
 	private async createProfileFlow(): Promise<void> {
-		const name = await new Promise<string | undefined>((resolve) => {
-			this.ui.showSelector((done) => {
-				const input = new ExtensionInputComponent(
-					"Create Profile / Situation",
-					"Enter profile/situation name",
-					(value) => {
-						done();
-						resolve(value);
-					},
-					() => {
-						done();
-						resolve(undefined);
-					},
-					{ tui: this.ui.tui },
-				);
-				return { component: input, focus: input, onSuperseded: () => resolve(undefined) };
-			});
-		});
+		const name = await promptForTextInput(this.ui, "Create Profile / Situation", "Enter profile/situation name");
 
 		if (name === undefined) {
 			this.ui.requestRender();
@@ -1234,20 +1186,9 @@ export class ProfileMenuController {
 				},
 				onEdit: async (id, pathValue, kind) => {
 					done();
-					const resolvedEditPath = resolveResourceEditPath(id, pathValue, kind);
-					if (!resolvedEditPath) {
-						this.ui.showWarning(`Resource "${id}" of kind "${kind}" has no editable file path.`);
+					await this.editProfileResource(id, pathValue, kind, () => {
 						void this.openNewProfileEditor(profileName, profileModel);
-						return;
-					}
-					if (!fs.existsSync(resolvedEditPath)) {
-						this.ui.showError(`Resolved path for "${id}" does not exist: ${resolvedEditPath}`);
-						void this.openNewProfileEditor(profileName, profileModel);
-						return;
-					}
-					await this.ui.openEditorForPath(resolvedEditPath);
-					await this.ui.handleReloadCommand();
-					void this.openNewProfileEditor(profileName, profileModel);
+					});
 				},
 			});
 			return { component: editor, focus: editor };
@@ -1329,42 +1270,16 @@ export class ProfileMenuController {
 			}
 			this.ui.showStatus(`Deleted profile "${profileName}" from ${scope}.`);
 		} catch (error) {
-			const rollbackError = switchedToNone
-				? await this.rollbackValidatedProfileMutation(settingsSnapshot, {
-						profileName,
-						scope,
-						profileFilesSnapshot,
-					})
-				: undefined;
-			if (!switchedToNone) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
-			const message = error instanceof Error ? error.message : String(error);
-			this.ui.showError(
-				rollbackError
-					? `${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-					: message,
-			);
+			await this.reportProfileMutationFailure(error, settingsSnapshot, switchedToNone, {
+				profileName,
+				scope,
+				profileFilesSnapshot,
+			});
 		}
 	}
 
 	private async addExternalResourceRootFlow(): Promise<void> {
-		const rootPath = await new Promise<string | undefined>((resolve) => {
-			this.ui.showSelector((done) => {
-				const input = new ExtensionInputComponent(
-					"Add External Root",
-					"Enter external root directory path",
-					(value) => {
-						done();
-						resolve(value);
-					},
-					() => {
-						done();
-						resolve(undefined);
-					},
-					{ tui: this.ui.tui },
-				);
-				return { component: input, focus: input, onSuperseded: () => resolve(undefined) };
-			});
-		});
+		const rootPath = await promptForTextInput(this.ui, "Add External Root", "Enter external root directory path");
 
 		if (rootPath === undefined) {
 			this.ui.requestRender();
@@ -1383,32 +1298,11 @@ export class ProfileMenuController {
 			return;
 		}
 
-		// Prompt for trust confirmation (Yes/No)
-		const trust = await new Promise<boolean>((resolve) => {
-			this.ui.showSelector((done) => {
-				const submenu = new SelectSubmenu(
-					"Trust external source?",
-					"This directory can load custom extensions that execute arbitrary code on your machine.",
-					[
-						{ value: "yes", label: "Yes", description: "Trust this directory and enable loading resources." },
-						{ value: "no", label: "No", description: "Do not trust this directory. Skip loading resources." },
-					],
-					"no",
-					(value) => {
-						done();
-						resolve(value === "yes");
-					},
-					() => {
-						done();
-						resolve(false);
-					},
-				);
-				return {
-					component: submenu,
-					focus: submenu.getSelectList(),
-					onSuperseded: () => resolve(false),
-				};
-			});
+		const trust = await confirmExternalResourceTrust(this.ui, {
+			title: "Trust external source?",
+			description: "This directory can load custom extensions that execute arbitrary code on your machine.",
+			acceptDescription: "Trust this directory and enable loading resources.",
+			rejectDescription: "Do not trust this directory. Skip loading resources.",
 		});
 
 		if (!trust) {

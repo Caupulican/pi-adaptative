@@ -1,70 +1,69 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import ts from "typescript";
+import { resolve } from "node:path";
+import {
+	isCallExpression,
+	isExportDeclaration,
+	isImportDeclaration,
+	isImportExpression,
+	isImportTypeNode,
+	isLiteralTypeNode,
+	isStringLiteralLikeNode,
+} from "typescript/unstable/ast";
+import { API } from "typescript/unstable/sync";
 
-const ignoredDirectories = new Set([".git", "coverage", "dist", "node_modules"]);
-const files = [];
-
-function collectTypescriptFiles(directory) {
-	for (const entry of readdirSync(directory, { withFileTypes: true })) {
-		if (entry.isDirectory()) {
-			if (!ignoredDirectories.has(entry.name)) {
-				collectTypescriptFiles(join(directory, entry.name));
-			}
-			continue;
-		}
-
-		if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
-			files.push(join(directory, entry.name));
-		}
-	}
-}
+const configPath = resolve(process.argv[2] ?? "tsconfig.json");
+const api = new API({ cwd: process.cwd() });
+const failures = [];
 
 function isRelativeJavaScriptSpecifier(specifier) {
 	return /^\.\.?\//.test(specifier) && /\.js(?:[?#].*)?$/.test(specifier);
 }
 
 function getImportTypeSpecifier(node) {
-	if (!ts.isLiteralTypeNode(node.argument)) return undefined;
-	if (!ts.isStringLiteralLike(node.argument.literal)) return undefined;
+	if (!isLiteralTypeNode(node.argument)) return undefined;
+	if (!isStringLiteralLikeNode(node.argument.literal)) return undefined;
 	return node.argument.literal;
 }
 
-const failures = [];
+try {
+	const snapshot = api.updateSnapshot({ openProject: configPath });
+	const project = snapshot.getProject(configPath);
+	if (!project) throw new Error(`TypeScript project was not loaded from ${configPath}`);
 
-collectTypescriptFiles(".");
+	for (const file of [...project.rootFiles].sort()) {
+		if (file.endsWith(".d.ts")) continue;
+		const sourceFile = project.program.getSourceFile(file);
+		if (!sourceFile) throw new Error(`TypeScript project did not return its root file ${file}`);
 
-for (const file of files.sort()) {
-	const sourceText = readFileSync(file, "utf8");
-	const sourceFile = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true);
-
-	function checkSpecifier(node) {
-		if (!isRelativeJavaScriptSpecifier(node.text)) return;
-		const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-		failures.push(`${file}:${line + 1}:${character + 1}: ${node.text}`);
-	}
-
-	function visit(node) {
-		if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
-			checkSpecifier(node.moduleSpecifier);
-		} else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
-			checkSpecifier(node.moduleSpecifier);
-		} else if (
-			ts.isCallExpression(node) &&
-			node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-			node.arguments[0] &&
-			ts.isStringLiteralLike(node.arguments[0])
-		) {
-			checkSpecifier(node.arguments[0]);
-		} else if (ts.isImportTypeNode(node)) {
-			const specifier = getImportTypeSpecifier(node);
-			if (specifier) checkSpecifier(specifier);
+		function checkSpecifier(node) {
+			if (!isRelativeJavaScriptSpecifier(node.text)) return;
+			const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+			failures.push(`${file}:${line + 1}:${character + 1}: ${node.text}`);
 		}
 
-		ts.forEachChild(node, visit);
-	}
+		function visit(node) {
+			if (isImportDeclaration(node) && isStringLiteralLikeNode(node.moduleSpecifier)) {
+				checkSpecifier(node.moduleSpecifier);
+			} else if (isExportDeclaration(node) && node.moduleSpecifier && isStringLiteralLikeNode(node.moduleSpecifier)) {
+				checkSpecifier(node.moduleSpecifier);
+			} else if (
+				isCallExpression(node) &&
+				isImportExpression(node.expression) &&
+				node.arguments[0] &&
+				isStringLiteralLikeNode(node.arguments[0])
+			) {
+				checkSpecifier(node.arguments[0]);
+			} else if (isImportTypeNode(node)) {
+				const specifier = getImportTypeSpecifier(node);
+				if (specifier) checkSpecifier(specifier);
+			}
 
-	visit(sourceFile);
+			node.forEachChild(visit);
+		}
+
+		visit(sourceFile);
+	}
+} finally {
+	api.close();
 }
 
 if (failures.length > 0) {

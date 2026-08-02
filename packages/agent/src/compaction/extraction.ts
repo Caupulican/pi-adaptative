@@ -1,5 +1,6 @@
 import type { SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage } from "../types.ts";
+import { isPlainRecord } from "./utils.ts";
 
 export interface CompactionFileFact {
 	path: string;
@@ -134,12 +135,6 @@ function assistantToolCallTarget(name: string, rawArgs: unknown): string | undef
 
 function clampText(text: string, maxLen: number): string {
 	return text.length > maxLen ? text.slice(0, maxLen) : text;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 function normalizeDelegatedWorkerText(text: string, maxLen: number): string {

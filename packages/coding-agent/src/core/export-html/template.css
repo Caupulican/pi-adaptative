@@ -104,9 +104,10 @@
       color: var(--muted);
     }
 
-    .filter-btn {
+    .filter-btn,
+    .sidebar-close,
+    #hamburger {
       padding: 3px 8px;
-      font-size: 10px;
       font-family: inherit;
       background: transparent;
       color: var(--muted);
@@ -115,7 +116,13 @@
       cursor: pointer;
     }
 
-    .filter-btn:hover {
+    .filter-btn {
+      font-size: 10px;
+    }
+
+    .filter-btn:hover,
+    .sidebar-close:hover,
+    #hamburger:hover {
       color: var(--text);
       border-color: var(--text);
     }
@@ -128,20 +135,8 @@
 
     .sidebar-close {
       display: none;
-      padding: 3px 8px;
       font-size: 12px;
-      font-family: inherit;
-      background: transparent;
-      color: var(--muted);
-      border: 1px solid var(--dim);
-      border-radius: 3px;
-      cursor: pointer;
       margin-left: auto;
-    }
-
-    .sidebar-close:hover {
-      color: var(--text);
-      border-color: var(--text);
     }
 
     .tree-container {
@@ -633,7 +628,8 @@
     }
 
     /* System prompt */
-    .system-prompt {
+    .system-prompt,
+    .tools-list {
       background: var(--customMessageBg);
       padding: var(--line-height);
       border-radius: 4px;
@@ -649,7 +645,8 @@
       color: var(--customMessageLabel);
     }
 
-    .system-prompt-preview {
+    .system-prompt-preview,
+    .system-prompt-full {
       color: var(--customMessageText);
       white-space: pre-wrap;
       word-wrap: break-word;
@@ -665,11 +662,6 @@
 
     .system-prompt-full {
       display: none;
-      color: var(--customMessageText);
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      font-size: 11px;
-      margin-top: var(--line-height);
     }
 
     .system-prompt.expanded .system-prompt-preview,
@@ -693,13 +685,6 @@
     }
 
     /* Tools list */
-    .tools-list {
-      background: var(--customMessageBg);
-      padding: var(--line-height);
-      border-radius: 4px;
-      margin-bottom: var(--line-height);
-    }
-
     .tools-header {
       font-weight: bold;
       color: var(--customMessageLabel);
@@ -987,19 +972,7 @@
       top: 10px;
       left: 10px;
       z-index: 100;
-      padding: 3px 8px;
       font-size: 12px;
-      font-family: inherit;
-      background: transparent;
-      color: var(--muted);
-      border: 1px solid var(--dim);
-      border-radius: 3px;
-      cursor: pointer;
-    }
-
-    #hamburger:hover {
-      color: var(--text);
-      border-color: var(--text);
     }
 
 

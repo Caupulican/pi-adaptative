@@ -1,44 +1,33 @@
-import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
-import {
-	copyFileSync,
-	createWriteStream,
-	type Dirent,
-	existsSync,
-	linkSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-} from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { copyFileSync, type Dirent, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, arch as osArch, platform as osPlatform } from "node:os";
 import { delimiter, dirname, join, relative } from "node:path";
-import type { Readable, Writable } from "node:stream";
+import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
+import { StreamingLineDecoder } from "@caupulican/pi-ai";
 import { getBundledResourcesDir } from "../../config.ts";
 import {
 	type ChildProcessTerminationResult,
 	spawnProcess,
-	spawnProcessSync,
 	waitForChildProcessWithTermination,
 } from "../../utils/child-process.ts";
-import { StreamingLineDecoder } from "../../utils/streaming-lines.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
+import {
+	createRuntimeCommandRunner,
+	extractZipArchive,
+	installRuntimeArchive,
+	type ManagedRuntimeSpawn,
+	type RuntimeCommandResult,
+	type RuntimeCommandRunner,
+	requireRuntimeStdin,
+	resolveRuntimeLifecycleDependencies,
+	runtimeCommandAvailable,
+} from "./runtime-process.ts";
+
+export type { RuntimeCommandResult, RuntimeCommandRunner } from "./runtime-process.ts";
 
 const MAX_OLLAMA_PULL_LINE_CHARS = 64 * 1024 * 1024;
-
-/**
- * `spawnProcess(..., { stdio: ["pipe", "pipe", "pipe"] })` always yields a non-null `stdin` at
- * runtime, but child-process.ts's typed overload only narrows `.stdin` to non-null for the
- * capture-only (`StdioNull, StdioPipe, StdioPipe`) shape, so the generic overload's `Writable |
- * null` leaks through here. This makes the true invariant explicit and fails loudly (instead of
- * silently misbehaving) if it's ever violated by a future stdio change.
- */
-function requireStdin(proc: ChildProcess, label: string): Writable {
-	if (!proc.stdin) throw new Error(`${label}: no stdin pipe`);
-	return proc.stdin;
-}
 
 /**
  * Local model runtime manager (local-model-lifecycle-design.md): Ollama first, interface kept
@@ -138,29 +127,9 @@ export function resolveOllamaAsset(plat: string, architecture: string): OllamaRe
 	return undefined;
 }
 
-export interface RuntimeCommandResult {
-	ok: boolean;
-	stdout: string;
-	stderr: string;
-	code?: number | null;
-	error?: string;
-}
-
-export type RuntimeCommandRunner = (
-	command: string,
-	args: string[],
-	options?: { env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void },
-) => Promise<RuntimeCommandResult>;
-
-type LocalRuntimeSpawnOptions = Pick<SpawnOptions, "detached" | "stdio"> & { env: NodeJS.ProcessEnv };
-
 export interface LocalRuntimeDeps {
 	fetchFn?: typeof fetch;
-	spawnFn?: (
-		command: string,
-		args: string[],
-		options: LocalRuntimeSpawnOptions,
-	) => Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
+	spawnFn?: ManagedRuntimeSpawn;
 	existsFn?: (path: string) => boolean;
 	linkFile?: (source: string, target: string) => void;
 	copyFile?: (source: string, target: string) => void;
@@ -234,56 +203,10 @@ function fileSizeBytes(path: string): number {
 	}
 }
 
-async function runCommandDefault(
-	command: string,
-	args: string[],
-	options: { env?: NodeJS.ProcessEnv; onOutput?: (chunk: string) => void } = {},
-): Promise<RuntimeCommandResult> {
-	try {
-		const proc = spawnProcess(command, args, {
-			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
-			env: options.env ? { ...process.env, ...options.env } : process.env,
-		});
-		let stdout = "";
-		let stderr = "";
-		proc.stdout.setEncoding("utf8");
-		proc.stderr.setEncoding("utf8");
-		proc.stdout.on("data", (chunk: string) => {
-			stdout = `${stdout}${chunk}`.slice(-1024 * 1024);
-			options.onOutput?.(chunk);
-		});
-		proc.stderr.on("data", (chunk: string) => {
-			stderr = `${stderr}${chunk}`.slice(-1024 * 1024);
-			options.onOutput?.(chunk);
-		});
-		const terminal = await waitForChildProcessWithTermination(proc, {
-			timeoutMs: LOCAL_RUNTIME_COMMAND_TIMEOUT_MS,
-			killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
-		});
-		const timedOut = terminal.reason === "timeout";
-		return {
-			ok: terminal.code === 0,
-			stdout,
-			stderr,
-			code: terminal.code,
-			...(terminal.code === 0
-				? {}
-				: {
-						error: timedOut
-							? `${command} timed out after ${LOCAL_RUNTIME_COMMAND_TIMEOUT_MS}ms`
-							: stderr.trim() || stdout.trim() || `exit code ${terminal.code ?? "unknown"}`,
-					}),
-		};
-	} catch (error) {
-		return {
-			ok: false,
-			stdout: "",
-			stderr: "",
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
-}
+const runCommandDefault = createRuntimeCommandRunner({
+	timeoutMs: LOCAL_RUNTIME_COMMAND_TIMEOUT_MS,
+	killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+});
 
 function sanitizeCommandOutput(value: string | undefined): string {
 	return value?.trim().split("\n").slice(-3).join("\n") || "unknown error";
@@ -318,22 +241,18 @@ export class OllamaRuntime {
 	private readonly _arch: () => string;
 	private readonly _createZstdDecompress: (() => NodeJS.ReadWriteStream) | undefined;
 	private readonly _hasCommand: (command: string) => boolean;
-	private readonly _extractArchiveOverride: LocalRuntimeDeps["extractArchive"] | undefined;
+	private readonly _extractArchiveFn: NonNullable<LocalRuntimeDeps["extractArchive"]>;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 	private _childModelsDir: string | undefined;
 
 	constructor(args: { agentDir: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {
 		this._agentDir = args.agentDir;
 		this._baseUrl = (args.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
-		this._fetch = args.deps?.fetchFn ?? fetch;
-		this._spawn =
-			args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, { ...options, stdio: "ignore" }));
-		this._exists = args.deps?.existsFn ?? existsSync;
+		[this._fetch, this._spawn, this._exists, this._sleep] = resolveRuntimeLifecycleDependencies(args.deps);
 		this._linkFile = args.deps?.linkFile ?? linkSync;
 		this._copyFile = args.deps?.copyFile ?? copyFileSync;
 		this._envPath = args.deps?.envPath ?? process.env.PATH ?? "";
 		this._homeDir = args.deps?.homeDir ?? homedir();
-		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 		this._platform = args.deps?.platform ?? osPlatform;
 		this._arch = args.deps?.arch ?? osArch;
 		// Feature-detect (not version-sniff): recent Node added zstd natively to node:zlib. Verified
@@ -347,11 +266,9 @@ export class OllamaRuntime {
 				: typeof nodeZlib.createZstdDecompress === "function"
 					? () => nodeZlib.createZstdDecompress()
 					: undefined;
-		this._hasCommand =
-			args.deps?.hasCommand ??
-			((command) =>
-				spawnProcessSync(command, ["--version"], { encoding: "utf8", timeout: 5_000 }).error === undefined);
-		this._extractArchiveOverride = args.deps?.extractArchive;
+		this._hasCommand = args.deps?.hasCommand ?? runtimeCommandAvailable;
+		this._extractArchiveFn =
+			args.deps?.extractArchive ?? ((input, destDir, kind) => this._extractArchive(input, destDir, kind));
 	}
 
 	get baseUrl(): string {
@@ -573,26 +490,11 @@ export class OllamaRuntime {
 		const asset = resolveOllamaAsset(this._platform(), this._arch());
 		if (!asset) return { ok: false, error: "unsupported-platform" };
 
-		onProgress?.(`Downloading ${asset.name}…`);
 		const downloadUrl = `https://github.com/ollama/ollama/releases/download/v${OLLAMA_PINNED_VERSION}/${asset.name}`;
-		let response: Response;
-		try {
-			response = await this._fetch(downloadUrl);
-		} catch (error) {
-			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
-		}
-		if (!response.ok || !response.body) {
-			return { ok: false, error: `download-fail: HTTP ${response.status}` };
-		}
-
-		const destDir = agentRuntimesDir("ollama", this._agentDir);
-		mkdirSync(destDir, { recursive: true });
-
-		onProgress?.(`Extracting ${asset.name}…`);
-		const extract = this._extractArchiveOverride ?? ((input, dest, kind) => this._extractArchive(input, dest, kind));
-		const extracted = await extract(response.body as unknown as NodeJS.ReadableStream, destDir, asset.kind);
+		const extracted = await this._installArchive(downloadUrl, asset, onProgress);
 		if (!extracted.ok) return extracted;
 
+		const destDir = agentRuntimesDir("ollama", this._agentDir);
 		const binaryName = this._platform() === "win32" ? "ollama.exe" : "ollama";
 		const binaryPath = join(destDir, "bin", binaryName);
 		if (!this._exists(binaryPath)) {
@@ -600,6 +502,21 @@ export class OllamaRuntime {
 		}
 		onProgress?.("Ollama installed.");
 		return { ok: true };
+	}
+
+	private _installArchive(
+		downloadUrl: string,
+		asset: OllamaReleaseAsset,
+		onProgress?: (status: string) => void,
+	): Promise<{ ok: boolean; error?: string }> {
+		return installRuntimeArchive(
+			this._fetch,
+			downloadUrl,
+			agentRuntimesDir("ollama", this._agentDir),
+			asset,
+			this._extractArchiveFn,
+			onProgress,
+		);
 	}
 
 	/** Real extraction: `tar-gz` lets `tar` itself gunzip; `tar-zst` decompresses first (native
@@ -661,13 +578,13 @@ export class OllamaRuntime {
 			}),
 		);
 		const streamPipelines = nativeZstd
-			? [pipeline(input as unknown as Readable, nativeZstd, requireStdin(tarProc, "tar"))]
+			? [pipeline(input as unknown as Readable, nativeZstd, requireRuntimeStdin(tarProc, "tar"))]
 			: zstdProc
 				? [
-						pipeline(input as unknown as Readable, requireStdin(zstdProc, "zstd")),
-						pipeline(zstdProc.stdout as unknown as Readable, requireStdin(tarProc, "tar")),
+						pipeline(input as unknown as Readable, requireRuntimeStdin(zstdProc, "zstd")),
+						pipeline(zstdProc.stdout as unknown as Readable, requireRuntimeStdin(tarProc, "tar")),
 					]
-				: [pipeline(input as unknown as Readable, requireStdin(tarProc, "tar"))];
+				: [pipeline(input as unknown as Readable, requireRuntimeStdin(tarProc, "tar"))];
 		let terminals: ChildProcessTerminationResult[];
 		try {
 			[, terminals] = await Promise.all([Promise.all(streamPipelines), Promise.all(processWaits)]);
@@ -690,37 +607,15 @@ export class OllamaRuntime {
 	}
 
 	private async _extractZip(input: NodeJS.ReadableStream, destDir: string): Promise<{ ok: boolean; error?: string }> {
-		// Zip's central directory needs seekable file access — buffer to a temp file first.
-		const zipPath = join(destDir, "..", `ollama-download-${process.pid}-${Date.now()}.zip`);
-		await pipeline(input as unknown as Readable, createWriteStream(zipPath));
-		try {
-			const extractCommand = this._platform() === "win32" && this._hasCommand("tar") ? "tar" : "unzip";
-			const args = extractCommand === "tar" ? ["-xf", zipPath, "-C", destDir] : ["-q", zipPath, "-d", destDir];
-			const proc = spawnProcess(extractCommand, args, {
-				detached: process.platform !== "win32",
-				stdio: "ignore",
-			});
-			const terminal = await waitForChildProcessWithTermination(proc, {
-				timeoutMs: LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS,
-				killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
-			});
-			if (terminal.reason === "timeout" || terminal.code !== 0) {
-				return {
-					ok: false,
-					error:
-						terminal.reason === "timeout"
-							? `extract-fail: ${extractCommand} timed out after ${LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS}ms`
-							: `extract-fail: ${extractCommand} exited with code ${terminal.code ?? "unknown"}`,
-				};
-			}
-			return { ok: true };
-		} finally {
-			try {
-				rmSync(zipPath, { force: true });
-			} catch {
-				// best-effort cleanup
-			}
-		}
+		return extractZipArchive({
+			input: input as unknown as Readable,
+			destDir,
+			tempPrefix: "ollama-download",
+			platform: this._platform,
+			hasCommand: this._hasCommand,
+			timeoutMs: LOCAL_RUNTIME_EXTRACTION_TIMEOUT_MS,
+			killGraceMs: LOCAL_RUNTIME_KILL_GRACE_MS,
+		});
 	}
 
 	/** Shared spawn-then-health-poll for both start modes below; `extraEnv` is the only thing that
@@ -746,20 +641,15 @@ export class OllamaRuntime {
 		return { started: false, reason: "health_check_timeout" };
 	}
 
-	/**
-	 * Start a pi-managed serve with OWNED storage and the hardened env verified on this class of
-	 * hardware. No-op (reported) when a server already responds — pi never double-serves. Used by
-	 * `/models add` et al, where isolated per-model-pull storage is the point.
-	 */
-	async start(): Promise<{ started: boolean; reason: string }> {
+	private async _startServer(modelsDir?: string): Promise<{ started: boolean; reason: string }> {
 		if (await this._serverUp()) {
 			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
 		}
 		const binary = this._findBinary();
 		if (!binary) return { started: false, reason: "binary_missing" };
-		mkdirSync(this.ownedModelsDir(), { recursive: true });
+		if (modelsDir) mkdirSync(modelsDir, { recursive: true });
 		return this._spawnAndPoll(binary, {
-			OLLAMA_MODELS: this.ownedModelsDir(),
+			...(modelsDir ? { OLLAMA_MODELS: modelsDir } : {}),
 			OLLAMA_FLASH_ATTENTION: "1",
 			OLLAMA_KV_CACHE_TYPE: "q8_0",
 			OLLAMA_NUM_PARALLEL: "1",
@@ -769,24 +659,22 @@ export class OllamaRuntime {
 	}
 
 	/**
+	 * Start a pi-managed serve with OWNED storage and the hardened env verified on this class of
+	 * hardware. No-op (reported) when a server already responds — pi never double-serves. Used by
+	 * `/models add` et al, where isolated per-model-pull storage is the point.
+	 */
+	async start(): Promise<{ started: boolean; reason: string }> {
+		return this._startServer(this.ownedModelsDir());
+	}
+
+	/**
 	 * Start a serve that REUSES the user's own existing models directory (no `OLLAMA_MODELS`
 	 * override — falls through to Ollama's own default, `~/.ollama`), for callers that must see the
 	 * user's already-pulled models rather than pi's isolated/owned storage. Same idempotency and
 	 * hardened perf env as {@link start}; the only difference is which storage the server sees.
 	 */
 	async startReuseExisting(): Promise<{ started: boolean; reason: string }> {
-		if (await this._serverUp()) {
-			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
-		}
-		const binary = this._findBinary();
-		if (!binary) return { started: false, reason: "binary_missing" };
-		return this._spawnAndPoll(binary, {
-			OLLAMA_FLASH_ATTENTION: "1",
-			OLLAMA_KV_CACHE_TYPE: "q8_0",
-			OLLAMA_NUM_PARALLEL: "1",
-			OLLAMA_KEEP_ALIVE: "30m",
-			OLLAMA_MAX_LOADED_MODELS: "3",
-		});
+		return this._startServer();
 	}
 
 	/** Resource hygiene only: stops the pi-managed serve process; never deletes anything. */
@@ -868,27 +756,39 @@ export class OllamaRuntime {
 		}
 	}
 
-	async createFromModelfile(args: {
-		name: string;
-		modelfile: string;
-	}): Promise<{ ok: true } | { ok: false; error: string }> {
+	private async _requestModelMutation(
+		endpoint: string,
+		init: RequestInit,
+		operation: string,
+	): Promise<{ ok: true } | { ok: false; error: string }> {
 		try {
-			const response = await this._fetch(`${this._baseUrl}/api/create`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ model: args.name, modelfile: args.modelfile, stream: false }),
-				signal: AbortSignal.timeout(60_000),
-			});
+			const response = await this._fetch(`${this._baseUrl}${endpoint}`, init);
 			if (!response.ok) {
 				return {
 					ok: false,
-					error: `create failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
+					error: `${operation} failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
 				};
 			}
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}
+	}
+
+	async createFromModelfile(args: {
+		name: string;
+		modelfile: string;
+	}): Promise<{ ok: true } | { ok: false; error: string }> {
+		return this._requestModelMutation(
+			"/api/create",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ model: args.name, modelfile: args.modelfile, stream: false }),
+				signal: AbortSignal.timeout(60_000),
+			},
+			"create",
+		);
 	}
 
 	/** Pull a model through the server API (weights land in the SERVER's models dir). */
@@ -943,22 +843,15 @@ export class OllamaRuntime {
 
 	/** EXPLICIT user action only — callers must have shown what gets deleted and confirmed. */
 	async remove(ref: string): Promise<{ ok: boolean; error?: string }> {
-		try {
-			const response = await this._fetch(`${this._baseUrl}/api/delete`, {
+		return this._requestModelMutation(
+			"/api/delete",
+			{
 				method: "DELETE",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ model: ref }),
-			});
-			if (!response.ok) {
-				return {
-					ok: false,
-					error: `delete failed: HTTP ${response.status} ${await response.text().catch(() => "")}`,
-				};
-			}
-			return { ok: true };
-		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
-		}
+			},
+			"delete",
+		);
 	}
 }
 
@@ -989,12 +882,7 @@ export class TransformersRuntime {
 		this._agentDir = args.agentDir;
 		this._modelId = args.modelId;
 		this._baseUrl = args.baseUrl?.replace(/\/$/, "") ?? resolveTransformersBaseUrl(args.modelId);
-		this._fetch = args.deps?.fetchFn ?? fetch;
-		this._spawn =
-			args.deps?.spawnFn ??
-			((command, argv, options) => spawn(command, argv, { env: options.env, stdio: "ignore" }));
-		this._exists = args.deps?.existsFn ?? existsSync;
-		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+		[this._fetch, this._spawn, this._exists, this._sleep] = resolveRuntimeLifecycleDependencies(args.deps);
 		this._platform = args.deps?.platform ?? osPlatform;
 		this._runCommand = args.deps?.runCommand ?? runCommandDefault;
 		this._serverScriptPath =

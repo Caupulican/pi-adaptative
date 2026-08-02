@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	handleAcceptanceHelpFlag,
+	readJsonIfExists,
+	startPiAcceptanceRpc,
+} from "./lib/live-acceptance-rpc.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const DEFAULT_MODEL = "ollama/qwen3:1.7b";
@@ -50,10 +55,7 @@ function parseArgs(argv) {
 	let keepSession = false;
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
-		if (arg === "--help" || arg === "-h") {
-			usage();
-			process.exit(0);
-		}
+		if (handleAcceptanceHelpFlag(arg, usage)) continue;
 		if (arg === "--model" && argv[index + 1]) {
 			modelRef = argv[++index];
 			continue;
@@ -87,51 +89,6 @@ async function freePort() {
 	});
 }
 
-function parseJsonLine(line) {
-	try {
-		return JSON.parse(line);
-	} catch {
-		return undefined;
-	}
-}
-
-function makeLineReader(stream, onLine) {
-	let buffer = "";
-	stream.setEncoding("utf8");
-	stream.on("data", (chunk) => {
-		buffer += chunk;
-		while (true) {
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) break;
-			const line = buffer.slice(0, newline).trim();
-			buffer = buffer.slice(newline + 1);
-			if (line) onLine(line);
-		}
-	});
-}
-
-function waitForEvent(state, predicate, description, timeoutMs = TIMEOUT_MS, startIndex = 0) {
-	for (const event of state.events.slice(startIndex)) {
-		if (predicate(event)) return Promise.resolve(event);
-	}
-	return new Promise((resolve, reject) => {
-		const timeout = setTimeout(() => {
-			cleanup();
-			reject(new Error(`Timed out waiting for ${description}`));
-		}, timeoutMs);
-		function listener(event) {
-			if (!predicate(event)) return;
-			cleanup();
-			resolve(event);
-		}
-		function cleanup() {
-			clearTimeout(timeout);
-			state.listeners.delete(listener);
-		}
-		state.listeners.add(listener);
-	});
-}
-
 async function waitForOllama(baseUrl, model) {
 	for (let attempt = 0; attempt < 120; attempt++) {
 		try {
@@ -156,15 +113,6 @@ async function unloadModel(baseUrl, model) {
 		body: JSON.stringify({ model, prompt: "", stream: false, keep_alive: 0, options: { num_predict: 0 } }),
 		signal: AbortSignal.timeout(60_000),
 	}).catch(() => undefined);
-}
-
-async function readJsonIfExists(filePath) {
-	try {
-		return JSON.parse(await readFile(filePath, "utf8"));
-	} catch (error) {
-		if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return {};
-		throw error;
-	}
 }
 
 async function hydrateAgentDir(agentDir, baseUrl, model) {
@@ -193,10 +141,6 @@ async function hydrateAgentDir(agentDir, baseUrl, model) {
 	await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({}, null, 2), "utf8");
 }
 
-function writeJson(child, value) {
-	child.stdin.write(`${JSON.stringify(value)}\n`);
-}
-
 function eventText(event) {
 	return JSON.stringify(event);
 }
@@ -212,76 +156,43 @@ function isToolReadSuccess(event, marker) {
 }
 
 async function runPiTurn({ agentDir, sessionDir, model, markerPath, marker }) {
-	const state = { events: [], listeners: new Set(), stderr: "" };
-	const child = spawn(
-		path.join(root, "pi-test.sh"),
-		[
-			"--mode",
-			"rpc",
-			"--provider",
-			"ollama",
-			"--model",
-			model,
-			"--session-dir",
-			sessionDir,
-			"--system-prompt",
-			"",
-			"--no-extensions",
-		],
-		{
-			cwd: root,
-			env: {
-				...process.env,
-				PI_CODING_AGENT_DIR: agentDir,
-				PI_CODING_AGENT_SESSION_DIR: sessionDir,
-				PI_ADAPTATIVE_CODING_AGENT_DIR: agentDir,
-				PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR: sessionDir,
-			},
-			stdio: ["pipe", "pipe", "pipe"],
-		},
-	);
-	makeLineReader(child.stdout, (line) => {
-		const event = parseJsonLine(line);
-		if (!event) return;
-		state.events.push(event);
-		for (const listener of [...state.listeners]) listener(event);
-	});
-	child.stderr.setEncoding("utf8");
-	child.stderr.on("data", (chunk) => {
-		state.stderr += chunk;
-		process.stderr.write(chunk);
+	const rpc = startPiAcceptanceRpc({
+		root,
+		provider: "ollama",
+		model,
+		agentDir,
+		sessionDir,
+		timeoutMs: TIMEOUT_MS,
 	});
 	try {
-		const promptStartIndex = state.events.length;
-		writeJson(child, {
+		const promptStartIndex = rpc.checkpoint();
+		rpc.send({
 			id: "cold-turn",
 			type: "prompt",
 			message: `Read the file ${markerPath} and tell me exactly what it contains.`,
 		});
-		const promptResponse = await waitForEvent(
-			state,
+		const promptResponse = await rpc.waitForEvent(
 			(event) => event.id === "cold-turn" && event.type === "response" && event.command === "prompt",
 			"prompt preflight response",
 			60_000,
 			promptStartIndex,
 		);
 		if (!promptResponse.success) throw new Error(promptResponse.error || "prompt preflight failed");
-		await waitForEvent(
-			state,
+		await rpc.waitForEvent(
 			(event) => event.type === "agent_end" || isToolReadSuccess(event, marker),
 			"cold tool turn",
 			TIMEOUT_MS,
 			promptStartIndex,
 		);
-		if (state.events.slice(promptStartIndex).some((event) => eventText(event).includes("stream stalled"))) {
-			throw new Error("Cold-start turn hit a stream stall");
+		let successfulRead = false;
+		for (let index = promptStartIndex; index < rpc.events.length; index++) {
+			const event = rpc.events[index];
+			if (eventText(event).includes("stream stalled")) throw new Error("Cold-start turn hit a stream stall");
+			if (isToolReadSuccess(event, marker)) successfulRead = true;
 		}
-		if (!state.events.slice(promptStartIndex).some((event) => isToolReadSuccess(event, marker))) {
-			throw new Error("Cold-start turn completed without a successful read tool result");
-		}
+		if (!successfulRead) throw new Error("Cold-start turn completed without a successful read tool result");
 	} finally {
-		child.stdin.end();
-		child.kill("SIGTERM");
+		rpc.close();
 	}
 }
 

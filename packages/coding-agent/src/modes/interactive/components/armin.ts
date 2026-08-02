@@ -295,16 +295,7 @@ export class ArminComponent implements Component {
 	}
 
 	private tickFade(): boolean {
-		const state = this.effectState as { positions: [number, number][]; idx: number };
-		const pixelsPerFrame = 15;
-
-		for (let i = 0; i < pixelsPerFrame; i++) {
-			if (state.idx >= state.positions.length) return true;
-			const [row, x] = state.positions[state.idx];
-			this.currentGrid[row][x] = this.finalGrid[row][x];
-			state.idx++;
-		}
-		return false;
+		return this.tickPositionReveal(15);
 	}
 
 	private tickCrt(): boolean {
@@ -360,8 +351,11 @@ export class ArminComponent implements Component {
 	}
 
 	private tickDissolve(): boolean {
+		return this.tickPositionReveal(20);
+	}
+
+	private tickPositionReveal(pixelsPerFrame: number): boolean {
 		const state = this.effectState as { positions: [number, number][]; idx: number };
-		const pixelsPerFrame = 20;
 
 		for (let i = 0; i < pixelsPerFrame; i++) {
 			if (state.idx >= state.positions.length) return true;

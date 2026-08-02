@@ -1,6 +1,6 @@
 import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
-import { StreamingLineDecoder } from "../../utils/streaming-lines.ts";
+import { StreamingLineDecoder } from "@caupulican/pi-ai";
 
 /**
  * Serialize a single strict JSONL record.

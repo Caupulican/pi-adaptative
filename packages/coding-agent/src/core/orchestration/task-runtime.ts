@@ -518,6 +518,19 @@ function taskStatusForResult(status: WorkerResultContract["status"]): Orchestrat
 	return "blocked";
 }
 
+function releaseAttemptAgent(
+	agents: Record<string, AgentBindingContract>,
+	attempt: AttemptRuntimeState,
+	at: string,
+): void {
+	if (!attempt.agentId) return;
+	const agent = agents[attempt.agentId];
+	if (!agent) return;
+	const next = { ...agent, status: "registered" as const, updatedAt: at };
+	delete next.activeAttemptId;
+	agents[attempt.agentId] = next;
+}
+
 function missingTrustedCriteria(result: WorkerResultContract, criterionIds: readonly string[]): string[] {
 	const proven = new Set(
 		result.evidence.flatMap((evidence) => (evidence.trusted && evidence.criterionId ? [evidence.criterionId] : [])),
@@ -851,14 +864,7 @@ export function reduceOrchestrationEvent(
 					task: { ...task.task, status: "cancelled", updatedAt: event.occurredAt },
 				};
 			}
-			if (attempt.agentId) {
-				const agent = agents[attempt.agentId];
-				if (agent) {
-					const next = { ...agent, status: "registered" as const, updatedAt: event.occurredAt };
-					delete next.activeAttemptId;
-					agents[attempt.agentId] = next;
-				}
-			}
+			releaseAttemptAgent(agents, attempt, event.occurredAt);
 			break;
 		}
 		case "attempt.finished": {
@@ -872,14 +878,7 @@ export function reduceOrchestrationEvent(
 				...task,
 				task: { ...task.task, status: taskStatusForResult(result.status), updatedAt: event.occurredAt },
 			};
-			if (attempt.agentId) {
-				const agent = agents[attempt.agentId];
-				if (agent) {
-					const next = { ...agent, status: "registered" as const, updatedAt: event.occurredAt };
-					delete next.activeAttemptId;
-					agents[attempt.agentId] = next;
-				}
-			}
+			releaseAttemptAgent(agents, attempt, event.occurredAt);
 			refreshReadyTasks(state, task.task.objectiveId, event.occurredAt);
 			break;
 		}
@@ -1341,16 +1340,7 @@ export class DurableTaskRuntime {
 			if (!task || task.task.role !== agent.role)
 				throw new DurableTaskRuntimeError(`Agent '${agentId}' role does not match task.`);
 		}
-		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
-		const issuedAtMs = this.now();
-		const lease: AttemptLease = {
-			leaseId: `lease-${this.createId()}`,
-			attemptId,
-			ownerId,
-			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
-			issuedAt: new Date(issuedAtMs).toISOString(),
-			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),
-		};
+		const lease = this.issueLease(attempt, ownerId, ttlMs);
 		this.commit({
 			type: "attempt.leased",
 			aggregateId: attemptId,
@@ -1644,16 +1634,7 @@ export class DurableTaskRuntime {
 		if (!agent || agent.status !== "resuming")
 			throw new DurableTaskRuntimeError(`Agent '${agentId}' is not resuming.`);
 		this.requireActiveObjectiveForAttempt(attempt);
-		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
-		const issuedAtMs = this.now();
-		const lease: AttemptLease = {
-			leaseId: `lease-${this.createId()}`,
-			attemptId,
-			ownerId,
-			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
-			issuedAt: new Date(issuedAtMs).toISOString(),
-			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),
-		};
+		const lease = this.issueLease(attempt, ownerId, ttlMs);
 		this.commit({
 			type: "attempt.resumed",
 			aggregateId: attemptId,
@@ -1873,6 +1854,19 @@ export class DurableTaskRuntime {
 		const attempt = this.state.attempts[attemptId];
 		if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
 		return attempt;
+	}
+
+	private issueLease(attempt: AttemptRuntimeState, ownerId: string, ttlMs: number): AttemptLease {
+		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
+		const issuedAtMs = this.now();
+		return {
+			leaseId: `lease-${this.createId()}`,
+			attemptId: attempt.attemptId,
+			ownerId,
+			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
+			issuedAt: new Date(issuedAtMs).toISOString(),
+			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),
+		};
 	}
 
 	private approvalForAttempt(attemptId: string): ApprovalRuntimeState | undefined {

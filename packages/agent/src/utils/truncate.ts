@@ -55,6 +55,72 @@ function splitLinesForCounting(content: string): string[] {
 	return lines;
 }
 
+interface TruncationMeasurement {
+	lines: string[];
+	maxLines: number;
+	maxBytes: number;
+	totalLines: number;
+	totalBytes: number;
+}
+
+interface TruncationOutcome {
+	content: string;
+	truncated: boolean;
+	truncatedBy: "lines" | "bytes" | null;
+	outputLines: number;
+	lastLinePartial?: boolean;
+	firstLineExceedsLimit?: boolean;
+}
+
+function measureTruncation(content: string, options: TruncationOptions): TruncationMeasurement {
+	const lines = splitLinesForCounting(content);
+	return {
+		lines,
+		maxLines: options.maxLines ?? DEFAULT_MAX_LINES,
+		maxBytes: options.maxBytes ?? DEFAULT_MAX_BYTES,
+		totalLines: lines.length,
+		totalBytes: Buffer.byteLength(content, "utf-8"),
+	};
+}
+
+function buildTruncationResult(measurement: TruncationMeasurement, outcome: TruncationOutcome): TruncationResult {
+	return {
+		...outcome,
+		totalLines: measurement.totalLines,
+		totalBytes: measurement.totalBytes,
+		outputBytes: Buffer.byteLength(outcome.content, "utf-8"),
+		lastLinePartial: outcome.lastLinePartial ?? false,
+		firstLineExceedsLimit: outcome.firstLineExceedsLimit ?? false,
+		maxLines: measurement.maxLines,
+		maxBytes: measurement.maxBytes,
+	};
+}
+
+function unchangedTruncationResult(content: string, measurement: TruncationMeasurement): TruncationResult | undefined {
+	if (measurement.totalLines > measurement.maxLines || measurement.totalBytes > measurement.maxBytes) return undefined;
+	return buildTruncationResult(measurement, {
+		content,
+		truncated: false,
+		truncatedBy: null,
+		outputLines: measurement.totalLines,
+	});
+}
+
+function completedTruncationResult(
+	measurement: TruncationMeasurement,
+	outputLines: string[],
+	truncatedBy: "lines" | "bytes",
+	lastLinePartial = false,
+): TruncationResult {
+	return buildTruncationResult(measurement, {
+		content: outputLines.join("\n"),
+		truncated: true,
+		truncatedBy,
+		outputLines: outputLines.length,
+		lastLinePartial,
+	});
+}
+
 /**
  * Format bytes as human-readable size.
  */
@@ -76,46 +142,22 @@ export function formatSize(bytes: number): string {
  * returns empty content with firstLineExceedsLimit=true.
  */
 export function truncateHead(content: string, options: TruncationOptions = {}): TruncationResult {
-	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const measurement = measureTruncation(content, options);
+	const { lines, maxBytes, maxLines } = measurement;
 
-	const totalBytes = Buffer.byteLength(content, "utf-8");
-	const lines = splitLinesForCounting(content);
-	const totalLines = lines.length;
-
-	// Check if no truncation needed
-	if (totalLines <= maxLines && totalBytes <= maxBytes) {
-		return {
-			content,
-			truncated: false,
-			truncatedBy: null,
-			totalLines,
-			totalBytes,
-			outputLines: totalLines,
-			outputBytes: totalBytes,
-			lastLinePartial: false,
-			firstLineExceedsLimit: false,
-			maxLines,
-			maxBytes,
-		};
-	}
+	const unchanged = unchangedTruncationResult(content, measurement);
+	if (unchanged) return unchanged;
 
 	// Check if first line alone exceeds byte limit
 	const firstLineBytes = Buffer.byteLength(lines[0], "utf-8");
 	if (firstLineBytes > maxBytes) {
-		return {
+		return buildTruncationResult(measurement, {
 			content: "",
 			truncated: true,
 			truncatedBy: "bytes",
-			totalLines,
-			totalBytes,
 			outputLines: 0,
-			outputBytes: 0,
-			lastLinePartial: false,
 			firstLineExceedsLimit: true,
-			maxLines,
-			maxBytes,
-		};
+		});
 	}
 
 	// Collect complete lines that fit
@@ -141,22 +183,7 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
 		truncatedBy = "lines";
 	}
 
-	const outputContent = outputLinesArr.join("\n");
-	const finalOutputBytes = Buffer.byteLength(outputContent, "utf-8");
-
-	return {
-		content: outputContent,
-		truncated: true,
-		truncatedBy,
-		totalLines,
-		totalBytes,
-		outputLines: outputLinesArr.length,
-		outputBytes: finalOutputBytes,
-		lastLinePartial: false,
-		firstLineExceedsLimit: false,
-		maxLines,
-		maxBytes,
-	};
+	return completedTruncationResult(measurement, outputLinesArr, truncatedBy);
 }
 
 /**
@@ -166,29 +193,11 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
  * May return partial first line if the last line of original content exceeds byte limit.
  */
 export function truncateTail(content: string, options: TruncationOptions = {}): TruncationResult {
-	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const measurement = measureTruncation(content, options);
+	const { lines, maxBytes, maxLines } = measurement;
 
-	const totalBytes = Buffer.byteLength(content, "utf-8");
-	const lines = splitLinesForCounting(content);
-	const totalLines = lines.length;
-
-	// Check if no truncation needed
-	if (totalLines <= maxLines && totalBytes <= maxBytes) {
-		return {
-			content,
-			truncated: false,
-			truncatedBy: null,
-			totalLines,
-			totalBytes,
-			outputLines: totalLines,
-			outputBytes: totalBytes,
-			lastLinePartial: false,
-			firstLineExceedsLimit: false,
-			maxLines,
-			maxBytes,
-		};
-	}
+	const unchanged = unchangedTruncationResult(content, measurement);
+	if (unchanged) return unchanged;
 
 	// Work backwards from the end
 	const outputLinesArr: string[] = [];
@@ -222,22 +231,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 		truncatedBy = "lines";
 	}
 
-	const outputContent = outputLinesArr.join("\n");
-	const finalOutputBytes = Buffer.byteLength(outputContent, "utf-8");
-
-	return {
-		content: outputContent,
-		truncated: true,
-		truncatedBy,
-		totalLines,
-		totalBytes,
-		outputLines: outputLinesArr.length,
-		outputBytes: finalOutputBytes,
-		lastLinePartial,
-		firstLineExceedsLimit: false,
-		maxLines,
-		maxBytes,
-	};
+	return completedTruncationResult(measurement, outputLinesArr, truncatedBy, lastLinePartial);
 }
 
 /**

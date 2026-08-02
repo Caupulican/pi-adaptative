@@ -77,6 +77,21 @@ export function generateArtifactId(
 	return hash.digest("hex").slice(0, 24);
 }
 
+function createArtifactRef(id: string, request: ArtifactWriteRequest): ContextArtifactRef {
+	return {
+		id,
+		kind: request.kind,
+		sessionEntryId: request.sessionEntryId,
+		toolName: request.toolName,
+		command: request.command,
+		path: request.path,
+		byteLength: estimateByteLength(request.content),
+		lineCount: estimateLineCount(request.content),
+		createdAtTurn: request.createdAtTurn,
+		reproducible: request.reproducible,
+	};
+}
+
 export interface ArtifactStore {
 	write(request: ArtifactWriteRequest): ArtifactRecord;
 	read(id: string): ArtifactRecord | MissingArtifactMarker;
@@ -122,18 +137,7 @@ export function createInMemoryArtifactStore(): ArtifactStore {
 				return { ref: existing.ref, content: existing.content };
 			}
 
-			const ref: ContextArtifactRef = {
-				id,
-				kind: request.kind,
-				sessionEntryId: request.sessionEntryId,
-				toolName: request.toolName,
-				command: request.command,
-				path: request.path,
-				byteLength: estimateByteLength(request.content),
-				lineCount: estimateLineCount(request.content),
-				createdAtTurn: request.createdAtTurn,
-				reproducible: request.reproducible,
-			};
+			const ref = createArtifactRef(id, request);
 			artifacts.set(id, { ref, content: request.content, references: new Set() });
 			cleanedUp.delete(id);
 			return { ref, content: request.content };
@@ -320,18 +324,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 				return { ref: existingMeta.ref, content: readFileSync(existingPayloadPath, "utf8") };
 			}
 
-			const ref: ContextArtifactRef = {
-				id,
-				kind: request.kind,
-				sessionEntryId: request.sessionEntryId,
-				toolName: request.toolName,
-				command: request.command,
-				path: request.path,
-				byteLength: estimateByteLength(request.content),
-				lineCount: estimateLineCount(request.content),
-				createdAtTurn: request.createdAtTurn,
-				reproducible: request.reproducible,
-			};
+			const ref = createArtifactRef(id, request);
 			writeFileSync(payloadPath(baseDir, id), request.content, "utf8");
 			writeMeta(baseDir, id, { ref, references: [] });
 			cleanedUpThisInstance.delete(id);

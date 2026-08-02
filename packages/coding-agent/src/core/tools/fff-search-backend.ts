@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { ensureFffNodePackage, isFffInstallRetryable, loadAvailableFffNodePackage } from "../../utils/tools-manager.ts";
+import type { SearchRouter, SearchToolKind } from "./search-router.ts";
 
 export type FffResult<T> = { ok: true; value: T } | { ok: false; error: string };
 export type FffGrepMode = "plain" | "regex" | "fuzzy";
@@ -124,6 +125,43 @@ export async function safeGetFinder(backend: FffSearchBackend, cwd: string): Pro
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Acquire an FFF finder only when all three routing stages accept it. Finder startup begins before
+ * routing so a lazy managed install can progress even when the current request falls back to fd/rg.
+ */
+export async function resolveRoutedFffFinder(options: {
+	backend: FffSearchBackend;
+	router: SearchRouter;
+	tool: SearchToolKind;
+	cwd: string;
+	searchPath: string;
+	glob: boolean;
+	ignoreCase: boolean;
+	limit: number;
+	readGitignoreInTree: () => Promise<boolean> | boolean;
+}): Promise<{ finder: FffFileFinder; searchPathRelativeToCwd: string } | undefined> {
+	const finderPromise = safeGetFinder(options.backend, options.cwd);
+	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
+	const route = (finderAvailable: boolean, pathResolvable: boolean, gitignoreInTree: boolean) =>
+		options.router.route({
+			tool: options.tool,
+			glob: options.glob,
+			ignoreCase: options.ignoreCase,
+			limit: options.limit,
+			finderAvailable,
+			pathResolvable,
+			gitignoreInTree,
+		});
+
+	if (route(true, searchPathRelativeToCwd !== undefined, false).backend !== "fff") return undefined;
+	if (searchPathRelativeToCwd === undefined) return undefined;
+	if (route(true, true, await options.readGitignoreInTree()).backend !== "fff") return undefined;
+
+	const finder = await finderPromise;
+	if (!finder || route(true, true, false).backend !== "fff") return undefined;
+	return { finder, searchPathRelativeToCwd };
 }
 
 type ModuleRequire = (id: string) => unknown;

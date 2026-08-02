@@ -145,6 +145,8 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const template = readFileSync(join(templateDir, "template.html"), "utf-8");
 	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
 	const templateJs = readFileSync(join(templateDir, "template.js"), "utf-8");
+	const sessionTreeFoundationsJs = readFileSync(join(templateDir, "session-tree-foundations.mjs"), "utf-8");
+	const skillBlockJs = readFileSync(join(templateDir, "..", "skill-block.mjs"), "utf-8");
 	const markedJs = readFileSync(join(templateDir, "vendor", "marked.min.js"), "utf-8");
 	const hljsJs = readFileSync(join(templateDir, "vendor", "highlight.min.js"), "utf-8");
 
@@ -168,6 +170,8 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 
 	return template
 		.replace("{{CSS}}", () => css)
+		.replace("{{SKILL_BLOCK_JS}}", () => skillBlockJs)
+		.replace("{{SESSION_TREE_FOUNDATIONS_JS}}", () => sessionTreeFoundationsJs)
 		.replace("{{JS}}", () => templateJs)
 		.replace("{{SESSION_DATA}}", () => sessionDataBase64)
 		.replace("{{MARKED_JS}}", () => markedJs)

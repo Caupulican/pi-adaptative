@@ -135,6 +135,29 @@ function shouldEncodeGrantAllWildcard(options?: EncodeResourceSelectionOptions):
 	return options?.originalFilter?.allow?.includes("*") ?? false;
 }
 
+function encodeSelection(
+	enabled: ReadonlySet<string>,
+	allIds: readonly string[],
+	framing: ResourceFraming,
+	options?: EncodeResourceSelectionOptions,
+): ResourceProfileFilterSettings | undefined {
+	const allIdsSet = new Set(allIds);
+	let validEnabledCount = 0;
+	for (const id of enabled) {
+		if (allIdsSet.has(id)) validEnabledCount++;
+	}
+
+	if (allIds.length > 0 && validEnabledCount === allIds.length) {
+		return shouldEncodeGrantAllWildcard(options) ? { allow: ["*"] } : { allow: [...allIds] };
+	}
+	if (allIds.length === 0) return undefined;
+	if (validEnabledCount === 0) return { block: ["*"] };
+
+	return framing === "allow"
+		? { allow: allIds.filter((id) => enabled.has(id)) }
+		: { block: allIds.filter((id) => !enabled.has(id)) };
+}
+
 /**
  * Encode an enabled set back into a filter.
  *  - all enabled            -> enumerated { allow: [...allIds] } (or { allow: ["*"] } only when the
@@ -147,41 +170,7 @@ export function encodeResourceSelection(
 	allIds: string[],
 	options?: EncodeResourceSelectionOptions,
 ): ResourceProfileFilterSettings | undefined {
-	const allIdsSet = new Set(allIds);
-
-	// Count how many enabled ids are actually in allIds
-	let validEnabledCount = 0;
-	for (const id of enabled) {
-		if (allIdsSet.has(id)) {
-			validEnabledCount++;
-		}
-	}
-
-	// All enabled: grant-all must be said OUT LOUD under strict UAC — omitting the kind (returning
-	// undefined) would mean deny-all. But saying it out loud does NOT mean widening: an enumerated
-	// closed grant re-encodes as the explicit id list, so a no-change save over a collapsed universe
-	// cannot silently turn "grant exactly these" into "grant everything, including future resources".
-	// A wildcard is only produced when it was already a wildcard (or grant-all was chosen explicitly).
-	if (allIds.length > 0 && validEnabledCount === allIds.length) {
-		return shouldEncodeGrantAllWildcard(options) ? { allow: ["*"] } : { allow: [...allIds] };
-	}
-	if (allIds.length === 0) {
-		return undefined;
-	}
-
-	// None enabled: return { block: ["*"] }
-	if (validEnabledCount === 0) {
-		return { block: ["*"] };
-	}
-
-	// Some but not all: return { allow: [...enabled, in allIds order] }
-	const allow: string[] = [];
-	for (const id of allIds) {
-		if (enabled.has(id)) {
-			allow.push(id);
-		}
-	}
-	return { allow };
+	return encodeSelection(enabled, allIds, "allow", options);
 }
 
 export type ResourceFraming = "allow" | "block";
@@ -214,38 +203,5 @@ export function encodeResourceSelectionWithFraming(
 	framing: ResourceFraming,
 	options?: EncodeResourceSelectionOptions,
 ): ResourceProfileFilterSettings | undefined {
-	if (framing === "allow") {
-		return encodeResourceSelection(enabled, allIds, options);
-	}
-
-	const allIdsSet = new Set(allIds);
-	let validEnabledCount = 0;
-	for (const id of enabled) {
-		if (allIdsSet.has(id)) {
-			validEnabledCount++;
-		}
-	}
-
-	// All enabled: explicit grant-all (see encodeResourceSelection — undefined means DENIED), but
-	// never widened to a wildcard without context — same gate as the allow-framing branch.
-	if (allIds.length > 0 && validEnabledCount === allIds.length) {
-		return shouldEncodeGrantAllWildcard(options) ? { allow: ["*"] } : { allow: [...allIds] };
-	}
-	if (allIds.length === 0) {
-		return undefined;
-	}
-
-	// None enabled: return { block: ["*"] }
-	if (validEnabledCount === 0) {
-		return { block: ["*"] };
-	}
-
-	// Block framing with subset disabled: list disabled ids in block
-	const block: string[] = [];
-	for (const id of allIds) {
-		if (!enabled.has(id)) {
-			block.push(id);
-		}
-	}
-	return { block };
+	return encodeSelection(enabled, allIds, framing, options);
 }

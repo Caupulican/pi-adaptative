@@ -8,11 +8,9 @@ import {
 	type TruncationResult,
 	truncateLine,
 } from "@caupulican/pi-agent-core/node";
-import { Text } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -26,17 +24,23 @@ import {
 } from "../context/tool-output-packer.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
-	defaultFffSearchBackend,
 	type FffGrepMatch,
 	type FffGrepResult,
 	type FffSearchBackend,
 	hasGitignoreInTree,
-	relativePathInside,
-	safeGetFinder,
+	resolveRoutedFffFinder,
 } from "./fff-search-backend.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
-import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
+import {
+	formatCollapsibleToolResult,
+	invalidArgText,
+	renderTextComponent,
+	shortenPath,
+	str,
+	toolTextResult,
+} from "./render-utils.ts";
+import type { SearchRouter } from "./search-router.ts";
+import { resolveSearchToolRuntime } from "./search-tool-runtime.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const grepSchema = Type.Object({
@@ -131,30 +135,22 @@ function formatGrepResult(
 	theme: Theme,
 	showImages: boolean,
 ): string {
-	const output = getTextOutput(result, showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = options.expanded ? lines.length : 15;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
-		}
-	}
-
-	const matchLimit = result.details?.matchLimitReached;
-	const truncation = result.details?.truncation;
-	const linesTruncated = result.details?.linesTruncated;
-	if (matchLimit || truncation?.truncated || linesTruncated) {
-		const warnings: string[] = [];
-		if (matchLimit) warnings.push(`${matchLimit} matches limit`);
-		if (truncation?.truncated) warnings.push(`${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
-		if (linesTruncated) warnings.push("some lines truncated");
-		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
-	}
-	return text;
+	return formatCollapsibleToolResult({
+		result,
+		options,
+		theme,
+		showImages,
+		collapsedLineLimit: 15,
+		warnings: (details) => {
+			const warnings: string[] = [];
+			if (details?.matchLimitReached) warnings.push(`${details.matchLimitReached} matches limit`);
+			if (details?.truncation?.truncated) {
+				warnings.push(`${formatSize(details.truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
+			}
+			if (details?.linesTruncated) warnings.push("some lines truncated");
+			return warnings;
+		},
+	});
 }
 
 function globConstraintForFff(glob: string | undefined): string {
@@ -372,55 +368,19 @@ export async function tryFffGrep(options: {
 	broadQueryTracker?: BroadQueryTracker;
 	rawPath?: string;
 }): Promise<{ text: string; details: GrepToolDetails } | undefined> {
-	// Kick off the FFF finder -- and, on a machine where fff-node isn't provisioned
-	// yet, its lazy managed install -- unconditionally and as early as possible.
-	// See the matching comment in find.ts's tryFffFind: routing below can still
-	// send THIS call to the rg fallback for reasons unrelated to tool availability
-	// (chiefly the default match limit exceeding the FFF top-N threshold), and
-	// that outcome must not gate the install itself. getFinder() is cached per
-	// basePath, so later calls -- including the `await` below -- reuse this same
-	// in-flight/resolved promise instead of doing the work twice. safeGetFinder()
-	// guarantees this can never reject (a non-conforming custom backend that
-	// throws synchronously still degrades to "unavailable"), so it can neither
-	// produce an unhandled rejection nor fail this tool call outright.
-	const finderPromise = safeGetFinder(options.backend, options.cwd);
-
-	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
-	const baseRoute = options.router.route({
+	const routed = await resolveRoutedFffFinder({
+		backend: options.backend,
+		router: options.router,
 		tool: "grep",
+		cwd: options.cwd,
+		searchPath: options.searchPath,
 		glob: Boolean(options.glob),
 		ignoreCase: Boolean(options.ignoreCase),
 		limit: options.effectiveLimit,
-		finderAvailable: true,
-		pathResolvable: searchPathRelativeToCwd !== undefined,
-		gitignoreInTree: false,
+		readGitignoreInTree: () => (options.isDirectory ? hasGitignoreInTree(options.searchPath) : false),
 	});
-	if (baseRoute.backend !== "fff") return undefined;
-	if (searchPathRelativeToCwd === undefined) return undefined;
-
-	const gitignoreInTree = options.isDirectory ? await hasGitignoreInTree(options.searchPath) : false;
-	const semanticRoute = options.router.route({
-		tool: "grep",
-		glob: Boolean(options.glob),
-		ignoreCase: Boolean(options.ignoreCase),
-		limit: options.effectiveLimit,
-		finderAvailable: true,
-		pathResolvable: true,
-		gitignoreInTree,
-	});
-	if (semanticRoute.backend !== "fff") return undefined;
-
-	const finder = await finderPromise;
-	const finderRoute = options.router.route({
-		tool: "grep",
-		glob: Boolean(options.glob),
-		ignoreCase: Boolean(options.ignoreCase),
-		limit: options.effectiveLimit,
-		finderAvailable: Boolean(finder),
-		pathResolvable: true,
-		gitignoreInTree: false,
-	});
-	if (!finder || finderRoute.backend !== "fff") return undefined;
+	if (!routed) return undefined;
+	const { finder, searchPathRelativeToCwd } = routed;
 
 	const query = fffGrepQuery({
 		pattern: options.pattern,
@@ -459,11 +419,7 @@ export function createGrepToolDefinition(
 	cwd: string,
 	options?: GrepToolOptions,
 ): ToolDefinition<typeof grepSchema, GrepToolDetails | undefined> {
-	const customOps = options?.operations;
-	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
-	const searchRouter = options?.searchRouter ?? defaultSearchRouter;
-	const artifactStore = options?.artifactStore;
-	const broadQueryTracker = options?.broadQueryTracker;
+	const search = resolveSearchToolRuntime(options);
 	return {
 		name: "grep",
 		label: "grep",
@@ -513,7 +469,7 @@ export function createGrepToolDefinition(
 				(async () => {
 					try {
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
-						const ops = customOps ?? defaultGrepOperations;
+						const ops = search.operations ?? defaultGrepOperations;
 						let isDirectory: boolean;
 						try {
 							isDirectory = await ops.isDirectory(searchPath);
@@ -534,10 +490,10 @@ export function createGrepToolDefinition(
 							return path.basename(filePath);
 						};
 
-						if (!customOps && fffBackend) {
+						if (!search.operations && search.fffBackend) {
 							const fffResult = await tryFffGrep({
-								backend: fffBackend,
-								router: searchRouter,
+								backend: search.fffBackend,
+								router: search.searchRouter,
 								cwd,
 								searchPath,
 								pattern,
@@ -548,17 +504,12 @@ export function createGrepToolDefinition(
 								effectiveLimit,
 								isDirectory,
 								toolCallId,
-								artifactStore,
-								broadQueryTracker,
+								artifactStore: search.artifactStore,
+								broadQueryTracker: search.broadQueryTracker,
 								rawPath: searchDir,
 							});
 							if (fffResult) {
-								settle(() =>
-									resolve({
-										content: [{ type: "text", text: fffResult.text }],
-										details: Object.keys(fffResult.details).length > 0 ? fffResult.details : undefined,
-									}),
-								);
+								settle(() => resolve(toolTextResult(fffResult)));
 								return;
 							}
 						}
@@ -737,20 +688,15 @@ export function createGrepToolDefinition(
 						const { text: output, details } = packGrepOutput({
 							rawOutput,
 							toolCallId,
-							artifactStore,
-							broadQueryTracker,
+							artifactStore: search.artifactStore,
+							broadQueryTracker: search.broadQueryTracker,
 							pattern,
 							rawPath: searchDir,
 							glob,
 							matchLimitReached: matchLimitReached ? effectiveLimit : false,
 							linesTruncated,
 						});
-						settle(() =>
-							resolve({
-								content: [{ type: "text", text: output }],
-								details: Object.keys(details).length > 0 ? details : undefined,
-							}),
-						);
+						settle(() => resolve(toolTextResult({ text: output, details })));
 					} catch (err) {
 						settle(() => reject(err as Error));
 					}
@@ -758,14 +704,13 @@ export function createGrepToolDefinition(
 			});
 		},
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatGrepCall(args, theme, context.cwd));
-			return text;
+			return renderTextComponent(context.lastComponent, formatGrepCall(args, theme, context.cwd));
 		},
 		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatGrepResult(result as any, options, theme, context.showImages));
-			return text;
+			return renderTextComponent(
+				context.lastComponent,
+				formatGrepResult(result as Parameters<typeof formatGrepResult>[0], options, theme, context.showImages),
+			);
 		},
 	};
 }

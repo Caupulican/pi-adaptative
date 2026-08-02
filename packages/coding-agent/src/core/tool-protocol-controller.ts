@@ -1,6 +1,14 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, StreamFn } from "@caupulican/pi-agent-core";
+import {
+	formatVariantEnvelope,
+	generateTextToolProtocolPrimer,
+	parseTextToolCalls,
+	TEXT_TOOL_PROTOCOL_VARIANTS,
+	type TextToolProtocolVariant,
+} from "@caupulican/pi-ai/text-tool-protocol";
+import { formatToolRepairStandingRule, type ToolRepairModeName } from "@caupulican/pi-ai/tool-repair-registry";
 import type {
 	Api,
 	AssistantMessage,
@@ -10,19 +18,10 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	TextToolProtocolParseEvent,
-	TextToolProtocolVariant,
 	Tool,
-	ToolArgumentValidationTelemetryEvent,
-	ToolRepairModeName,
 	Usage,
-} from "@caupulican/pi-ai";
-import {
-	formatToolRepairStandingRule,
-	formatVariantEnvelope,
-	generateTextToolProtocolPrimer,
-	parseTextToolCalls,
-	TEXT_TOOL_PROTOCOL_VARIANTS,
-} from "@caupulican/pi-ai";
+} from "@caupulican/pi-ai/types";
+import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
 import { Type } from "typebox";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -474,46 +473,52 @@ export class ToolProtocolController {
 		return base ? `${base}\n\n${instruction}` : instruction;
 	}
 
-	private async runNativeReadTaskProbeTrial(model: Model<Api>, path: string): Promise<boolean> {
-		const instruction =
-			`Native tool-call capability probe: task-scale read. Use provider-native tool calling, not prose. ` +
-			`Call read exactly once with path exactly "${path}".`;
+	private async runNativeToolProbeTrial(
+		model: Model<Api>,
+		instruction: string,
+		tool: Tool,
+		maxTokens: number,
+		reportKind: string,
+		argName: string,
+		argValue: string,
+	): Promise<boolean> {
 		const stream = await this.streamForProbe(
 			model,
 			{
 				systemPrompt: this.nativeToolProbeSystemPrompt(instruction),
 				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
-				tools: [NATIVE_TOOL_PROBE_READ_TOOL],
+				tools: [tool],
 			},
-			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 768 },
+			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens },
 		);
 		const message = await this.resolveProbeStreamCountingUsage(
 			stream,
 			"tool-probe",
-			this.nextProbeUsageReportId(model, "read-task"),
+			this.nextProbeUsageReportId(model, reportKind),
 		);
-		return this.messageHasToolCallWithStringArgument(message, "read", "path", path);
+		return this.messageHasToolCallWithStringArgument(message, tool.name, argName, argValue);
+	}
+
+	private async runNativeReadTaskProbeTrial(model: Model<Api>, path: string): Promise<boolean> {
+		const instruction =
+			`Native tool-call capability probe: task-scale read. Use provider-native tool calling, not prose. ` +
+			`Call read exactly once with path exactly "${path}".`;
+		return this.runNativeToolProbeTrial(
+			model,
+			instruction,
+			NATIVE_TOOL_PROBE_READ_TOOL,
+			768,
+			"read-task",
+			"path",
+			path,
+		);
 	}
 
 	private async runNativeEchoToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
 		const instruction =
 			`Native tool-call capability probe: echo-only. Use provider-native tool calling, not prose. ` +
 			`Call echo with data exactly "${token}".`;
-		const stream = await this.streamForProbe(
-			model,
-			{
-				systemPrompt: this.nativeToolProbeSystemPrompt(instruction),
-				messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
-				tools: [TEXT_TOOL_PROTOCOL_ECHO_TOOL],
-			},
-			{ textToolCallProtocol: false, maxRetries: 0, temperature: 0, maxTokens: 256 },
-		);
-		const message = await this.resolveProbeStreamCountingUsage(
-			stream,
-			"tool-probe",
-			this.nextProbeUsageReportId(model, "echo"),
-		);
-		return this.messageHasToolCallWithStringArgument(message, "echo", "data", token);
+		return this.runNativeToolProbeTrial(model, instruction, TEXT_TOOL_PROTOCOL_ECHO_TOOL, 256, "echo", "data", token);
 	}
 
 	private async gradeNativeToolCallingForModel(model: Model<Api>, token: string): Promise<NativeToolProbeGrade> {

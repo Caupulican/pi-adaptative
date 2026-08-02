@@ -1,8 +1,10 @@
-import { createHash } from "node:crypto";
+import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
+import { runIsolatedTextCompletion } from "../isolated-text-completion.ts";
 import { FitnessStore, type StoredFitnessReport } from "../models/fitness-store.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { reportSpawnedUsage } from "../spawned-usage.ts";
 import type { LaneModelResolver } from "./lane-model-resolver.ts";
 import { type ModelFitnessReport, runModelFitnessProbe } from "./model-fitness.ts";
 
@@ -15,11 +17,6 @@ export interface ModelFitnessControllerDeps {
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-}
-
-function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
-	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-	return `${kind}:${sessionId}:${digest}`;
 }
 
 /** Owns model-fitness execution, cancellation, accounting, and host-keyed persistence. */
@@ -52,14 +49,7 @@ export class ModelFitnessController {
 			`fitness:${resolved.provider}/${resolved.id}`,
 		);
 		try {
-			const spent: Usage = {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			};
+			const spent = createEmptyUsage();
 			const report = await runModelFitnessProbe({
 				trials: args.trials,
 				signal: this.abortController.signal,
@@ -69,9 +59,9 @@ export class ModelFitnessController {
 						: undefined,
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
 					const callStarted = Date.now();
-					const completion = await this.deps.runIsolatedCompletion({
+					const completion = await runIsolatedTextCompletion(this.deps, {
 						systemPrompt,
-						messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
+						userPrompt,
 						model: resolved,
 						thinkingLevel: "off",
 						maxTokens: capability.laneMaxOutputTokens,
@@ -80,32 +70,27 @@ export class ModelFitnessController {
 						laneKind: "fitness",
 					});
 					const callMs = Date.now() - callStarted;
-					spent.input += completion.usage.input;
-					spent.output += completion.usage.output;
-					spent.cacheRead += completion.usage.cacheRead;
-					spent.cacheWrite += completion.usage.cacheWrite;
-					spent.totalTokens += completion.usage.totalTokens;
-					spent.cost.input += completion.usage.cost.input;
-					spent.cost.output += completion.usage.cost.output;
-					spent.cost.cacheRead += completion.usage.cost.cacheRead;
-					spent.cost.cacheWrite += completion.usage.cost.cacheWrite;
-					spent.cost.total += completion.usage.cost.total;
+					addUsage(spent, completion.usage);
 					return {
 						text: completion.text,
-						costUsd: completion.usage.cost.total,
-						stopReason: String(completion.stopReason),
+						costUsd: completion.costUsd,
+						stopReason: completion.stopReason,
 						outputTokens: completion.usage.output,
 						evalMs: callMs,
 					};
 				},
 			});
 			const modelRef = `${resolved.provider}/${resolved.id}`;
-			if (!this.deps.isDisposed() && (spent.cost.total > 0 || spent.totalTokens > 0)) {
+			if (!this.deps.isDisposed()) {
 				const identity = args.toolCallId
 					? `toolcall:${args.toolCallId}`
 					: `${modelRef} ${args.trials ?? "default"}`;
-				const reportId = deriveSpawnedUsageReportId("model-fitness", this.deps.getSessionId(), identity);
-				this.deps.addSpawnedUsage(spent, { label: "model-fitness", reportId });
+				reportSpawnedUsage(this.deps, spent, {
+					kind: "model-fitness",
+					label: "model-fitness",
+					sessionId: this.deps.getSessionId(),
+					identity,
+				});
 			}
 			try {
 				if (!this.deps.isDisposed()) FitnessStore.forAgentDir(this.deps.getAgentDir()).save(modelRef, report);

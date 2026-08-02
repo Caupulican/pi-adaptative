@@ -17,4 +17,11 @@ describe("json parse repair", () => {
 		expect(JSON.parse(repairJson('{"x":"a\nb"}'))).toEqual({ x: "a\nb" });
 		expect(repairJson('{"x":"tail\\')).toBe('{"x":"tail\\\\');
 	});
+
+	it("repairs a large malformed string in one bounded pass", () => {
+		const raw = `{"x":"${"line\n".repeat(20_000)}"}`;
+		const repaired = repairJson(raw);
+
+		expect(JSON.parse(repaired)).toEqual({ x: "line\n".repeat(20_000) });
+	});
 });

@@ -89,10 +89,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	interruptWorkerAgent(agentId: string): { interrupted: boolean; reason?: string } {
-		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
-		const attemptId = agent.activeAttemptId;
-		const attempt = attemptId ? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[attemptId] : undefined;
+		const { agent, attempt } = this.controlledAgentAttempt(agentId);
 		if (!attempt || (attempt.status !== "running" && attempt.status !== "leased")) {
 			return { interrupted: false, reason: "agent_not_running" };
 		}
@@ -107,10 +104,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	resumeWorkerAgent(agentId: string): { started: boolean; record?: LaneRecord; skipReason?: string } {
-		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
-		const attemptId = agent.activeAttemptId;
-		const attempt = attemptId ? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[attemptId] : undefined;
+		const { attempt } = this.controlledAgentAttempt(agentId);
 		if (!attempt || attempt.status !== "suspended") return { started: false, skipReason: "agent_not_suspended" };
 		const record = this.options.getLifecycle().getRecord(attempt.taskId);
 		if (!record) return { started: false, skipReason: "orchestration_projection_missing" };
@@ -121,10 +115,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	cancelWorkerAgent(agentId: string, reasonCode = "agent_cancelled"): LaneRecord | undefined {
-		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
-		const attemptId = agent.activeAttemptId;
-		const attempt = attemptId ? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[attemptId] : undefined;
+		const { attempt } = this.controlledAgentAttempt(agentId);
 		if (!attempt) return undefined;
 		this.options.abortLane(attempt.taskId, reasonCode);
 		const record = this.options.cancelLane(attempt.taskId, reasonCode);
@@ -217,6 +208,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const agent = this.options.getLifecycle().getAgent(normalized);
 		if (!agent) throw new Error(`Unknown logical worker agent '${normalized}'.`);
 		return agent;
+	}
+
+	private controlledAgentAttempt(agentId: string): {
+		agent: AgentBindingContract;
+		attempt: AttemptRuntimeState | undefined;
+	} {
+		this.requireControl();
+		const agent = this.requireKnownAgent(agentId);
+		const attempt = agent.activeAttemptId
+			? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[agent.activeAttemptId]
+			: undefined;
+		return { agent, attempt };
 	}
 
 	private getMailbox(agentId: string): WorkerAgentMailbox {

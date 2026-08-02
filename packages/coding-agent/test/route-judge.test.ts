@@ -62,6 +62,9 @@ describe("parseRouteJudgeVerdict", () => {
 			parseRouteJudgeVerdict('{"tier":"free","risk":"read-only","trivial":false,"reason":"no"}'),
 		).toBeUndefined();
 		expect(parseRouteJudgeVerdict('{"tier":"cheap","risk":"nonsense","trivial":true,"reason":"no"}')).toBeUndefined();
+		expect(
+			parseRouteJudgeVerdict('[{"tier":"cheap","risk":"read-only","trivial":true,"reason":"no"}]'),
+		).toBeUndefined();
 		expect(parseRouteJudgeVerdict("no json at all")).toBeUndefined();
 	});
 });

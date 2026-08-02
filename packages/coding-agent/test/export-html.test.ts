@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("HTML export asset injection", () => {
-	it("preserves dollar replacement sequences inside injected JS assets", async () => {
+	it("preserves replacement sequences while injecting the shared module assets", async () => {
 		const session = SessionManager.create(tempDir, tempDir, tempDir);
 		session.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
 		session.appendMessage({
@@ -44,5 +44,10 @@ describe("HTML export asset injection", () => {
 		const html = readFileSync(outputPath, "utf-8");
 		expect(html).toContain('Cost:</span><span class="info-value">$${totalCost.toFixed(3)}</span>');
 		expect(html).toContain(String.raw`[-+*\/?!$&|:<=>@^~]`);
+		expect(html).toContain('<script type="module">');
+		expect(html).toContain("export function parseSkillBlock(text)");
+		expect(html).toContain("export function flattenSessionTree(roots, activeEntryIds)");
+		expect(html.indexOf("export function flattenSessionTree")).toBeLessThan(html.indexOf("(function()"));
+		expect(html).not.toMatch(/\{\{(?:SKILL_BLOCK|SESSION_TREE_FOUNDATIONS)_JS\}\}/);
 	});
 });

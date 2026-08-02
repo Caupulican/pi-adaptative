@@ -27,6 +27,7 @@ export * from "./providers/register-builtins.ts";
 export * from "./session-resources.ts";
 export * from "./stream.ts";
 export * from "./types.ts";
+export * from "./usage.ts";
 export * from "./utils/diagnostics.ts";
 export * from "./utils/event-stream.ts";
 export * from "./utils/json-parse.ts";
@@ -45,6 +46,7 @@ export type {
 } from "./utils/oauth/types.ts";
 export * from "./utils/overflow.ts";
 export * from "./utils/provider-retry.ts";
+export * from "./utils/streaming-lines.ts";
 export * from "./utils/tool-repair/registry.ts";
 export * from "./utils/tool-repair/replay.ts";
 export * from "./utils/tool-repair/text-protocol.ts";

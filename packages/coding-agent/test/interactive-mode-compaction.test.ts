@@ -1,7 +1,46 @@
 import { describe, expect, test, vi } from "vitest";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { flushCompactionQueue } from "../src/modes/interactive/compaction-queue.ts";
+import {
+	handleInteractiveEvent,
+	type InteractiveEventHost,
+} from "../src/modes/interactive/interactive-event-controller.ts";
 
 describe("InteractiveMode compaction events", () => {
+	test.each([
+		{
+			name: "agent start",
+			event: { type: "agent_start" as const },
+		},
+		{
+			name: "retry end",
+			event: { type: "auto_retry_end" as const, success: true, attempt: 1, finalError: undefined },
+		},
+	])("restores retry controls on $name", async ({ event }) => {
+		const originalEscape = vi.fn();
+		const dispose = vi.fn();
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			retryEscapeHandler: originalEscape as (() => void) | undefined,
+			retryCountdown: { dispose } as unknown,
+			defaultEditor: { onEscape: vi.fn() },
+			settingsManager: { getShowTerminalProgress: () => false },
+			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+			activityLane: { remove: vi.fn(), finish: vi.fn() },
+			clearActiveToolCalls: vi.fn(),
+			stopWorkingLoader: vi.fn(),
+			workingVisible: false,
+			showError: vi.fn(),
+		};
+
+		await handleInteractiveEvent(fakeThis as unknown as InteractiveEventHost, event);
+
+		expect(fakeThis.defaultEditor.onEscape).toBe(originalEscape);
+		expect(fakeThis.retryEscapeHandler).toBeUndefined();
+		expect(fakeThis.retryCountdown).toBeUndefined();
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
 	test("flushes queued compaction prompts as steering when the agent is still streaming", async () => {
 		const prompt = vi.fn().mockResolvedValue(undefined);
 		const fakeThis = {
@@ -21,12 +60,7 @@ describe("InteractiveMode compaction events", () => {
 			refreshAutonomyFooterStatus: vi.fn(),
 			showError: vi.fn(),
 		};
-		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
-			this: typeof fakeThis,
-			options?: { willRetry?: boolean },
-		) => Promise<void>;
-
-		await flushCompactionQueue.call(fakeThis, { willRetry: false });
+		await flushCompactionQueue(fakeThis, { willRetry: false });
 
 		expect(prompt).toHaveBeenCalledWith("verify the image", { images: undefined, streamingBehavior: "steer" });
 		expect(fakeThis.showError).not.toHaveBeenCalled();
@@ -54,24 +88,13 @@ describe("InteractiveMode compaction events", () => {
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 		};
 
-		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
-			this: typeof fakeThis,
-			event: {
-				type: "compaction_end";
-				reason: "manual" | "threshold" | "overflow";
-				result: { tokensBefore: number; summary: string } | undefined;
-				aborted: boolean;
-				willRetry: boolean;
-				errorMessage?: string;
-			},
-		) => Promise<void>;
-
-		await handleEvent.call(fakeThis, {
+		await handleInteractiveEvent(fakeThis as unknown as InteractiveEventHost, {
 			type: "compaction_end",
 			reason: "manual",
 			result: {
 				tokensBefore: 123,
 				summary: "summary",
+				firstKeptEntryId: "entry-1",
 			},
 			aborted: false,
 			willRetry: false,

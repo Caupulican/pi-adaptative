@@ -28,6 +28,16 @@ export interface CompactionQueueHost {
 	refreshAutonomyFooterStatus(): void;
 }
 
+async function submitQueuedMessage(host: CompactionQueueHost, message: CompactionQueuedMessage): Promise<void> {
+	if (host.isExtensionCommand(message.text)) {
+		await host.session.prompt(message.text);
+	} else if (message.mode === "followUp") {
+		await host.session.followUp(message.text, message.images);
+	} else {
+		await host.session.steer(message.text, message.images);
+	}
+}
+
 export async function flushCompactionQueue(
 	host: CompactionQueueHost,
 	options?: { willRetry?: boolean },
@@ -55,13 +65,7 @@ export async function flushCompactionQueue(
 		if (options?.willRetry) {
 			// When retry is pending, queue messages for the retry turn
 			for (const message of queuedMessages) {
-				if (host.isExtensionCommand(message.text)) {
-					await host.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await host.session.followUp(message.text, message.images);
-				} else {
-					await host.session.steer(message.text, message.images);
-				}
+				await submitQueuedMessage(host, message);
 			}
 			host.updatePendingMessagesDisplay();
 			return;
@@ -103,13 +107,7 @@ export async function flushCompactionQueue(
 
 		// Queue remaining messages
 		for (const message of rest) {
-			if (host.isExtensionCommand(message.text)) {
-				await host.session.prompt(message.text);
-			} else if (message.mode === "followUp") {
-				await host.session.followUp(message.text, message.images);
-			} else {
-				await host.session.steer(message.text, message.images);
-			}
+			await submitQueuedMessage(host, message);
 		}
 		host.updatePendingMessagesDisplay();
 		void promptPromise;

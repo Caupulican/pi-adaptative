@@ -1,5 +1,11 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
-import type { CapabilityEnvelope, EvidenceBundle, EvidenceRef, Finding, GateOutcome } from "../autonomy/contracts.ts";
+import type { CapabilityEnvelope, EvidenceBundle, EvidenceRef, GateOutcome } from "../autonomy/contracts.ts";
+import {
+	type EvidenceFindingDraft,
+	normalizeEvidenceFinding,
+	projectEvidenceFindings,
+} from "../autonomy/evidence-finding-projection.ts";
+import { parseModelOutputJsonObject } from "../model-output-json.ts";
 import { createEvidenceBundle } from "./evidence-bundle.ts";
 import { evaluateResearchRequest } from "./research-gate.ts";
 
@@ -84,49 +90,24 @@ export function buildResearchUserPrompt(args: {
 }
 
 export interface ParsedResearchFindings {
-	findings: Array<{ summary: string; confidence?: number }>;
+	findings: EvidenceFindingDraft[];
 }
 
 export function parseResearchFindings(text: string, maxFindings: number): ParsedResearchFindings | undefined {
-	const trimmed = text.trim();
-	const candidates: string[] = [trimmed];
-	const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-	if (fenced?.[1]) candidates.push(fenced[1].trim());
-	const start = trimmed.indexOf("{");
-	const end = trimmed.lastIndexOf("}");
-	if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
+	const parsed = parseModelOutputJsonObject(text);
+	const findingsRaw = parsed?.findings;
+	if (!Array.isArray(findingsRaw)) return undefined;
 
-	for (const candidate of candidates) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(candidate);
-		} catch {
-			continue;
-		}
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-		const findingsRaw = (parsed as { findings?: unknown }).findings;
-		if (!Array.isArray(findingsRaw)) continue;
-
-		const findings: Array<{ summary: string; confidence?: number }> = [];
-		for (const item of findingsRaw) {
-			if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-			const summary = (item as { summary?: unknown }).summary;
-			if (typeof summary !== "string" || summary.trim().length === 0) continue;
-			const confidenceRaw = (item as { confidence?: unknown }).confidence;
-			const confidence =
-				typeof confidenceRaw === "number" && Number.isFinite(confidenceRaw)
-					? Math.min(Math.max(confidenceRaw, 0), 1)
-					: undefined;
-			findings.push({ summary: summary.trim(), confidence });
-			if (findings.length >= maxFindings) break;
-		}
-		// A well-formed-but-empty findings array is a valid "nothing found"; a findings array whose
-		// every item is malformed is not.
-		if (findings.length > 0 || findingsRaw.length === 0) {
-			return { findings };
-		}
+	const findings: EvidenceFindingDraft[] = [];
+	for (const item of findingsRaw) {
+		const finding = normalizeEvidenceFinding(item);
+		if (!finding) continue;
+		findings.push(finding);
+		if (findings.length >= maxFindings) break;
 	}
-	return undefined;
+	// A well-formed-but-empty findings array is a valid "nothing found"; a findings array whose
+	// every item is malformed is not.
+	return findings.length > 0 || findingsRaw.length === 0 ? { findings } : undefined;
 }
 
 function truncateExcerpt(text: string, maxChars: number): string {
@@ -155,12 +136,7 @@ function buildBundle(options: ResearchRunnerOptions, parsed: ParsedResearchFindi
 	const workspaceRoom = Math.max(0, budget - 2);
 	const workspaceSources = (options.sources ?? []).slice(0, workspaceRoom);
 	const sources = budget === 1 ? [synthesisRef] : [contextRef, ...workspaceSources, synthesisRef];
-	const findings: Finding[] = parsed.findings.slice(0, options.maxFindings).map((finding, index) => ({
-		id: `finding-${index + 1}`,
-		summary: finding.summary,
-		evidenceIds: [synthesisRef.id],
-		...(finding.confidence !== undefined ? { confidence: finding.confidence } : {}),
-	}));
+	const findings = projectEvidenceFindings(parsed.findings, synthesisRef.id, options.maxFindings);
 	return createEvidenceBundle({ query: options.query, sources, findings });
 }
 

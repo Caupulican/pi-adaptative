@@ -9,8 +9,6 @@ import type {
 import { calculateCost } from "../models.ts";
 import type {
 	AnthropicMessagesCompat,
-	Api,
-	AssistantMessage,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -27,7 +25,6 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -36,22 +33,19 @@ import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import {
+	applyProviderPayloadHook,
+	beginAssistantResponseStream,
+	completeAssistantStream,
+	createAssistantMessage,
+	createProviderRetryOptions,
+	createRetryFreeRequestOptions,
+	mapStandardThinkingEffort,
+	resolveCacheRetention,
+	terminateAssistantStreamWithError,
+} from "./provider-runtime.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
-}
 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
@@ -423,23 +417,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output = createAssistantMessage(model);
 
 		try {
 			let client: Anthropic;
@@ -482,29 +460,24 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				context.tools ?? [],
 				isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 			);
-			let params = buildParams(model, context, isOAuth, toolNameMap, options);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as MessageCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: 0,
-			};
+			const params = await applyProviderPayloadHook(
+				buildParams(model, context, isOAuth, toolNameMap, options),
+				model,
+				options?.onPayload,
+			);
+			const requestOptions = createRetryFreeRequestOptions(options);
 			const response = await retryProviderRequest(
 				() => client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),
-				{
-					maxRetries: options?.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: options?.signal,
-				},
+				createProviderRetryOptions(options),
 			);
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			stream.push({ type: "start", partial: output });
+			await beginAssistantResponseStream(stream, output, response, model, options?.onResponse);
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
+			const startBlock = (block: Block, type: "text_start" | "thinking_start" | "toolcall_start"): void => {
+				output.content.push(block);
+				stream.push({ type, contentIndex: output.content.length - 1, partial: output });
+			};
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				if (event.type === "message_start") {
@@ -529,8 +502,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							text: "",
 							index: event.index,
 						};
-						output.content.push(block);
-						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+						startBlock(block, "text_start");
 					} else if (event.content_block.type === "thinking") {
 						const block: Block = {
 							type: "thinking",
@@ -538,8 +510,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							thinkingSignature: "",
 							index: event.index,
 						};
-						output.content.push(block);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						startBlock(block, "thinking_start");
 					} else if (event.content_block.type === "redacted_thinking") {
 						const block: Block = {
 							type: "thinking",
@@ -548,8 +519,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							redacted: true,
 							index: event.index,
 						};
-						output.content.push(block);
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						startBlock(block, "thinking_start");
 					} else if (event.content_block.type === "tool_use") {
 						const block: Block = {
 							type: "toolCall",
@@ -559,8 +529,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							partialJson: "",
 							index: event.index,
 						};
-						output.content.push(block);
-						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+						startBlock(block, "toolcall_start");
 					}
 				} else if (event.type === "content_block_delta") {
 					if (event.delta.type === "text_delta") {
@@ -673,26 +642,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				}
 			}
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
+				formatError: (caught) => (caught instanceof Error ? caught.message : JSON.stringify(caught)),
+				scratchFields: ["index", "partialJson"],
+			});
 		}
 	})();
 
@@ -707,20 +662,7 @@ function mapThinkingLevelToEffort(
 	model: Model<"anthropic-messages">,
 	level: SimpleStreamOptions["reasoning"],
 ): AnthropicEffort {
-	const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
-	if (typeof mapped === "string") return mapped as AnthropicEffort;
-
-	switch (level) {
-		case "minimal":
-		case "low":
-			return "low";
-		case "medium":
-			return "medium";
-		case "high":
-			return "high";
-		default:
-			return "high";
-	}
+	return mapStandardThinkingEffort(model, level) as AnthropicEffort;
 }
 
 export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
@@ -770,6 +712,12 @@ function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
 }
 
+type AnthropicClientOptions = NonNullable<ConstructorParameters<typeof Anthropic>[0]>;
+
+function createAnthropicSdkClient(options: AnthropicClientOptions): Anthropic {
+	return new Anthropic({ ...options, dangerouslyAllowBrowser: true });
+}
+
 function createClient(
 	model: Model<"anthropic-messages">,
 	apiKey: string | undefined,
@@ -790,11 +738,10 @@ function createClient(
 	}
 
 	if (!apiKey && hasAuthorizationHeader(model.headers, optionsHeaders)) {
-		const client = new Anthropic({
+		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: null,
 			baseURL: model.provider === "cloudflare-ai-gateway" ? resolveCloudflareBaseUrl(model) : model.baseUrl,
-			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
 				{
 					accept: "application/json",
@@ -813,11 +760,10 @@ function createClient(
 	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
-		const client = new Anthropic({
+		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: null,
 			baseURL: resolveCloudflareBaseUrl(model),
-			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
 				{
 					accept: "application/json",
@@ -835,34 +781,12 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	if (getAnthropicCompat(model).authFormat === "bearer") {
-		const client = new Anthropic({
+	// Anthropic-compatible bearer endpoints and Copilot share the same SDK auth shape.
+	if (getAnthropicCompat(model).authFormat === "bearer" || model.provider === "github-copilot") {
+		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
-			dangerouslyAllowBrowser: true,
-			defaultHeaders: mergeHeaders(
-				{
-					accept: "application/json",
-					"anthropic-dangerous-direct-browser-access": "true",
-					...(betaFeatures.length > 0 ? { "anthropic-beta": betaFeatures.join(",") } : {}),
-				},
-				model.headers,
-				dynamicHeaders,
-				optionsHeaders,
-			),
-		});
-
-		return { client, isOAuthToken: false };
-	}
-
-	// Copilot: Bearer auth, selective betas.
-	if (model.provider === "github-copilot") {
-		const client = new Anthropic({
-			apiKey: null,
-			authToken: apiKey,
-			baseURL: model.baseUrl,
-			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
 				{
 					accept: "application/json",
@@ -880,11 +804,10 @@ function createClient(
 
 	// OAuth: Bearer auth, Claude Code identity headers
 	if (isOAuthToken(apiKey)) {
-		const client = new Anthropic({
+		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
-			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
 				{
 					accept: "application/json",
@@ -904,11 +827,10 @@ function createClient(
 	// API key auth
 	const sessionAffinityHeaders: Record<string, string | null> =
 		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
-	const client = new Anthropic({
+	const client = createAnthropicSdkClient({
 		apiKey,
 		authToken: null,
 		baseURL: model.baseUrl,
-		dangerouslyAllowBrowser: true,
 		defaultHeaders: mergeHeaders(
 			{
 				accept: "application/json",

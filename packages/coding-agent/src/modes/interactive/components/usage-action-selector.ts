@@ -1,7 +1,7 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Spacer, Text } from "@caupulican/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { SelectorNavigationFooter } from "./selector-list.ts";
 
 const USAGE_ACTION_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 20,
@@ -44,21 +44,7 @@ export class UsageActionSelectorComponent extends Container {
 		this.selectList.onSelect = (item) => options.onSelect(item.value);
 		this.selectList.onCancel = options.onCancel;
 		this.addChild(this.selectList);
-
-		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(
-				rawKeyHint("↑↓", "navigate") +
-					"  " +
-					keyHint("tui.select.confirm", "select") +
-					"  " +
-					keyHint("tui.select.cancel", "cancel"),
-				1,
-				0,
-			),
-		);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.addChild(new SelectorNavigationFooter("select"));
 	}
 
 	handleInput(data: string): void {

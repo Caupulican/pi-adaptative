@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { StreamingLineDecoder } from "../packages/ai/src/utils/streaming-lines.ts";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -12,7 +13,10 @@ const distCliPath = join(packageDir, "dist", "cli.js");
 const srcCliPath = join(packageDir, "src", "cli.ts");
 const defaultNodeProfileDir = join(repoRoot, "profiles-node");
 const defaultBunProfileDir = join(repoRoot, "profiles-bun");
-const agentDirEnvName = "PI_CODING_AGENT_DIR";
+const packageManifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+const appName = typeof packageManifest.piConfig?.name === "string" ? packageManifest.piConfig.name : "pi";
+const appEnvPrefix = appName.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+const agentDirEnvName = `${/^[0-9]/.test(appEnvPrefix) ? `_${appEnvPrefix}` : appEnvPrefix}_CODING_AGENT_DIR`;
 const startupBenchmarkEnvName = "PI_STARTUP_BENCHMARK";
 
 function printHelp() {
@@ -33,7 +37,7 @@ Options:
                          Default: profiles-node for Node, profiles-bun for Bun
   --label <name>         Profile name prefix (default: <mode>-startup)
   --runtime <name>       node, bun, or auto (default: auto)
-  --agent-dir <dir>      Use a specific PI_CODING_AGENT_DIR for the benchmark run
+  --agent-dir <dir>      Use a specific ${agentDirEnvName} for the benchmark run
   --isolated-agent-dir   Use a fresh temporary agent dir instead of the normal one
   --no-offline           Do not force PI_OFFLINE=1 / PI_SKIP_VERSION_CHECK=1
   --skip-build           Reuse the current dist/cli.js without rebuilding first (Node only)
@@ -303,19 +307,21 @@ async function runBuild() {
 		},
 	);
 
-	let stdout = "";
-	let stderr = "";
+	const stdoutChunks = [];
+	const stderrChunks = [];
 	child.stdout.setEncoding("utf8");
 	child.stdout.on("data", (chunk) => {
-		stdout += chunk;
+		stdoutChunks.push(chunk);
 	});
 	child.stderr.setEncoding("utf8");
 	child.stderr.on("data", (chunk) => {
-		stderr += chunk;
+		stderrChunks.push(chunk);
 	});
 
 	const exitCode = await waitForExit(child, "Build");
 	if (exitCode !== 0) {
+		const stdout = stdoutChunks.join("");
+		const stderr = stderrChunks.join("");
 		if (stdout.trim()) {
 			process.stdout.write(`${stdout}${stdout.endsWith("\n") ? "" : "\n"}`);
 		}
@@ -374,16 +380,29 @@ function createBenchmarkEnv(options, isolatedAgentDir) {
 	return env;
 }
 
-async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+function createBenchmarkRunContext(runIndex, options) {
 	const runNumber = runIndex + 1;
 	const suffix = String(runNumber).padStart(3, "0");
 	const profileName = `${options.label}-${suffix}.cpuprofile`;
 	const workRun = options.isolatedAgentDir ? acquireScriptWorkRun("benchmarks", "startup") : undefined;
-	const tempRoot = workRun?.path;
-	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
+	const isolatedAgentDir = workRun ? join(workRun.path, "agent") : undefined;
 	if (isolatedAgentDir) {
 		mkdirSync(isolatedAgentDir, { recursive: true });
 	}
+	return { runNumber, profileName, workRun, isolatedAgentDir };
+}
+
+function resolveWrittenProfilePath(options, profileDir, profileName) {
+	if (!options.cpuProfile) return undefined;
+	const profilePath = join(profileDir, profileName);
+	if (!existsSync(profilePath)) {
+		throw new Error(`CPU profile was not written: ${profilePath}`);
+	}
+	return profilePath;
+}
+
+async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+	const { runNumber, profileName, workRun, isolatedAgentDir } = createBenchmarkRunContext(runIndex, options);
 
 	const command = getRuntimeCommand(runtime, "tui", profileDir, profileName, options.cpuProfile);
 	const child = spawn(command.executable, command.args, {
@@ -393,10 +412,10 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 		shell: process.platform === "win32" && runtime === "bun",
 	});
 
-	let stderr = "";
+	const stderrChunks = [];
 	child.stderr.setEncoding("utf8");
 	child.stderr.on("data", (chunk) => {
-		stderr += chunk;
+		stderrChunks.push(chunk);
 	});
 
 	const startedAt = performance.now();
@@ -404,14 +423,12 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	const elapsedMs = performance.now() - startedAt;
 
 	try {
+		const stderr = stderrChunks.join("");
 		if (exitCode !== 0) {
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
 		}
 
-		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
-		if (profilePath && !existsSync(profilePath)) {
-			throw new Error(`CPU profile was not written: ${profilePath}`);
-		}
+		const profilePath = resolveWrittenProfilePath(options, profileDir, profileName);
 
 		return { elapsedMs, profilePath, timings: parseStartupTimings(stderr) };
 	} finally {
@@ -419,29 +436,8 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	}
 }
 
-function splitJsonLines(buffer, onLine) {
-	let remaining = buffer;
-	while (true) {
-		const newlineIndex = remaining.indexOf("\n");
-		if (newlineIndex === -1) {
-			return remaining;
-		}
-		const line = remaining.slice(0, newlineIndex);
-		onLine(line.endsWith("\r") ? line.slice(0, -1) : line);
-		remaining = remaining.slice(newlineIndex + 1);
-	}
-}
-
 async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
-	const runNumber = runIndex + 1;
-	const suffix = String(runNumber).padStart(3, "0");
-	const profileName = `${options.label}-${suffix}.cpuprofile`;
-	const workRun = options.isolatedAgentDir ? acquireScriptWorkRun("benchmarks", "startup") : undefined;
-	const tempRoot = workRun?.path;
-	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
-	if (isolatedAgentDir) {
-		mkdirSync(isolatedAgentDir, { recursive: true });
-	}
+	const { runNumber, profileName, workRun, isolatedAgentDir } = createBenchmarkRunContext(runIndex, options);
 
 	const command = getRuntimeCommand(runtime, "rpc", profileDir, profileName, options.cpuProfile);
 	const child = spawn(command.executable, command.args, {
@@ -451,46 +447,51 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 		shell: process.platform === "win32" && runtime === "bun",
 	});
 
-	let stdoutBuffer = "";
-	let stderr = "";
+	const stdoutDecoder = new StreamingLineDecoder(1024 * 1024, { lineEndings: "lf" });
+	const stderrChunks = [];
 	let readyElapsedMs;
 	let responseError;
 	const requestId = `startup-benchmark-${runNumber}`;
 	const startedAt = performance.now();
 
+	const consumeResponseLine = (line) => {
+		if (line.trim() === "") return;
+		let parsed;
+		try {
+			parsed = JSON.parse(line);
+		} catch (error) {
+			responseError = error instanceof Error ? error.message : String(error);
+			child.stdin.end();
+			return;
+		}
+
+		if (parsed?.type !== "response" || parsed.id !== requestId || parsed.command !== "get_state") return;
+
+		if (parsed.success !== true) {
+			responseError = typeof parsed.error === "string" ? parsed.error : "get_state failed";
+			child.stdin.end();
+			return;
+		}
+
+		if (readyElapsedMs === undefined) {
+			readyElapsedMs = performance.now() - startedAt;
+			child.stdin.end();
+		}
+	};
+
 	child.stdout.setEncoding("utf8");
 	child.stdout.on("data", (chunk) => {
-		stdoutBuffer = splitJsonLines(stdoutBuffer + chunk, (line) => {
-			if (line.trim() === "") {
-				return;
-			}
-			let parsed;
-			try {
-				parsed = JSON.parse(line);
-			} catch (error) {
-				responseError = error instanceof Error ? error.message : String(error);
-				return;
-			}
-
-			if (parsed?.type !== "response" || parsed.id !== requestId || parsed.command !== "get_state") {
-				return;
-			}
-
-			if (parsed.success !== true) {
-				responseError = typeof parsed.error === "string" ? parsed.error : "get_state failed";
-				return;
-			}
-
-			if (readyElapsedMs === undefined) {
-				readyElapsedMs = performance.now() - startedAt;
-				child.stdin.end();
-			}
-		});
+		try {
+			for (const line of stdoutDecoder.push(chunk)) consumeResponseLine(line);
+		} catch (error) {
+			responseError = error instanceof Error ? error.message : String(error);
+			child.stdin.end();
+		}
 	});
 
 	child.stderr.setEncoding("utf8");
 	child.stderr.on("data", (chunk) => {
-		stderr += chunk;
+		stderrChunks.push(chunk);
 	});
 
 	child.stdin.setDefaultEncoding("utf8");
@@ -499,6 +500,9 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	const exitCode = await waitForExit(child, `Benchmark ${measuredIndex === undefined ? `warmup ${runNumber}` : `run ${measuredIndex}`}`);
 
 	try {
+		const finalLine = stdoutDecoder.finish();
+		if (finalLine !== undefined) consumeResponseLine(finalLine);
+		const stderr = stderrChunks.join("");
 		if (responseError) {
 			throw new Error(responseError);
 		}
@@ -509,10 +513,7 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
 		}
 
-		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
-		if (profilePath && !existsSync(profilePath)) {
-			throw new Error(`CPU profile was not written: ${profilePath}`);
-		}
+		const profilePath = resolveWrittenProfilePath(options, profileDir, profileName);
 
 		return { elapsedMs: readyElapsedMs, profilePath, timings: parseStartupTimings(stderr) };
 	} finally {
@@ -525,6 +526,18 @@ async function runBenchmarkRun(params) {
 		return await runRpcBenchmarkRun(params);
 	}
 	return await runTuiBenchmarkRun(params);
+}
+
+function writeSelectedProfile(options, maxElapsedRun, profileDir) {
+	if (!options.cpuProfile || !maxElapsedRun.profilePath) return;
+	process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
+	process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
+}
+
+function writeTimingMetrics(timingSummaries) {
+	for (const [label, summary] of timingSummaries.entries()) {
+		process.stdout.write(`METRIC ${toMetricName(label)}=${summary.median.toFixed(1)}\n`);
+	}
 }
 
 async function main() {
@@ -599,14 +612,9 @@ async function main() {
 		for (const [label, summary] of timingSummaries.entries()) {
 			process.stdout.write(`  ${label}: ${formatMs(summary.median)}\n`);
 		}
-		if (options.cpuProfile && maxElapsedRun.profilePath) {
-			process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
-			process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
-		}
+		writeSelectedProfile(options, maxElapsedRun, profileDir);
 		process.stdout.write(`METRIC startup_time_ms=${measuredRuns[0].elapsedMs.toFixed(1)}\n`);
-		for (const [label, summary] of timingSummaries.entries()) {
-			process.stdout.write(`METRIC ${toMetricName(label)}=${summary.median.toFixed(1)}\n`);
-		}
+		writeTimingMetrics(timingSummaries);
 		return;
 	}
 
@@ -620,14 +628,9 @@ async function main() {
 	for (const [label, summary] of timingSummaries.entries()) {
 		process.stdout.write(`  ${label} median: ${formatMs(summary.median)}\n`);
 	}
-	if (options.cpuProfile && maxElapsedRun.profilePath) {
-		process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
-		process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
-	}
+	writeSelectedProfile(options, maxElapsedRun, profileDir);
 	process.stdout.write(`METRIC startup_time_ms=${elapsedSummary.median.toFixed(1)}\n`);
-	for (const [label, summary] of timingSummaries.entries()) {
-		process.stdout.write(`METRIC ${toMetricName(label)}=${summary.median.toFixed(1)}\n`);
-	}
+	writeTimingMetrics(timingSummaries);
 }
 
 main().catch((error) => {

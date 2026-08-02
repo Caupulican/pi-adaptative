@@ -15,12 +15,34 @@ export interface FileOperations {
 	edited: Set<string>;
 }
 
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
 export function createFileOps(): FileOperations {
 	return {
 		read: new Set(),
 		written: new Set(),
 		edited: new Set(),
 	};
+}
+
+export function addPersistedFileOperations(
+	fileOps: FileOperations,
+	details: { readFiles?: unknown; modifiedFiles?: unknown },
+): void {
+	if (Array.isArray(details.readFiles)) {
+		for (const path of details.readFiles) {
+			if (typeof path === "string") fileOps.read.add(path);
+		}
+	}
+	if (Array.isArray(details.modifiedFiles)) {
+		for (const path of details.modifiedFiles) {
+			if (typeof path === "string") fileOps.edited.add(path);
+		}
+	}
 }
 
 /**

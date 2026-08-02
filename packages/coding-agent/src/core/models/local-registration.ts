@@ -28,17 +28,16 @@ interface ModelsJsonModel {
 	compat?: Record<string, unknown>;
 }
 
+interface ModelsJsonProvider {
+	baseUrl?: string;
+	api?: string;
+	apiKey?: string;
+	models?: ModelsJsonModel[];
+	[key: string]: unknown;
+}
+
 interface ModelsJson {
-	providers: Record<
-		string,
-		{
-			baseUrl?: string;
-			api?: string;
-			apiKey?: string;
-			models?: ModelsJsonModel[];
-			[key: string]: unknown;
-		}
-	>;
+	providers: Record<string, ModelsJsonProvider>;
 	[key: string]: unknown;
 }
 
@@ -126,21 +125,19 @@ function loadStrict(path: string): { json?: ModelsJson; reason?: string } {
 	}
 }
 
-export function registerLocalModel(args: {
+function writeModelsJson(path: string, json: ModelsJson): void {
+	writeFileSync(path, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
+}
+
+function registerModel(args: {
 	agentDir: string;
-	ref: string;
-	baseUrl: string;
-	contextWindow?: number;
-	servedContextWindow?: number;
+	providerId: string;
+	modelId: string;
+	entry: ModelsJsonModel;
+	providerDefaults?: ModelsJsonProvider;
 }): LocalRegistrationResult {
 	const modelsJsonPath = configFile(args.agentDir, "models.json");
-	const contextWindow = args.contextWindow ?? 8192;
-	const entry = localModelEntry(args.ref, contextWindow, args.servedContextWindow);
-	const providerBase = {
-		baseUrl: `${args.baseUrl.replace(/\/$/, "")}/v1`,
-		api: "openai-completions",
-		apiKey: "ollama",
-	};
+	const providerDefaults = args.providerDefaults ?? {};
 	const { json, reason } = loadStrict(modelsJsonPath);
 	if (!json) {
 		return {
@@ -148,26 +145,67 @@ export function registerLocalModel(args: {
 			modelsJsonPath,
 			reason,
 			manualSnippet: JSON.stringify(
-				{ providers: { [OLLAMA_PROVIDER]: { ...providerBase, models: [entry] } } },
+				{ providers: { [args.providerId]: { ...providerDefaults, models: [args.entry] } } },
 				null,
 				"\t",
 			),
 		};
 	}
-	json.providers[OLLAMA_PROVIDER] ??= { ...providerBase, models: [] };
-	const provider = json.providers[OLLAMA_PROVIDER];
-	provider.baseUrl ??= providerBase.baseUrl;
-	provider.api ??= providerBase.api;
-	provider.apiKey ??= providerBase.apiKey;
-	provider.models ??= [];
-	const existing = provider.models.findIndex((model) => model.id === args.ref);
-	if (existing >= 0) {
-		provider.models[existing] = { ...provider.models[existing], ...entry };
-	} else {
-		provider.models.push(entry);
+
+	json.providers[args.providerId] ??= { ...providerDefaults, models: [] };
+	const provider = json.providers[args.providerId];
+	for (const [key, value] of Object.entries(providerDefaults)) {
+		if (provider[key] === null || provider[key] === undefined) provider[key] = value;
 	}
-	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
+	provider.models ??= [];
+	const existing = provider.models.findIndex((model) => model.id === args.modelId);
+	if (existing >= 0) provider.models[existing] = { ...provider.models[existing], ...args.entry };
+	else provider.models.push(args.entry);
+
+	writeModelsJson(modelsJsonPath, json);
 	return { ok: true, modelsJsonPath };
+}
+
+function unregisterModel(args: {
+	agentDir: string;
+	providerId: string;
+	modelId: string;
+	deleteProviderWhenEmpty: boolean;
+}): LocalRegistrationResult {
+	const modelsJsonPath = configFile(args.agentDir, "models.json");
+	const { json, reason } = loadStrict(modelsJsonPath);
+	if (!json) return { ok: false, modelsJsonPath, reason };
+	const provider = json.providers[args.providerId];
+	if (!provider?.models) return { ok: true, modelsJsonPath };
+	const before = provider.models.length;
+	provider.models = provider.models.filter((model) => model.id !== args.modelId);
+	if (provider.models.length === before) return { ok: true, modelsJsonPath };
+	if (args.deleteProviderWhenEmpty && provider.models.length === 0) delete json.providers[args.providerId];
+	writeModelsJson(modelsJsonPath, json);
+	return { ok: true, modelsJsonPath };
+}
+
+export function registerLocalModel(args: {
+	agentDir: string;
+	ref: string;
+	baseUrl: string;
+	contextWindow?: number;
+	servedContextWindow?: number;
+}): LocalRegistrationResult {
+	const contextWindow = args.contextWindow ?? 8192;
+	const entry = localModelEntry(args.ref, contextWindow, args.servedContextWindow);
+	const providerBase = {
+		baseUrl: `${args.baseUrl.replace(/\/$/, "")}/v1`,
+		api: "openai-completions",
+		apiKey: "ollama",
+	};
+	return registerModel({
+		agentDir: args.agentDir,
+		providerId: OLLAMA_PROVIDER,
+		modelId: args.ref,
+		entry,
+		providerDefaults: providerBase,
+	});
 }
 
 export function registerTransformersModel(args: {
@@ -176,7 +214,6 @@ export function registerTransformersModel(args: {
 	baseUrl: string;
 	contextWindow?: number;
 }): LocalRegistrationResult {
-	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const entry = transformersModelEntry(args);
 	const providerBase = {
 		name: "Hugging Face Transformers (pi-managed)",
@@ -184,34 +221,13 @@ export function registerTransformersModel(args: {
 		api: "openai-completions",
 		apiKey: "pi-transformers",
 	};
-	const { json, reason } = loadStrict(modelsJsonPath);
-	if (!json) {
-		return {
-			ok: false,
-			modelsJsonPath,
-			reason,
-			manualSnippet: JSON.stringify(
-				{ providers: { [HF_TRANSFORMERS_PROVIDER]: { ...providerBase, models: [entry] } } },
-				null,
-				"\t",
-			),
-		};
-	}
-	json.providers[HF_TRANSFORMERS_PROVIDER] ??= { ...providerBase, models: [] };
-	const provider = json.providers[HF_TRANSFORMERS_PROVIDER];
-	provider.name ??= providerBase.name;
-	provider.baseUrl ??= providerBase.baseUrl;
-	provider.api ??= providerBase.api;
-	provider.apiKey ??= providerBase.apiKey;
-	provider.models ??= [];
-	const existing = provider.models.findIndex((model) => model.id === args.modelId);
-	if (existing >= 0) {
-		provider.models[existing] = { ...provider.models[existing], ...entry };
-	} else {
-		provider.models.push(entry);
-	}
-	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
-	return { ok: true, modelsJsonPath };
+	return registerModel({
+		agentDir: args.agentDir,
+		providerId: HF_TRANSFORMERS_PROVIDER,
+		modelId: args.modelId,
+		entry,
+		providerDefaults: providerBase,
+	});
 }
 
 /**
@@ -231,67 +247,38 @@ export function registerPrismLlamaCppModel(args: {
 	contextWindow: number;
 	servedContextWindow?: number;
 }): LocalRegistrationResult {
-	const modelsJsonPath = configFile(args.agentDir, "models.json");
 	const entry = prismLlamaCppModelEntry({
 		modelId: args.modelId,
 		baseUrl: args.baseUrl,
 		contextWindow: args.contextWindow,
 		servedContextWindow: args.servedContextWindow ?? args.contextWindow,
 	});
-	const { json, reason } = loadStrict(modelsJsonPath);
-	if (!json) {
-		return {
-			ok: false,
-			modelsJsonPath,
-			reason,
-			manualSnippet: JSON.stringify({ providers: { [PRISM_LLAMACPP_PROVIDER]: { models: [entry] } } }, null, "\t"),
-		};
-	}
-	json.providers[PRISM_LLAMACPP_PROVIDER] ??= { models: [] };
-	const provider = json.providers[PRISM_LLAMACPP_PROVIDER];
-	provider.models ??= [];
-	const existing = provider.models.findIndex((model) => model.id === args.modelId);
-	if (existing >= 0) {
-		provider.models[existing] = { ...provider.models[existing], ...entry };
-	} else {
-		provider.models.push(entry);
-	}
-	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
-	return { ok: true, modelsJsonPath };
+	return registerModel({
+		agentDir: args.agentDir,
+		providerId: PRISM_LLAMACPP_PROVIDER,
+		modelId: args.modelId,
+		entry,
+	});
 }
 
 export function unregisterLocalModel(args: { agentDir: string; ref: string }): LocalRegistrationResult {
-	const modelsJsonPath = configFile(args.agentDir, "models.json");
-	const { json, reason } = loadStrict(modelsJsonPath);
-	if (!json) return { ok: false, modelsJsonPath, reason };
-	const provider = json.providers[OLLAMA_PROVIDER];
-	if (!provider?.models) return { ok: true, modelsJsonPath };
-	const before = provider.models.length;
-	provider.models = provider.models.filter((model) => model.id !== args.ref);
-	if (provider.models.length === before) return { ok: true, modelsJsonPath };
 	// Drop the whole provider entry when its last pi-registered model goes (leave user fields alone
 	// if they added any models themselves — only an all-pi-managed empty list is removed).
-	if (provider.models.length === 0) {
-		delete json.providers[OLLAMA_PROVIDER];
-	}
-	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
-	return { ok: true, modelsJsonPath };
+	return unregisterModel({
+		agentDir: args.agentDir,
+		providerId: OLLAMA_PROVIDER,
+		modelId: args.ref,
+		deleteProviderWhenEmpty: true,
+	});
 }
 
 export function unregisterTransformersModel(args: { agentDir: string; modelId: string }): LocalRegistrationResult {
-	const modelsJsonPath = configFile(args.agentDir, "models.json");
-	const { json, reason } = loadStrict(modelsJsonPath);
-	if (!json) return { ok: false, modelsJsonPath, reason };
-	const provider = json.providers[HF_TRANSFORMERS_PROVIDER];
-	if (!provider?.models) return { ok: true, modelsJsonPath };
-	const before = provider.models.length;
-	provider.models = provider.models.filter((model) => model.id !== args.modelId);
-	if (provider.models.length === before) return { ok: true, modelsJsonPath };
-	if (provider.models.length === 0) {
-		delete json.providers[HF_TRANSFORMERS_PROVIDER];
-	}
-	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
-	return { ok: true, modelsJsonPath };
+	return unregisterModel({
+		agentDir: args.agentDir,
+		providerId: HF_TRANSFORMERS_PROVIDER,
+		modelId: args.modelId,
+		deleteProviderWhenEmpty: true,
+	});
 }
 
 /**
@@ -303,14 +290,10 @@ export function unregisterTransformersModel(args: { agentDir: string; modelId: s
  * fields it didn't write.
  */
 export function unregisterPrismLlamaCppModel(args: { agentDir: string; modelId: string }): LocalRegistrationResult {
-	const modelsJsonPath = configFile(args.agentDir, "models.json");
-	const { json, reason } = loadStrict(modelsJsonPath);
-	if (!json) return { ok: false, modelsJsonPath, reason };
-	const provider = json.providers[PRISM_LLAMACPP_PROVIDER];
-	if (!provider?.models) return { ok: true, modelsJsonPath };
-	const before = provider.models.length;
-	provider.models = provider.models.filter((model) => model.id !== args.modelId);
-	if (provider.models.length === before) return { ok: true, modelsJsonPath };
-	writeFileSync(modelsJsonPath, `${JSON.stringify(json, null, "\t")}\n`, "utf-8");
-	return { ok: true, modelsJsonPath };
+	return unregisterModel({
+		agentDir: args.agentDir,
+		providerId: PRISM_LLAMACPP_PROVIDER,
+		modelId: args.modelId,
+		deleteProviderWhenEmpty: false,
+	});
 }

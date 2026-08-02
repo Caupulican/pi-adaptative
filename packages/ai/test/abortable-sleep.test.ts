@@ -1,6 +1,6 @@
 import { getEventListeners } from "node:events";
 import { describe, expect, it } from "vitest";
-import { abortableSleep } from "../src/utils/abort-signals.ts";
+import { abortableSleep, sleepWithAbortError } from "../src/utils/abort-signals.ts";
 
 describe("abortableSleep", () => {
 	it("removes its abort listener after a normal timeout completion", async () => {
@@ -27,5 +27,13 @@ describe("abortableSleep", () => {
 		controller.abort();
 
 		await expect(abortableSleep(1, controller.signal)).rejects.toThrow(/abort/i);
+	});
+
+	it("lets domain owners provide their exact cancellation error", async () => {
+		const controller = new AbortController();
+		controller.abort();
+
+		const error = new Error("Login cancelled");
+		await expect(sleepWithAbortError(1, controller.signal, () => error)).rejects.toBe(error);
 	});
 });

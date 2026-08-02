@@ -1576,6 +1576,40 @@ describe("SettingsManager", () => {
 			expect(renamed.resources).toEqual({ tools: { allow: ["read"] } });
 		});
 
+		it("renames one stored profile without crossing project and directory ownership", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition("reviewer", { resources: { tools: { allow: ["read"] } } }, "project");
+			manager.setProfileDefinition("reviewer", { resources: { tools: { allow: ["rg"] } } }, "directory");
+			manager.setActiveProfile("reviewer", "directory");
+			await manager.flush();
+
+			manager.renameProfile("reviewer", "directory-reviewer", "directory");
+			await manager.flush();
+
+			const projectSettings = JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf-8"));
+			const directoryPath = getDirectoryResourceProfileInfo(projectDir, agentDir).path;
+			const directorySettings = JSON.parse(readFileSync(directoryPath, "utf-8"));
+			expect(projectSettings.resourceProfiles.reviewer.tools.allow).toEqual(["read"]);
+			expect(projectSettings.resourceProfiles["directory-reviewer"]).toBeUndefined();
+			expect(directorySettings.resourceProfiles.reviewer).toBeUndefined();
+			expect(directorySettings.resourceProfiles["directory-reviewer"].tools.allow).toEqual(["rg"]);
+			expect(directorySettings.activeResourceProfile).toBe("directory-reviewer");
+		});
+
+		it("rejects a stored-profile rename collision without mutating the durable generation", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProfileDefinition("source", { resources: { tools: { allow: ["read"] } } }, "project");
+			manager.setProfileDefinition("target", { resources: { tools: { allow: ["rg"] } } }, "project");
+			await manager.flush();
+			const settingsPath = join(projectDir, ".pi", "settings.json");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() => manager.renameProfile("source", "target", "project")).toThrow("Profile already exists: target");
+			await manager.flush();
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
 		it("allows a fresh settings manager to load newly created reusable-file profiles", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 			manager.setProfileDefinition(

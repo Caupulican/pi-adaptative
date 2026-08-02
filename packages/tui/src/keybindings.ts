@@ -89,11 +89,11 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.pageUp": { defaultKeys: "pageUp", description: "Page up" },
 	"tui.editor.pageDown": { defaultKeys: "pageDown", description: "Page down" },
 	"tui.editor.deleteCharBackward": {
-		defaultKeys: "backspace",
+		defaultKeys: ["backspace", "shift+backspace"],
 		description: "Delete character backward",
 	},
 	"tui.editor.deleteCharForward": {
-		defaultKeys: ["delete", "ctrl+d"],
+		defaultKeys: ["delete", "ctrl+d", "shift+delete"],
 		description: "Delete character forward",
 	},
 	"tui.editor.deleteWordBackward": {

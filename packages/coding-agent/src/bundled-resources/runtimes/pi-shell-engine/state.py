@@ -1,6 +1,7 @@
 """Shell state: current working directory + environment, and delta computation.
 
-Owned by WP-C. Pure stdlib. See windows-shell-workpackages-2026-07-19.md §3 (WP-C spec).
+This pure-stdlib WP-C state owner implements the environment contract documented in
+windows-shell-workpackages-2026-07-19.md §3.
 """
 
 from __future__ import annotations

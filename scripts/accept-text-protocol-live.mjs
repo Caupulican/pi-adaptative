@@ -1,9 +1,13 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import {
+	handleAcceptanceHelpFlag,
+	readJsonIfExists,
+	startPiAcceptanceRpc,
+} from "./lib/live-acceptance-rpc.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const MINICPM_PROVIDER = "pi-hf-transformers";
@@ -32,10 +36,7 @@ function parseArgs(argv) {
 	let keepSessions = false;
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
-		if (arg === "--help" || arg === "-h") {
-			usage();
-			process.exit(0);
-		}
+		if (handleAcceptanceHelpFlag(arg, usage)) continue;
 		if (arg === "--keep-sessions") {
 			keepSessions = true;
 			continue;
@@ -49,25 +50,12 @@ function parseArgs(argv) {
 	return { models: models.length ? models : DEFAULT_MODELS, keepSessions };
 }
 
-function writeJson(child, value) {
-	child.stdin.write(`${JSON.stringify(value)}\n`);
-}
-
 function parseModelRef(input) {
 	if (input.includes("/")) {
 		const [provider, ...modelParts] = input.split("/");
 		return { provider, model: modelParts.join("/"), ref: input };
 	}
 	return { provider: "ollama", model: input, ref: `ollama/${input}` };
-}
-
-async function readJsonIfExists(filePath) {
-	try {
-		return JSON.parse(await readFile(filePath, "utf8"));
-	} catch (error) {
-		if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return {};
-		throw error;
-	}
 }
 
 function miniCpmBaseUrl() {
@@ -147,53 +135,8 @@ async function hydrateAgentDir(agentDir, modelRef) {
 	);
 }
 
-function makeLineReader(stream, onLine) {
-	let buffer = "";
-	stream.setEncoding("utf8");
-	stream.on("data", (chunk) => {
-		buffer += chunk;
-		while (true) {
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) break;
-			const line = buffer.slice(0, newline).trim();
-			buffer = buffer.slice(newline + 1);
-			if (line) onLine(line);
-		}
-	});
-}
-
-function parseJsonLine(line) {
-	try {
-		return JSON.parse(line);
-	} catch {
-		return undefined;
-	}
-}
-
 function delay(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function waitForEvent(state, predicate, description, timeoutMs = TIMEOUT_MS, startIndex = 0) {
-	for (const event of state.events.slice(startIndex)) {
-		if (predicate(event)) return Promise.resolve(event);
-	}
-	return new Promise((resolve, reject) => {
-		const timeout = setTimeout(() => {
-			cleanup();
-			reject(new Error(`Timed out waiting for ${description}`));
-		}, timeoutMs);
-		function listener(event) {
-			if (!predicate(event)) return;
-			cleanup();
-			resolve(event);
-		}
-		function cleanup() {
-			clearTimeout(timeout);
-			state.listeners.delete(listener);
-		}
-		state.listeners.add(listener);
-	});
 }
 
 function isReadToolResultEvent(event) {
@@ -210,13 +153,12 @@ function eventResultJson(event) {
 	return JSON.stringify(event.message?.content);
 }
 
-async function waitForIdle(child, state, targetRef) {
+async function waitForIdle(rpc, targetRef) {
 	for (let attempt = 0; attempt < 60; attempt++) {
 		const id = `idle-${targetRef}-${Date.now()}-${attempt}`;
-		const startIndex = state.events.length;
-		writeJson(child, { id, type: "get_state" });
-		const response = await waitForEvent(
-			state,
+		const startIndex = rpc.checkpoint();
+		rpc.send({ id, type: "get_state" });
+		const response = await rpc.waitForEvent(
 			(event) => event.id === id && event.type === "response" && event.command === "get_state",
 			`get_state response for ${targetRef}`,
 			30_000,
@@ -237,54 +179,24 @@ async function runModel(modelRef, keepSessions) {
 	const agentDir = path.join(scratch, "agent");
 	await mkdir(agentDir, { recursive: true });
 	await hydrateAgentDir(agentDir, target.ref);
-	const state = { events: [], listeners: new Set(), stderr: "" };
 	let markerPath;
-	const child = spawn(
-		path.join(root, "pi-test.sh"),
-		[
-			"--mode",
-			"rpc",
-			"--provider",
-			target.provider,
-			"--model",
-			target.model,
-			"--session-dir",
-			sessionDir,
-			"--system-prompt",
-			"",
-			"--no-extensions",
-		],
-		{
-			cwd: root,
-			env: {
-				...process.env,
-				PI_CODING_AGENT_DIR: agentDir,
-				PI_CODING_AGENT_SESSION_DIR: sessionDir,
-				PI_ADAPTATIVE_CODING_AGENT_DIR: agentDir,
-				PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR: sessionDir,
-			},
-			stdio: ["pipe", "pipe", "pipe"],
-		},
-	);
-
-	makeLineReader(child.stdout, (line) => {
-		const event = parseJsonLine(line);
-		if (!event) return;
-		state.events.push(event);
-		for (const listener of [...state.listeners]) listener(event);
-	});
-	child.stderr.setEncoding("utf8");
-	child.stderr.on("data", (chunk) => {
-		state.stderr += chunk;
-		process.stderr.write(chunk);
+	const rpc = startPiAcceptanceRpc({
+		root,
+		provider: target.provider,
+		model: target.model,
+		agentDir,
+		sessionDir,
+		timeoutMs: TIMEOUT_MS,
 	});
 
 	try {
-		writeJson(child, { id: `probe-${target.ref}`, type: "tool_probe", model: target.ref });
-		const probeResponse = await waitForEvent(
-			state,
+		const probeStartIndex = rpc.checkpoint();
+		rpc.send({ id: `probe-${target.ref}`, type: "tool_probe", model: target.ref });
+		const probeResponse = await rpc.waitForEvent(
 			(event) => event.id === `probe-${target.ref}` && event.type === "response" && event.command === "tool_probe",
 			`tool_probe response for ${target.ref}`,
+			TIMEOUT_MS,
+			probeStartIndex,
 		);
 		if (!probeResponse.success) throw new Error(probeResponse.error || `tool_probe failed for ${target.ref}`);
 		const probe = probeResponse.data.results.find((entry) => entry.model === target.ref);
@@ -328,10 +240,9 @@ async function runModel(modelRef, keepSessions) {
 		let lastReadEvent;
 		for (const [index, message] of prompts.entries()) {
 			const promptId = `prompt-${target.ref}-${index + 1}`;
-			const promptStartIndex = state.events.length;
-			writeJson(child, { id: promptId, type: "prompt", message });
-			const promptResponse = await waitForEvent(
-				state,
+			const promptStartIndex = rpc.checkpoint();
+			rpc.send({ id: promptId, type: "prompt", message });
+			const promptResponse = await rpc.waitForEvent(
 				(event) => event.id === promptId && event.type === "response" && event.command === "prompt",
 				`prompt preflight response for ${target.ref}`,
 				60_000,
@@ -339,8 +250,7 @@ async function runModel(modelRef, keepSessions) {
 			);
 			if (!promptResponse.success) throw new Error(promptResponse.error || `prompt failed for ${target.ref}`);
 			try {
-				await waitForEvent(
-					state,
+				await rpc.waitForEvent(
 					(event) =>
 						(event.type === "message_end" &&
 							event.message?.role === "assistant" &&
@@ -351,12 +261,11 @@ async function runModel(modelRef, keepSessions) {
 					promptStartIndex,
 				);
 			} catch {
-				await waitForIdle(child, state, target.ref);
+				await waitForIdle(rpc, target.ref);
 			}
-			const readEvents = state.events
-				.slice(promptStartIndex)
-				.filter((event) => event.type === "tool_execution_end" || isReadToolResultEvent(event));
-			for (const event of readEvents) {
+			for (let eventIndex = promptStartIndex; eventIndex < rpc.events.length; eventIndex++) {
+				const event = rpc.events[eventIndex];
+				if (event.type !== "tool_execution_end" && !isReadToolResultEvent(event)) continue;
 				lastReadEvent = event;
 				const resultJson = eventResultJson(event);
 				if (!eventIsError(event) && resultJson.includes(marker)) {
@@ -381,8 +290,7 @@ async function runModel(modelRef, keepSessions) {
 			sessionDir,
 		};
 	} finally {
-		child.stdin.end();
-		child.kill("SIGTERM");
+		rpc.close();
 		if (keepSessions) workRun.release();
 		else removeScriptWorkRun(workRun);
 	}

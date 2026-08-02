@@ -1,5 +1,6 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { RouteDecision } from "../autonomy/contracts.ts";
+import { parseModelOutputJsonObject } from "../model-output-json.ts";
 
 /**
  * Routing-only judge: a bounded, tool-less completion (default: the medium model) that decides the
@@ -44,38 +45,21 @@ const JUDGE_TIERS: readonly string[] = ["cheap", "medium", "expensive"];
 const JUDGE_RISKS: readonly string[] = ["read-only", "scoped-write", "high-impact", "approval-required"];
 
 export function parseRouteJudgeVerdict(text: string): RouteJudgeVerdict | undefined {
-	const trimmed = text.trim();
-	const candidates: string[] = [trimmed];
-	const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-	if (fenced?.[1]) candidates.push(fenced[1].trim());
-	const start = trimmed.indexOf("{");
-	const end = trimmed.lastIndexOf("}");
-	if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
-
-	for (const candidate of candidates) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(candidate);
-		} catch {
-			continue;
-		}
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-		const record = parsed as Record<string, unknown>;
-		// The judge may never select the learning tier or anything outside the three foreground tiers.
-		if (typeof record.tier !== "string" || !JUDGE_TIERS.includes(record.tier)) continue;
-		const risk =
-			typeof record.risk === "string" && JUDGE_RISKS.includes(record.risk)
-				? (record.risk as RouteDecision["risk"])
-				: undefined;
-		if (!risk) continue;
-		return {
-			tier: record.tier as RouteJudgeVerdict["tier"],
-			risk,
-			trivial: record.trivial === true,
-			reason: typeof record.reason === "string" ? record.reason.slice(0, 200) : "",
-		};
-	}
-	return undefined;
+	const record = parseModelOutputJsonObject(text);
+	if (!record) return undefined;
+	// The judge may never select the learning tier or anything outside the three foreground tiers.
+	if (typeof record.tier !== "string" || !JUDGE_TIERS.includes(record.tier)) return undefined;
+	const risk =
+		typeof record.risk === "string" && JUDGE_RISKS.includes(record.risk)
+			? (record.risk as RouteDecision["risk"])
+			: undefined;
+	if (!risk) return undefined;
+	return {
+		tier: record.tier as RouteJudgeVerdict["tier"],
+		risk,
+		trivial: record.trivial === true,
+		reason: typeof record.reason === "string" ? record.reason.slice(0, 200) : "",
+	};
 }
 
 /** Merge a judge verdict into the baseline decision (pure; never returns learning). */

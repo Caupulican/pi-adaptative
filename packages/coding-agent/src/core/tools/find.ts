@@ -1,12 +1,10 @@
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "@caupulican/pi-agent-core/node";
-import { Text } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -20,16 +18,22 @@ import {
 } from "../context/tool-output-packer.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
-	defaultFffSearchBackend,
 	type FffSearchBackend,
 	type FffSearchResult,
 	hasGitignoreInTree,
-	relativePathInside,
-	safeGetFinder,
+	resolveRoutedFffFinder,
 } from "./fff-search-backend.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
-import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
-import { defaultSearchRouter, type SearchRouter } from "./search-router.ts";
+import {
+	formatCollapsibleToolResult,
+	invalidArgText,
+	renderTextComponent,
+	shortenPath,
+	str,
+	toolTextResult,
+} from "./render-utils.ts";
+import type { SearchRouter } from "./search-router.ts";
+import { resolveSearchToolRuntime } from "./search-tool-runtime.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 function toPosixPath(value: string): string {
@@ -125,28 +129,21 @@ function formatFindResult(
 	theme: Theme,
 	showImages: boolean,
 ): string {
-	const output = getTextOutput(result, showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = options.expanded ? lines.length : 20;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
-		}
-	}
-
-	const resultLimit = result.details?.resultLimitReached;
-	const truncation = result.details?.truncation;
-	if (resultLimit || truncation?.truncated) {
-		const warnings: string[] = [];
-		if (resultLimit) warnings.push(`${resultLimit} results limit`);
-		if (truncation?.truncated) warnings.push(`${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
-		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
-	}
-	return text;
+	return formatCollapsibleToolResult({
+		result,
+		options,
+		theme,
+		showImages,
+		collapsedLineLimit: 20,
+		warnings: (details) => {
+			const warnings: string[] = [];
+			if (details?.resultLimitReached) warnings.push(`${details.resultLimitReached} results limit`);
+			if (details?.truncation?.truncated) {
+				warnings.push(`${formatSize(details.truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
+			}
+			return warnings;
+		},
+	});
 }
 
 function hasGlobSyntax(pattern: string): boolean {
@@ -209,59 +206,20 @@ export async function tryFffFind(options: {
 	rawPath?: string;
 }): Promise<{ text: string; details: FindToolDetails } | undefined> {
 	if (!(await pathExists(options.searchPath))) return undefined;
-
-	// Kick off the FFF finder -- and, on a machine where fff-node isn't provisioned
-	// yet, its lazy managed install -- unconditionally and as early as possible.
-	// Routing below can still send THIS call to the fd fallback for reasons that
-	// have nothing to do with tool availability (most commonly: the default result
-	// limit is well above the FFF top-N threshold, see search-router.ts). That
-	// outcome must not gate the install itself, or a machine that only ever issues
-	// default-limit searches would never provision fff-node at all. getFinder() is
-	// cached per basePath, so this costs nothing beyond the first call for a given
-	// cwd -- the `await` further down, when this call does want FFF, reuses this
-	// same in-flight/resolved promise instead of triggering the work twice.
-	// safeGetFinder() guarantees this can never reject (a non-conforming custom
-	// backend that throws synchronously still degrades to "unavailable"), so it
-	// can neither produce an unhandled rejection nor fail this tool call outright.
-	const finderPromise = safeGetFinder(options.backend, options.cwd);
-
-	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
 	const glob = hasGlobSyntax(options.pattern);
-	const baseRoute = options.router.route({
+	const routed = await resolveRoutedFffFinder({
+		backend: options.backend,
+		router: options.router,
 		tool: "find",
+		cwd: options.cwd,
+		searchPath: options.searchPath,
 		glob,
 		ignoreCase: Boolean(options.ignoreCase),
 		limit: options.effectiveLimit,
-		finderAvailable: true,
-		pathResolvable: searchPathRelativeToCwd !== undefined,
-		gitignoreInTree: false,
+		readGitignoreInTree: () => hasGitignoreInTree(options.searchPath),
 	});
-	if (baseRoute.backend !== "fff") return undefined;
-	if (searchPathRelativeToCwd === undefined) return undefined;
-
-	const gitignoreInTree = await hasGitignoreInTree(options.searchPath);
-	const semanticRoute = options.router.route({
-		tool: "find",
-		glob,
-		ignoreCase: Boolean(options.ignoreCase),
-		limit: options.effectiveLimit,
-		finderAvailable: true,
-		pathResolvable: true,
-		gitignoreInTree,
-	});
-	if (semanticRoute.backend !== "fff") return undefined;
-
-	const finder = await finderPromise;
-	const finderRoute = options.router.route({
-		tool: "find",
-		glob,
-		ignoreCase: Boolean(options.ignoreCase),
-		limit: options.effectiveLimit,
-		finderAvailable: Boolean(finder),
-		pathResolvable: true,
-		gitignoreInTree: false,
-	});
-	if (!finder || finderRoute.backend !== "fff") return undefined;
+	if (!routed) return undefined;
+	const { finder, searchPathRelativeToCwd } = routed;
 
 	const packing: FindPackingOptions = {
 		toolCallId: options.toolCallId,
@@ -399,11 +357,7 @@ export function createFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
 ): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
-	const customOps = options?.operations;
-	const fffBackend = options?.fff === false ? undefined : (options?.fff ?? defaultFffSearchBackend);
-	const searchRouter = options?.searchRouter ?? defaultSearchRouter;
-	const artifactStore = options?.artifactStore;
-	const broadQueryTracker = options?.broadQueryTracker;
+	const search = resolveSearchToolRuntime(options);
 	return {
 		name: "find",
 		label: "find",
@@ -452,25 +406,25 @@ export function createFindToolDefinition(
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 						const probeLimit = effectiveLimit + 1;
-						const ops = customOps ?? defaultFindOperations;
+						const ops = search.operations ?? defaultFindOperations;
 
 						let effectivePattern = pattern;
 						if (pattern === ".") {
 							effectivePattern = "**/*";
 						}
 
-						if (!customOps && fffBackend) {
+						if (!search.operations && search.fffBackend) {
 							const fffResult = await tryFffFind({
-								backend: fffBackend,
-								router: searchRouter,
+								backend: search.fffBackend,
+								router: search.searchRouter,
 								cwd,
 								searchPath,
 								pattern: effectivePattern,
 								ignoreCase,
 								effectiveLimit,
 								toolCallId,
-								artifactStore,
-								broadQueryTracker,
+								artifactStore: search.artifactStore,
+								broadQueryTracker: search.broadQueryTracker,
 								rawPath: searchDir,
 							});
 							if (signal?.aborted) {
@@ -478,18 +432,13 @@ export function createFindToolDefinition(
 								return;
 							}
 							if (fffResult) {
-								settle(() =>
-									resolve({
-										content: [{ type: "text", text: fffResult.text }],
-										details: Object.keys(fffResult.details).length > 0 ? fffResult.details : undefined,
-									}),
-								);
+								settle(() => resolve(toolTextResult(fffResult)));
 								return;
 							}
 						}
 
 						// If custom operations provide glob(), use that instead of fd.
-						if (customOps?.glob) {
+						if (search.operations?.glob) {
 							if (!(await ops.exists(searchPath))) {
 								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
 								return;
@@ -515,17 +464,12 @@ export function createFindToolDefinition(
 
 							const formatted = formatFindResults(relativized, effectiveLimit, {
 								toolCallId,
-								artifactStore,
-								broadQueryTracker,
+								artifactStore: search.artifactStore,
+								broadQueryTracker: search.broadQueryTracker,
 								pattern: effectivePattern,
 								rawPath: searchDir,
 							});
-							settle(() =>
-								resolve({
-									content: [{ type: "text", text: formatted.text }],
-									details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
-								}),
-							);
+							settle(() => resolve(toolTextResult(formatted)));
 							return;
 						}
 
@@ -642,17 +586,12 @@ export function createFindToolDefinition(
 
 						const formatted = formatFindResults(relativized, effectiveLimit, {
 							toolCallId,
-							artifactStore,
-							broadQueryTracker,
+							artifactStore: search.artifactStore,
+							broadQueryTracker: search.broadQueryTracker,
 							pattern: effectivePattern,
 							rawPath: searchDir,
 						});
-						settle(() =>
-							resolve({
-								content: [{ type: "text", text: formatted.text }],
-								details: Object.keys(formatted.details).length > 0 ? formatted.details : undefined,
-							}),
-						);
+						settle(() => resolve(toolTextResult(formatted)));
 					} catch (e) {
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));
@@ -665,14 +604,13 @@ export function createFindToolDefinition(
 			});
 		},
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindCall(args, theme, context.cwd));
-			return text;
+			return renderTextComponent(context.lastComponent, formatFindCall(args, theme, context.cwd));
 		},
 		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindResult(result as any, options, theme, context.showImages));
-			return text;
+			return renderTextComponent(
+				context.lastComponent,
+				formatFindResult(result as Parameters<typeof formatFindResult>[0], options, theme, context.showImages),
+			);
 		},
 	};
 }

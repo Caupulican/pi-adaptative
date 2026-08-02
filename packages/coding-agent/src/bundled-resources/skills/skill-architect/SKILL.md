@@ -1,13 +1,13 @@
 ---
 name: skill-architect
-description: "Use when creating, rewriting, merging, or reviewing AI skills, prompt templates, or system prompts. Builds production-ready skills with the 5-Part Skill Anatomy, Freedom Dial, strict routing, references, validation, and known gaps."
+description: "Design, rewrite, merge, or review the content and routing architecture of AI skills, prompt templates, and system prompts. Use for Freedom Dial selection, instruction structure, trigger quality, overlap review, references, and known gaps; pair with skill-creator for safe Pi package scaffolding and structural validation."
 ---
 
 # Skill Architect
 
 ## How to use the skill
 
-Load this skill when the user asks to create, improve, merge, split, or audit a skill, agent role, tool instruction, prompt template, or system prompt.
+Load this skill when the user asks to design, improve, merge, split, or audit the content of a skill, agent role, tool instruction, prompt template, or system prompt. Pair it with `skill-creator` when creating or validating a Pi skill directory.
 
 Before generating anything, state the chosen **Freedom Dial** and why:
 

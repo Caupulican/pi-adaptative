@@ -5,8 +5,9 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai";
-import { completeSimple, uuidv7 } from "@caupulican/pi-ai";
+import { completeSimple } from "@caupulican/pi-ai/stream";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai/types";
+import { uuidv7 } from "@caupulican/pi-ai/uuid";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -18,10 +19,12 @@ import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
 import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
 import { type CompactionFacts, extractCompactionFacts, renderFactsBlock } from "./extraction.ts";
 import {
+	addPersistedFileOperations,
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
+	isPlainRecord,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
@@ -70,13 +73,7 @@ function extractFileOperations(
 		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
 		if (!prevCompaction.fromHook && prevCompaction.details) {
 			// fromHook field kept for session file compatibility
-			const details = prevCompaction.details as CompactionDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				for (const f of details.modifiedFiles) fileOps.edited.add(f);
-			}
+			addPersistedFileOperations(fileOps, prevCompaction.details as CompactionDetails);
 		}
 	}
 
@@ -173,12 +170,6 @@ function cloneVerificationReport(report: VerificationReport): VerificationReport
 		ok: report.ok,
 		failures: report.failures.map((failure) => ({ ...failure })),
 	};
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
 }
 
 function aggregateVerificationChecks(
@@ -686,6 +677,42 @@ async function completeSummarization(
 	return stream.result();
 }
 
+async function completeSummarizationPrompt(
+	promptText: string,
+	model: Model<any>,
+	maxTokens: number,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn: StreamFn | undefined,
+	completion: CompactionCompletion | undefined,
+	usage?: Usage,
+	failureLabel = "Summarization",
+): Promise<AssistantMessage> {
+	const response = await completeSummarization(
+		model,
+		{
+			systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "text", text: promptText }],
+					timestamp: Date.now(),
+				},
+			],
+		},
+		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+		streamFn,
+		completion,
+	);
+	if (usage) addUsage(usage, response.usage);
+	if (response.stopReason === "error") {
+		throw new Error(`${failureLabel} failed: ${response.errorMessage || "Unknown error"}`);
+	}
+	return response;
+}
+
 /**
  * Serialize messages to conversation text and, if a `preDigest` callback is supplied, run it
  * through that pass (a cheaper curation-model call that compresses older chunks — see
@@ -822,27 +849,18 @@ export async function generateSummaryWithUsage(
 	if (estimateStringTokens(promptText) > inputBound) {
 		throw new Error("input-overflow: chunked summarization merge still exceeds summarizer window");
 	}
-	const response = await completeSummarization(
+	const response = await completeSummarizationPrompt(
+		promptText,
 		model,
-		{
-			systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: promptText }],
-					timestamp: Date.now(),
-				},
-			],
-		},
-		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+		maxTokens,
+		apiKey,
+		headers,
+		signal,
+		thinkingLevel,
 		streamFn,
 		completion,
+		usage,
 	);
-	addUsage(usage, response.usage);
-
-	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
 	// A length-stopped checkpoint silently lost its tail sections — gating it as if complete
 	// guarantees a verification failure. Fail loudly so the compaction ladder escalates instead.
 	if (response.stopReason === "length") {
@@ -985,26 +1003,18 @@ async function summarizeChunkPass(
 
 	for (let i = 0; i < chunks.length; i++) {
 		const promptText = buildChunkSummarizationPrompt(chunks[i], i + 1, chunks.length);
-		const response = await completeSummarization(
+		const response = await completeSummarizationPrompt(
+			promptText,
 			model,
-			{
-				systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-				messages: [
-					{
-						role: "user",
-						content: [{ type: "text", text: promptText }],
-						timestamp: Date.now(),
-					},
-				],
-			},
-			createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+			maxTokens,
+			apiKey,
+			headers,
+			signal,
+			thinkingLevel,
 			streamFn,
 			completion,
+			usage,
 		);
-		addUsage(usage, response.usage);
-		if (response.stopReason === "error") {
-			throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
-		}
 		summaries.push(extractTextContent(response));
 	}
 
@@ -1490,25 +1500,19 @@ async function generateTurnPrefixSummary(
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-
-	const response = await completeSummarization(
+	const response = await completeSummarizationPrompt(
+		promptText,
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+		maxTokens,
+		apiKey,
+		headers,
+		signal,
+		thinkingLevel,
 		streamFn,
 		completion,
+		undefined,
+		"Turn prefix summarization",
 	);
-
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
 
 	return {
 		text: response.content

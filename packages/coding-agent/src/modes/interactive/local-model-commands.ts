@@ -21,8 +21,6 @@ import {
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
-	Spacer,
-	Text,
 	type TUI,
 } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
@@ -58,12 +56,13 @@ import {
 	PRISM_LLAMACPP_DESCRIPTORS,
 	PRISM_LLAMACPP_SERVE_PORT,
 } from "../../core/models/prism-llamacpp-lifecycle.ts";
-import { formatModelFitnessReport, isProbeAllFailed } from "../../core/research/model-fitness.ts";
+import { isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { type FitnessRole, FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
+import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
 import { getSelectListTheme } from "./theme/theme.ts";
 
 type SelectorFactory = (done: () => void) => { component: Component; focus: Component };
@@ -1013,13 +1012,7 @@ export async function runFitnessAndAssign(
 	host.showStatus(`Model fitness probe running on ${modelRef}… (6 surfaces; local models may take a few minutes)`);
 	try {
 		const outcome = await host.session.runModelFitness({ model: modelRef });
-		if (!outcome.started) {
-			host.showStatus(`Model fitness skipped: ${outcome.skipReason}`);
-			return;
-		}
-		host.chatContainer.addChild(new Spacer(1));
-		host.chatContainer.addChild(new Text(formatModelFitnessReport(outcome.model, outcome.report), 1, 0));
-		host.ui.requestRender();
+		if (!presentModelFitnessOutcome(host, outcome)) return;
 		// Validate-before-load: zero successes on every probed surface means the model cannot
 		// drive any of the harness's subagent contracts on this host — refuse adoption instead
 		// of landing a role selector the user might reflexively confirm (this is the reported

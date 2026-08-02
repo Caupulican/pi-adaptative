@@ -32,9 +32,9 @@
  */
 
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { CURATION_RELEVANCE_MIN_CONFIDENCE } from "./brain-curator.ts";
 import type { PromptPolicyShadowReport } from "./context-prompt-policy.ts";
+import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
 
 export interface ContextPromptEnforcementSettings {
 	enabled: boolean;
@@ -92,25 +92,11 @@ export interface EnforcePromptPolicyResult {
 
 const ENFORCEMENT_ABSOLUTE_RECENT_FLOOR = 4;
 
-function extractDetailsArtifactId(details: unknown): string | undefined {
-	if (typeof details !== "object" || details === null) return undefined;
-	const artifactId = (details as { artifactId?: unknown }).artifactId;
-	return typeof artifactId === "string" ? artifactId : undefined;
-}
-
 /** True if legacy context-gc already packed this message this turn, or this module already stubbed it. */
 function isAlreadyStubbedOrPacked(details: unknown): boolean {
 	if (typeof details !== "object" || details === null) return false;
 	const record = details as { promptPolicy?: { enforced?: unknown }; contextGc?: { packed?: unknown } };
 	return record.promptPolicy?.enforced === true || record.contextGc?.packed === true;
-}
-
-function toolResultText(message: ToolResultMessage): string {
-	const parts: string[] = [];
-	for (const part of message.content) {
-		if (part.type === "text") parts.push(part.text);
-	}
-	return parts.join("\n");
 }
 
 function buildStubText(toolName: string, originalChars: number, artifactId: string): string {
@@ -195,12 +181,12 @@ export function enforcePromptPolicy(
 			items.push(skip(planItem, "hard_constraint_rejected"));
 			continue;
 		}
-		const artifactId = extractDetailsArtifactId(message.details);
+		const artifactId = getToolResultArtifactId(message.details);
 		if (!artifactId) {
 			items.push(skip(planItem, "missing_artifact_id"));
 			continue;
 		}
-		const originalChars = toolResultText(message).length;
+		const originalChars = getToolResultText(message).length;
 		if (originalChars < settings.minChars) {
 			items.push(skip(planItem, "below_min_chars", { artifactId, originalChars }));
 			continue;

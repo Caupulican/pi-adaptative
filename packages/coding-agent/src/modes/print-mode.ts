@@ -9,7 +9,7 @@
 import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
-import { killTrackedDetachedChildren } from "../utils/shell.ts";
+import { registerTerminationSignalHandlers } from "./termination-signals.ts";
 
 /**
  * Sentinel prefix for the cumulative-usage line emitted to stderr in text print mode under
@@ -49,7 +49,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let disposed = false;
-	const signalCleanupHandlers: Array<() => void> = [];
 
 	const disposeRuntime = async (): Promise<void> => {
 		if (disposed) return;
@@ -58,25 +57,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		await runtimeHost.dispose();
 	};
 
-	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
-
-		for (const signal of signals) {
-			const handler = () => {
-				killTrackedDetachedChildren();
-				void disposeRuntime().finally(() => {
-					process.exit(signal === "SIGHUP" ? 129 : 143);
-				});
-			};
-			process.on(signal, handler);
-			signalCleanupHandlers.push(() => process.off(signal, handler));
-		}
-	};
-
-	registerSignalHandlers();
+	const cleanupSignalHandlers = registerTerminationSignalHandlers((exitCode) => {
+		void disposeRuntime().finally(() => process.exit(exitCode));
+	});
 
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
@@ -176,9 +159,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		console.error(error instanceof Error ? error.message : String(error));
 		return 1;
 	} finally {
-		for (const cleanup of signalCleanupHandlers) {
-			cleanup();
-		}
+		cleanupSignalHandlers();
 		await disposeRuntime();
 		await flushRawStdout();
 	}

@@ -15,7 +15,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Available tools:\n(none)");
 		});
 
-		test("shows file paths guideline even with no tools", () => {
+		test("shows file path guidance even with no tools", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: [],
 				contextFiles: [],
@@ -23,7 +23,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Show file paths clearly");
+			expect(prompt).toContain("show file paths clearly");
 		});
 	});
 
@@ -40,20 +40,22 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Keep dependent calls, mutations, and stateful commands ordered");
 		});
 
-		test("includes the adaptive operating posture guardrails", () => {
+		test("includes the compact Pi-Adaptative and language-agnostic N+2 contract", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			// The verbose MAPE/self-evolution block was condensed into the "Adaptive operating
-			// posture" guardrails (token-burst reduction); assert the current concise content.
-			expect(prompt).toContain("Adaptive operating posture:");
-			expect(prompt).toContain("Prefer the smallest safe action");
-			expect(prompt).toContain("ask before credentials, destructive actions, publish/push/tag/release");
-			expect(prompt).toContain("Keep durable learning concise and auditable");
-			expect(prompt).toContain("use explicit tools/profiles and validate changes before claiming success");
+			expect(prompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
+			expect(prompt).toContain("Treat a clear outcome expressed in normal conversation as a goal");
+			expect(prompt).toContain("Move work expected to exceed 15 seconds into managed background execution");
+			expect(prompt).toContain("N+2 ARCHITECTURE");
+			expect(prompt).toContain("Apply these language-agnostic principles");
+			expect(prompt).toContain("Never concatenate growing prefixes");
+			expect(prompt).toContain("Detect → Verify → Score → Gate");
+			expect(prompt.match(/N\+2 ARCHITECTURE/g)).toHaveLength(1);
+			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(6_500);
 		});
 
 		test("includes all default tools when snippets are provided", () => {
@@ -75,16 +77,14 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- write:");
 		});
 
-		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
+		test("routes Pi documentation through its absolute roots", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain(
-				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
-			);
+			expect(prompt).toContain("Resolve `docs/...` and `examples/...` from those roots");
 		});
 	});
 

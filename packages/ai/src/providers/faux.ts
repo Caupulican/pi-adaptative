@@ -241,16 +241,18 @@ function withUsageEstimate(
 	};
 }
 
-function splitStringByTokenSize(text: string, minTokenSize: number, maxTokenSize: number): string[] {
-	const chunks: string[] = [];
+function* splitStringByTokenSize(text: string, minTokenSize: number, maxTokenSize: number): Generator<string> {
+	if (text.length === 0) {
+		yield "";
+		return;
+	}
 	let index = 0;
 	while (index < text.length) {
 		const tokenSize = minTokenSize + Math.floor(Math.random() * (maxTokenSize - minTokenSize + 1));
 		const charSize = Math.max(1, tokenSize * 4);
-		chunks.push(text.slice(index, index + charSize));
+		yield text.slice(index, index + charSize);
 		index += charSize;
 	}
-	return chunks.length > 0 ? chunks : [""];
 }
 
 function cloneMessage(message: AssistantMessage, api: string, provider: string, modelId: string): AssistantMessage {
@@ -296,6 +298,36 @@ function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Prom
 	return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function abortStreamIfNeeded(
+	stream: AssistantMessageEventStream,
+	partial: AssistantMessage,
+	signal: AbortSignal | undefined,
+): boolean {
+	if (!signal?.aborted) return false;
+	const aborted = createAbortedMessage(partial);
+	stream.push({ type: "error", reason: "aborted", error: aborted });
+	stream.end(aborted);
+	return true;
+}
+
+async function emitScheduledChunks(options: {
+	text: string;
+	minTokenSize: number;
+	maxTokenSize: number;
+	tokensPerSecond: number | undefined;
+	stream: AssistantMessageEventStream;
+	partial: AssistantMessage;
+	signal: AbortSignal | undefined;
+	emit: (chunk: string) => void;
+}): Promise<boolean> {
+	for (const chunk of splitStringByTokenSize(options.text, options.minTokenSize, options.maxTokenSize)) {
+		await scheduleChunk(chunk, options.tokensPerSecond);
+		if (abortStreamIfNeeded(options.stream, options.partial, options.signal)) return false;
+		options.emit(chunk);
+	}
+	return true;
+}
+
 async function streamWithDeltas(
 	stream: AssistantMessageEventStream,
 	message: AssistantMessage,
@@ -305,39 +337,32 @@ async function streamWithDeltas(
 	signal: AbortSignal | undefined,
 ): Promise<void> {
 	const partial: AssistantMessage = { ...message, content: [] };
-	if (signal?.aborted) {
-		const aborted = createAbortedMessage(partial);
-		stream.push({ type: "error", reason: "aborted", error: aborted });
-		stream.end(aborted);
-		return;
-	}
+	if (abortStreamIfNeeded(stream, partial, signal)) return;
 
 	stream.push({ type: "start", partial: { ...partial } });
 
 	for (let index = 0; index < message.content.length; index++) {
-		if (signal?.aborted) {
-			const aborted = createAbortedMessage(partial);
-			stream.push({ type: "error", reason: "aborted", error: aborted });
-			stream.end(aborted);
-			return;
-		}
+		if (abortStreamIfNeeded(stream, partial, signal)) return;
 
 		const block = message.content[index];
 
 		if (block.type === "thinking") {
 			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
 			stream.push({ type: "thinking_start", contentIndex: index, partial: { ...partial } });
-			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
-				if (signal?.aborted) {
-					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
-					return;
-				}
-				(partial.content[index] as ThinkingContent).thinking += chunk;
-				stream.push({ type: "thinking_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
-			}
+			const emitted = await emitScheduledChunks({
+				text: block.thinking,
+				minTokenSize,
+				maxTokenSize,
+				tokensPerSecond,
+				stream,
+				partial,
+				signal,
+				emit: (chunk) => {
+					(partial.content[index] as ThinkingContent).thinking += chunk;
+					stream.push({ type: "thinking_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+				},
+			});
+			if (!emitted) return;
 			stream.push({
 				type: "thinking_end",
 				contentIndex: index,
@@ -350,33 +375,39 @@ async function streamWithDeltas(
 		if (block.type === "text") {
 			partial.content = [...partial.content, { type: "text", text: "" }];
 			stream.push({ type: "text_start", contentIndex: index, partial: { ...partial } });
-			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
-				if (signal?.aborted) {
-					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
-					return;
-				}
-				(partial.content[index] as TextContent).text += chunk;
-				stream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
-			}
+			const emitted = await emitScheduledChunks({
+				text: block.text,
+				minTokenSize,
+				maxTokenSize,
+				tokensPerSecond,
+				stream,
+				partial,
+				signal,
+				emit: (chunk) => {
+					(partial.content[index] as TextContent).text += chunk;
+					stream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+				},
+			});
+			if (!emitted) return;
 			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: { ...partial } });
 			continue;
 		}
 
 		partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
 		stream.push({ type: "toolcall_start", contentIndex: index, partial: { ...partial } });
-		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
-			await scheduleChunk(chunk, tokensPerSecond);
-			if (signal?.aborted) {
-				const aborted = createAbortedMessage(partial);
-				stream.push({ type: "error", reason: "aborted", error: aborted });
-				stream.end(aborted);
-				return;
-			}
-			stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
-		}
+		const emitted = await emitScheduledChunks({
+			text: JSON.stringify(block.arguments),
+			minTokenSize,
+			maxTokenSize,
+			tokensPerSecond,
+			stream,
+			partial,
+			signal,
+			emit: (chunk) => {
+				stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
+			},
+		});
+		if (!emitted) return;
 		(partial.content[index] as ToolCall).arguments = block.arguments;
 		stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partial } });
 	}

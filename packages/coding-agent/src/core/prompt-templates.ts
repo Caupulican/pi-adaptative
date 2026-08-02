@@ -1,9 +1,10 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
-import { basename, dirname, join, resolve, sep } from "path";
+import { existsSync, readFileSync, statSync } from "fs";
+import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
+import { isResourcePathWithin, readResourceDirectory } from "./resource-traversal.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
@@ -141,37 +142,17 @@ function loadTemplatesFromDir(
 		return templates;
 	}
 
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			const fullPath = join(dir, entry.name);
-
-			// For symlinks, check if they point to a file
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isFile = stats.isFile();
-				} catch {
-					// Broken symlink, skip it
-					continue;
-				}
+	for (const entry of readResourceDirectory(dir, { followSymbolicLinks: true })) {
+		if (entry.isFile && entry.name.endsWith(".md")) {
+			// Profile UAC: a denied template file is never read from disk.
+			if (isPathAllowed && !isPathAllowed(entry.path)) {
+				continue;
 			}
-
-			if (isFile && entry.name.endsWith(".md")) {
-				// Profile UAC: a denied template file is never read from disk.
-				if (isPathAllowed && !isPathAllowed(fullPath)) {
-					continue;
-				}
-				const template = loadTemplateFromFile(fullPath, getSourceInfo(fullPath));
-				if (template) {
-					templates.push(template);
-				}
+			const template = loadTemplateFromFile(entry.path, getSourceInfo(entry.path));
+			if (template) {
+				templates.push(template);
 			}
 		}
-	} catch {
-		return templates;
 	}
 
 	return templates;
@@ -207,24 +188,15 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 	const globalPromptsDir = join(resolvedAgentDir, "prompts");
 	const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
 
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
-
 	const getSourceInfo = (resolvedPath: string): SourceInfo => {
-		if (isUnderPath(resolvedPath, globalPromptsDir)) {
+		if (isResourcePathWithin(resolvedPath, globalPromptsDir)) {
 			return createSyntheticSourceInfo(resolvedPath, {
 				source: "local",
 				scope: "user",
 				baseDir: globalPromptsDir,
 			});
 		}
-		if (isUnderPath(resolvedPath, projectPromptsDir)) {
+		if (isResourcePathWithin(resolvedPath, projectPromptsDir)) {
 			return createSyntheticSourceInfo(resolvedPath, {
 				source: "local",
 				scope: "project",

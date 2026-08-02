@@ -4,7 +4,6 @@ import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
-import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
@@ -22,10 +21,15 @@ import {
 } from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
-import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
+import {
+	mergeResourceProfileMap,
+	mergeResourceProfileSettings,
+	normalizeResourceProfileFilter,
+} from "./resource-profile-blocks.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { validateSkillName } from "./skills.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
+import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
 
 export interface CompactionSettings {
@@ -695,21 +699,11 @@ function isThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && VALID_THINKING_LEVELS.includes(value as ThinkingLevel);
 }
 
-function asStringArrayWithPattern(value: unknown): string[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-	return values.length > 0 ? values : undefined;
-}
-
 function normalizeProfileFilterResource(value: unknown): ResourceProfileFilterSettings {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error("resource profile filter must be an object");
 	}
-	const filter = value as Record<string, unknown>;
-	return {
-		allow: asStringArrayWithPattern(filter.allow),
-		block: asStringArrayWithPattern(filter.block),
-	};
+	return normalizeResourceProfileFilter(value as Record<string, unknown>);
 }
 
 function normalizeProfileResources(value: unknown): ResourceProfileSettings {
@@ -887,33 +881,6 @@ export class FileSettingsStorage implements SettingsStorage {
 		}
 	}
 
-	private acquireLockSyncWithRetry(path: string): () => void {
-		const maxAttempts = 10;
-		const delayMs = 20;
-		let lastError: unknown;
-
-		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-			try {
-				return lockfile.lockSync(path, { realpath: false });
-			} catch (error) {
-				const code =
-					typeof error === "object" && error !== null && "code" in error
-						? String((error as { code?: unknown }).code)
-						: undefined;
-				if (code !== "ELOCKED" || attempt === maxAttempts) {
-					throw error;
-				}
-				lastError = error;
-				const start = Date.now();
-				while (Date.now() - start < delayMs) {
-					// Sleep synchronously to avoid changing callers to async.
-				}
-			}
-		}
-
-		throw (lastError as Error) ?? new Error("Failed to acquire settings lock");
-	}
-
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
 		const path =
 			scope === "global"
@@ -934,14 +901,16 @@ export class FileSettingsStorage implements SettingsStorage {
 
 			// Directory-profile locks always follow legacy -> canonical order, including a partial migration
 			// where both files exist. This keeps old and new SDK clients from deadlocking each other.
-			if (legacyPath && legacyExists) releases.push(this.acquireLockSyncWithRetry(legacyPath));
-			if (canonicalExists) releases.push(this.acquireLockSyncWithRetry(path));
+			if (legacyPath && legacyExists) {
+				releases.push(acquireFileLockSync(legacyPath, LOW_LATENCY_FILE_LOCK_OPTIONS));
+			}
+			if (canonicalExists) releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
 
 			// A legacy directory overlay can race another process that already knows the canonical path.
 			// Hold the legacy lock, then bind to the canonical lock before deriving the update.
 			if (legacyExists && !canonicalExists) {
 				if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-				releases.push(this.acquireLockSyncWithRetry(path));
+				releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
 				if (existsSync(path)) currentPath = path;
 			}
 
@@ -952,8 +921,10 @@ export class FileSettingsStorage implements SettingsStorage {
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
-				if (releases.length === 0) releases.push(this.acquireLockSyncWithRetry(path));
-				writeFileSync(path, next, "utf-8");
+				if (releases.length === 0) {
+					releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
+				}
+				writeFileAtomicSync(path, next);
 				migratedLegacy = legacyExists;
 			}
 		} finally {
@@ -1683,6 +1654,37 @@ export class SettingsManager {
 		return Object.keys(definition.resources).length > 0 ? definition.resources : undefined;
 	}
 
+	private updateStoredProfileDefinition(
+		settings: Settings,
+		name: string,
+		definition: ProfileDefinitionInput,
+		resources: ResourceProfileSettings,
+	): void {
+		const definitions = { ...(settings.resourceProfiles ?? {}) };
+		const stored = this.encodeStoredProfileDefinition(
+			this.mergeProfileDefinition(name, definition, resources, definitions[name]),
+		);
+		if (stored) definitions[name] = stored;
+		else delete definitions[name];
+		if (Object.keys(definitions).length > 0) settings.resourceProfiles = definitions;
+		else delete settings.resourceProfiles;
+	}
+
+	private renameStoredProfileDefinition(settings: Settings, oldName: string, newName: string): void {
+		const definitions = { ...(settings.resourceProfiles ?? {}) };
+		if (!definitions[oldName]) throw new Error(`Profile not found: ${oldName}`);
+		if (definitions[newName]) throw new Error(`Profile already exists: ${newName}`);
+		definitions[newName] = definitions[oldName];
+		delete definitions[oldName];
+		settings.resourceProfiles = definitions;
+		if (settings.activeResourceProfile === oldName) settings.activeResourceProfile = newName;
+		if (settings.activeResourceProfiles) {
+			settings.activeResourceProfiles = settings.activeResourceProfiles.map((name) =>
+				name === oldName ? newName : name,
+			);
+		}
+	}
+
 	private setActiveProfileInSettings(settings: Settings, profileName: string | undefined): void {
 		if (profileName) {
 			settings.activeResourceProfile = profileName;
@@ -1814,18 +1816,7 @@ export class SettingsManager {
 
 		if (scope === "global") {
 			const next = structuredClone(this.globalSettings);
-			next.resourceProfiles = { ...(next.resourceProfiles ?? {}) };
-			const stored = this.encodeStoredProfileDefinition(
-				this.mergeProfileDefinition(name, definition, resources, next.resourceProfiles[name]),
-			);
-			if (stored) {
-				next.resourceProfiles[name] = stored;
-			} else {
-				delete next.resourceProfiles[name];
-			}
-			if (Object.keys(next.resourceProfiles).length === 0) {
-				delete next.resourceProfiles;
-			}
+			this.updateStoredProfileDefinition(next, name, definition, resources);
 			this.globalSettings = next;
 			this.markModified("resourceProfiles");
 			this.save();
@@ -1834,40 +1825,14 @@ export class SettingsManager {
 
 		if (scope === "project") {
 			this.updateProjectSettings("resourceProfiles", (settings) => {
-				const next = structuredClone(settings.resourceProfiles ?? {});
-				const stored = this.encodeStoredProfileDefinition(
-					this.mergeProfileDefinition(name, definition, resources, next[name]),
-				);
-				if (stored) {
-					next[name] = stored;
-				} else {
-					delete next[name];
-				}
-				if (Object.keys(next).length > 0) {
-					settings.resourceProfiles = next;
-				} else {
-					delete settings.resourceProfiles;
-				}
+				this.updateStoredProfileDefinition(settings, name, definition, resources);
 			});
 			return;
 		}
 
 		if (scope === "directory") {
 			this.persistDirectoryProfiles((current) => {
-				const next = { ...(current.resourceProfiles ?? {}) };
-				const stored = this.encodeStoredProfileDefinition(
-					this.mergeProfileDefinition(name, definition, resources, next[name]),
-				);
-				if (stored) {
-					next[name] = stored;
-				} else {
-					delete next[name];
-				}
-				if (Object.keys(next).length > 0) {
-					current.resourceProfiles = next;
-				} else {
-					delete current.resourceProfiles;
-				}
+				this.updateStoredProfileDefinition(current, name, definition, resources);
 			});
 			return;
 		}
@@ -2000,22 +1965,7 @@ export class SettingsManager {
 
 		if (scope === "global") {
 			const next = structuredClone(this.globalSettings);
-			if (!next.resourceProfiles?.[oldName]) {
-				throw new Error(`Profile not found: ${oldName}`);
-			}
-			if (next.resourceProfiles[newName]) {
-				throw new Error(`Profile already exists: ${newName}`);
-			}
-			next.resourceProfiles[newName] = next.resourceProfiles[oldName]!;
-			delete next.resourceProfiles[oldName];
-			if (next.activeResourceProfile === oldName) {
-				next.activeResourceProfile = newName;
-			}
-			if (next.activeResourceProfiles) {
-				next.activeResourceProfiles = next.activeResourceProfiles.map((name) =>
-					name === oldName ? newName : name,
-				);
-			}
+			this.renameStoredProfileDefinition(next, oldName, newName);
 			this.globalSettings = next;
 			this.markModified("resourceProfiles");
 			this.markModified("activeResourceProfile");
@@ -2026,48 +1976,14 @@ export class SettingsManager {
 
 		if (scope === "project") {
 			this.updateProjectSettings("resourceProfiles", (settings) => {
-				const next = structuredClone(settings.resourceProfiles ?? {});
-				if (!next[oldName]) {
-					throw new Error(`Profile not found: ${oldName}`);
-				}
-				if (next[newName]) {
-					throw new Error(`Profile already exists: ${newName}`);
-				}
-				next[newName] = next[oldName]!;
-				delete next[oldName];
-				settings.resourceProfiles = next;
-				if (settings.activeResourceProfile === oldName) {
-					settings.activeResourceProfile = newName;
-				}
-				if (settings.activeResourceProfiles) {
-					settings.activeResourceProfiles = settings.activeResourceProfiles.map((name) =>
-						name === oldName ? newName : name,
-					);
-				}
+				this.renameStoredProfileDefinition(settings, oldName, newName);
 			});
 			return;
 		}
 
 		if (scope === "directory") {
-			const next = structuredClone(this.directoryProfileSettings.resourceProfiles ?? {});
-			if (!next[oldName]) {
-				throw new Error(`Profile not found: ${oldName}`);
-			}
-			if (next[newName]) {
-				throw new Error(`Profile already exists: ${newName}`);
-			}
-			next[newName] = next[oldName]!;
-			delete next[oldName];
 			this.persistDirectoryProfiles((current) => {
-				current.resourceProfiles = next;
-				if (current.activeResourceProfile === oldName) {
-					current.activeResourceProfile = newName;
-				}
-				if (current.activeResourceProfiles) {
-					current.activeResourceProfiles = current.activeResourceProfiles.map((name) =>
-						name === oldName ? newName : name,
-					);
-				}
+				this.renameStoredProfileDefinition(current, oldName, newName);
 			});
 			return;
 		}

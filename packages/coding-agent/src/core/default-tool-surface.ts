@@ -21,6 +21,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"ask_question",
 		"secret_store",
 		"delegate",
+		"tool_task",
 		"run_toolkit_script",
 	];
 }

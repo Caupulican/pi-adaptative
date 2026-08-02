@@ -6,6 +6,7 @@
  */
 
 import type { Server } from "node:http";
+import { parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
@@ -46,36 +47,6 @@ async function getNodeApis(): Promise<NodeApis> {
 	}
 	nodeApis = await nodeApisPromise;
 	return nodeApis;
-}
-
-function parseAuthorizationInput(input: string): { code?: string; state?: string } {
-	const value = input.trim();
-	if (!value) return {};
-
-	try {
-		const url = new URL(value);
-		return {
-			code: url.searchParams.get("code") ?? undefined,
-			state: url.searchParams.get("state") ?? undefined,
-		};
-	} catch {
-		// not a URL
-	}
-
-	if (value.includes("#")) {
-		const [code, state] = value.split("#", 2);
-		return { code, state };
-	}
-
-	if (value.includes("code=")) {
-		const params = new URLSearchParams(value);
-		return {
-			code: params.get("code") ?? undefined,
-			state: params.get("state") ?? undefined,
-		};
-	}
-
-	return { code: value };
 }
 
 function formatErrorDetails(error: unknown): string {
@@ -259,51 +230,17 @@ export async function loginAnthropic(options: {
 		});
 
 		if (options.onManualCodeInput) {
-			let manualInput: string | undefined;
-			let manualError: Error | undefined;
-			const manualPromise = options
-				.onManualCodeInput()
-				.then((input) => {
-					manualInput = input;
-					server.cancelWait();
-				})
-				.catch((err) => {
-					manualError = err instanceof Error ? err : new Error(String(err));
-					server.cancelWait();
-				});
-
-			const result = await server.waitForCode();
-
-			if (manualError) {
-				throw manualError;
-			}
-
-			if (result?.code) {
-				code = result.code;
-				state = result.state;
-				redirectUriForExchange = REDIRECT_URI;
-			} else if (manualInput) {
-				const parsed = parseAuthorizationInput(manualInput);
-				if (parsed.state && parsed.state !== verifier) {
-					throw new Error("OAuth state mismatch");
-				}
-				code = parsed.code;
-				state = parsed.state ?? verifier;
-			}
-
-			if (!code) {
-				await manualPromise;
-				if (manualError) {
-					throw manualError;
-				}
-				if (manualInput) {
-					const parsed = parseAuthorizationInput(manualInput);
-					if (parsed.state && parsed.state !== verifier) {
-						throw new Error("OAuth state mismatch");
-					}
-					code = parsed.code;
-					state = parsed.state ?? verifier;
-				}
+			const authorization = await raceAuthorizationInput({
+				manualInput: options.onManualCodeInput,
+				waitForCallback: server.waitForCode,
+				cancelWait: server.cancelWait,
+				expectedState: verifier,
+				stateMismatchMessage: "OAuth state mismatch",
+			});
+			if (authorization) {
+				code = authorization.code;
+				state = authorization.state ?? verifier;
+				if (authorization.source === "callback") redirectUriForExchange = REDIRECT_URI;
 			}
 		} else {
 			const result = await server.waitForCode();

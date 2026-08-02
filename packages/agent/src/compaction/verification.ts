@@ -171,8 +171,7 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 		// File paths from the facts are REQUIRED elsewhere (files-modified/read-recall demand them
 		// in ## Files), so counting them as cancelled-work leakage would make the two gates
 		// unsatisfiable together whenever a reversal message references a touched file.
-		const factPathTokens = tokenSet(facts.files.map((file) => file.path).join("\n"));
-		const cancelledTokens = new Set([...tokenSet(facts.cancelledText)].filter((token) => !factPathTokens.has(token)));
+		const cancelledTokens = cancelledWorkTokens(facts);
 		const score = containment(cancelledTokens, tokenSet(summaryOutsideMandatoryRules));
 		if (score > CANCELLED_WORK_DROPPED_THRESHOLD) {
 			failures.push({
@@ -444,14 +443,18 @@ function findNextDoneNumber(lines: string[]): number {
 
 function removeCancelledWorkLines(sectionByName: Map<string, ParsedSummarySection>, facts: CompactionFacts): void {
 	if (!facts.cancelledText) return;
-	const factPathTokens = tokenSet(facts.files.map((file) => file.path).join("\n"));
-	const cancelledTokens = new Set([...tokenSet(facts.cancelledText)].filter((token) => !factPathTokens.has(token)));
+	const cancelledTokens = cancelledWorkTokens(facts);
 	if (cancelledTokens.size === 0) return;
 
 	for (const section of sectionByName.values()) {
 		if (section.normalized === SECTION_MANDATORY_RULES) continue;
 		section.lines = section.lines.filter((line) => !lineShouldBeDroppedAsCancelledWork(line, cancelledTokens));
 	}
+}
+
+function cancelledWorkTokens(facts: CompactionFacts): Set<string> {
+	const factPathTokens = tokenSet(facts.files.map((file) => file.path).join("\n"));
+	return new Set([...tokenSet(facts.cancelledText)].filter((token) => !factPathTokens.has(token)));
 }
 
 function lineShouldBeDroppedAsCancelledWork(line: string, cancelledTokens: Set<string>): boolean {

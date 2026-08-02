@@ -1,14 +1,18 @@
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "@caupulican/pi-agent-core/node";
-import { Text } from "@caupulican/pi-tui";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
-import { getTextOutput, renderToolPath, str } from "./render-utils.ts";
+import {
+	formatCollapsibleToolResult,
+	renderTextComponent,
+	renderToolPath,
+	str,
+	toolTextResult,
+} from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const lsSchema = Type.Object({
@@ -75,28 +79,21 @@ function formatLsResult(
 	theme: Theme,
 	showImages: boolean,
 ): string {
-	const output = getTextOutput(result, showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = options.expanded ? lines.length : 20;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
-		}
-	}
-
-	const entryLimit = result.details?.entryLimitReached;
-	const truncation = result.details?.truncation;
-	if (entryLimit || truncation?.truncated) {
-		const warnings: string[] = [];
-		if (entryLimit) warnings.push(`${entryLimit} entries limit`);
-		if (truncation?.truncated) warnings.push(`${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
-		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
-	}
-	return text;
+	return formatCollapsibleToolResult({
+		result,
+		options,
+		theme,
+		showImages,
+		collapsedLineLimit: 20,
+		warnings: (details) => {
+			const warnings: string[] = [];
+			if (details?.entryLimitReached) warnings.push(`${details.entryLimitReached} entries limit`);
+			if (details?.truncation?.truncated) {
+				warnings.push(`${formatSize(details.truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
+			}
+			return warnings;
+		},
+	});
 }
 
 function getPermissionString(mode: number, isDirectory: boolean): string {
@@ -236,10 +233,7 @@ export function createLsToolDefinition(
 							output += `\n\n[${notices.join(". ")}]`;
 						}
 
-						resolve({
-							content: [{ type: "text", text: output }],
-							details: Object.keys(details).length > 0 ? details : undefined,
-						});
+						resolve(toolTextResult({ text: output, details }));
 					} catch (e: any) {
 						signal?.removeEventListener("abort", onAbort);
 						reject(e);
@@ -248,14 +242,13 @@ export function createLsToolDefinition(
 			});
 		},
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatLsCall(args, theme, context.cwd));
-			return text;
+			return renderTextComponent(context.lastComponent, formatLsCall(args, theme, context.cwd));
 		},
 		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatLsResult(result as any, options, theme, context.showImages));
-			return text;
+			return renderTextComponent(
+				context.lastComponent,
+				formatLsResult(result as Parameters<typeof formatLsResult>[0], options, theme, context.showImages),
+			);
 		},
 	};
 }

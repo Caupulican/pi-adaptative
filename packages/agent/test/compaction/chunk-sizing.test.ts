@@ -6,6 +6,10 @@ import {
 } from "../../src/compaction/compaction.ts";
 
 describe("compaction chunk sizing", () => {
+	it("keeps the shared chars-per-token estimate deterministic at empty and partial boundaries", () => {
+		expect(["", "x", "xxxx", "xxxxx"].map(estimateStringTokens)).toEqual([0, 1, 1, 2]);
+	});
+
 	it("keeps the full per-chunk prompt within the summarizer input bound", () => {
 		const inputBound = 8_000;
 		const chunkTokenBudget = getChunkSummarizationTokenBudget(inputBound);

@@ -46,6 +46,16 @@ const MODEL_ROUTER_TIER_ORDER: readonly ("cheap" | "medium" | "expensive")[] = [
  * long enough to read and decide, short enough that an unattended session doesn't hang a turn on it. */
 const OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS = 30_000;
 
+interface LocalRuntimeReadiness {
+	ready: boolean;
+	reason: string;
+	installGuide?: string[];
+}
+
+interface LocalRuntimeInstallReadiness extends LocalRuntimeReadiness {
+	installAttemptError?: string;
+}
+
 function parseWrongOllamaStoreReason(
 	reason: string,
 ): { activePath: string; modelCount: number; ownedPath: string } | undefined {
@@ -177,9 +187,7 @@ export class LocalRuntimeController {
 
 	/** Three-way readiness dispatch shared by ensureIsolatedModelReady/ensureForegroundModelReady/
 	 * ensureRouteModelReady — one place to add a new managed-local kind instead of tripling a ternary. */
-	private async ensureManagedLocalReadiness(
-		model: Model<Api>,
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
+	private async ensureManagedLocalReadiness(model: Model<Api>): Promise<LocalRuntimeReadiness> {
 		if (model.provider === OLLAMA_PROVIDER) return this.ensureLocalModelReady(model);
 		if (model.provider === HF_TRANSFORMERS_PROVIDER) return this.ensureTransformersModelReady(model);
 		return this.ensurePrismLlamaCppModelReady(model);
@@ -194,8 +202,8 @@ export class LocalRuntimeController {
 	 * maintaining an install the user already approved, not a fresh one needing to be asked again. */
 	private async maybeInstallManagedLocalOnConsent(
 		model: Model<Api>,
-		readiness: { ready: boolean; reason: string; installGuide?: string[] },
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
+		readiness: LocalRuntimeReadiness,
+	): Promise<LocalRuntimeInstallReadiness> {
 		if (model.provider === OLLAMA_PROVIDER) return this.maybeInstallOllamaOnConsent(model, readiness);
 		if (model.provider === HF_TRANSFORMERS_PROVIDER) return this.maybeInstallTransformersOnConsent(model, readiness);
 		return readiness;
@@ -226,6 +234,41 @@ export class LocalRuntimeController {
 		}
 	}
 
+	private unconfirmedKey(model: Model<Api>, serverUrl: string): string {
+		const key = this.confirmationKey(model, serverUrl);
+		this.invalidateIfLastCallFailed(model, serverUrl);
+		return this._confirmedUp.has(key) ? "" : key;
+	}
+
+	private async ensureResidentWithAdapter(
+		model: Model<Api>,
+		adapterId: string,
+		adapter: RuntimeResidencyAdapter,
+		bytes: number,
+	): Promise<{ ok: boolean; reason?: string }> {
+		this._residencyAdapters.set(adapterId, adapter);
+		const arbiter = this.createResidencyArbiter();
+		try {
+			const nowMs = Date.now();
+			const plan = await arbiter.ensureResident(adapterId, {
+				model: model.id,
+				bytes,
+				role: "active",
+				priority: 100,
+				nowMs,
+				pinActiveModel: model.id,
+				recentEvictions: this._recentEvictions,
+				// Cold model loads can take minutes. The adaptive stream owns that wait; admission
+				// must not front-run it with an empty generation.
+				loadModel: false,
+			});
+			this.recordEvictions(plan.evict, model.id, nowMs, adapterId);
+			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
+		} catch (error) {
+			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
+		}
+	}
+
 	private async ensureOllamaResident(
 		model: Model<Api>,
 		runtime: OllamaRuntime,
@@ -242,27 +285,12 @@ export class LocalRuntimeController {
 		}
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
 		const adapterId = `ollama:${serverUrl}`;
-		this._residencyAdapters.set(adapterId, new OllamaRuntimeResidencyAdapter(adapterId, runtime));
-		const arbiter = this.createResidencyArbiter();
-		try {
-			const nowMs = Date.now();
-			const plan = await arbiter.ensureResident(adapterId, {
-				model: model.id,
-				bytes,
-				role: "active",
-				priority: 100,
-				nowMs,
-				pinActiveModel: model.id,
-				recentEvictions: this._recentEvictions,
-				// Cold Ollama loads can legitimately take several minutes. The actual adaptive stream
-				// owns that wait; readiness must not front-run it with a 60-second empty generation.
-				loadModel: false,
-			});
-			this.recordEvictions(plan.evict, model.id, nowMs, adapterId);
-			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
-		} catch (error) {
-			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
-		}
+		return this.ensureResidentWithAdapter(
+			model,
+			adapterId,
+			new OllamaRuntimeResidencyAdapter(adapterId, runtime),
+			bytes,
+		);
 	}
 
 	private async ensureTransformersResident(
@@ -271,25 +299,12 @@ export class LocalRuntimeController {
 	): Promise<{ ok: boolean; reason?: string }> {
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
 		const adapterId = `transformers:${model.id}:${serverUrl}`;
-		this._residencyAdapters.set(adapterId, new TransformersRuntimeResidencyAdapter(adapterId, runtime, model.id, 0));
-		const arbiter = this.createResidencyArbiter();
-		try {
-			const nowMs = Date.now();
-			const plan = await arbiter.ensureResident(adapterId, {
-				model: model.id,
-				bytes: 0,
-				role: "active",
-				priority: 100,
-				nowMs,
-				pinActiveModel: model.id,
-				recentEvictions: this._recentEvictions,
-				loadModel: false,
-			});
-			this.recordEvictions(plan.evict, model.id, nowMs, adapterId);
-			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
-		} catch (error) {
-			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
-		}
+		return this.ensureResidentWithAdapter(
+			model,
+			adapterId,
+			new TransformersRuntimeResidencyAdapter(adapterId, runtime, model.id, 0),
+			0,
+		);
 	}
 
 	private createResidencyArbiter(): RuntimeResidencyArbiter {
@@ -339,12 +354,7 @@ export class LocalRuntimeController {
 	 */
 	async ensureForegroundModelReady(model: Model<Api>): Promise<void> {
 		if (!this.isManagedLocalModel(model)) return;
-		let readiness: {
-			ready: boolean;
-			reason: string;
-			installGuide?: string[];
-			installAttemptError?: string;
-		} = await this.ensureManagedLocalReadiness(model);
+		let readiness: LocalRuntimeInstallReadiness = await this.ensureManagedLocalReadiness(model);
 		if (!readiness.ready) {
 			readiness = await this.maybeInstallManagedLocalOnConsent(model, readiness);
 		}
@@ -366,9 +376,8 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_local" };
 		}
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
-		const confirmedKey = this.confirmationKey(model, serverUrl);
-		this.invalidateIfLastCallFailed(model, serverUrl);
-		if (this._confirmedUp.has(confirmedKey)) {
+		const confirmedKey = this.unconfirmedKey(model, serverUrl);
+		if (!confirmedKey) {
 			return { ready: true, reason: "confirmed_up_cached" };
 		}
 		const runtime = this.getLocalRuntime(serverUrl);
@@ -429,9 +438,8 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_transformers" };
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
-		const confirmedKey = this.confirmationKey(model, serverUrl);
-		this.invalidateIfLastCallFailed(model, serverUrl);
-		if (this._confirmedUp.has(confirmedKey)) {
+		const confirmedKey = this.unconfirmedKey(model, serverUrl);
+		if (!confirmedKey) {
 			return { ready: true, reason: "confirmed_up_cached" };
 		}
 		const runtime = this.getTransformersRuntime(model.id, serverUrl);
@@ -476,9 +484,8 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_pi_managed_llama_cpp" };
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
-		const confirmedKey = this.confirmationKey(model, serverUrl);
-		this.invalidateIfLastCallFailed(model, serverUrl);
-		if (this._confirmedUp.has(confirmedKey)) {
+		const confirmedKey = this.unconfirmedKey(model, serverUrl);
+		if (!confirmedKey) {
 			return { ready: true, reason: "confirmed_up_cached" };
 		}
 		if (await isPrismLlamaCppServerHealthy(serverUrl, this.deps.prismLlamaCppDeps?.fetchFn)) {
@@ -520,8 +527,8 @@ export class LocalRuntimeController {
 	 */
 	private async maybeInstallOllamaOnConsent(
 		model: Model<Api>,
-		readiness: { ready: boolean; reason: string; installGuide?: string[] },
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
+		readiness: LocalRuntimeReadiness,
+	): Promise<LocalRuntimeInstallReadiness> {
 		const ui = this.deps.getUIContext();
 		if (!ui || readiness.ready || readiness.reason !== "binary_missing") return readiness;
 
@@ -558,8 +565,8 @@ export class LocalRuntimeController {
 
 	private async maybeInstallTransformersOnConsent(
 		model: Model<Api>,
-		readiness: { ready: boolean; reason: string; installGuide?: string[] },
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string }> {
+		readiness: LocalRuntimeReadiness,
+	): Promise<LocalRuntimeInstallReadiness> {
 		const ui = this.deps.getUIContext();
 		if (!ui || readiness.ready || readiness.reason !== "runtime_missing") return readiness;
 
@@ -625,8 +632,7 @@ export class LocalRuntimeController {
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		let current = resolved;
 		while (current && this.isManagedLocalModel(current.model)) {
-			let readiness: { ready: boolean; reason: string; installGuide?: string[]; installAttemptError?: string } =
-				await this.ensureManagedLocalReadiness(current.model);
+			let readiness: LocalRuntimeInstallReadiness = await this.ensureManagedLocalReadiness(current.model);
 			if (!readiness.ready) {
 				readiness = await this.maybeInstallManagedLocalOnConsent(current.model, readiness);
 			}

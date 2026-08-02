@@ -1,5 +1,6 @@
 import { Container, type Terminal, Text, TUI } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { ExtensionInputComponent } from "../src/modes/interactive/components/extension-input.ts";
 import type { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.ts";
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
 import { ExtensionUiHost } from "../src/modes/interactive/extension-ui-host.ts";
@@ -25,6 +26,10 @@ class FakeTerminal implements Terminal {
 
 function createHost() {
 	const tui = new TUI(new FakeTerminal());
+	let renderRequests = 0;
+	tui.requestRender = () => {
+		renderRequests += 1;
+	};
 	const editorContainer = new Container();
 	let editorText = "";
 	const editor = new Text(editorText, 0, 0);
@@ -39,9 +44,10 @@ function createHost() {
 	editorContainer.addChild(editor);
 	return {
 		editorContainer,
+		getRenderRequests: () => renderRequests,
 		extensionSelector: undefined as ExtensionSelectorComponent | undefined,
 		activeExtensionDialogCancel: undefined as (() => void) | undefined,
-		extensionInput: undefined,
+		extensionInput: undefined as ExtensionInputComponent | undefined,
 		extensionEditor: undefined,
 		extensionWidgets: new Map(),
 		extensionErrorOverlay: undefined,
@@ -60,8 +66,11 @@ function createHost() {
 			updateTerminalTitle: () => {},
 			resetWorkingIndicators: () => {},
 		},
+		showExtensionDialog: Reflect.get(ExtensionUiHost.prototype, "showExtensionDialog"),
 		showExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "showExtensionSelector"),
 		hideExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "hideExtensionSelector"),
+		showExtensionInput: Reflect.get(ExtensionUiHost.prototype, "showExtensionInput"),
+		hideExtensionInput: Reflect.get(ExtensionUiHost.prototype, "hideExtensionInput"),
 		clearExtensionTerminalInputListeners: () => {},
 		setExtensionFooter: () => {},
 		setExtensionHeader: () => {},
@@ -76,6 +85,12 @@ const showSelector = Reflect.get(ExtensionUiHost.prototype, "showExtensionSelect
 	title: string,
 	options: string[],
 	opts?: { signal?: AbortSignal; timeout?: number },
+) => Promise<string | undefined>;
+const showInput = Reflect.get(ExtensionUiHost.prototype, "showExtensionInput") as (
+	this: TestHost,
+	title: string,
+	placeholder?: string,
+	opts?: { signal?: AbortSignal; timeout?: number; sensitive?: boolean },
 ) => Promise<string | undefined>;
 const resetExtensionUI = Reflect.get(ExtensionUiHost.prototype, "resetExtensionUI") as (this: TestHost) => void;
 const showCustom = Reflect.get(ExtensionUiHost.prototype, "showExtensionCustom") as <T>(
@@ -123,6 +138,62 @@ describe("extension UI dialog liveness", () => {
 		expect(host.extensionSelector).toBe(secondSelector);
 		secondSelector.handleInput("\n");
 		await expect(secondPromise).resolves.toBe("second");
+	});
+
+	it("does not displace an active selector for an already-aborted input request", async () => {
+		const host = createHost();
+		const selectorPromise = showSelector.call(host, "Active", ["active"]);
+		const selector = host.extensionSelector;
+		if (!selector) throw new Error("selector was not mounted");
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(showInput.call(host, "Ignored", undefined, { signal: controller.signal })).resolves.toBeUndefined();
+
+		expect(host.extensionSelector).toBe(selector);
+		expect(host.extensionInput).toBeUndefined();
+		expect(host.editorContainer.children).toEqual([selector]);
+		selector.handleInput("\n");
+		await expect(selectorPromise).resolves.toBe("active");
+	});
+
+	it("settles a replaced input and ignores its stale abort callback", async () => {
+		const host = createHost();
+		const controller = new AbortController();
+		const inputPromise = showInput.call(host, "Input", "placeholder", { signal: controller.signal });
+		const input = host.extensionInput;
+		if (!input) throw new Error("input was not mounted");
+		input.handleInput("draft");
+
+		const selectorPromise = showSelector.call(host, "Replacement", ["replacement"]);
+		await expect(inputPromise).resolves.toBeUndefined();
+		const selector = host.extensionSelector;
+		if (!selector) throw new Error("replacement selector was not mounted");
+
+		controller.abort();
+		expect(host.extensionInput).toBeUndefined();
+		expect(host.extensionSelector).toBe(selector);
+		expect(host.editorContainer.children).toEqual([selector]);
+		selector.handleInput("\n");
+		await expect(selectorPromise).resolves.toBe("replacement");
+	});
+
+	it("restores the editor when an input completes", async () => {
+		const host = createHost();
+		const pending = showInput.call(host, "Input");
+		const input = host.extensionInput;
+		if (!input) throw new Error("input was not mounted");
+		expect(input.focused).toBe(true);
+		expect(host.getRenderRequests()).toBe(1);
+
+		input.handleInput("value");
+		input.handleInput("\n");
+
+		await expect(pending).resolves.toBe("value");
+		expect(input.focused).toBe(false);
+		expect(host.getRenderRequests()).toBe(2);
+		expect(host.extensionInput).toBeUndefined();
+		expect(host.editorContainer.children).toEqual([host.ui.getEditor()]);
 	});
 
 	it("settles the active selector when an unrelated overlay supersedes it", async () => {

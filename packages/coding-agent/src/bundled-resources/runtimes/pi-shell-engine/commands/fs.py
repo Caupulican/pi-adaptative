@@ -16,16 +16,10 @@ import shutil
 from typing import TYPE_CHECKING
 
 from errors import UnsupportedConstruct
+from paths import resolve_request_path
 
 if TYPE_CHECKING:
     from context import BuiltinContext
-
-
-def _resolve(cwd: str, path: str) -> str:
-    """Resolve `path` against `cwd` without ever touching process cwd."""
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    return os.path.normpath(os.path.join(cwd, path))
 
 
 def _to_posix(path: str) -> str:
@@ -60,13 +54,13 @@ def ls(ctx: "BuiltinContext") -> int:
     # aligned with the PowerShell floor when chaining routes the command here.
     flags, positional = _split_flags(ctx.argv[1:], {"a", "A", "1", "l", "r"}, "ls")
     if len(positional) > 1:
-        if any(os.path.isdir(_resolve(ctx.cwd, p)) for p in positional):
+        if any(os.path.isdir(resolve_request_path(ctx.cwd, p)) for p in positional):
             raise UnsupportedConstruct("unsupported-flag", "ls: only one directory operand is supported")
         ordered = sorted(positional)
         lines = []
         exit_code = 0
         for operand in ordered:
-            abs_operand = _resolve(ctx.cwd, operand)
+            abs_operand = resolve_request_path(ctx.cwd, operand)
             if os.path.isfile(abs_operand):
                 lines.append(operand)
             else:
@@ -75,7 +69,7 @@ def ls(ctx: "BuiltinContext") -> int:
         ctx.stdout.write("".join(line + "\n" for line in lines).encode())
         return exit_code
     target = positional[0] if positional else "."
-    abs_target = _resolve(ctx.cwd, target)
+    abs_target = resolve_request_path(ctx.cwd, target)
     if not os.path.exists(abs_target):
         ctx.stdout.write(f"ls: cannot access '{target}': No such file or directory\n".encode())
         return 1
@@ -131,7 +125,7 @@ def find(ctx: "BuiltinContext") -> int:
         i += 1
     if path is None:
         path = "."
-    abs_root = _resolve(ctx.cwd, path)
+    abs_root = resolve_request_path(ctx.cwd, path)
     if not os.path.exists(abs_root):
         ctx.stdout.write(f"find: '{path}': No such file or directory\n".encode())
         return 1
@@ -166,7 +160,7 @@ def rm(ctx: "BuiltinContext") -> int:
     force = "f" in flags
     exit_code = 0
     for p in paths:
-        abs_p = _resolve(ctx.cwd, p)
+        abs_p = resolve_request_path(ctx.cwd, p)
         if not os.path.lexists(abs_p):
             if not force:
                 ctx.stdout.write(f"rm: cannot remove '{p}': No such file or directory\n".encode())
@@ -190,8 +184,8 @@ def cp(ctx: "BuiltinContext") -> int:
         return 1
     recursive = "r" in flags or "R" in flags
     src, dst = positional
-    abs_src = _resolve(ctx.cwd, src)
-    abs_dst = _resolve(ctx.cwd, dst)
+    abs_src = resolve_request_path(ctx.cwd, src)
+    abs_dst = resolve_request_path(ctx.cwd, dst)
     if not os.path.exists(abs_src):
         ctx.stdout.write(f"cp: cannot stat '{src}': No such file or directory\n".encode())
         return 1
@@ -217,8 +211,8 @@ def mv(ctx: "BuiltinContext") -> int:
         ctx.stdout.write(b"mv: missing file operand\n")
         return 1
     src, dst = positional
-    abs_src = _resolve(ctx.cwd, src)
-    abs_dst = _resolve(ctx.cwd, dst)
+    abs_src = resolve_request_path(ctx.cwd, src)
+    abs_dst = resolve_request_path(ctx.cwd, dst)
     if not os.path.exists(abs_src):
         ctx.stdout.write(f"mv: cannot stat '{src}': No such file or directory\n".encode())
         return 1
@@ -237,7 +231,7 @@ def mkdir(ctx: "BuiltinContext") -> int:
     parents = "p" in flags
     exit_code = 0
     for d in dirs:
-        abs_d = _resolve(ctx.cwd, d)
+        abs_d = resolve_request_path(ctx.cwd, d)
         if parents:
             os.makedirs(abs_d, exist_ok=True)
             continue
@@ -260,7 +254,7 @@ def touch(ctx: "BuiltinContext") -> int:
         return 1
     exit_code = 0
     for f in files:
-        abs_f = _resolve(ctx.cwd, f)
+        abs_f = resolve_request_path(ctx.cwd, f)
         if os.path.exists(abs_f):
             os.utime(abs_f, None)
             continue

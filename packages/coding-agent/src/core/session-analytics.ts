@@ -8,7 +8,7 @@
  * /context window estimate, and HTML/JSONL export of the current branch.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
 	type AgentMessage,
@@ -26,7 +26,7 @@ import {
 	type SessionHeader,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/node";
-import type { AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
+import type { Model, Usage } from "@caupulican/pi-ai";
 import { getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -37,6 +37,7 @@ import {
 	type SpawnedUsageReport,
 	type SpawnedUsageTotals,
 } from "./agent-session-contracts.ts";
+import { latestAssistantText } from "./context/message-text.ts";
 import {
 	accumulateCurrentSessionCostsFromEntries,
 	type CurrentSessionCostAccumulator,
@@ -54,6 +55,8 @@ import {
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
+import { resolveSessionEntryIndex } from "./session-entry-index.ts";
+import { writeJsonLinesSync } from "./session-jsonl-writer.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import {
 	isToolArgumentValidationLogRecord,
@@ -435,14 +438,9 @@ export class SessionAnalytics {
 
 	private getPostCompactionUsageState(): { hasCompaction: boolean; hasPostCompactionUsage: boolean } {
 		const sessionManager = this.deps.getSessionManager();
-		const indexedSessionManager = sessionManager as unknown as {
-			getLeafId?: () => string | null;
-			getEntry?: (id: string) => SessionEntry | undefined;
-		};
-		const getLeafId = indexedSessionManager.getLeafId?.bind(sessionManager);
-		const getEntry = indexedSessionManager.getEntry?.bind(sessionManager);
-		const leafId = getLeafId?.();
-		if (getLeafId && getEntry && leafId !== undefined) {
+		const index = resolveSessionEntryIndex(sessionManager);
+		const leafId = index?.leafId;
+		if (index && leafId !== undefined) {
 			if (this._postCompactionUsageCache?.leafId === leafId) {
 				return { ...this._postCompactionUsageCache };
 			}
@@ -452,7 +450,7 @@ export class SessionAnalytics {
 			const seen = new Set<string>();
 			while (currentId !== null && currentId !== cachedLeafId && !seen.has(currentId)) {
 				seen.add(currentId);
-				const entry = getEntry(currentId);
+				const entry = index.getEntry(currentId);
 				if (!entry) break;
 				appended.push(entry);
 				currentId = entry.parentId;
@@ -464,7 +462,7 @@ export class SessionAnalytics {
 			if (!extendsCachedBranch && currentId !== null) {
 				while (currentId !== null && !seen.has(currentId)) {
 					seen.add(currentId);
-					const entry = getEntry(currentId);
+					const entry = index.getEntry(currentId);
 					if (!entry) break;
 					appended.push(entry);
 					currentId = entry.parentId;
@@ -575,17 +573,15 @@ export class SessionAnalytics {
 		};
 
 		const branchEntries = sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
+		function* linearizedEntries(): Generator<SessionHeader | SessionEntry> {
+			yield header;
+			let prevId: string | null = null;
+			for (const entry of branchEntries) {
+				yield { ...entry, parentId: prevId };
+				prevId = entry.id;
+			}
 		}
-
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
+		writeJsonLinesSync(filePath, linearizedEntries());
 		return filePath;
 	}
 
@@ -595,27 +591,6 @@ export class SessionAnalytics {
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
 	getLastAssistantText(): string | undefined {
-		const lastAssistant = this.deps
-			.getMessages()
-			.slice()
-			.reverse()
-			.find((m) => {
-				if (m.role !== "assistant") return false;
-				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
-				return true;
-			});
-
-		if (!lastAssistant) return undefined;
-
-		let text = "";
-		for (const content of (lastAssistant as AssistantMessage).content) {
-			if (content.type === "text") {
-				text += content.text;
-			}
-		}
-
-		return text.trim() || undefined;
+		return latestAssistantText(this.deps.getMessages());
 	}
 }

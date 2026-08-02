@@ -33,7 +33,6 @@
  * `_refreshToolRegistry` delegation for its internal callers.
  */
 
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
@@ -97,11 +96,7 @@ import {
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
-import {
-	buildReflexUserPrompt,
-	parseReflexPlan,
-	REFLEX_INTERPRETER_SYSTEM_PROMPT,
-} from "./toolkit/reflex-interpreter.ts";
+import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
@@ -121,6 +116,7 @@ import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
@@ -129,17 +125,6 @@ import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
-}
-
-/**
- * Deterministic `addSpawnedUsage` reportId: `kind` + session id + a content hash of `identity`
- * (never `Date.now`/random). Same identity on a retry of the same logical work unit yields the same
- * id, so the ledger's `seenSubagentReportIds` dedupe catches a duplicate report instead of
- * double-counting spend.
- */
-function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: string): string {
-	const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-	return `${kind}:${sessionId}:${digest}`;
 }
 
 /**
@@ -287,6 +272,8 @@ export interface RuntimeBuilderDeps {
 
 	/** Session-scoped tool-output artifact store for artifact-producing tools and artifact_retrieve (gated on the profile). */
 	getToolArtifactStore(): ArtifactStore;
+	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
+	getToolTaskDependencies?(): ToolTaskDependencies;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -434,12 +421,17 @@ export class RuntimeBuilder {
 			allowedToolNames,
 			toolProfileFilter,
 			allows: (name) => {
+				const sessionControlCompanion = name === "tool_task";
 				// Strict worker UAC ceiling wins over every explicit grant.
 				if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
-				if (allowedToolNames && !allowedToolNames.has(name)) return false;
+				if (allowedToolNames && !allowedToolNames.has(name) && !sessionControlCompanion) return false;
 				if (excludedToolNames?.has(name)) return false;
 				if (!toolProfileFilter) return true;
-				if (toolProfileFilter.allow.length > 0 && !matchesResourceProfilePattern(name, toolProfileFilter.allow)) {
+				if (
+					toolProfileFilter.allow.length > 0 &&
+					!matchesResourceProfilePattern(name, toolProfileFilter.allow) &&
+					!sessionControlCompanion
+				) {
 					return false;
 				}
 				if (matchesResourceProfilePattern(name, toolProfileFilter.block)) return false;
@@ -813,6 +805,10 @@ export class RuntimeBuilder {
 						.filter((name) => toolAccess.allows(name))
 						.map((name) => [name, createToolDefinition(name, this.deps.getCwd(), toolOptions)]),
 				);
+		const toolTaskDependencies = this.deps.getToolTaskDependencies?.();
+		if (toolTaskDependencies && toolAccess.allows("tool_task")) {
+			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
+		}
 		if (!baseToolsOverride) {
 			if (toolAccess.allows("run_process")) {
 				const orchestrationProfile = this.deps.getOrchestrationProfile?.();
@@ -975,35 +971,17 @@ export class RuntimeBuilder {
 					interpret: async (request, scripts) => {
 						const model = this.deps.resolveCurationModelIfFit();
 						if (!model) return undefined;
-						const completion = await this.deps.runIsolatedCompletion({
-							systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
-							messages: [
-								{
-									role: "user",
-									content: [{ type: "text", text: buildReflexUserPrompt(request, scripts) }],
-									timestamp: Date.now(),
-								},
-							],
+						return runReflexInterpreterCompletion({
+							request,
+							scripts,
 							model,
-							thinkingLevel: "off",
-							maxTokens: 256,
-							cacheRetention: "short",
-							// Stable per-lane synthetic affinity key so repeat ambiguous-request
-							// interpretations hit the same cache-warm backend.
 							laneKind: "toolkit-brain",
+							usageKind: "toolkit-brain",
+							usageLabel: "toolkit-brain",
+							sessionId: this.deps.getSessionManager().getSessionId(),
+							completionRunner: this.deps,
+							usageReporter: this.deps,
 						});
-						if (completion.usage.cost.total > 0 || completion.usage.totalTokens > 0) {
-							// `reportId` keyed on the ambiguous request text driving THIS interpretation —
-							// stable across a retry of the same tool call, distinct across genuinely
-							// different requests.
-							const reportId = deriveSpawnedUsageReportId(
-								"toolkit-brain",
-								this.deps.getSessionManager().getSessionId(),
-								request,
-							);
-							this.deps.addSpawnedUsage(completion.usage, { label: "toolkit-brain", reportId });
-						}
-						return parseReflexPlan(completion.text);
 					},
 				});
 				this._baseToolDefinitions.set(runToolkitScriptToolDefinition.name, runToolkitScriptToolDefinition);

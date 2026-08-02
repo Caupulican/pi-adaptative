@@ -1,19 +1,17 @@
 import { type Model, modelsAreEqual } from "@caupulican/pi-ai";
-import {
-	Container,
-	type Focusable,
-	fuzzyFilter,
-	getKeybindings,
-	Input,
-	Spacer,
-	Text,
-	type TUI,
-} from "@caupulican/pi-tui";
+import { Container, type Focusable, getKeybindings, type Input, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import {
+	advanceSelectorIndex,
+	filterSelectorItems,
+	getCenteredVisibleRange,
+	getSelectorScrollText,
+	SearchableListSurface,
+} from "./selector-list.ts";
 
 interface ModelItem {
 	provider: string;
@@ -33,15 +31,14 @@ type ModelScope = "all" | "scoped";
  */
 export class ModelSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
+	private searchSurface: SearchableListSurface;
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
-	private _focused = false;
 	get focused(): boolean {
-		return this._focused;
+		return this.searchSurface.focused;
 	}
 	set focused(value: boolean) {
-		this._focused = value;
-		this.searchInput.focused = value;
+		this.searchSurface.focused = value;
 	}
 	private listContainer: Container;
 	private allModels: ModelItem[] = [];
@@ -98,24 +95,15 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		this.addChild(new Spacer(1));
 
-		// Create search input
-		this.searchInput = new Input();
-		if (initialSearchInput) {
-			this.searchInput.setValue(initialSearchInput);
-		}
+		this.searchSurface = SearchableListSurface.mount(this, initialSearchInput);
+		this.searchInput = this.searchSurface.searchInput;
+		this.listContainer = this.searchSurface.listContainer;
 		this.searchInput.onSubmit = () => {
 			// Enter on search input selects the first filtered item
 			if (this.filteredModels[this.selectedIndex]) {
 				this.handleSelect(this.filteredModels[this.selectedIndex].model);
 			}
 		};
-		this.addChild(this.searchInput);
-
-		this.addChild(new Spacer(1));
-
-		// Create list container
-		this.listContainer = new Container();
-		this.addChild(this.listContainer);
 
 		this.addChild(new Spacer(1));
 
@@ -216,13 +204,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private filterModels(query: string): void {
-		this.filteredModels = query
-			? fuzzyFilter(
-					this.activeModels,
-					query,
-					({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
-				)
-			: this.activeModels;
+		this.filteredModels = filterSelectorItems(
+			this.activeModels,
+			query,
+			({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
+		);
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		this.updateList();
 	}
@@ -231,11 +217,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.listContainer.clear();
 
 		const maxVisible = 10;
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible),
-		);
-		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
+		const range = getCenteredVisibleRange(this.selectedIndex, this.filteredModels.length, maxVisible);
+		const { startIndex, endIndex } = range;
 
 		// Show visible slice of filtered models
 		for (let i = startIndex; i < endIndex; i++) {
@@ -263,10 +246,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 
 		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredModels.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredModels.length})`);
-			this.listContainer.addChild(new Text(scrollInfo, 0, 0));
-		}
+		const scrollText = getSelectorScrollText(this.selectedIndex, this.filteredModels.length, range);
+		if (scrollText) this.listContainer.addChild(new Text(theme.fg("muted", scrollText), 0, 0));
 
 		// Show error message or "no results" if empty
 		if (this.errorMessage) {
@@ -299,13 +280,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredModels.length - 1 : this.selectedIndex - 1;
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, this.filteredModels.length, -1, "wrap");
 			this.updateList();
 		}
 		// Down arrow - wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, this.filteredModels.length, 1, "wrap");
 			this.updateList();
 		}
 		// Enter

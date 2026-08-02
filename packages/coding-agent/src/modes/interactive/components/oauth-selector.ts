@@ -1,15 +1,14 @@
-import {
-	Container,
-	type Focusable,
-	fuzzyFilter,
-	getKeybindings,
-	Input,
-	Spacer,
-	TruncatedText,
-} from "@caupulican/pi-tui";
+import { Container, type Focusable, getKeybindings, type Input, Spacer, TruncatedText } from "@caupulican/pi-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import {
+	advanceSelectorIndex,
+	filterSelectorItems,
+	getCenteredVisibleRange,
+	getSelectorScrollText,
+	SearchableListSurface,
+} from "./selector-list.ts";
 
 export type AuthSelectorProvider = {
 	id: string;
@@ -22,15 +21,14 @@ export type AuthSelectorProvider = {
  */
 export class OAuthSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
+	private searchSurface: SearchableListSurface;
 
 	// Focusable implementation - propagate to search input for IME cursor positioning
-	private _focused = false;
 	get focused(): boolean {
-		return this._focused;
+		return this.searchSurface.focused;
 	}
 	set focused(value: boolean) {
-		this._focused = value;
-		this.searchInput.focused = value;
+		this.searchSurface.focused = value;
 	}
 
 	private listContainer: Container;
@@ -70,19 +68,15 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.addChild(new TruncatedText(theme.fg("accent", theme.bold(title)), 1, 0));
 		this.addChild(new Spacer(1));
 
-		this.searchInput = new Input();
+		this.searchSurface = SearchableListSurface.mount(this);
+		this.searchInput = this.searchSurface.searchInput;
+		this.listContainer = this.searchSurface.listContainer;
 		this.searchInput.onSubmit = () => {
 			const selectedProvider = this.filteredProviders[this.selectedIndex];
 			if (selectedProvider) {
 				this.onSelectCallback(selectedProvider.id);
 			}
 		};
-		this.addChild(this.searchInput);
-		this.addChild(new Spacer(1));
-
-		// Create list container
-		this.listContainer = new Container();
-		this.addChild(this.listContainer);
 
 		this.addChild(new Spacer(1));
 
@@ -94,9 +88,11 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	}
 
 	private filterProviders(query: string): void {
-		this.filteredProviders = query
-			? fuzzyFilter(this.allProviders, query, (provider) => `${provider.name} ${provider.id} ${provider.authType}`)
-			: this.allProviders;
+		this.filteredProviders = filterSelectorItems(
+			this.allProviders,
+			query,
+			(provider) => `${provider.name} ${provider.id} ${provider.authType}`,
+		);
 		this.selectedIndex = Math.max(0, Math.min(this.selectedIndex, Math.max(0, this.filteredProviders.length - 1)));
 		this.updateList();
 	}
@@ -105,11 +101,8 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.listContainer.clear();
 
 		const maxVisible = 8;
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredProviders.length - maxVisible),
-		);
-		const endIndex = Math.min(startIndex + maxVisible, this.filteredProviders.length);
+		const range = getCenteredVisibleRange(this.selectedIndex, this.filteredProviders.length, maxVisible);
+		const { startIndex, endIndex } = range;
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const provider = this.filteredProviders[i];
@@ -131,10 +124,8 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new TruncatedText(line, 1, 0));
 		}
 
-		if (startIndex > 0 || endIndex < this.filteredProviders.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredProviders.length})`);
-			this.listContainer.addChild(new TruncatedText(scrollInfo, 1, 0));
-		}
+		const scrollText = getSelectorScrollText(this.selectedIndex, this.filteredProviders.length, range);
+		if (scrollText) this.listContainer.addChild(new TruncatedText(theme.fg("muted", scrollText), 1, 0));
 
 		// Show "no providers" if empty
 		if (this.filteredProviders.length === 0) {
@@ -179,13 +170,13 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		// Up arrow
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, this.filteredProviders.length, -1, "clamp");
 			this.updateList();
 		}
 		// Down arrow
 		else if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = Math.min(this.filteredProviders.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, this.filteredProviders.length, 1, "clamp");
 			this.updateList();
 		}
 		// Enter

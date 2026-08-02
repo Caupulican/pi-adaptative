@@ -68,6 +68,40 @@ def _refuse_flag(name: str, flag: str) -> None:
     )
 
 
+def _parse_simple_flags(
+    ctx: "BuiltinContext", name: str, known_flags: set[str], max_operands: int | None
+) -> tuple[list[str], list[str]]:
+    flags: list[str] = []
+    operands: list[str] = []
+    for arg in ctx.argv[1:]:
+        if arg == "--":
+            continue
+        if arg.startswith("-") and arg != "-":
+            if arg not in known_flags:
+                _refuse_flag(name, arg)
+            flags.append(arg)
+        else:
+            operands.append(arg)
+    if max_operands is not None and len(operands) > max_operands:
+        _refuse_flag(name, "multi-file")
+    return flags, operands
+
+
+def _decode_text_lines(data: bytes) -> list[str]:
+    text = data.decode("utf-8", errors="surrogateescape")
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines.pop()
+    return lines
+
+
+def _write_text_lines(ctx: "BuiltinContext", lines: list[str]) -> None:
+    if not lines:
+        return
+    ctx.stdout.write("\n".join(lines).encode("utf-8", errors="surrogateescape"))
+    ctx.stdout.write(b"\n")
+
+
 # --- cat ---------------------------------------------------------------------
 
 
@@ -183,21 +217,9 @@ def _wc_counts(data: bytes) -> tuple[int, int, int, int]:
 
 
 def wc(ctx: "BuiltinContext") -> int:
-    known_single = {"-l", "-w", "-c", "-m"}
-    flags: list[str] = []
-    operands: list[str] = []
-    for a in ctx.argv[1:]:
-        if a == "--":
-            continue
-        if a.startswith("-") and a != "-":
-            if a not in known_single:
-                _refuse_flag("wc", a)
-            flags.append(a)
-        else:
-            operands.append(a)
-
-    if len(operands) > 1:
-        _refuse_flag("wc", "multi-file")
+    flags, operands = _parse_simple_flags(
+        ctx, "wc", {"-l", "-w", "-c", "-m"}, 1
+    )
 
     single_flag = len(flags) == 1 and not operands
     if single_flag:
@@ -237,26 +259,12 @@ def wc(ctx: "BuiltinContext") -> int:
 
 
 def sort(ctx: "BuiltinContext") -> int:
-    flags: list[str] = []
-    operands: list[str] = []
-    for a in ctx.argv[1:]:
-        if a == "--":
-            continue
-        if a.startswith("-") and a != "-":
-            if a not in {"-r", "-n", "-u", "-f"}:
-                _refuse_flag("sort", a)
-            flags.append(a)
-        else:
-            operands.append(a)
-    if len(operands) > 1:
-        _refuse_flag("sort", "multi-file")
+    flags, operands = _parse_simple_flags(
+        ctx, "sort", {"-r", "-n", "-u", "-f"}, 1
+    )
 
     data = _read_operand_or_stdin(ctx, operands)
-    text = data.decode("utf-8", errors="surrogateescape")
-    had_trailing_newline = text.endswith("\n")
-    lines = text.split("\n")
-    if had_trailing_newline:
-        lines = lines[:-1]
+    lines = _decode_text_lines(data)
 
     reverse = "-r" in flags
     numeric = "-n" in flags
@@ -284,10 +292,7 @@ def sort(ctx: "BuiltinContext") -> int:
                 deduped.append(line)
         lines = deduped
 
-    out = "\n".join(lines)
-    if lines:
-        out += "\n"
-    ctx.stdout.write(out.encode("utf-8", errors="surrogateescape"))
+    _write_text_lines(ctx, lines)
     return 0
 
 
@@ -295,26 +300,12 @@ def sort(ctx: "BuiltinContext") -> int:
 
 
 def uniq(ctx: "BuiltinContext") -> int:
-    flags: list[str] = []
-    operands: list[str] = []
-    for a in ctx.argv[1:]:
-        if a == "--":
-            continue
-        if a.startswith("-") and a != "-":
-            if a not in {"-c", "-d", "-u", "-i"}:
-                _refuse_flag("uniq", a)
-            flags.append(a)
-        else:
-            operands.append(a)
-    if len(operands) > 1:
-        _refuse_flag("uniq", "multi-file")
+    flags, operands = _parse_simple_flags(
+        ctx, "uniq", {"-c", "-d", "-u", "-i"}, 1
+    )
 
     data = _read_operand_or_stdin(ctx, operands)
-    text = data.decode("utf-8", errors="surrogateescape")
-    had_trailing_newline = text.endswith("\n")
-    lines = text.split("\n")
-    if had_trailing_newline:
-        lines = lines[:-1]
+    lines = _decode_text_lines(data)
 
     ignore_case = "-i" in flags
     count_flag = "-c" in flags
@@ -344,10 +335,7 @@ def uniq(ctx: "BuiltinContext") -> int:
     else:
         out_lines = [line for line, _ in groups]
 
-    out = "\n".join(out_lines)
-    if out_lines:
-        out += "\n"
-    ctx.stdout.write(out.encode("utf-8", errors="surrogateescape"))
+    _write_text_lines(ctx, out_lines)
     return 0
 
 
@@ -441,11 +429,7 @@ def cut(ctx: "BuiltinContext") -> int:
         _refuse_flag("cut", "multi-file")
 
     data = _read_operand_or_stdin(ctx, operands)
-    text = data.decode("utf-8", errors="surrogateescape")
-    had_trailing_newline = text.endswith("\n")
-    lines = text.split("\n")
-    if had_trailing_newline:
-        lines = lines[:-1]
+    lines = _decode_text_lines(data)
 
     out_lines: list[str] = []
     if field_spec is not None:
@@ -460,10 +444,7 @@ def cut(ctx: "BuiltinContext") -> int:
             selected_chars = [c for idx, c in enumerate(line, start=1) if _in_ranges(idx, ranges)]
             out_lines.append("".join(selected_chars))
 
-    out = "\n".join(out_lines)
-    if out_lines:
-        out += "\n"
-    ctx.stdout.write(out.encode("utf-8", errors="surrogateescape"))
+    _write_text_lines(ctx, out_lines)
     return 0
 
 
@@ -503,17 +484,9 @@ def _expand_tr_set(spec: str) -> str:
 
 
 def tr(ctx: "BuiltinContext") -> int:
-    flags: list[str] = []
-    operands: list[str] = []
-    for a in ctx.argv[1:]:
-        if a == "--":
-            continue
-        if a.startswith("-") and a != "-":
-            if a not in {"-d", "-s", "-c"}:
-                _refuse_flag("tr", a)
-            flags.append(a)
-        else:
-            operands.append(a)
+    flags, operands = _parse_simple_flags(
+        ctx, "tr", {"-d", "-s", "-c"}, None
+    )
 
     delete = "-d" in flags
     squeeze = "-s" in flags

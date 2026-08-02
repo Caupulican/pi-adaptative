@@ -22,12 +22,21 @@ export interface AppKeybindings {
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
 	"app.tools.expand": true;
+	"app.tools.background": true;
 	"app.thinking.toggle": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
+	"app.transcript.open": true;
+	"app.transcript.scrollUp": true;
+	"app.transcript.scrollDown": true;
+	"app.transcript.pageUp": true;
+	"app.transcript.pageDown": true;
+	"app.transcript.top": true;
+	"app.transcript.bottom": true;
+	"app.transcript.close": true;
 	"app.question.next": true;
 	"app.question.previous": true;
 	"app.question.toggle": true;
@@ -100,6 +109,7 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
+	"app.tools.background": { defaultKeys: "ctrl+b", description: "Move active tool calls to background" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
@@ -124,6 +134,17 @@ export const KEYBINDINGS = {
 		defaultKeys: defaultImagePasteKeys(),
 		description: "Paste image from clipboard",
 	},
+	"app.transcript.open": {
+		defaultKeys: "shift+pageUp",
+		description: "Open transcript scrollback",
+	},
+	"app.transcript.scrollUp": { defaultKeys: "up", description: "Scroll transcript up" },
+	"app.transcript.scrollDown": { defaultKeys: "down", description: "Scroll transcript down" },
+	"app.transcript.pageUp": { defaultKeys: "pageUp", description: "Page transcript up" },
+	"app.transcript.pageDown": { defaultKeys: "pageDown", description: "Page transcript down" },
+	"app.transcript.top": { defaultKeys: "home", description: "Jump to transcript start" },
+	"app.transcript.bottom": { defaultKeys: "end", description: "Jump to transcript tail" },
+	"app.transcript.close": { defaultKeys: "escape", description: "Close transcript scrollback" },
 	"app.question.next": {
 		defaultKeys: ["tab", "right"],
 		description: "Next question or review",

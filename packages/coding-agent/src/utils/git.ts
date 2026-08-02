@@ -18,34 +18,34 @@ export type GitSource = {
 	pinned: boolean;
 };
 
+function splitPathRef(pathWithMaybeRef: string): { path: string; ref: string } | undefined {
+	const refSeparator = pathWithMaybeRef.indexOf("@");
+	if (refSeparator < 0) return undefined;
+	const path = pathWithMaybeRef.slice(0, refSeparator);
+	const ref = pathWithMaybeRef.slice(refSeparator + 1);
+	return path && ref ? { path, ref } : undefined;
+}
+
 function splitRef(url: string): { repo: string; ref?: string } {
 	const scpLikeMatch = url.match(/^git@([^:]+):(.+)$/);
 	if (scpLikeMatch) {
-		const pathWithMaybeRef = scpLikeMatch[2] ?? "";
-		const refSeparator = pathWithMaybeRef.indexOf("@");
-		if (refSeparator < 0) return { repo: url };
-		const repoPath = pathWithMaybeRef.slice(0, refSeparator);
-		const ref = pathWithMaybeRef.slice(refSeparator + 1);
-		if (!repoPath || !ref) return { repo: url };
+		const split = splitPathRef(scpLikeMatch[2] ?? "");
+		if (!split) return { repo: url };
 		return {
-			repo: `git@${scpLikeMatch[1] ?? ""}:${repoPath}`,
-			ref,
+			repo: `git@${scpLikeMatch[1] ?? ""}:${split.path}`,
+			ref: split.ref,
 		};
 	}
 
 	if (url.includes("://")) {
 		try {
 			const parsed = new URL(url);
-			const pathWithMaybeRef = parsed.pathname.replace(/^\/+/, "");
-			const refSeparator = pathWithMaybeRef.indexOf("@");
-			if (refSeparator < 0) return { repo: url };
-			const repoPath = pathWithMaybeRef.slice(0, refSeparator);
-			const ref = pathWithMaybeRef.slice(refSeparator + 1);
-			if (!repoPath || !ref) return { repo: url };
-			parsed.pathname = `/${repoPath}`;
+			const split = splitPathRef(parsed.pathname.replace(/^\/+/, ""));
+			if (!split) return { repo: url };
+			parsed.pathname = `/${split.path}`;
 			return {
 				repo: parsed.toString().replace(/\/$/, ""),
-				ref,
+				ref: split.ref,
 			};
 		} catch {
 			return { repo: url };
@@ -58,18 +58,11 @@ function splitRef(url: string): { repo: string; ref?: string } {
 	}
 	const host = url.slice(0, slashIndex);
 	const pathWithMaybeRef = url.slice(slashIndex + 1);
-	const refSeparator = pathWithMaybeRef.indexOf("@");
-	if (refSeparator < 0) {
-		return { repo: url };
-	}
-	const repoPath = pathWithMaybeRef.slice(0, refSeparator);
-	const ref = pathWithMaybeRef.slice(refSeparator + 1);
-	if (!repoPath || !ref) {
-		return { repo: url };
-	}
+	const split = splitPathRef(pathWithMaybeRef);
+	if (!split) return { repo: url };
 	return {
-		repo: `${host}/${repoPath}`,
-		ref,
+		repo: `${host}/${split.path}`,
+		ref: split.ref,
 	};
 }
 

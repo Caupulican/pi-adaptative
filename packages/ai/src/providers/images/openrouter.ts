@@ -19,6 +19,11 @@ import { formatProviderError, normalizeProviderError } from "../../utils/error-b
 import { headersToRecord } from "../../utils/headers.ts";
 import { retryProviderRequest } from "../../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../../utils/sanitize-unicode.ts";
+import {
+	applyProviderPayloadHook,
+	createProviderRetryOptions,
+	createRetryFreeRequestOptions,
+} from "../provider-runtime.ts";
 
 interface OpenRouterGeneratedImage {
 	image_url?: string | { url?: string };
@@ -56,26 +61,14 @@ export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", Image
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
 		const client = createClient(model, apiKey, options?.headers);
-		let params = buildParams(model, context);
-		const nextParams = await options?.onPayload?.(params, model);
-		if (nextParams !== undefined) {
-			params = nextParams as typeof params;
-		}
-		const requestOptions = {
-			...(options?.signal ? { signal: options.signal } : {}),
-			...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-			maxRetries: 0,
-		};
+		const params = await applyProviderPayloadHook(buildParams(model, context), model, options?.onPayload);
+		const requestOptions = createRetryFreeRequestOptions(options);
 		const { data: response, response: rawResponse } = await retryProviderRequest(
 			() =>
 				client.chat.completions
 					.create(params as unknown as ChatCompletionCreateParamsNonStreaming, requestOptions)
 					.withResponse(),
-			{
-				maxRetries: options?.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs,
-				signal: options?.signal,
-			},
+			createProviderRetryOptions(options),
 		);
 		await options?.onResponse?.({ status: rawResponse.status, headers: headersToRecord(rawResponse.headers) }, model);
 

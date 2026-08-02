@@ -5,6 +5,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/node";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
+import { boundedTextPreview } from "./text-preview.ts";
 
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean;
@@ -151,11 +152,6 @@ type ToolCallMeta = {
 	args: Record<string, unknown>;
 	messageIndex: number;
 };
-
-function cap(text: string, limit = 220): string {
-	const compact = text.replace(/\s+/g, " ").trim();
-	return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 1))}…` : compact;
-}
 
 function normalizeSemanticMemoryGcSettings(settings?: SemanticMemoryGcSettings): Required<SemanticMemoryGcSettings> {
 	return {
@@ -374,7 +370,7 @@ function buildSummary(record: ContextGcPackedRecord): string {
 		semantic ? "[Semantic GC packed stale Automata/Mind context page]" : "[Context GC packed stale tool result]",
 		semantic ? undefined : `tool: ${record.toolName}`,
 		record.path ? `path: ${record.path}` : undefined,
-		record.command ? `command: ${cap(record.command)}` : undefined,
+		record.command ? `command: ${boundedTextPreview(record.command)}` : undefined,
 		`reason: ${reasonText(record)}`,
 		`original: ${record.originalChars} chars (~${record.originalTokens} tokens)`,
 		// The digest arrives PRE-FENCED from the curator (brain-curator.ts wraps it once, in the
@@ -425,6 +421,27 @@ function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextG
 		content: [{ type: "text", text: summary }],
 		details: gcDetails(message as { details?: unknown }, record),
 	} as AgentMessage;
+}
+
+function commitPackedMessage<TMessage extends AgentMessage>(
+	options: ContextGcOptions,
+	report: ContextGcReport,
+	nextMessages: AgentMessage[],
+	messageIndex: number,
+	message: TMessage,
+	originalText: string,
+	key: string,
+	record: ContextGcPackedRecord,
+	makePacked: (message: TMessage, record: ContextGcPackedRecord) => AgentMessage,
+): void {
+	record.digest = options.curation?.resolveDigest?.(key);
+	options.curation?.onPacked?.(record, originalText);
+	const packed = makePacked(message, record);
+	record.packedTokens = estimateTokens(packed);
+	nextMessages[messageIndex] = packed;
+	report.records.push(record);
+	report.originalTokens += record.originalTokens;
+	report.packedTokens += record.packedTokens;
 }
 
 export function applyContextGc(
@@ -493,14 +510,17 @@ export function applyContextGc(
 					storagePath,
 					key,
 				};
-				record.digest = options.curation?.resolveDigest?.(key);
-				options.curation?.onPacked?.(record, originalText);
-				const packed = makePackedSemanticMemoryMessage(message, record);
-				record.packedTokens = estimateTokens(packed);
-				nextMessages[index] = packed;
-				baseReport.records.push(record);
-				baseReport.originalTokens += record.originalTokens;
-				baseReport.packedTokens += record.packedTokens;
+				commitPackedMessage(
+					options,
+					baseReport,
+					nextMessages,
+					index,
+					message,
+					originalText,
+					key,
+					record,
+					makePackedSemanticMemoryMessage,
+				);
 				changed = true;
 				continue;
 			}
@@ -544,14 +564,17 @@ export function applyContextGc(
 			command: typeof call?.args.command === "string" ? call.args.command : undefined,
 			key,
 		};
-		record.digest = options.curation?.resolveDigest?.(key);
-		options.curation?.onPacked?.(record, originalText);
-		const packed = makePackedToolResult(message, record);
-		record.packedTokens = estimateTokens(packed);
-		nextMessages[index] = packed as AgentMessage;
-		baseReport.records.push(record);
-		baseReport.originalTokens += record.originalTokens;
-		baseReport.packedTokens += record.packedTokens;
+		commitPackedMessage(
+			options,
+			baseReport,
+			nextMessages,
+			index,
+			message,
+			originalText,
+			key,
+			record,
+			makePackedToolResult,
+		);
 		changed = true;
 	}
 

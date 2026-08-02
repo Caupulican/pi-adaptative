@@ -28,7 +28,11 @@ export { Spacer } from "./components/spacer.ts";
 export { Text } from "./components/text.ts";
 export { TruncatedText } from "./components/truncated-text.ts";
 // Editor component interface (for custom editors)
-export type { EditorComponent } from "./editor-component.ts";
+export {
+	type EditorChangeSummary,
+	type EditorComponent,
+	firstNonWhitespaceCharacter,
+} from "./editor-component.ts";
 // Fuzzy matching
 export { type FuzzyMatch, fuzzyFilter, fuzzyMatch } from "./fuzzy.ts";
 // Keybindings

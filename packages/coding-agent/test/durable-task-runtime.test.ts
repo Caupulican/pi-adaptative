@@ -988,6 +988,85 @@ describe("DurableTaskRuntime", () => {
 		expect(harness.runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({ status: "running" });
 	});
 
+	it("releases the same logical agent after both cancellation and completion without weakening lease fences", () => {
+		const harness = createHarness();
+		const objective = harness.runtime.createObjective({
+			title: "Release agent",
+			description: "Make terminal attempts return one logical agent to the idle pool",
+		});
+		const agent = harness.runtime.registerAgent({
+			agentId: "agent-release",
+			role: "explorer",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "pi-release",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		});
+		const taskIds = ["task-cancel", "task-finish"] as const;
+		for (const taskId of taskIds) {
+			harness.runtime.createTask({
+				taskId,
+				objectiveId: objective.objectiveId,
+				title: taskId,
+				description: `Exercise ${taskId}`,
+				role: "explorer",
+			});
+		}
+
+		const cancelledAttempt = harness.runtime.queueAttempt(taskIds[0], dispatch(taskIds[0]));
+		harness.runtime.bindAttemptGrant(
+			cancelledAttempt.attemptId,
+			createTestExecutionGrant({
+				objectiveId: objective.objectiveId,
+				taskId: taskIds[0],
+				attemptId: cancelledAttempt.attemptId,
+				role: "explorer",
+			}),
+		);
+		const cancelledLease = harness.runtime.leaseAttempt(
+			cancelledAttempt.attemptId,
+			"owner-cancel",
+			60_000,
+			agent.agentId,
+		);
+		harness.runtime.startAttempt(cancelledAttempt.attemptId, cancelledLease.leaseId, cancelledLease.fencingToken);
+		harness.runtime.cancelAttempt(cancelledAttempt.attemptId, "owner_cancelled");
+		expect(harness.runtime.getSnapshot().agents[agent.agentId]).toMatchObject({ status: "registered" });
+		expect(harness.runtime.getSnapshot().agents[agent.agentId]?.activeAttemptId).toBeUndefined();
+
+		const finishedAttempt = harness.runtime.queueAttempt(taskIds[1], dispatch(taskIds[1]));
+		harness.runtime.bindAttemptGrant(
+			finishedAttempt.attemptId,
+			createTestExecutionGrant({
+				objectiveId: objective.objectiveId,
+				taskId: taskIds[1],
+				attemptId: finishedAttempt.attemptId,
+				role: "explorer",
+			}),
+		);
+		const finishedLease = harness.runtime.leaseAttempt(
+			finishedAttempt.attemptId,
+			"owner-finish",
+			60_000,
+			agent.agentId,
+		);
+		harness.runtime.startAttempt(finishedAttempt.attemptId, finishedLease.leaseId, finishedLease.fencingToken);
+		harness.runtime.finishAttempt(
+			completedResult({
+				objectiveId: objective.objectiveId,
+				taskId: taskIds[1],
+				attemptId: finishedAttempt.attemptId,
+				leaseId: finishedLease.leaseId,
+				fencingToken: finishedLease.fencingToken,
+			}),
+		);
+		expect(harness.runtime.getSnapshot().agents[agent.agentId]).toMatchObject({ status: "registered" });
+		expect(harness.runtime.getSnapshot().agents[agent.agentId]?.activeAttemptId).toBeUndefined();
+	});
+
 	it("rejects replayed suspension events with a stale lease or fence", () => {
 		const harness = createHarness();
 		const objective = harness.runtime.createObjective({ title: "Replay", description: "Reject stale suspend" });

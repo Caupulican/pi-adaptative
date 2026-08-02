@@ -1,3 +1,6 @@
+import type { Api, Model } from "@caupulican/pi-ai";
+import { type IsolatedCompletionRunner, runIsolatedTextCompletion } from "../isolated-text-completion.ts";
+import { reportSpawnedUsage, type SpawnedUsageReporter } from "../spawned-usage.ts";
 import type { ToolkitScript } from "./script-registry.ts";
 
 /**
@@ -24,6 +27,40 @@ export interface ReflexPlan {
 }
 
 export const REFLEX_MIN_CONFIDENCE = 0.75;
+
+export interface ReflexInterpreterCompletionOptions {
+	request: string;
+	scripts: readonly ToolkitScript[];
+	model: Model<Api>;
+	laneKind: string;
+	usageKind: string;
+	usageLabel: string;
+	sessionId: string;
+	completionRunner: IsolatedCompletionRunner;
+	usageReporter: SpawnedUsageReporter;
+}
+
+/** Execute the shared reflex interpreter call and account for it under the caller's lane identity. */
+export async function runReflexInterpreterCompletion(
+	options: ReflexInterpreterCompletionOptions,
+): Promise<ReflexPlan | undefined> {
+	const completion = await runIsolatedTextCompletion(options.completionRunner, {
+		systemPrompt: REFLEX_INTERPRETER_SYSTEM_PROMPT,
+		userPrompt: buildReflexUserPrompt(options.request, options.scripts),
+		model: options.model,
+		thinkingLevel: "off",
+		maxTokens: 256,
+		cacheRetention: "short",
+		laneKind: options.laneKind,
+	});
+	reportSpawnedUsage(options.usageReporter, completion.usage, {
+		kind: options.usageKind,
+		label: options.usageLabel,
+		sessionId: options.sessionId,
+		identity: options.request,
+	});
+	return parseReflexPlan(completion.text);
+}
 
 export function buildReflexUserPrompt(request: string, scripts: readonly ToolkitScript[]): string {
 	const registry = scripts

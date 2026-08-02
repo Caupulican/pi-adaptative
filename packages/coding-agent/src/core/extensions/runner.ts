@@ -149,6 +149,15 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+export function createExtensionHandlerError(extensionPath: string, event: string, error: unknown): ExtensionError {
+	return {
+		extensionPath,
+		event,
+		error: error instanceof Error ? error.message : String(error),
+		stack: error instanceof Error ? error.stack : undefined,
+	};
+}
+
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
 	setup?: (sessionManager: SessionManager) => Promise<void>;
@@ -539,6 +548,10 @@ export class ExtensionRunner {
 		}
 	}
 
+	private reportHandlerError(extensionPath: string, event: string, error: unknown): void {
+		this.emitError(createExtensionHandlerError(extensionPath, event, error));
+	}
+
 	hasHandlers(eventType: string): boolean {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
@@ -754,14 +767,7 @@ export class ExtensionRunner {
 						}
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: event.type,
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, event.type, err);
 				}
 			}
 		}
@@ -783,14 +789,7 @@ export class ExtensionRunner {
 			try {
 				await handler(event, ctx);
 			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				const stack = err instanceof Error ? err.stack : undefined;
-				this.emitError({
-					extensionPath: extension.path,
-					event: event.type,
-					error: message,
-					stack,
-				});
+				this.reportHandlerError(extension.path, event.type, err);
 			}
 		}
 	}
@@ -822,14 +821,7 @@ export class ExtensionRunner {
 					currentMessage = handlerResult.message;
 					modified = true;
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "message_end",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "message_end", err);
 				}
 			}
 		}
@@ -868,14 +860,7 @@ export class ExtensionRunner {
 						modified = true;
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "tool_result",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "tool_result", err);
 				}
 			}
 		}
@@ -910,14 +895,7 @@ export class ExtensionRunner {
 					}
 				} catch (err) {
 					if (firstError === undefined) firstError = err;
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "tool_call",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "tool_call", err);
 				}
 			}
 		}
@@ -940,14 +918,7 @@ export class ExtensionRunner {
 						return handlerResult as UserBashEventResult;
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "user_bash",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "user_bash", err);
 				}
 			}
 		}
@@ -972,14 +943,7 @@ export class ExtensionRunner {
 						currentMessages = (handlerResult as ContextEventResult).messages!;
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "context",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "context", err);
 				}
 			}
 		}
@@ -1006,14 +970,7 @@ export class ExtensionRunner {
 						currentPayload = handlerResult;
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "before_provider_request",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "before_provider_request", err);
 				}
 			}
 		}
@@ -1065,14 +1022,7 @@ export class ExtensionRunner {
 						}
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "before_agent_start",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "before_agent_start", err);
 				}
 			}
 		}
@@ -1120,14 +1070,7 @@ export class ExtensionRunner {
 						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
 					}
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "resources_discover",
-						error: message,
-						stack,
-					});
+					this.reportHandlerError(ext.path, "resources_discover", err);
 				}
 			}
 		}
@@ -1163,12 +1106,7 @@ export class ExtensionRunner {
 						currentImages = result.images ?? currentImages;
 					}
 				} catch (err) {
-					this.emitError({
-						extensionPath: ext.path,
-						event: "input",
-						error: err instanceof Error ? err.message : String(err),
-						stack: err instanceof Error ? err.stack : undefined,
-					});
+					this.reportHandlerError(ext.path, "input", err);
 				}
 			}
 		}

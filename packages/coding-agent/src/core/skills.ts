@@ -1,11 +1,13 @@
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
-import ignore from "ignore";
-import { basename, dirname, join, relative, resolve, sep } from "path";
+import { existsSync, readFileSync, statSync } from "fs";
+import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
+import { escapePromptXml } from "./prompt-markup.ts";
+import { isResourcePathWithin } from "./resource-traversal.ts";
+import { discoverSkillFiles } from "./skill-discovery.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /** Max name length per spec */
@@ -16,63 +18,12 @@ const MAX_NAME_LENGTH = 64;
 /** Max description length per spec */
 const MAX_DESCRIPTION_LENGTH = 1024;
 
-const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
-
 // Kept local rather than imported from settings-manager.ts's ThinkingLevel validation: that module
 // already imports validateSkillName FROM this file, so importing back would cycle. The literal set
 // is small and stable (mirrors settings-manager.ts's own VALID_THINKING_LEVELS).
 const VALID_SKILL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 function isSkillThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && (VALID_SKILL_THINKING_LEVELS as readonly string[]).includes(value);
-}
-
-type IgnoreMatcher = ReturnType<typeof ignore>;
-
-function toPosixPath(p: string): string {
-	return p.split(sep).join("/");
-}
-
-function prefixIgnorePattern(line: string, prefix: string): string | null {
-	const trimmed = line.trim();
-	if (!trimmed) return null;
-	if (trimmed.startsWith("#") && !trimmed.startsWith("\\#")) return null;
-
-	let pattern = line;
-	let negated = false;
-
-	if (pattern.startsWith("!")) {
-		negated = true;
-		pattern = pattern.slice(1);
-	} else if (pattern.startsWith("\\!")) {
-		pattern = pattern.slice(1);
-	}
-
-	if (pattern.startsWith("/")) {
-		pattern = pattern.slice(1);
-	}
-
-	const prefixed = prefix ? `${prefix}${pattern}` : pattern;
-	return negated ? `!${prefixed}` : prefixed;
-}
-
-function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
-	const relativeDir = relative(rootDir, dir);
-	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
-
-	for (const filename of IGNORE_FILE_NAMES) {
-		const ignorePath = join(dir, filename);
-		if (!existsSync(ignorePath)) continue;
-		try {
-			const content = readFileSync(ignorePath, "utf-8");
-			const patterns = content
-				.split(/\r?\n/)
-				.map((line) => prefixIgnorePattern(line, prefix))
-				.filter((line): line is string => Boolean(line));
-			if (patterns.length > 0) {
-				ig.add(patterns);
-			}
-		} catch {}
-	}
 }
 
 export interface SkillFrontmatter {
@@ -193,120 +144,23 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
  */
 export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkillsResult {
 	const { dir, source } = options;
-	return loadSkillsFromDirInternal(dir, source, true, undefined, undefined, options.isPathAllowed);
+	return loadSkillsFromDirInternal(dir, source, options.isPathAllowed);
 }
 
 function loadSkillsFromDirInternal(
 	dir: string,
 	source: string,
-	includeRootFiles: boolean,
-	ignoreMatcher?: IgnoreMatcher,
-	rootDir?: string,
 	isPathAllowed?: (path: string) => boolean,
 ): LoadSkillsResult {
 	const skills: Skill[] = [];
 	const diagnostics: ResourceDiagnostic[] = [];
-
-	if (!existsSync(dir)) {
-		return { skills, diagnostics };
+	for (const filePath of discoverSkillFiles(dir, "pi")) {
+		// Profile UAC: denied skill contents are never read from disk.
+		if (isPathAllowed && !isPathAllowed(filePath)) continue;
+		const result = loadSkillFromFile(filePath, source);
+		if (result.skill) skills.push(result.skill);
+		diagnostics.push(...result.diagnostics);
 	}
-
-	const root = rootDir ?? dir;
-	const ig = ignoreMatcher ?? ignore();
-	addIgnoreRules(ig, dir, root);
-
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			if (entry.name !== "SKILL.md") {
-				continue;
-			}
-
-			const fullPath = join(dir, entry.name);
-
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			if (!isFile || ig.ignores(relPath)) {
-				continue;
-			}
-
-			// Profile UAC: a denied SKILL.md is never read from disk (its dir stays unloaded).
-			if (isPathAllowed && !isPathAllowed(fullPath)) {
-				return { skills, diagnostics };
-			}
-
-			const result = loadSkillFromFile(fullPath, source);
-			if (result.skill) {
-				skills.push(result.skill);
-			}
-			diagnostics.push(...result.diagnostics);
-			return { skills, diagnostics };
-		}
-
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) {
-				continue;
-			}
-
-			// Skip node_modules to avoid scanning dependencies
-			if (entry.name === "node_modules") {
-				continue;
-			}
-
-			const fullPath = join(dir, entry.name);
-
-			// For symlinks, check if they point to a directory and follow them
-			let isDirectory = entry.isDirectory();
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDirectory = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					// Broken symlink, skip it
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			const ignorePath = isDirectory ? `${relPath}/` : relPath;
-			if (ig.ignores(ignorePath)) {
-				continue;
-			}
-
-			if (isDirectory) {
-				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root, isPathAllowed);
-				skills.push(...subResult.skills);
-				diagnostics.push(...subResult.diagnostics);
-				continue;
-			}
-
-			if (!isFile || !includeRootFiles || !entry.name.endsWith(".md")) {
-				continue;
-			}
-
-			// Profile UAC: a denied skill file is never read from disk.
-			if (isPathAllowed && !isPathAllowed(fullPath)) {
-				continue;
-			}
-
-			const result = loadSkillFromFile(fullPath, source);
-			if (result.skill) {
-				skills.push(result.skill);
-			}
-			diagnostics.push(...result.diagnostics);
-		}
-	} catch {}
 
 	return { skills, diagnostics };
 }
@@ -401,24 +255,15 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 	for (const skill of visibleSkills) {
 		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
+		lines.push(`    <name>${escapePromptXml(skill.name)}</name>`);
+		lines.push(`    <description>${escapePromptXml(skill.description)}</description>`);
+		lines.push(`    <location>${escapePromptXml(skill.filePath)}</location>`);
 		lines.push("  </skill>");
 	}
 
 	lines.push("</available_skills>");
 
 	return lines.join("\n");
-}
-
-function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
 }
 
 export interface LoadSkillsOptions {
@@ -482,44 +327,19 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	}
 
 	if (includeDefaults) {
+		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", options.isPathAllowed));
 		addSkills(
-			loadSkillsFromDirInternal(
-				join(resolvedAgentDir, "skills"),
-				"user",
-				true,
-				undefined,
-				undefined,
-				options.isPathAllowed,
-			),
-		);
-		addSkills(
-			loadSkillsFromDirInternal(
-				resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"),
-				"project",
-				true,
-				undefined,
-				undefined,
-				options.isPathAllowed,
-			),
+			loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", options.isPathAllowed),
 		);
 	}
 
 	const userSkillsDir = join(resolvedAgentDir, "skills");
 	const projectSkillsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "skills");
 
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
-
 	const getSource = (resolvedPath: string): "user" | "project" | "path" => {
 		if (!includeDefaults) {
-			if (isUnderPath(resolvedPath, userSkillsDir)) return "user";
-			if (isUnderPath(resolvedPath, projectSkillsDir)) return "project";
+			if (isResourcePathWithin(resolvedPath, userSkillsDir)) return "user";
+			if (isResourcePathWithin(resolvedPath, projectSkillsDir)) return "project";
 		}
 		return "path";
 	};
@@ -535,9 +355,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 			const stats = statSync(resolvedPath);
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {
-				addSkills(
-					loadSkillsFromDirInternal(resolvedPath, source, true, undefined, undefined, options.isPathAllowed),
-				);
+				addSkills(loadSkillsFromDirInternal(resolvedPath, source, options.isPathAllowed));
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
 				// Profile UAC: a denied skill file is never read from disk.
 				if (options.isPathAllowed && !options.isPathAllowed(resolvedPath)) {

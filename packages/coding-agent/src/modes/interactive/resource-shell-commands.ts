@@ -18,7 +18,7 @@ import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
-import { SelectSubmenu } from "./components/settings-selector.ts";
+import { confirmExternalResourceTrust } from "./interactive-selection-prompts.ts";
 
 export interface InstallResourcesHost {
 	readonly settingsManager: Pick<
@@ -93,35 +93,11 @@ export async function handleInstallResourcesCommand(host: InstallResourcesHost, 
 		const trusted = trustedRoots.includes(canonical);
 
 		if (!trusted) {
-			const trust = await new Promise<boolean>((resolve) => {
-				host.showSelector((done) => {
-					const submenu = new SelectSubmenu(
-						"Trust external source for installation?",
-						`The directory "${canonical}" contains extensions/resources to install. Extensions can execute arbitrary code on your machine. Do you trust it?`,
-						[
-							{
-								value: "yes",
-								label: "Yes",
-								description: "Trust this directory and proceed with installation.",
-							},
-							{ value: "no", label: "No", description: "Do not trust this directory. Abort." },
-						],
-						"no",
-						(value) => {
-							done();
-							resolve(value === "yes");
-						},
-						() => {
-							done();
-							resolve(false);
-						},
-					);
-					return {
-						component: submenu,
-						focus: submenu.getSelectList(),
-						onSuperseded: () => resolve(false),
-					};
-				});
+			const trust = await confirmExternalResourceTrust(host, {
+				title: "Trust external source for installation?",
+				description: `The directory "${canonical}" contains extensions/resources to install. Extensions can execute arbitrary code on your machine. Do you trust it?`,
+				acceptDescription: "Trust this directory and proceed with installation.",
+				rejectDescription: "Do not trust this directory. Abort.",
 			});
 
 			if (!trust) {

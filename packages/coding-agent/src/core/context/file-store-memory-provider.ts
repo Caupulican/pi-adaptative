@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { scanContextFileThreats, stripInvisibleUnicode } from "../resource-loader.ts";
 import type { MemoryScope } from "./context-item.ts";
+import { fetchLocalMemoryItem, searchLocalMemoryItems, tokenOverlapScore } from "./local-memory-search.ts";
 import type {
 	MemoryItem,
 	MemoryItemKind,
@@ -40,29 +41,12 @@ const FILE_STORE_MEMORY_CAPABILITIES: MemoryProviderCapabilities = {
 	localOnly: true,
 };
 
-function tokenSet(text: string): Set<string> {
-	return new Set(text.toLowerCase().match(/[a-z0-9_/-]+/g) ?? []);
-}
-
-function scoreItem(queryTokens: Set<string>, item: MemoryItem): number {
+function scoreItem(queryTokens: ReadonlySet<string>, item: MemoryItem): number {
 	if (queryTokens.size === 0) return item.kind === "user_preference" ? 0.2 : 0;
-	const haystack = tokenSet(
-		[item.title, item.summary].filter((part): part is string => part !== undefined).join("\n"),
-	);
-	let overlap = 0;
-	for (const token of queryTokens) {
-		if (haystack.has(token)) overlap++;
-	}
-	const score = overlap / queryTokens.size;
+	const score = tokenOverlapScore(queryTokens, [item.title, item.summary]);
 	// USER.md lines are standing preferences. When file-store retrieval is used as a compact-window
 	// fallback for the static prompt, keep them eligible even if the latest query has no token overlap.
 	return item.kind === "user_preference" ? Math.max(0.2, Math.min(1, score + 0.05)) : score;
-}
-
-function matchesRequest(item: MemoryItem, request: MemorySearchRequest): boolean {
-	if (request.scope !== undefined && item.scope !== request.scope) return false;
-	if (request.kinds !== undefined && !request.kinds.includes(item.kind)) return false;
-	return true;
 }
 
 function refFor(providerId: string, source: FileStoreLineSource, lineNumber: number, kind: MemoryItemKind): MemoryRef {
@@ -117,18 +101,13 @@ export function createFileStoreMemoryProvider(options: FileStoreMemoryProviderOp
 		source: "pi_native",
 		capabilities: FILE_STORE_MEMORY_CAPABILITIES,
 		async search(request: MemorySearchRequest): Promise<MemorySearchResult[]> {
-			const queryTokens = tokenSet(request.query);
-			return items()
-				.filter((item) => matchesRequest(item, request))
-				.map((item) => ({ item, score: scoreItem(queryTokens, item) }))
-				.filter((result) => result.score > 0)
-				.sort((left, right) => right.score - left.score || left.item.id.localeCompare(right.item.id))
-				.slice(0, request.maxResults)
-				.map((result) => ({ ...result, reason: `file-store line match score ${result.score.toFixed(3)}` }));
+			return searchLocalMemoryItems(items(), request, {
+				score: scoreItem,
+				reason: (score) => `file-store line match score ${score.toFixed(3)}`,
+			});
 		},
 		async fetch(ref: MemoryRef): Promise<MemoryItem | undefined> {
-			if (ref.providerId !== providerId) return undefined;
-			return items().find((item) => item.id === ref.itemId && item.scope === ref.scope && item.kind === ref.kind);
+			return fetchLocalMemoryItem(items(), providerId, ref);
 		},
 	};
 }

@@ -13,24 +13,11 @@ import re
 from dataclasses import dataclass
 
 from errors import UnsupportedConstruct
+from escapes import ANSI_C_ESCAPES, decode_backslash_escapes
 from nodes import CmdSub, DQ, Lit, Param, Raw, Segment, Tilde, Word
 
 _IDENT_START_RE = re.compile(r"[A-Za-z_]")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_ANSI_C_MAP = {
-    "\\": "\\",
-    "a": "\a",
-    "b": "\b",
-    "c": "",  # \c stops output; treated as empty here (bounded, no truncation semantics)
-    "e": "\x1b",
-    "f": "\f",
-    "n": "\n",
-    "r": "\r",
-    "t": "\t",
-    "v": "\v",
-}
-
-
 @dataclass
 class Token:
     kind: str  # "WORD" | "OP"
@@ -45,94 +32,31 @@ def _unterminated(what: str) -> UnsupportedConstruct:
     return UnsupportedConstruct("malformed-syntax", f"Unterminated {what}: the command has an unbalanced quote or bracket.")
 
 
-def _ansi_c_unescape(text: str) -> str:
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c != "\\" or i + 1 >= n:
-            out.append(c)
-            i += 1
-            continue
-        nxt = text[i + 1]
-        if nxt in _ANSI_C_MAP:
-            out.append(_ANSI_C_MAP[nxt])
-            i += 2
-            continue
-        if nxt == "0":
-            j = i + 2
-            digits = ""
-            while j < n and len(digits) < 3 and text[j] in "01234567":
-                digits += text[j]
-                j += 1
-            out.append(chr(int(digits, 8)) if digits else "\0")
-            i = j
-            continue
-        if nxt == "x":
-            j = i + 2
-            digits = ""
-            while j < n and len(digits) < 2 and text[j] in "0123456789abcdefABCDEF":
-                digits += text[j]
-                j += 1
-            out.append(chr(int(digits, 16)) if digits else "x")
-            i = j
-            continue
-        out.append(nxt)
-        i += 2
-    return "".join(out)
-
-
 def _find_closing_paren(src: str, pos: int) -> int:
     """`pos` is the index right after the opening '('. Returns the index of the matching ')'."""
-    n = len(src)
-    depth = 1
-    i = pos
-    while i < n:
-        c = src[i]
-        if c == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if c == "'":
-            j = src.find("'", i + 1)
-            if j == -1:
-                raise _unterminated("single quote")
-            i = j + 1
-            continue
-        if c == '"':
-            i = _skip_double_quote(src, i + 1)
-            continue
-        if c == "(":
-            depth += 1
-            i += 1
-            continue
-        if c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-            i += 1
-            continue
-        i += 1
-    raise _unterminated("'('")
+    return _find_closing_group(src, pos, "(", ")")
 
 
 def _skip_double_quote(src: str, pos: int) -> int:
     """`pos` is the index right after the opening '"'. Returns the index right after the closing '"'."""
-    n = len(src)
-    i = pos
-    while i < n:
-        c = src[i]
-        if c == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if c == '"':
-            return i + 1
-        i += 1
-    raise _unterminated('double quote')
+    return _find_unescaped_character(src, pos, '"', "double quote") + 1
 
 
-def _find_closing_brace(src: str, pos: int) -> int:
-    """`pos` is the index right after the opening '{'. Returns the index of the matching '}'."""
+def _find_unescaped_character(src: str, pos: int, closing: str, description: str) -> int:
+    i = src.find(closing, pos)
+    while i != -1:
+        backslashes = 0
+        cursor = i - 1
+        while cursor >= pos and src[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return i
+        i = src.find(closing, i + 1)
+    raise _unterminated(description)
+
+
+def _find_closing_group(src: str, pos: int, opening: str, closing: str) -> int:
     n = len(src)
     depth = 1
     i = pos
@@ -150,21 +74,105 @@ def _find_closing_brace(src: str, pos: int) -> int:
         if c == '"':
             i = _skip_double_quote(src, i + 1)
             continue
-        if src[i : i + 2] == "${":
+        if opening == "{" and src[i : i + 2] == "${":
             depth += 1
             i += 2
             continue
-        if src[i : i + 2] == "$(":
-            i = _find_closing_paren(src, i + 2) + 1
+        if opening == "{" and src[i : i + 2] == "$(":
+            i = _find_closing_group(src, i + 2, "(", ")") + 1
             continue
-        if c == "}":
+        if c == opening:
+            depth += 1
+            i += 1
+            continue
+        if c == closing:
             depth -= 1
             if depth == 0:
                 return i
             i += 1
             continue
         i += 1
-    raise _unterminated("'{'")
+    raise _unterminated(repr(opening))
+
+
+def _find_closing_brace(src: str, pos: int) -> int:
+    """`pos` is the index right after the opening '{'. Returns the index of the matching '}'."""
+    return _find_closing_group(src, pos, "{", "}")
+
+
+def _scan_ansi_c_quote(src: str, pos: int) -> tuple[Lit, int]:
+    j = pos + 2
+    raw_chars: list[str] = []
+    while j < len(src) and src[j] != "'":
+        if src[j] == "\\" and j + 1 < len(src):
+            raw_chars.extend((src[j], src[j + 1]))
+            j += 2
+        else:
+            raw_chars.append(src[j])
+            j += 1
+    if j >= len(src):
+        raise _unterminated("$'...' quote")
+    decoded, _ = decode_backslash_escapes("".join(raw_chars), ANSI_C_ESCAPES)
+    return Lit(text=decoded), j + 1
+
+
+def _flush_buffer(
+    segments: list[Segment], buf: list[str], literal_buffer: bool
+) -> None:
+    if not buf:
+        return
+    text = "".join(buf)
+    segments.append(Lit(text=text) if literal_buffer else Raw(text=text))
+    buf.clear()
+
+
+def _scan_or_append(
+    src: str,
+    pos: int,
+    segments: list[Segment],
+    buf: list[str],
+    *,
+    literal_buffer: bool,
+    unquoted: bool,
+) -> int:
+    c = src[pos]
+    if unquoted and c == "'":
+        close = src.find("'", pos + 1)
+        if close == -1:
+            raise _unterminated("single quote")
+        _flush_buffer(segments, buf, literal_buffer)
+        segments.append(Lit(text=src[pos + 1 : close]))
+        return close + 1
+    if unquoted and c == '"':
+        _flush_buffer(segments, buf, literal_buffer)
+        dq_segments, new_pos = _scan_dq_segments(src, pos + 1)
+        segments.append(DQ(segments=dq_segments))
+        return new_pos
+    if unquoted and c == "$" and src[pos + 1 : pos + 2] == "'":
+        segment, new_pos = _scan_ansi_c_quote(src, pos)
+        _flush_buffer(segments, buf, literal_buffer)
+        segments.append(segment)
+        return new_pos
+    if c == "$":
+        segment, new_pos = _scan_dollar_form(src, pos)
+        if isinstance(segment, Lit) and segment.text == "$" and new_pos == pos + 1:
+            buf.append("$")
+        else:
+            _flush_buffer(segments, buf, literal_buffer)
+            segments.append(segment)
+        return new_pos
+    if c != "`":
+        buf.append(c)
+        return pos + 1
+
+    j = pos + 1
+    while j < len(src) and src[j] != "`":
+        j += 2 if src[j] == "\\" and j + 1 < len(src) else 1
+    if j >= len(src):
+        raise _unterminated("backtick")
+    _flush_buffer(segments, buf, literal_buffer)
+    segments.append(CmdSub(src=src[pos + 1 : j]))
+    return j + 1
 
 
 def _scan_param_arg_word(text: str) -> Word:
@@ -180,79 +188,21 @@ def _scan_param_arg_word(text: str) -> Word:
     buf: list[str] = []
     i = 0
 
-    def flush() -> None:
-        if buf:
-            segments.append(Raw(text="".join(buf)))
-            buf.clear()
-
     while i < n:
         c = text[i]
         if c == "\\":
             if i + 1 < n:
-                flush()
+                _flush_buffer(segments, buf, False)
                 segments.append(Lit(text=text[i + 1]))
                 i += 2
             else:
                 buf.append(c)
                 i += 1
             continue
-        if c == "'":
-            j = text.find("'", i + 1)
-            if j == -1:
-                raise _unterminated("single quote")
-            flush()
-            segments.append(Lit(text=text[i + 1 : j]))
-            i = j + 1
-            continue
-        if c == '"':
-            flush()
-            dq_segments, newpos = _scan_dq_segments(text, i + 1)
-            segments.append(DQ(segments=dq_segments))
-            i = newpos
-            continue
-        if c == "$" and text[i + 1 : i + 2] == "'":
-            j = i + 2
-            raw_chars: list[str] = []
-            while j < n and text[j] != "'":
-                if text[j] == "\\" and j + 1 < n:
-                    raw_chars.append(text[j])
-                    raw_chars.append(text[j + 1])
-                    j += 2
-                else:
-                    raw_chars.append(text[j])
-                    j += 1
-            if j >= n:
-                raise _unterminated("$'...' quote")
-            flush()
-            segments.append(Lit(text=_ansi_c_unescape("".join(raw_chars))))
-            i = j + 1
-            continue
-        if c == "$":
-            seg, newpos = _scan_dollar_form(text, i)
-            if isinstance(seg, Lit) and seg.text == "$" and newpos == i + 1:
-                buf.append("$")
-                i = newpos
-                continue
-            flush()
-            segments.append(seg)
-            i = newpos
-            continue
-        if c == "`":
-            j = i + 1
-            while j < n and text[j] != "`":
-                if text[j] == "\\" and j + 1 < n:
-                    j += 2
-                else:
-                    j += 1
-            if j >= n:
-                raise _unterminated("backtick")
-            flush()
-            segments.append(CmdSub(src=text[i + 1 : j]))
-            i = j + 1
-            continue
-        buf.append(c)
-        i += 1
-    flush()
+        i = _scan_or_append(
+            text, i, segments, buf, literal_buffer=False, unquoted=True
+        )
+    _flush_buffer(segments, buf, False)
     return Word(segments=segments)
 
 
@@ -311,15 +261,10 @@ def _scan_dq_segments(src: str, pos: int) -> tuple[list[Segment], int]:
     buf: list[str] = []
     i = pos
 
-    def flush() -> None:
-        if buf:
-            segments.append(Lit(text="".join(buf)))
-            buf.clear()
-
     while i < n:
         c = src[i]
         if c == '"':
-            flush()
+            _flush_buffer(segments, buf, True)
             return segments, i + 1
         if c == "\\" and i + 1 < n:
             nxt = src[i + 1]
@@ -333,37 +278,18 @@ def _scan_dq_segments(src: str, pos: int) -> tuple[list[Segment], int]:
                 buf.append(nxt)
                 i += 2
             continue
-        if c == "$":
-            seg, newpos = _scan_dollar_form(src, i)
-            if isinstance(seg, Lit) and seg.text == "$" and newpos == i + 1:
-                buf.append("$")
-                i = newpos
-                continue
-            flush()
-            segments.append(seg)
-            i = newpos
-            continue
-        if c == "`":
-            j = i + 1
-            while j < n and src[j] != "`":
-                if src[j] == "\\" and j + 1 < n:
-                    j += 2
-                else:
-                    j += 1
-            if j >= n:
-                raise _unterminated("backtick")
-            flush()
-            segments.append(CmdSub(src=src[i + 1 : j]))
-            i = j + 1
-            continue
-        buf.append(c)
-        i += 1
+        i = _scan_or_append(
+            src, i, segments, buf, literal_buffer=True, unquoted=False
+        )
     raise _unterminated("double quote")
 
 
 _WORD_BOUNDARY_CHARS = set("|&;()<> \t\n")
 _EXTGLOB_PREFIX_CHARS = set("@!?*+")
-_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _is_drive_path_prefix(buf: list[str]) -> bool:
+    return len(buf) >= 2 and len(buf[0]) == 1 and buf[0].isalpha() and buf[1] == ":"
 
 
 def _scan_word(src: str, pos: int) -> tuple[Word, int]:
@@ -372,11 +298,7 @@ def _scan_word(src: str, pos: int) -> tuple[Word, int]:
     buf: list[str] = []
     i = pos
     at_word_start = True
-
-    def flush() -> None:
-        if buf:
-            segments.append(Raw(text="".join(buf)))
-            buf.clear()
+    preserve_backslashes = False
 
     while i < n:
         c = src[i]
@@ -425,80 +347,28 @@ def _scan_word(src: str, pos: int) -> tuple[Word, int]:
             # drive-letter path ('C:\...') or a UNC path ('\\server\...') is preserved
             # literally rather than treated as a POSIX escape of the next character.
             # Mirrors the TS router's identical heuristic (shell-contract-router.ts).
-            buf_text = "".join(buf)
-            if _DRIVE_PREFIX_RE.match(buf_text) or buf_text.startswith("\\\\"):
+            if preserve_backslashes or _is_drive_path_prefix(buf):
+                preserve_backslashes = True
                 buf.append(c)
                 i += 1
                 continue
             if not buf and not segments and src[i + 1 : i + 2] == "\\":
                 buf.append("\\\\")
+                preserve_backslashes = True
                 i += 2
                 continue
             if i + 1 < n:
-                flush()
+                _flush_buffer(segments, buf, False)
                 segments.append(Lit(text=src[i + 1]))
                 i += 2
             else:
                 buf.append(c)
                 i += 1
             continue
-        if c == "'":
-            j = src.find("'", i + 1)
-            if j == -1:
-                raise _unterminated("single quote")
-            flush()
-            segments.append(Lit(text=src[i + 1 : j]))
-            i = j + 1
-            continue
-        if c == '"':
-            flush()
-            dq_segments, newpos = _scan_dq_segments(src, i + 1)
-            segments.append(DQ(segments=dq_segments))
-            i = newpos
-            continue
-        if c == "$" and src[i + 1 : i + 2] == "'":
-            j = i + 2
-            raw_chars: list[str] = []
-            while j < n and src[j] != "'":
-                if src[j] == "\\" and j + 1 < n:
-                    raw_chars.append(src[j])
-                    raw_chars.append(src[j + 1])
-                    j += 2
-                else:
-                    raw_chars.append(src[j])
-                    j += 1
-            if j >= n:
-                raise _unterminated("$'...' quote")
-            flush()
-            segments.append(Lit(text=_ansi_c_unescape("".join(raw_chars))))
-            i = j + 1
-            continue
-        if c == "$":
-            seg, newpos = _scan_dollar_form(src, i)
-            if isinstance(seg, Lit) and seg.text == "$" and newpos == i + 1:
-                buf.append("$")
-                i = newpos
-                continue
-            flush()
-            segments.append(seg)
-            i = newpos
-            continue
-        if c == "`":
-            j = i + 1
-            while j < n and src[j] != "`":
-                if src[j] == "\\" and j + 1 < n:
-                    j += 2
-                else:
-                    j += 1
-            if j >= n:
-                raise _unterminated("backtick")
-            flush()
-            segments.append(CmdSub(src=src[i + 1 : j]))
-            i = j + 1
-            continue
-        buf.append(c)
-        i += 1
-    flush()
+        i = _scan_or_append(
+            src, i, segments, buf, literal_buffer=False, unquoted=True
+        )
+    _flush_buffer(segments, buf, False)
     return Word(segments=segments), i
 
 

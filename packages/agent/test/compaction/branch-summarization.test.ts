@@ -5,8 +5,8 @@ import {
 	type Model,
 } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { generateBranchSummary } from "../../src/compaction/branch-summarization.ts";
-import type { SessionMessageEntry } from "../../src/session/session-manager.ts";
+import { generateBranchSummary, prepareBranchEntries } from "../../src/compaction/branch-summarization.ts";
+import type { SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 import type { StreamFn } from "../../src/types.ts";
 
 function createModel(): Model<any> {
@@ -41,6 +41,23 @@ function streamWith(event: AssistantMessageEvent): ReturnType<StreamFn> {
 }
 
 describe("generateBranchSummary reliability", () => {
+	it("ignores malformed persisted file-operation values", () => {
+		const malformed = {
+			type: "branch_summary",
+			id: "summary-1",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			summary: "summary",
+			fromId: "entry-1",
+			details: { readFiles: ["read.ts", 42], modifiedFiles: [null, "edited.ts"] },
+		} as unknown as SessionEntry;
+
+		const result = prepareBranchEntries([malformed]);
+
+		expect([...result.fileOps.read]).toEqual(["read.ts"]);
+		expect([...result.fileOps.edited]).toEqual(["edited.ts"]);
+	});
+
 	it("uses the injected stream function instead of bypassing through completeSimple", async () => {
 		let calls = 0;
 		const streamFn: StreamFn = () => {

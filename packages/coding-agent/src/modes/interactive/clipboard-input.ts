@@ -26,9 +26,12 @@ export type PendingClipboardImage = {
 	content: ImageContent;
 };
 
-export interface ClipboardQueueHost {
+export interface ClipboardQueueState {
 	pendingClipboardImages: PendingClipboardImage[];
 	clipboardImageCounter: number;
+}
+
+export interface ClipboardQueueHost extends ClipboardQueueState {
 	readonly clipboardImageStore?: Pick<SessionImageStore, "resolveReferences">;
 }
 
@@ -45,6 +48,35 @@ export interface ClipboardInputHost extends ClipboardQueueHost {
 
 export interface BuildSubmissionHost {
 	takeClipboardImagesForText(text: string): ImageContent[] | undefined;
+}
+
+export function bindClipboardQueue(
+	state: ClipboardQueueState,
+	controls: Omit<ClipboardInputHost, keyof ClipboardQueueHost>,
+): ClipboardInputHost;
+export function bindClipboardQueue<TControls extends object>(
+	state: ClipboardQueueState,
+	controls: TControls,
+): ClipboardQueueHost & TControls;
+export function bindClipboardQueue<TControls extends object>(
+	state: ClipboardQueueState,
+	controls: TControls,
+): ClipboardQueueHost & TControls {
+	return {
+		...controls,
+		get pendingClipboardImages() {
+			return state.pendingClipboardImages;
+		},
+		set pendingClipboardImages(value) {
+			state.pendingClipboardImages = value;
+		},
+		get clipboardImageCounter() {
+			return state.clipboardImageCounter;
+		},
+		set clipboardImageCounter(value) {
+			state.clipboardImageCounter = value;
+		},
+	};
 }
 
 export async function handleClipboardImagePaste(host: ClipboardInputHost): Promise<void> {

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME, getBundledExtensionsDir, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
@@ -27,6 +27,7 @@ import {
 	parseResourceProfileBlocks,
 	stripResourceProfileBlocks,
 } from "./resource-profile-blocks.ts";
+import { collectResourceFilesRecursively, isResourcePathWithin, readResourceDirectory } from "./resource-traversal.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileKind,
@@ -617,29 +618,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private discoverExtensionPathsInDirectory(extensionsDir: string): string[] {
-		if (!existsSync(extensionsDir)) return [];
-		try {
-			return readdirSync(extensionsDir, { withFileTypes: true }).flatMap((entry) => {
-				let isDir = entry.isDirectory();
-				if (entry.isSymbolicLink()) {
-					try {
-						isDir = statSync(join(extensionsDir, entry.name)).isDirectory();
-					} catch {
-						return [];
-					}
-				}
-				if (!isDir) return [];
-				const entryPath = join(extensionsDir, entry.name);
-				return existsSync(join(entryPath, "index.ts")) ||
+		return readResourceDirectory(extensionsDir, { followSymbolicLinks: true })
+			.filter((entry) => entry.isDirectory)
+			.map((entry) => entry.path)
+			.filter(
+				(entryPath) =>
+					existsSync(join(entryPath, "index.ts")) ||
 					existsSync(join(entryPath, "index.js")) ||
-					existsSync(join(entryPath, "package.json"))
-					? [entryPath]
-					: [];
-			});
-		} catch {
-			// A missing or unreadable resource directory must not break startup.
-			return [];
-		}
+					existsSync(join(entryPath, "package.json")),
+			);
 	}
 
 	/**
@@ -970,30 +957,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const externalSkills: string[] = [];
 			for (const root of effectiveRoots) {
 				const skillsDir = join(root, "skills");
-				if (existsSync(skillsDir)) {
-					try {
-						const entries = readdirSync(skillsDir, { withFileTypes: true });
-						for (const entry of entries) {
-							let isDir = entry.isDirectory();
-							if (entry.isSymbolicLink()) {
-								try {
-									const stats = statSync(join(skillsDir, entry.name));
-									isDir = stats.isDirectory();
-								} catch {
-									continue;
-								}
-							}
-							if (isDir) {
-								const entryPath = join(skillsDir, entry.name);
-								const skillFile = join(entryPath, "SKILL.md");
-								const targetPath = existsSync(skillFile) ? skillFile : entryPath;
-								externalSkills.push(targetPath);
-								metadataByPath.set(targetPath, { source: "external", scope: "user", origin: "top-level" });
-							}
-						}
-					} catch {
-						// silent
-					}
+				for (const entry of readResourceDirectory(skillsDir, { followSymbolicLinks: true })) {
+					if (!entry.isDirectory) continue;
+					const skillFile = join(entry.path, "SKILL.md");
+					const targetPath = existsSync(skillFile) ? skillFile : entry.path;
+					externalSkills.push(targetPath);
+					metadataByPath.set(targetPath, { source: "external", scope: "user", origin: "top-level" });
 				}
 			}
 
@@ -1001,19 +970,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Bundled skills are expanded into individual SKILL.md paths so they pass through the
 			// resource-profile filter exactly like user/external skills (no source bypasses the profile).
 			const bundledSkillsDir = getBundledSkillsDir();
-			const bundledSkillPaths: string[] = [];
-			if (existsSync(bundledSkillsDir)) {
-				try {
-					for (const entry of readdirSync(bundledSkillsDir, { withFileTypes: true })) {
-						if (!entry.isDirectory()) continue;
-						const entryPath = join(bundledSkillsDir, entry.name);
-						const skillFile = join(entryPath, "SKILL.md");
-						bundledSkillPaths.push(existsSync(skillFile) ? skillFile : entryPath);
-					}
-				} catch {
-					// silent
-				}
-			}
+			const bundledSkillPaths = readResourceDirectory(bundledSkillsDir, { followSymbolicLinks: false })
+				.filter((entry) => entry.isDirectory)
+				.map((entry) => {
+					const skillFile = join(entry.path, "SKILL.md");
+					return existsSync(skillFile) ? skillFile : entry.path;
+				});
 			const skillPaths = this.noSkills
 				? this.mergePaths([...cliEnabledSkills], this.additionalSkillPaths)
 				: this.mergePaths(
@@ -1049,7 +1011,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 			for (const root of effectiveRoots) {
 				const promptsDir = join(root, "prompts");
 				if (existsSync(promptsDir)) {
-					const files = collectFilesRecursively(promptsDir, /\.md$/);
+					const files = collectResourceFilesRecursively(promptsDir, (entry) => entry.name.endsWith(".md"), {
+						followSymbolicLinks: true,
+						skipHidden: true,
+						skipNodeModules: true,
+					});
 					for (const f of files) {
 						externalPrompts.push(f);
 						metadataByPath.set(f, { source: "external", scope: "user", origin: "top-level" });
@@ -1060,7 +1026,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Bundled prompts expanded into individual files so they pass through the profile filter too.
 			const bundledPromptsDir = getBundledPromptsDir();
 			const bundledPromptPaths = existsSync(bundledPromptsDir)
-				? collectFilesRecursively(bundledPromptsDir, /\.md$/)
+				? collectResourceFilesRecursively(bundledPromptsDir, (entry) => entry.name.endsWith(".md"), {
+						followSymbolicLinks: true,
+						skipHidden: true,
+						skipNodeModules: true,
+					})
 				: [];
 			const promptPaths = this.noPromptTemplates
 				? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
@@ -1099,7 +1069,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 			for (const root of effectiveRoots) {
 				const themesDir = join(root, "themes");
 				if (existsSync(themesDir)) {
-					const files = collectFilesRecursively(themesDir, /\.json$/);
+					const files = collectResourceFilesRecursively(themesDir, (entry) => entry.name.endsWith(".json"), {
+						followSymbolicLinks: true,
+						skipHidden: true,
+						skipNodeModules: true,
+					});
 					for (const f of files) {
 						externalThemes.push(f);
 						metadataByPath.set(f, { source: "external", scope: "user", origin: "top-level" });
@@ -1377,13 +1351,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		];
 
 		for (const root of agentRoots) {
-			if (this.isUnderPath(normalizedPath, root)) {
+			if (isResourcePathWithin(normalizedPath, root)) {
 				return { path: filePath, source: "local", scope: "user", origin: "top-level", baseDir: root };
 			}
 		}
 
 		for (const root of projectRoots) {
-			if (this.isUnderPath(normalizedPath, root)) {
+			if (isResourcePathWithin(normalizedPath, root)) {
 				return { path: filePath, source: "local", scope: "project", origin: "top-level", baseDir: root };
 			}
 		}
@@ -1463,28 +1437,17 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return;
 		}
 
-		try {
-			const entries = readdirSync(dir, { withFileTypes: true });
-			for (const entry of entries) {
-				let isFile = entry.isFile();
-				if (entry.isSymbolicLink()) {
-					try {
-						isFile = statSync(join(dir, entry.name)).isFile();
-					} catch {
-						continue;
-					}
-				}
-				if (!isFile) {
-					continue;
-				}
-				if (!entry.name.endsWith(".json")) {
-					continue;
-				}
-				this.loadThemeFromFile(join(dir, entry.name), themes, diagnostics);
+		const entries = readResourceDirectory(dir, {
+			followSymbolicLinks: true,
+			onDirectoryReadError: (path, error) => {
+				const message = error instanceof Error ? error.message : "failed to read theme directory";
+				diagnostics.push({ type: "warning", message, path });
+			},
+		});
+		for (const entry of entries) {
+			if (entry.isFile && entry.name.endsWith(".json")) {
+				this.loadThemeFromFile(entry.path, themes, diagnostics);
 			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "failed to read theme directory";
-			diagnostics.push({ type: "warning", message, path: dir });
 		}
 	}
 
@@ -1601,15 +1564,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return undefined;
 	}
 
-	private isUnderPath(target: string, root: string): boolean {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	}
-
 	private detectExtensionConflicts(extensions: Extension[]): Array<{ path: string; message: string }> {
 		const conflicts: Array<{ path: string; message: string }> = [];
 
@@ -1647,40 +1601,4 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		return conflicts;
 	}
-}
-
-function collectFilesRecursively(dir: string, pattern: RegExp): string[] {
-	const files: string[] = [];
-	if (!existsSync(dir)) return files;
-
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isDir = entry.isDirectory();
-			let isFile = entry.isFile();
-
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDir = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			if (isDir) {
-				files.push(...collectFilesRecursively(fullPath, pattern));
-			} else if (isFile && pattern.test(entry.name)) {
-				files.push(fullPath);
-			}
-		}
-	} catch {
-		// silent
-	}
-	return files;
 }

@@ -1,22 +1,24 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import {
-	createWriteStream,
-	type Dirent,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { type Dirent, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, join, relative } from "node:path";
-import type { Readable, Writable } from "node:stream";
+import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
+import {
+	extractZipArchive,
+	fetchRuntimeDownload,
+	installRuntimeArchive,
+	type ManagedRuntimeSpawn,
+	removePartialDownload,
+	requireRuntimeStdin,
+	resolveRuntimeLifecycleDependencies,
+	runtimeCommandAvailable,
+	tryFileSizeBytes,
+	writeRuntimeDownload,
+} from "./runtime-process.ts";
 
 /**
  * Managed runtime for prism-ml 1-bit GGUF models (Bonsai-27B first). The provider requires their
@@ -136,12 +138,6 @@ interface PrismInstallManifest {
 	backend: PrismBackend;
 }
 
-type PrismSpawnOptions = { detached?: boolean; stdio?: "ignore"; env?: NodeJS.ProcessEnv };
-type PrismSpawnFn = (
-	command: string,
-	args: string[],
-	options: PrismSpawnOptions,
-) => Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
 type PrismExtractArchiveFn = (
 	input: Readable,
 	destDir: string,
@@ -150,7 +146,7 @@ type PrismExtractArchiveFn = (
 
 export interface PrismLlamaCppDeps {
 	fetchFn?: typeof fetch;
-	spawnFn?: PrismSpawnFn;
+	spawnFn?: ManagedRuntimeSpawn;
 	existsFn?: (path: string) => boolean;
 	sleepFn?: (ms: number) => Promise<void>;
 	/** Whether a named command exists on PATH (nvidia-smi, tar — for zip extraction on Windows). */
@@ -182,47 +178,30 @@ function parseContentLength(header: string | null): number | undefined {
 	return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-/**
- * `spawnProcess(..., { stdio: ["pipe", ...] })` always yields a non-null `stdin` at runtime, but
- * child-process.ts's typed overload only narrows `.stdin` for the capture-only stdio shape used
- * elsewhere. This makes the true invariant explicit and fails loudly instead of silently
- * misbehaving if it's ever violated by a future stdio change.
- */
-function requireStdin(proc: ChildProcess, label: string): Writable {
-	if (!proc.stdin) throw new Error(`${label}: no stdin pipe`);
-	return proc.stdin;
-}
-
 export class PrismLlamaCppRuntime {
 	private readonly _agentDir: string;
 	private readonly _fetch: typeof fetch;
-	private readonly _spawn: PrismSpawnFn;
+	private readonly _spawn: ManagedRuntimeSpawn;
 	private readonly _exists: (path: string) => boolean;
 	private readonly _sleep: (ms: number) => Promise<void>;
 	private readonly _hasCommand: (command: string) => boolean;
 	private readonly _hasNvidiaGpu: () => boolean;
 	private readonly _platform: () => string;
 	private readonly _arch: () => string;
-	private readonly _extractArchiveOverride: PrismExtractArchiveFn | undefined;
+	private readonly _extractArchiveFn: PrismExtractArchiveFn;
 	private readonly _healthPollAttempts: number;
 	private readonly _healthPollIntervalMs: number;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 
 	constructor(args: { agentDir: string; deps?: PrismLlamaCppDeps }) {
 		this._agentDir = args.agentDir;
-		this._fetch = args.deps?.fetchFn ?? fetch;
-		this._spawn =
-			args.deps?.spawnFn ?? ((command, argv, options) => spawn(command, argv, { ...options, stdio: "ignore" }));
-		this._exists = args.deps?.existsFn ?? existsSync;
-		this._sleep = args.deps?.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-		this._hasCommand =
-			args.deps?.hasCommand ??
-			((command) =>
-				spawnProcessSync(command, ["--version"], { encoding: "utf8", timeout: 5_000 }).error === undefined);
+		[this._fetch, this._spawn, this._exists, this._sleep] = resolveRuntimeLifecycleDependencies(args.deps);
+		this._hasCommand = args.deps?.hasCommand ?? runtimeCommandAvailable;
 		this._hasNvidiaGpu = args.deps?.hasNvidiaGpu ?? (() => this._hasCommand("nvidia-smi"));
 		this._platform = args.deps?.platform ?? osPlatform;
 		this._arch = args.deps?.arch ?? osArch;
-		this._extractArchiveOverride = args.deps?.extractArchive;
+		this._extractArchiveFn =
+			args.deps?.extractArchive ?? ((input, destDir, kind) => this._extractArchive(input, destDir, kind));
 		this._healthPollAttempts = args.deps?.healthPollAttempts ?? DEFAULT_HEALTH_POLL_ATTEMPTS;
 		this._healthPollIntervalMs = args.deps?.healthPollIntervalMs ?? DEFAULT_HEALTH_POLL_INTERVAL_MS;
 	}
@@ -314,27 +293,12 @@ export class PrismLlamaCppRuntime {
 		const asset = resolvePrismLlamaAsset(this._platform(), this._arch(), this._hasNvidiaGpu());
 		if (!asset) return { ok: false, error: "unsupported-platform" };
 
-		onProgress?.(`Downloading ${asset.name}…`);
 		const downloadUrl = `${PRISM_LLAMACPP_RELEASES_BASE_URL}/${PRISM_LLAMACPP_PINNED_RELEASE}/${asset.name}`;
-		let response: Response;
-		try {
-			response = await this._fetch(downloadUrl);
-		} catch (error) {
-			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
-		}
-		if (!response.ok || !response.body) {
-			return { ok: false, error: `download-fail: HTTP ${response.status}` };
-		}
-
-		const destDir = this.runtimeDir();
-		mkdirSync(destDir, { recursive: true });
-
-		onProgress?.(`Extracting ${asset.name}…`);
-		const extract = this._extractArchiveOverride ?? ((input, dest, kind) => this._extractArchive(input, dest, kind));
-		const extracted = await extract(response.body as unknown as Readable, destDir, asset.kind);
+		const extracted = await this._installArchive(downloadUrl, asset, onProgress);
 		if (!extracted.ok) return extracted;
 
 		onProgress?.("Locating llama-server binary…");
+		const destDir = this.runtimeDir();
 		const binaryRelPath = this._findBinaryRelPath(destDir);
 		if (!binaryRelPath) {
 			return { ok: false, error: "binary-missing: no llama-server binary found in the extracted archive" };
@@ -343,6 +307,21 @@ export class PrismLlamaCppRuntime {
 		this._writeManifest({ release: PRISM_LLAMACPP_PINNED_RELEASE, binaryRelPath, backend: asset.backend });
 		onProgress?.("Prism llama.cpp runtime installed.");
 		return { ok: true };
+	}
+
+	private _installArchive(
+		downloadUrl: string,
+		asset: PrismLlamaAsset,
+		onProgress?: (status: string) => void,
+	): Promise<{ ok: boolean; error?: string }> {
+		return installRuntimeArchive(
+			this._fetch,
+			downloadUrl,
+			this.runtimeDir(),
+			asset,
+			this._extractArchiveFn,
+			onProgress,
+		);
 	}
 
 	private async _extractArchive(
@@ -369,7 +348,7 @@ export class PrismLlamaCppRuntime {
 			killGraceMs: COMMAND_KILL_GRACE_MS,
 		});
 		try {
-			await pipeline(input, requireStdin(tarProc, "tar"));
+			await pipeline(input, requireRuntimeStdin(tarProc, "tar"));
 		} catch (error) {
 			terminationController.abort();
 			await processWait.catch(() => {});
@@ -389,34 +368,15 @@ export class PrismLlamaCppRuntime {
 	}
 
 	private async _extractZip(input: Readable, destDir: string): Promise<{ ok: boolean; error?: string }> {
-		// Zip's central directory needs seekable file access — buffer to a temp file first.
-		const zipPath = join(destDir, "..", `prism-llamacpp-download-${process.pid}-${Date.now()}.zip`);
-		await pipeline(input, createWriteStream(zipPath));
-		try {
-			const extractCommand = this._platform() === "win32" && this._hasCommand("tar") ? "tar" : "unzip";
-			const args = extractCommand === "tar" ? ["-xf", zipPath, "-C", destDir] : ["-q", zipPath, "-d", destDir];
-			const proc = spawnProcess(extractCommand, args, { detached: process.platform !== "win32", stdio: "ignore" });
-			const terminal = await waitForChildProcessWithTermination(proc, {
-				timeoutMs: EXTRACTION_TIMEOUT_MS,
-				killGraceMs: COMMAND_KILL_GRACE_MS,
-			});
-			if (terminal.reason === "timeout" || terminal.code !== 0) {
-				return {
-					ok: false,
-					error:
-						terminal.reason === "timeout"
-							? `extract-fail: ${extractCommand} timed out after ${EXTRACTION_TIMEOUT_MS}ms`
-							: `extract-fail: ${extractCommand} exited with code ${terminal.code ?? "unknown"}`,
-				};
-			}
-			return { ok: true };
-		} finally {
-			try {
-				rmSync(zipPath, { force: true });
-			} catch {
-				// best-effort cleanup
-			}
-		}
+		return extractZipArchive({
+			input,
+			destDir,
+			tempPrefix: "prism-llamacpp-download",
+			platform: this._platform,
+			hasCommand: this._hasCommand,
+			timeoutMs: EXTRACTION_TIMEOUT_MS,
+			killGraceMs: COMMAND_KILL_GRACE_MS,
+		});
 	}
 
 	private async _remoteContentLength(url: string): Promise<number | undefined> {
@@ -429,37 +389,6 @@ export class PrismLlamaCppRuntime {
 		} catch {
 			return undefined;
 		}
-	}
-
-	private _fileSizeBytes(path: string): number | undefined {
-		try {
-			return statSync(path).size;
-		} catch {
-			return undefined;
-		}
-	}
-
-	private _cleanupPartial(path: string): void {
-		try {
-			rmSync(path, { force: true });
-		} catch {
-			// best-effort cleanup
-		}
-	}
-
-	/**
-	 * Wait until a write stream's underlying fd is actually closed. `pipeline()` destroys the
-	 * stream on error but its promise can settle before the fd close completes (Windows in
-	 * particular keeps the file handle open a tick longer) — unlinking before that races with the
-	 * OS and can leave the "partial" file behind or fail the delete outright. Resolves immediately
-	 * if the stream already reports `closed`.
-	 */
-	private _waitForStreamClosed(stream: Writable & { closed?: boolean }): Promise<void> {
-		if (stream.closed) return Promise.resolve();
-		return new Promise((resolve) => {
-			stream.once("close", () => resolve());
-			stream.destroy();
-		});
 	}
 
 	/**
@@ -478,36 +407,23 @@ export class PrismLlamaCppRuntime {
 
 		if (this._exists(destPath)) {
 			const remoteSize = await this._remoteContentLength(url);
-			if (remoteSize !== undefined && remoteSize === this._fileSizeBytes(destPath)) {
+			if (remoteSize !== undefined && remoteSize === tryFileSizeBytes(destPath)) {
 				onProgress?.(`${args.file} already downloaded (${remoteSize} bytes) — skipping.`);
 				return { ok: true, path: destPath, skipped: true };
 			}
 		}
 
 		onProgress?.(`Downloading ${args.file} from ${args.repo}…`);
-		let response: Response;
-		try {
-			response = await this._fetch(url);
-		} catch (error) {
-			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
-		}
-		if (!response.ok || !response.body) {
-			return { ok: false, error: `download-fail: HTTP ${response.status}` };
-		}
+		const download = await fetchRuntimeDownload(this._fetch, url);
+		if (!download.ok) return download;
 
-		const expectedBytes = parseContentLength(response.headers.get("content-length"));
-		const writeStream = createWriteStream(destPath);
-		try {
-			await pipeline(response.body as unknown as Readable, writeStream);
-		} catch (error) {
-			await this._waitForStreamClosed(writeStream);
-			this._cleanupPartial(destPath);
-			return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
-		}
+		const expectedBytes = parseContentLength(download.response.headers.get("content-length"));
+		const written = await writeRuntimeDownload(download.body as unknown as Readable, destPath);
+		if (!written.ok) return written;
 
-		const actualBytes = this._fileSizeBytes(destPath);
+		const actualBytes = tryFileSizeBytes(destPath);
 		if (expectedBytes !== undefined && actualBytes !== expectedBytes) {
-			this._cleanupPartial(destPath);
+			removePartialDownload(destPath);
 			return { ok: false, error: `size-mismatch: expected ${expectedBytes} bytes, got ${actualBytes ?? 0}` };
 		}
 

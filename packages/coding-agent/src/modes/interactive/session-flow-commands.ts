@@ -22,6 +22,7 @@ import type {
 	GoalContinuationLoopResult,
 } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { hasCostSummarySignal } from "../../core/cost/cost-summary.ts";
 import type { ExtensionCommandContext } from "../../core/extensions/index.ts";
 import {
 	cancelPersistedGoal,
@@ -66,6 +67,7 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
+import { formatCostReport } from "./report-commands.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
 import { theme } from "./theme/theme.ts";
 
@@ -101,6 +103,16 @@ export interface SessionFlowHost {
 	shutdown(options?: { fromSignal?: boolean }): Promise<void>;
 }
 
+function finishSelectorCancellation(host: Pick<SessionFlowHost, "ui">, done: () => void): void {
+	done();
+	host.ui.requestRender();
+}
+
+function finishSelectorError(host: Pick<SessionFlowHost, "showError">, done: () => void, error: unknown): void {
+	done();
+	host.showError(error instanceof Error ? error.message : String(error));
+}
+
 export async function showModelSelector(host: SessionFlowHost, initialSearchInput?: string): Promise<void> {
 	try {
 		await host.session.extensionRunner.emit({
@@ -131,13 +143,11 @@ export async function showModelSelector(host: SessionFlowHost, initialSearchInpu
 					void host.maybeWarnAboutAnthropicSubscriptionAuth(model);
 					host.checkDaxnutsEasterEgg(model);
 				} catch (error) {
-					done();
-					host.showError(error instanceof Error ? error.message : String(error));
+					finishSelectorError(host, done, error);
 				}
 			},
 			() => {
-				done();
-				host.ui.requestRender();
+				finishSelectorCancellation(host, done);
 			},
 			initialSearchInput,
 		);
@@ -222,8 +232,7 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 					host.showStatus("Model selection saved to settings");
 				},
 				onCancel: () => {
-					done();
-					host.ui.requestRender();
+					finishSelectorCancellation(host, done);
 				},
 			},
 		);
@@ -248,8 +257,7 @@ export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: 
 				try {
 					const result = await host.runtimeHost.fork(entryId);
 					if (result.cancelled) {
-						done();
-						host.ui.requestRender();
+						finishSelectorCancellation(host, done);
 						return;
 					}
 
@@ -261,13 +269,11 @@ export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: 
 					done();
 					host.showStatus(newSessionName ? `Forked to new session: ${newSessionName}` : "Forked to new session");
 				} catch (error: unknown) {
-					done();
-					host.showError(error instanceof Error ? error.message : String(error));
+					finishSelectorError(host, done, error);
 				}
 			},
 			() => {
-				done();
-				host.ui.requestRender();
+				finishSelectorCancellation(host, done);
 			},
 			initialSelectedId,
 		);
@@ -391,8 +397,7 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 				}
 			},
 			() => {
-				done();
-				host.ui.requestRender();
+				finishSelectorCancellation(host, done);
 			},
 			(entryId, label) => {
 				host.sessionManager.appendLabelChange(entryId, label);
@@ -422,8 +427,7 @@ export function showTrustSelector(host: SessionFlowHost): void {
 				);
 			},
 			onCancel: () => {
-				done();
-				host.ui.requestRender();
+				finishSelectorCancellation(host, done);
 			},
 		});
 		return { component: selector, focus: selector };
@@ -443,8 +447,7 @@ export function showSessionSelector(host: SessionFlowHost): void {
 				await handleResumeSession(host, sessionPath);
 			},
 			() => {
-				done();
-				host.ui.requestRender();
+				finishSelectorCancellation(host, done);
 			},
 			() => {
 				void host.shutdown();
@@ -976,14 +979,9 @@ export function handleSessionCommand(host: SessionInfoCommandHost): void {
 	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
 	const costs = host.session.getCostSummary();
-	if (costs.currentCost > 0 || costs.todayCost > 0 || costs.subagentReports > 0) {
+	if (hasCostSummarySignal(costs)) {
 		info += `\n${theme.bold("Cost")}\n`;
-		info += `${theme.fg("dim", "CURRENT (session):")} $${costs.currentCost.toFixed(4)}\n`;
-		if (costs.subagentReports > 0 || costs.subagentCost > 0) {
-			info += `${theme.fg("dim", "SUBAGENTS (included in CURRENT):")} $${costs.subagentCost.toFixed(4)} (${costs.subagentReports} reports)\n`;
-		}
-		info += `${theme.fg("dim", "TODAY (host local day):")} $${costs.todayCost.toFixed(4)}\n`;
-		info += `${theme.fg("dim", "Today rollover:")} local midnight`;
+		info += formatCostReport(costs);
 	}
 
 	info += `\n\n${theme.bold("Model Router")}\n`;

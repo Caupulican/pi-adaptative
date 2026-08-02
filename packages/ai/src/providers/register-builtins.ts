@@ -19,6 +19,7 @@ import type { MistralOptions } from "./mistral.ts";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.ts";
 import type { OpenAICompletionsOptions } from "./openai-completions.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
+import { createAssistantMessage } from "./provider-runtime.ts";
 
 interface LazyProviderModule<
 	TApi extends Api,
@@ -139,58 +140,24 @@ function forwardStream(target: AssistantMessageEventStream, source: AsyncIterabl
 }
 
 function createLazyLoadErrorMessage<TApi extends Api>(model: Model<TApi>, error: unknown): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+	return createAssistantMessage(model, {
 		stopReason: "error",
 		errorMessage: error instanceof Error ? error.message : String(error),
-		timestamp: Date.now(),
-	};
+	});
 }
 
-function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TSimpleOptions extends SimpleStreamOptions>(
-	loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>,
+function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TModule>(
+	loadModule: () => Promise<TModule>,
+	selectStream: (
+		module: TModule,
+	) => (model: Model<TApi>, context: Context, options?: TOptions) => AsyncIterable<AssistantMessageEvent>,
 ): StreamFunction<TApi, TOptions> {
 	return (model, context, options) => {
 		const outer = new AssistantMessageEventStream();
 
 		loadModule()
 			.then((module) => {
-				const inner = module.stream(model, context, options);
-				forwardStream(outer, inner);
-			})
-			.catch((error) => {
-				const message = createLazyLoadErrorMessage(model, error);
-				outer.push({ type: "error", reason: "error", error: message });
-				outer.end(message);
-			});
-
-		return outer;
-	};
-}
-
-function createLazySimpleStream<
-	TApi extends Api,
-	TOptions extends StreamOptions,
-	TSimpleOptions extends SimpleStreamOptions,
->(loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>): StreamFunction<TApi, TSimpleOptions> {
-	return (model, context, options) => {
-		const outer = new AssistantMessageEventStream();
-
-		loadModule()
-			.then((module) => {
-				const inner = module.streamSimple(model, context, options);
+				const inner = selectStream(module)(model, context, options);
 				forwardStream(outer, inner);
 			})
 			.catch((error) => {
@@ -323,24 +290,45 @@ function loadBedrockProviderModule(): Promise<
 	return bedrockProviderModulePromise;
 }
 
-export const streamAnthropic = createLazyStream(loadAnthropicProviderModule);
-export const streamSimpleAnthropic = createLazySimpleStream(loadAnthropicProviderModule);
-export const streamAzureOpenAIResponses = createLazyStream(loadAzureOpenAIResponsesProviderModule);
-export const streamSimpleAzureOpenAIResponses = createLazySimpleStream(loadAzureOpenAIResponsesProviderModule);
-export const streamGoogle = createLazyStream(loadGoogleProviderModule);
-export const streamSimpleGoogle = createLazySimpleStream(loadGoogleProviderModule);
-export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
-export const streamSimpleGoogleVertex = createLazySimpleStream(loadGoogleVertexProviderModule);
-export const streamMistral = createLazyStream(loadMistralProviderModule);
-export const streamSimpleMistral = createLazySimpleStream(loadMistralProviderModule);
-export const streamOpenAICodexResponses = createLazyStream(loadOpenAICodexResponsesProviderModule);
-export const streamSimpleOpenAICodexResponses = createLazySimpleStream(loadOpenAICodexResponsesProviderModule);
-export const streamOpenAICompletions = createLazyStream(loadOpenAICompletionsProviderModule);
-export const streamSimpleOpenAICompletions = createLazySimpleStream(loadOpenAICompletionsProviderModule);
-export const streamOpenAIResponses = createLazyStream(loadOpenAIResponsesProviderModule);
-export const streamSimpleOpenAIResponses = createLazySimpleStream(loadOpenAIResponsesProviderModule);
-const streamBedrockLazy = createLazyStream(loadBedrockProviderModule);
-const streamSimpleBedrockLazy = createLazySimpleStream(loadBedrockProviderModule);
+export const streamAnthropic = createLazyStream(loadAnthropicProviderModule, (module) => module.stream);
+export const streamSimpleAnthropic = createLazyStream(loadAnthropicProviderModule, (module) => module.streamSimple);
+export const streamAzureOpenAIResponses = createLazyStream(
+	loadAzureOpenAIResponsesProviderModule,
+	(module) => module.stream,
+);
+export const streamSimpleAzureOpenAIResponses = createLazyStream(
+	loadAzureOpenAIResponsesProviderModule,
+	(module) => module.streamSimple,
+);
+export const streamGoogle = createLazyStream(loadGoogleProviderModule, (module) => module.stream);
+export const streamSimpleGoogle = createLazyStream(loadGoogleProviderModule, (module) => module.streamSimple);
+export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule, (module) => module.stream);
+export const streamSimpleGoogleVertex = createLazyStream(
+	loadGoogleVertexProviderModule,
+	(module) => module.streamSimple,
+);
+export const streamMistral = createLazyStream(loadMistralProviderModule, (module) => module.stream);
+export const streamSimpleMistral = createLazyStream(loadMistralProviderModule, (module) => module.streamSimple);
+export const streamOpenAICodexResponses = createLazyStream(
+	loadOpenAICodexResponsesProviderModule,
+	(module) => module.stream,
+);
+export const streamSimpleOpenAICodexResponses = createLazyStream(
+	loadOpenAICodexResponsesProviderModule,
+	(module) => module.streamSimple,
+);
+export const streamOpenAICompletions = createLazyStream(loadOpenAICompletionsProviderModule, (module) => module.stream);
+export const streamSimpleOpenAICompletions = createLazyStream(
+	loadOpenAICompletionsProviderModule,
+	(module) => module.streamSimple,
+);
+export const streamOpenAIResponses = createLazyStream(loadOpenAIResponsesProviderModule, (module) => module.stream);
+export const streamSimpleOpenAIResponses = createLazyStream(
+	loadOpenAIResponsesProviderModule,
+	(module) => module.streamSimple,
+);
+const streamBedrockLazy = createLazyStream(loadBedrockProviderModule, (module) => module.stream);
+const streamSimpleBedrockLazy = createLazyStream(loadBedrockProviderModule, (module) => module.streamSimple);
 
 export function registerBuiltInApiProviders(): void {
 	registerApiProvider({

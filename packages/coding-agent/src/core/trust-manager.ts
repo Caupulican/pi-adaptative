@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import lockfile from "proper-lockfile";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { stateFile } from "./agent-paths.ts";
 import { isWorkerSession } from "./session-role.ts";
+import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
 
 export type ProjectTrustDecision = boolean | null;
 
@@ -50,44 +50,11 @@ function writeTrustFile(path: string, data: TrustFile): void {
 			sorted[key] = value;
 		}
 	}
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(sorted, null, 2)}\n`, "utf-8");
-}
-
-function acquireTrustLockSync(path: string): () => void {
-	const trustDir = dirname(path);
-	mkdirSync(trustDir, { recursive: true });
-	const maxAttempts = 10;
-	const delayMs = 20;
-	let lastError: unknown;
-
-	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		try {
-			return lockfile.lockSync(trustDir, { realpath: false, lockfilePath: `${path}.lock` });
-		} catch (error) {
-			const code =
-				typeof error === "object" && error !== null && "code" in error
-					? String((error as { code?: unknown }).code)
-					: undefined;
-			if (code !== "ELOCKED" || attempt === maxAttempts) {
-				throw error;
-			}
-			lastError = error;
-			const start = Date.now();
-			while (Date.now() - start < delayMs) {
-				// Sleep synchronously to avoid changing trust store callers to async.
-			}
-		}
-	}
-
-	if (lastError instanceof Error) {
-		throw lastError;
-	}
-	throw new Error("Failed to acquire trust store lock");
+	writeFileAtomicSync(path, `${JSON.stringify(sorted, null, 2)}\n`);
 }
 
 function withTrustFileLock<T>(path: string, fn: () => T): T {
-	const release = acquireTrustLockSync(path);
+	const release = acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS);
 	try {
 		return fn();
 	} finally {
@@ -137,9 +104,8 @@ export class ProjectTrustStore {
 	get(cwd: string): ProjectTrustDecision {
 		if (this.readOnly) {
 			// Zero-footprint (worker session): a lock-free read -- no lockfile, no state dir ever
-			// created just from reading trust. A torn read (concurrent writer mid-rewrite) reads as
-			// invalid JSON, which `readTrustFile` reports as `undefined`, and fails safe to untrusted
-			// (null) below, never a crash.
+			// created just from reading trust. Writers publish by atomic rename, so a worker sees either
+			// the prior or next complete generation and still fails malformed input safe to untrusted.
 			const data = readTrustFile(this.trustPath);
 			if (!data) return null;
 			const value = data[normalizeCwd(cwd)];

@@ -1,9 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
+import { piAiSourceAliases } from "../agent/vitest-ai-source-aliases.ts";
 
 const codingAgentSrcIndex = fileURLToPath(new URL("./src/index.ts", import.meta.url));
-const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
-const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const agentSrcNode = fileURLToPath(new URL("../agent/src/node.ts", import.meta.url));
 const agentSrcPaths = fileURLToPath(new URL("../agent/src/utils/paths.ts", import.meta.url));
@@ -38,21 +37,16 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: [
+			...piAiSourceAliases,
 			{ find: /^@caupulican\/pi-adaptative$/, replacement: codingAgentSrcIndex },
 			{ find: /^@earendil-works\/pi-coding-agent$/, replacement: codingAgentSrcIndex },
 			{ find: /^@mariozechner\/pi-coding-agent$/, replacement: codingAgentSrcIndex },
-			{ find: /^@caupulican\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@caupulican\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@caupulican\/pi-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@caupulican\/pi-agent-core\/node$/, replacement: agentSrcNode },
 			{ find: /^@caupulican\/pi-agent-core\/paths$/, replacement: agentSrcPaths },
-			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@earendil-works\/pi-agent-core\/node$/, replacement: agentSrcNode },
 			{ find: /^@earendil-works\/pi-agent-core\/paths$/, replacement: agentSrcPaths },
-			{ find: /^@mariozechner\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@mariozechner\/pi-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@mariozechner\/pi-agent-core\/node$/, replacement: agentSrcNode },
 			{ find: /^@mariozechner\/pi-agent-core\/paths$/, replacement: agentSrcPaths },

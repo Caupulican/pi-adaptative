@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { piAiSourceAliases } from "./vitest-ai-source-aliases.ts";
 
 export default defineConfig({
 	test: {
@@ -14,5 +15,8 @@ export default defineConfig({
 			reporter: ["text", "html", "lcov"],
 			reportsDirectory: "coverage/harness",
 		},
+	},
+	resolve: {
+		alias: piAiSourceAliases,
 	},
 });

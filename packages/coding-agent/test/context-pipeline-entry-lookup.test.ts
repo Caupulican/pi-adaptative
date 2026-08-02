@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ContextPipeline, type ContextPipelineDeps, latestUserPromptText } from "../src/core/context-pipeline.ts";
+import { latestUserPromptText } from "../src/core/context/message-text.ts";
+import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
 
 const tempDirs: string[] = [];
 
@@ -66,6 +67,21 @@ describe("latestUserPromptText", () => {
 				8,
 			),
 		).toBe("first\nse");
+	});
+
+	it("projects many text blocks once and ignores non-text content", () => {
+		const blocks = Array.from({ length: 2_000 }, (_, index) => ({ type: "text" as const, text: `part-${index}` }));
+		blocks.splice(1, 0, { type: "text", text: "part-extra" });
+		const message = {
+			role: "user" as const,
+			content: [{ type: "image", data: "ignored", mimeType: "image/png" } as const, ...blocks],
+			timestamp: 1,
+		};
+
+		const projected = latestUserPromptText([message], 64);
+
+		expect(projected).toHaveLength(64);
+		expect(projected).toBe("part-0\npart-extra\npart-1\npart-2\npart-3\npart-4\npart-5\npart-6\npart");
 	});
 });
 

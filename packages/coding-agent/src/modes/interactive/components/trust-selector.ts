@@ -2,7 +2,7 @@ import { Container, getKeybindings, Spacer, Text } from "@caupulican/pi-tui";
 import type { ProjectTrustDecision } from "../../../core/trust-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { advanceSelectorIndex, SelectorNavigationFooter } from "./selector-list.ts";
 
 interface TrustOption {
 	label: string;
@@ -63,20 +63,7 @@ export class TrustSelectorComponent extends Container {
 
 		this.listContainer = new Container();
 		this.addChild(this.listContainer);
-		this.addChild(new Spacer(1));
-		this.addChild(
-			new Text(
-				rawKeyHint("↑↓", "navigate") +
-					"  " +
-					keyHint("tui.select.confirm", "save") +
-					"  " +
-					keyHint("tui.select.cancel", "cancel"),
-				1,
-				0,
-			),
-		);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.addChild(new SelectorNavigationFooter("save"));
 
 		this.updateList();
 	}
@@ -101,10 +88,10 @@ export class TrustSelectorComponent extends Container {
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, TRUST_OPTIONS.length, -1, "clamp");
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(TRUST_OPTIONS.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = advanceSelectorIndex(this.selectedIndex, TRUST_OPTIONS.length, 1, "clamp");
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const selected = TRUST_OPTIONS[this.selectedIndex];

@@ -1,3 +1,13 @@
+import { BracketedPasteBuffer } from "../bracketed-paste.ts";
+import {
+	DELETE_CHARACTER_BACKWARD,
+	DELETE_CHARACTER_FORWARD,
+	DELETE_TO_LINE_END,
+	DELETE_TO_LINE_START,
+	DELETE_WORD_BACKWARD,
+	DELETE_WORD_FORWARD,
+	dispatchDeletionInput,
+} from "../editing-actions.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodeKittyPrintable } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -33,8 +43,7 @@ export class Input implements Component, Focusable {
 	focused: boolean = false;
 
 	// Bracketed paste mode buffering
-	private pasteBuffer: string = "";
-	private isInPaste: boolean = false;
+	private bracketedPaste = new BracketedPasteBuffer();
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
@@ -63,50 +72,23 @@ export class Input implements Component, Focusable {
 	clear(): void {
 		this.value = "";
 		this.cursor = 0;
-		this.pasteBuffer = "";
-		this.isInPaste = false;
+		this.bracketedPaste.clear();
 		this.lastAction = null;
 		this.undoStack.clear();
 		this.killRing = new KillRing();
 	}
 
 	handleInput(data: string): void {
-		// Handle bracketed paste mode
-		// Start of paste: \x1b[200~
-		// End of paste: \x1b[201~
-
-		// Check if we're starting a bracketed paste
-		if (data.includes("\x1b[200~")) {
-			this.isInPaste = true;
-			this.pasteBuffer = "";
-			data = data.replace("\x1b[200~", "");
-		}
-
-		// If we're in a paste, buffer the data
-		if (this.isInPaste) {
-			// Check if this chunk contains the end marker
-			this.pasteBuffer += data;
-
-			const endIndex = this.pasteBuffer.indexOf("\x1b[201~");
-			if (endIndex !== -1) {
-				// Extract the pasted content
-				const pasteContent = this.pasteBuffer.substring(0, endIndex);
-
-				// Process the complete paste
-				this.handlePaste(pasteContent);
-
-				// Reset paste state
-				this.isInPaste = false;
-
-				// Handle any remaining input after the paste marker
-				const remaining = this.pasteBuffer.substring(endIndex + 6); // 6 = length of \x1b[201~
-				this.pasteBuffer = "";
-				if (remaining) {
-					this.handleInput(remaining);
-				}
+		const pasteResult = this.bracketedPaste.consume(data);
+		if (pasteResult.kind === "pending") return;
+		if (pasteResult.kind === "complete") {
+			this.handlePaste(pasteResult.content);
+			if (pasteResult.remainder) {
+				this.handleInput(pasteResult.remainder);
 			}
 			return;
 		}
+		data = pasteResult.data;
 
 		const kb = getKeybindings();
 
@@ -128,36 +110,7 @@ export class Input implements Component, Focusable {
 			return;
 		}
 
-		// Deletion
-		if (kb.matches(data, "tui.editor.deleteCharBackward")) {
-			this.handleBackspace();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteCharForward")) {
-			this.handleForwardDelete();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteWordBackward")) {
-			this.deleteWordBackwards();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteWordForward")) {
-			this.deleteWordForward();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteToLineStart")) {
-			this.deleteToLineStart();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteToLineEnd")) {
-			this.deleteToLineEnd();
-			return;
-		}
+		if (dispatchDeletionInput(data, this)) return;
 
 		// Kill ring actions
 		if (kb.matches(data, "tui.editor.yank")) {
@@ -246,7 +199,7 @@ export class Input implements Component, Focusable {
 		this.cursor += char.length;
 	}
 
-	private handleBackspace(): void {
+	[DELETE_CHARACTER_BACKWARD](): void {
 		this.lastAction = null;
 		if (this.cursor > 0) {
 			this.pushUndo();
@@ -259,7 +212,7 @@ export class Input implements Component, Focusable {
 		}
 	}
 
-	private handleForwardDelete(): void {
+	[DELETE_CHARACTER_FORWARD](): void {
 		this.lastAction = null;
 		if (this.cursor < this.value.length) {
 			this.pushUndo();
@@ -271,7 +224,7 @@ export class Input implements Component, Focusable {
 		}
 	}
 
-	private deleteToLineStart(): void {
+	[DELETE_TO_LINE_START](): void {
 		if (this.cursor === 0) return;
 		this.pushUndo();
 		const deletedText = this.value.slice(0, this.cursor);
@@ -285,7 +238,7 @@ export class Input implements Component, Focusable {
 		this.cursor = 0;
 	}
 
-	private deleteToLineEnd(): void {
+	[DELETE_TO_LINE_END](): void {
 		if (this.cursor >= this.value.length) return;
 		this.pushUndo();
 		const deletedText = this.value.slice(this.cursor);
@@ -298,7 +251,7 @@ export class Input implements Component, Focusable {
 		this.value = this.value.slice(0, this.cursor);
 	}
 
-	private deleteWordBackwards(): void {
+	[DELETE_WORD_BACKWARD](): void {
 		if (this.cursor === 0) return;
 
 		// Save lastAction before cursor movement (moveWordBackwards resets it)
@@ -323,7 +276,7 @@ export class Input implements Component, Focusable {
 		this.cursor = deleteFrom;
 	}
 
-	private deleteWordForward(): void {
+	[DELETE_WORD_FORWARD](): void {
 		if (this.cursor >= this.value.length) return;
 
 		// Save lastAction before cursor movement (moveWordForwards resets it)

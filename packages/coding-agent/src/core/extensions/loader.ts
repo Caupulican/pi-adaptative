@@ -9,7 +9,22 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as _bundledPiAgentCore from "@caupulican/pi-agent-core";
 import * as _bundledPiAi from "@caupulican/pi-ai";
+import * as _bundledPiAiAbortSignals from "@caupulican/pi-ai/abort-signals";
+import * as _bundledPiAiEventStream from "@caupulican/pi-ai/event-stream";
+import * as _bundledPiAiJsonParse from "@caupulican/pi-ai/json-parse";
 import * as _bundledPiAiOauth from "@caupulican/pi-ai/oauth";
+import * as _bundledPiAiOverflow from "@caupulican/pi-ai/overflow";
+import * as _bundledPiAiProviderRetry from "@caupulican/pi-ai/provider-retry";
+import * as _bundledPiAiStream from "@caupulican/pi-ai/stream";
+import * as _bundledPiAiStreamingLines from "@caupulican/pi-ai/streaming-lines";
+import * as _bundledPiAiTextToolProtocol from "@caupulican/pi-ai/text-tool-protocol";
+import * as _bundledPiAiToolRepairRegistry from "@caupulican/pi-ai/tool-repair-registry";
+import * as _bundledPiAiTypeboxHelpers from "@caupulican/pi-ai/typebox-helpers";
+import * as _bundledPiAiTypes from "@caupulican/pi-ai/types";
+import * as _bundledPiAiUsage from "@caupulican/pi-ai/usage";
+import * as _bundledPiAiUuid from "@caupulican/pi-ai/uuid";
+import * as _bundledPiAiValidation from "@caupulican/pi-ai/validation";
+import * as _bundledPiAiValidationPath from "@caupulican/pi-ai/validation-path";
 import type { KeyId } from "@caupulican/pi-tui";
 import * as _bundledPiTui from "@caupulican/pi-tui";
 import { createJiti } from "jiti/static";
@@ -29,6 +44,7 @@ import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
+import { resolveExtensionIndexEntry } from "./entry-resolution.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
 import { createExtensionStorage } from "./storage.ts";
 import type {
@@ -49,6 +65,51 @@ const inactiveExtensions = new WeakSet<Extension>();
 
 class ExtensionFactoryTimeoutError extends Error {}
 
+const PI_AI_WORKSPACE_SUBPATHS = {
+	"abort-signals": "ai/src/utils/abort-signals.ts",
+	"event-stream": "ai/src/utils/event-stream.ts",
+	"json-parse": "ai/src/utils/json-parse.ts",
+	oauth: "ai/src/oauth.ts",
+	overflow: "ai/src/utils/overflow.ts",
+	"provider-retry": "ai/src/utils/provider-retry.ts",
+	stream: "ai/src/stream.ts",
+	"streaming-lines": "ai/src/utils/streaming-lines.ts",
+	"text-tool-protocol": "ai/src/utils/tool-repair/text-protocol.ts",
+	"tool-repair-registry": "ai/src/utils/tool-repair/registry.ts",
+	"typebox-helpers": "ai/src/utils/typebox-helpers.ts",
+	types: "ai/src/types.ts",
+	usage: "ai/src/usage.ts",
+	uuid: "ai/src/utils/uuid.ts",
+	validation: "ai/src/utils/validation.ts",
+	"validation-path": "ai/src/utils/validation-path.ts",
+} as const;
+
+const PI_AI_VIRTUAL_SUBPATHS: Record<keyof typeof PI_AI_WORKSPACE_SUBPATHS, unknown> = {
+	"abort-signals": _bundledPiAiAbortSignals,
+	"event-stream": _bundledPiAiEventStream,
+	"json-parse": _bundledPiAiJsonParse,
+	oauth: _bundledPiAiOauth,
+	overflow: _bundledPiAiOverflow,
+	"provider-retry": _bundledPiAiProviderRetry,
+	stream: _bundledPiAiStream,
+	"streaming-lines": _bundledPiAiStreamingLines,
+	"text-tool-protocol": _bundledPiAiTextToolProtocol,
+	"tool-repair-registry": _bundledPiAiToolRepairRegistry,
+	"typebox-helpers": _bundledPiAiTypeboxHelpers,
+	types: _bundledPiAiTypes,
+	usage: _bundledPiAiUsage,
+	uuid: _bundledPiAiUuid,
+	validation: _bundledPiAiValidation,
+	"validation-path": _bundledPiAiValidationPath,
+};
+
+function piAiVirtualModules(packageName: string): Record<string, unknown> {
+	return Object.fromEntries([
+		[packageName, _bundledPiAi],
+		...Object.entries(PI_AI_VIRTUAL_SUBPATHS).map(([subpath, module]) => [`${packageName}/${subpath}`, module]),
+	]);
+}
+
 /** Modules available to extensions via virtualModules (for compiled Bun binary) */
 const VIRTUAL_MODULES: Record<string, unknown> = {
 	typebox: _bundledTypebox,
@@ -59,18 +120,15 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox/value": _bundledTypeboxValue,
 	"@caupulican/pi-agent-core": _bundledPiAgentCore,
 	"@caupulican/pi-tui": _bundledPiTui,
-	"@caupulican/pi-ai": _bundledPiAi,
-	"@caupulican/pi-ai/oauth": _bundledPiAiOauth,
+	...piAiVirtualModules("@caupulican/pi-ai"),
 	"@caupulican/pi-adaptative": _bundledPiCodingAgent,
 	"@earendil-works/pi-agent-core": _bundledPiAgentCore,
 	"@earendil-works/pi-tui": _bundledPiTui,
-	"@earendil-works/pi-ai": _bundledPiAi,
-	"@earendil-works/pi-ai/oauth": _bundledPiAiOauth,
+	...piAiVirtualModules("@earendil-works/pi-ai"),
 	"@earendil-works/pi-coding-agent": _bundledPiCodingAgent,
 	"@mariozechner/pi-agent-core": _bundledPiAgentCore,
 	"@mariozechner/pi-tui": _bundledPiTui,
-	"@mariozechner/pi-ai": _bundledPiAi,
-	"@mariozechner/pi-ai/oauth": _bundledPiAiOauth,
+	...piAiVirtualModules("@mariozechner/pi-ai"),
 	"@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
 };
 
@@ -146,30 +204,37 @@ function getAliases(): Record<string, string> {
 	);
 	const piTuiEntry = resolveWorkspaceOrImport("tui/src/index.ts", "@caupulican/pi-tui");
 	const piAiEntry = resolveWorkspaceOrImport("ai/src/index.ts", "@caupulican/pi-ai");
-	const piAiOauthEntry = resolveWorkspaceOrImport("ai/src/oauth.ts", "@caupulican/pi-ai/oauth");
+	const piAiSubpathEntries = Object.fromEntries(
+		Object.entries(PI_AI_WORKSPACE_SUBPATHS).map(([subpath, workspacePath]) => [
+			subpath,
+			resolveWorkspaceOrImport(workspacePath, `@caupulican/pi-ai/${subpath}`),
+		]),
+	);
+	const piAiAliases = (packageName: string): Record<string, string> =>
+		Object.fromEntries([
+			...Object.entries(piAiSubpathEntries).map(([subpath, entry]) => [`${packageName}/${subpath}`, entry]),
+			[packageName, piAiEntry],
+		]);
 
 	_aliases = {
 		"@caupulican/pi-agent-core/node": piAgentCoreNodeEntry,
 		"@caupulican/pi-agent-core/paths": piAgentCorePathsEntry,
-		"@caupulican/pi-ai/oauth": piAiOauthEntry,
+		...piAiAliases("@caupulican/pi-ai"),
 		"@caupulican/pi-adaptative": piCodingAgentEntry,
 		"@caupulican/pi-agent-core": piAgentCoreEntry,
 		"@caupulican/pi-tui": piTuiEntry,
-		"@caupulican/pi-ai": piAiEntry,
 		"@earendil-works/pi-agent-core/node": piAgentCoreNodeEntry,
 		"@earendil-works/pi-agent-core/paths": piAgentCorePathsEntry,
-		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
+		...piAiAliases("@earendil-works/pi-ai"),
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
 		"@earendil-works/pi-agent-core": piAgentCoreEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
-		"@earendil-works/pi-ai": piAiEntry,
 		"@mariozechner/pi-agent-core/node": piAgentCoreNodeEntry,
 		"@mariozechner/pi-agent-core/paths": piAgentCorePathsEntry,
-		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
+		...piAiAliases("@mariozechner/pi-ai"),
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
-		"@mariozechner/pi-ai": piAiEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,
@@ -1024,6 +1089,11 @@ function isExtensionFile(name: string): boolean {
 	return name.endsWith(".ts") || name.endsWith(".js");
 }
 
+const BUNDLED_EXTENSIONS_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../../bundled-resources/extensions",
+);
+
 /**
  * Resolve extension entry points from a directory.
  *
@@ -1053,14 +1123,8 @@ function resolveExtensionEntries(dir: string): ExtensionLoadSpec[] | null {
 	}
 
 	// Check for index.ts or index.js
-	const indexTs = path.join(dir, "index.ts");
-	const indexJs = path.join(dir, "index.js");
-	if (fs.existsSync(indexTs)) {
-		return [{ path: indexTs }];
-	}
-	if (fs.existsSync(indexJs)) {
-		return [{ path: indexJs }];
-	}
+	const indexEntry = resolveExtensionIndexEntry(dir, BUNDLED_EXTENSIONS_ROOT);
+	if (indexEntry) return [{ path: indexEntry }];
 
 	return null;
 }

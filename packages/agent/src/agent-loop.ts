@@ -3,18 +3,16 @@
  * Transforms to Message[] only at the LLM call boundary.
  */
 
+import { EventStream } from "@caupulican/pi-ai/event-stream";
+import { streamSimple } from "@caupulican/pi-ai/stream";
+import { formatToolRepairStandingRule } from "@caupulican/pi-ai/tool-repair-registry";
+import type { AssistantMessage, Context, ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
-	type AssistantMessage,
-	type Context,
-	EventStream,
-	formatToolRepairStandingRule,
-	streamSimple,
 	type ToolArgumentExecutionOutcome,
 	ToolArgumentValidationError,
 	type ToolArgumentValidationTelemetryEvent,
-	type ToolResultMessage,
 	validateToolArguments,
-} from "@caupulican/pi-ai";
+} from "@caupulican/pi-ai/validation";
 import {
 	assessToolFailure,
 	clearToolFailure,
@@ -34,6 +32,7 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
+	BackgroundToolCallCompletion,
 	RequestPreflightContext,
 	RequestPreflightResult,
 	StreamFn,
@@ -55,28 +54,7 @@ export function agentLoop(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	const stream = createAgentStream();
-
-	void runAgentLoop(
-		prompts,
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	)
-		.catch(async (error) => {
-			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false)];
-			stream.push({ type: "agent_end", messages });
-			return messages;
-		})
-		.then((messages) => {
-			stream.end(messages);
-		});
-
-	return stream;
+	return streamAgentLoop(config, signal, (emit) => runAgentLoop(prompts, context, config, emit, signal, streamFn));
 }
 
 /**
@@ -93,25 +71,20 @@ export function agentLoopContinue(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	if (context.messages.length === 0) {
-		throw new Error("Cannot continue: no messages in context");
-	}
+	assertContinuableContext(context);
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
-	}
+	return streamAgentLoop(config, signal, (emit) => runAgentLoopContinue(context, config, emit, signal, streamFn));
+}
 
+function streamAgentLoop(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	run: (emit: AgentEventSink) => Promise<AgentMessage[]>,
+): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
-
-	void runAgentLoopContinue(
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	)
+	void run(async (event) => {
+		stream.push(event);
+	})
 		.catch(async (error) => {
 			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false)];
 			stream.push({ type: "agent_end", messages });
@@ -156,13 +129,7 @@ export async function runAgentLoopContinue(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): Promise<AgentMessage[]> {
-	if (context.messages.length === 0) {
-		throw new Error("Cannot continue: no messages in context");
-	}
-
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
-	}
+	assertContinuableContext(context);
 
 	const newMessages: AgentMessage[] = [];
 	const currentContext: AgentContext = { ...context, messages: [...context.messages] };
@@ -172,6 +139,16 @@ export async function runAgentLoopContinue(
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
 	return newMessages;
+}
+
+function assertContinuableContext(context: AgentContext): void {
+	if (context.messages.length === 0) {
+		throw new Error("Cannot continue: no messages in context");
+	}
+
+	if (context.messages[context.messages.length - 1].role === "assistant") {
+		throw new Error("Cannot continue from message role: assistant");
+	}
 }
 
 function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, aborted: boolean): AssistantMessage {
@@ -601,16 +578,15 @@ async function executeToolCallsSequential(
 			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
 			finalized = finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory);
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			finalized = await finalizeExecutedToolCall(
+			finalized = await executeAndFinalizePreparedToolCall(
 				currentContext,
 				assistantMessage,
 				preparation,
-				executed,
 				config,
 				repairTeachTracker,
 				toolFailureMemory,
 				signal,
+				emit,
 			);
 		}
 
@@ -666,16 +642,15 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			const finalized = await finalizeExecutedToolCall(
+			const finalized = await executeAndFinalizePreparedToolCall(
 				currentContext,
 				assistantMessage,
 				preparation,
-				executed,
 				config,
 				repairTeachTracker,
 				toolFailureMemory,
 				signal,
+				emit,
 			);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
@@ -1008,6 +983,145 @@ function finalizeRejectedToolCall(
 	};
 }
 
+type LinkedToolAbort = {
+	signal: AbortSignal;
+	detachForeground(): void;
+	cancel(): void;
+};
+
+function createLinkedToolAbort(foregroundSignal: AbortSignal | undefined): LinkedToolAbort {
+	const controller = new AbortController();
+	const abortFromForeground = (): void => controller.abort(foregroundSignal?.reason);
+	let linked = false;
+	if (foregroundSignal?.aborted) {
+		abortFromForeground();
+	} else if (foregroundSignal) {
+		foregroundSignal.addEventListener("abort", abortFromForeground, { once: true });
+		linked = true;
+	}
+	return {
+		signal: controller.signal,
+		detachForeground: () => {
+			if (!linked || !foregroundSignal) return;
+			foregroundSignal.removeEventListener("abort", abortFromForeground);
+			linked = false;
+		},
+		cancel: () => controller.abort(),
+	};
+}
+
+function getBackgroundToolCallDelay(config: AgentLoopConfig): number | undefined {
+	const delay = config.backgroundToolCallAfterMs;
+	if (delay === undefined || !Number.isFinite(delay) || delay <= 0) return undefined;
+	return delay;
+}
+
+async function executeAndFinalizePreparedToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	prepared: PreparedToolCall,
+	config: AgentLoopConfig,
+	repairTeachTracker: ToolRepairTeachTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	foregroundSignal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<FinalizedToolCallOutcome> {
+	const backgroundDelay = getBackgroundToolCallDelay(config);
+	if (
+		!config.handoffToolCall ||
+		(backgroundDelay === undefined && config.subscribeToolCallHandoffRequest === undefined)
+	) {
+		const executed = await executePreparedToolCall(prepared, foregroundSignal, emit);
+		return finalizeExecutedToolCall(
+			currentContext,
+			assistantMessage,
+			prepared,
+			executed,
+			config,
+			repairTeachTracker,
+			toolFailureMemory,
+			foregroundSignal,
+		);
+	}
+
+	const executionAbort = createLinkedToolAbort(foregroundSignal);
+	const startedAt = Date.now();
+	let emitForegroundUpdates = true;
+	const completion: Promise<BackgroundToolCallCompletion> = (async () => {
+		const executed = await executePreparedToolCall(prepared, executionAbort.signal, (event) => {
+			if (emitForegroundUpdates) return emit(event);
+		});
+		return finalizeExecutedToolCall(
+			currentContext,
+			assistantMessage,
+			prepared,
+			executed,
+			config,
+			repairTeachTracker,
+			toolFailureMemory,
+			executionAbort.signal,
+		);
+	})();
+	completion.then(executionAbort.detachForeground, executionAbort.detachForeground);
+
+	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	const triggers: Array<Promise<{ kind: "deadline" | "manual" }>> = [];
+	if (backgroundDelay !== undefined) {
+		triggers.push(
+			new Promise<{ kind: "deadline" }>((resolve) => {
+				deadlineTimer = setTimeout(() => resolve({ kind: "deadline" }), backgroundDelay);
+				(deadlineTimer as { unref?: () => void }).unref?.();
+			}),
+		);
+	}
+	let unsubscribeHandoffRequest: (() => void) | undefined;
+	if (config.subscribeToolCallHandoffRequest) {
+		const manual = new Promise<{ kind: "manual" }>((resolve) => {
+			try {
+				unsubscribeHandoffRequest = config.subscribeToolCallHandoffRequest?.(prepared.toolCall.id, () =>
+					resolve({ kind: "manual" }),
+				);
+			} catch {
+				unsubscribeHandoffRequest = undefined;
+			}
+		});
+		triggers.push(manual);
+	}
+	let outcome: { kind: "completed"; value: BackgroundToolCallCompletion } | { kind: "deadline" | "manual" };
+	try {
+		outcome = await Promise.race([completion.then((value) => ({ kind: "completed" as const, value })), ...triggers]);
+	} finally {
+		if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+		unsubscribeHandoffRequest?.();
+	}
+	if (outcome.kind === "completed") return outcome.value;
+	if (executionAbort.signal.aborted) return completion;
+
+	let handoff: ReturnType<NonNullable<AgentLoopConfig["handoffToolCall"]>>;
+	try {
+		handoff = config.handoffToolCall({
+			assistantMessage,
+			toolCall: prepared.toolCall,
+			args: prepared.args,
+			context: currentContext,
+			elapsedMs: Math.max(0, Date.now() - startedAt),
+			completion,
+			cancel: executionAbort.cancel,
+		});
+	} catch {
+		return completion;
+	}
+	if (!handoff) return completion;
+
+	emitForegroundUpdates = false;
+	executionAbort.detachForeground();
+	return {
+		toolCall: prepared.toolCall,
+		result: handoff.result,
+		isError: handoff.isError ?? handoff.result.isError === true,
+	};
+}
+
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
@@ -1183,7 +1297,7 @@ async function emitToolExecutionStart(toolCall: AgentToolCall, emit: AgentEventS
 	});
 }
 
-function getToolCallRepairInfo(toolCall: AgentToolCall): ToolCallRepairInfo | undefined {
+export function getToolCallRepairInfo(toolCall: AgentToolCall): ToolCallRepairInfo | undefined {
 	if (!toolCall.rawArguments && !toolCall.repairNotes?.length) return undefined;
 	return {
 		repaired: true,

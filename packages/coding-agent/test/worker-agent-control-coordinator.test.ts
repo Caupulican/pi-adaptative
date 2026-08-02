@@ -68,12 +68,14 @@ describe("WorkerAgentControlCoordinator", () => {
 			agent = registeredAgent({ activeAttemptId: attempt.attemptId });
 			return { record, attempt };
 		});
+		const suspendAgent = vi.fn();
 		const lifecycle = {
 			getAgent: (agentId: string) => (agentId === agent.agentId ? agent : undefined),
 			getTaskRuntimeSnapshot: () =>
 				({ attempts: attempt ? { [attempt.attemptId]: attempt } : {} }) as TaskRuntimeProjection,
 			prepareAgentTurn,
 			getRecord: () => record,
+			suspendAgent,
 		} as unknown as WorkerLifecycle;
 		const enqueue = vi.fn();
 		const drain = vi.fn();
@@ -113,13 +115,21 @@ describe("WorkerAgentControlCoordinator", () => {
 
 		attempt = activeAttempt("running");
 		agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "active" });
+		expect(coordinator.interruptWorkerAgent("agent-1")).toEqual({ interrupted: true });
+		expect(suspendAgent).toHaveBeenCalledWith("worker-1", "agent-1", "pi-worker:1:owner");
+		expect(abortLane).toHaveBeenCalledWith("worker-1", "agent_interrupted");
+
 		const waiting = coordinator.waitForWorkerAgent("agent-1", 10_000);
 		agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "suspended" });
 		coordinator.signalStateChanged();
 		await expect(waiting).resolves.toEqual({ status: "suspended" });
 
+		attempt = activeAttempt("suspended");
+		expect(coordinator.resumeWorkerAgent("agent-1")).toMatchObject({ started: true, record });
+		expect(track).toHaveBeenCalledWith("worker-1", expect.any(Promise));
+
 		expect(coordinator.cancelWorkerAgent("agent-1", "owner_cancelled")).toMatchObject({ status: "canceled" });
-		expect(abortLane).toHaveBeenCalledWith("worker-1", "owner_cancelled");
+		expect(abortLane).toHaveBeenLastCalledWith("worker-1", "owner_cancelled");
 		expect(cancelLane).toHaveBeenCalledWith("worker-1", "owner_cancelled");
 	});
 });

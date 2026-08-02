@@ -25,7 +25,6 @@ function getEnv(): NodeJS.ProcessEnv {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { globSync } from "glob";
-import ignore from "ignore";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
@@ -35,8 +34,11 @@ import { gitDir, npmDir } from "./agent-paths.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
 import { isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
+import { createResourceIgnoreMatcher, toPosixResourcePath } from "./resource-ignore.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
+import { collectResourceFilesRecursively, readResourceDirectory } from "./resource-traversal.ts";
 import type { PackageSource, ResourceProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
+import { discoverSkillFiles, type SkillDiscoveryMode } from "./skill-discovery.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
@@ -167,6 +169,16 @@ interface ResourceAccumulator {
 	themes: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 }
 
+function collectConfiguredPackageSources(
+	globalSettings: Settings,
+	projectSettings: Settings,
+): Array<{ pkg: PackageSource; scope: SourceScope }> {
+	return [
+		...(projectSettings.packages ?? []).map((pkg) => ({ pkg, scope: "project" as const })),
+		...(globalSettings.packages ?? []).map((pkg) => ({ pkg, scope: "user" as const })),
+	];
+}
+
 /**
  * Compute a numeric precedence rank for a resource based on its metadata.
  * Lower rank = higher precedence. Used to sort resolved resources so that
@@ -203,14 +215,6 @@ const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	themes: /\.json$/,
 };
 
-const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
-
-type IgnoreMatcher = ReturnType<typeof ignore>;
-
-function toPosixPath(p: string): string {
-	return p.split(sep).join("/");
-}
-
 function getHomeDir(): string {
 	return process.env.HOME || homedir();
 }
@@ -219,49 +223,6 @@ export function getExtensionTempFolder(agentDir: string): string {
 	const tempFolder = getProcessWorkRun(agentDir, "extensions", "packages").path;
 	chmodSync(tempFolder, 0o700);
 	return tempFolder;
-}
-
-function prefixIgnorePattern(line: string, prefix: string): string | null {
-	const trimmed = line.trim();
-	if (!trimmed) return null;
-	if (trimmed.startsWith("#") && !trimmed.startsWith("\\#")) return null;
-
-	let pattern = line;
-	let negated = false;
-
-	if (pattern.startsWith("!")) {
-		negated = true;
-		pattern = pattern.slice(1);
-	} else if (pattern.startsWith("\\!")) {
-		pattern = pattern.slice(1);
-	}
-
-	if (pattern.startsWith("/")) {
-		pattern = pattern.slice(1);
-	}
-
-	const prefixed = prefix ? `${prefix}${pattern}` : pattern;
-	return negated ? `!${prefixed}` : prefixed;
-}
-
-function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
-	const relativeDir = relative(rootDir, dir);
-	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
-
-	for (const filename of IGNORE_FILE_NAMES) {
-		const ignorePath = join(dir, filename);
-		if (!existsSync(ignorePath)) continue;
-		try {
-			const content = readFileSync(ignorePath, "utf-8");
-			const patterns = content
-				.split(/\r?\n/)
-				.map((line) => prefixIgnorePattern(line, prefix))
-				.filter((line): line is string => Boolean(line));
-			if (patterns.length > 0) {
-				ig.add(patterns);
-			}
-		} catch {}
-	}
 }
 
 function isPattern(s: string): boolean {
@@ -289,135 +250,18 @@ function splitPatterns(entries: string[]): { plain: string[]; patterns: string[]
 	return { plain, patterns };
 }
 
-function collectFiles(
-	dir: string,
-	filePattern: RegExp,
-	skipNodeModules = true,
-	ignoreMatcher?: IgnoreMatcher,
-	rootDir?: string,
-): string[] {
-	const files: string[] = [];
-	if (!existsSync(dir)) return files;
-
-	const root = rootDir ?? dir;
-	const ig = ignoreMatcher ?? ignore();
-	addIgnoreRules(ig, dir, root);
-
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) continue;
-			if (skipNodeModules && entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isDir = entry.isDirectory();
-			let isFile = entry.isFile();
-
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDir = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			const ignorePath = isDir ? `${relPath}/` : relPath;
-			if (ig.ignores(ignorePath)) continue;
-
-			if (isDir) {
-				files.push(...collectFiles(fullPath, filePattern, skipNodeModules, ig, root));
-			} else if (isFile && filePattern.test(entry.name)) {
-				files.push(fullPath);
-			}
-		}
-	} catch {
-		// Ignore errors
-	}
-
-	return files;
-}
-
-type SkillDiscoveryMode = "pi" | "agents";
-
-function collectSkillEntries(
-	dir: string,
-	mode: SkillDiscoveryMode,
-	ignoreMatcher?: IgnoreMatcher,
-	rootDir?: string,
-): string[] {
-	const entries: string[] = [];
-	if (!existsSync(dir)) return entries;
-
-	const root = rootDir ?? dir;
-	const ig = ignoreMatcher ?? ignore();
-	addIgnoreRules(ig, dir, root);
-
-	try {
-		const dirEntries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of dirEntries) {
-			if (entry.name !== "SKILL.md") {
-				continue;
-			}
-
-			const fullPath = join(dir, entry.name);
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			if (isFile && !ig.ignores(relPath)) {
-				entries.push(fullPath);
-				return entries;
-			}
-		}
-
-		for (const entry of dirEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isDir = entry.isDirectory();
-			let isFile = entry.isFile();
-
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDir = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(root, fullPath));
-			if (mode === "pi" && dir === root && isFile && entry.name.endsWith(".md") && !ig.ignores(relPath)) {
-				entries.push(fullPath);
-				continue;
-			}
-
-			if (!isDir) continue;
-			if (ig.ignores(`${relPath}/`)) continue;
-
-			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
-		}
-	} catch {
-		// Ignore errors
-	}
-
-	return entries;
+function collectFiles(dir: string, filePattern: RegExp, skipNodeModules = true): string[] {
+	return collectResourceFilesRecursively(dir, (entry) => filePattern.test(entry.name), {
+		followSymbolicLinks: true,
+		ignoreMatcher: createResourceIgnoreMatcher(),
+		rootDir: dir,
+		skipHidden: true,
+		skipNodeModules,
+	});
 }
 
 function collectAutoSkillEntries(dir: string, mode: SkillDiscoveryMode): string[] {
-	return collectSkillEntries(dir, mode);
+	return discoverSkillFiles(dir, mode);
 }
 
 function findGitRepoRoot(startDir: string): string | null {
@@ -455,78 +299,24 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	return skillDirs;
 }
 
+function collectAutoFileEntries(dir: string, extension: ".md" | ".json"): string[] {
+	return readResourceDirectory(dir, {
+		followSymbolicLinks: true,
+		ignoreMatcher: createResourceIgnoreMatcher(),
+		rootDir: dir,
+		skipHidden: true,
+		skipNodeModules: true,
+	})
+		.filter((entry) => entry.isFile && entry.name.endsWith(extension))
+		.map((entry) => entry.path);
+}
+
 function collectAutoPromptEntries(dir: string): string[] {
-	const entries: string[] = [];
-	if (!existsSync(dir)) return entries;
-
-	const ig = ignore();
-	addIgnoreRules(ig, dir, dir);
-
-	try {
-		const dirEntries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of dirEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(dir, fullPath));
-			if (ig.ignores(relPath)) continue;
-
-			if (isFile && entry.name.endsWith(".md")) {
-				entries.push(fullPath);
-			}
-		}
-	} catch {
-		// Ignore errors
-	}
-
-	return entries;
+	return collectAutoFileEntries(dir, ".md");
 }
 
 function collectAutoThemeEntries(dir: string): string[] {
-	const entries: string[] = [];
-	if (!existsSync(dir)) return entries;
-
-	const ig = ignore();
-	addIgnoreRules(ig, dir, dir);
-
-	try {
-		const dirEntries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of dirEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(dir, fullPath));
-			if (ig.ignores(relPath)) continue;
-
-			if (isFile && entry.name.endsWith(".json")) {
-				entries.push(fullPath);
-			}
-		}
-	} catch {
-		// Ignore errors
-	}
-
-	return entries;
+	return collectAutoFileEntries(dir, ".json");
 }
 
 function readPiManifestFile(packageJsonPath: string): PiManifest | null {
@@ -571,7 +361,6 @@ function resolveExtensionEntries(dir: string): string[] | null {
 
 function collectAutoExtensionEntries(dir: string): string[] {
 	const entries: string[] = [];
-	if (!existsSync(dir)) return entries;
 
 	// First check if this directory itself has explicit extension entries (package.json or index)
 	const rootEntries = resolveExtensionEntries(dir);
@@ -580,44 +369,19 @@ function collectAutoExtensionEntries(dir: string): string[] {
 	}
 
 	// Otherwise, discover extensions from directory contents
-	const ig = ignore();
-	addIgnoreRules(ig, dir, dir);
-
-	try {
-		const dirEntries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of dirEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isDir = entry.isDirectory();
-			let isFile = entry.isFile();
-
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDir = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(dir, fullPath));
-			const ignorePath = isDir ? `${relPath}/` : relPath;
-			if (ig.ignores(ignorePath)) continue;
-
-			if (isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
-				entries.push(fullPath);
-			} else if (isDir) {
-				const resolvedEntries = resolveExtensionEntries(fullPath);
-				if (resolvedEntries) {
-					entries.push(...resolvedEntries);
-				}
-			}
+	for (const entry of readResourceDirectory(dir, {
+		followSymbolicLinks: true,
+		ignoreMatcher: createResourceIgnoreMatcher(),
+		rootDir: dir,
+		skipHidden: true,
+		skipNodeModules: true,
+	})) {
+		if (entry.isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
+			entries.push(entry.path);
+		} else if (entry.isDirectory) {
+			const resolvedEntries = resolveExtensionEntries(entry.path);
+			if (resolvedEntries) entries.push(...resolvedEntries);
 		}
-	} catch {
-		// Ignore errors
 	}
 
 	return entries;
@@ -629,7 +393,7 @@ function collectAutoExtensionEntries(dir: string): string[] {
  */
 function collectResourceFiles(dir: string, resourceType: ResourceType): string[] {
 	if (resourceType === "skills") {
-		return collectSkillEntries(dir, "pi");
+		return discoverSkillFiles(dir, "pi");
 	}
 	if (resourceType === "extensions") {
 		return collectAutoExtensionEntries(dir);
@@ -637,53 +401,37 @@ function collectResourceFiles(dir: string, resourceType: ResourceType): string[]
 	return collectFiles(dir, FILE_PATTERNS[resourceType]);
 }
 
-function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string): boolean {
-	const rel = toPosixPath(relative(baseDir, filePath));
-	const name = basename(filePath);
-	const filePathPosix = toPosixPath(filePath);
+function getResourceMatchCandidates(filePath: string, baseDir: string): readonly string[] {
 	const parentDir = dirname(filePath);
-	const parentRel = toPosixPath(relative(baseDir, parentDir));
-	const parentName = basename(parentDir);
-	const parentDirPosix = toPosixPath(parentDir);
+	return [
+		toPosixResourcePath(relative(baseDir, filePath)),
+		basename(filePath),
+		toPosixResourcePath(filePath),
+		toPosixResourcePath(relative(baseDir, parentDir)),
+		basename(parentDir),
+		toPosixResourcePath(parentDir),
+	];
+}
 
+function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string): boolean {
+	const candidates = getResourceMatchCandidates(filePath, baseDir);
 	return patterns.some((pattern) => {
-		const normalizedPattern = toPosixPath(pattern);
-		if (
-			matchesCompiledPattern(rel, normalizedPattern) ||
-			matchesCompiledPattern(name, normalizedPattern) ||
-			matchesCompiledPattern(filePathPosix, normalizedPattern)
-		) {
-			return true;
-		}
-		return (
-			matchesCompiledPattern(parentRel, normalizedPattern) ||
-			matchesCompiledPattern(parentName, normalizedPattern) ||
-			matchesCompiledPattern(parentDirPosix, normalizedPattern)
-		);
+		const normalizedPattern = toPosixResourcePath(pattern);
+		return candidates.some((candidate) => matchesCompiledPattern(candidate, normalizedPattern));
 	});
 }
 
 function normalizeExactPattern(pattern: string): string {
 	const normalized = pattern.startsWith("./") || pattern.startsWith(".\\") ? pattern.slice(2) : pattern;
-	return toPosixPath(normalized);
+	return toPosixResourcePath(normalized);
 }
 
 function matchesAnyExactPattern(filePath: string, patterns: string[], baseDir: string): boolean {
 	if (patterns.length === 0) return false;
-	const rel = toPosixPath(relative(baseDir, filePath));
-	const name = basename(filePath);
-	const filePathPosix = toPosixPath(filePath);
-	const parentDir = dirname(filePath);
-	const parentRel = toPosixPath(relative(baseDir, parentDir));
-	const parentName = basename(parentDir);
-	const parentDirPosix = toPosixPath(parentDir);
-
+	const candidates = getResourceMatchCandidates(filePath, baseDir);
 	return patterns.some((pattern) => {
 		const normalized = normalizeExactPattern(pattern);
-		if (normalized === rel || normalized === name || normalized === filePathPosix) {
-			return true;
-		}
-		return normalized === parentRel || normalized === parentName || normalized === parentDirPosix;
+		return candidates.includes(normalized);
 	});
 }
 
@@ -801,11 +549,18 @@ export class DefaultPackageManager implements PackageManager {
 		this.progressCallback = callback;
 	}
 
-	addSourceToSettings(source: string, options?: { local?: boolean }): boolean {
-		const scope: SourceScope = options?.local ? "project" : "user";
-		const currentSettings =
+	private getConfiguredPackages(options?: { local?: boolean }): {
+		scope: InstalledSourceScope;
+		packages: PackageSource[];
+	} {
+		const scope: InstalledSourceScope = options?.local ? "project" : "user";
+		const settings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
-		const currentPackages = currentSettings.packages ?? [];
+		return { scope, packages: settings.packages ?? [] };
+	}
+
+	addSourceToSettings(source: string, options?: { local?: boolean }): boolean {
+		const { scope, packages: currentPackages } = this.getConfiguredPackages(options);
 		const normalizedSource = this.normalizePackageSourceForSettings(source, scope);
 		const matchIndex = currentPackages.findIndex((existing) => this.packageSourcesMatch(existing, source, scope));
 		if (matchIndex !== -1) {
@@ -833,10 +588,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean {
-		const scope: SourceScope = options?.local ? "project" : "user";
-		const currentSettings =
-			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
-		const currentPackages = currentSettings.packages ?? [];
+		const { scope, packages: currentPackages } = this.getConfiguredPackages(options);
 		const nextPackages = currentPackages.filter((existing) => !this.packageSourcesMatch(existing, source, scope));
 		const changed = nextPackages.length !== currentPackages.length;
 		if (!changed) {
@@ -894,17 +646,8 @@ export class DefaultPackageManager implements PackageManager {
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
 
-		// Collect all packages with scope (project first so cwd resources win collisions)
-		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
-		for (const pkg of projectSettings.packages ?? []) {
-			allPackages.push({ pkg, scope: "project" });
-		}
-		for (const pkg of globalSettings.packages ?? []) {
-			allPackages.push({ pkg, scope: "user" });
-		}
-
 		// Dedupe: project scope wins over global for same package identity
-		const packageSources = this.dedupePackages(allPackages);
+		const packageSources = this.dedupePackages(collectConfiguredPackageSources(globalSettings, projectSettings));
 		await this.resolvePackageSources(packageSources, accumulator, onMissing);
 
 		const globalBaseDir = this.agentDir;
@@ -1172,15 +915,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
-		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
-		for (const pkg of projectSettings.packages ?? []) {
-			allPackages.push({ pkg, scope: "project" });
-		}
-		for (const pkg of globalSettings.packages ?? []) {
-			allPackages.push({ pkg, scope: "user" });
-		}
-
-		const packageSources = this.dedupePackages(allPackages);
+		const packageSources = this.dedupePackages(collectConfiguredPackageSources(globalSettings, projectSettings));
 		const checks = packageSources
 			.filter(
 				(entry): entry is { pkg: PackageSource; scope: Exclude<SourceScope, "temporary"> } =>
@@ -1337,27 +1072,22 @@ export class DefaultPackageManager implements PackageManager {
 		return typeof pkg === "string" ? pkg : pkg.source;
 	}
 
+	private getParsedSourceIdentity(parsed: ParsedSource, resolveLocal: (path: string) => string): string {
+		if (parsed.type === "npm") return `npm:${parsed.name}`;
+		if (parsed.type === "git") return `git:${parsed.host}/${parsed.path}`;
+		return `local:${resolveLocal(parsed.path)}`;
+	}
+
 	private getSourceMatchKeyForInput(source: string): string {
 		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		return this.getParsedSourceIdentity(parsed, (path) => this.resolvePath(path));
 	}
 
 	private getSourceMatchKeyForSettings(source: string, scope: SourceScope): string {
 		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		const baseDir = this.getBaseDirForScope(scope);
-		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
+		return this.getParsedSourceIdentity(parsed, (path) =>
+			this.resolvePathFromBase(path, this.getBaseDirForScope(scope)),
+		);
 	}
 
 	private buildNoMatchingPackageMessage(source: string, configuredPackages: PackageSource[]): string {
@@ -1648,18 +1378,9 @@ export class DefaultPackageManager implements PackageManager {
 	 */
 	private getPackageIdentity(source: string, scope?: SourceScope): string {
 		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			// Use host/path for identity to normalize SSH and HTTPS
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		if (scope) {
-			const baseDir = this.getBaseDirForScope(scope);
-			return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
-		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		return this.getParsedSourceIdentity(parsed, (path) => {
+			return scope ? this.resolvePathFromBase(path, this.getBaseDirForScope(scope)) : this.resolvePath(path);
+		});
 	}
 
 	/**
@@ -1792,12 +1513,7 @@ export class DefaultPackageManager implements PackageManager {
 	private async installGit(source: GitSource, scope: SourceScope): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (existsSync(targetDir)) {
-			if (source.ref) {
-				await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
-				return;
-			}
-			const target = await this.getLocalGitUpdateTarget(targetDir);
-			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
+			await this.updateInstalledGitSource(source, targetDir);
 			return;
 		}
 		const gitRoot = this.getGitInstallRoot(scope);
@@ -1822,7 +1538,10 @@ export class DefaultPackageManager implements PackageManager {
 			await this.installGit(source, scope);
 			return;
 		}
+		await this.updateInstalledGitSource(source, targetDir);
+	}
 
+	private async updateInstalledGitSource(source: GitSource, targetDir: string): Promise<void> {
 		if (source.ref) {
 			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
 			return;

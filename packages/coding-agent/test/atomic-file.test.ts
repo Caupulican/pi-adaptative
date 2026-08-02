@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "../src/core/util/atomic-file.ts";
+import {
+	acquireFileLockSync,
+	withFileLock,
+	withFileLockSync,
+	writeFileAtomic,
+	writeFileAtomicSync,
+} from "../src/core/util/atomic-file.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 // `renameSync` is a named export consumed directly by atomic-file.ts (`import { renameSync } from
@@ -176,6 +182,63 @@ describe("rename retry (win32 Defender/indexer transient EPERM/EACCES/EBUSY)", (
 });
 
 describe("withFileLockSync / withFileLock", () => {
+	it("acquires through the configured lock path with an exact bounded retry budget", () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		const lockfilePath = join(dir, "locks", "data.lock");
+		const locked = Object.assign(new Error("already locked"), { code: "ELOCKED" });
+		const release = vi.fn();
+		const lockSpy = vi
+			.spyOn(lockfile, "lockSync")
+			.mockImplementationOnce(() => {
+				throw locked;
+			})
+			.mockReturnValueOnce(release);
+
+		try {
+			const acquiredRelease = acquireFileLockSync(filePath, {
+				lockfilePath,
+				retries: 1,
+				minRetryDelayMs: 0,
+				maxRetryDelayMs: 0,
+			});
+
+			expect(lockSpy).toHaveBeenCalledTimes(2);
+			expect(lockSpy).toHaveBeenLastCalledWith(filePath, {
+				lockfilePath,
+				realpath: false,
+				stale: undefined,
+			});
+			expect(existsSync(join(dir, "locks"))).toBe(true);
+			acquiredRelease();
+			expect(release).toHaveBeenCalledOnce();
+		} finally {
+			lockSpy.mockRestore();
+		}
+	});
+
+	it("does not retry a non-contention lock failure", () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const lockSpy = vi.spyOn(lockfile, "lockSync").mockImplementation(() => {
+			throw denied;
+		});
+
+		try {
+			expect(() =>
+				acquireFileLockSync(filePath, {
+					retries: 5,
+					minRetryDelayMs: 0,
+					maxRetryDelayMs: 0,
+				}),
+			).toThrow(denied);
+			expect(lockSpy).toHaveBeenCalledOnce();
+		} finally {
+			lockSpy.mockRestore();
+		}
+	});
+
 	it("holds an exclusive lock for the duration of the sync callback", () => {
 		const dir = tempDir();
 		const filePath = join(dir, "data.json");

@@ -5,11 +5,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExecResult } from "../src/core/exec.ts";
 import type { LaneRegistration } from "../src/core/worktree-sync/codes.ts";
 import {
+	abortSync,
+	continueSync,
 	createLane,
+	landLane,
 	parseWorktreeList,
 	reconcile,
 	releaseLane,
 	resolveRepoContext,
+	syncLane,
 	type WorktreeSyncEngineDeps,
 	type WorktreeSyncExec,
 } from "../src/core/worktree-sync/git-engine.ts";
@@ -309,6 +313,27 @@ describe("releaseLane", () => {
 		expect(calls.some((call) => call.args.join(" ") === "branch -d pi/wt/adhoc-1")).toBe(true);
 
 		expect((await releaseLane(engineDeps(repo), { laneKey: "adhoc-1" })).code).toBe("released");
+	});
+});
+
+describe("lane lifecycle boundary", () => {
+	it("keeps release idempotent while every active-lane operation rejects a released registration", async () => {
+		const repo = fauxRepo();
+		await writeLane(syncStorePaths(repo.commonDir), registration({ status: "released" }));
+		const deps = engineDeps(repo);
+
+		expect(await releaseLane(deps, { laneKey: "adhoc-1" })).toEqual({
+			code: "released",
+			laneKey: "adhoc-1",
+		});
+		for (const result of [
+			await syncLane(deps, { laneKey: "adhoc-1" }),
+			await continueSync(deps, { laneKey: "adhoc-1" }),
+			await abortSync(deps, { laneKey: "adhoc-1" }),
+			await landLane(deps, { laneKey: "adhoc-1", gate: "off" }),
+		]) {
+			expect(result).toMatchObject({ code: "lane_not_found" });
+		}
 	});
 });
 

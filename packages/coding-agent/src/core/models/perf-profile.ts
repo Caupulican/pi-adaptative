@@ -1,13 +1,15 @@
 import type { StreamFn, StreamIdleOptions } from "@caupulican/pi-agent-core";
-import {
-	type Api,
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	type Context,
-	createAssistantMessageEventStream,
-	type Model,
-	type ProviderResponse,
-} from "@caupulican/pi-ai";
+import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Model,
+	ProviderResponse,
+} from "@caupulican/pi-ai/types";
+import { createEmptyUsage } from "@caupulican/pi-ai/usage";
+import { measureJsonLength } from "../util/json-size.ts";
 
 const PERF_EWMA_ALPHA = 0.3;
 const CHARS_PER_TOKEN_ESTIMATE = 4;
@@ -131,13 +133,12 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 }
 
 export function estimateContextPromptTokens(context: Context): number {
-	const serialized = JSON.stringify({
+	const serializedLength = measureJsonLength({
 		systemPrompt: context.systemPrompt,
 		messages: context.messages,
 		tools: context.tools,
 	});
-	if (!serialized) return 0;
-	return Math.ceil(serialized.length / CHARS_PER_TOKEN_ESTIMATE);
+	return serializedLength === undefined ? 0 : Math.ceil(serializedLength / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProfileStreamRecorder): StreamFn {
@@ -215,14 +216,7 @@ function emptyAssistantMessage(model: Model<Api>): AssistantMessage {
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		usage: createEmptyUsage(),
 		stopReason: "stop",
 		timestamp: Date.now(),
 	};

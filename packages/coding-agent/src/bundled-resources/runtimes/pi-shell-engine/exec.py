@@ -119,41 +119,50 @@ def _real_fd(stream: BinaryIO | int) -> int | None:
         return None
 
 
-def _prepare_child_output(stream: BinaryIO | int) -> _ChildStream:
+def _direct_child_stream(stream: BinaryIO | int) -> _ChildStream | None:
     fd = _real_fd(stream)
-    if fd is not None:
-        return _ChildStream(fd, owns_fd=False)
+    return _ChildStream(fd, owns_fd=False) if fd is not None else None
+
+
+def _copy_stream(source: BinaryIO, target: BinaryIO) -> None:
+    while True:
+        chunk = source.read(65536)
+        if not chunk:
+            return
+        target.write(chunk)
+
+
+def _prepare_child_stream(stream: BinaryIO | int, *, child_reads: bool) -> _ChildStream:
+    direct = _direct_child_stream(stream)
+    if direct is not None:
+        return direct
     assert not isinstance(stream, int)
     read_fd, write_fd = os.pipe()
 
-    def pump() -> None:
-        with os.fdopen(read_fd, "rb", closefd=True) as reader:
-            while True:
-                chunk = reader.read(65536)
-                if not chunk:
-                    break
-                stream.write(chunk)
+    if child_reads:
+        def bridge() -> None:
+            with os.fdopen(write_fd, "wb", closefd=True) as writer:
+                _copy_stream(stream, writer)
 
-    thread = threading.Thread(target=pump, daemon=True)
+        child_fd = read_fd
+    else:
+        def bridge() -> None:
+            with os.fdopen(read_fd, "rb", closefd=True) as reader:
+                _copy_stream(reader, stream)
+
+        child_fd = write_fd
+
+    thread = threading.Thread(target=bridge, daemon=True)
     thread.start()
-    return _ChildStream(write_fd, owns_fd=True, join=thread.join)
+    return _ChildStream(child_fd, owns_fd=True, join=thread.join)
+
+
+def _prepare_child_output(stream: BinaryIO | int) -> _ChildStream:
+    return _prepare_child_stream(stream, child_reads=False)
 
 
 def _prepare_child_input(stream: BinaryIO | int) -> _ChildStream:
-    fd = _real_fd(stream)
-    if fd is not None:
-        return _ChildStream(fd, owns_fd=False)
-    assert not isinstance(stream, int)
-    data = stream.read()
-    read_fd, write_fd = os.pipe()
-
-    def feed() -> None:
-        with os.fdopen(write_fd, "wb", closefd=True) as writer:
-            writer.write(data)
-
-    thread = threading.Thread(target=feed, daemon=True)
-    thread.start()
-    return _ChildStream(read_fd, owns_fd=True, join=thread.join)
+    return _prepare_child_stream(stream, child_reads=True)
 
 
 def _spawn_with_bridges(
@@ -183,6 +192,39 @@ def _spawn_with_bridges(
         if err_prep is not out_prep and err_prep.owns_fd:
             _safe_close(err_prep.fd)
     return child, in_prep, out_prep, err_prep
+
+
+def _spawn_argv_or_report(
+    argv: list[str],
+    state: ShellState,
+    ctx: ExecContext,
+    stdin_stream: BinaryIO | int,
+    stdout_stream: BinaryIO | int,
+    stderr_stream: BinaryIO | int,
+) -> tuple["subprocess.Popen[bytes]", _ChildStream, _ChildStream, _ChildStream] | None:
+    try:
+        return _spawn_with_bridges(
+            argv,
+            state,
+            stdin_stream,
+            stdout_stream,
+            stderr_stream,
+            ctx.deadline,
+        )
+    except FileNotFoundError:
+        message = f"{argv[0]}: command not found\n"
+        _write_merged(
+            stderr_stream, message.encode("utf-8", errors="replace"), ctx
+        )
+        return None
+
+
+def _command_scratch_state(command: nodes.SimpleCommand, ctx: ExecContext) -> ShellState:
+    return ShellState(
+        cwd=ctx.state.cwd,
+        env=_apply_transient_assignments(command, ctx),
+        powershell_path=ctx.state.powershell_path,
+    )
 
 
 def _finish_bridges(*preps: _ChildStream) -> None:
@@ -407,20 +449,12 @@ def _spawn_external_stage(
     try:
         r_in, r_out, r_err = _apply_redirects(command.redirects, ctx, stdin_stream, stdout_stream, stderr_base, tracker)
         argv = _expand_argv(command, ctx)
-        env = _apply_transient_assignments(command, ctx)
-        scratch_state = ShellState(
-            cwd=ctx.state.cwd,
-            env=env,
-            powershell_path=ctx.state.powershell_path,
+        spawned = _spawn_argv_or_report(
+            argv, _command_scratch_state(command, ctx), ctx, r_in, r_out, r_err
         )
-        try:
-            child, in_prep, out_prep, err_prep = _spawn_with_bridges(
-                argv, scratch_state, r_in, r_out, r_err, ctx.deadline
-            )
-        except FileNotFoundError:
-            message = f"{argv[0]}: command not found\n"
-            _write_merged(stderr_base, message.encode("utf-8", errors="replace"), ctx)
+        if spawned is None:
             return None
+        child, in_prep, out_prep, err_prep = spawned
         return child, (in_prep, out_prep, err_prep)
     finally:
         tracker.close()
@@ -477,32 +511,42 @@ def _sub_ctx(
     )
 
 
-def _execute_subshell(node: nodes.Subshell, ctx: ExecContext, stdin_stream, stdout_stream, stderr_stream) -> int:
+def _execute_redirected_group(
+    node: nodes.Subshell | nodes.BraceGroup,
+    ctx: ExecContext,
+    stdin_stream,
+    stdout_stream,
+    stderr_stream,
+    *,
+    isolated: bool,
+) -> int:
     tracker = _Redirected()
     try:
         r_in, r_out, r_err = _apply_redirects(
             node.redirects, ctx, stdin_stream, stdout_stream, stderr_stream, tracker
         )
-        isolated_state = ctx.state.copy()
-        inner_ctx = _sub_ctx(ctx, isolated_state, r_in, r_out, r_err)
+        state = ctx.state.copy() if isolated else ctx.state
+        inner_ctx = _sub_ctx(ctx, state, r_in, r_out, r_err)
         try:
             return execute(node.body, inner_ctx)
         except ShellExit as exc:
-            return exc.exit_code
+            if isolated:
+                return exc.exit_code
+            raise
     finally:
         tracker.close()
+
+
+def _execute_subshell(node: nodes.Subshell, ctx: ExecContext, stdin_stream, stdout_stream, stderr_stream) -> int:
+    return _execute_redirected_group(
+        node, ctx, stdin_stream, stdout_stream, stderr_stream, isolated=True
+    )
 
 
 def _execute_brace_group(node: nodes.BraceGroup, ctx: ExecContext, stdin_stream, stdout_stream, stderr_stream) -> int:
-    tracker = _Redirected()
-    try:
-        r_in, r_out, r_err = _apply_redirects(
-            node.redirects, ctx, stdin_stream, stdout_stream, stderr_stream, tracker
-        )
-        inner_ctx = _sub_ctx(ctx, ctx.state, r_in, r_out, r_err)
-        return execute(node.body, inner_ctx)
-    finally:
-        tracker.close()
+    return _execute_redirected_group(
+        node, ctx, stdin_stream, stdout_stream, stderr_stream, isolated=False
+    )
 
 
 def _dispatch_simple_command(
@@ -551,18 +595,12 @@ def _dispatch_simple_command(
             return ctx.builtins[name](builtin_ctx)
 
         # External command.
-        env = _apply_transient_assignments(command, ctx)
-        scratch_state = ShellState(
-            cwd=ctx.state.cwd,
-            env=env,
-            powershell_path=ctx.state.powershell_path,
+        spawned = _spawn_argv_or_report(
+            argv, _command_scratch_state(command, ctx), ctx, r_in, r_out, r_err
         )
-        try:
-            child, in_prep, out_prep, err_prep = _spawn_with_bridges(argv, scratch_state, r_in, r_out, r_err, ctx.deadline)
-        except FileNotFoundError:
-            message = f"{name}: command not found\n"
-            _write_merged(r_err, message.encode("utf-8", errors="replace"), ctx)
+        if spawned is None:
             return 127
+        child, in_prep, out_prep, err_prep = spawned
         exit_code = proc.wait_with_deadline(child, ctx.deadline)
         _finish_bridges(in_prep, out_prep, err_prep)
         return exit_code
@@ -718,13 +756,12 @@ def _run_xargs_batch(argv: list[str], ctx: ExecContext, out_stream: BinaryIO | i
         env=ctx.state.env.copy(),
         powershell_path=ctx.state.powershell_path,
     )
-    try:
-        child, in_prep, out_prep, err_prep = _spawn_with_bridges(
-            argv, scratch_state, subprocess.DEVNULL, out_stream, out_stream, ctx.deadline
-        )
-    except FileNotFoundError:
-        _write_merged(out_stream, f"{name}: command not found\n".encode("utf-8"), ctx)
+    spawned = _spawn_argv_or_report(
+        argv, scratch_state, ctx, subprocess.DEVNULL, out_stream, out_stream
+    )
+    if spawned is None:
         return 127
+    child, in_prep, out_prep, err_prep = spawned
     exit_code = proc.wait_with_deadline(child, ctx.deadline)
     _finish_bridges(in_prep, out_prep, err_prep)
     return exit_code

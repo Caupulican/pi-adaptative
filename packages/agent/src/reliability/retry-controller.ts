@@ -13,7 +13,8 @@
  * racing the retry continuation.
  */
 
-import { type AssistantMessage, isContextOverflow } from "@caupulican/pi-ai";
+import { isContextOverflow } from "@caupulican/pi-ai/overflow";
+import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import type { AgentMessage } from "../types.ts";
 import { classifyFailure } from "./classifier.ts";
 import { computeRetryDelayMs, type RetryPolicy, sleepAbortable } from "./retry.ts";

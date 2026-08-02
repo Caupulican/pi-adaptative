@@ -1,7 +1,5 @@
-import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
-
-const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
+import { piAiSourceAliases } from "./vitest-ai-source-aliases.ts";
 
 export default defineConfig({
 	test: {
@@ -10,10 +8,6 @@ export default defineConfig({
 		testTimeout: 30000, // 30 seconds for API calls
 	},
 	resolve: {
-		alias: [
-			{ find: /^@caupulican\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai$/, replacement: aiSrcIndex },
-		],
+		alias: piAiSourceAliases,
 	},
 });

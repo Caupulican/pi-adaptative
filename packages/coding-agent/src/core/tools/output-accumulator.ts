@@ -145,13 +145,7 @@ export class OutputAccumulator {
 			this.tryEnsureTempFile();
 		}
 
-		return {
-			...snapshot,
-			fullOutputPath: this.fullOutputPath(),
-			fullOutputError: this.tempFileError,
-			persistedOutputTruncated: this.persistedOutputTruncated || undefined,
-			persistedOutputBytes: this.persistedOutputTruncated ? this.persistedOutputBytes : undefined,
-		};
+		return this.withPersistenceState(snapshot);
 	}
 
 	preview(maxLines: number, maxBytes = this.maxBytes): OutputPreview {
@@ -171,6 +165,10 @@ export class OutputAccumulator {
 		if (options.persistIfFullTruncated && this.shouldUseTempFile()) {
 			this.tryEnsureTempFile();
 		}
+		return this.withPersistenceState(snapshot);
+	}
+
+	private withPersistenceState(snapshot: OutputSnapshot): OutputSnapshot {
 		return {
 			...snapshot,
 			fullOutputPath: this.fullOutputPath(),

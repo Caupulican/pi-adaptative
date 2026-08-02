@@ -1,6 +1,10 @@
 import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { OrchestrationPanelComponent, renderOrchestrationPanelLines } from "../src/core/tools/orchestration-panel.ts";
+import {
+	OrchestrationPanelComponent,
+	renderOrchestrationPanelLines,
+	renderOrchestrationToolResult,
+} from "../src/core/tools/orchestration-panel.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -55,5 +59,49 @@ describe("orchestration panel", () => {
 		expect(stripAnsi(collapsed.join("\n"))).not.toContain("blocker:");
 		expect(stripAnsi(expanded.join("\n"))).toContain("blocker:");
 		for (const line of [...collapsed, ...expanded]) expect(visibleWidth(line)).toBeLessThanOrEqual(34);
+	});
+
+	it("owns partial, collapsed, and expanded tool-result projection without deciding tool policy", () => {
+		const model = {
+			label: "workers",
+			status: "running" as const,
+			rows: [{ status: "running" as const, label: "worker-1", details: ["bounded detail"] }],
+		};
+
+		expect(
+			renderOrchestrationToolResult(theme, model, {
+				isPartial: true,
+				collapse: false,
+				expanded: true,
+			}).render(80),
+		).toEqual([]);
+		expect(
+			renderOrchestrationToolResult(theme, model, {
+				isPartial: false,
+				collapse: true,
+				expanded: true,
+			}).render(80),
+		).toEqual([]);
+
+		const collapsed = stripAnsi(
+			renderOrchestrationToolResult(theme, model, {
+				isPartial: false,
+				collapse: false,
+				expanded: false,
+			})
+				.render(80)
+				.join("\n"),
+		);
+		const expanded = stripAnsi(
+			renderOrchestrationToolResult(theme, model, {
+				isPartial: false,
+				collapse: false,
+				expanded: true,
+			})
+				.render(80)
+				.join("\n"),
+		);
+		expect(collapsed).not.toContain("bounded detail");
+		expect(expanded).toContain("bounded detail");
 	});
 });

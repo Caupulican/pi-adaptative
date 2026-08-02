@@ -29,17 +29,32 @@ describe("bundled skills discovery", () => {
 
 		// Verify bundled skills are discovered
 		const skillArchitect = skills.find((s) => s.name === "skill-architect");
+		const skillCreator = skills.find((s) => s.name === "skill-creator");
 		const piHarnessLearning = skills.find((s) => s.name === "pi-harness-learning");
 		const harnessSelfAdaptation = skills.find((s) => s.name === "harness-self-adaptation");
+		const deduplicateByEvidence = skills.find((s) => s.name === "deduplicate-by-evidence");
+		const evidenceGatedTdd = skills.find((s) => s.name === "evidence-gated-tdd");
+		const authorizedWebSecurityAudit = skills.find((s) => s.name === "authorized-web-security-audit");
+		const secureAgentToolSurfaces = skills.find((s) => s.name === "secure-agent-tool-surfaces");
 
 		expect(skillArchitect).toBeDefined();
+		expect(skillCreator).toBeDefined();
 		expect(piHarnessLearning).toBeDefined();
 		expect(harnessSelfAdaptation).toBeDefined();
+		expect(deduplicateByEvidence).toBeDefined();
+		expect(evidenceGatedTdd).toBeDefined();
+		expect(authorizedWebSecurityAudit).toBeDefined();
+		expect(secureAgentToolSurfaces).toBeDefined();
 
 		// Verify bundled skills have correct source info
 		if (skillArchitect) {
 			expect(skillArchitect.sourceInfo?.source).toBe("local");
 			expect(skillArchitect.sourceInfo?.scope).toBe("temporary");
+		}
+
+		if (skillCreator) {
+			expect(skillCreator.sourceInfo?.source).toBe("local");
+			expect(skillCreator.sourceInfo?.scope).toBe("temporary");
 		}
 
 		if (piHarnessLearning) {
@@ -51,6 +66,111 @@ describe("bundled skills discovery", () => {
 			expect(harnessSelfAdaptation.sourceInfo?.source).toBe("local");
 			expect(harnessSelfAdaptation.sourceInfo?.scope).toBe("temporary");
 		}
+
+		if (deduplicateByEvidence) {
+			expect(deduplicateByEvidence.sourceInfo?.source).toBe("local");
+			expect(deduplicateByEvidence.sourceInfo?.scope).toBe("temporary");
+		}
+
+		if (evidenceGatedTdd) {
+			expect(evidenceGatedTdd.sourceInfo?.source).toBe("local");
+			expect(evidenceGatedTdd.sourceInfo?.scope).toBe("temporary");
+		}
+
+		if (authorizedWebSecurityAudit) {
+			expect(authorizedWebSecurityAudit.sourceInfo?.source).toBe("local");
+			expect(authorizedWebSecurityAudit.sourceInfo?.scope).toBe("temporary");
+		}
+
+		if (secureAgentToolSurfaces) {
+			expect(secureAgentToolSurfaces.sourceInfo?.source).toBe("local");
+			expect(secureAgentToolSurfaces.sourceInfo?.scope).toBe("temporary");
+		}
+	});
+
+	it("ships a provider-neutral Pi skill creator with deterministic local tooling", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skill = loader.getSkills().skills.find((candidate) => candidate.name === "skill-creator");
+		expect(skill).toBeDefined();
+		if (!skill) return;
+
+		const content = readFileSync(skill.filePath, "utf8");
+		expect(existsSync(join(dirname(skill.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(content.split("\n").length).toBeLessThan(500);
+		expect(content).toContain("scripts/init-skill.mjs");
+		expect(content).toContain("scripts/validate-skill.mjs");
+		expect(content).toContain("provider-neutral");
+		expect(existsSync(join(dirname(skill.filePath), "scripts", "init-skill.mjs"))).toBe(true);
+		expect(existsSync(join(dirname(skill.filePath), "scripts", "validate-skill.mjs"))).toBe(true);
+	});
+
+	it("ships provider-neutral security workflows with fail-closed authority boundaries", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skills = loader.getSkills().skills;
+		const webAudit = skills.find((candidate) => candidate.name === "authorized-web-security-audit");
+		const toolSurfaces = skills.find((candidate) => candidate.name === "secure-agent-tool-surfaces");
+		expect(webAudit).toBeDefined();
+		expect(toolSurfaces).toBeDefined();
+		if (!webAudit || !toolSurfaces) return;
+
+		const webAuditContent = readFileSync(webAudit.filePath, "utf8");
+		expect(existsSync(join(dirname(webAudit.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(webAuditContent.split("\n").length).toBeLessThan(500);
+		expect(webAuditContent).toContain("written authorization");
+		expect(webAuditContent).toContain("scope manifest");
+		expect(webAuditContent).toContain("negative control");
+		expect(webAuditContent).toContain("Do not infer authorization");
+		expect(existsSync(join(dirname(webAudit.filePath), "references", "assessment-contract.md"))).toBe(true);
+
+		const toolSurfaceContent = readFileSync(toolSurfaces.filePath, "utf8");
+		expect(existsSync(join(dirname(toolSurfaces.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(toolSurfaceContent.split("\n").length).toBeLessThan(500);
+		expect(toolSurfaceContent).toContain("session tenant");
+		expect(toolSurfaceContent).toContain("untrusted result");
+		expect(toolSurfaceContent).toContain("loopback");
+		expect(toolSurfaceContent).toContain("SSRF");
+		expect(toolSurfaceContent).toContain("event-driven");
+		expect(existsSync(join(dirname(toolSurfaces.filePath), "references", "tool-boundary-checklist.md"))).toBe(true);
+		const exploitCataloguePath = join(dirname(toolSurfaces.filePath), "references", "defensive-exploit-catalogue.md");
+		expect(existsSync(exploitCataloguePath)).toBe(true);
+		const exploitCatalogue = readFileSync(exploitCataloguePath, "utf8");
+		expect(exploitCatalogue).toContain("Prompt and tool injection");
+		expect(exploitCatalogue).toContain("DNS rebinding");
+		expect(exploitCatalogue).toContain("Tenant crossover");
+		expect(exploitCatalogue).toContain("Regression oracle");
+	});
+
+	it("ships deduplication and evidence-gated TDD as complete first-party workflows", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skills = loader.getSkills().skills;
+		const deduplicateByEvidence = skills.find((candidate) => candidate.name === "deduplicate-by-evidence");
+		const evidenceGatedTdd = skills.find((candidate) => candidate.name === "evidence-gated-tdd");
+		expect(deduplicateByEvidence).toBeDefined();
+		expect(evidenceGatedTdd).toBeDefined();
+		if (!deduplicateByEvidence || !evidenceGatedTdd) return;
+
+		const deduplicationContent = readFileSync(deduplicateByEvidence.filePath, "utf8");
+		expect(existsSync(join(dirname(deduplicateByEvidence.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(deduplicationContent.split("\n").length).toBeLessThan(500);
+		expect(deduplicationContent).toContain("Detect → Verify → Score → Gate");
+		expect(deduplicationContent).toContain("For jscpd");
+		expect(deduplicationContent).toContain("candidate-file count");
+		expect(deduplicationContent).toContain("zero textual clones");
+
+		const tddContent = readFileSync(evidenceGatedTdd.filePath, "utf8");
+		expect(existsSync(join(dirname(evidenceGatedTdd.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(tddContent.split("\n").length).toBeLessThan(500);
+		expect(tddContent).toContain("Detect → Verify → Score → Gate");
+		expect(tddContent).toContain("negative control");
+		expect(tddContent).toContain("Review the report body");
+		expect(existsSync(join(dirname(evidenceGatedTdd.filePath), "references", "evidence-model.md"))).toBe(true);
+		expect(existsSync(join(dirname(evidenceGatedTdd.filePath), "references", "security-scanners.md"))).toBe(true);
 	});
 
 	it("should ship the harness self-adaptation contract and layer reference", async () => {

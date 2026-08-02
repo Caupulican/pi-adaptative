@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { ansi256ToHex } from "../src/utils/ansi-colors.ts";
 
 function referenceAnsiRegex(): RegExp {
 	const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
@@ -106,5 +107,21 @@ describe("stripAnsi", () => {
 	it("strips common ANSI sequences used in tool output", () => {
 		const input = "a\x1b[31mred\x1b[0m\x1b]8;;https://example.com\x07link\x1b]8;;\x07z";
 		expect(stripAnsi(input)).toBe("aredlinkz");
+	});
+});
+
+describe("ansi256ToHex", () => {
+	it("preserves the basic, cube, and grayscale palette boundaries", () => {
+		expect([
+			ansi256ToHex(0),
+			ansi256ToHex(15),
+			ansi256ToHex(16),
+			ansi256ToHex(17),
+			ansi256ToHex(21),
+			ansi256ToHex(22),
+			ansi256ToHex(231),
+			ansi256ToHex(232),
+			ansi256ToHex(255),
+		]).toEqual(["#000000", "#ffffff", "#000000", "#00005f", "#0000ff", "#005f00", "#ffffff", "#080808", "#eeeeee"]);
 	});
 });

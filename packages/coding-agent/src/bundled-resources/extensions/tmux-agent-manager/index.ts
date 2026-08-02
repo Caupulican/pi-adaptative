@@ -405,6 +405,19 @@ const PROVIDER_COMMANDS: Record<Provider, string> = {
 	opencode: "opencode",
 	custom: "",
 };
+function providerSchema(description?: string) {
+	return Type.Union(
+		[
+			Type.Literal("pi"),
+			Type.Literal("codex"),
+			Type.Literal("agy"),
+			Type.Literal("claude"),
+			Type.Literal("opencode"),
+			Type.Literal("custom"),
+		],
+		description === undefined ? {} : { description },
+	);
+}
 const DEFAULT_DEADLINE_SECONDS = 20 * 60;
 const MAX_DEADLINE_SECONDS = 24 * 60 * 60;
 const TEAM_TEMPLATES: TeamTemplate[] = [
@@ -1135,6 +1148,41 @@ function injectPromptToPane(paneId: string, prompt: string, provider: Provider):
 		`tmux prompt submit for ${paneId}`,
 	);
 }
+type AgentTurnArtifacts = {
+	doneMarker: string;
+	blockedMarker: string;
+	resultPath: string;
+	promptPath: string;
+	watcherPath: string;
+};
+function resolveAgentTurnArtifacts(job: FireTaskPlan, agent: FireAgentPlan, turn: number): AgentTurnArtifacts {
+	const markers = turnMarkers(job, agent, turn);
+	return {
+		doneMarker: markers.doneMarker,
+		blockedMarker: markers.blockedMarker,
+		resultPath: turnResultPath(job.jobDir, agent.id, turn, agent.resultPath),
+		promptPath: turnPromptPath(job.jobDir, agent.id, turn, agent.promptPath),
+		watcherPath: turnWatcherPath(job, turn),
+	};
+}
+function writeAgentTurnWatcher(job: FireTaskPlan, agent: FireAgentPlan, artifacts: AgentTurnArtifacts): void {
+	const turnSpec: PaneWatcherJobSpec = {
+		id: job.id,
+		sessionName: job.sessionName,
+		deadlineSeconds: job.deadlineSeconds,
+		agents: [
+			{
+				...agent,
+				doneMarker: artifacts.doneMarker,
+				blockedMarker: artifacts.blockedMarker,
+				resultPath: artifacts.resultPath,
+				promptPath: artifacts.promptPath,
+			},
+		],
+	};
+	fs.writeFileSync(artifacts.watcherPath, makePaneWatcherScript(turnSpec), { mode: 0o700 });
+	fs.chmodSync(artifacts.watcherPath, 0o700);
+}
 /** Write a fresh per-turn prompt + single-agent watcher script and arm `pipe-pane -O` for it. Used by
  * send_followup to open a NEW turn on an already-live pane. Does not inject the prompt text into the
  * pane itself — callers do that separately via injectPromptToPane, after this has armed the watcher,
@@ -1146,33 +1194,25 @@ function dispatchAgentTurn(
 	promptText: string,
 ): { promptPath: string; resultPath: string; watcherPath: string } {
 	if (!agent.paneId) throw new Error(`tmux agent ${agent.name} has no recorded pane id`);
-	const markers = turnMarkers(job, agent, turn);
-	const resultPath = turnResultPath(job.jobDir, agent.id, turn, agent.resultPath);
-	const promptPath = turnPromptPath(job.jobDir, agent.id, turn, agent.promptPath);
-	const watcherPath = turnWatcherPath(job, turn);
-	fs.writeFileSync(promptPath, `${promptText}\n`, { mode: 0o600 });
-	const turnSpec: PaneWatcherJobSpec = {
-		id: job.id,
-		sessionName: job.sessionName,
-		deadlineSeconds: job.deadlineSeconds,
-		agents: [
-			{ ...agent, doneMarker: markers.doneMarker, blockedMarker: markers.blockedMarker, resultPath, promptPath },
-		],
-	};
-	fs.writeFileSync(watcherPath, makePaneWatcherScript(turnSpec), { mode: 0o700 });
-	fs.chmodSync(watcherPath, 0o700);
+	const artifacts = resolveAgentTurnArtifacts(job, agent, turn);
+	fs.writeFileSync(artifacts.promptPath, `${promptText}\n`, { mode: 0o600 });
+	writeAgentTurnWatcher(job, agent, artifacts);
 	const armed = runTmux([
 		"pipe-pane",
 		"-O",
 		"-t",
 		agent.paneId,
-		`sh ${quoteShell(watcherPath)} ${quoteShell(agent.id)}`,
+		`sh ${quoteShell(artifacts.watcherPath)} ${quoteShell(agent.id)}`,
 	]);
 	if (!armed.ok)
 		throw new Error(
 			`Failed to arm completion watcher for turn ${turn}: ${armed.error || armed.stderr || armed.stdout}`,
 		);
-	return { promptPath, resultPath, watcherPath };
+	return {
+		promptPath: artifacts.promptPath,
+		resultPath: artifacts.resultPath,
+		watcherPath: artifacts.watcherPath,
+	};
 }
 /** Session-level reconcile's resume step: re-arm `pipe-pane` for an agent whose current turn is still
  * pending on a pane tmux confirms is alive AND has no pipe already attached (see tmuxPaneHasPipe). Only
@@ -1181,23 +1221,9 @@ function dispatchAgentTurn(
 function rearmAgentWatcher(job: FireTaskPlan, agent: FireAgentPlan): void {
 	if (!agent.paneId) return;
 	const turn = agent.currentTurn ?? 1;
-	const markers = turnMarkers(job, agent, turn);
-	const resultPath = turnResultPath(job.jobDir, agent.id, turn, agent.resultPath);
-	const promptPath = turnPromptPath(job.jobDir, agent.id, turn, agent.promptPath);
-	const watcherPath = turnWatcherPath(job, turn);
-	if (!fs.existsSync(watcherPath)) {
-		const turnSpec: PaneWatcherJobSpec = {
-			id: job.id,
-			sessionName: job.sessionName,
-			deadlineSeconds: job.deadlineSeconds,
-			agents: [
-				{ ...agent, doneMarker: markers.doneMarker, blockedMarker: markers.blockedMarker, resultPath, promptPath },
-			],
-		};
-		fs.writeFileSync(watcherPath, makePaneWatcherScript(turnSpec), { mode: 0o700 });
-		fs.chmodSync(watcherPath, 0o700);
-	}
-	runTmux(["pipe-pane", "-O", "-t", agent.paneId, `sh ${quoteShell(watcherPath)} ${quoteShell(agent.id)}`]);
+	const artifacts = resolveAgentTurnArtifacts(job, agent, turn);
+	if (!fs.existsSync(artifacts.watcherPath)) writeAgentTurnWatcher(job, agent, artifacts);
+	runTmux(["pipe-pane", "-O", "-t", agent.paneId, `sh ${quoteShell(artifacts.watcherPath)} ${quoteShell(agent.id)}`]);
 }
 function stopTmuxSession(
 	sessionName: string,
@@ -2292,16 +2318,7 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			agents: Type.Optional(
 				Type.Array(
 					Type.Object({
-						provider: Type.Optional(
-							Type.Union([
-								Type.Literal("pi"),
-								Type.Literal("codex"),
-								Type.Literal("agy"),
-								Type.Literal("claude"),
-								Type.Literal("opencode"),
-								Type.Literal("custom"),
-							]),
-						),
+						provider: Type.Optional(providerSchema()),
 						name: Type.Optional(Type.String({ description: "Pane/worker name." })),
 						command: Type.Optional(
 							Type.String({
@@ -2335,19 +2352,7 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 						"Goal this dispatch/grant is scoped to. For grant_dispatch: an unscoped grant (omitted) covers any goal; a scoped grant covers only launches naming the same goalId. For fire_task/send_followup: tags the request for grant-coverage matching.",
 				}),
 			),
-			agent: Type.Optional(
-				Type.Union(
-					[
-						Type.Literal("pi"),
-						Type.Literal("codex"),
-						Type.Literal("agy"),
-						Type.Literal("claude"),
-						Type.Literal("opencode"),
-						Type.Literal("custom"),
-					],
-					{ description: "grant_dispatch: the provider this standing grant authorizes." },
-				),
-			),
+			agent: Type.Optional(providerSchema("grant_dispatch: the provider this standing grant authorizes.")),
 			allowedTools: Type.Optional(
 				Type.Array(Type.String(), {
 					description:

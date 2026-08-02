@@ -14,8 +14,8 @@ import {
 } from "../goals/goal-tool-core.ts";
 import {
 	emptyOrchestrationCall,
-	OrchestrationPanelComponent,
 	type OrchestrationPanelModel,
+	renderOrchestrationToolResult,
 } from "./orchestration-panel.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
@@ -359,10 +359,12 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			return emptyOrchestrationCall();
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) return emptyOrchestrationCall();
 			const details = result.details as GoalToolDetails | undefined;
-			if (!expanded && details?.applied) return emptyOrchestrationCall();
-			return new OrchestrationPanelComponent(theme, goalPanelModel(details), true);
+			return renderOrchestrationToolResult(theme, goalPanelModel(details), {
+				isPartial,
+				collapse: !expanded && details?.applied === true,
+				expanded: true,
+			});
 		},
 		async execute(
 			_toolCallId,

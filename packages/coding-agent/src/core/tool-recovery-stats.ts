@@ -73,6 +73,20 @@ function boundedDetailKey(record: Record<string, unknown>, key: string): string 
 	return OTHER_DETAIL_KEY;
 }
 
+function getTeachEfficacy(stats: ToolArgumentValidationStats, key: string): ToolArgumentValidationTeachEfficacy {
+	const existing = stats.teachEfficacy[key];
+	if (existing) return existing;
+	const created: ToolArgumentValidationTeachEfficacy = {
+		recurrenceBefore: 0,
+		recurrenceAfter: 0,
+		repairedThenSucceeded: 0,
+		repairedThenFailed: 0,
+		repairedThenNotRun: 0,
+	};
+	stats.teachEfficacy[key] = created;
+	return created;
+}
+
 export function consumeToolArgumentValidationRecord(
 	stats: ToolArgumentValidationStats,
 	record: ToolArgumentValidationRecord,
@@ -96,17 +110,7 @@ export function consumeToolArgumentValidationRecord(
 			stats.teachEfficacy,
 			`${record.provider ?? "unknown"}/${record.model ?? "unknown"}:${mode}`,
 		);
-		let efficacy = stats.teachEfficacy[key];
-		if (!efficacy) {
-			efficacy = {
-				recurrenceBefore: 0,
-				recurrenceAfter: 0,
-				repairedThenSucceeded: 0,
-				repairedThenFailed: 0,
-				repairedThenNotRun: 0,
-			};
-			stats.teachEfficacy[key] = efficacy;
-		}
+		const efficacy = getTeachEfficacy(stats, key);
 		if (taught === "none") efficacy.recurrenceBefore++;
 		else efficacy.recurrenceAfter++;
 	}
@@ -116,17 +120,7 @@ export function consumeToolArgumentValidationRecord(
 				stats.teachEfficacy,
 				`${record.provider ?? "unknown"}/${record.model ?? "unknown"}:${repair}`,
 			);
-			let efficacy = stats.teachEfficacy[key];
-			if (!efficacy) {
-				efficacy = {
-					recurrenceBefore: 0,
-					recurrenceAfter: 0,
-					repairedThenSucceeded: 0,
-					repairedThenFailed: 0,
-					repairedThenNotRun: 0,
-				};
-				stats.teachEfficacy[key] = efficacy;
-			}
+			const efficacy = getTeachEfficacy(stats, key);
 			if (executionOutcome === "succeeded") efficacy.repairedThenSucceeded++;
 			if (executionOutcome === "failed") efficacy.repairedThenFailed++;
 			if (executionOutcome === "not_run") efficacy.repairedThenNotRun++;

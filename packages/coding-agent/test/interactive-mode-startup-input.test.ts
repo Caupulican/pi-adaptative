@@ -36,8 +36,10 @@ type InputContext = {
 };
 
 type ClipboardImageContext = {
-	pendingClipboardImages: Array<{ label: string; content: unknown }>;
-	clipboardImageCounter: number;
+	clipboardQueue: {
+		pendingClipboardImages: Array<{ label: string; content: unknown }>;
+		clipboardImageCounter: number;
+	};
 	clipboardImageStore?: { resolveReferences: (text: string) => unknown[] };
 	takeClipboardImagesForText: (text: string) => unknown[] | undefined;
 };
@@ -161,11 +163,13 @@ describe("InteractiveMode startup input", () => {
 		const firstImage = { type: "image", data: "aaa", mimeType: "image/png" };
 		const secondImage = { type: "image", data: "bbb", mimeType: "image/png" };
 		const context: ClipboardImageContext = {
-			pendingClipboardImages: [
-				{ label: "[Image #1]", content: firstImage },
-				{ label: "[Image #2]", content: secondImage },
-			],
-			clipboardImageCounter: 2,
+			clipboardQueue: {
+				pendingClipboardImages: [
+					{ label: "[Image #1]", content: firstImage },
+					{ label: "[Image #2]", content: secondImage },
+				],
+				clipboardImageCounter: 2,
+			},
 			takeClipboardImagesForText: (text: string) =>
 				interactiveModePrototype.takeClipboardImagesForText.call(context, text),
 		};
@@ -174,15 +178,14 @@ describe("InteractiveMode startup input", () => {
 			text: "describe [Image #2]",
 			images: [secondImage],
 		});
-		expect(context.pendingClipboardImages).toEqual([]);
-		expect(context.clipboardImageCounter).toBe(0);
+		expect(context.clipboardQueue.pendingClipboardImages).toEqual([]);
+		expect(context.clipboardQueue.clipboardImageCounter).toBe(0);
 	});
 
 	it("resolves a later natural-language reference from the session image store", () => {
 		const storedImage = { type: "image", data: "stored", mimeType: "image/png" };
 		const context: ClipboardImageContext = {
-			pendingClipboardImages: [],
-			clipboardImageCounter: 0,
+			clipboardQueue: { pendingClipboardImages: [], clipboardImageCounter: 0 },
 			clipboardImageStore: { resolveReferences: () => [storedImage] },
 			takeClipboardImagesForText: (text: string) =>
 				interactiveModePrototype.takeClipboardImagesForText.call(context, text),

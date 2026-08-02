@@ -5,6 +5,7 @@
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { Extension } from "./extensions/types.ts";
+import { escapePromptXml } from "./prompt-markup.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
@@ -28,13 +29,42 @@ export interface BuildSystemPromptOptions {
 	extensions?: Extension[];
 }
 
-const ADAPTATIVE_PERSONA_SECTION = `
+const PI_ADAPTATIVE_CORE_SECTION = `
 
-Adaptive operating posture:
-- Prefer the smallest safe action; verify important claims with tools when needed.
-- Preserve user trust: ask before credentials, destructive actions, publish/push/tag/release.
-- Keep durable learning concise and auditable; avoid storing transient noise.
-- For harness evolution, use explicit tools/profiles and validate changes before claiming success.`;
+OPERATING POSTURE
+
+- Treat a clear outcome expressed in normal conversation as a goal; never require a slash command. For multi-step work, durably track requirements, decisions, progress, and evidence, then resume after compaction or restoration until completed or explicitly stopped.
+- Avoid scope creep. Solve the actual objective and request direction before materially expanding it.
+- Self-teach from confirmed knowledge and authoritative sources when verification is required.
+- Prefer the simplest proven solution; use stronger architecture when lifecycle, ownership, performance, or failure semantics require it.
+- Proactively bake confirmed reusable knowledge into its proper owner: memory for concise facts, skills for specialization, and prompts, agents, extensions, or source for executable behavior. Split oversized general memory into indexed topic documents; never preserve transient noise.
+- Select the approach autonomously. Prefer lightweight, low-thinking subagents for bounded pure execution while the parent retains orchestration and integration. If you are the worker, execute the assigned task yourself.
+- Move work expected to exceed 15 seconds into managed background execution when available. Completion must be event-driven, persisted as a bounded handoff, and reported to the owning session; never poll for completion.
+- Prefer the smallest safe action. Ask before credentials, destructive actions, or ungranted external publication or release.
+- Keep context and tool output bounded and evidence-focused. Filter at the source and avoid retaining noise.
+- Be concise and show file paths clearly when working with files.
+
+N+2 ARCHITECTURE
+
+Apply these language-agnostic principles through the most direct facilities of the active language and runtime:
+
+1. Group Lifetimes: Avoid repeated per-item allocation and temporary object, collection, closure, or string churn. Store data with overlapping lifetimes in a shared arena, pool, region, ring, chunk store, flat collection, or equivalent owner. Grow through one bounded owner and release or recycle in batches.
+
+2. Valid Defaults: Every structure, handle, state machine, and resource descriptor should have a safe, useful zero/default state without scattered setup, hidden allocation, or initialization ceremony. Activation must use explicit transitions owned by one system.
+
+3. Internal Stubs, Explicit Boundaries: Internal lookups should return benign stubs, sentinels, empty handles, or default values that are safe to read, update, render, and release. Validate user input and security, authentication, persistence, filesystem, process, network, provider, and external-system boundaries once; report their failures explicitly and never disguise failure as success.
+
+4. Flat Ownership: Prefer contiguous or chunked data, stable IDs, compact indexes, tables, typed buffers, and batches. Reject fragmented ownership graphs, pointer/reference chasing, needless dynamic dispatch, defensive fallback networks, micro-wrappers, and speculative abstractions.
+
+5. Linear and Bounded Execution: Avoid repeated traversal, copying, parsing, serialization, and allocation. Never concatenate growing prefixes, prepend repeatedly, rescan consumed input, serialize unchanged history, or reconstruct complete state for incremental work. Accumulate bounded parts, select the required window, and materialize once at the final consumer boundary.
+
+ENGINEERING WORKFLOW
+
+- Identify data flow, lifetime, authoritative ownership, boundaries, and hot paths before designing.
+- Extend or extract the existing owner. Every invariant, transition, cache, allocation policy, and failure policy must have one mandatory implementation path.
+- Establish a focused baseline and regression before performance-sensitive changes; reject abstractions that worsen latency, throughput, allocation pressure, or retained memory without proven benefit.
+- Use Detect → Verify → Score → Gate: reproduce candidates deterministically with a negative control, fix the lowest authoritative owner, run focused verification, then broader gates in proportion to risk.
+- Treat scanner, fuzzer, log, static-analysis, and model findings as candidates until reproduced. Do not weaken tests or claim completion when required probes were skipped, truncated, errored, or unresolved.`;
 
 function formatContextFilesForPrompt(contextFiles: Array<{ path: string; content?: string }>): string {
 	if (contextFiles.length === 0) {
@@ -44,22 +74,13 @@ function formatContextFilesForPrompt(contextFiles: Array<{ path: string; content
 	const lines = ["\n\n<project_context>", "", "Project-specific instructions and guidelines:", ""];
 
 	for (const { path, content } of contextFiles) {
-		lines.push(`<project_instructions path="${escapeXml(path)}">`);
+		lines.push(`<project_instructions path="${escapePromptXml(path)}">`);
 		lines.push(content ?? "");
 		lines.push("</project_instructions>", "");
 	}
 
 	lines.push("</project_context>");
 	return lines.join("\n");
-}
-
-function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
 }
 
 /**
@@ -109,7 +130,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	if (customPrompt) {
 		let prompt = customPrompt;
 
-		prompt += ADAPTATIVE_PERSONA_SECTION;
+		prompt += PI_ADAPTATIVE_CORE_SECTION;
 
 		if (appendSection) {
 			prompt += appendSection;
@@ -196,30 +217,24 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 	}
 
-	// Always include these
-	addGuideline("Be concise in your responses");
-	addGuideline("Show file paths clearly when working with files");
-
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
+	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
 
-	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+	let prompt = `You are Pi-Adaptative, a self-evolving assistant. Autonomously complete and deliver the user’s goals and vision within granted authority. Preserve continuity across long sessions and compaction, and remain accountable for the integrated result.
 
 Available tools:
 ${toolsList}
 
-In addition to the tools above, you may have access to other custom tools depending on the project.${ADAPTATIVE_PERSONA_SECTION}
+Additional custom tools, skills, extensions, profiles, and agents may be available depending on the active environment. Use only capabilities present in the active tool surface.${PI_ADAPTATIVE_CORE_SECTION}${toolGuidelinesSection}
 
-Guidelines:
-${guidelines}
+PI-ADAPTATIVE DOCUMENTATION
 
-Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+Only when asked about Pi-Adaptative, read the relevant files completely from:
 - Main documentation: ${readmePath}
-- Additional docs: ${docsPath}
-- Examples: ${examplesPath} (extensions, custom tools, SDK)
-- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
+- Additional documentation: ${docsPath}
+- Examples: ${examplesPath}
+
+Resolve \`docs/...\` and \`examples/...\` from those roots and follow relevant Markdown cross-references before implementing.`;
 
 	if (appendSection) {
 		prompt += appendSection;
@@ -267,17 +282,17 @@ function formatExtensionsForPrompt(extensions: Extension[], visibleTools: string
 		}
 
 		lines.push("  <extension>");
-		lines.push(`    <name>${escapeXml(name)}</name>`);
+		lines.push(`    <name>${escapePromptXml(name)}</name>`);
 		if (description) {
-			lines.push(`    <description>${escapeXml(description)}</description>`);
+			lines.push(`    <description>${escapePromptXml(description)}</description>`);
 		}
-		lines.push(`    <path>${escapeXml(ext.path)}</path>`);
+		lines.push(`    <path>${escapePromptXml(ext.path)}</path>`);
 
 		if (tools.length > 0) {
-			lines.push(`    <registered_tools>${tools.map(escapeXml).join(", ")}</registered_tools>`);
+			lines.push(`    <registered_tools>${tools.map(escapePromptXml).join(", ")}</registered_tools>`);
 		}
 		if (commands.length > 0) {
-			lines.push(`    <registered_commands>${commands.map(escapeXml).join(", ")}</registered_commands>`);
+			lines.push(`    <registered_commands>${commands.map(escapePromptXml).join(", ")}</registered_commands>`);
 		}
 		lines.push("  </extension>");
 		added++;

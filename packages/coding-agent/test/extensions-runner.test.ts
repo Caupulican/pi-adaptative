@@ -9,7 +9,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
-import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import { createExtensionHandlerError, ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -468,6 +468,58 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("normalizes Error and non-Error failures without losing extension attribution", () => {
+			const failure = new Error("handler failed");
+			failure.stack = "handler stack";
+
+			expect(createExtensionHandlerError("/extensions/failing.ts", "context", failure)).toEqual({
+				extensionPath: "/extensions/failing.ts",
+				event: "context",
+				error: "handler failed",
+				stack: "handler stack",
+			});
+			expect(createExtensionHandlerError("/extensions/failing.ts", "input", "plain failure")).toEqual({
+				extensionPath: "/extensions/failing.ts",
+				event: "input",
+				error: "plain failure",
+				stack: undefined,
+			});
+		});
+
+		it("continues after an isolated failure, then stops in order at a cancellation", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_before_switch", async (event) => {
+						event.trace.push("failure");
+						throw new Error("switch failure");
+					});
+					pi.on("session_before_switch", async (event) => {
+						event.trace.push("cancel");
+						return { cancel: true };
+					});
+					pi.on("session_before_switch", async (event) => {
+						event.trace.push("late");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "ordered-cancel.ts"), extCode);
+			const loaded = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(`${error.event}:${error.error}`));
+			const event = {
+				type: "session_before_switch" as const,
+				reason: "new" as const,
+				trace: [] as string[],
+			};
+
+			const result = await runner.emit(event);
+
+			expect(result).toEqual({ cancel: true });
+			expect(event.trace).toEqual(["failure", "cancel"]);
+			expect(errors).toEqual(["session_before_switch:switch failure"]);
+		});
+
 		it("isolates throwing tool_call handlers and still runs later handlers", async () => {
 			const extCode = `
 				export default function(pi) {

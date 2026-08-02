@@ -1,4 +1,5 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
+import { parseModelOutputJsonObject } from "../model-output-json.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 
 /**
@@ -37,7 +38,7 @@ export const CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT = [
 ].join("\n");
 
 export function parseCompactionChunkDigest(text: string): string | undefined {
-	const parsed = extractJsonObject(text);
+	const parsed = parseModelOutputJsonObject(text);
 	if (!parsed) return undefined;
 	const digest = (parsed as { digest?: unknown }).digest;
 	if (typeof digest !== "string") return undefined;
@@ -165,27 +166,8 @@ const DIGEST_MAX_WALL_CLOCK_MS = 20_000;
 const RELEVANCE_MAX_WALL_CLOCK_MS = 8_000;
 export const CURATION_RELEVANCE_MIN_CONFIDENCE = 0.8;
 
-function extractJsonObject(text: string): unknown | undefined {
-	const trimmed = text.trim();
-	const candidates: string[] = [trimmed];
-	const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-	if (fenced?.[1]) candidates.push(fenced[1].trim());
-	const start = trimmed.indexOf("{");
-	const end = trimmed.lastIndexOf("}");
-	if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
-	for (const candidate of candidates) {
-		try {
-			const parsed = JSON.parse(candidate);
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-		} catch {
-			// try next candidate
-		}
-	}
-	return undefined;
-}
-
 export function parseCurationDigest(text: string): string | undefined {
-	const parsed = extractJsonObject(text);
+	const parsed = parseModelOutputJsonObject(text);
 	if (!parsed) return undefined;
 	const digest = (parsed as { digest?: unknown }).digest;
 	if (typeof digest !== "string") return undefined;
@@ -207,7 +189,7 @@ function fenceDigestForStorage(digest: string): string {
 }
 
 export function parseCurationRelevance(text: string): { relevant: boolean; confidence: number } | undefined {
-	const parsed = extractJsonObject(text);
+	const parsed = parseModelOutputJsonObject(text);
 	if (!parsed) return undefined;
 	const record = parsed as { relevant?: unknown; confidence?: unknown };
 	if (typeof record.relevant !== "boolean") return undefined;
