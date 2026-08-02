@@ -24,6 +24,7 @@
 - Bounded collapsed streamed write previews so growing content is neither rescanned nor fully split and highlighted on each update.
 - Kept native delegation available when tmux is missing or unsupported, validated tmux before worktree/process side effects, and prevented regular agents from overriding the owner's worker profile at dispatch time.
 - Kept base-profile delegation working with branch-unaware session adapters while explicitly blocking session task-profile persistence on that unsupported boundary.
+- Kept local binary release packaging able to stamp the bundled jscpd version when dependency installation is intentionally skipped.
 
 ## [0.84.1] - 2026-08-02
 

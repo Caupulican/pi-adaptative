@@ -80,6 +80,7 @@ fi
 if [[ "$OUTPUT_DIR" != /* ]]; then
     OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
 fi
+JSCPD_VERSION=$(node -p "require('./packages/coding-agent/package.json').dependencies.jscpd")
 
 if [[ "$SKIP_INSTALL" == "false" ]]; then
     echo "==> Installing dependencies..."
@@ -91,7 +92,6 @@ fi
 if [[ "$SKIP_DEPS" == "false" ]]; then
     echo "==> Installing cross-platform native bindings..."
     CLIPBOARD_VERSION=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
-    JSCPD_VERSION=$(node -p "require('./packages/coding-agent/package.json').dependencies.jscpd")
     # npm ci only installs optional deps for the current platform
     # We need the base clipboard package and all platform bindings for bun cross-compilation
     # Use --force to bypass platform checks (os/cpu restrictions in package.json)

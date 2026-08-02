@@ -97,6 +97,9 @@ describe("bundled jscpd", () => {
 
 		const buildScript = await readFile(resolve(packageRoot, "..", "..", "scripts", "build-binaries.sh"), "utf8");
 		expect(buildScript).toContain("dependencies.jscpd");
+		expect(buildScript.indexOf("JSCPD_VERSION=$(node")).toBeLessThan(
+			buildScript.indexOf('if [[ "$SKIP_DEPS" == "false" ]]'),
+		);
 		expect(buildScript).toContain('jscpd-windows-x64-msvc@"$JSCPD_VERSION"');
 		expect(buildScript).toContain("bundled-tools/jscpd");
 
