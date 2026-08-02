@@ -508,9 +508,9 @@ export class InteractiveMode {
 		// Load changelog (only show new entries, skip for resumed sessions)
 		this.changelogMarkdown = this.getChangelogForDisplay();
 
-		// Ensure fd and rg are available (downloads if missing, adds to PATH via getBinDir)
-		// Both are needed: fd for autocomplete, rg for grep tool and bash commands
-		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
+		// Ensure the shared discovery/projection binaries are available and on PATH.
+		// fd feeds autocomplete; rg and jq keep source/JSON filtering outside V8.
+		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg"), ensureTool("jq")]);
 		this.fdPath = fdPath;
 
 		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {

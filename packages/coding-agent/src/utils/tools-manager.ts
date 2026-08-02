@@ -33,6 +33,8 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
 const FFF_NODE_VERSION = "0.9.6";
+export const RG_VERSION = "15.2.0";
+export const JQ_VERSION = "1.8.2";
 export const UV_VERSION = "0.11.28";
 const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
 const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
@@ -55,11 +57,12 @@ interface ToolConfig {
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
+	downloadKind?: "archive" | "binary";
 	pinnedVersion?: string;
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
-const TOOLS: Record<"fd" | "rg" | "uv", ToolConfig> = {
+const TOOLS: Record<"fd" | "jq" | "rg" | "uv", ToolConfig> = {
 	fd: {
 		name: "fd",
 		repo: "sharkdp/fd",
@@ -85,6 +88,7 @@ const TOOLS: Record<"fd" | "rg" | "uv", ToolConfig> = {
 		repo: "BurntSushi/ripgrep",
 		binaryName: "rg",
 		tagPrefix: "",
+		pinnedVersion: RG_VERSION,
 		getAssetName: (version, plat, architecture) => {
 			if (plat === "darwin") {
 				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
@@ -99,6 +103,45 @@ const TOOLS: Record<"fd" | "rg" | "uv", ToolConfig> = {
 				return `ripgrep-${version}-${archStr}-pc-windows-msvc.zip`;
 			}
 			return null;
+		},
+		sha256ByAsset: {
+			"ripgrep-15.2.0-aarch64-apple-darwin.tar.gz":
+				"3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4",
+			"ripgrep-15.2.0-aarch64-pc-windows-msvc.zip":
+				"e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f",
+			"ripgrep-15.2.0-aarch64-unknown-linux-gnu.tar.gz":
+				"a740b91c82eaf9914cfedd353572f2791cbe0162c84101ee0951058f4dcbc90d",
+			"ripgrep-15.2.0-x86_64-apple-darwin.tar.gz":
+				"af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1",
+			"ripgrep-15.2.0-x86_64-pc-windows-msvc.zip":
+				"71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+			"ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz":
+				"33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+		},
+	},
+	jq: {
+		name: "jq",
+		repo: "jqlang/jq",
+		binaryName: "jq",
+		systemBinaryNames: ["jq"],
+		tagPrefix: "jq-",
+		downloadKind: "binary",
+		pinnedVersion: JQ_VERSION,
+		getAssetName: (_version, plat, architecture) => {
+			if (architecture !== "arm64" && architecture !== "x64") return null;
+			const archStr = architecture === "arm64" ? "arm64" : "amd64";
+			if (plat === "darwin") return `jq-macos-${archStr}`;
+			if (plat === "linux") return `jq-linux-${archStr}`;
+			if (plat === "win32") return `jq-windows-${archStr}.exe`;
+			return null;
+		},
+		sha256ByAsset: {
+			"jq-linux-amd64": "b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f",
+			"jq-linux-arm64": "8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309",
+			"jq-macos-amd64": "e94b266e3c26690550006abe63152b782280f4e14374accdf04cbde844f00bc0",
+			"jq-macos-arm64": "2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e",
+			"jq-windows-amd64.exe": "a6fc67fedaf9128a3309a1e2ebb8b986aeccf70122ee46d2cb4849e423f0c627",
+			"jq-windows-arm64.exe": "083b5377392bc57cf27052b6d20a2d927770683bca844632901ff38b4b7b0ac7",
 		},
 	},
 	uv: {
@@ -491,6 +534,17 @@ function extractZipArchive(archivePath: string, extractDir: string, assetName: s
 	throw new Error(`Failed to extract ${assetName}: ${failures.join("; ")}`);
 }
 
+/** Move a verified upstream standalone executable into Pi's managed bin directory. */
+export function installStandaloneBinaryAsset(
+	downloadedPath: string,
+	binaryPath: string,
+	targetPlatform: string = platform(),
+): void {
+	mkdirSync(dirname(binaryPath), { recursive: true });
+	renameSync(downloadedPath, binaryPath);
+	if (targetPlatform !== "win32") chmodSync(binaryPath, 0o755);
+}
+
 // Download and install a tool
 const toolDownloadPromises = new Map<ManagedToolName, Promise<string | undefined>>();
 
@@ -516,7 +570,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 	const plat = platform();
 	const architecture = arch();
 
-	// Pinned tools are reproducible; legacy search tools retain their current latest-release behavior.
+	// Pinned tools are reproducible and verified before installation.
 	let version = config.pinnedVersion ?? (await getLatestVersion(config.repo));
 	if (tool === "fd" && plat === "darwin" && architecture === "x64") {
 		version = "10.3.0";
@@ -547,7 +601,16 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 		throw new Error(`SHA-256 verification failed for ${assetName}`);
 	}
 
-	// Extract into a unique temp directory. fd and rg downloads can run concurrently
+	if (config.downloadKind === "binary") {
+		try {
+			installStandaloneBinaryAsset(archivePath, binaryPath, plat);
+		} finally {
+			rmSync(archivePath, { force: true });
+		}
+		return binaryPath;
+	}
+
+	// Extract into a unique temp directory. Tool downloads can run concurrently
 	// during startup, so sharing a fixed directory causes races.
 	const extractDir = join(
 		downloadWorkDir,
@@ -597,6 +660,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 // Termux package names for tools
 const TERMUX_PACKAGES: Record<ManagedToolName, string> = {
 	fd: "fd",
+	jq: "jq",
 	rg: "ripgrep",
 	uv: "uv",
 };

@@ -5,7 +5,7 @@ Pi supports native Windows on x64 and ARM64. The Node.js package runs under Wind
 ## Prerequisites
 
 - Windows 10 or newer
-- Node.js 22.19 or newer for the npm package
+- Node.js 24.18 or newer for the npm package
 - Windows PowerShell 5.1 or PowerShell 7
 - Git for Windows for native Git commands
 - Windows Terminal, WezTerm, or the VS Code terminal for the best keyboard support
@@ -129,7 +129,7 @@ A Windows release is expected to preserve the same Pi features as Linux and macO
 | Sessions, branching, compaction, context storage, export, and sharing | Native | Agent and coding-agent session tests on Windows |
 | Background delegation, goal continuation, reflection, and worker queues | Native | Delegation and liveness suites on Windows; no tmux dependency |
 | Clipboard text, clipboard images, and image processing | Native | Windows native clipboard binding is packaged per architecture; conversion tests run headlessly |
-| Managed `rg`, `fd`, Ollama, and Transformers runtimes | Native where the upstream runtime supports the architecture | Platform selection, install, process, and lifecycle tests on Windows |
+| Managed `rg`, `jq`, `fd`, Ollama, and Transformers runtimes | Native where the upstream runtime supports the architecture | Platform selection, install, process, and lifecycle tests on Windows |
 | Toolkit scripts | Native | PowerShell, Bash, and `uv` runners use the same bounded process lifecycle |
 | External editor and browser launch | Native | Windows process-launch tests; `$EDITOR`/`$VISUAL` and the default browser remain user choices |
 | Self-update | npm and pnpm global installs | Windows native-dependency quarantine and update-path tests |

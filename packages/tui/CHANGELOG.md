@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Require Node.js 24.18.0 or newer.
+
 ## [0.81.43] - 2026-08-02
 
 ### Changed

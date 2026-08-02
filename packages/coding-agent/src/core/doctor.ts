@@ -2,9 +2,9 @@ import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import {
 	ensureFffNodePackage,
+	ensureTool,
 	type FffInstallOutcome,
 	getLastFffInstallOutcome,
-	getToolPath,
 	loadAvailableFffNodePackage,
 	probeVersion,
 } from "../utils/tools-manager.ts";
@@ -21,15 +21,15 @@ import { ensurePythonRuntime, type PythonRuntimeOutcome } from "./python-runtime
  *
  * Two tool kinds, two different postures:
  * - "managed": pi owns provisioning and attempts it when absent (fff-node,
- *   plus pinned uv and the Python interpreter resolved through it).
- * - "system": pi does not own the install (ripgrep and ollama). GUIDE MODE
- *   only -- exact manual steps are reported, never executed.
+ *   pinned rg/jq/uv, and the Python interpreter resolved through uv).
+ * - "system": pi does not own the install (Ollama). GUIDE MODE only -- exact
+ *   manual steps are reported, never executed.
  */
 
 export type DoctorToolKind = "managed" | "system";
 
 export interface DoctorCheck {
-	/** Stable identifier, e.g. "fff-node", "ripgrep", "ollama", "python". */
+	/** Stable identifier, e.g. "fff-node", "ripgrep", "jq", "ollama", "python". */
 	id: string;
 	/** Human-readable label for the report. */
 	label: string;
@@ -61,7 +61,7 @@ export interface DoctorDeps {
 	loadAvailableFffNodePackage: () => unknown | undefined;
 	ensureFffNodePackage: (silent?: boolean) => Promise<unknown | undefined>;
 	getLastFffInstallOutcome: () => FffInstallOutcome | undefined;
-	getRgPath: () => string | null;
+	ensureTool: (tool: "jq" | "rg", silent: boolean) => Promise<string | undefined>;
 	ensurePythonRuntime: (options: { silent: boolean }) => Promise<PythonRuntimeOutcome>;
 	/** Best-effort `<command> --version` probe; undefined if it can't be run. Used only to enrich a status line, never for presence detection. */
 	probeVersion: (command: string, versionArgs?: readonly string[]) => string | undefined;
@@ -83,20 +83,12 @@ const realDoctorDeps: DoctorDeps = {
 	loadAvailableFffNodePackage,
 	ensureFffNodePackage,
 	getLastFffInstallOutcome,
-	getRgPath: () => getToolPath("rg"),
+	ensureTool,
 	ensurePythonRuntime,
 	probeVersion,
 	ollamaRuntime: new OllamaRuntime({ agentDir: getAgentDir() }),
 	inspectAgentDirectoryLayout: () => inspectAgentDirectoryLayout(getAgentDir()),
 };
-
-const RIPGREP_GUIDE = [
-	"ripgrep (rg) was not found. Pi never runs installers itself -- manual steps (user-level, no sudo):",
-	"  - macOS (Homebrew): brew install ripgrep",
-	"  - Debian/Ubuntu: apt install ripgrep",
-	"  - Arch: pacman -S ripgrep",
-	"  - Or download a release: https://github.com/BurntSushi/ripgrep/releases",
-];
 
 function describeFffOutcome(outcome: FffInstallOutcome | undefined): string {
 	switch (outcome?.status) {
@@ -139,17 +131,17 @@ async function checkFffNode(deps: DoctorDeps, silent: boolean): Promise<DoctorCh
 	};
 }
 
-/** SYSTEM tool: guide mode only, never installed by the doctor. */
-function checkRipgrep(deps: DoctorDeps): DoctorCheck {
-	const path = deps.getRgPath();
-	if (!path) {
-		return { id: "ripgrep", label: "ripgrep (rg)", kind: "system", present: false, guide: RIPGREP_GUIDE };
-	}
+/** MANAGED tools: exact releases and checksums are owned by tools-manager. */
+async function checkManagedDataTool(deps: DoctorDeps, tool: "jq" | "rg", silent: boolean): Promise<DoctorCheck> {
+	const path = await deps.ensureTool(tool, silent);
+	const id = tool === "rg" ? "ripgrep" : "jq";
+	const label = tool === "rg" ? "ripgrep (rg)" : "jq (JSON projection)";
+	if (!path) return { id, label, kind: "managed", present: false, detail: "managed install unavailable" };
 	const version = firstLine(deps.probeVersion(path));
 	return {
-		id: "ripgrep",
-		label: "ripgrep (rg)",
-		kind: "system",
+		id,
+		label,
+		kind: "managed",
 		present: true,
 		detail: version ? `${path} (${version})` : path,
 	};
@@ -235,12 +227,14 @@ export async function runDoctor(
 	options: RunDoctorOptions = {},
 ): Promise<DoctorReport> {
 	const silent = options.silent ?? true;
-	const [fffNode, ollama, python] = await Promise.all([
+	const [fffNode, ripgrep, jq, ollama, python] = await Promise.all([
 		checkFffNode(deps, silent),
+		checkManagedDataTool(deps, "rg", silent),
+		checkManagedDataTool(deps, "jq", silent),
 		checkOllama(deps),
 		checkPython(deps, silent),
 	]);
-	return { checks: [fffNode, checkRipgrep(deps), ollama, python], notices: checkAgentDirectoryLayout(deps) };
+	return { checks: [fffNode, ripgrep, jq, ollama, python], notices: checkAgentDirectoryLayout(deps) };
 }
 
 export function formatDoctorReport(report: DoctorReport): string {

@@ -64,7 +64,7 @@ straggler:
     state/extensions/<namespace>/                                                      extension durable state
   cache/     rebuildable, safe to delete: tool-path probes, jiti transform cache, uv    -- cacheDir/cacheFile
     cache/extensions/<namespace>/                                                      extension rebuildable cache
-  bin/       managed executable helpers (fd, rg)                                       -- binDir (legacy getBinDir accessor)
+  bin/       managed executable helpers (fd, rg, jq, uv)                               -- binDir (legacy getBinDir accessor)
   work/      transient/scratch (this document)                                         -- re-exported from agent-paths.ts
     work/extensions/<namespace>/<run-id>/                                              extension leased work
   runtimes/<kind>  models/<kind>  sessions/  npm/  git/  worktrees/                    -- runtimesDir/modelsDir/sessionsDir/npmDir/gitDir/worktreesDir

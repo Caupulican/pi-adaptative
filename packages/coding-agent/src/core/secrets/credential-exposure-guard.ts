@@ -31,6 +31,8 @@ const PYTHON_INSPECTION_RE = /\b(?:open|read_text|read_bytes)\b/;
 const QUOTED_TEXT_RE = /(["'])([^"'\\]*(?:\\.[^"'\\]*)*)\1/g;
 const MAX_REDACTED_DETAIL_DEPTH = 8;
 const MAX_REDACTED_DETAIL_NODES = 10_000;
+const JQ_OPTIONS_WITH_ONE_OPERAND = new Set(["-L", "--indent"]);
+const JQ_OPTIONS_WITH_TWO_OPERANDS = new Set(["--arg", "--argjson", "--rawfile", "--slurpfile"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -77,16 +79,20 @@ function shellCredentialRisk(
 	command: string,
 	cwd: string,
 	vault?: SecretVault,
-): "broad_search" | "credential_path" | undefined {
+): "broad_search" | "credential_path" | "process_environment" | undefined {
 	const shellTokens = tokenizeShellCommand(command);
 	if (!shellTokens) return /\b(?:grep|rg)\b/iu.test(command) ? "broad_search" : undefined;
 
 	const assessInvocation = (
 		invocation: string[],
 		readsPipe: boolean,
-	): "broad_search" | "credential_path" | undefined => {
+	): "broad_search" | "credential_path" | "process_environment" | undefined => {
 		for (let commandIndex = 0; commandIndex < invocation.length; commandIndex++) {
 			const toolName = (invocation[commandIndex].split(/[\\/]/u).at(-1) ?? "").toLowerCase().replace(/\.exe$/u, "");
+			if (toolName === "jq") {
+				const filter = jqFilterFromArgs(invocation.slice(commandIndex + 1));
+				if (filter && jqFilterReadsProcessEnvironment(filter)) return "process_environment";
+			}
 			if (!SHELL_INSPECTION_COMMANDS.has(toolName)) continue;
 			const args = invocation.slice(commandIndex + 1);
 			const searchTool: ShellContentSearchTool | undefined =
@@ -134,6 +140,28 @@ function shellCredentialRisk(
 		readsPipe = token.kind === "pipe";
 	}
 	return assessInvocation(invocation, readsPipe);
+}
+
+function jqFilterFromArgs(args: string[]): string | undefined {
+	for (let index = 0; index < args.length; index++) {
+		const token = args[index];
+		if (token === "--") return args[index + 1];
+		if (JQ_OPTIONS_WITH_TWO_OPERANDS.has(token)) {
+			index += 2;
+			continue;
+		}
+		if (JQ_OPTIONS_WITH_ONE_OPERAND.has(token)) {
+			index++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		return token;
+	}
+	return undefined;
+}
+
+function jqFilterReadsProcessEnvironment(filter: string): boolean {
+	return /(?:^|[\s|,(:;[])(?:env|\$ENV)(?=$|[\s|),.;[\]}])/u.test(filter);
 }
 
 function isCredentialSafeGlob(glob: string): boolean {
@@ -208,6 +236,9 @@ export function credentialToolBlockReason(
 		const shellRisk = shellCredentialRisk(command, cwd, vault);
 		if (shellRisk === "broad_search") {
 			return "Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.";
+		}
+		if (shellRisk === "process_environment") {
+			return "Direct jq projection of the process environment is blocked because it can expose credentials. Query bounded JSON inputs instead.";
 		}
 		if (SHELL_SECRET_READ_RE.test(command) || shellRisk === "credential_path") {
 			return "Direct shell inspection of credential dotenv files is blocked. Use secret_store, then run the credential-consuming command normally.";

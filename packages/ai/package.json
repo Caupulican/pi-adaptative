@@ -156,7 +156,7 @@
 		"directory": "packages/ai"
 	},
 	"engines": {
-		"node": ">=22.19.0"
+		"node": ">=24.18.0"
 	},
 	"devDependencies": {
 		"@types/node": "24.12.4",

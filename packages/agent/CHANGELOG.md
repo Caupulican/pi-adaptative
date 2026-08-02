@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Require Node.js 24.18.0 or newer.
+
+### Fixed
+
+- Reopen large persisted sessions with bounded payload ownership by disk-backing each oversized message during the streaming load pass, preventing aggregate history from exhausting the V8 heap.
+
 ## [0.81.43] - 2026-08-02
 
 ### Added

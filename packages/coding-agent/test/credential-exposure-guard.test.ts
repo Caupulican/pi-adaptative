@@ -31,6 +31,20 @@ describe("credential exposure guard", () => {
 		expect(credentialToolBlockReason("bash", { command: "npm run deploy" }, cwd)).toBeUndefined();
 	});
 
+	it("blocks jq process-environment projection without blocking ordinary env fields", () => {
+		const cwd = "/workspace";
+		expect(credentialToolBlockReason("bash", { command: "jq -n 'env'" }, cwd)).toContain("environment");
+		expect(credentialToolBlockReason("bash", { command: "jq -n '$ENV.API_TOKEN'" }, cwd)).toContain("environment");
+		expect(credentialToolBlockReason("bash", { command: "jq -n '[env]'" }, cwd)).toContain("environment");
+		expect(credentialToolBlockReason("bash", { command: "jq -n '{token: $ENV.API_TOKEN}'" }, cwd)).toContain(
+			"environment",
+		);
+		expect(credentialToolBlockReason("powershell", { command: 'jq ".env" config.json' }, cwd)).toBeUndefined();
+		expect(
+			credentialToolBlockReason("bash", { command: 'jq ".label == \\"env\\"" config.json' }, cwd),
+		).toBeUndefined();
+	});
+
 	it("keeps quoted search alternation intact while proving an explicit file scope", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-secret-search-scope-"));
 		tempDirs.push(root);

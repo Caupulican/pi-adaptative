@@ -158,7 +158,7 @@ export function extensionCacheDir(agentDir: string, namespace: string): string {
 	return cacheFile(agentDir, "extensions", namespace);
 }
 
-/** `<agentDir>/bin` -- managed executable helpers (fd, rg). */
+/** `<agentDir>/bin` -- managed executable helpers (fd, rg, jq, uv). */
 export function binDir(agentDir: string): string {
 	return join(agentDir, "bin");
 }

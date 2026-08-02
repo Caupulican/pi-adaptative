@@ -4,7 +4,7 @@ See [AGENTS.md](https://github.com/earendil-works/pi-mono/blob/main/AGENTS.md) f
 
 ## Setup
 
-Development and CI use Node.js 24 (pinned in the repository's `.nvmrc`). Published packages retain a minimum supported runtime of Node.js 22.19.
+Development, CI, and published packages use Node.js 24.18.0 or newer, pinned in the repository's `.nvmrc` to the current LTS patch.
 
 ```bash
 git clone https://github.com/earendil-works/pi-mono

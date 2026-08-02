@@ -570,7 +570,7 @@ export function getToolsDir(): string {
 	return join(getAgentDir(), "tools");
 }
 
-/** Get path to managed binaries directory (fd, rg) */
+/** Get path to managed binaries directory (fd, rg, jq, uv) */
 export function getBinDir(): string {
 	return join(getAgentDir(), "bin");
 }

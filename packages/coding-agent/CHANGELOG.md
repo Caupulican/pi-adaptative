@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Require Node.js 24.18.0 or newer.
+
+### Added
+
+- Provision checksum-pinned ripgrep 15.2.0 and jq 1.8.2 binaries for supported Linux, macOS, and Windows targets, and report both through `/doctor`.
+
+### Changed
+
+- Guide agents to use ripgrep for candidate filtering and jq for bounded JSON projection before native semantic parsing.
+
+### Fixed
+
+- Block jq filters that project the process environment while preserving ordinary `.env` JSON field queries.
+
 ## [0.81.43] - 2026-08-02
 
 ### Added

@@ -490,10 +490,18 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 	}
 }
 
-/** Exported for testing */
-export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?: number }): FileEntry[] {
+interface SessionEntryFileLocation {
+	offset: number;
+	length: number;
+}
+
+function loadEntriesFromFileInternal(
+	filePath: string,
+	options?: { maxLineChars?: number },
+	onEntry?: (entry: FileEntry, offset: number | undefined, length: number | undefined) => void,
+): { entries: FileEntry[]; indexedBytes: number } {
 	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return [];
+	if (!existsSync(resolvedFilePath)) return { entries: [], indexedBytes: 0 };
 
 	// A single line beyond this budget can never become a usable entry, and
 	// accumulating it would crash the whole load (RangeError near V8's max string
@@ -501,7 +509,16 @@ export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?:
 	const maxLineChars = options?.maxLineChars ?? MAX_SESSION_LINE_CHARS;
 
 	const entries: FileEntry[] = [];
+	const appendLine = (line: string, offset?: number, length?: number): void => {
+		const entry = parseSessionEntryLine(line);
+		if (!entry) return;
+		onEntry?.(entry, offset, length);
+		entries.push(entry);
+	};
 	const fd = openSync(resolvedFilePath, "r");
+	let indexedBytes = 0;
+	let lineOffset = 0;
+	let lineLength = 0;
 	try {
 		const decoder = new StringDecoder("utf8");
 		const lines = new StreamingLineDecoder(maxLineChars, { overflow: "skip", lineEndings: "lf" });
@@ -510,38 +527,53 @@ export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?:
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
-			for (const line of lines.push(decoder.write(buffer.subarray(0, bytesRead)))) {
-				const entry = parseSessionEntryLine(line);
-				if (entry) entries.push(entry);
+			const chunkOffset = indexedBytes;
+			indexedBytes += bytesRead;
+			const offsets: number[] = [];
+			const lengths: number[] = [];
+			let segmentStart = 0;
+			while (segmentStart < bytesRead) {
+				const newlineIndex = buffer.indexOf(0x0a, segmentStart);
+				if (newlineIndex === -1 || newlineIndex >= bytesRead) break;
+				lineLength += newlineIndex - segmentStart;
+				offsets.push(lineOffset);
+				lengths.push(lineLength);
+				lineOffset = chunkOffset + newlineIndex + 1;
+				lineLength = 0;
+				segmentStart = newlineIndex + 1;
+			}
+			lineLength += bytesRead - segmentStart;
+			const decodedLines = lines.push(decoder.write(buffer.subarray(0, bytesRead)));
+			const locationsMatch = decodedLines.length === offsets.length;
+			for (let index = 0; index < decodedLines.length; index++) {
+				appendLine(
+					decodedLines[index],
+					locationsMatch ? offsets[index] : undefined,
+					locationsMatch ? lengths[index] : undefined,
+				);
 			}
 		}
 
-		for (const line of lines.push(decoder.end())) {
-			const entry = parseSessionEntryLine(line);
-			if (entry) entries.push(entry);
-		}
+		for (const line of lines.push(decoder.end())) appendLine(line);
 		const finalLine = lines.finish();
-		if (finalLine !== undefined) {
-			const entry = parseSessionEntryLine(finalLine);
-			if (entry) entries.push(entry);
-		}
+		if (finalLine !== undefined) appendLine(finalLine, lineOffset, lineLength);
 	} finally {
 		closeSync(fd);
 	}
 
 	// Validate session header
-	if (entries.length === 0) return entries;
+	if (entries.length === 0) return { entries, indexedBytes };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return [];
+		return { entries: [], indexedBytes };
 	}
 
-	return entries;
+	return { entries, indexedBytes };
 }
 
-interface SessionEntryFileLocation {
-	offset: number;
-	length: number;
+/** Exported for testing */
+export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?: number }): FileEntry[] {
+	return loadEntriesFromFileInternal(filePath, options).entries;
 }
 
 const ENTRY_ID_PREFIX_BYTES = 64 * 1024;
@@ -967,12 +999,32 @@ export class SessionManager {
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			this.fileEntries = loadEntriesFromFile(this.sessionFile);
+			// The session file is the cold payload arena. Release each large payload as
+			// soon as its JSONL record is parsed so GC can reclaim it during this pass;
+			// waiting until the complete history is loaded makes peak heap proportional
+			// to file size and can OOM before post-load compaction cleanup runs.
+			const loaded = loadEntriesFromFileInternal(this.sessionFile, undefined, (entry, offset, length) => {
+				if (entry.type !== "message") return;
+				this._releaseMessageProperty(entry, "content");
+				this._releaseMessageProperty(entry, "output");
+				if (offset !== undefined && length !== undefined && this.coldPayloadEntryIds.has(entry.id)) {
+					this.entryFileLocations.set(entry.id, { offset, length });
+				}
+			});
+			this.fileEntries = loaded.entries;
+			let indexedEveryColdPayload = true;
+			for (const id of this.coldPayloadEntryIds) {
+				if (this.entryFileLocations.has(id)) continue;
+				indexedEveryColdPayload = false;
+				break;
+			}
+			if (indexedEveryColdPayload) this.indexedSessionFileBytes = loaded.indexedBytes;
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
 			// to avoid appending messages without a session header (which breaks the session)
 			if (this.fileEntries.length === 0) {
 				const explicitPath = this.sessionFile;
+				this._resetEntryFileIndex(true);
 				this.newSession();
 				this.sessionFile = explicitPath;
 				this._rewriteFile();
@@ -982,6 +1034,7 @@ export class SessionManager {
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? createSessionId();
+			this._ensureEntryFileLocations(this.coldPayloadEntryIds);
 
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();

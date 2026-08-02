@@ -194,6 +194,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		addGuideline(
 			"Keep searches bounded and purposeful: discover paths first, pass an explicit root and filters, prefer rg over broad find, and raise command timeouts only for a justified scoped search",
 		);
+		addGuideline(
+			"Use rg for text candidate filtering and jq for bounded JSON projection; parse only selected records natively for exact semantic verification, and avoid slurping full datasets or building large shell pipelines",
+		);
 	}
 	if (hasPython) {
 		addGuideline(
