@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
+import { ensureManagedJscpd } from "./bundled-jscpd.ts";
 import { normalizePath } from "./paths.ts";
 
 export type PlatformShellToolName = "bash" | "powershell";
@@ -104,6 +105,7 @@ function getBashConfig(): ShellConfig {
 // boot on Windows) and is a process-lifetime invariant, so successful resolutions are cached.
 // Failures are not cached: the user can install a shell and retry without restarting.
 const resolvedPlatformShellConfigs = new Map<PlatformShellToolName, ShellConfig>();
+let managedJscpdProvisionAttempted = false;
 
 /** Resolve the requested shell. Runtime callers omit shellName to select PowerShell on Windows and Bash elsewhere. */
 export function getShellConfig(
@@ -127,6 +129,14 @@ export function getShellConfig(
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {
+	if (!managedJscpdProvisionAttempted) {
+		managedJscpdProvisionAttempted = true;
+		try {
+			ensureManagedJscpd();
+		} catch {
+			// The jscpd wrapper and doctor surface the exact packaging failure. Shell startup stays usable.
+		}
+	}
 	const binDir = getBinDir();
 	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
 	const currentPath = process.env[pathKey] ?? "";

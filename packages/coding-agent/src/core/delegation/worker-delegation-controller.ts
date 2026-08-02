@@ -25,6 +25,13 @@ import type {
 	WorkerExecutionContract,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
+import {
+	type TaskProfileCreateInput,
+	type TaskProfileCreateResult,
+	type TaskProfileInspection,
+	TaskProfileWriter,
+} from "../orchestration/task-profile-writer.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
 	createWorkerExecutionContract,
@@ -152,6 +159,8 @@ export class WorkerDelegationController {
 	private readonly workerAbort = new AbortController();
 	private readonly lifecycle: WorkerLifecycle;
 	private profileResolver: WorkerProfileResolver | undefined;
+	private taskProfileStore: SessionTaskProfileStore | undefined;
+	private taskProfileWriter: TaskProfileWriter | undefined;
 	private readonly recovery: WorkerRecoveryCoordinator;
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
@@ -367,9 +376,31 @@ export class WorkerDelegationController {
 			getModelRegistry: () => this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
 			getActiveOrchestrationProfile: () => this.deps.getActiveOrchestrationProfile?.(),
+			getTaskProfileStore: () => this.getTaskProfileStore(),
 			onDiagnostic: (message) => this.safeWarn(message),
 		});
 		return this.profileResolver;
+	}
+
+	private getTaskProfileStore(): SessionTaskProfileStore {
+		this.taskProfileStore ??= new SessionTaskProfileStore(this.deps.getSessionManager());
+		return this.taskProfileStore;
+	}
+
+	private getTaskProfileWriter(): TaskProfileWriter {
+		this.taskProfileWriter ??= new TaskProfileWriter({
+			agentDir: this.deps.getAgentDir(),
+			cwd: this.deps.getCwd(),
+			store: this.getTaskProfileStore(),
+			getSettingsManager: () => this.deps.getSettingsManager(),
+			getModelRegistry: () => this.deps.getModelRegistry(),
+			isModelExhausted: (provider, modelId) => {
+				const model = this.deps.getModelRegistry().find(provider, modelId);
+				return !model || this.deps.isModelExhausted(model);
+			},
+			getActiveOrchestrationProfile: () => this.deps.getActiveOrchestrationProfile?.(),
+		});
+		return this.taskProfileWriter;
 	}
 
 	/** Read-only durable worker projection. Undefined means the delegate capability never loaded. */
@@ -424,6 +455,14 @@ export class WorkerDelegationController {
 
 	getProfileCatalog(): Array<{ profileId: string; role: string; description: string }> {
 		return this.getWorkerProfileResolver().catalog();
+	}
+
+	inspectTaskProfileOptions(): TaskProfileInspection {
+		return this.getTaskProfileWriter().inspectTaskProfileOptions();
+	}
+
+	createTaskProfile(input: TaskProfileCreateInput): TaskProfileCreateResult {
+		return this.getTaskProfileWriter().createTaskProfile(input);
 	}
 
 	private resolveWorkerShipment(

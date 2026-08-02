@@ -290,7 +290,12 @@ describe("quiesce registry", () => {
 			getCwd: () => "/repo",
 			getAgentDir: () => agentDir,
 			getSessionManager: () =>
-				({ getEntries: () => [], appendCustomEntry: () => "entry-1" }) as unknown as SessionManager,
+				({
+					getEntries: () => [],
+					getLeafId: () => null,
+					getEntry: () => undefined,
+					appendCustomEntry: () => "entry-1",
+				}) as unknown as SessionManager,
 			getSettingsManager: () => settingsManager,
 			getResourceLoader: () => createTestResourceLoader(),
 			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,

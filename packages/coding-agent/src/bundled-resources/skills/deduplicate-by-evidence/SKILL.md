@@ -49,11 +49,13 @@ Inspect the scanner, wrapper, package scripts, and CI command before trusting a 
 For jscpd:
 
 1. Prefer an existing repository wrapper such as `npm run check:clones`.
-2. Require pinned jscpd v5 and verify the major version before relying on its Rust-native CLI. Do not silently fall back to the v4 Node engine.
-3. Explicitly configure `maxLines` and `maxSize`; defaults can omit god units. Keep both far above the largest legitimate owned file.
-4. Pin `minLines`, `minTokens`, `mode`, formats, cross-format policy, exact ignores, JSON reporter, and zero threshold in a regression test.
-5. Reconcile every owned candidate with the analyzed count. Account for below-minimum files by exact path and proof that they cannot contain the configured block size.
-6. Keep console projection bounded and retain the complete JSON report out of model context for explicit inspection.
+2. Use the Pi-managed jscpd v5 binary; never install jscpd into the project with npm, npx, Bun, or another package manager. If it is unavailable, run `pi doctor` and block or change approach rather than creating project metadata or dependencies.
+3. Write ad-hoc configs and full reports only under Pi-managed work storage or the OS temporary directory. Do not create repository reports, configs, lockfiles, manifests, or `node_modules` without an explicit request.
+4. Verify the pinned major version before relying on its Rust-native CLI. Do not silently fall back to the v4 Node engine.
+5. Explicitly configure `maxLines` and `maxSize`; defaults can omit god units. Keep both far above the largest legitimate owned file.
+6. Pin `minLines`, `minTokens`, `mode`, formats, cross-format policy, exact ignores, JSON reporter, and zero threshold in a regression test.
+7. Reconcile every owned candidate with the analyzed count. Account for below-minimum files by exact path and proof that they cannot contain the configured block size.
+8. Keep console projection bounded and retain the complete JSON report out of model context for explicit inspection.
 
 Never make the gate green by raising thresholds, increasing minimum clone size, adding broad ignores, renaming identifiers, or reformatting clone blocks.
 

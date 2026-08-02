@@ -53,6 +53,8 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("N+2 ARCHITECTURE");
 			expect(prompt).toContain("Apply these language-agnostic principles");
 			expect(prompt).toContain("Never concatenate growing prefixes");
+			expect(prompt).toContain("The user’s desired outcome is authoritative; a proposed method is not");
+			expect(prompt).toContain("If a method may undermine the outcome");
 			expect(prompt).toContain("Detect → Verify → Score → Gate");
 			expect(prompt.match(/N\+2 ARCHITECTURE/g)).toHaveLength(1);
 			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(6_500);

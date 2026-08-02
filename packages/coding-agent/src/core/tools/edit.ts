@@ -6,12 +6,14 @@ import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
+	applyEditMatchPlan,
 	applyEditsToNormalizedContent,
-	computeEditsDiff,
+	computeEditsPlannedDiff,
 	detectLineEnding,
 	type Edit,
 	type EditDiffError,
 	type EditDiffResult,
+	type EditMatchPlan,
 	generateDiffString,
 	generateUnifiedPatch,
 	normalizeToLF,
@@ -35,6 +37,15 @@ const replaceEditSchema = Type.Object(
 	{
 		oldText: Type.String({ minLength: 1 }),
 		newText: Type.String(),
+		range: Type.Optional(
+			Type.Object(
+				{
+					startLine: Type.Integer({ minimum: 1 }),
+					endLine: Type.Integer({ minimum: 1 }),
+				},
+				{ additionalProperties: false },
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -81,6 +92,8 @@ export interface EditToolDetails {
 	patch?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
+	/** True when execution reused the match plan already validated for the call preview. */
+	matchPlanReused?: boolean;
 }
 
 /**
@@ -179,7 +192,9 @@ function getEditCallRenderComponent(state: EditRenderState, lastComponent: unkno
 	return component;
 }
 
-function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
+function getRenderablePreviewInput(
+	args: RenderableEditArgs | undefined,
+): { path: string; intentId: string; edits: Edit[] } | null {
 	if (!args) {
 		return null;
 	}
@@ -189,20 +204,55 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 	if (!path) {
 		return null;
 	}
+	if (typeof args.intentId !== "string" || args.intentId.length === 0) return null;
 
 	if (
 		Array.isArray(args.edits) &&
 		args.edits.length > 0 &&
 		args.edits.every((edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string")
 	) {
-		return { path, edits: args.edits };
+		return { path, intentId: args.intentId, edits: args.edits };
 	}
 
 	if (typeof args.oldText === "string" && typeof args.newText === "string") {
-		return { path, edits: [{ oldText: args.oldText, newText: args.newText }] };
+		return { path, intentId: args.intentId, edits: [{ oldText: args.oldText, newText: args.newText }] };
 	}
 
 	return null;
+}
+
+interface CachedEditMatchPlan {
+	intentId: string;
+	absolutePath: string;
+	edits: Edit[];
+	plan: EditMatchPlan;
+	diff: string;
+	firstChangedLine: number | undefined;
+}
+
+function snapshotEdits(edits: Edit[]): Edit[] {
+	return edits.map((edit) => ({
+		oldText: edit.oldText,
+		newText: edit.newText,
+		...(edit.range ? { range: { startLine: edit.range.startLine, endLine: edit.range.endLine } } : {}),
+	}));
+}
+
+function editsMatch(left: Edit[], right: Edit[]): boolean {
+	if (left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index++) {
+		const leftEdit = left[index];
+		const rightEdit = right[index];
+		if (
+			leftEdit.oldText !== rightEdit.oldText ||
+			leftEdit.newText !== rightEdit.newText ||
+			leftEdit.range?.startLine !== rightEdit.range?.startLine ||
+			leftEdit.range?.endLine !== rightEdit.range?.endLine
+		) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
@@ -302,15 +352,16 @@ export function createEditToolDefinition(
 		throw new Error("Custom edit operations require a matching file mutation intent controller.");
 	}
 	const intentController = options?.intentController ?? new FileMutationIntentController();
+	let cachedMatchPlan: CachedEditMatchPlan | undefined;
 	return {
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit existing UTF-8 text: prepare(path), then commit(path,intentId,edits). oldText must be exact, unique, and non-overlapping; stale targets are rejected.",
+			"Edit existing UTF-8 text: prepare(path), then commit(path,intentId,edits). oldText must be exact, unique, and non-overlapping; optional inclusive line ranges bind matches to prior reads; stale targets are rejected.",
 		promptSnippet: "Preflight existing files; commit exact, stale-safe edits",
 		promptGuidelines: [
 			"Before replacements, prepare(path); then commit once with intentId and all edits.",
-			"oldText is exact, unique, minimal, and original-file based; batch separate edits and merge overlaps.",
+			"oldText is exact, unique, minimal, and original-file based; pass the inclusive line range from the supplying read when known, batch separate edits, and merge overlaps.",
 		],
 		parameters: editSchema,
 		renderShell: "self",
@@ -362,7 +413,15 @@ export function createEditToolDefinition(
 				const { bom, text: content } = stripBom(rawContent);
 				const originalEnding = detectLineEnding(content);
 				const normalizedContent = normalizeToLF(content);
-				const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+				const cachedForIntent = cachedMatchPlan?.intentId === intentId ? cachedMatchPlan : undefined;
+				if (cachedForIntent) cachedMatchPlan = undefined;
+				const matchPlanReused =
+					cachedForIntent !== undefined &&
+					cachedForIntent.absolutePath === absolutePath &&
+					editsMatch(cachedForIntent.edits, edits);
+				const { baseContent, newContent } = matchPlanReused
+					? applyEditMatchPlan(normalizedContent, cachedForIntent.plan, path)
+					: applyEditsToNormalizedContent(normalizedContent, edits, path);
 				throwIfAborted();
 
 				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
@@ -370,7 +429,9 @@ export function createEditToolDefinition(
 				throwIfAborted();
 				const contentReference = intentController.rememberContent(absolutePath, finalContent);
 
-				const diffResult = generateDiffString(baseContent, newContent);
+				const diffResult = matchPlanReused
+					? { diff: cachedForIntent.diff, firstChangedLine: cachedForIntent.firstChangedLine }
+					: generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
 				return {
 					content: [
@@ -385,6 +446,7 @@ export function createEditToolDefinition(
 						diff: diffResult.diff,
 						patch,
 						firstChangedLine: diffResult.firstChangedLine,
+						matchPlanReused,
 					},
 				};
 			});
@@ -403,8 +465,18 @@ export function createEditToolDefinition(
 			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
 				const requestId = ++component.previewRequestId;
-				void computeEditsDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
+				void computeEditsPlannedDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
 					if (component.previewRequestId === requestId) {
+						if (!("error" in preview) && !options?.operations) {
+							cachedMatchPlan = {
+								intentId: previewInput.intentId,
+								absolutePath: resolveToCwd(previewInput.path, context.cwd),
+								edits: snapshotEdits(previewInput.edits),
+								plan: preview.plan,
+								diff: preview.diff,
+								firstChangedLine: preview.firstChangedLine,
+							};
+						}
 						setEditPreview(component, preview);
 						context.invalidate();
 					}

@@ -20,6 +20,7 @@
 				"highlight.js": "10.7.3",
 				"hosted-git-info": "9.0.3",
 				"ignore": "7.0.5",
+				"jscpd": "5.0.14",
 				"jiti": "2.7.0",
 				"minimatch": "10.2.5",
 				"proper-lockfile": "4.1.2",
@@ -32,6 +33,7 @@
 				"@mariozechner/clipboard": "0.3.9"
 			},
 			"bin": {
+				"jscpd": "dist/jscpd-cli.js",
 				"pi": "dist/cli.js",
 				"pi-adaptative": "dist/cli.js"
 			},
@@ -1682,6 +1684,104 @@
 			"bin": {
 				"jiti": "lib/jiti-cli.mjs"
 			}
+		},
+		"node_modules/jscpd": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd/-/jscpd-5.0.14.tgz",
+			"integrity": "sha512-zge+FPZZAymt2Do5Z0+QHyIn4/XcUhrO/W7of9HcHZfx2AK8++dYhLA1uWtwXj47ml3Of8PbcUW4wUWvYMCc3w==",
+			"license": "MIT",
+			"optionalDependencies": {
+				"jscpd-darwin-arm64": "5.0.14",
+				"jscpd-darwin-x64": "5.0.14",
+				"jscpd-linux-arm64-gnu": "5.0.14",
+				"jscpd-linux-x64-gnu": "5.0.14",
+				"jscpd-linux-x64-musl": "5.0.14",
+				"jscpd-windows-x64-msvc": "5.0.14"
+			},
+			"bin": {
+				"jscpd": "run-jscpd.js"
+			},
+			"engines": {
+				"node": ">=18"
+			}
+		},
+		"node_modules/jscpd-darwin-arm64": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd-darwin-arm64/-/jscpd-darwin-arm64-5.0.14.tgz",
+			"integrity": "sha512-Ojjl79SBuj9tEW6WbjZ1a/1ZOR89dneH9yLQYQu8WyWaQownttnx7RYFEHU6aGhS4jIvwUEbr+1wxzFTb37cwg==",
+			"license": "MIT",
+			"os": [
+				"darwin"
+			],
+			"cpu": [
+				"arm64"
+			],
+			"optional": true
+		},
+		"node_modules/jscpd-darwin-x64": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd-darwin-x64/-/jscpd-darwin-x64-5.0.14.tgz",
+			"integrity": "sha512-DxFg5XvjMZ81iVeqillnM5apqcGCfNTbroNF+mPLr7RkHLGH6mudLgtO+ILL/hfpZXy1bF9oIY5BSudPmN/k9A==",
+			"license": "MIT",
+			"os": [
+				"darwin"
+			],
+			"cpu": [
+				"x64"
+			],
+			"optional": true
+		},
+		"node_modules/jscpd-linux-arm64-gnu": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd-linux-arm64-gnu/-/jscpd-linux-arm64-gnu-5.0.14.tgz",
+			"integrity": "sha512-1uw+XBHEt9pONXNICSp5HpaVWPjG6mQ6deDXaq9Yb0xCNJkX4/8gmn0vhzekIyZD2DspRYKPUolbDsqm/HEdYg==",
+			"license": "MIT",
+			"os": [
+				"linux"
+			],
+			"cpu": [
+				"arm64"
+			],
+			"optional": true
+		},
+		"node_modules/jscpd-linux-x64-gnu": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd-linux-x64-gnu/-/jscpd-linux-x64-gnu-5.0.14.tgz",
+			"integrity": "sha512-dFTbyyrm+Z9pcXIVzJQCw8QAgiNqIiO69sm4AfA7/wFdPoizoVzjhaXsYXcSV4bs0aoPiWbNazg0J0HgslT/5A==",
+			"license": "MIT",
+			"os": [
+				"linux"
+			],
+			"cpu": [
+				"x64"
+			],
+			"optional": true
+		},
+		"node_modules/jscpd-linux-x64-musl": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd-linux-x64-musl/-/jscpd-linux-x64-musl-5.0.14.tgz",
+			"integrity": "sha512-SayS7qQJvixyy9eR0+UjepkTsUUwqvlsiuSxfIdHgG2qzqoh/thnkgiu4By8fsiiDpQONsQrRrZDwHRQ3GDrBQ==",
+			"license": "MIT",
+			"os": [
+				"linux"
+			],
+			"cpu": [
+				"x64"
+			],
+			"optional": true
+		},
+		"node_modules/jscpd-windows-x64-msvc": {
+			"version": "5.0.14",
+			"resolved": "https://registry.npmjs.org/jscpd-windows-x64-msvc/-/jscpd-windows-x64-msvc-5.0.14.tgz",
+			"integrity": "sha512-DqjxlVkUanlahGgY2lY7Zkrau4BUTI+AwWky+bPGK4kSK2AIOaUziY9Q19u8b58idXmJA9FKK98Fuu4ajNXVjQ==",
+			"license": "MIT",
+			"os": [
+				"win32"
+			],
+			"cpu": [
+				"x64"
+			],
+			"optional": true
 		},
 		"node_modules/json-bigint": {
 			"version": "1.0.0",

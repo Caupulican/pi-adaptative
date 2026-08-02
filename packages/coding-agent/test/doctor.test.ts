@@ -16,7 +16,7 @@ import {
  *   actually attempts the install when missing.
  * - python is now MANAGED through a pinned uv runtime; doctor/update preflight
  *   ensure it proactively while retaining bounded, non-fatal failures.
- * - ripgrep and jq are pinned MANAGED tools; ollama remains SYSTEM guide-mode tooling.
+ * - ripgrep, jq, and jscpd v5 are pinned MANAGED tools; ollama remains SYSTEM guide-mode tooling.
  *
  * All dependencies are injected (mirroring loadFffModule's requires? and
  * DefaultFffSearchBackend's constructor-injected deps elsewhere in this
@@ -139,8 +139,8 @@ describe("runDoctor: fff-node (managed tool)", () => {
 });
 
 describe("runDoctor: pinned data tools", () => {
-	it("provisions ripgrep and jq through the shared managed-tool owner", async () => {
-		const ensureTool = vi.fn(async (tool: "jq" | "rg") => `/agent/bin/${tool}`);
+	it("provisions ripgrep, jq, and jscpd through the shared managed-tool owner", async () => {
+		const ensureTool = vi.fn(async (tool: "jq" | "jscpd" | "rg") => `/agent/bin/${tool}`);
 		const deps = baseDeps({
 			ensureTool,
 			probeVersion: () => "ripgrep 14.1.0\n-SIMD -AVX (compiled)",
@@ -148,6 +148,7 @@ describe("runDoctor: pinned data tools", () => {
 		const report = await runDoctor(deps);
 		const rg = report.checks.find((c) => c.id === "ripgrep");
 		const jq = report.checks.find((c) => c.id === "jq");
+		const jscpd = report.checks.find((c) => c.id === "jscpd");
 
 		expect(rg?.present).toBe(true);
 		expect(rg?.kind).toBe("managed");
@@ -156,8 +157,11 @@ describe("runDoctor: pinned data tools", () => {
 		expect(rg?.detail).not.toContain("SIMD");
 		expect(jq).toMatchObject({ kind: "managed", present: true });
 		expect(jq?.detail).toContain("/agent/bin/jq");
+		expect(jscpd).toMatchObject({ kind: "managed", present: true });
+		expect(jscpd?.detail).toContain("/agent/bin/jscpd");
 		expect(ensureTool).toHaveBeenCalledWith("rg", true);
 		expect(ensureTool).toHaveBeenCalledWith("jq", true);
+		expect(ensureTool).toHaveBeenCalledWith("jscpd", true);
 	});
 
 	it("still reports present when a version probe itself comes back empty", async () => {
@@ -260,9 +264,9 @@ describe("runDoctor: python (uv-managed tool)", () => {
 });
 
 describe("runDoctor: overall report shape", () => {
-	it("includes exactly the five expected checks", async () => {
+	it("includes exactly the six expected checks", async () => {
 		const report = await runDoctor(baseDeps());
-		expect(report.checks.map((c) => c.id).sort()).toEqual(["fff-node", "jq", "ollama", "python", "ripgrep"]);
+		expect(report.checks.map((c) => c.id).sort()).toEqual(["fff-node", "jq", "jscpd", "ollama", "python", "ripgrep"]);
 	});
 
 	it("surfaces unexpected root entries as a bounded warning without changing tool checks", async () => {
@@ -278,7 +282,7 @@ describe("runDoctor: overall report shape", () => {
 			}),
 		);
 
-		expect(report.checks).toHaveLength(5);
+		expect(report.checks).toHaveLength(6);
 		expect(report.notices).toEqual([
 			expect.objectContaining({
 				id: "agent-directory-layout",

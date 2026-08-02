@@ -61,7 +61,7 @@ export interface DoctorDeps {
 	loadAvailableFffNodePackage: () => unknown | undefined;
 	ensureFffNodePackage: (silent?: boolean) => Promise<unknown | undefined>;
 	getLastFffInstallOutcome: () => FffInstallOutcome | undefined;
-	ensureTool: (tool: "jq" | "rg", silent: boolean) => Promise<string | undefined>;
+	ensureTool: (tool: "jq" | "jscpd" | "rg", silent: boolean) => Promise<string | undefined>;
 	ensurePythonRuntime: (options: { silent: boolean }) => Promise<PythonRuntimeOutcome>;
 	/** Best-effort `<command> --version` probe; undefined if it can't be run. Used only to enrich a status line, never for presence detection. */
 	probeVersion: (command: string, versionArgs?: readonly string[]) => string | undefined;
@@ -132,10 +132,15 @@ async function checkFffNode(deps: DoctorDeps, silent: boolean): Promise<DoctorCh
 }
 
 /** MANAGED tools: exact releases and checksums are owned by tools-manager. */
-async function checkManagedDataTool(deps: DoctorDeps, tool: "jq" | "rg", silent: boolean): Promise<DoctorCheck> {
+async function checkManagedDataTool(
+	deps: DoctorDeps,
+	tool: "jq" | "jscpd" | "rg",
+	silent: boolean,
+): Promise<DoctorCheck> {
 	const path = await deps.ensureTool(tool, silent);
-	const id = tool === "rg" ? "ripgrep" : "jq";
-	const label = tool === "rg" ? "ripgrep (rg)" : "jq (JSON projection)";
+	const id = tool === "rg" ? "ripgrep" : tool;
+	const label =
+		tool === "rg" ? "ripgrep (rg)" : tool === "jscpd" ? "jscpd v5 (clone scanner)" : "jq (JSON projection)";
 	if (!path) return { id, label, kind: "managed", present: false, detail: "managed install unavailable" };
 	const version = firstLine(deps.probeVersion(path));
 	return {
@@ -227,14 +232,15 @@ export async function runDoctor(
 	options: RunDoctorOptions = {},
 ): Promise<DoctorReport> {
 	const silent = options.silent ?? true;
-	const [fffNode, ripgrep, jq, ollama, python] = await Promise.all([
+	const [fffNode, ripgrep, jq, jscpd, ollama, python] = await Promise.all([
 		checkFffNode(deps, silent),
 		checkManagedDataTool(deps, "rg", silent),
 		checkManagedDataTool(deps, "jq", silent),
+		checkManagedDataTool(deps, "jscpd", silent),
 		checkOllama(deps),
 		checkPython(deps, silent),
 	]);
-	return { checks: [fffNode, ripgrep, jq, ollama, python], notices: checkAgentDirectoryLayout(deps) };
+	return { checks: [fffNode, ripgrep, jq, jscpd, ollama, python], notices: checkAgentDirectoryLayout(deps) };
 }
 
 export function formatDoctorReport(report: DoctorReport): string {

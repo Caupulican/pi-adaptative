@@ -24,6 +24,7 @@ import { pipeline } from "stream/promises";
 import { pathToFileURL } from "url";
 import { APP_NAME, getAgentDir, getBinDir } from "../config.ts";
 import { cacheDir as agentCacheDir, cacheFile } from "../core/agent-paths.ts";
+import { ensureManagedJscpd, JSCPD_VERSION } from "./bundled-jscpd.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
 import { getProcessWorkRun } from "./work-directory.ts";
 
@@ -62,7 +63,7 @@ interface ToolConfig {
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
-const TOOLS: Record<"fd" | "jq" | "rg" | "uv", ToolConfig> = {
+const TOOLS: Record<"fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
 	fd: {
 		name: "fd",
 		repo: "sharkdp/fd",
@@ -143,6 +144,15 @@ const TOOLS: Record<"fd" | "jq" | "rg" | "uv", ToolConfig> = {
 			"jq-windows-amd64.exe": "a6fc67fedaf9128a3309a1e2ebb8b986aeccf70122ee46d2cb4849e423f0c627",
 			"jq-windows-arm64.exe": "083b5377392bc57cf27052b6d20a2d927770683bca844632901ff38b4b7b0ac7",
 		},
+	},
+	jscpd: {
+		name: "jscpd",
+		repo: "",
+		binaryName: "jscpd",
+		systemBinaryNames: [],
+		tagPrefix: "",
+		pinnedVersion: JSCPD_VERSION,
+		getAssetName: () => null,
 	},
 	uv: {
 		name: "uv",
@@ -660,6 +670,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 // Termux package names for tools
 const TERMUX_PACKAGES: Record<ManagedToolName, string> = {
 	fd: "fd",
+	jscpd: "jscpd",
 	jq: "jq",
 	rg: "ripgrep",
 	uv: "uv",
@@ -975,6 +986,16 @@ async function installTermuxManagedTool(tool: ManagedToolName, silent: boolean):
 // Ensure a tool is available, downloading if necessary
 // Returns the path to the tool, or undefined if unavailable
 export async function ensureTool(tool: ManagedToolName, silent: boolean = false): Promise<string | undefined> {
+	if (tool === "jscpd") {
+		try {
+			return ensureManagedJscpd();
+		} catch (error) {
+			if (!silent) {
+				console.log(chalk.yellow(`Failed to provision jscpd: ${error instanceof Error ? error.message : error}`));
+			}
+			return undefined;
+		}
+	}
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
 		return existingPath;

@@ -11,6 +11,7 @@ import {
 	resolvePinnedOrchestrationModel,
 } from "../orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
+import type { SessionTaskProfileRecord, SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { catalogWorkerResourcePointers, type WorkerResourceCatalogResourceLoader } from "./worker-resource-catalog.ts";
@@ -32,7 +33,14 @@ export interface WorkerProfileResolverOptions {
 	getModelRegistry(): ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
 	getActiveOrchestrationProfile(): OrchestrationProfile | undefined;
+	getTaskProfileStore(): SessionTaskProfileStore;
 	onDiagnostic(message: string): void;
+}
+
+interface LoadedWorkerProfiles {
+	profiles: OrchestrationProfile[];
+	registry: ReadonlyMap<string, OrchestrationProfile>;
+	taskRegistry: ReadonlyMap<string, SessionTaskProfileRecord>;
 }
 
 export class WorkerProfileResolver {
@@ -44,14 +52,9 @@ export class WorkerProfileResolver {
 	}
 
 	catalog(): Array<{ profileId: string; role: string; description: string }> {
-		const activeProfile = this.options.getActiveOrchestrationProfile();
-		const allowedProfileIds =
-			activeProfile?.role === "orchestrator" ? new Set(activeProfile.dispatchProfileIds) : undefined;
-		return this.loadProfiles()
-			.profiles.filter(
-				(profile) =>
-					profile.role !== "orchestrator" && (!allowedProfileIds || allowedProfileIds.has(profile.profileId)),
-			)
+		const loaded = this.loadProfiles();
+		return loaded.profiles
+			.filter((profile) => profile.role !== "orchestrator" && this.isProfileAuthorized(profile.profileId, loaded))
 			.map((profile) => ({
 				profileId: profile.profileId,
 				role: profile.role,
@@ -65,15 +68,19 @@ export class WorkerProfileResolver {
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
 		const requestedProfileId = request.profileId?.trim();
 		const activeProfile = this.options.getActiveOrchestrationProfile();
+		const loaded = this.loadProfiles();
+		const requestedTaskProfile = requestedProfileId ? loaded.taskRegistry.has(requestedProfileId) : false;
 		// A regular session uses the owner's fixed default even if the model invents or mistypes a
 		// profile id. Only an owner-authored orchestrator is a routing authority, and its selections
 		// remain constrained by dispatchProfileIds in resolveProfileId().
 		const profileId =
 			activeProfile?.role === "orchestrator"
 				? requestedProfileId || defaultProfileId
-				: defaultProfileId || requestedProfileId;
+				: requestedTaskProfile
+					? requestedProfileId
+					: defaultProfileId || requestedProfileId;
 		if (!profileId) return { ok: false, reason: "orchestration_profile_required" };
-		const selected = this.resolveProfileId(profileId);
+		const selected = this.resolveProfileId(profileId, loaded);
 		if (!selected.ok) return selected;
 		const profile = selected.resolved.profile;
 		if (request.verificationOfTaskId && profile.role !== "verifier") {
@@ -124,11 +131,12 @@ export class WorkerProfileResolver {
 
 	private resolveProfileId(
 		profileId: string,
+		loaded: LoadedWorkerProfiles = this.loadProfiles(),
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
-		if (!this.isProfileAuthorized(profileId)) {
+		if (!this.isProfileAuthorized(profileId, loaded)) {
 			return { ok: false, reason: "orchestration_profile_not_authorized_for_orchestrator" };
 		}
-		const profile = this.loadProfiles().registry.get(profileId);
+		const profile = loaded.registry.get(profileId);
 		if (!profile) return { ok: false, reason: "orchestration_profile_not_found" };
 		const resolvedModel = resolveConfiguredOrchestrationModel(profile, this.options.getModelRegistry(), (model) =>
 			this.options.isModelExhausted(model),
@@ -163,15 +171,24 @@ export class WorkerProfileResolver {
 		};
 	}
 
-	private isProfileAuthorized(profileId: string): boolean {
+	private isProfileAuthorized(profileId: string, loaded: LoadedWorkerProfiles): boolean {
 		const activeProfile = this.options.getActiveOrchestrationProfile();
+		const taskRecord = loaded.taskRegistry.get(profileId);
+		if (taskRecord) {
+			return (
+				!activeProfile ||
+				(activeProfile.role === "orchestrator" &&
+					taskRecord.authorProfileId === activeProfile.profileId &&
+					activeProfile.dispatchProfileIds.includes(taskRecord.baseProfileId))
+			);
+		}
 		return (
 			!activeProfile ||
 			(activeProfile.role === "orchestrator" && activeProfile.dispatchProfileIds.includes(profileId))
 		);
 	}
 
-	private loadProfiles(): ReturnType<OrchestrationProfileStore["load"]> {
+	private loadProfiles(): LoadedWorkerProfiles {
 		const loaded = new OrchestrationProfileStore({
 			agentDir: this.options.agentDir,
 			cwd: this.options.cwd,
@@ -183,6 +200,22 @@ export class WorkerProfileResolver {
 			this.warnedDiagnostics.add(key);
 			this.options.onDiagnostic(`Orchestration profile ignored (${diagnostic.path}): ${diagnostic.message}`);
 		}
-		return loaded;
+		const taskProfiles = this.options.getTaskProfileStore().load();
+		for (const diagnostic of taskProfiles.diagnostics) {
+			const key = `session\0${diagnostic}`;
+			if (this.warnedDiagnostics.has(key)) continue;
+			this.warnedDiagnostics.add(key);
+			this.options.onDiagnostic(`Session task profile ignored: ${diagnostic}`);
+		}
+		const profiles = [...loaded.profiles];
+		const registry = new Map(loaded.profiles.map((profile) => [profile.profileId, profile]));
+		const taskRegistry = new Map<string, SessionTaskProfileRecord>();
+		for (const record of taskProfiles.records) {
+			if (registry.has(record.profile.profileId)) continue;
+			profiles.push(record.profile);
+			registry.set(record.profile.profileId, record.profile);
+			taskRegistry.set(record.profile.profileId, record);
+		}
+		return { profiles, registry, taskRegistry };
 	}
 }

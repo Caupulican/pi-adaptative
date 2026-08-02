@@ -35,7 +35,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["goal", policy(["memory.mutate"], "memory-broker")],
 	["memory", policy(["memory.mutate", "memory.query"], "memory-broker")],
 	["secret_store", policy(["credentials.modify"], "control-plane")],
-	...["delegate", "delegate_status"].map((toolName) => [toolName, DELEGATE_POLICY] as const),
+	...["delegate", "delegate_status", "profile_writer"].map((toolName) => [toolName, DELEGATE_POLICY] as const),
 	["model_fitness", policy(["research.execute"], "control-plane")],
 ]);
 

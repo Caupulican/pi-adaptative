@@ -11,7 +11,12 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"memory",
 	"run_process",
 ] as const;
-export const ORCHESTRATION_PROFILE_TOOL_NAMES = [...CLASSIFIED_LANE_TOOL_NAMES, "delegate", "delegate_status"] as const;
+export const ORCHESTRATION_PROFILE_TOOL_NAMES = [
+	...CLASSIFIED_LANE_TOOL_NAMES,
+	"delegate",
+	"delegate_status",
+	"profile_writer",
+] as const;
 
 /**
  * Manifest-only lane catalogue. It contains no tool factories, so policy compilation can omit

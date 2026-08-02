@@ -65,6 +65,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"secret_store",
 	"delegate",
 	"delegate_status",
+	"profile_writer",
 	"improvement_loop",
 	"extensionify",
 	"skillify",

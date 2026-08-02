@@ -510,7 +510,7 @@ export class InteractiveMode {
 
 		// Ensure the shared discovery/projection binaries are available and on PATH.
 		// fd feeds autocomplete; rg and jq keep source/JSON filtering outside V8.
-		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg"), ensureTool("jq")]);
+		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg"), ensureTool("jq"), ensureTool("jscpd")]);
 		this.fdPath = fdPath;
 
 		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {

@@ -8,6 +8,13 @@
 
 - Added session-bounded exact-content references so successful writes and edits can copy unchanged bytes without retransmitting content.
 - Added live and terminal elapsed time to every interactive tool panel, including read, Python, extension, error, and replay paths.
+- Added `profile_writer` for immutable, session-branch-scoped worker profiles that can narrow owner-approved tools, resources, budgets, models, and thinking levels without writing profile files.
+- Bundled the pinned Rust `jscpd` 5.0.14 scanner for every desktop release target and provisioned it only into Pi-managed storage.
+
+### Changed
+
+- Edit commits can bind anchors to inclusive read-line ranges, prove uniqueness globally without occurrence arrays, and reuse a compact preview match plan and diff during execution.
+- The core agent contract now treats the user's desired outcome as authoritative over suggested methods and requires evidence-backed disagreement when a method may undermine that outcome.
 
 ### Fixed
 

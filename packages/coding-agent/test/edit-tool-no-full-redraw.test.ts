@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Container, type Terminal, Text, TUI } from "@caupulican/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -207,6 +208,56 @@ describe("edit tool TUI rendering", () => {
 		const rendered = component.render(80).join("\n");
 		expect(rendered).toContain("line 50 changed");
 		expect(rendered).toContain("line 150 changed");
+	});
+
+	it("reuses the preview's compact validated match plan during commit", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "pi-edit-plan-reuse-"));
+		tempDirs.push(dir);
+		const filePath = join(dir, "bounded-edit.txt");
+		const lines = Array.from({ length: 5_000 }, (_, index) =>
+			index === 3_499 ? "const bounded_target = true;" : `const line_${index + 1} = ${index + 1};`,
+		);
+		await writeFile(filePath, lines.join("\n"), "utf8");
+
+		const definition = createEditToolDefinition(dir);
+		const preparation = await definition.execute(
+			"prepare-plan",
+			{ action: "prepare", path: "bounded-edit.txt" },
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		);
+		const intentId = preparation.details?.intentId;
+		if (!intentId) throw new Error("Expected edit preparation to return an intent id.");
+		const args = {
+			action: "commit" as const,
+			path: "bounded-edit.txt",
+			intentId,
+			edits: [
+				{
+					oldText: "const bounded_target = true;",
+					newText: "const bounded_target = false;",
+					range: { startLine: 3_300, endLine: 3_700 },
+				},
+			],
+		};
+
+		const terminal = new FakeTerminal();
+		const tui = new TUI(terminal);
+		const component = new ToolExecutionComponent("edit", "commit-plan", args, {}, definition, tui, dir);
+		tui.addChild(component);
+		tui.start();
+		component.setArgsComplete();
+		await waitForRenderedText(
+			() => component.render(80).join("\n"),
+			"bounded_target = false",
+			() => tui.requestRender(true),
+		);
+
+		const result = await definition.execute("commit-plan", args, undefined, undefined, {} as ExtensionContext);
+		expect(result.details?.matchPlanReused).toBe(true);
+		expect((await readFile(filePath, "utf8")).split("\n")[3_499]).toBe("const bounded_target = false;");
+		tui.stop();
 	});
 
 	it("shows a preflight error without rendering a diff when the edits do not apply", async () => {

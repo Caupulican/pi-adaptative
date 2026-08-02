@@ -49,11 +49,13 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Tool repair](tool-repair.md) - repaired tool-call arguments, health diagnostics, kill switches, and replay workflow.
 - [Task steps](task-steps.md) - native session checklist, slash commands, persistence, and delegation migration.
 - [Native Python](python.md) - uv-managed bounded Python execution, provisioning, output limits, and cross-platform file guidance.
+- [Managed data tools](managed-data-tools.md) - pinned rg, jq, and Rust jscpd provisioning without project files.
 
 ## Customization
 
 - [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
 - [tmux agent manager](tmux-agent-manager.md) - bundled event-driven external-provider teams with parent wake handoffs.
+- [Task worker profiles](worker-profiles.md) - immutable session-scoped worker profiles with bounded model and tool authority.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
 - [Resource profiles & library](resources.md) - curate extensions, skills, and agents per project or situation; share a catalog; install and back up.
 - [Self-adaptation](self-adaptation.md) - draft live skills/extensions and run evidence-backed Pi harness improvement loops.

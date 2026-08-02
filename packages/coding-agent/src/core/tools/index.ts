@@ -90,6 +90,11 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
+	createProfileWriterToolDefinition,
+	type ProfileWriterToolDetails,
+	type ProfileWriterToolInput,
+} from "./profile-writer.ts";
+export {
 	createPythonTool,
 	createPythonToolDefinition,
 	DEFAULT_PYTHON_TIMEOUT_SECONDS,

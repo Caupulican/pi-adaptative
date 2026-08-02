@@ -36,6 +36,7 @@ describe("bundled skills discovery", () => {
 		const evidenceGatedTdd = skills.find((s) => s.name === "evidence-gated-tdd");
 		const authorizedWebSecurityAudit = skills.find((s) => s.name === "authorized-web-security-audit");
 		const secureAgentToolSurfaces = skills.find((s) => s.name === "secure-agent-tool-surfaces");
+		const workerProfileWriter = skills.find((s) => s.name === "worker-profile-writer");
 
 		expect(skillArchitect).toBeDefined();
 		expect(skillCreator).toBeDefined();
@@ -45,6 +46,7 @@ describe("bundled skills discovery", () => {
 		expect(evidenceGatedTdd).toBeDefined();
 		expect(authorizedWebSecurityAudit).toBeDefined();
 		expect(secureAgentToolSurfaces).toBeDefined();
+		expect(workerProfileWriter).toBeDefined();
 
 		// Verify bundled skills have correct source info
 		if (skillArchitect) {
@@ -86,6 +88,27 @@ describe("bundled skills discovery", () => {
 			expect(secureAgentToolSurfaces.sourceInfo?.source).toBe("local");
 			expect(secureAgentToolSurfaces.sourceInfo?.scope).toBe("temporary");
 		}
+
+		if (workerProfileWriter) {
+			expect(workerProfileWriter.sourceInfo?.source).toBe("local");
+			expect(workerProfileWriter.sourceInfo?.scope).toBe("temporary");
+		}
+	});
+
+	it("ships session-scoped worker profile composition without provider metadata", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skill = loader.getSkills().skills.find((candidate) => candidate.name === "worker-profile-writer");
+		expect(skill).toBeDefined();
+		if (!skill) return;
+
+		const content = readFileSync(skill.filePath, "utf8");
+		expect(existsSync(join(dirname(skill.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(content).toContain("profile_writer");
+		expect(content).toContain("exact harness-issued profile ID");
+		expect(content).toContain("Human edge");
+		expect(content.split("\n").length).toBeLessThan(500);
 	});
 
 	it("ships a provider-neutral Pi skill creator with deterministic local tooling", async () => {

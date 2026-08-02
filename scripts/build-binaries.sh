@@ -91,6 +91,7 @@ fi
 if [[ "$SKIP_DEPS" == "false" ]]; then
     echo "==> Installing cross-platform native bindings..."
     CLIPBOARD_VERSION=$(node -p "require('./packages/coding-agent/package.json').optionalDependencies['@mariozechner/clipboard']")
+    JSCPD_VERSION=$(node -p "require('./packages/coding-agent/package.json').dependencies.jscpd")
     # npm ci only installs optional deps for the current platform
     # We need the base clipboard package and all platform bindings for bun cross-compilation
     # Use --force to bypass platform checks (os/cpu restrictions in package.json)
@@ -102,7 +103,14 @@ if [[ "$SKIP_DEPS" == "false" ]]; then
         @mariozechner/clipboard-linux-x64-gnu@"$CLIPBOARD_VERSION" \
         @mariozechner/clipboard-linux-arm64-gnu@"$CLIPBOARD_VERSION" \
         @mariozechner/clipboard-win32-x64-msvc@"$CLIPBOARD_VERSION" \
-        @mariozechner/clipboard-win32-arm64-msvc@"$CLIPBOARD_VERSION"
+        @mariozechner/clipboard-win32-arm64-msvc@"$CLIPBOARD_VERSION" \
+        jscpd@"$JSCPD_VERSION" \
+        jscpd-darwin-arm64@"$JSCPD_VERSION" \
+        jscpd-darwin-x64@"$JSCPD_VERSION" \
+        jscpd-linux-x64-gnu@"$JSCPD_VERSION" \
+        jscpd-linux-x64-musl@"$JSCPD_VERSION" \
+        jscpd-linux-arm64-gnu@"$JSCPD_VERSION" \
+        jscpd-windows-x64-msvc@"$JSCPD_VERSION"
 else
     echo "==> Skipping cross-platform native bindings (--skip-deps)"
 fi
@@ -165,26 +173,41 @@ for platform in "${PLATFORMS[@]}"; do
     case "$platform" in
         darwin-arm64)
             clipboard_native_package="clipboard-darwin-arm64"
+            jscpd_native_package="jscpd-darwin-arm64"
             ;;
         darwin-x64)
             clipboard_native_package="clipboard-darwin-x64"
+            jscpd_native_package="jscpd-darwin-x64"
             ;;
         linux-x64)
             clipboard_native_package="clipboard-linux-x64-gnu"
+            jscpd_native_package="jscpd-linux-x64-gnu"
             ;;
         linux-arm64)
             clipboard_native_package="clipboard-linux-arm64-gnu"
+            jscpd_native_package="jscpd-linux-arm64-gnu"
             ;;
         windows-x64)
             clipboard_native_package="clipboard-win32-x64-msvc"
+            jscpd_native_package="jscpd-windows-x64-msvc"
             ;;
         windows-arm64)
             clipboard_native_package="clipboard-win32-arm64-msvc"
+            jscpd_native_package="jscpd-windows-x64-msvc"
             ;;
     esac
     mkdir -p "$OUTPUT_DIR/$platform/node_modules/@mariozechner"
     cp -r ../../node_modules/@mariozechner/clipboard "$OUTPUT_DIR/$platform/node_modules/@mariozechner/"
     cp -r ../../node_modules/@mariozechner/$clipboard_native_package "$OUTPUT_DIR/$platform/node_modules/@mariozechner/"
+
+    mkdir -p "$OUTPUT_DIR/$platform/bundled-tools"
+    if [[ "$platform" == windows-* ]]; then
+        cp ../../node_modules/$jscpd_native_package/bin/jscpd.exe "$OUTPUT_DIR/$platform/bundled-tools/jscpd.exe"
+    else
+        cp ../../node_modules/$jscpd_native_package/bin/jscpd "$OUTPUT_DIR/$platform/bundled-tools/jscpd"
+        chmod +x "$OUTPUT_DIR/$platform/bundled-tools/jscpd"
+    fi
+    echo "$JSCPD_VERSION" > "$OUTPUT_DIR/$platform/bundled-tools/jscpd.version"
 
     # Copy terminal input native helpers next to compiled binaries.
     if [[ "$platform" == darwin-* ]]; then

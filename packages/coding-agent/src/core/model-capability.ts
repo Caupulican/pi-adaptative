@@ -35,6 +35,7 @@ export const MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT = 8_192;
 
 export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"delegate",
+	"profile_writer",
 	"context_audit",
 	"goal",
 	"worktree_sync",

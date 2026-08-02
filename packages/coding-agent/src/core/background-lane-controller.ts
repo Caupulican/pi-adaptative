@@ -39,6 +39,11 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
+import type {
+	TaskProfileCreateInput,
+	TaskProfileCreateResult,
+	TaskProfileInspection,
+} from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -307,6 +312,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }> {
 		return this._getWorkerController().getProfileCatalog();
+	}
+
+	inspectTaskProfileOptions(): TaskProfileInspection {
+		return this._getWorkerController().inspectTaskProfileOptions();
+	}
+
+	createTaskProfile(input: TaskProfileCreateInput): TaskProfileCreateResult {
+		return this._getWorkerController().createTaskProfile(input);
 	}
 
 	/**

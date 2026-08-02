@@ -79,6 +79,7 @@ import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
 import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -109,6 +110,7 @@ import { createGrepTool } from "./tools/grep.ts";
 import { allToolNames, createToolDefinition, type ToolsOptions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
+import { createProfileWriterToolDefinition } from "./tools/profile-writer.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
@@ -301,7 +303,7 @@ export interface RuntimeBuilderDeps {
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord };
-	workerAgentControl?: WorkerAgentControlPort;
+	workerAgentControl?: WorkerAgentControlPort & Partial<TaskProfileWriterPort>;
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerClaimSnapshots(): WorkerClaim[];
@@ -946,6 +948,20 @@ export class RuntimeBuilder {
 					...(this.deps.workerAgentControl ? { workerAgentControl: this.deps.workerAgentControl } : {}),
 				});
 				this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
+			}
+			if (
+				toolAccess.allows("profile_writer") &&
+				this.deps.workerAgentControl?.inspectTaskProfileOptions &&
+				this.deps.workerAgentControl.createTaskProfile
+			) {
+				const writer = this.deps.workerAgentControl;
+				this._baseToolDefinitions.set(
+					"profile_writer",
+					createProfileWriterToolDefinition({
+						inspectTaskProfileOptions: () => writer.inspectTaskProfileOptions!(),
+						createTaskProfile: (input) => writer.createTaskProfile!(input),
+					}),
+				);
 			}
 			// Registered but not default-active: probes spend tokens on the probed model, so
 			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).
