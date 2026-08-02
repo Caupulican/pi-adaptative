@@ -52,8 +52,8 @@ describe("native python tool registration", () => {
 
 	it("adds concise preference and bounded-search guidance to the system prompt", () => {
 		const prompt = buildSystemPrompt({ cwd: process.cwd(), selectedTools: ["read", "bash", "python"] });
-		expect(prompt).toContain("Prefer the python tool for bounded Python snippets and scripts");
-		expect(prompt).toContain("Keep searches bounded and purposeful");
-		expect(prompt).toContain("Use rg for text candidate filtering and jq for bounded JSON projection");
+		expect(prompt).toContain("Use python for bounded scripts and data shaping");
+		expect(prompt).toContain("Use scoped rg to filter text and jq to project JSON");
+		expect(prompt).toContain("pass explicit roots and filters");
 	});
 });
