@@ -33,41 +33,27 @@ type EditRenderState = {
 
 const replaceEditSchema = Type.Object(
 	{
-		oldText: Type.String({
-			description:
-				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
-			minLength: 1,
-		}),
-		newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		oldText: Type.String({ minLength: 1 }),
+		newText: Type.String(),
 	},
 	{ additionalProperties: false },
 );
 
-const editPathSchema = Type.String({
-	description: "Path to the existing file to edit (relative or absolute)",
-	minLength: 1,
-});
+const editPathSchema = Type.String({ minLength: 1 });
 const editSchema = Type.Union([
 	Type.Object(
 		{
-			action: Type.Literal("prepare", {
-				description: "Validate the target before generating replacement text.",
-			}),
+			action: Type.Literal("prepare"),
 			path: editPathSchema,
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
-			action: Type.Literal("commit", { description: "Apply edits accepted by a prior prepare call." }),
+			action: Type.Literal("commit"),
 			path: editPathSchema,
-			intentId: Type.String({
-				description: "Intent id returned by edit action=prepare for this exact path.",
-				minLength: 1,
-			}),
+			intentId: Type.String({ minLength: 1 }),
 			edits: Type.Array(replaceEditSchema, {
-				description:
-					"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
 				minItems: 1,
 			}),
 		},
@@ -320,15 +306,11 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit one existing file using exact text replacement. Always call action=prepare with only path before generating edits. If preparation succeeds, call action=commit with its intentId and edits. Commit rejects stale targets changed after preparation. Every edits[].oldText must match a unique, non-overlapping region of the prepared file.",
-		promptSnippet: "Preflight existing files, then make precise exact-text edits with one stale-safe commit",
+			"Edit existing UTF-8 text: prepare(path), then commit(path,intentId,edits). oldText must be exact, unique, and non-overlapping; stale targets are rejected.",
+		promptSnippet: "Preflight existing files; commit exact, stale-safe edits",
 		promptGuidelines: [
-			"Before generating replacement text, call edit with action=prepare and only the file path.",
-			"After preparation succeeds, call edit action=commit with the returned intentId and all replacements.",
-			"Use edit for precise changes (edits[].oldText must match exactly)",
-			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
-			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+			"Before replacements, prepare(path); then commit once with intentId and all edits.",
+			"oldText is exact, unique, minimal, and original-file based; batch separate edits and merge overlaps.",
 		],
 		parameters: editSchema,
 		renderShell: "self",

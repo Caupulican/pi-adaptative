@@ -12,24 +12,16 @@ import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-const writePathSchema = Type.String({
-	description: "Path to the new file (relative or absolute)",
-	minLength: 1,
-});
+const writePathSchema = Type.String({ minLength: 1 });
 const writeCommitProperties = {
-	action: Type.Literal("commit", { description: "Create a destination accepted by a prior prepare call." }),
+	action: Type.Literal("commit"),
 	path: writePathSchema,
-	intentId: Type.String({
-		description: "Intent id returned by write action=prepare for this exact path.",
-		minLength: 1,
-	}),
+	intentId: Type.String({ minLength: 1 }),
 };
 const writeSchema = Type.Union([
 	Type.Object(
 		{
-			action: Type.Literal("prepare", {
-				description: "Validate and reserve the destination before generating file content.",
-			}),
+			action: Type.Literal("prepare"),
 			path: writePathSchema,
 		},
 		{ additionalProperties: false },
@@ -37,17 +29,14 @@ const writeSchema = Type.Union([
 	Type.Object(
 		{
 			...writeCommitProperties,
-			content: Type.String({ description: "New file content." }),
+			content: Type.String(),
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
 			...writeCommitProperties,
-			contentRef: Type.String({
-				description: "Exact session-local content handle returned by an earlier write or edit.",
-				minLength: 1,
-			}),
+			contentRef: Type.String({ minLength: 1 }),
 		},
 		{ additionalProperties: false },
 	),
@@ -286,13 +275,11 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Create a new file without overwriting. Always call action=prepare with only path first. If preparation succeeds, call action=commit with its intentId and exactly one of content or contentRef. Preparation rejects collisions before content is generated; commit rechecks atomically. Parent directories are created during commit.",
-		promptSnippet: "Create new files through path-only preflight; never overwrite existing paths",
+			"Create a file without overwriting: prepare(path), then commit(path,intentId,content|contentRef). Prepare rejects collisions before content generation; commit rechecks atomically.",
+		promptSnippet: "Preflight new paths; never overwrite",
 		promptGuidelines: [
-			"Before generating content, call write with action=prepare and only the destination path.",
-			"After preparation succeeds, call write action=commit with the returned intentId and exactly one of content or contentRef.",
-			"Use edit for existing files. Write is create-only and rejects every existing file, directory, or symlink.",
-			"Reuse a returned contentRef when exact bytes should be copied to another prepared destination; never resend identical content.",
+			"Before content generation, prepare(path); then commit with intentId and one of content or contentRef.",
+			"Write is create-only; edit existing files. Reuse contentRef for exact copies.",
 		],
 		parameters: writeSchema,
 		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
