@@ -2,8 +2,8 @@
 
 ### Fixed
 
-- Bounded ineffective auto-compaction retries with a stricter deterministic checkpoint instead of repeated equivalent model calls.
-- Preserved tool-failure phase, bounded diagnostics, and corrective next actions across rejected and executed native or phone/text-protocol tool calls, including authoritative unknown-tool identity.
+- Stopped auto-compaction after one ineffective model retry and applied a stricter deterministic checkpoint instead of issuing repeated equivalent calls.
+- Preserved tool-failure phase, bounded diagnostics, and corrective next actions across rejected and executed native or phone/text-protocol calls, including authoritative unknown-tool identity.
 
 ## [0.85.0] - 2026-08-02
 

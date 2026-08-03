@@ -2,8 +2,8 @@
 
 ### Fixed
 
-- Prevented concurrent and ineffective repeated auto-compaction runs in image-heavy or protected-recent contexts.
-- Fixed Windows runtime probes, case-insensitive context-file identity, Bash-like path parsing, portable `printf`, word-list and arithmetic `for` loops, and nested `break`/`continue`.
+- Prevented concurrent and ineffective repeated auto-compaction runs in image-heavy sessions and contexts with protected recent messages.
+- Fixed Windows runtime probes and case-insensitive context-file identity, plus Bash-like path parsing, portable `printf`, word-list and arithmetic `for` loops, and nested `break`/`continue` in the managed shell.
 - Preserved managed-tool provisioning causes and bounded execution-failure guidance in recovery logs, failure corpora, and `/toolhealth`.
 - Kept proven native tool-call models off the phone/text protocol and routed phone validation, repair teaching, and failure guidance through the shared tool pipeline.
 - Required the exact release ref to pass Linux and Windows CI before publishing binaries.
