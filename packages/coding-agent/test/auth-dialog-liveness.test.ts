@@ -9,11 +9,14 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 beforeAll(() => initTheme("dark"));
 
 const originalAwsProfile = process.env.AWS_PROFILE;
+const originalAwsRegion = process.env.AWS_REGION;
 
 afterEach(() => {
 	vi.restoreAllMocks();
 	if (originalAwsProfile === undefined) delete process.env.AWS_PROFILE;
 	else process.env.AWS_PROFILE = originalAwsProfile;
+	if (originalAwsRegion === undefined) delete process.env.AWS_REGION;
+	else process.env.AWS_REGION = originalAwsRegion;
 });
 
 describe("authentication dialog liveness", () => {
@@ -252,15 +255,41 @@ describe("authentication dialog liveness", () => {
 
 	it("runs Bedrock login for the configured profile and restores the editor", async () => {
 		process.env.AWS_PROFILE = "work-sso";
+		delete process.env.AWS_REGION;
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("us-east-2");
 		const editor = { render: () => ["editor"], invalidate: () => {} };
 		const overlayHost = { swap: vi.fn() };
 		const showError = vi.fn();
 		const showStatus = vi.fn();
 		const loginBedrockSso = vi.fn(async () => {});
+		const verifiedScope = {
+			region: "us-east-2",
+			profile: "work-sso",
+			modelIds: ["us.anthropic.claude-sonnet-5"],
+			verifiedAt: "2026-08-03T12:00:00.000Z",
+			verification: "identity+control-plane+runtime" as const,
+		};
+		const verifyBedrockScope = vi.fn(async () => verifiedScope);
+		const setBedrockScopeSettings = vi.fn();
+		const setProviderModelScope = vi.fn();
 		const refresh = vi.fn();
 		const controller = new AuthDialogsController({
-			getSession: () => ({ modelRegistry: { refresh } }) as never,
+			getSession: () =>
+				({
+					settingsManager: {
+						getBedrockScopeSettings: () => ({
+							region: "us-west-2",
+							profile: "old-sso",
+							modelIds: ["us.anthropic.claude-opus-4-6-v1"],
+							verifiedAt: "2026-08-02T12:00:00.000Z",
+							verification: "identity+control-plane+runtime",
+						}),
+						setBedrockScopeSettings,
+					},
+					modelRegistry: { getAll: () => [], refresh, setProviderModelScope },
+				}) as never,
 			loginBedrockSso,
+			verifyBedrockScope,
 			ui: {
 				tui: { requestRender: vi.fn() },
 				overlayHost,
@@ -281,9 +310,119 @@ describe("authentication dialog liveness", () => {
 		await showBedrockDialog("amazon-bedrock", "Amazon Bedrock");
 
 		expect(loginBedrockSso).toHaveBeenCalledWith("work-sso", expect.objectContaining({ signal: expect.anything() }));
+		expect(verifyBedrockScope).toHaveBeenCalledWith(
+			expect.objectContaining({
+				profile: "work-sso",
+				region: "us-east-2",
+				signal: expect.anything(),
+				credentialMode: "profile",
+			}),
+			expect.anything(),
+		);
+		expect(setBedrockScopeSettings).toHaveBeenCalledWith(verifiedScope);
+		expect(setProviderModelScope).toHaveBeenCalledWith("amazon-bedrock", verifiedScope.modelIds);
+		expect(process.env.AWS_REGION).toBe("us-east-2");
 		expect(refresh).toHaveBeenCalledOnce();
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining('AWS profile "work-sso"'));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("1 model in us-east-2"));
 		expect(showError).not.toHaveBeenCalled();
 		expect(overlayHost.swap).toHaveBeenLastCalledWith(editor);
+	});
+
+	it("does not start SSO when the mandatory Bedrock region is empty", async () => {
+		process.env.AWS_PROFILE = "work-sso";
+		delete process.env.AWS_REGION;
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("   ");
+		const editor = { render: () => ["editor"], invalidate: () => {} };
+		const showError = vi.fn();
+		const loginBedrockSso = vi.fn(async () => {});
+		const verifyBedrockScope = vi.fn();
+		const controller = new AuthDialogsController({
+			getSession: () =>
+				({
+					settingsManager: { getBedrockScopeSettings: () => undefined },
+					modelRegistry: {},
+				}) as never,
+			loginBedrockSso,
+			verifyBedrockScope,
+			ui: {
+				tui: { requestRender: vi.fn() },
+				overlayHost: { swap: vi.fn() },
+				getEditor: () => editor,
+				showError,
+			} as never,
+		});
+
+		await (
+			controller as unknown as {
+				showBedrockSsoDialog(providerId: string, providerName: string): Promise<void>;
+			}
+		).showBedrockSsoDialog("amazon-bedrock", "Amazon Bedrock");
+
+		expect(loginBedrockSso).not.toHaveBeenCalled();
+		expect(verifyBedrockScope).not.toHaveBeenCalled();
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining("AWS region cannot be empty"));
+	});
+
+	it("verifies ambient IAM or bearer credentials in us-east-2 without invoking SSO", async () => {
+		delete process.env.AWS_PROFILE;
+		delete process.env.AWS_REGION;
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("us-east-2");
+		const editor = { render: () => ["editor"], invalidate: () => {} };
+		const scope = {
+			region: "us-east-2",
+			modelIds: ["us.anthropic.claude-sonnet-5"],
+			verifiedAt: "2026-08-03T12:00:00.000Z",
+			verification: "runtime" as const,
+		};
+		const verifyBedrockScope = vi.fn(async () => scope);
+		const setBedrockScopeSettings = vi.fn();
+		const setProviderModelScope = vi.fn();
+		const showStatus = vi.fn();
+		const controller = new AuthDialogsController({
+			getSession: () =>
+				({
+					settingsManager: {
+						getBedrockScopeSettings: () => ({
+							region: "us-west-2",
+							profile: "old-sso",
+							modelIds: ["us.anthropic.claude-opus-4-6-v1"],
+							verifiedAt: "2026-08-02T12:00:00.000Z",
+							verification: "identity+control-plane+runtime",
+						}),
+						setBedrockScopeSettings,
+					},
+					modelRegistry: { getAll: () => [], setProviderModelScope, refresh: vi.fn() },
+				}) as never,
+			verifyBedrockScope,
+			ui: {
+				tui: { requestRender: vi.fn() },
+				overlayHost: { swap: vi.fn() },
+				getEditor: () => editor,
+				showError: vi.fn(),
+				showStatus,
+				updateAvailableProviderCount: vi.fn(async () => {}),
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+			} as never,
+		});
+
+		await (
+			controller as unknown as {
+				showBedrockCredentialInfoDialog(providerId: string, providerName: string): Promise<void>;
+			}
+		).showBedrockCredentialInfoDialog("amazon-bedrock", "Amazon Bedrock");
+
+		expect(verifyBedrockScope).toHaveBeenCalledWith(
+			expect.objectContaining({
+				region: "us-east-2",
+				profile: undefined,
+				signal: expect.anything(),
+				credentialMode: "ambient",
+			}),
+			expect.anything(),
+		);
+		expect(setBedrockScopeSettings).toHaveBeenCalledWith(scope);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("us-east-2"));
 	});
 });

@@ -409,6 +409,7 @@ export class ModelRegistry {
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
+	private providerModelScopes: Map<string, Set<string>> = new Map();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
 	private modelsJsonPath: string | undefined;
@@ -704,6 +705,23 @@ export class ModelRegistry {
 		return this.models.filter((m) => this.hasConfiguredAuth(m));
 	}
 
+	/** Restrict one provider to an exact, externally verified set of model IDs. */
+	setProviderModelScope(provider: string, modelIds: Iterable<string> | undefined): void {
+		if (modelIds === undefined) {
+			this.providerModelScopes.delete(provider);
+			return;
+		}
+		this.providerModelScopes.set(
+			provider,
+			new Set([...modelIds].map((id) => id.trim()).filter((id) => id.length > 0)),
+		);
+	}
+
+	getProviderModelScope(provider: string): string[] | undefined {
+		const scope = this.providerModelScopes.get(provider);
+		return scope ? [...scope] : undefined;
+	}
+
 	/**
 	 * Find a model by provider and ID.
 	 */
@@ -715,6 +733,8 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
+		const scope = this.providerModelScopes.get(model.provider);
+		if (scope && !scope.has(model.id)) return false;
 		if (model.provider === "llama-cpp") {
 			return true;
 		}
@@ -913,6 +933,9 @@ export class ModelRegistry {
 			registeredProviders: new Map(
 				Array.from(this.registeredProviders, ([name, config]) => [name, cloneProviderConfigInput(config)]),
 			),
+			providerModelScopes: new Map(
+				Array.from(this.providerModelScopes, ([name, modelIds]) => [name, new Set(modelIds)]),
+			),
 			loadError: this.loadError,
 		};
 	}
@@ -928,6 +951,9 @@ export class ModelRegistry {
 		);
 		this.registeredProviders = new Map(
 			Array.from(snapshot.registeredProviders, ([name, config]) => [name, cloneProviderConfigInput(config)]),
+		);
+		this.providerModelScopes = new Map(
+			Array.from(snapshot.providerModelScopes, ([name, modelIds]) => [name, new Set(modelIds)]),
 		);
 		this.loadError = snapshot.loadError;
 
@@ -1127,6 +1153,7 @@ export interface ModelRegistryReloadSnapshot {
 	providerRequestConfigs: Map<string, ProviderRequestConfig>;
 	modelRequestHeaders: Map<string, Record<string, string>>;
 	registeredProviders: Map<string, ProviderConfigInput>;
+	providerModelScopes: Map<string, Set<string>>;
 	loadError: string | undefined;
 }
 

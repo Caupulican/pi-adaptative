@@ -7,6 +7,12 @@ import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import {
+	BEDROCK_PROVIDER_ID,
+	bindSavedBedrockScope,
+	getActiveBedrockScope,
+	isUnscopedBedrockProxy,
+} from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
@@ -243,6 +249,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	bindSavedBedrockScope(settingsManager, modelRegistry);
 	const isChildSession = options.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
 	const forceBackgroundRequests = isChildSession || isWorkerSession();
 	const orchestrationProfile = options.orchestrationProfile;
@@ -455,6 +462,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
+			const bedrockScope =
+				model.provider === BEDROCK_PROVIDER_ID ? getActiveBedrockScope(settingsManager) : undefined;
+			if (model.provider === BEDROCK_PROVIDER_ID && !bedrockScope && !isUnscopedBedrockProxy()) {
+				throw new Error(
+					"Amazon Bedrock requires a verified profile/region scope. Run /login amazon-bedrock before using this model.",
+				);
+			}
 			const auth = await modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
 				throw new Error(auth.error);
@@ -468,8 +482,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const attributionHeaders = getAttributionHeaders(model, settingsManager, options?.sessionId);
-			return streamSimple(model, context, {
+			const providerOptions = {
 				...options,
+				...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
 				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
 				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
 				apiKey: auth.apiKey,
@@ -485,7 +500,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					attributionHeaders || auth.headers || options?.headers
 						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
 						: undefined,
-			});
+			};
+			return streamSimple(model, context, providerOptions);
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;

@@ -217,7 +217,10 @@ export function getEnvApiKey(provider: string): string | undefined {
 		// 4. AWS_CONTAINER_CREDENTIALS_RELATIVE_URI - ECS task roles
 		// 5. AWS_CONTAINER_CREDENTIALS_FULL_URI - ECS task roles (full URI)
 		// 6. AWS_WEB_IDENTITY_TOKEN_FILE - IRSA (IAM Roles for Service Accounts)
+		// 7. Explicit unauthenticated proxy mode with a Bedrock runtime endpoint
 		if (
+			((procEnv?.AWS_BEDROCK_SKIP_AUTH || getProcEnv("AWS_BEDROCK_SKIP_AUTH")) === "1" &&
+				Boolean(procEnv?.AWS_ENDPOINT_URL_BEDROCK_RUNTIME || getProcEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME"))) ||
 			procEnv?.AWS_PROFILE ||
 			(procEnv?.AWS_ACCESS_KEY_ID && procEnv?.AWS_SECRET_ACCESS_KEY) ||
 			procEnv?.AWS_BEARER_TOKEN_BEDROCK ||

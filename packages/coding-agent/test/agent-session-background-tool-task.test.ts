@@ -110,6 +110,90 @@ describe("AgentSession background tool tasks", () => {
 		}
 	});
 
+	it("batches simultaneous terminal completions without racing the owning agent prompt", async () => {
+		let releaseSlow: (() => void) | undefined;
+		const slowCompletion = new Promise<void>((resolve) => {
+			releaseSlow = resolve;
+		});
+		const slowTool: AgentTool<typeof slowParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic slow test tool",
+			parameters: slowParameters,
+			execute: async () => {
+				await slowCompletion;
+				return { content: [{ type: "text" as const, text: "slow result" }], details: {} };
+			},
+		};
+		const harness = createHarness({
+			baseToolsOverride: { slow: slowTool },
+			responses: [
+				{
+					toolCalls: [
+						{ id: "slow-call-1", name: "slow", args: {} },
+						{ id: "slow-call-2", name: "slow", args: {} },
+						{ id: "slow-call-3", name: "slow", args: {} },
+					],
+				},
+				"foreground continued",
+				"batched completion acknowledged",
+			],
+		});
+		harness.session.setActiveToolsByName(["slow", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+		const warnings: string[] = [];
+		const handoffs: string[] = [];
+		let resolveAcknowledged: (() => void) | undefined;
+		const acknowledged = new Promise<void>((resolve) => {
+			resolveAcknowledged = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "warning") warnings.push(event.message);
+			if (event.type !== "message_end") return;
+			if (event.message.role === "custom" && event.message.customType === "background-tool-completion") {
+				handoffs.push(
+					typeof event.message.content === "string"
+						? event.message.content
+						: event.message.content
+								.filter((block) => block.type === "text")
+								.map((block) => block.text)
+								.join("\n"),
+				);
+			}
+			if (event.message.role !== "assistant") return;
+			const text = event.message.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			if (text.includes("batched completion acknowledged")) resolveAcknowledged?.();
+		});
+
+		try {
+			await harness.session.prompt("run three slow tools");
+			expect(harness.faux.callCount).toBe(2);
+			releaseSlow?.();
+			await Promise.race([
+				acknowledged,
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("background completion notification timed out")), 1_000),
+				),
+			]);
+
+			expect(
+				warnings.filter((warning) => warning.includes("Failed to notify terminal background tool task")),
+			).toEqual([]);
+			expect(handoffs).toHaveLength(1);
+			for (const taskId of ["tool-task-1", "tool-task-2", "tool-task-3"]) {
+				expect(handoffs[0]).toContain(taskId);
+			}
+			expect(harness.faux.callCount).toBe(3);
+		} finally {
+			unsubscribe();
+			releaseSlow?.();
+			harness.cleanup();
+		}
+	});
+
 	it("reconstructs only the resumed session's durable task projection", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const retained: BackgroundToolTaskRecord = {

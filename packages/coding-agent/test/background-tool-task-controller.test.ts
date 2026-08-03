@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	BackgroundToolTaskController,
 	type BackgroundToolTaskRecord,
+	createBackgroundToolTerminalMessage,
 } from "../src/core/background-tool-task-controller.ts";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 
@@ -56,8 +57,8 @@ function createHarness(sessionId: string) {
 		getSessionId: () => sessionId,
 		getArtifactStore: () => artifactStore,
 		persist: (record) => persisted.push(record),
-		notifyTerminal: async (record, options) => {
-			notifications.push(record);
+		notifyTerminal: async (records, options) => {
+			notifications.push(...records);
 			wakeSignals.push(options.wakeParent);
 		},
 		onLiveTasksChanged: (tasks) => liveSignals.push(tasks.map((task) => task.taskId)),
@@ -66,6 +67,32 @@ function createHarness(sessionId: string) {
 }
 
 describe("BackgroundToolTaskController", () => {
+	it("bounds a batched terminal handoff while retaining exact task identities", () => {
+		const records = Array.from(
+			{ length: 12 },
+			(_, index): BackgroundToolTaskRecord => ({
+				sessionId: "session-a",
+				taskId: `tool-task-${index + 1}`,
+				toolCallId: `call-${index + 1}`,
+				toolName: "slow",
+				status: "completed",
+				startedAt: "2026-08-01T12:00:00.000Z",
+				completedAt: "2026-08-01T12:00:01.000Z",
+				elapsedBeforeHandoffMs: 15_000,
+				summary: "slow completed",
+				output: "retained outside the terminal handoff",
+			}),
+		);
+
+		const message = createBackgroundToolTerminalMessage(records);
+		expect(message.details.records.map((record) => record.taskId)).toEqual(
+			Array.from({ length: 8 }, (_, index) => `tool-task-${index + 1}`),
+		);
+		expect(message.content).toContain("4 additional terminal tool task(s) omitted");
+		expect(message.content).not.toContain("tool-task-9:");
+		expect(message.content).toContain("tool_task action=wait");
+	});
+
 	it("owns task identity and terminal output per session", async () => {
 		const first = createHarness("session-a");
 		const second = createHarness("session-b");
@@ -204,6 +231,64 @@ describe("BackgroundToolTaskController", () => {
 		await controller.shutdown();
 	});
 
+	it("serializes a terminal batch that arrives during an in-flight notification", async () => {
+		let resolveFirstDeliveryStarted: (() => void) | undefined;
+		const firstDeliveryStarted = new Promise<void>((resolve) => {
+			resolveFirstDeliveryStarted = resolve;
+		});
+		let releaseFirstDelivery: (() => void) | undefined;
+		const firstDelivery = new Promise<void>((resolve) => {
+			releaseFirstDelivery = resolve;
+		});
+		const batches: string[][] = [];
+		let activeDeliveries = 0;
+		let maxActiveDeliveries = 0;
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: () => {},
+			notifyTerminal: async (records) => {
+				activeDeliveries++;
+				maxActiveDeliveries = Math.max(maxActiveDeliveries, activeDeliveries);
+				batches.push(records.map((record) => record.taskId));
+				try {
+					if (batches.length === 1) {
+						resolveFirstDeliveryStarted?.();
+						await firstDelivery;
+					}
+				} finally {
+					activeDeliveries--;
+				}
+			},
+		});
+		const first = controlledContext("call-first");
+		const second = controlledContext("call-second");
+		controller.handoff(first.context);
+		controller.handoff(second.context);
+
+		first.resolveCompletion({
+			toolCall: first.context.toolCall,
+			result: { content: [{ type: "text", text: "first done" }], details: {} },
+			isError: false,
+		});
+		await firstDeliveryStarted;
+
+		const secondTerminal = controller.wait("tool-task-2");
+		second.resolveCompletion({
+			toolCall: second.context.toolCall,
+			result: { content: [{ type: "text", text: "second done" }], details: {} },
+			isError: false,
+		});
+		await secondTerminal;
+		expect(batches).toEqual([["tool-task-1"]]);
+
+		releaseFirstDelivery?.();
+		await controller.waitForNotifications();
+		expect(batches).toEqual([["tool-task-1"], ["tool-task-2"]]);
+		expect(maxActiveDeliveries).toBe(1);
+		await controller.shutdown();
+	});
+
 	it("restores terminal tasks per session and deterministically closes orphaned running tasks", async () => {
 		const completed: BackgroundToolTaskRecord = {
 			sessionId: "session-a",
@@ -239,8 +324,8 @@ describe("BackgroundToolTaskController", () => {
 				completed,
 			],
 			persist: (record) => persisted.push(record),
-			notifyTerminal: (record) => {
-				notifications.push(record);
+			notifyTerminal: (records) => {
+				notifications.push(...records);
 			},
 		});
 

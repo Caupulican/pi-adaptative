@@ -15,6 +15,12 @@ import { getProviders, type Model, type OAuthProviderId, type OAuthSelectPrompt 
 import type { Component, TUI } from "@caupulican/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import {
+	activateVerifiedBedrockScope,
+	BEDROCK_PROVIDER_ID,
+	type BedrockScopeVerificationRequest,
+	verifyBedrockScope,
+} from "../../core/bedrock-scope.ts";
 import { type BedrockSsoLoginOptions, loginBedrockSsoProfile } from "../../core/bedrock-sso-login.ts";
 import { cliProviderAliases, defaultModelPerProvider } from "../../core/model-resolver.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
@@ -32,7 +38,6 @@ function hasDefaultModelProvider(providerId: string): providerId is keyof typeof
 	return providerId in defaultModelPerProvider;
 }
 
-const BEDROCK_PROVIDER_ID = "amazon-bedrock";
 const LOGIN_CANCELLATION_MESSAGES = ["Login cancelled"] as const;
 const BEDROCK_CANCELLATION_MESSAGES = ["Login cancelled", "AWS SSO login was cancelled"] as const;
 
@@ -71,6 +76,7 @@ export interface AuthDialogsControllerDeps {
 	getSession(): AgentSession;
 	ui: AuthDialogsControllerUi;
 	loginBedrockSso?: (profile: string, options?: BedrockSsoLoginOptions) => Promise<void>;
+	verifyBedrockScope?: typeof verifyBedrockScope;
 }
 
 export class AuthDialogsController {
@@ -419,7 +425,7 @@ export class AuthDialogsController {
 	}
 
 	private showBedrockSetupDialog(providerId: string, providerName: string): void {
-		const configuredProfile = process.env.AWS_PROFILE?.trim();
+		const configuredProfile = this.getConfiguredBedrockProfile();
 		const ssoLabel = configuredProfile
 			? `Sign in with SSO profile "${configuredProfile}"`
 			: "Sign in with an AWS SSO profile";
@@ -431,7 +437,7 @@ export class AuthDialogsController {
 				(option) => {
 					done();
 					if (option === ssoLabel) void this.showBedrockSsoDialog(providerId, providerName);
-					else this.showBedrockCredentialInfoDialog(providerId, providerName);
+					else void this.showBedrockCredentialInfoDialog(providerId, providerName);
 				},
 				() => {
 					done();
@@ -442,7 +448,41 @@ export class AuthDialogsController {
 		});
 	}
 
-	private showBedrockCredentialInfoDialog(providerId: string, providerName: string): void {
+	private getConfiguredBedrockProfile(): string | undefined {
+		return process.env.AWS_PROFILE?.trim() || this.session.settingsManager.getBedrockScopeSettings()?.profile;
+	}
+
+	private getConfiguredBedrockRegion(): string {
+		return (
+			process.env.AWS_REGION?.trim() ||
+			this.session.settingsManager.getBedrockScopeSettings()?.region ||
+			process.env.AWS_DEFAULT_REGION?.trim() ||
+			"us-east-1"
+		);
+	}
+
+	private async verifyAndActivateBedrockScope(
+		request: BedrockScopeVerificationRequest,
+	): Promise<Awaited<ReturnType<typeof verifyBedrockScope>>> {
+		const scope = await (this.deps.verifyBedrockScope ?? verifyBedrockScope)(request, this.session.modelRegistry);
+		activateVerifiedBedrockScope(this.session.settingsManager, this.session.modelRegistry, scope);
+		return scope;
+	}
+
+	private async completeBedrockSetup(
+		scope: Awaited<ReturnType<typeof verifyBedrockScope>>,
+		message: string,
+	): Promise<void> {
+		this.session.modelRegistry.refresh();
+		await this.ui.updateAvailableProviderCount();
+		this.ui.invalidateFooter();
+		this.ui.updateEditorBorderColor();
+		this.ui.showStatus(
+			`${message} Verified ${scope.modelIds.length} model${scope.modelIds.length === 1 ? "" : "s"} in ${scope.region}.`,
+		);
+	}
+
+	private async showBedrockCredentialInfoDialog(providerId: string, providerName: string): Promise<void> {
 		this.cancelActiveDialog();
 		const dialog = new LoginDialogComponent(
 			this.ui.tui,
@@ -455,11 +495,37 @@ export class AuthDialogsController {
 		);
 		dialog.showInfo([
 			theme.fg("text", "Amazon Bedrock uses AWS credentials instead of a single API key."),
-			theme.fg("text", "Configure IAM keys, a bearer token, or role-based credentials before starting Pi."),
+			theme.fg(
+				"text",
+				"Configure IAM keys, a bearer token, or role-based credentials, then verify their exact region.",
+			),
 			theme.fg("muted", "See:"),
 			theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
 		]);
 		this.mountLoginDialog(dialog);
+		let scope: Awaited<ReturnType<typeof verifyBedrockScope>> | undefined;
+		await this.runMountedLoginDialog(
+			dialog,
+			async () => {
+				const region = (
+					await dialog.showPrompt("AWS region (required):", this.getConfiguredBedrockRegion())
+				).trim();
+				if (!region) throw new Error("AWS region cannot be empty.");
+				dialog.showProgress("Verifying AWS identity, Bedrock profiles, and model access...");
+				scope = await this.verifyAndActivateBedrockScope({
+					region,
+					profile: process.env.AWS_PROFILE?.trim(),
+					signal: dialog.signal,
+					credentialMode: "ambient",
+				});
+			},
+			async () => {
+				if (!scope) return;
+				await this.completeBedrockSetup(scope, "Amazon Bedrock credentials are ready.");
+			},
+			`Failed to configure ${providerName}: `,
+			BEDROCK_CANCELLATION_MESSAGES,
+		);
 	}
 
 	private async showBedrockSsoDialog(providerId: string, providerName: string): Promise<void> {
@@ -475,29 +541,38 @@ export class AuthDialogsController {
 		);
 		this.mountLoginDialog(dialog);
 		let profile = "";
+		let scope: Awaited<ReturnType<typeof verifyBedrockScope>> | undefined;
 		await this.runMountedLoginDialog(
 			dialog,
 			async () => {
-				const configuredProfile = process.env.AWS_PROFILE?.trim();
+				const configuredProfile = this.getConfiguredBedrockProfile();
 				profile = configuredProfile ?? (await dialog.showPrompt("AWS SSO profile name:", "my-work-profile")).trim();
 				if (!profile) throw new Error("AWS profile name cannot be empty.");
+				const region = (
+					await dialog.showPrompt("AWS region (required):", this.getConfiguredBedrockRegion())
+				).trim();
+				if (!region) throw new Error("AWS region cannot be empty.");
 
 				if (configuredProfile) {
 					dialog.showInfo([
 						theme.fg("text", `Using AWS profile: ${profile}`),
+						theme.fg("text", `Bedrock region: ${region}`),
 						theme.fg("muted", "Complete the IAM Identity Center sign-in in your browser."),
 					]);
 				}
 				dialog.showProgress("Waiting for AWS SSO authentication...");
 				await (this.deps.loginBedrockSso ?? loginBedrockSsoProfile)(profile, { signal: dialog.signal });
-				process.env.AWS_PROFILE = profile;
+				dialog.showProgress("Verifying AWS identity, Bedrock profiles, and model access...");
+				scope = await this.verifyAndActivateBedrockScope({
+					profile,
+					region,
+					signal: dialog.signal,
+					credentialMode: "profile",
+				});
 			},
 			async () => {
-				this.session.modelRegistry.refresh();
-				await this.ui.updateAvailableProviderCount();
-				this.ui.invalidateFooter();
-				this.ui.updateEditorBorderColor();
-				this.ui.showStatus(`Signed in with AWS profile "${profile}". The AWS SSO session is ready.`);
+				if (!scope) return;
+				await this.completeBedrockSetup(scope, `Signed in with AWS profile "${profile}".`);
 			},
 			`Failed to sign in to ${providerName}: `,
 			BEDROCK_CANCELLATION_MESSAGES,

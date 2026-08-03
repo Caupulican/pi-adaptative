@@ -13,6 +13,8 @@
 ### Fixed
 
 - Hardened phone-protocol tool execution for non-native local models with reasoning-channel envelope recovery, parallel-call identity, dependent prepare/write/edit examples, bounded corrective teaching after failures, and protection against repeating an already-successful mutation.
+- Fixed simultaneous background-tool completions racing separate notification prompts: terminal handoffs are now bounded, coalesced, and serialized while every task result remains individually retrievable through `tool_task`.
+- Required Amazon Bedrock to use a durable verified profile-and-region scope, with STS/control-plane discovery, bounded runtime probes, exact model visibility, and request-level region/profile binding; `us-east-2` now resolves only US inference profiles.
 
 ## [0.85.3] - 2026-08-03
 

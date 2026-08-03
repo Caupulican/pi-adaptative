@@ -640,7 +640,7 @@ export class AgentSession {
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
 			persist: (record) => this.sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
-			notifyTerminal: (record, options) => this._notifyBackgroundToolTerminal(record, options.wakeParent),
+			notifyTerminal: (records, options) => this._notifyBackgroundToolTerminal(records, options.wakeParent),
 			onLiveTasksChanged: (tasks) => this._emit({ type: "background_tools", tasks }),
 			recordUsage: (taskId, usage) => {
 				this.addSpawnedUsage(usage, {
@@ -1737,12 +1737,15 @@ export class AgentSession {
 		);
 	}
 
-	private async _notifyBackgroundToolTerminal(record: BackgroundToolTaskRecord, wakeParent: boolean): Promise<void> {
+	private async _notifyBackgroundToolTerminal(
+		records: readonly BackgroundToolTaskRecord[],
+		wakeParent: boolean,
+	): Promise<void> {
 		if (!wakeParent) return;
 		if (this._disposed) throw new Error("Session disposed before background tool terminal handoff was delivered");
 		await this.agent.waitForIdle();
 		if (this._disposed) throw new Error("Session disposed before background tool terminal handoff was delivered");
-		await this.sendCustomMessage(createBackgroundToolTerminalMessage(record), {
+		await this.sendCustomMessage(createBackgroundToolTerminalMessage(records), {
 			triggerTurn: true,
 			deliverAs: "followUp",
 		});

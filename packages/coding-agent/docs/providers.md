@@ -201,6 +201,9 @@ export AZURE_OPENAI_DEPLOYMENT_NAME_MAP=gpt-4=my-gpt4,gpt-4o=my-gpt4o
 
 ### Amazon Bedrock
 
+Amazon Bedrock requires an explicit verified region scope. A region from `~/.aws/config` is not
+enough: Pi persists and sends `AWS_REGION` explicitly so discovery and runtime requests cannot drift.
+
 ```bash
 # Option 1: AWS Profile (recommended for IAM Identity Center / SSO)
 export AWS_PROFILE=your-profile
@@ -212,30 +215,47 @@ export AWS_SECRET_ACCESS_KEY=...
 # Option 3: Bearer Token
 export AWS_BEARER_TOKEN_BEDROCK=...
 
-# Optional region (defaults to us-east-1)
-export AWS_REGION=us-west-2
+# Required AWS scope. US inference profiles in Ohio use us-east-2.
+export AWS_REGION=us-east-2
 ```
 
 For an SSO profile, AWS CLI v2 is required and the modern `sso-session` profile format is recommended.
-Start Pi with `AWS_PROFILE` set, or run `/login amazon-bedrock` and enter the profile name for the
-current Pi process. Pi runs `aws sso login --profile <profile>` without a shell. The AWS SDK refreshes
-ordinary role credentials; if the underlying SSO session later expires, Pi performs one foreground
-login and replays the Bedrock request once, only before a response has started. Background and worker
-requests never open a browser and instead return an authentication-required error to the owning
-session.
+Run `/login amazon-bedrock`, select SSO, and enter the exact profile and region. For IAM keys, bearer
+tokens, ECS roles, or IRSA, select the ambient-credentials option and enter the exact region. Pi then:
+
+1. verifies the selected profile and region with STS;
+2. paginates region-scoped system inference profiles;
+3. selects the current US/EU/APAC/global Claude candidate for each available tier;
+4. runs a bounded one-token runtime probe for every candidate; and
+5. persists the exact profile, region, verified model IDs, verification mode, and timestamp in the
+   user settings file.
+
+Bearer tokens skip STS and control-plane discovery because that auth mode cannot reliably use them;
+Pi instead probes the bounded region-derived candidates directly. A credential alone exposes no
+Bedrock models. If `AWS_PROFILE` or `AWS_REGION` later differs from the saved scope, the saved model
+evidence is rejected until `/login amazon-bedrock` verifies the new scope. Direct Anthropic models are
+unaffected.
+
+Pi runs `aws sso login --profile <profile>` without a shell. The AWS SDK refreshes ordinary role
+credentials; if the underlying SSO session later expires, Pi performs one foreground login and
+replays the Bedrock request once, only before a response has started. Background and worker requests
+never open a browser and instead return an authentication-required error to the owning session.
 
 Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE`).
 
 ```bash
-pi --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
+pi --provider amazon-bedrock --model us.anthropic.claude-sonnet-5
 ```
 
 Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
 
 ```bash
 export AWS_BEDROCK_FORCE_CACHE=1
-pi --provider amazon-bedrock --model arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123
+pi --provider amazon-bedrock --model arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/abc123
 ```
+
+An explicitly configured application-inference-profile ARN remains selectable only when its ARN
+region matches the verified scope. It does not expand the discovered system-model allowlist.
 
 If you are connecting to a Bedrock API proxy, the following environment variables can be used:
 
@@ -249,6 +269,10 @@ export AWS_BEDROCK_SKIP_AUTH=1
 # Set if your proxy only supports HTTP/1.1
 export AWS_BEDROCK_FORCE_HTTP1=1
 ```
+
+An explicit unauthenticated proxy (`AWS_BEDROCK_SKIP_AUTH=1` plus
+`AWS_ENDPOINT_URL_BEDROCK_RUNTIME`) is outside AWS account/region verification and retains its custom
+model surface.
 
 ### Cloudflare AI Gateway
 

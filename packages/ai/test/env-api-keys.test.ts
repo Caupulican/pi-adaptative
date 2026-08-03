@@ -6,6 +6,8 @@ const originalGhToken = process.env.GH_TOKEN;
 const originalGitHubToken = process.env.GITHUB_TOKEN;
 const originalSakanaApiKey = process.env.SAKANA_API_KEY;
 const originalFuguApiKey = process.env.FUGU_API_KEY;
+const originalBedrockSkipAuth = process.env.AWS_BEDROCK_SKIP_AUTH;
+const originalBedrockEndpoint = process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
 
 function withoutProcess(callback: () => void): void {
 	const descriptor = Object.getOwnPropertyDescriptor(globalThis, "process");
@@ -51,6 +53,11 @@ afterEach(() => {
 	} else {
 		process.env.FUGU_API_KEY = originalFuguApiKey;
 	}
+
+	if (originalBedrockSkipAuth === undefined) delete process.env.AWS_BEDROCK_SKIP_AUTH;
+	else process.env.AWS_BEDROCK_SKIP_AUTH = originalBedrockSkipAuth;
+	if (originalBedrockEndpoint === undefined) delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
+	else process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME = originalBedrockEndpoint;
 });
 
 describe("environment API keys", () => {
@@ -86,6 +93,13 @@ describe("environment API keys", () => {
 
 		expect(findEnvKeys("fugu")).toEqual(["FUGU_API_KEY"]);
 		expect(getEnvApiKey("fugu")).toBe("fugu-token");
+	});
+
+	it("keeps explicit unauthenticated Bedrock proxy mode outside AWS scope verification", () => {
+		process.env.AWS_BEDROCK_SKIP_AUTH = "1";
+		process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME = "http://localhost:9000/bedrock";
+
+		expect(getEnvApiKey("amazon-bedrock")).toBe("<authenticated>");
 	});
 
 	it("does not read env keys without a process global", () => {

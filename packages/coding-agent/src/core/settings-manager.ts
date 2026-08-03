@@ -371,6 +371,61 @@ export interface ModelCapabilitySettings {
 	mode?: ModelCapabilityMode;
 }
 
+export type BedrockScopeVerification = "identity+control-plane+runtime" | "runtime";
+
+/** User-owned, verified Amazon Bedrock request and model-visibility boundary. */
+export interface BedrockScopeSettings {
+	region: string;
+	profile?: string;
+	modelIds: string[];
+	verifiedAt: string;
+	verification: BedrockScopeVerification;
+}
+
+const MAX_BEDROCK_SCOPE_MODEL_IDS = 16;
+const MAX_BEDROCK_MODEL_ID_CHARS = 512;
+
+function normalizeBedrockScopeSettings(value: BedrockScopeSettings | undefined): BedrockScopeSettings | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const region = typeof value.region === "string" ? value.region.trim().toLowerCase() : "";
+	if (!/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(region)) return undefined;
+
+	const profile = typeof value.profile === "string" ? value.profile.trim() : undefined;
+	if (
+		profile !== undefined &&
+		(profile.length === 0 || profile.length > 256 || /[\u0000-\u001f\u007f]/.test(profile))
+	) {
+		return undefined;
+	}
+
+	if (!Array.isArray(value.modelIds)) return undefined;
+	const modelIds = [
+		...new Set(
+			value.modelIds
+				.filter((id): id is string => typeof id === "string")
+				.map((id) => id.trim())
+				.filter(
+					(id) => id.length > 0 && id.length <= MAX_BEDROCK_MODEL_ID_CHARS && !/[\u0000-\u001f\u007f]/.test(id),
+				),
+		),
+	];
+	if (modelIds.length === 0 || modelIds.length > MAX_BEDROCK_SCOPE_MODEL_IDS) return undefined;
+
+	const verifiedAt = typeof value.verifiedAt === "string" ? value.verifiedAt.trim() : "";
+	if (!verifiedAt || !Number.isFinite(Date.parse(verifiedAt))) return undefined;
+	if (value.verification !== "identity+control-plane+runtime" && value.verification !== "runtime") {
+		return undefined;
+	}
+
+	return {
+		region,
+		...(profile ? { profile } : {}),
+		modelIds,
+		verifiedAt,
+		verification: value.verification,
+	};
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -475,6 +530,7 @@ export interface Settings {
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
 	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
+	bedrock?: BedrockScopeSettings; // User-level verified profile/region/model scope for Amazon Bedrock
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	toolRepair?: ToolRepairSettings; // Tool-recovery logging plus teach and text-protocol switches
@@ -3487,6 +3543,30 @@ export class SettingsManager {
 
 		this.globalSettings.modelCapability = { ...settings };
 		this.markModified("modelCapability");
+		this.save();
+	}
+
+	getBedrockScopeSettings(): BedrockScopeSettings | undefined {
+		const scope = normalizeBedrockScopeSettings(this.globalSettings.bedrock);
+		return scope
+			? {
+					...scope,
+					modelIds: [...scope.modelIds],
+				}
+			: undefined;
+	}
+
+	setBedrockScopeSettings(scope: BedrockScopeSettings): void {
+		const normalized = normalizeBedrockScopeSettings(scope);
+		if (!normalized) throw new Error("Cannot persist an invalid or empty Bedrock verification scope.");
+		this.globalSettings.bedrock = { ...normalized, modelIds: [...normalized.modelIds] };
+		this.markModified("bedrock");
+		this.save();
+	}
+
+	clearBedrockScopeSettings(): void {
+		delete this.globalSettings.bedrock;
+		this.markModified("bedrock");
 		this.save();
 	}
 

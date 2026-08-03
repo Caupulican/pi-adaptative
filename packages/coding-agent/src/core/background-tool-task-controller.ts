@@ -16,6 +16,7 @@ const MAX_RETAINED_TERMINAL_TASKS = 64;
 const MAX_INLINE_OUTPUT_BYTES = 32 * 1024;
 const MAX_INLINE_OUTPUT_LINES = 400;
 const MAX_SUMMARY_CHARS = 200;
+const MAX_TERMINAL_HANDOFF_RECORDS = 8;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
 const RECORD_KEYS = [
 	"sessionId",
@@ -63,10 +64,12 @@ export interface BackgroundToolTerminalMessage {
 	content: string;
 	display: true;
 	details: {
-		taskId: string;
-		status: BackgroundToolTaskStatus;
-		toolName: string;
-		artifactId?: string;
+		records: Array<{
+			taskId: string;
+			status: BackgroundToolTaskStatus;
+			toolName: string;
+			artifactId?: string;
+		}>;
 	};
 }
 
@@ -76,7 +79,7 @@ export interface BackgroundToolTaskControllerDeps {
 	/** Durable task records on the active branch, newest first, without rebuilding full model context. */
 	loadPersistedRecordsNewestFirst?(): readonly unknown[];
 	persist(record: BackgroundToolTaskRecord): void;
-	notifyTerminal(record: BackgroundToolTaskRecord, options: { wakeParent: boolean }): Promise<void> | void;
+	notifyTerminal(records: readonly BackgroundToolTaskRecord[], options: { wakeParent: boolean }): Promise<void> | void;
 	onLiveTasksChanged?(tasks: readonly BackgroundToolTaskLiveView[]): void;
 	recordUsage?(taskId: string, usage: Usage): void;
 	onError?(message: string, error: unknown): void;
@@ -108,20 +111,28 @@ export function loadBackgroundToolTaskRecordsNewestFirst(
 	}
 }
 
-export function createBackgroundToolTerminalMessage(record: BackgroundToolTaskRecord): BackgroundToolTerminalMessage {
+export function createBackgroundToolTerminalMessage(
+	records: readonly BackgroundToolTaskRecord[],
+): BackgroundToolTerminalMessage {
+	if (records.length === 0) throw new TypeError("Background tool terminal handoff requires at least one record");
+	const included = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS);
+	const omitted = records.length - included.length;
 	return {
 		customType: "background-tool-completion",
 		content: [
 			"Background tool terminal handoff:",
-			`- ${record.taskId}: ${record.status} (tool=${record.toolName})`,
+			...included.map((record) => `- ${record.taskId}: ${record.status} (tool=${record.toolName})`),
+			...(omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted from this bounded handoff.`] : []),
 			"This terminal event woke the owning session. Retrieve the result once with tool_task action=wait if it is needed; never poll.",
 		].join("\n"),
 		display: true,
 		details: {
-			taskId: record.taskId,
-			status: record.status,
-			toolName: record.toolName,
-			...(record.artifactId ? { artifactId: record.artifactId } : {}),
+			records: included.map((record) => ({
+				taskId: record.taskId,
+				status: record.status,
+				toolName: record.toolName,
+				...(record.artifactId ? { artifactId: record.artifactId } : {}),
+			})),
 		},
 	};
 }
@@ -240,7 +251,8 @@ export class BackgroundToolTaskController {
 	private readonly deps: BackgroundToolTaskControllerDeps;
 	private readonly tasks = new Map<string, BackgroundToolTaskState>();
 	private readonly handoffRequests = new Map<string, Set<() => void>>();
-	private readonly pendingNotifications = new Set<Promise<void>>();
+	private readonly queuedNotifications: Array<{ record: BackgroundToolTaskRecord; wakeParent: boolean }> = [];
+	private notificationDrain: Promise<void> | undefined;
 	private nextTaskId = 1;
 	private disposed = false;
 
@@ -367,7 +379,15 @@ export class BackgroundToolTaskController {
 	}
 
 	async waitForNotifications(): Promise<void> {
-		await Promise.allSettled([...this.pendingNotifications]);
+		// A just-resolved tool completion settles through its promise continuation before it can enqueue
+		// the notification drain. Yield once so this event-driven barrier observes that enqueue.
+		await Promise.resolve();
+		for (;;) {
+			const drain = this.notificationDrain;
+			if (!drain) return;
+			await drain;
+			if (!this.notificationDrain && this.queuedNotifications.length === 0) return;
+		}
 	}
 
 	async shutdown(): Promise<void> {
@@ -521,21 +541,39 @@ export class BackgroundToolTaskController {
 	}
 
 	private notify(record: BackgroundToolTaskRecord, wakeParent: boolean): void {
-		let notification: Promise<void>;
-		try {
-			notification = Promise.resolve(this.deps.notifyTerminal({ ...record }, { wakeParent }));
-		} catch (error) {
-			this.deps.onError?.(`Failed to notify terminal background tool task ${record.taskId}`, error);
-			return;
+		this.queuedNotifications.push({ record: { ...record }, wakeParent });
+		this.scheduleNotificationDrain();
+	}
+
+	private scheduleNotificationDrain(): void {
+		if (this.notificationDrain) return;
+		this.notificationDrain = this.drainNotifications().finally(() => {
+			this.notificationDrain = undefined;
+			if (this.queuedNotifications.length > 0) this.scheduleNotificationDrain();
+		});
+	}
+
+	private async drainNotifications(): Promise<void> {
+		// Allow completions released by the same event to reach this queue before forming the batch.
+		await Promise.resolve();
+		while (this.queuedNotifications.length > 0) {
+			await Promise.resolve();
+			const batch = this.queuedNotifications.splice(0);
+			const records = batch.map((notification) => notification.record);
+			try {
+				await this.deps.notifyTerminal(records, {
+					wakeParent: batch.some((notification) => notification.wakeParent),
+				});
+			} catch (error) {
+				const includedIds = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS).map((record) => record.taskId);
+				const omitted = records.length - includedIds.length;
+				const suffix = omitted > 0 ? ` (+${omitted} more)` : "";
+				this.deps.onError?.(
+					`Failed to notify terminal background tool task batch ${includedIds.join(", ")}${suffix}`,
+					error,
+				);
+			}
 		}
-		this.pendingNotifications.add(notification);
-		notification.then(
-			() => this.pendingNotifications.delete(notification),
-			(error) => {
-				this.pendingNotifications.delete(notification);
-				this.deps.onError?.(`Failed to notify terminal background tool task ${record.taskId}`, error);
-			},
-		);
 	}
 
 	private emitLiveTasks(): void {

@@ -5,6 +5,7 @@ import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { configFile } from "./agent-paths.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import { bindSavedBedrockScope } from "./bedrock-scope.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
@@ -147,6 +148,7 @@ export async function createAgentSessionServices(
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const modelRegistry =
 		options.modelRegistry ?? ModelRegistry.create(authStorage, configFile(agentDir, "models.json"));
+	bindSavedBedrockScope(settingsManager, modelRegistry);
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		cwd,
