@@ -3,6 +3,9 @@
 ### Fixed
 
 - Fixed the bundled Windows incident collector on PowerShell 5.1 hosts where the module-provided `Get-FileHash` command is unavailable.
+- Fixed native Windows path canonicalization so 8.3 short paths and their long-path spellings resolve to one resource identity.
+- Fixed cooperative worker cleanup under Windows file-lock contention so terminal state is durably persisted, including cleanup requested during the adoption grace window.
+- Fixed system Python detection incorrectly accepting the Windows Store execution alias or another non-Python executable as an installed interpreter.
 
 ## [0.85.2] - 2026-08-03
 
