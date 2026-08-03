@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 describe("proactive reflection across session modes", () => {
@@ -43,23 +43,26 @@ describe("proactive reflection across session modes", () => {
 			},
 		]);
 
+		const scheduler = (
+			harness.session as unknown as {
+				_reflection: {
+					scheduleFromTurn(messages: AgentMessage[], headroom: number): void;
+					waitForActivePass(): Promise<void>;
+				};
+			}
+		)._reflection;
+
 		await harness.session.prompt("From now on, remember that I prefer bounded diagnostic output.");
+		await scheduler.waitForActivePass();
 		const userFile = join(harness.tempDir, "USER.md");
-		await vi.waitFor(() => {
-			expect(existsSync(userFile)).toBe(true);
-			expect(readFileSync(userFile, "utf-8")).toContain("User prefers bounded diagnostic output.");
-		});
+		expect(existsSync(userFile)).toBe(true);
+		expect(readFileSync(userFile, "utf-8")).toContain("User prefers bounded diagnostic output.");
 		expect(harness.session.getLearningAuditRecords().at(-1)).toMatchObject({
 			action: "apply",
 			reasonCode: "explicit_user_memory_instruction",
 		});
 		expect(harness.session.getSpawnedUsage().reports).toBe(1);
 
-		const scheduler = (
-			harness.session as unknown as {
-				_reflection: { scheduleFromTurn(messages: AgentMessage[], headroom: number): void };
-			}
-		)._reflection;
 		scheduler.scheduleFromTurn(
 			[
 				{
@@ -71,7 +74,7 @@ describe("proactive reflection across session modes", () => {
 			],
 			90,
 		);
-		await Promise.resolve();
+		await scheduler.waitForActivePass();
 		expect(harness.session.getSpawnedUsage().reports).toBe(1);
 	});
 });
