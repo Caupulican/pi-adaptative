@@ -117,7 +117,12 @@ describe("bash broad-search guard", () => {
 		const text = result.content.map((item) => (item.type === "text" ? item.text : "")).join("");
 		const details = result.details as BashToolDetails | undefined;
 
-		expect(executedCommands).toEqual(["rg needle"]);
+		expect(executedCommands).toHaveLength(1);
+		if (process.platform === "win32") {
+			expect(executedCommands[0]).toContain("& 'rg' 'needle'");
+		} else {
+			expect(executedCommands[0]).toBe("rg needle");
+		}
 		expect(text).toContain("Broad search output routed to");
 		expect(text).not.toContain("src/a.ts:needle");
 		expect(details?.fullOutputPath).toBeDefined();

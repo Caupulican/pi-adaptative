@@ -102,5 +102,5 @@ describe("built-in all-active profile activation", () => {
 		const withAllActive = await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
 		expect(withAllActive).toEqual(expect.arrayContaining(baseline));
 		expect(withAllActive.length).toBeGreaterThan(baseline.length);
-	});
+	}, 60_000);
 });

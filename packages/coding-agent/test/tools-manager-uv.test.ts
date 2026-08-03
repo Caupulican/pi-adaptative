@@ -92,6 +92,6 @@ describe("managed search and JSON tools", () => {
 		installStandaloneBinaryAsset(downloaded, installed, "linux");
 
 		await expect(readFile(installed, "utf-8")).resolves.toBe("standalone-jq");
-		expect((await stat(installed)).mode & 0o111).not.toBe(0);
+		if (process.platform !== "win32") expect((await stat(installed)).mode & 0o111).not.toBe(0);
 	});
 });

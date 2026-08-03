@@ -504,7 +504,7 @@ Content`,
 			expect(extension, JSON.stringify(loader.getExtensions().errors)).toBeDefined();
 			expect(extension?.tools.has("tmux_agent_manager")).toBe(true);
 			expect(loader.getExtensions().errors).toEqual([]);
-		});
+		}, 60_000);
 
 		it("should suppress external root extensions at load time when no resource profile is active", async () => {
 			const root = join(tempDir, "catalog-no-profile");

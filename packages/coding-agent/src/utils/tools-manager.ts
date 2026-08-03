@@ -22,18 +22,19 @@ import { dirname, join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { pathToFileURL } from "url";
-import { APP_NAME, getAgentDir, getBinDir } from "../config.ts";
+import { getAgentDir, getBinDir } from "../config.ts";
 import { cacheDir as agentCacheDir, cacheFile } from "../core/agent-paths.ts";
 import { ensureManagedJscpd, JSCPD_VERSION } from "./bundled-jscpd.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
 import { getProcessWorkRun } from "./work-directory.ts";
 
 const TOOLS_DIR = getBinDir();
-const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
 const FFF_NODE_VERSION = "0.9.6";
+export const FD_VERSION = "10.4.2";
+const FD_DARWIN_X64_VERSION = "10.3.0";
 export const RG_VERSION = "15.2.0";
 export const JQ_VERSION = "1.8.2";
 export const UV_VERSION = "0.11.28";
@@ -59,7 +60,8 @@ interface ToolConfig {
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
 	downloadKind?: "archive" | "binary";
-	pinnedVersion?: string;
+	pinnedVersion: string;
+	getPinnedVersion?: (plat: string, architecture: string) => string | undefined;
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
@@ -70,7 +72,11 @@ const TOOLS: Record<"fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
 		binaryName: "fd",
 		systemBinaryNames: ["fd", "fdfind"],
 		tagPrefix: "v",
+		pinnedVersion: FD_VERSION,
+		getPinnedVersion: (plat, architecture) =>
+			plat === "darwin" && architecture === "x64" ? FD_DARWIN_X64_VERSION : undefined,
 		getAssetName: (version, plat, architecture) => {
+			if (architecture !== "arm64" && architecture !== "x64") return null;
 			if (plat === "darwin") {
 				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
 				return `fd-v${version}-${archStr}-apple-darwin.tar.gz`;
@@ -82,6 +88,16 @@ const TOOLS: Record<"fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
 				return `fd-v${version}-${archStr}-pc-windows-msvc.zip`;
 			}
 			return null;
+		},
+		sha256ByAsset: {
+			"fd-v10.3.0-x86_64-apple-darwin.tar.gz": "50d30f13fe3d5914b14c4fff5abcbd4d0cdab4b855970a6956f4f006c17117a3",
+			"fd-v10.4.2-aarch64-apple-darwin.tar.gz": "623dc0afc81b92e4d4606b380d7bc91916ba7b97814263e554d50923a39e480a",
+			"fd-v10.4.2-aarch64-pc-windows-msvc.zip": "4f9110c2d5b33a7f760bfa5510f4c113d828109f7277d421b1053a9943c0fc92",
+			"fd-v10.4.2-aarch64-unknown-linux-gnu.tar.gz":
+				"6c51f7c5446b3338b1e401ff15dc194c590bb2fa64fd43ff3278300f073adec5",
+			"fd-v10.4.2-x86_64-pc-windows-msvc.zip": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+			"fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz":
+				"def59805cd14b5651b68990855f426ad087f3b96881296d963910431ba3143c8",
 		},
 	},
 	rg: {
@@ -208,17 +224,22 @@ export interface PinnedToolAsset {
 	expectedSha256: string;
 }
 
+function getConfiguredPinnedVersion(config: ToolConfig, targetPlatform: string, targetArchitecture: string): string {
+	return config.getPinnedVersion?.(targetPlatform, targetArchitecture) ?? config.pinnedVersion;
+}
+
 export function getPinnedToolAsset(
 	tool: ManagedToolName,
 	targetPlatform: string = platform(),
 	targetArchitecture: string = arch(),
 ): PinnedToolAsset | null {
 	const config: ToolConfig = TOOLS[tool];
-	if (!config.pinnedVersion || !config.sha256ByAsset) return null;
-	const assetName = config.getAssetName(config.pinnedVersion, targetPlatform, targetArchitecture);
+	const version = getConfiguredPinnedVersion(config, targetPlatform, targetArchitecture);
+	if (!config.sha256ByAsset) return null;
+	const assetName = config.getAssetName(version, targetPlatform, targetArchitecture);
 	if (!assetName) return null;
 	const expectedSha256 = config.sha256ByAsset[assetName];
-	return expectedSha256 ? { version: config.pinnedVersion, assetName, expectedSha256 } : null;
+	return expectedSha256 ? { version, assetName, expectedSha256 } : null;
 }
 
 // Check if a command exists in PATH by trying to run it
@@ -419,21 +440,6 @@ export function probeVersion(command: string, versionArgs: readonly string[] = [
 	}
 }
 
-// Fetch latest release version from GitHub
-async function getLatestVersion(repo: string): Promise<string> {
-	const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-		headers: { "User-Agent": `${APP_NAME}-coding-agent` },
-		signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
-	});
-
-	if (!response.ok) {
-		throw new Error(`GitHub API error: ${response.status}`);
-	}
-
-	const data = (await response.json()) as { tag_name: string };
-	return data.tag_name.replace(/^v/, "");
-}
-
 // Download a file from URL
 async function downloadFile(url: string, dest: string): Promise<void> {
 	const response = await fetch(url, {
@@ -601,10 +607,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 	const architecture = arch();
 
 	// Pinned tools are reproducible and verified before installation.
-	let version = config.pinnedVersion ?? (await getLatestVersion(config.repo));
-	if (tool === "fd" && plat === "darwin" && architecture === "x64") {
-		version = "10.3.0";
-	}
+	const version = getConfiguredPinnedVersion(config, plat, architecture);
 
 	// Get asset name for this platform
 	const assetName = config.getAssetName(version, plat, architecture);

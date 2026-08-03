@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed fresh Windows search-tool provisioning by pinning checksum-verified `fd` release assets instead of relying on GitHub's rate-limited latest-release API, and hardened Windows release-gate portability without enabling unsupported native tmux.
+
 ## [0.85.1] - 2026-08-03
 
 ### Fixed

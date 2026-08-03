@@ -34,6 +34,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 }
 
 const fauxCtx = { signal: undefined } as unknown as ExtensionContext;
+const fauxTmuxPlatform: NodeJS.Platform = "linux";
 
 function fauxTmuxTool(
 	execute: ToolDefinition["execute"],
@@ -80,6 +81,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		});
 
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: (id) => blc.resolveManagedLaneId(id),
@@ -136,6 +138,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			);
 		});
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: () => toolDef,
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -149,6 +152,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 
 	it("extension-not-loaded: getToolDefinition undefined -> honest skip, no crash", async () => {
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: () => undefined,
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -201,6 +205,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			{ allowed: false, onCall: () => actions.push("guard") },
 		);
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: () => toolDef,
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -223,6 +228,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			throw new Error("tmux session already exists: pi-agents-x. Use stop_job/stop_session first.");
 		});
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: () => toolDef,
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -237,6 +243,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 	it("tmux_dispatch_incomplete when the result carries no job/agents", async () => {
 		const toolDef = fauxTmuxTool(async () => ({ content: [], details: {} }));
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: () => toolDef,
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -253,6 +260,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			details: { job: { id: "job1", agents: [{ id: "goal-worker-1" }] } },
 		}));
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: () => toolDef,
 			createExtensionContext: () => fauxCtx,
 			// Never actually dispatched via recordManagedLane -- nothing to correlate.
@@ -277,6 +285,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		});
 
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: (laneId) => laneId,
@@ -315,6 +324,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		});
 
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -339,6 +349,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		});
 
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: (laneId) => laneId,
@@ -360,6 +371,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		});
 
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: () => undefined,
@@ -393,6 +405,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		});
 
 		const deps: TmuxDispatchDeps = {
+			platform: fauxTmuxPlatform,
 			getToolDefinition: (name) => (name === "tmux_agent_manager" ? toolDef : undefined),
 			createExtensionContext: () => fauxCtx,
 			resolveManagedLaneId: (laneId) => laneId,

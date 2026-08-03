@@ -16060,6 +16060,23 @@ export const MODELS = {
 			contextWindow: 1000000,
 			maxTokens: 64000,
 		} satisfies Model<"anthropic-messages">,
+		"alibaba/qwen3.8-max": {
+			id: "alibaba/qwen3.8-max",
+			name: "Qwen 3.8 Max",
+			api: "anthropic-messages",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 6,
+				cacheRead: 0.25,
+				cacheWrite: 2.5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		} satisfies Model<"anthropic-messages">,
 		"amazon/nova-2-lite": {
 			id: "amazon/nova-2-lite",
 			name: "Nova 2 Lite",

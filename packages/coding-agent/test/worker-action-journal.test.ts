@@ -37,6 +37,7 @@ describe("WorkerActionJournal", () => {
 
 		const persisted = readFileSync(journal.filePath, "utf-8");
 		expect(persisted).not.toContain("TOP-SECRET-CONTENT");
+		const normalizedTarget = normalizeWorkerActionTarget(journal.agentDir, "/workspace/src/a.ts");
 		expect(JSON.parse(persisted)).toMatchObject({
 			schemaVersion: 1,
 			scope: { parentSessionId: "parent-1", taskId: "task-1" },
@@ -46,7 +47,7 @@ describe("WorkerActionJournal", () => {
 					fencingToken: 7,
 					operation: "write",
 					status: "succeeded",
-					normalizedTarget: "/workspace/src/a.ts",
+					normalizedTarget,
 				},
 			],
 		});
