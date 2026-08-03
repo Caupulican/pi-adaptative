@@ -219,7 +219,7 @@ describe("InteractiveMode.handleUsageCommand", () => {
 		expect(output).toContain("SUBAGENTS (included in CURRENT): $0.2500 (3 reports)");
 		expect(output).toContain("TODAY (host local day): $0.7500");
 		expect(output).toContain("Today rollover: local midnight");
-		expect(output).toContain("Context: 66.6% (66,600/100,000)");
+		expect(output).toContain(`Context: 66.6% (${(66_600).toLocaleString()}/${(100_000).toLocaleString()})`);
 		expect(output).toContain("Auto-compaction: enabled");
 		expect(output).toContain("Compaction gate failures: 4 (1 deterministic gap-fill)");
 		expect(output).toContain("Failing compaction checks: open-errors-recall x4 (0.09-0.43 < 0.70)");

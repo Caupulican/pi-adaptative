@@ -206,6 +206,14 @@ async function awaitState<T>(
 	}
 }
 
+async function awaitNotice(harness: Harness, predicate: (notice: string) => boolean): Promise<string> {
+	const notices = await awaitState(
+		async () => harness.notices,
+		(values) => values.some(predicate),
+	);
+	return notices.find(predicate) as string;
+}
+
 function workerEntryId(harness: Harness): string {
 	return buildEntryId("worker", harness.config.agent.resumeContext.sessionId);
 }
@@ -318,7 +326,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			(entry) => entry?.status === "resumable",
 		);
 		expect(woundDown?.windDownReason).toBe("parent_lost");
-		expect(harness.notices[0]).toContain("parent process");
+		expect(await awaitNotice(harness, (notice) => notice.includes("parent process"))).toContain("parent process");
 		await handle.stop();
 	});
 
@@ -341,6 +349,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			windDownReason: "parent_lost",
 			resumable: { lastCode: "resumable", agent: harness.config.agent },
 		});
+		await awaitNotice(harness, (notice) => notice.includes(`pid ${PARENT_PID}`) && notice.includes("resumable"));
 		expect(harness.notices).toHaveLength(1);
 		expect(harness.notices[0]).toContain(`pid ${PARENT_PID}`);
 		expect(harness.notices[0]).toContain("resumable");
@@ -420,7 +429,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		// The worker's local re-apply must NOT clobber the adopter's sessionId back to the old parent's.
 		expect(adopted?.parentSessionId).toBe("adopter-session");
 		expect(adopted?.windDownReason).toBeUndefined();
-		expect(harness.notices.some((text) => text.includes(`pid ${NEW_PARENT_PID}`))).toBe(true);
+		await awaitNotice(harness, (notice) => notice.includes(`pid ${NEW_PARENT_PID}`));
 		expect(harness.exitRequests).toBe(0);
 
 		// The healthy watch now tracks the NEW parent: its death triggers a second wind-down.
@@ -431,9 +440,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			(entry) => entry?.status === "resumable" && entry?.windDownReason === "parent_lost",
 		);
 		expect(rewoundDown).toMatchObject({ status: "resumable", windDownReason: "parent_lost" });
-		expect(harness.notices.some((text) => text.includes(`pid ${NEW_PARENT_PID}`) && text.includes("gone"))).toBe(
-			true,
-		);
+		await awaitNotice(harness, (notice) => notice.includes(`pid ${NEW_PARENT_PID}`) && notice.includes("gone"));
 		await handle.stop();
 	});
 
@@ -494,7 +501,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			(entry) => entry?.status === "closed",
 		);
 		expect(woundDown).toMatchObject({ status: "closed", windDownReason: "user_cleanup" });
-		expect(harness.notices.some((text) => text.includes("cooperative cleanup"))).toBe(true);
+		await awaitNotice(harness, (notice) => notice.includes("cooperative cleanup"));
 		await awaitState(
 			async () => harness.exitRequests,
 			(count) => count === 1,
@@ -1027,14 +1034,15 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		});
 
 		finish({ code: 0, signal: null });
-		await awaitState(
-			async () => harness.notices,
-			(notices) => notices.some((notice) => notice.includes("logical-agent-1") && notice.includes("terminal")),
+		const terminal = await awaitState(
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.terminal?.notificationDeliveredAt !== undefined,
 		);
-		expect(await readEntry(harness.agentDir, orphan.entryId)).toMatchObject({
+		expect(terminal).toMatchObject({
 			status: "closed",
 			terminal: { code: 0, signal: null, notificationDeliveredAt: expect.any(String) },
 		});
+		expect(await awaitNotice(harness, (notice) => notice.includes("logical-agent-1"))).toContain("terminal");
 		await handle.stop();
 	});
 
@@ -1186,10 +1194,10 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 
 		const terminal = await awaitState(
 			() => readEntry(harness.agentDir, orphan.entryId),
-			(entry) => entry?.terminal?.code === 7,
+			(entry) => entry?.terminal?.code === 7 && entry.terminal.notificationDeliveredAt !== undefined,
 		);
 		expect(terminal).toMatchObject({ pid: launchedPid, status: "closed", terminal: { code: 7, signal: null } });
-		expect(harness.notices.some((notice) => notice.includes("terminal process state"))).toBe(true);
+		await awaitNotice(harness, (notice) => notice.includes("terminal process state"));
 		await handle.stop();
 	});
 

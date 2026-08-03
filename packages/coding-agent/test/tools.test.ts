@@ -46,6 +46,10 @@ function getTextOutput(result: any): string {
 	);
 }
 
+function createNumberSequenceCommand(last: number): string {
+	return `node -e "for(let i=1;i<=${last};i++)console.log(i)"`;
+}
+
 describe("Coding Agent Tools", () => {
 	let testDir: string;
 
@@ -772,7 +776,7 @@ describe("Coding Agent Tools", () => {
 
 		it("should persist full output when truncation happens by line count only", async () => {
 			const bash = bashToolFor(testDir);
-			const result = await bash.execute("test-call-line-truncation", { command: "seq 3000" });
+			const result = await bash.execute("test-call-line-truncation", { command: createNumberSequenceCommand(3000) });
 			const output = getTextOutput(result);
 			const fullOutputPath = result.details?.fullOutputPath;
 
@@ -791,7 +795,11 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("executeBash should persist full output when truncation happens by line count only", async () => {
-			const result = await executeBashWithOperations("seq 3000", process.cwd(), createLocalBashOperations());
+			const result = await executeBashWithOperations(
+				createNumberSequenceCommand(3000),
+				process.cwd(),
+				createLocalBashOperations(),
+			);
 			const fullOutputPath = result.fullOutputPath;
 
 			expect(result.truncated).toBe(true);

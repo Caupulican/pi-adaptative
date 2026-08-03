@@ -6,6 +6,11 @@ import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
+import {
+	createCounterConfigCommand,
+	createOutputConfigCommand,
+	createPipeConfigCommand,
+} from "./config-command-fixtures.ts";
 
 describe("AuthStorage", () => {
 	let tempDir: string;
@@ -30,10 +35,6 @@ describe("AuthStorage", () => {
 		writeFileSync(authJsonPath, JSON.stringify(data));
 	}
 
-	function toShPath(value: string): string {
-		return value.replace(/\\/g, "/").replace(/"/g, '\\"');
-	}
-
 	describe("API key resolution", () => {
 		test("literal API key is returned directly", async () => {
 			writeAuthJson({
@@ -48,7 +49,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix executes command and uses stdout", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo test-api-key-from-command" },
+				anthropic: { type: "api_key", key: createOutputConfigCommand("test-api-key-from-command") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -59,7 +60,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix trims whitespace from command output", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo '  spaced-key  '" },
+				anthropic: { type: "api_key", key: createOutputConfigCommand("  spaced-key  ") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -70,7 +71,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix handles multiline output (uses trimmed result)", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!printf 'line1\\nline2'" },
+				anthropic: { type: "api_key", key: createOutputConfigCommand("line1\nline2") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -103,7 +104,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey with ! prefix returns undefined on empty output", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!printf ''" },
+				anthropic: { type: "api_key", key: createOutputConfigCommand("") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -284,7 +285,7 @@ describe("AuthStorage", () => {
 
 		test("apiKey command can use shell features like pipes", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo 'hello world' | tr ' ' '-'" },
+				anthropic: { type: "api_key", key: createPipeConfigCommand() },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -299,8 +300,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -321,8 +321,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -343,8 +342,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -363,8 +361,8 @@ describe("AuthStorage", () => {
 
 			test("different commands are cached separately", async () => {
 				writeAuthJson({
-					anthropic: { type: "api_key", key: "!echo key-anthropic" },
-					openai: { type: "api_key", key: "!echo key-openai" },
+					anthropic: { type: "api_key", key: createOutputConfigCommand("key-anthropic") },
+					openai: { type: "api_key", key: createOutputConfigCommand("key-openai") },
 				});
 
 				authStorage = AuthStorage.create(authJsonPath);
@@ -380,8 +378,7 @@ describe("AuthStorage", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; exit 1'`;
+				const command = createCounterConfigCommand(counterFile, { exitCode: 1 });
 				writeAuthJson({
 					anthropic: { type: "api_key", key: command },
 				});
@@ -588,7 +585,7 @@ describe("AuthStorage", () => {
 	describe("runtime overrides", () => {
 		test("runtime override takes priority over auth.json", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo stored-key" },
+				anthropic: { type: "api_key", key: createOutputConfigCommand("stored-key") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);
@@ -601,7 +598,7 @@ describe("AuthStorage", () => {
 
 		test("removing runtime override falls back to auth.json", async () => {
 			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo stored-key" },
+				anthropic: { type: "api_key", key: createOutputConfigCommand("stored-key") },
 			});
 
 			authStorage = AuthStorage.create(authJsonPath);

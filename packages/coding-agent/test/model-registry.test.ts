@@ -9,6 +9,12 @@ import { listModels } from "../src/cli/list-models.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
 import { clearDeprecationWarningsForTests } from "../src/utils/deprecation.ts";
+import {
+	createCounterConfigCommand,
+	createOutputConfigCommand,
+	createPipeConfigCommand,
+	createReadFileConfigCommand,
+} from "./config-command-fixtures.ts";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -60,10 +66,6 @@ describe("ModelRegistry", () => {
 
 	function getModelsForProvider(registry: ModelRegistry, provider: string) {
 		return registry.getAll().filter((m) => m.provider === provider);
-	}
-
-	function toShPath(value: string): string {
-		return value.replace(/\\/g, "/").replace(/"/g, '\\"');
 	}
 
 	/** Create a baseUrl-only override (no custom models) */
@@ -1338,7 +1340,7 @@ describe("ModelRegistry", () => {
 
 		test("apiKey with ! prefix executes command and uses stdout", async () => {
 			writeRawModelsJson({
-				"custom-provider": providerWithApiKey("!echo test-api-key-from-command"),
+				"custom-provider": providerWithApiKey(createOutputConfigCommand("test-api-key-from-command")),
 			});
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1349,7 +1351,7 @@ describe("ModelRegistry", () => {
 
 		test("apiKey with ! prefix trims whitespace from command output", async () => {
 			writeRawModelsJson({
-				"custom-provider": providerWithApiKey("!echo '  spaced-key  '"),
+				"custom-provider": providerWithApiKey(createOutputConfigCommand("  spaced-key  ")),
 			});
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1360,7 +1362,7 @@ describe("ModelRegistry", () => {
 
 		test("apiKey with ! prefix handles multiline output (uses trimmed result)", async () => {
 			writeRawModelsJson({
-				"custom-provider": providerWithApiKey("!printf 'line1\\nline2'"),
+				"custom-provider": providerWithApiKey(createOutputConfigCommand("line1\nline2")),
 			});
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1393,7 +1395,7 @@ describe("ModelRegistry", () => {
 
 		test("apiKey with ! prefix returns undefined on empty output", async () => {
 			writeRawModelsJson({
-				"custom-provider": providerWithApiKey("!printf ''"),
+				"custom-provider": providerWithApiKey(createOutputConfigCommand("")),
 			});
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1550,7 +1552,7 @@ describe("ModelRegistry", () => {
 
 		test("apiKey command can use shell features like pipes", async () => {
 			writeRawModelsJson({
-				"custom-provider": providerWithApiKey("!echo 'hello world' | tr ' ' '-'"),
+				"custom-provider": providerWithApiKey(createPipeConfigCommand()),
 			});
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1564,8 +1566,7 @@ describe("ModelRegistry", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeRawModelsJson({
 					"custom-provider": providerWithApiKey(command),
 				});
@@ -1583,8 +1584,7 @@ describe("ModelRegistry", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeRawModelsJson({
 					"custom-provider": providerWithApiKey(command),
 				});
@@ -1601,8 +1601,8 @@ describe("ModelRegistry", () => {
 
 			test("different commands resolve independently", async () => {
 				writeRawModelsJson({
-					"provider-a": providerWithApiKey("!echo key-a"),
-					"provider-b": providerWithApiKey("!echo key-b"),
+					"provider-a": providerWithApiKey(createOutputConfigCommand("key-a")),
+					"provider-b": providerWithApiKey(createOutputConfigCommand("key-b")),
 				});
 
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1618,8 +1618,7 @@ describe("ModelRegistry", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; exit 1'`;
+				const command = createCounterConfigCommand(counterFile, { exitCode: 1 });
 				writeRawModelsJson({
 					"custom-provider": providerWithApiKey(command),
 				});
@@ -1736,8 +1735,7 @@ describe("ModelRegistry", () => {
 			test("provider auth status reports command apiKey values from models.json without executing them", () => {
 				const counterFile = join(tempDir, "status-counter");
 				writeFileSync(counterFile, "0");
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'echo 1 > "${counterPath}"; echo key-value'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeRawModelsJson({
 					"custom-provider": providerWithApiKey(command),
 				});
@@ -1784,8 +1782,7 @@ describe("ModelRegistry", () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const command = createCounterConfigCommand(counterFile, { output: "key-value" });
 				writeRawModelsJson({
 					"custom-provider": providerWithApiKey(command),
 				});
@@ -1801,11 +1798,9 @@ describe("ModelRegistry", () => {
 			test("getApiKeyAndHeaders resolves authHeader on every request", async () => {
 				const tokenFile = join(tempDir, "token");
 				writeFileSync(tokenFile, "token-1");
-				const tokenPath = toShPath(tokenFile);
-
 				writeRawModelsJson({
 					"custom-provider": {
-						...providerWithApiKey(`!sh -c 'cat "${tokenPath}"'`),
+						...providerWithApiKey(createReadFileConfigCommand(tokenFile)),
 						authHeader: true,
 					},
 				});

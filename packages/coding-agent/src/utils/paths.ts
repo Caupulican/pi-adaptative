@@ -15,7 +15,7 @@ export { normalizePath, type PathInputOptions, resolvePath };
  */
 export function canonicalizePath(path: string): string {
 	try {
-		return realpathSync(path);
+		return realpathSync.native(path);
 	} catch {
 		return path;
 	}

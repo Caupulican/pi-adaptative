@@ -212,7 +212,12 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const fetchMock = vi.fn(async () => Response.json({ version: getNewerPatchVersion() }));
+		const latestVersionUrl = "https://registry.npmjs.org/@caupulican%2fpi-adaptative/latest";
+		const fetchMock = vi.fn(async (input: Parameters<typeof fetch>[0]) =>
+			String(input) === latestVersionUrl
+				? Response.json({ version: getNewerPatchVersion() })
+				: new Response(undefined, { status: 404 }),
+		);
 		vi.stubGlobal("fetch", fetchMock);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -223,7 +228,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 
 			expect(process.exitCode).toBeUndefined();
 			expect(errorSpy).not.toHaveBeenCalled();
-			expect(fetchMock).toHaveBeenCalledOnce();
+			expect(fetchMock.mock.calls.filter(([input]) => String(input) === latestVersionUrl)).toHaveLength(1);
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
 			expect(recordedArgs).toContain(PACKAGE_NAME);
 		} finally {

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,7 +32,7 @@ describe("canonicalizePath", () => {
 		const dir = createTempDir();
 		const file = join(dir, "file.txt");
 		writeFileSync(file, "hello");
-		expect(canonicalizePath(file)).toBe(realpathSync(file));
+		expect(canonicalizePath(file)).toBe(realpathSync.native(file));
 	});
 
 	it("resolves symlinks to their targets", () => {
@@ -40,7 +41,7 @@ describe("canonicalizePath", () => {
 		const link = join(dir, "link.txt");
 		writeFileSync(target, "hello");
 		symlinkSync(target, link);
-		expect(canonicalizePath(link)).toBe(realpathSync(target));
+		expect(canonicalizePath(link)).toBe(realpathSync.native(target));
 	});
 
 	it("resolves directory symlinks", () => {
@@ -49,7 +50,30 @@ describe("canonicalizePath", () => {
 		const linkDir = join(dir, "link-dir");
 		mkdirSync(targetDir);
 		symlinkSync(targetDir, linkDir, "dir");
-		expect(canonicalizePath(linkDir)).toBe(realpathSync(targetDir));
+		expect(canonicalizePath(linkDir)).toBe(realpathSync.native(targetDir));
+	});
+
+	it.runIf(process.platform === "win32")("collapses Windows short and long path spellings", () => {
+		const dir = createTempDir();
+		const file = join(dir, "canonical-file.txt");
+		writeFileSync(file, "hello");
+
+		const shortPathResult = spawnSync(
+			process.env.ComSpec ?? "cmd.exe",
+			["/d", "/c", `for %I in ("${file}") do @echo %~sI`],
+			{
+				encoding: "utf-8",
+				windowsVerbatimArguments: true,
+				windowsHide: true,
+			},
+		);
+		expect(shortPathResult.status).toBe(0);
+		const shortPath = shortPathResult.stdout.trim();
+		expect(shortPath).not.toBe("");
+
+		const expected = realpathSync.native(file).toLowerCase();
+		expect(canonicalizePath(file).toLowerCase()).toBe(expected);
+		expect(canonicalizePath(shortPath).toLowerCase()).toBe(expected);
 	});
 
 	it("falls back to the raw path when the target does not exist", () => {
