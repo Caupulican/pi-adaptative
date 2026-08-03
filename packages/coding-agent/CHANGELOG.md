@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bundled Windows incident collector on PowerShell 5.1 hosts where the module-provided `Get-FileHash` command is unavailable.
+
 ## [0.85.2] - 2026-08-03
 
 ### Fixed

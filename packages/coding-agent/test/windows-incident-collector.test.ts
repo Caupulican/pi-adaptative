@@ -32,6 +32,14 @@ const collectorPath = resolve(process.cwd(), "../../scripts/collect-pi-incident.
 const wslCollectorPath = resolve(process.cwd(), "../../scripts/collect-pi-incident.sh");
 const scratchDirectories: string[] = [];
 
+describe("Windows incident collector portability", () => {
+	it("does not require the optional Get-FileHash PowerShell cmdlet", () => {
+		const source = readFileSync(collectorPath, "utf8");
+		expect(source).not.toContain("Get-FileHash");
+		expect(source).toContain("function Get-FileSha256");
+	});
+});
+
 const powerShellRunsOnWindows =
 	powerShell !== undefined &&
 	spawnSync(
@@ -206,6 +214,8 @@ describe.runIf(process.platform === "win32" || powerShell !== undefined)("native
 		expect(readFileSync(join(extractedDir, "diagnostics", "environment.txt"), "utf8")).toContain("selected_session=");
 		const manifest = readFileSync(join(extractedDir, "manifest.txt"), "utf8");
 		expect(manifest).toContain("Affected session ID: affected-session");
+		const expectedSessionHash = createHash("sha256").update(readFileSync(extractedSession)).digest("hex");
+		expect(manifest).toContain(`${expectedSessionHash}  session/${basename(affectedSession)}`);
 		expect(manifest).toContain(
 			"Incident window (UTC): 2026-01-02T09:45:00.0000000+00:00 through 2026-01-02T10:45:00.0000000+00:00",
 		);

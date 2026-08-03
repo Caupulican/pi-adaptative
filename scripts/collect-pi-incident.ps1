@@ -90,6 +90,21 @@ function Write-Utf8Lines {
     [IO.File]::WriteAllLines($Path, $Lines, $script:utf8WithoutBom)
 }
 
+function Get-FileSha256 {
+    param([string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digestBytes = $sha256.ComputeHash($stream)
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+    return ([BitConverter]::ToString($digestBytes)).Replace("-", "").ToLowerInvariant()
+}
+
 function Initialize-EvidenceCopy {
     param(
         [string]$Source,
@@ -454,7 +469,7 @@ function Write-InstalledRuntimeDiagnostic {
     [void]$lines.Add("pi_command=$PiCommandPath")
     if (Test-Path -LiteralPath $PiCommandPath -PathType Leaf) {
         try {
-            [void]$lines.Add("pi_command_sha256=$((Get-FileHash -LiteralPath $PiCommandPath -Algorithm SHA256).Hash.ToLowerInvariant())")
+            [void]$lines.Add("pi_command_sha256=$(Get-FileSha256 -Path $PiCommandPath)")
         }
         catch {
             [void]$lines.Add("pi_command_hash_error=$($_.Exception.Message)")
@@ -472,7 +487,7 @@ function Write-InstalledRuntimeDiagnostic {
         )) {
             $file = Join-Path $packageRoot $relativePath
             if (Test-Path -LiteralPath $file -PathType Leaf) {
-                $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+                $hash = Get-FileSha256 -Path $file
                 [void]$lines.Add("$hash  $($relativePath.Replace('\', '/'))")
             }
         }
@@ -798,7 +813,7 @@ try {
     [void]$manifestLines.Add("Archive files (SHA-256):")
     foreach ($file in @(Get-ChildItem -LiteralPath $staging -File -Recurse | Sort-Object FullName)) {
         $relativePath = $file.FullName.Substring($staging.Length).TrimStart("\", "/").Replace("\", "/")
-        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-FileSha256 -Path $file.FullName
         [void]$manifestLines.Add("$hash  $relativePath")
     }
     Write-Utf8Lines -Path (Join-Path $staging "manifest.txt") -Lines $manifestLines.ToArray()
