@@ -618,6 +618,8 @@ async function startWorkerBranch(
 	let timer: NodeJS.Timeout | undefined;
 	let ticking = false;
 	let preserveResumableOnExit = false;
+	let stopTask: Promise<void> | undefined;
+	const generationStartedAt = entry.startedAt;
 	const closeOnExit = (code: number | null = null): void => {
 		if (preserveResumableOnExit) return;
 		try {
@@ -629,13 +631,43 @@ async function startWorkerBranch(
 	};
 	process.once("exit", closeOnExit);
 
-	const stop = (): void => {
+	const closeWorker = async (): Promise<void> => {
 		if (stopped) return;
 		stopped = true;
 		if (timer) clearInterval(timer);
 		timer = undefined;
-		if (!preserveResumableOnExit) closeOnExit();
+		if (!preserveResumableOnExit) {
+			// Normal runtime shutdown can await the lock and Windows rename retry policy. Keep the
+			// synchronous exit hook only as a last-chance process-exit fallback: using it here made a
+			// transient lock collision leave cooperative cleanup permanently in `winding_down`.
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const expected = entry;
+				const terminal = markTerminal(expected, { code: null, signal: null }, nowIso(now));
+				try {
+					if (await writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, terminal)) {
+						entry = terminal;
+						break;
+					}
+					const current = await readEntry(config.agentDir, expected.entryId);
+					if (current?.pid !== process.pid || current.startedAt !== generationStartedAt) {
+						config.onDiagnostic?.("process-matrix: worker entry ownership moved to a newer process generation");
+						break;
+					}
+					entry = current;
+				} catch (error) {
+					config.onDiagnostic?.(
+						`process-matrix: failed to persist worker terminal state: ${describeError(error)}`,
+					);
+					break;
+				}
+			}
+		}
 		process.off("exit", closeOnExit);
+	};
+
+	const stop = (): Promise<void> => {
+		stopTask ??= closeWorker();
+		return stopTask;
 	};
 
 	const persist = async (
@@ -661,6 +693,21 @@ async function startWorkerBranch(
 			config.onDiagnostic?.(`process-matrix: ${failureContext}: ${describeError(error)}`);
 		}
 		return false;
+	};
+
+	const completeCooperativeCleanup = async (fresh: ProcessMatrixEntry): Promise<void> => {
+		if (
+			!(await persist(
+				fresh,
+				beginWindDown(fresh, "user_cleanup", nowIso(now)),
+				"failed to write a master-requested worker wind-down",
+			))
+		)
+			return;
+		preserveResumableOnExit = false;
+		emitRuntimeNotice(config, "process-matrix: the parent session requested a cooperative cleanup. Winding down.");
+		await stop();
+		config.requestExit();
 	};
 
 	const startHealthyWatch = (): void => {
@@ -699,17 +746,7 @@ async function startWorkerBranch(
 		if (!fresh) return;
 		const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
 		if (directive.code !== "user_cleanup") return;
-		if (
-			!(await persist(
-				fresh,
-				beginWindDown(fresh, "user_cleanup", nowIso(now)),
-				"failed to write a master-requested worker wind-down",
-			))
-		)
-			return;
-		emitRuntimeNotice(config, "process-matrix: the parent session requested a cooperative cleanup. Winding down.");
-		stop();
-		config.requestExit();
+		await completeCooperativeCleanup(fresh);
 	};
 
 	const enterWindDown = async (): Promise<void> => {
@@ -773,13 +810,12 @@ async function startWorkerBranch(
 				return;
 			}
 			if (directive.code === "user_cleanup") {
-				stop();
-				config.requestExit();
+				await completeCooperativeCleanup(fresh);
 				return;
 			}
 		}
 		if (now() >= graceDeadline) {
-			stop();
+			await stop();
 			config.requestExit();
 		}
 	};

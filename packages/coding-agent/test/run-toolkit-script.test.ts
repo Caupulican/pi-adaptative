@@ -134,7 +134,9 @@ describe("executeToolkitScript (real spawn)", () => {
 	});
 
 	afterEach(() => {
-		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+		if (tempDir && existsSync(tempDir)) {
+			rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+		}
 	});
 
 	it("captures real exit codes and output from a real process", async () => {

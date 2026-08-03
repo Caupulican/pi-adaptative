@@ -513,6 +513,32 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		await handle.stop();
 	});
 
+	it("honors cooperative cleanup during the adoption grace window and replaces resumable state with terminal state", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1");
+		const harness = makeHarness();
+		const handle = await startProcessMatrixRuntime(harness.config);
+
+		await tick(POLL_MS);
+		const resumable = (await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "resumable",
+		)) as ProcessMatrixEntry;
+		await writeEntry(
+			harness.agentDir,
+			beginWindDown(resumable, "user_cleanup", new Date(harness.clock.ms).toISOString()),
+		);
+
+		await tick(POLL_MS);
+		const closed = await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry?.status === "closed",
+		);
+		expect(closed).toMatchObject({ status: "closed", windDownReason: "user_cleanup" });
+		expect(harness.exitRequests).toBe(1);
+		await handle.stop();
+	});
+
 	it("stop() halts the watch: a later parent death is no longer observed", async () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		useWorkerEnv();

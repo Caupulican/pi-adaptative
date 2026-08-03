@@ -20,4 +20,9 @@ describe("detectPython", () => {
 		const status = detectPython(["definitely-not-a-real-command-xyz"]);
 		expect(status).toEqual({ present: false });
 	});
+
+	it("rejects an executable whose successful --version output is not a Python interpreter", () => {
+		const status = detectPython([process.execPath]);
+		expect(status).toEqual({ present: false });
+	});
 });

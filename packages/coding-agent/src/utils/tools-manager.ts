@@ -408,11 +408,12 @@ export function detectPython(commands: readonly string[] = PYTHON_COMMANDS): Sys
 	for (const command of commands) {
 		try {
 			const result = spawnSync(command, ["--version"], { encoding: "utf-8", stdio: "pipe", timeout: 5_000 });
-			if (result.error) continue;
+			if (result.error || result.status !== 0) continue;
 			// Python 2 prints its version to stderr; Python 3 prints to stdout. Some
 			// platforms' `python` alias is one or the other, so check both.
-			const version = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() || undefined;
-			if (result.status !== 0 && !version) continue;
+			const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
+			const version = output.match(/(?:^|\r?\n)(Python \d+\.\d+(?:\.\d+)?[^\r\n]*)(?:\r?\n|$)/)?.[1]?.trim();
+			if (!version) continue;
 			return { present: true, command, version };
 		} catch {
 			// Try the next candidate.

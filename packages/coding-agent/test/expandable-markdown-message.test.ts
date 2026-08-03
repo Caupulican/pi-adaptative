@@ -40,7 +40,7 @@ describe("expandable markdown messages", () => {
 			expect(rendered(component)).not.toContain("to expand");
 		}
 		expect(rendered(branch)).toContain("branch details");
-		expect(rendered(compaction)).toContain("12,345 tokens");
+		expect(rendered(compaction)).toContain(`${(12_345).toLocaleString()} tokens`);
 		expect(rendered(skill)).toContain("skill details");
 	});
 

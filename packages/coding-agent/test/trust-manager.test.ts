@@ -68,8 +68,10 @@ describe("ProjectTrustStore", () => {
 		expect(readFileSync(trustPath, "utf-8")).toBe("{not json");
 	});
 
-	it("detects project trust inputs", () => {
-		expect(hasProjectTrustInputs(cwd)).toBe(false);
+	it("detects local project trust inputs without ignoring inherited trust inputs", () => {
+		// Windows temp directories live below the user profile. A real ~/.agents/skills directory is
+		// therefore an intentional inherited trust input, not test pollution.
+		expect(hasProjectTrustInputs(cwd)).toBe(hasProjectTrustInputs(tempDir));
 
 		mkdirSync(join(cwd, ".pi"), { recursive: true });
 		expect(hasProjectTrustInputs(cwd)).toBe(true);
