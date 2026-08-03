@@ -140,18 +140,27 @@ describe("executeToolkitScript (real spawn)", () => {
 	});
 
 	it("captures real exit codes and output from a real process", async () => {
-		writeFileSync(join(tempDir, "ok.sh"), 'echo "real hello"\n');
+		const runner = process.platform === "win32" ? "powershell" : "bash";
+		const okScript = process.platform === "win32" ? "ok.ps1" : "ok.sh";
+		const failScript = process.platform === "win32" ? "fail.ps1" : "fail.sh";
+		writeFileSync(
+			join(tempDir, okScript),
+			process.platform === "win32" ? 'Write-Output "real hello"\n' : 'echo "real hello"\n',
+		);
 		const success = await executeToolkitScript({
-			script: { name: "ok", description: "d", runner: "bash", path: "ok.sh" },
+			script: { name: "ok", description: "d", runner, path: okScript },
 			scriptArgs: [],
 			cwd: tempDir,
 		});
 		expect(success.exitCode).toBe(0);
 		expect(success.stdout).toContain("real hello");
 
-		writeFileSync(join(tempDir, "fail.sh"), 'echo "boom" >&2\nexit 3\n');
+		writeFileSync(
+			join(tempDir, failScript),
+			process.platform === "win32" ? '[Console]::Error.WriteLine("boom")\nexit 3\n' : 'echo "boom" >&2\nexit 3\n',
+		);
 		const failure = await executeToolkitScript({
-			script: { name: "fail", description: "d", runner: "bash", path: "fail.sh" },
+			script: { name: "fail", description: "d", runner, path: failScript },
 			scriptArgs: [],
 			cwd: tempDir,
 		});
