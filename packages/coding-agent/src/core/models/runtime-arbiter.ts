@@ -19,6 +19,9 @@ export interface RuntimeLoadRequest {
 	role: RuntimeRole;
 	priority: number;
 	nowMs: number;
+	/** Refuse an immediate reload of a model that was just evicted for the current resident. */
+	antiThrashWindowMs?: number;
+	/** Protect every newly-used resident from eviction for this duration. */
 	minDwellMs?: number;
 	pinActiveModel?: string;
 	/** Adapter identity for this request; set by RuntimeResidencyArbiter before planning. */
@@ -286,12 +289,13 @@ export function planRuntimeResidency(args: {
 }
 
 function hasPingPongRisk(request: RuntimeLoadRequest): boolean {
+	const windowMs = request.antiThrashWindowMs ?? request.minDwellMs ?? 0;
 	return (request.recentEvictions ?? []).some(
 		(record) =>
 			record.evicted === request.model &&
 			(request.adapterId === undefined ||
 				record.evictedAdapterId === undefined ||
 				record.evictedAdapterId === request.adapterId) &&
-			request.nowMs - record.atMs <= (request.minDwellMs ?? 0),
+			request.nowMs - record.atMs <= windowMs,
 	);
 }

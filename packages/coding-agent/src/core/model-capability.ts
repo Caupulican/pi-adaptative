@@ -1,7 +1,8 @@
 /**
  * Model capability auto-detection: derive what the harness may load onto a model FROM the model's
  * own metadata (`Model.contextWindow`), so small open models (4k/8k/16k windows, sub-1B params)
- * can still hold a usable chat instead of drowning in tool schemas and background-lane prompts.
+ * can still hold a usable chat instead of drowning in the stable prompt, tool schemas, and
+ * background-lane prompts. The same class is the single input to prompt shaping and tool/lane gates.
  *
  * Derivation is metadata-first; defaults apply only when the metadata is missing (unknown/zero
  * window keeps today's full behavior rather than guessing). Detection can be disabled or forced
@@ -16,6 +17,8 @@ export interface ModelCapabilityProfile {
 	class: ModelCapabilityClass;
 	contextWindow?: number;
 	reasonCode: string;
+	/** Hard aggregate character envelope for the stable system prompt; undefined = intentionally unbounded. */
+	systemPromptMaxChars: number | undefined;
 	/** Allow-list; undefined = no allow-list restriction. */
 	allowedToolNames?: readonly string[];
 	/** Block-list applied after the allow-list; undefined = nothing blocked. */
@@ -32,6 +35,18 @@ export const MODEL_CAPABILITY_FULL_MIN_CONTEXT = 32_768;
 export const MODEL_CAPABILITY_LEAN_MIN_CONTEXT = 16_384;
 /** Windows at or above this get the minimal coding set; below is chat-only. */
 export const MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT = 8_192;
+
+/**
+ * Aggregate stable-prompt envelopes. These are deliberately owned beside the classification
+ * thresholds so every harness expansion must fit the same profile that owns tools and lanes.
+ * Full/off profiles are intentionally unbounded; constrained profiles fail visibly on overflow.
+ */
+export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapabilityClass, number | undefined>> = {
+	full: undefined,
+	lean: 8_192,
+	minimal: 4_096,
+	chat: 2_048,
+};
 
 export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"delegate",
@@ -77,6 +92,7 @@ function profileForClass(
 	const base = {
 		class: capabilityClass,
 		reasonCode,
+		systemPromptMaxChars: MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS[capabilityClass],
 		backgroundLanesEnabled: true,
 		laneMaxOutputTokens: laneOutputTokensForWindow(contextWindow),
 		...(contextWindow !== undefined && contextWindow > 0 ? { contextWindow } : {}),
@@ -99,6 +115,21 @@ function profileForClass(
 				backgroundLanesEnabled: false,
 			};
 	}
+}
+
+/**
+ * Mandatory provider-neutral gate for a final system prompt. This intentionally rejects rather
+ * than truncates: arbitrary truncation can silently remove security, repair, or project rules.
+ */
+export function enforceModelCapabilitySystemPromptBudget(
+	systemPrompt: string,
+	profile: Pick<ModelCapabilityProfile, "class" | "systemPromptMaxChars">,
+): string {
+	const maxChars = profile.systemPromptMaxChars;
+	if (maxChars === undefined || systemPrompt.length <= maxChars) return systemPrompt;
+	throw new Error(
+		`${profile.class} system prompt exceeds its ${maxChars}-character capability budget (${systemPrompt.length} characters). Reduce custom, extension, or harness prompt guidance, or select a more capable profile.`,
+	);
 }
 
 export function deriveModelCapabilityProfile(args: {

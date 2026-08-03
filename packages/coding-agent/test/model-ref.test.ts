@@ -7,10 +7,10 @@ describe("normalizeModelSource", () => {
 		expect(normalizeModelSource("llama3")).toEqual({ type: "local", pullRef: "llama3" });
 	});
 
-	it("normalizes hf.co refs with and without quant tags", () => {
-		expect(normalizeModelSource("hf.co/prism-ml/Ternary-Bonsai-4B-gguf:Q8_0")).toEqual({
+	it("normalizes uncurated hf.co refs with and without quant tags", () => {
+		expect(normalizeModelSource("hf.co/org/repo:Q8_0")).toEqual({
 			type: "local",
-			pullRef: "hf.co/prism-ml/Ternary-Bonsai-4B-gguf:Q8_0",
+			pullRef: "hf.co/org/repo:Q8_0",
 		});
 		expect(normalizeModelSource("hf.co/org/repo")).toEqual({ type: "local", pullRef: "hf.co/org/repo" });
 	});
@@ -27,7 +27,7 @@ describe("normalizeModelSource", () => {
 		});
 	});
 
-	it("routes the curated Bonsai-27B ref to the prism-llamacpp source, bare/any-case/quant/URL", () => {
+	it("routes curated Bonsai refs to the prism-llamacpp source, bare/any-case/quant/URL", () => {
 		const expected = {
 			type: "prism-llamacpp",
 			modelId: "prism-ml/Bonsai-27B-gguf",
@@ -37,16 +37,22 @@ describe("normalizeModelSource", () => {
 		expect(normalizeModelSource("hf.co/PRISM-ML/bonsai-27b-GGUF")).toEqual(expected);
 		expect(normalizeModelSource("hf.co/prism-ml/Bonsai-27B-gguf:Q1_0")).toEqual(expected);
 		expect(normalizeModelSource("https://huggingface.co/prism-ml/Bonsai-27B-gguf/tree/main")).toEqual(expected);
+		expect(normalizeModelSource("hf.co/prism-ml/Bonsai-4B-gguf:Q1_0")).toEqual({
+			type: "prism-llamacpp",
+			modelId: "prism-ml/Bonsai-4B-gguf",
+			ref: "hf.co/prism-ml/Bonsai-4B-gguf",
+		});
+		expect(normalizeModelSource("hf.co/prism-ml/Ternary-Bonsai-4B-gguf:Q2_0")).toEqual({
+			type: "prism-llamacpp",
+			modelId: "prism-ml/Ternary-Bonsai-4B-gguf",
+			ref: "hf.co/prism-ml/Ternary-Bonsai-4B-gguf",
+		});
 	});
 
-	it("does not route other prism-ml GGUF refs to prism-llamacpp — only the curated Bonsai-27B id", () => {
-		expect(normalizeModelSource("hf.co/prism-ml/Bonsai-4B-gguf:Q1_0")).toEqual({
+	it("does not route unknown prism-ml GGUF refs to the managed runtime", () => {
+		expect(normalizeModelSource("hf.co/prism-ml/Uncurated-4B-gguf:Q1_0")).toEqual({
 			type: "local",
-			pullRef: "hf.co/prism-ml/Bonsai-4B-gguf:Q1_0",
-		});
-		expect(normalizeModelSource("hf.co/prism-ml/Ternary-Bonsai-4B-gguf")).toEqual({
-			type: "local",
-			pullRef: "hf.co/prism-ml/Ternary-Bonsai-4B-gguf",
+			pullRef: "hf.co/prism-ml/Uncurated-4B-gguf:Q1_0",
 		});
 	});
 
@@ -70,8 +76,9 @@ describe("normalizeModelSource", () => {
 
 	it("normalizes full HuggingFace URLs to the matching local runtime ref", () => {
 		expect(normalizeModelSource("https://huggingface.co/prism-ml/Ternary-Bonsai-1.7B-gguf/tree/main")).toEqual({
-			type: "local",
-			pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
+			type: "prism-llamacpp",
+			modelId: "prism-ml/Ternary-Bonsai-1.7B-gguf",
+			ref: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
 		});
 		expect(normalizeModelSource("https://huggingface.co/openbmb/MiniCPM5-1B/tree/main")).toEqual({
 			type: "transformers",

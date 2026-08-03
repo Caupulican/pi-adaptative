@@ -42,6 +42,13 @@ describe("deriveModelCapabilityProfile", () => {
 		expect(deriveModelCapabilityProfile({ contextWindow: 2_048 }).class).toBe("chat");
 	});
 
+	it("owns the aggregate system-prompt envelope in the same derived profile", () => {
+		expect(deriveModelCapabilityProfile({ contextWindow: 200_000 }).systemPromptMaxChars).toBeUndefined();
+		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).systemPromptMaxChars).toBe(8_192);
+		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).systemPromptMaxChars).toBe(4_096);
+		expect(deriveModelCapabilityProfile({ contextWindow: 4_096 }).systemPromptMaxChars).toBe(2_048);
+	});
+
 	it("falls back to full defaults when the window is unknown (defaults are for missing info)", () => {
 		const missing = deriveModelCapabilityProfile({});
 		expect(missing.class).toBe("full");

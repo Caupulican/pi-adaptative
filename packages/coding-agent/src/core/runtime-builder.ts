@@ -77,6 +77,8 @@ import type { LaneWorkerRefusal } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
+import { resolveModelToolProtocol } from "./model-tool-protocol.ts";
+import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
@@ -97,6 +99,7 @@ import {
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
+import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
@@ -453,6 +456,7 @@ export class RuntimeBuilder {
 					this.deps.getSettingsManager().getScoutSettings().model,
 					this.deps.getAgentDir(),
 					(model) => this.deps.isModelExhausted(model),
+					resolveCurrentToolRepairSettings(this.deps.getSettingsManager().settings).textProtocol,
 				),
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => [
@@ -1496,6 +1500,7 @@ export async function resolveScoutModel(
 	modelSetting: string,
 	agentDir: string,
 	isModelExhausted: (model: Model<Api>) => boolean = () => false,
+	textProtocolOverride?: boolean,
 ) {
 	const model =
 		modelSetting === "auto"
@@ -1507,8 +1512,14 @@ export async function resolveScoutModel(
 	if (isModelExhausted(model)) {
 		return { failure: `${model.provider}/${model.id} exhausted: quota` };
 	}
+	const modelRef = `${model.provider}/${model.id}`;
+	const adaptation = ModelAdaptationStore.forAgentDir(agentDir).get(modelRef);
+	const protocolResolution = resolveModelToolProtocol({
+		model,
+		settingsOverride: textProtocolOverride,
+		adaptation,
+	});
 	if (modelSetting === "auto") {
-		const modelRef = `${model.provider}/${model.id}`;
 		const fitness = FitnessStore.forAgentDir(agentDir)
 			.getForHost()
 			.find((entry) => entry.model === modelRef);
@@ -1518,12 +1529,32 @@ export async function resolveScoutModel(
 				? { failure: `${modelRef} unprobed — run /fitness before auto-selection` }
 				: { failure: `${modelRef} unfit (${verdict.lane} ${verdict.succeeded}/${verdict.total})` };
 		}
+		const toolProbe = adaptation.toolProbe;
+		if (!toolProbe) {
+			return { failure: `${modelRef} unprobed — run /toolprobe before auto-selection` };
+		}
+		if (toolProbe.status === "none") {
+			return { failure: `${modelRef} unfit (real tool execution: none)` };
+		}
+		if (toolProbe.status === "native" && toolProbe.nativeGrade !== "task") {
+			return {
+				failure: `${modelRef} unfit (real tool execution: native ${toolProbe.nativeGrade ?? "ungraded"})`,
+			};
+		}
+		if (toolProbe.status === "text-protocol" && !protocolResolution.protocol) {
+			return { failure: `${modelRef} unfit (real tool execution: phone calibration unavailable)` };
+		}
 	}
 	const auth = await modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) {
 		return { failure: auth.error ?? `no usable auth for scout model ${model.provider}/${model.id}` };
 	}
-	return { model, apiKey: auth.apiKey, headers: auth.headers };
+	return {
+		model,
+		apiKey: auth.apiKey,
+		headers: auth.headers,
+		textToolCallProtocol: protocolResolution.protocol,
+	};
 }
 
 function findFastContextModel(modelRegistry: ModelRegistry) {

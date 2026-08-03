@@ -1,8 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,41 +9,18 @@ import {
 	startPiAcceptanceRpc,
 } from "./lib/live-acceptance-rpc.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
+import {
+	acceptanceAgentDir,
+	defaultAcceptanceOllamaStore,
+	startLowImpactAcceptanceOllama,
+} from "./lib/ollama-acceptance-runtime.mjs";
 
 const DEFAULT_MODEL = "ollama/qwen3:1.7b";
 const TIMEOUT_MS = Number(process.env.PI_ACCEPT_COLD_TIMEOUT_MS ?? 900_000);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function usage() {
-	console.log(`Usage: node scripts/accept-local-cold-start-live.mjs [--model <ollama/model>] [--store <ollama-models-dir>] [--keep-session]\n\nStarts a fresh isolated Ollama serve on a random loopback port with STOCK pi stall settings, unloads the requested model, then runs one real read-tool turn through pi RPC. The turn fails if a stream stall appears.\n\nDefault model: ${DEFAULT_MODEL}\nDefault store: PI_ACCEPT_OLLAMA_MODELS, else the pi-owned store when it contains the model, else ~/.ollama/models`);
-}
-
-function agentDirFromEnv() {
-	return process.env.PI_CODING_AGENT_DIR || process.env.PI_ADAPTATIVE_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent");
-}
-
-function resolveOllamaBin() {
-	if (process.env.OLLAMA_BIN) return process.env.OLLAMA_BIN;
-	for (const candidate of [
-		path.join(agentDirFromEnv(), "runtimes", "ollama", "bin", "ollama"),
-		path.join(homedir(), ".local", "share", "ollama-dist", "bin", "ollama"),
-	]) {
-		if (existsSync(candidate)) return candidate;
-	}
-	return "ollama";
-}
-
-function manifestPathFor(storeDir, model) {
-	const [name, tag = "latest"] = model.split(":");
-	if (name.startsWith("hf.co/")) return path.join(storeDir, "manifests", ...name.split("/"), tag);
-	return path.join(storeDir, "manifests", "registry.ollama.ai", "library", name, tag);
-}
-
-function defaultStoreFor(model) {
-	if (process.env.PI_ACCEPT_OLLAMA_MODELS) return process.env.PI_ACCEPT_OLLAMA_MODELS;
-	const owned = path.join(agentDirFromEnv(), "models", "ollama");
-	if (existsSync(manifestPathFor(owned, model))) return owned;
-	return path.join(homedir(), ".ollama", "models");
+	console.log(`Usage: node scripts/accept-local-cold-start-live.mjs [--model <ollama/model>] [--store <ollama-models-dir>] [--keep-session]\n\nStarts a fresh isolated low-impact Ollama serve on a random loopback port, unloads the requested model, then runs one real read-tool turn through pi RPC. The turn fails if a stream stall appears.\n\nDefault model: ${DEFAULT_MODEL}\nDefault store: PI_ACCEPT_OLLAMA_MODELS, else the pi-owned store when it contains the model, else ~/.ollama/models`);
 }
 
 function parseArgs(argv) {
@@ -72,21 +46,7 @@ function parseArgs(argv) {
 	}
 	if (!modelRef.startsWith("ollama/")) throw new Error("Cold-start acceptance currently requires an ollama/<model> ref");
 	const model = modelRef.slice("ollama/".length);
-	return { modelRef, model, storeDir: explicitStoreDir ?? defaultStoreFor(model), keepSession };
-}
-
-async function freePort() {
-	return await new Promise((resolve, reject) => {
-		const server = createServer();
-		server.on("error", reject);
-		server.listen(0, "127.0.0.1", () => {
-			const address = server.address();
-			server.close(() => {
-				if (address && typeof address === "object") resolve(address.port);
-				else reject(new Error("Could not allocate a loopback port"));
-			});
-		});
-	});
+	return { modelRef, model, storeDir: explicitStoreDir ?? defaultAcceptanceOllamaStore(model), keepSession };
 }
 
 async function waitForOllama(baseUrl, model) {
@@ -126,7 +86,7 @@ async function hydrateAgentDir(agentDir, baseUrl, model) {
 			{
 				id: model,
 				name: model,
-				contextWindow: 8192,
+				contextWindow: 4096,
 				maxTokens: 2048,
 				reasoning: false,
 				input: ["text"],
@@ -198,24 +158,12 @@ async function runPiTurn({ agentDir, sessionDir, model, markerPath, marker }) {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const port = await freePort();
-	const baseUrl = `http://127.0.0.1:${port}`;
-	const ollamaBin = resolveOllamaBin();
-	const serve = spawn(ollamaBin, ["serve"], {
-		env: {
-			...process.env,
-			OLLAMA_HOST: `127.0.0.1:${port}`,
-			OLLAMA_MODELS: args.storeDir,
-			OLLAMA_KEEP_ALIVE: "30m",
-			OLLAMA_NUM_PARALLEL: "1",
-		},
-		stdio: ["ignore", "ignore", "inherit"],
+	const managed = await startLowImpactAcceptanceOllama({
+		model: args.model,
+		storeDir: args.storeDir,
+		agentDir: acceptanceAgentDir(),
 	});
-	const serveStart = Promise.race([
-		new Promise((resolve) => setTimeout(resolve, 200)),
-		new Promise((_, reject) => serve.once("error", reject)),
-	]);
-	await serveStart;
+	const baseUrl = managed.baseUrl;
 	const workRun = acquireScriptWorkRun("acceptance", "local-cold-start");
 	const scratch = workRun.path;
 	const agentDir = path.join(scratch, "agent");
@@ -232,7 +180,8 @@ async function main() {
 		await runPiTurn({ agentDir, sessionDir, model: args.model, markerPath, marker });
 		console.log(`cold-start ok | ${args.modelRef} | store ${args.storeDir} | session ${args.keepSession ? sessionDir : "removed"}`);
 	} finally {
-		serve.kill("SIGTERM");
+		await unloadModel(baseUrl, args.model);
+		managed.runtime.stop();
 		if (args.keepSession) workRun.release();
 		else removeScriptWorkRun(workRun);
 	}

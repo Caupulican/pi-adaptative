@@ -181,6 +181,33 @@ src/ok.ts:1-2
 		expect(capturedSystemPrompt).toContain("Turn budget: 12 turns");
 	});
 
+	it("passes the calibrated text-tool protocol into the isolated scout Agent", async () => {
+		let capturedProtocol: unknown;
+		const controller = makeController(["<final_answer>\nok\n</final_answer>"], {
+			resolveScoutModel: async () => ({
+				model: createModel(),
+				apiKey: "test-key",
+				textToolCallProtocol: { variant: "fenced-json" },
+			}),
+			streamFn: (_model, _context, options) => {
+				capturedProtocol = options?.textToolCallProtocol;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage("<final_answer>\nok\n</final_answer>"),
+					});
+				});
+				return stream;
+			},
+		});
+
+		await controller.run("Find code", 8);
+
+		expect(capturedProtocol).toEqual({ variant: "fenced-json" });
+	});
+
 	it("propagates abort as a clean partial result", async () => {
 		const controller = new AbortController();
 		const scout = makeController(["partial"], {

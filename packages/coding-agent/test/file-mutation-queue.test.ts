@@ -198,7 +198,7 @@ describe("built-in edit and write tools", () => {
 		const controller = new AbortController();
 		const firstWrite = writeTool.execute(
 			"call-1",
-			{ action: "commit", path: filePath, intentId, content: "first\n" },
+			{ action: "write", path: filePath, intentId, content: "first\n" },
 			controller.signal,
 		);
 		await firstWriteStarted.promise;
@@ -252,7 +252,7 @@ describe("built-in edit and write tools", () => {
 		const firstEdit = editTool.execute(
 			"call-1",
 			{
-				action: "commit",
+				action: "edit",
 				path: filePath,
 				intentId: firstIntentId,
 				edits: [{ oldText: "alpha", newText: "ALPHA" }],
@@ -271,7 +271,7 @@ describe("built-in edit and write tools", () => {
 		const secondIntentId = preparedSecond.details?.intentId;
 		if (!secondIntentId) throw new Error("Expected edit preparation to return an intent id.");
 		await editTool.execute("call-2", {
-			action: "commit",
+			action: "edit",
 			path: filePath,
 			intentId: secondIntentId,
 			edits: [{ oldText: "beta", newText: "BETA" }],

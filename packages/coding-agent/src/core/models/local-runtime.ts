@@ -14,6 +14,12 @@ import {
 } from "../../utils/child-process.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
 import {
+	deriveHostLocalInferenceProfile,
+	type LocalInferenceProfile,
+	type LocalInferenceProfileMode,
+	ollamaEnvironmentForLocalInferenceProfile,
+} from "./local-inference-profile.ts";
+import {
 	createRuntimeCommandRunner,
 	extractZipArchive,
 	installRuntimeArchive,
@@ -93,6 +99,19 @@ export interface OllamaModelInfo {
 	modelInfo: Record<string, unknown>;
 }
 
+export type OllamaModelParameter = string | number | boolean;
+
+/** Current structured `/api/create` contract. Keep raw Modelfile syntax out of callers so managed
+ * profiles and context sizing cannot drift from the runtime adapter's supported request shape. */
+export interface OllamaCreateModelInput {
+	name: string;
+	from: string;
+	template?: string;
+	renderer?: string;
+	parser?: string;
+	parameters?: Readonly<Record<string, OllamaModelParameter>>;
+}
+
 /** Pinned ollama release for the managed installer below. Bump here when needed — one constant. */
 export const OLLAMA_PINNED_VERSION = "0.31.1";
 
@@ -139,6 +158,9 @@ export interface LocalRuntimeDeps {
 	/** os.platform()/os.arch() equivalents — injectable so asset/runtime resolution is testable per platform. */
 	platform?: () => string;
 	arch?: () => string;
+	/** Host capacity probes used once to derive the bounded local inference profile. */
+	totalMemoryBytes?: () => number;
+	logicalCpuCount?: () => number;
 	/** Runs a runtime-management command (Python venv/pip/download probe). Injectable so tests never
 	 * install packages or hit the network. */
 	runCommand?: RuntimeCommandRunner;
@@ -242,10 +264,16 @@ export class OllamaRuntime {
 	private readonly _createZstdDecompress: (() => NodeJS.ReadWriteStream) | undefined;
 	private readonly _hasCommand: (command: string) => boolean;
 	private readonly _extractArchiveFn: NonNullable<LocalRuntimeDeps["extractArchive"]>;
+	private readonly _profile: LocalInferenceProfile;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 	private _childModelsDir: string | undefined;
 
-	constructor(args: { agentDir: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {
+	constructor(args: {
+		agentDir: string;
+		baseUrl?: string;
+		profileMode?: LocalInferenceProfileMode;
+		deps?: LocalRuntimeDeps;
+	}) {
 		this._agentDir = args.agentDir;
 		this._baseUrl = (args.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
 		[this._fetch, this._spawn, this._exists, this._sleep] = resolveRuntimeLifecycleDependencies(args.deps);
@@ -255,6 +283,7 @@ export class OllamaRuntime {
 		this._homeDir = args.deps?.homeDir ?? homedir();
 		this._platform = args.deps?.platform ?? osPlatform;
 		this._arch = args.deps?.arch ?? osArch;
+		this._profile = deriveHostLocalInferenceProfile(args.profileMode ?? "balanced", args.deps);
 		// Feature-detect (not version-sniff): recent Node added zstd natively to node:zlib. Verified
 		// present on this repo's minimum supported Node (>=22.19.0); still detected at runtime rather
 		// than assumed, so an older/different Node correctly falls through to the system-zstd path.
@@ -650,11 +679,7 @@ export class OllamaRuntime {
 		if (modelsDir) mkdirSync(modelsDir, { recursive: true });
 		return this._spawnAndPoll(binary, {
 			...(modelsDir ? { OLLAMA_MODELS: modelsDir } : {}),
-			OLLAMA_FLASH_ATTENTION: "1",
-			OLLAMA_KV_CACHE_TYPE: "q8_0",
-			OLLAMA_NUM_PARALLEL: "1",
-			OLLAMA_KEEP_ALIVE: "30m",
-			OLLAMA_MAX_LOADED_MODELS: "3",
+			...ollamaEnvironmentForLocalInferenceProfile(this._profile),
 		});
 	}
 
@@ -665,6 +690,11 @@ export class OllamaRuntime {
 	 */
 	async start(): Promise<{ started: boolean; reason: string }> {
 		return this._startServer(this.ownedModelsDir());
+	}
+
+	/** Start against one caller-selected store; acceptance harnesses use this on an isolated port. */
+	async startWithModelsStore(modelsDir: string): Promise<{ started: boolean; reason: string }> {
+		return this._startServer(modelsDir);
 	}
 
 	/**
@@ -706,7 +736,7 @@ export class OllamaRuntime {
 	}
 
 	async ensureResident(model: string): Promise<{ ok: boolean; error?: string }> {
-		return this._postKeepAlive(model, "30m");
+		return this._postKeepAlive(model, this._profile.keepAlive);
 	}
 
 	async releaseResident(model: string): Promise<{ ok: boolean; error?: string }> {
@@ -775,16 +805,14 @@ export class OllamaRuntime {
 		}
 	}
 
-	async createFromModelfile(args: {
-		name: string;
-		modelfile: string;
-	}): Promise<{ ok: true } | { ok: false; error: string }> {
+	async createModel(args: OllamaCreateModelInput): Promise<{ ok: true } | { ok: false; error: string }> {
+		const { name, ...definition } = args;
 		return this._requestModelMutation(
 			"/api/create",
 			{
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ model: args.name, modelfile: args.modelfile, stream: false }),
+				body: JSON.stringify({ model: name, ...definition, stream: false }),
 				signal: AbortSignal.timeout(60_000),
 			},
 			"create",

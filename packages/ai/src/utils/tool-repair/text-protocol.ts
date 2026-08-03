@@ -45,6 +45,11 @@ export interface TextToolProtocolOptions {
 	variant?: TextToolProtocolVariant;
 }
 
+export interface TextToolProtocolParseOptions {
+	callIdPrefix?: string;
+	callIndexOffset?: number;
+}
+
 type EnvelopeKind = "pi_call" | "tool_call" | "fenced_json" | "function_xml";
 
 interface EnvelopeMatch {
@@ -320,13 +325,22 @@ function extractNameFromMalformedJson(raw: string): string | undefined {
 	return match?.[1];
 }
 
-function parsePiCallEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
+function textToolCallId(prefix: string, index: number): string {
+	return `${prefix}-${index}`;
+}
+
+function parsePiCallEnvelope(
+	match: EnvelopeMatch,
+	names: readonly string[],
+	index: number,
+	idPrefix: string,
+): ToolCall | undefined {
 	if (!match.name) return undefined;
 	const parsed = parseJsonValue(match.body);
 	const args = parsed.ok ? coerceArguments(parsed.value) : coerceArguments(match.body.trim());
 	return {
 		type: "toolCall",
-		id: `text-tool-${index}`,
+		id: textToolCallId(idPrefix, index),
 		name: match.name,
 		arguments: args.arguments,
 		rawArguments: parsed.ok ? args.rawArguments : { text: match.body.trim() },
@@ -335,7 +349,12 @@ function parsePiCallEnvelope(match: EnvelopeMatch, names: readonly string[], ind
 	};
 }
 
-function parseFunctionXmlEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
+function parseFunctionXmlEnvelope(
+	match: EnvelopeMatch,
+	names: readonly string[],
+	index: number,
+	idPrefix: string,
+): ToolCall | undefined {
 	if (!match.name) return undefined;
 	if (new RegExp(`<\\/?${FUNCTION_TAG}\\b`, "i").test(match.body)) return undefined;
 	const params: Record<string, string> = {};
@@ -354,7 +373,7 @@ function parseFunctionXmlEnvelope(match: EnvelopeMatch, names: readonly string[]
 	if (!sawParam) return undefined;
 	return {
 		type: "toolCall",
-		id: `text-tool-${index}`,
+		id: textToolCallId(idPrefix, index),
 		name: match.name,
 		arguments: params,
 		source: "text-protocol",
@@ -362,9 +381,14 @@ function parseFunctionXmlEnvelope(match: EnvelopeMatch, names: readonly string[]
 	};
 }
 
-function parseEnvelope(match: EnvelopeMatch, names: readonly string[], index: number): ToolCall | undefined {
-	if (match.kind === "pi_call") return parsePiCallEnvelope(match, names, index);
-	if (match.kind === "function_xml") return parseFunctionXmlEnvelope(match, names, index);
+function parseEnvelope(
+	match: EnvelopeMatch,
+	names: readonly string[],
+	index: number,
+	idPrefix: string,
+): ToolCall | undefined {
+	if (match.kind === "pi_call") return parsePiCallEnvelope(match, names, index, idPrefix);
+	if (match.kind === "function_xml") return parseFunctionXmlEnvelope(match, names, index, idPrefix);
 
 	const parsed = parseJsonObject(match.body);
 	if (!parsed) {
@@ -372,7 +396,7 @@ function parseEnvelope(match: EnvelopeMatch, names: readonly string[], index: nu
 		if (!name) return undefined;
 		return {
 			type: "toolCall",
-			id: `text-tool-${index}`,
+			id: textToolCallId(idPrefix, index),
 			name,
 			arguments: match.body.trim() as unknown as Record<string, unknown>,
 			rawArguments: { text: match.body.trim() },
@@ -388,7 +412,7 @@ function parseEnvelope(match: EnvelopeMatch, names: readonly string[], index: nu
 	const args = coerceArguments(argsValue);
 	return {
 		type: "toolCall",
-		id: `text-tool-${index}`,
+		id: textToolCallId(idPrefix, index),
 		name: nameValue,
 		arguments: args.arguments,
 		rawArguments: args.rawArguments,
@@ -459,7 +483,21 @@ function stringExampleForProperty(propertyName: string | undefined): string {
 	if (propertyName === "oldText") return "foo";
 	if (propertyName === "newText") return "bar";
 	if (propertyName === "content") return "text";
+	if (propertyName === "intentId") return "RETURNED_INTENT_ID";
 	return "value";
+}
+
+function schemaAlternatives(schemaValue: unknown): Record<string, unknown>[] {
+	const schema = schemaRecord(schemaValue);
+	if (!schema) return [];
+	const alternatives = Array.isArray(schema.anyOf)
+		? schema.anyOf
+		: Array.isArray(schema.oneOf)
+			? schema.oneOf
+			: undefined;
+	if (!alternatives) return [schema];
+	const records = alternatives.map(schemaRecord).filter((entry) => entry !== undefined);
+	return records.length > 0 ? records : [schema];
 }
 
 function exampleValueForSchema(schemaValue: unknown, propertyName?: string): unknown {
@@ -484,7 +522,7 @@ function requiredPropertyNames(parameters: Record<string, unknown> | undefined):
 }
 
 function exampleArgumentsForParameters(parametersValue: unknown): Record<string, unknown> {
-	const parameters = schemaRecord(parametersValue);
+	const parameters = schemaAlternatives(parametersValue)[0];
 	const properties = schemaRecord(parameters?.properties);
 	if (!properties) return {};
 	const args: Record<string, unknown> = {};
@@ -531,22 +569,24 @@ function formatDefault(value: unknown): string {
 }
 
 function formatToolProjection(tool: Tool): string {
-	const parameters = schemaRecord(tool.parameters);
-	const properties = schemaRecord(parameters?.properties);
-	const required = requiredPropertyNames(parameters);
-	const requiredSet = new Set(required);
-	const args = properties
-		? orderedPropertyNames(properties, required)
-				.map((name) => {
-					const schema = schemaRecord(properties[name]);
-					const optional = requiredSet.has(name) ? "" : "?";
-					const defaultText = schema && "default" in schema ? formatDefault(schema.default) : "";
-					return `${name}:${typeLabel(schema)}${optional}${defaultText}`;
-				})
-				.join(", ")
-		: "";
+	const signatures = schemaAlternatives(tool.parameters).map((parameters) => {
+		const properties = schemaRecord(parameters.properties);
+		const required = requiredPropertyNames(parameters);
+		const requiredSet = new Set(required);
+		const args = properties
+			? orderedPropertyNames(properties, required)
+					.map((name) => {
+						const schema = schemaRecord(properties[name]);
+						const optional = requiredSet.has(name) ? "" : "?";
+						const defaultText = schema && "default" in schema ? formatDefault(schema.default) : "";
+						return `${name}:${typeLabel(schema)}${optional}${defaultText}`;
+					})
+					.join(", ")
+			: "";
+		return `${tool.name}(${args})`;
+	});
 	const description = tool.description.replace(/\s+/g, " ").trim();
-	return `${tool.name}(${args}) - ${description}`;
+	return `${signatures.join(" OR ")} - ${description}`;
 }
 
 function toolHasArrayParameter(tool: Tool): boolean {
@@ -567,6 +607,30 @@ function exampleTools(tools: readonly Tool[]): Tool[] {
 	return examples;
 }
 
+function actionForSchema(schema: Record<string, unknown>): string | undefined {
+	const action = schemaRecord(schemaRecord(schema.properties)?.action);
+	return typeof action?.const === "string" ? action.const : undefined;
+}
+
+function dependentActionSchemas(tool: Tool): Record<string, unknown>[] {
+	const alternatives = schemaAlternatives(tool.parameters);
+	return alternatives.some((schema) => actionForSchema(schema) === "prepare") &&
+		alternatives.some((schema) => {
+			const action = actionForSchema(schema);
+			return action !== undefined && action !== "prepare";
+		})
+		? alternatives
+		: [];
+}
+
+function exampleArgumentsForSchema(schema: Record<string, unknown>): Record<string, unknown> {
+	const properties = schemaRecord(schema.properties);
+	if (!properties) return {};
+	const args: Record<string, unknown> = {};
+	for (const name of requiredPropertyNames(schema)) args[name] = exampleValueForSchema(properties[name], name);
+	return args;
+}
+
 function protocolHeader(variant: TextToolProtocolVariant): string[] {
 	return [
 		"Text tool-call protocol is enabled. To call a tool, emit an envelope in exactly this shape:",
@@ -574,6 +638,7 @@ function protocolHeader(variant: TextToolProtocolVariant): string[] {
 		"Arguments are one JSON object: double-quoted keys/strings, arrays as [ ] (never a quoted string), optional args omitted rather than null.",
 		"Reasoning may appear as prose before an envelope, never inside one.",
 		"Emit several envelopes in one reply to call multiple tools in parallel; each is executed and answered on its own.",
+		"After a successful tool result, use it and continue; do not repeat the same unchanged call.",
 		"Files, directories, searches, edits, writes, and shell commands always go through a tool envelope - never type out shell commands, file paths, or invented results yourself.",
 	];
 }
@@ -583,9 +648,24 @@ export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?:
 	const variant = options?.variant ?? DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT;
 	const lines = [...protocolHeader(variant), "Examples:"];
 	for (const tool of exampleTools(tools)) {
+		if (dependentActionSchemas(tool).length > 0) continue;
 		lines.push(
 			formatVariantEnvelope(variant, tool.name, JSON.stringify(exampleArgumentsForParameters(tool.parameters))),
 		);
+	}
+	const dependentTools = tools
+		.map((tool) => ({ tool, schemas: dependentActionSchemas(tool) }))
+		.filter((entry) => entry.schemas.length > 0);
+	if (dependentTools.length > 0) {
+		lines.push(
+			"Dependent action workflows:",
+			"Call action prepare first, wait for its tool result, then copy the returned intentId exactly. Never invent or reuse an intentId.",
+		);
+		for (const { tool, schemas } of dependentTools) {
+			for (const schema of schemas) {
+				lines.push(formatVariantEnvelope(variant, tool.name, JSON.stringify(exampleArgumentsForSchema(schema))));
+			}
+		}
 	}
 	lines.push("Available tools:");
 	for (const tool of tools) {
@@ -594,14 +674,20 @@ export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?:
 	return lines.join("\n");
 }
 
-export function parseTextToolCalls(text: string, knownTools: readonly Tool[]): ParsedTextToolCalls {
+export function parseTextToolCalls(
+	text: string,
+	knownTools: readonly Tool[],
+	options?: TextToolProtocolParseOptions,
+): ParsedTextToolCalls {
 	if (knownTools.length === 0) return { calls: [], text, attempted: false };
 	const matches = findToolEnvelopes(text);
 	if (matches.length === 0) return { calls: [], text, attempted: false };
 	const names = [...knownToolNames(knownTools)];
 	const parsed: ParsedMatch[] = [];
+	const idPrefix = options?.callIdPrefix?.trim() || "text-tool";
+	const indexOffset = options?.callIndexOffset ?? 0;
 	for (const [index, match] of matches.entries()) {
-		const call = parseEnvelope(match, names, index + 1);
+		const call = parseEnvelope(match, names, indexOffset + index + 1, idPrefix);
 		if (call) parsed.push({ match, call });
 	}
 	const selected = selectNonOverlappingParsedMatches(parsed);

@@ -59,15 +59,30 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: Assi
 }
 
 const toolSchema = Type.Object({ value: Type.String() });
-const echoTool: AgentTool<typeof toolSchema, { value: string }> = {
-	name: "echo",
-	label: "Echo",
-	description: "Echo tool",
-	parameters: toolSchema,
-	async execute(_id, params) {
-		return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
-	},
-};
+function createEchoTool(onExecute?: () => void): AgentTool<typeof toolSchema, { value: string }> {
+	return {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: toolSchema,
+		async execute(_id, params) {
+			onExecute?.();
+			return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+		},
+	};
+}
+
+const echoTool = createEchoTool();
+
+const writeLikeSchema = Type.Union([
+	Type.Object({ action: Type.Literal("prepare"), path: Type.String() }),
+	Type.Object({
+		action: Type.Literal("write"),
+		path: Type.String(),
+		content: Type.Optional(Type.String()),
+		contentRef: Type.Optional(Type.String()),
+	}),
+]);
 
 const identityConverter = (messages: AgentMessage[]): Message[] =>
 	messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -80,7 +95,12 @@ async function drain(stream: ReturnType<typeof agentLoop>) {
 
 describe("runaway-loop backstop", () => {
 	it("stops a loop that repeats the identical tool call, firing onRunawayStop", async () => {
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [echoTool] };
+		let executions = 0;
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [createEchoTool(() => executions++)],
+		};
 		let toolCalls = 0;
 		const stalls: Array<{ signature: string; repeats: number }> = [];
 
@@ -94,7 +114,15 @@ describe("runaway-loop backstop", () => {
 					type: "done",
 					reason: "toolUse",
 					message: assistantMessage(
-						[{ type: "toolCall", id: `t${toolCalls}`, name: "echo", arguments: { value: "stuck" } }],
+						[
+							{
+								type: "toolCall",
+								id: `t${toolCalls}`,
+								name: "echo",
+								arguments: { value: "stuck" },
+								source: "text-protocol",
+							},
+						],
 						"toolUse",
 					),
 				});
@@ -117,7 +145,219 @@ describe("runaway-loop backstop", () => {
 		expect(stalls).toHaveLength(1);
 		expect(stalls[0].repeats).toBe(4);
 		expect(toolCalls).toBe(4); // did not run beyond the limit
+		expect(executions).toBe(1); // repeated phone calls teach without replaying the successful operation
+		const rejectedRepeats = events.filter((event) => event.type === "tool_execution_end" && event.isError);
+		expect(rejectedRepeats).toHaveLength(3);
+		for (const event of rejectedRepeats) {
+			if (event.type !== "tool_execution_end") throw new Error("Expected tool_execution_end");
+			const text =
+				event.result.content.find((block: { type: string; text?: string }) => block.type === "text")?.text ?? "";
+			expect(text).toContain('"failure_code":"repeated_successful_call"');
+			expect(text).toContain('"next_action":"Use the previous successful result and continue');
+			expect(text).toContain("echoed: stuck");
+		}
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("teaches a phone model after one repeated success and lets it recover without halting", async () => {
+		let executions = 0;
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [createEchoTool(() => executions++)],
+		};
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `t${turn}`,
+									name: "echo",
+									arguments: { value: "once" },
+									source: "text-protocol",
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "used the result" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 4,
+					onRunawayStop: (info) => stalls.push(info),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(1);
+		expect(stalls).toHaveLength(0);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "tool_execution_end",
+				isError: true,
+				result: expect.objectContaining({
+					content: expect.arrayContaining([
+						expect.objectContaining({
+							type: "text",
+							text: expect.stringContaining('"failure_code":"repeated_successful_call"'),
+						}),
+					]),
+				}),
+			}),
+		);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("does not route native tool calls through the phone repeat guard", async () => {
+		let executions = 0;
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [createEchoTool(() => executions++)],
+		};
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[{ type: "toolCall", id: `t${turn}`, name: "echo", arguments: { value: "native" } }],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 4 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(2);
+		expect(events.filter((event) => event.type === "tool_execution_end" && event.isError)).toHaveLength(0);
+	});
+
+	it("guards a completed phone write by action and path when the model changes payload representation", async () => {
+		let executions = 0;
+		const writeLikeTool: AgentTool<typeof writeLikeSchema, { phase: string }> = {
+			name: "write",
+			label: "Write",
+			description: "Write once",
+			parameters: writeLikeSchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "write complete" }], details: { phase: "written" } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [writeLikeTool] };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `write-${turn}`,
+									name: "write",
+									arguments:
+										turn === 1
+											? { action: "write", path: "same.txt", content: "bytes" }
+											: turn === 2
+												? { action: "write", path: "same.txt", contentRef: "file-content:bytes" }
+												: { action: "prepare", path: "same.txt" },
+									source: "text-protocol",
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 4 },
+				undefined,
+				streamFn,
+			),
+		);
+		const guarded = events.filter(
+			(event) =>
+				event.type === "tool_execution_end" && (event.toolCallId === "write-2" || event.toolCallId === "write-3"),
+		);
+
+		expect(executions).toBe(1);
+		expect(guarded).toHaveLength(2);
+		for (const event of guarded) {
+			expect(event).toMatchObject({
+				type: "tool_execution_end",
+				isError: true,
+				result: {
+					details: {
+						piRepeatedSuccessfulCall: { previousToolCallId: "write-1" },
+					},
+				},
+			});
+		}
 	});
 
 	it("does not trip on legitimate varied tool use", async () => {

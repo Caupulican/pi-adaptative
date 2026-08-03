@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Added a Pi-managed local execution path for the complete Bonsai and Ternary-Bonsai GGUF families through a pinned Prism llama.cpp runtime, with exact model identity checks, bounded host-derived resource profiles, warm residency, validated paired-drafter policy, and complete Windows x64 CUDA archive installation.
+- Added LFM2.5-8B-A1B Q4_K_M to the curated local-model roster as a native-tool-first sparse-MoE worker candidate, with task-scale `/fitness` gating before role assignment and phone-protocol calibration only after native-call failure.
+
+### Changed
+
+- Shape and hard-gate the stable system prompt from the same model-capability profile that filters tools and lanes: lean, minimal, and chat models receive bounded role-specific contracts, oversized project instructions are deferred by path, constrained static memory obeys its prompt budget, and aggregate expansion is rejected after extension overrides without changing native-versus-phone tool protocol selection.
+- Renamed the filesystem mutation protocol's second phases from the Git-like `commit` term to the explicit `write` and `edit` actions, with preparation guidance and compatibility handling shaped for constrained local models.
+
+### Fixed
+
+- Hardened phone-protocol tool execution for non-native local models with reasoning-channel envelope recovery, parallel-call identity, dependent prepare/write/edit examples, bounded corrective teaching after failures, and protection against repeating an already-successful mutation.
+
 ## [0.85.3] - 2026-08-03
 
 ### Fixed

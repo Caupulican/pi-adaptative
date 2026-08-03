@@ -237,7 +237,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, _context) {
 			let text = theme.fg("toolTitle", theme.bold("write "));
 			text += theme.fg("accent", args.path);
-			const writeContent = args.action === "commit" && "content" in args ? args.content : undefined;
+			const writeContent = args.action === "write" && "content" in args ? args.content : undefined;
 			if (writeContent) text += theme.fg("dim", ` (${writeContent.length} characters)`);
 			return new Text(text, 0, 0);
 		},

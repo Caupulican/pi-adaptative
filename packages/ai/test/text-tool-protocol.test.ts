@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { complete, fauxAssistantMessage, fauxThinking, registerFauxProvider } from "../src/index.ts";
+import { complete, fauxAssistantMessage, fauxThinking, registerFauxProvider, stream } from "../src/index.ts";
 import type { Context, Tool } from "../src/types.ts";
 import { TOOL_REPAIR_MODE_NAMES } from "../src/utils/tool-repair/registry.ts";
 import {
@@ -49,6 +49,9 @@ describe("text tool-call protocol", () => {
 		expect(primer).toContain("search");
 		expect(primer).toContain("value");
 		expect(primer).toContain('<pi:call name="echo">{"value":"value"}</pi:call>');
+		expect(primer).toContain(
+			"After a successful tool result, use it and continue; do not repeat the same unchanged call.",
+		);
 	});
 
 	it("prefers core read and edit worked examples when present", () => {
@@ -87,6 +90,44 @@ describe("text tool-call protocol", () => {
 		expect(primer).toContain(
 			'<pi:call name="edit">{"path":"src/index.ts","edits":[{"oldText":"foo","newText":"bar"}]}</pi:call>',
 		);
+	});
+
+	it("teaches union-shaped two-phase mutation tools without invented intent IDs", () => {
+		const writeTool: Tool = {
+			name: "write",
+			description: "Create a file through a two-phase write workflow",
+			parameters: {
+				anyOf: [
+					{
+						type: "object",
+						properties: { action: { const: "prepare" }, path: { type: "string" } },
+						required: ["action", "path"],
+					},
+					{
+						type: "object",
+						properties: {
+							action: { const: "write" },
+							path: { type: "string" },
+							intentId: { type: "string" },
+							content: { type: "string" },
+						},
+						required: ["action", "path", "intentId", "content"],
+					},
+				],
+			} as Tool["parameters"],
+		};
+
+		const primer = generateTextToolProtocolPrimer([writeTool]);
+
+		expect(primer).toContain(
+			"Call action prepare first, wait for its tool result, then copy the returned intentId exactly. Never invent or reuse an intentId.",
+		);
+		expect(primer).toContain('<pi:call name="write">{"action":"prepare","path":"src/index.ts"}</pi:call>');
+		expect(primer).toContain(
+			'<pi:call name="write">{"action":"write","path":"src/index.ts","intentId":"RETURNED_INTENT_ID","content":"text"}</pi:call>',
+		);
+		expect(primer).not.toContain('<pi:call name="write">{}</pi:call>');
+		expect(primer).not.toMatch(/\bcommit\b/i);
 	});
 
 	it("parses grammar-supported envelopes into tool calls", () => {
@@ -432,6 +473,58 @@ describe("text tool-call protocol", () => {
 			{ type: "thinking", thinking: "I should use the protocol." },
 			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
 		]);
+	});
+
+	it("parses a phone envelope emitted only in thinking without leaking raw markup", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const context: Context = { systemPrompt: "base", messages: [], tools: [makeTool()] };
+		const envelope = '<pi:call name="echo">{"value":"hi"}</pi:call>';
+		registration.setResponses([fauxAssistantMessage([fauxThinking(envelope)])]);
+
+		const events = [];
+		for await (const event of stream(registration.getModel(), context, { textToolCallProtocol: true })) {
+			events.push(event);
+		}
+		const done = events.find((event) => event.type === "done");
+		expect(done?.type === "done" ? done.message.stopReason : undefined).toBe("toolUse");
+		expect(done?.type === "done" ? done.message.content : []).toMatchObject([
+			{ type: "toolCall", name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
+		expect(
+			events
+				.filter((event) => event.type !== "done")
+				.map((event) => JSON.stringify(event))
+				.join("\n"),
+		).not.toContain(envelope);
+	});
+
+	it("gives generated phone calls unique IDs across provider turns", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const context: Context = { systemPrompt: "base", messages: [], tools: [makeTool()] };
+		const envelope = '<pi:call name="echo">{"value":"hi"}</pi:call>';
+		registration.setResponses([fauxAssistantMessage(envelope), fauxAssistantMessage(envelope)]);
+
+		const first = await complete(registration.getModel(), context, { textToolCallProtocol: true });
+		const second = await complete(registration.getModel(), context, { textToolCallProtocol: true });
+		const firstCall = first.content.find((block) => block.type === "toolCall");
+		const secondCall = second.content.find((block) => block.type === "toolCall");
+
+		expect(firstCall?.id).toMatch(/^text-tool-\d+-1$/);
+		expect(secondCall?.id).toMatch(/^text-tool-\d+-1$/);
+		expect(secondCall?.id).not.toBe(firstCall?.id);
+	});
+
+	it("promotes plain thinking-only output to a visible answer for non-reasoning phone models", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		const context: Context = { systemPrompt: "base", messages: [], tools: [makeTool()] };
+		registration.setResponses([fauxAssistantMessage([fauxThinking("phone-read-marker")])]);
+
+		const converted = await complete(registration.getModel(), context, { textToolCallProtocol: true });
+
+		expect(converted.content).toEqual([{ type: "text", text: "phone-read-marker" }]);
 	});
 
 	it("keeps repair registry names documented in the user doc and bundled skill", () => {

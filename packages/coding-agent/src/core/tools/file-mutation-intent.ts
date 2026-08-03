@@ -9,8 +9,13 @@ const DEFAULT_INTENT_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_CONTENT_REFERENCE_TTL_MS = 60 * 60 * 1000;
 const HASH_BUFFER_BYTES = 64 * 1024;
 const CONTENT_REFERENCE_PREFIX = "file-content:";
+const FILE_MUTATION_INTENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type FileMutationKind = "write" | "edit";
+
+export function hasFileMutationIntentIdShape(value: unknown): value is string {
+	return typeof value === "string" && FILE_MUTATION_INTENT_ID_PATTERN.test(value);
+}
 
 export interface FilePathIdentity {
 	dev: string;
@@ -233,6 +238,14 @@ export class FileMutationIntentController {
 
 		const key = `${kind}\0${normalizedPath(absolutePath)}`;
 		const priorIntentId = this.intentByPath.get(key);
+		const priorIntent = priorIntentId ? this.intents.get(priorIntentId) : undefined;
+		if (priorIntent && (kind === "write" || identitiesMatch(priorIntent.identity, identity))) {
+			priorIntent.displayPath = displayPath;
+			priorIntent.expiresAt = this.now() + this.intentTtlMs;
+			this.intents.delete(priorIntent.intentId);
+			this.intents.set(priorIntent.intentId, priorIntent);
+			return { intentId: priorIntent.intentId, kind, path: absolutePath, displayPath };
+		}
 		if (priorIntentId) this.deleteIntent(priorIntentId);
 		while (this.intents.size >= this.intentLimit) {
 			const oldestIntentId = this.intents.keys().next().value;
@@ -260,7 +273,7 @@ export class FileMutationIntentController {
 		this.deleteIntent(intentId);
 		if (record.kind !== kind) throw new Error(`File mutation intent is for ${record.kind}, not ${kind}.`);
 		if (normalizedPath(record.path) !== normalizedPath(path)) {
-			throw new Error("File mutation intent path does not match the commit path.");
+			throw new Error("File mutation intent path does not match the requested mutation path.");
 		}
 		return {
 			intentId: record.intentId,

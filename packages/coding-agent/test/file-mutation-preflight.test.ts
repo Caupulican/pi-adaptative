@@ -30,7 +30,7 @@ describe("file mutation preflight", () => {
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
-	it("publishes disjoint path-only prepare and single-payload commit schemas", () => {
+	it("publishes disjoint path-only prepare and single-payload mutation schemas", () => {
 		const write = createWriteTool(testDir);
 		const edit = createEditTool(testDir);
 		const validate = (tool: typeof write | typeof edit, id: string, args: Record<string, unknown>) =>
@@ -49,7 +49,7 @@ describe("file mutation preflight", () => {
 		).toThrow();
 		expect(() =>
 			validate(write, "write-ambiguous-commit", {
-				action: "commit",
+				action: "write",
 				path: "new.txt",
 				intentId: "intent",
 				content: "one",
@@ -58,7 +58,7 @@ describe("file mutation preflight", () => {
 		).toThrow();
 		expect(() =>
 			validate(edit, "edit-empty-commit", {
-				action: "commit",
+				action: "edit",
 				path: "existing.txt",
 				intentId: "intent",
 				edits: [],
@@ -66,7 +66,7 @@ describe("file mutation preflight", () => {
 		).toThrow();
 		expect(
 			validate(write, "write-content-commit", {
-				action: "commit",
+				action: "write",
 				path: "new.txt",
 				intentId: "intent",
 				content: "",
@@ -85,7 +85,96 @@ describe("file mutation preflight", () => {
 		expect(readFileSync(path, "utf8")).toBe("original");
 	});
 
-	it("requires an accepted create intent and rechecks it atomically at commit", async () => {
+	it("teaches every required second-phase field without Git terminology", async () => {
+		const writePath = join(testDir, "new.txt");
+		const editPath = join(testDir, "existing.txt");
+		writeFileSync(editPath, "before", "utf8");
+		const writePrepared = await createWriteTool(testDir).execute("prepare-write-help", {
+			action: "prepare",
+			path: writePath,
+		} as never);
+		const editPrepared = await createEditTool(testDir).execute("prepare-edit-help", {
+			action: "prepare",
+			path: editPath,
+		} as never);
+		const writeHelp = writePrepared.content.find((block) => block.type === "text")?.text ?? "";
+		const editHelp = editPrepared.content.find((block) => block.type === "text")?.text ?? "";
+
+		expect(writeHelp).toContain('action "write"');
+		expect(writeHelp).toContain("intentId");
+		expect(writeHelp).toContain("content");
+		expect(writeHelp).toContain("required");
+		expect(editHelp).toContain('action "edit"');
+		expect(editHelp).toContain("intentId");
+		expect(editHelp).toContain("edits");
+		expect(editHelp).toContain("required");
+		expect(`${writeHelp}\n${editHelp}`).not.toMatch(/\bcommit\b/i);
+	});
+
+	it("reuses one stable intent for duplicate unchanged prepares", async () => {
+		const writePath = join(testDir, "duplicate-write.txt");
+		const writeTool = createWriteTool(testDir);
+		const firstWrite = await writeTool.execute("prepare-write-1", { action: "prepare", path: writePath } as never);
+		const secondWrite = await writeTool.execute("prepare-write-2", {
+			action: "prepare",
+			path: writePath,
+		} as never);
+		expect((secondWrite.details as PreparedMutationDetails).intentId).toBe(
+			(firstWrite.details as PreparedMutationDetails).intentId,
+		);
+		const written = await writeTool.execute("write-after-duplicate-prepare", {
+			action: "write",
+			path: writePath,
+			intentId: (firstWrite.details as PreparedMutationDetails).intentId,
+			content: "created",
+		} as never);
+		expect(readFileSync(writePath, "utf8")).toBe("created");
+		const writeResultText = written.content.find((block) => block.type === "text")?.text ?? "";
+		expect(writeResultText).toContain("write is complete");
+		expect(writeResultText).toContain("different new path");
+
+		const editPath = join(testDir, "duplicate-edit.txt");
+		writeFileSync(editPath, "before", "utf8");
+		const editTool = createEditTool(testDir);
+		const firstEdit = await editTool.execute("prepare-edit-1", { action: "prepare", path: editPath } as never);
+		const secondEdit = await editTool.execute("prepare-edit-2", { action: "prepare", path: editPath } as never);
+		expect((secondEdit.details as PreparedMutationDetails).intentId).toBe(
+			(firstEdit.details as PreparedMutationDetails).intentId,
+		);
+		const edited = await editTool.execute("edit-after-duplicate-prepare", {
+			action: "edit",
+			path: editPath,
+			intentId: (firstEdit.details as PreparedMutationDetails).intentId,
+			edits: [{ oldText: "before", newText: "after" }],
+		} as never);
+		expect(readFileSync(editPath, "utf8")).toBe("after");
+		const editResultText = edited.content.find((block) => block.type === "text")?.text ?? "";
+		expect(editResultText).toContain("edit is complete");
+		expect(editResultText).toContain("different new path");
+	});
+
+	it("refreshes an edit intent when the target changes between prepares", async () => {
+		const path = join(testDir, "changed-between-prepares.txt");
+		writeFileSync(path, "first", "utf8");
+		const tool = createEditTool(testDir);
+		const first = await tool.execute("prepare-before-change", { action: "prepare", path } as never);
+		writeFileSync(path, "second", "utf8");
+		const second = await tool.execute("prepare-after-change", { action: "prepare", path } as never);
+		const firstIntentId = (first.details as PreparedMutationDetails).intentId;
+		const secondIntentId = (second.details as PreparedMutationDetails).intentId;
+
+		expect(secondIntentId).not.toBe(firstIntentId);
+		await expect(
+			tool.execute("edit-with-stale-preparation", {
+				action: "edit",
+				path,
+				intentId: firstIntentId,
+				edits: [{ oldText: "second", newText: "third" }],
+			} as never),
+		).rejects.toThrow(/intent.*invalid|expired/i);
+	});
+
+	it("requires an accepted create intent and rechecks it atomically when writing", async () => {
 		const path = join(testDir, "raced.txt");
 		const tool = createWriteTool(testDir);
 		const prepared = await tool.execute("prepare-create", { action: "prepare", path } as never);
@@ -93,7 +182,7 @@ describe("file mutation preflight", () => {
 
 		writeFileSync(path, "won by another process", "utf8");
 		await expect(
-			tool.execute("commit-create", { action: "commit", path, intentId, content: "must not overwrite" } as never),
+			tool.execute("commit-create", { action: "write", path, intentId, content: "must not overwrite" } as never),
 		).rejects.toThrow(/already exists|collision|stale/i);
 		expect(readFileSync(path, "utf8")).toBe("won by another process");
 	});
@@ -108,7 +197,7 @@ describe("file mutation preflight", () => {
 		expect(existsSync(path)).toBe(false);
 	});
 
-	it("rejects an edit when the prepared file changed before commit", async () => {
+	it("rejects an edit when the prepared file changed before editing", async () => {
 		const path = join(testDir, "stale.txt");
 		writeFileSync(path, "alpha\nbeta\n", "utf8");
 		const tool = createEditTool(testDir);
@@ -118,7 +207,7 @@ describe("file mutation preflight", () => {
 		writeFileSync(path, "external change\n", "utf8");
 		await expect(
 			tool.execute("commit-edit", {
-				action: "commit",
+				action: "edit",
 				path,
 				intentId,
 				edits: [{ oldText: "alpha", newText: "ALPHA" }],
@@ -148,7 +237,7 @@ describe("file mutation preflight", () => {
 
 		const prepared = await tool.execute("prepare-access-owner", { action: "prepare", path } as never);
 		await tool.execute("commit-access-owner", {
-			action: "commit",
+			action: "edit",
 			path,
 			intentId: (prepared.details as PreparedMutationDetails).intentId,
 			edits: [{ oldText: "alpha", newText: "ALPHA" }],
@@ -167,10 +256,10 @@ describe("file mutation preflight", () => {
 		const edits = [{ oldText: "alpha", newText: "ALPHA" }];
 
 		await expect(
-			tool.execute("commit-corrupt", { action: "commit", path, intentId: firstIntentId, edits } as never),
+			tool.execute("commit-corrupt", { action: "edit", path, intentId: firstIntentId, edits } as never),
 		).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION.*exact text replacement.*unsafe/is);
 		await expect(
-			tool.execute("replay-corrupt", { action: "commit", path, intentId: firstIntentId, edits } as never),
+			tool.execute("replay-corrupt", { action: "edit", path, intentId: firstIntentId, edits } as never),
 		).rejects.toThrow(/intent.*invalid|expired/i);
 		expect(readFileSync(path)).toEqual(originalBytes);
 	});
@@ -182,7 +271,7 @@ describe("file mutation preflight", () => {
 		const sourceIntent = (await tool.execute("prepare-source", { action: "prepare", path: sourcePath } as never))
 			.details as PreparedMutationDetails;
 		const sourceResult = await tool.execute("commit-source", {
-			action: "commit",
+			action: "write",
 			path: sourcePath,
 			intentId: sourceIntent.intentId,
 			content: "same bytes\n",
@@ -193,7 +282,7 @@ describe("file mutation preflight", () => {
 		const targetIntent = (await tool.execute("prepare-target", { action: "prepare", path: targetPath } as never))
 			.details as PreparedMutationDetails;
 		await tool.execute("commit-target", {
-			action: "commit",
+			action: "write",
 			path: targetPath,
 			intentId: targetIntent.intentId,
 			contentRef,
@@ -210,20 +299,20 @@ describe("file mutation preflight", () => {
 		const intentId = (prepared.details as PreparedMutationDetails).intentId;
 
 		await expect(
-			foreign.execute("commit-foreign", { action: "commit", path, intentId, content: "no" } as never),
+			foreign.execute("commit-foreign", { action: "write", path, intentId, content: "no" } as never),
 		).rejects.toThrow(/intent.*invalid|unknown intent|session/i);
 		expect(existsSync(path)).toBe(false);
 	});
 
-	it("consumes an intent exactly once under concurrent commits", async () => {
+	it("consumes an intent exactly once under concurrent writes", async () => {
 		const path = join(testDir, "single-use.txt");
 		const tool = createWriteTool(testDir);
 		const prepared = await tool.execute("prepare-once", { action: "prepare", path } as never);
 		const intentId = (prepared.details as PreparedMutationDetails).intentId;
 
 		const outcomes = await Promise.allSettled([
-			tool.execute("commit-once-a", { action: "commit", path, intentId, content: "a" } as never),
-			tool.execute("commit-once-b", { action: "commit", path, intentId, content: "b" } as never),
+			tool.execute("commit-once-a", { action: "write", path, intentId, content: "a" } as never),
+			tool.execute("commit-once-b", { action: "write", path, intentId, content: "b" } as never),
 		]);
 		expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
 		expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
@@ -238,7 +327,7 @@ describe("file mutation preflight", () => {
 			await tool.execute("prepare-changing-source", { action: "prepare", path: sourcePath } as never)
 		).details as PreparedMutationDetails;
 		const sourceResult = await tool.execute("commit-changing-source", {
-			action: "commit",
+			action: "write",
 			path: sourcePath,
 			intentId: sourceIntent.intentId,
 			content: "original",
@@ -251,7 +340,7 @@ describe("file mutation preflight", () => {
 
 		await expect(
 			tool.execute("commit-changed-target", {
-				action: "commit",
+				action: "write",
 				path: targetPath,
 				intentId: targetIntent.intentId,
 				contentRef,
@@ -267,7 +356,7 @@ describe("file mutation preflight", () => {
 			const path = join(testDir, name);
 			const prepared = await tool.execute(`prepare-${name}`, { action: "prepare", path } as never);
 			const result = await tool.execute(`commit-${name}`, {
-				action: "commit",
+				action: "write",
 				path,
 				intentId: (prepared.details as PreparedMutationDetails).intentId,
 				content,
@@ -283,7 +372,7 @@ describe("file mutation preflight", () => {
 
 		await expect(
 			tool.execute("commit-evicted-target", {
-				action: "commit",
+				action: "write",
 				path: targetPath,
 				intentId: (prepared.details as PreparedMutationDetails).intentId,
 				contentRef: evictedRef,

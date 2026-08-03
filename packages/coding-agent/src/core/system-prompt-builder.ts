@@ -18,6 +18,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
+import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
@@ -53,8 +54,8 @@ export interface SystemPromptBuilderDeps {
 	getToolSelectionHints?(): readonly ToolSelectionHint[];
 	/** The session's currently active extensions. */
 	getActiveExtensions(): ReadonlyArray<Extension>;
-	/** Active model context window, used to compact-cap static memory prompt blocks. */
-	getContextWindow(): number | undefined;
+	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
+	getModelCapabilityProfile(): ModelCapabilityProfile;
 	/** Live reasoning/orchestration selection; Ultra adds a bounded proactive-delegation policy. */
 	getThinkingLevel(): ThinkingLevel;
 }
@@ -86,6 +87,11 @@ export class SystemPromptBuilder {
 	/** The options used to render the last base prompt — read by a before_agent_start extension hook. */
 	getBaseSystemPromptOptions(): BuildSystemPromptOptions {
 		return this._baseSystemPromptOptions;
+	}
+
+	/** Recheck the final prompt after extension and routed-turn overrides, immediately before use. */
+	enforceSystemPromptBudget(systemPrompt: string): string {
+		return enforceModelCapabilitySystemPromptBudget(systemPrompt, this.deps.getModelCapabilityProfile());
 	}
 
 	normalizePromptSnippet(text: string | undefined): string | undefined {
@@ -122,7 +128,7 @@ export class SystemPromptBuilder {
 		return `<situation_soul>\n${soul}\n</situation_soul>`;
 	}
 
-	private _buildSelfModificationPrompt(): string | undefined {
+	private _buildSelfModificationPrompt(profile: ModelCapabilityProfile): string | undefined {
 		const settings = this.deps.getSettingsManager().getSelfModificationSettings();
 		if (!settings.enabled) {
 			return undefined;
@@ -154,6 +160,9 @@ export class SystemPromptBuilder {
 			autonomy.mode === "full"
 				? "In autonomy.mode=full, autonomy/autoLearn setting tuning is covered by the standing autonomy grant; ask before changing credentials, provider auth, package sources, or unrelated preferences."
 				: "Ask for explicit approval before changing global settings.";
+		if (profile.class !== "full") {
+			return `Pi self-modification boundary: edit Pi core only under ${sourceStatus}. Inspect first, preserve concurrent work, make a small auditable change, and run focused validation. ${settingsGate} Always ask before publishing, pushing, tagging, or releasing.`;
+		}
 		return `Pi self-modification guardrails (local setting active):
 - Authorized pi-adaptative source path: ${sourceStatus}
 - Only modify Pi core/harness source under the authorized source path; never patch installed node_modules or generated runtime output as the source of truth.
@@ -165,11 +174,10 @@ export class SystemPromptBuilder {
 - Always ask for explicit approval before publishing, pushing, tagging, or releasing.`;
 	}
 
-	private _buildStaticMemoryPrompt(): string | undefined {
-		const contextWindow = this.deps.getContextWindow();
+	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile): string | undefined {
 		const budget =
-			contextWindow !== undefined && contextWindow <= 2048
-				? resolveMemoryPromptBudget({ contextWindow, configuredMaxResults: 3 })
+			profile.class !== "full" && profile.contextWindow !== undefined
+				? resolveMemoryPromptBudget({ contextWindow: profile.contextWindow, configuredMaxResults: 3 })
 				: undefined;
 		return this.deps.getMemoryManager().buildSystemPromptBlock(budget) || undefined;
 	}
@@ -186,15 +194,18 @@ export class SystemPromptBuilder {
 		return formatToolSelectionHints(this.deps.getToolSelectionHints?.() ?? []);
 	}
 
-	private _buildAutonomyPrompt(): string | undefined {
+	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
 		const autoLearn = this.deps.getSettingsManager().getAutoLearnSettings();
 		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
-		if (!autoLearn.enabled && autonomy.mode !== "full") {
+		if (!profile.backgroundLanesEnabled || (!autoLearn.enabled && autonomy.mode !== "full")) {
 			return undefined;
 		}
 
 		const reflection = autoLearn.reflectionReview ?? autonomy.mode !== "off";
 		const model = autoLearn.model?.trim() || "active";
+		if (profile.class !== "full") {
+			return `Pi autonomy policy (${autonomy.mode}): configured background learning may run using model ${model}, but the active task stays primary. Treat observations as evidence, keep changes bounded, and require explicit approval for publication, push/tag/release, credentials, destructive deletion, or broader authority.`;
+		}
 		if (autonomy.mode === "full") {
 			return `Pi autonomy policy (mode full, standing autonomy):
 - Setting-authorized background learners may run after long sessions or corrective/complex turns using model ${model}; they may act without asking first inside this standing grant.
@@ -228,6 +239,7 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
+		const modelCapability = this.deps.getModelCapabilityProfile();
 		const validToolNames = toolNames.filter((name) => this.deps.hasTool(name));
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelines: string[] = [];
@@ -251,13 +263,13 @@ export class SystemPromptBuilder {
 			this._buildSituationSoulPrompt(),
 			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
-			this._buildSelfModificationPrompt(),
-			this._buildAutonomyPrompt(),
+			this._buildSelfModificationPrompt(modelCapability),
+			this._buildAutonomyPrompt(modelCapability),
 			this._buildUltraDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
-			this._buildStaticMemoryPrompt(),
+			this._buildStaticMemoryPrompt(modelCapability),
 			...loaderAppendSystemPrompt,
 		].filter((part): part is string => Boolean(part));
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
@@ -267,6 +279,7 @@ export class SystemPromptBuilder {
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
 
 		return {
+			modelCapability,
 			cwd: this.deps.getCwd(),
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,

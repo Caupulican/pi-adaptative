@@ -126,7 +126,7 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		}
 	});
 
-	it("show and createFromModelfile use Ollama metadata/create endpoints", async () => {
+	it("show and createModel use the current structured Ollama metadata/create endpoints", async () => {
 		const bodies: unknown[] = [];
 		const runtime = new OllamaRuntime({
 			agentDir: "/tmp/pi-test",
@@ -148,15 +148,17 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 
 		expect(await runtime.show("qwen3:1.7b")).toEqual({ ok: true, info: { modelInfo: { "llama.block_count": 1 } } });
 		expect(
-			await runtime.createFromModelfile({
+			await runtime.createModel({
 				name: "pi-qwen3-1.7b:ctx8192",
-				modelfile: "FROM qwen3:1.7b\nPARAMETER num_ctx 8192\n",
+				from: "qwen3:1.7b",
+				parameters: { num_ctx: 8_192 },
 			}),
 		).toEqual({ ok: true });
 		expect(bodies).toContainEqual({ model: "qwen3:1.7b" });
 		expect(bodies).toContainEqual({
 			model: "pi-qwen3-1.7b:ctx8192",
-			modelfile: "FROM qwen3:1.7b\nPARAMETER num_ctx 8192\n",
+			from: "qwen3:1.7b",
+			parameters: { num_ctx: 8_192 },
 			stream: false,
 		});
 	});
@@ -535,7 +537,7 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 			expect(assistantTexts).toEqual(["answered locally"]);
 			expect(harness.eventsOfType("warning")).toHaveLength(0);
 			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
-			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("30m");
+			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("10m");
 			// The router's boot path uses the same canonical pi-owned store as /models add.
 			expect(serveEnv?.OLLAMA_MODELS?.replaceAll("\\", "/")).toContain("models/ollama");
 		} finally {

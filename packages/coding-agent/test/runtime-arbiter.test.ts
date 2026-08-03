@@ -106,6 +106,37 @@ describe("runtime residency arbiter", () => {
 		expect(plan).toMatchObject({ status: "refuse", reason: "anti-thrash" });
 	});
 
+	it("enforces anti-thrash independently from resident dwell protection", () => {
+		const firstHandoff = planRuntimeResidency({
+			budgetBytes: 2_000,
+			residents: [resident({ model: "a", bytes: 1_500, lastUsedAtMs: 1_000 })],
+			request: {
+				model: "b",
+				bytes: 1_500,
+				role: "active",
+				priority: 10,
+				nowMs: 1_000,
+				antiThrashWindowMs: 300_000,
+			},
+		});
+		expect(firstHandoff).toMatchObject({ status: "fits", evict: [{ model: "a" }] });
+
+		const immediateReturn = planRuntimeResidency({
+			budgetBytes: 2_000,
+			residents: [resident({ model: "b", bytes: 1_500, lastUsedAtMs: 1_050 })],
+			request: {
+				model: "a",
+				bytes: 1_500,
+				role: "active",
+				priority: 10,
+				nowMs: 1_050,
+				antiThrashWindowMs: 300_000,
+				recentEvictions: [{ evicted: "a", loaded: "b", atMs: 1_000 }],
+			},
+		});
+		expect(immediateReturn).toMatchObject({ status: "refuse", reason: "anti-thrash" });
+	});
+
 	it("plans pipeline reservations as an all-or-nothing fit", () => {
 		const fits = planRuntimeResidency({
 			budgetBytes: 10_000,

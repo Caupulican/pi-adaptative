@@ -180,7 +180,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, _context) {
 			const path = shortenPath(args.path || "");
 			const pathDisplay = path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-			const writeContent = args.action === "commit" && "content" in args ? args.content : undefined;
+			const writeContent = args.action === "write" && "content" in args ? args.content : undefined;
 			const sizeInfo = writeContent ? theme.fg("muted", ` (${writeContent.length} characters)`) : "";
 
 			return new Text(`${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}${sizeInfo}`, 0, 0);

@@ -5,7 +5,11 @@
 
 import { EventStream } from "@caupulican/pi-ai/event-stream";
 import { streamSimple } from "@caupulican/pi-ai/stream";
-import { formatToolRepairStandingRule, type ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
+import {
+	formatToolRepairStandingRule,
+	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
+	type ToolFailurePhase,
+} from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, Context, ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
 	type ToolArgumentExecutionOutcome,
@@ -180,6 +184,59 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
  */
 const STALL_WINDOW_PERIODS = 4;
 
+function textProtocolOperationArguments(toolCall: AgentToolCall): unknown {
+	const args: unknown = toolCall.arguments;
+	if (!args || typeof args !== "object" || Array.isArray(args)) return args ?? null;
+	const record = args as Record<string, unknown>;
+	if ((record.action === "write" || record.action === "edit") && typeof record.path === "string") {
+		return { action: record.action, path: record.path };
+	}
+	return args;
+}
+
+function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string {
+	return normalizeToolSignature(
+		toolCalls.map((toolCall) => [toolCall.name, textProtocolOperationArguments(toolCall)]),
+	);
+}
+
+function toolCallRecord(toolCall: AgentToolCall): Record<string, unknown> | undefined {
+	const args: unknown = toolCall.arguments;
+	return args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
+}
+
+function toolResultPhase(result: ToolResultMessage): string | undefined {
+	if (!result.details || typeof result.details !== "object" || Array.isArray(result.details)) return undefined;
+	const phase = (result.details as Record<string, unknown>).phase;
+	return typeof phase === "string" ? phase : undefined;
+}
+
+function repeatsSuccessfulTextProtocolBatch(
+	incomingSignature: string,
+	toolCalls: readonly AgentToolCall[],
+	previous: SuccessfulTextProtocolBatch | undefined,
+): boolean {
+	if (!previous) return false;
+	if (incomingSignature === previous.signature) return true;
+	if (toolCalls.length !== previous.calls.length || toolCalls.length !== previous.messages.length) return false;
+	return toolCalls.every((toolCall, index) => {
+		const previousCall = previous.calls[index];
+		const previousResult = previous.messages[index];
+		if (!previousCall || !previousResult) return false;
+		const currentArgs = toolCallRecord(toolCall);
+		const previousArgs = toolCallRecord(previousCall);
+		if (currentArgs?.path !== previousArgs?.path) return false;
+		const phase = toolResultPhase(previousResult);
+		if (phase === "written") return toolCall.name === "write" && previousCall.name === "write";
+		return (
+			phase === "edited" &&
+			toolCall.name === "edit" &&
+			previousCall.name === "edit" &&
+			currentArgs?.action === "edit"
+		);
+	});
+}
+
 /**
  * Apply one request-local preflight without mutating persistent loop configuration.
  * Shared with isolated tool-free provider calls so every transport boundary has identical
@@ -243,6 +300,7 @@ async function runLoop(
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -260,6 +318,7 @@ async function runLoop(
 
 			// Process pending messages (inject before next assistant response)
 			if (pendingMessages.length > 0) {
+				lastSuccessfulTextProtocolBatch = undefined;
 				for (const message of pendingMessages) {
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
@@ -285,6 +344,13 @@ async function runLoop(
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
+				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
+				const incomingBatchSignature = textProtocolBatchSignature(toolCalls);
+				const previousSuccessfulTextProtocolResults =
+					textProtocolBatch &&
+					repeatsSuccessfulTextProtocolBatch(incomingBatchSignature, toolCalls, lastSuccessfulTextProtocolBatch)
+						? lastSuccessfulTextProtocolBatch?.messages
+						: undefined;
 				const executedToolBatch = await executeToolCalls(
 					currentContext,
 					message,
@@ -292,6 +358,7 @@ async function runLoop(
 					validationFailureTracker,
 					repairTeachTracker,
 					toolFailureMemory,
+					previousSuccessfulTextProtocolResults,
 					signal,
 					emit,
 				);
@@ -302,6 +369,20 @@ async function runLoop(
 					currentContext.messages.push(result);
 					newMessages.push(result);
 				}
+				if (!previousSuccessfulTextProtocolResults) {
+					lastSuccessfulTextProtocolBatch =
+						textProtocolBatch &&
+						toolResults.length === toolCalls.length &&
+						toolResults.every((result) => !result.isError)
+							? {
+									signature: textProtocolBatchSignature(toolCalls),
+									messages: toolResults,
+									calls: toolCalls,
+								}
+							: undefined;
+				}
+			} else {
+				lastSuccessfulTextProtocolBatch = undefined;
 			}
 
 			await emit({ type: "turn_end", message, toolResults });
@@ -511,6 +592,7 @@ async function executeToolCalls(
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
+	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -527,6 +609,7 @@ async function executeToolCalls(
 			validationFailureTracker,
 			repairTeachTracker,
 			toolFailureMemory,
+			previousSuccessfulTextProtocolResults,
 			signal,
 			emit,
 		);
@@ -539,6 +622,7 @@ async function executeToolCalls(
 		validationFailureTracker,
 		repairTeachTracker,
 		toolFailureMemory,
+		previousSuccessfulTextProtocolResults,
 		signal,
 		emit,
 	);
@@ -549,6 +633,39 @@ type ExecutedToolCallBatch = {
 	terminate: boolean;
 };
 
+type SuccessfulTextProtocolBatch = {
+	signature: string;
+	messages: readonly ToolResultMessage[];
+	calls: readonly AgentToolCall[];
+};
+
+type StartedToolCall =
+	| { kind: "finalized"; finalized: FinalizedToolCallOutcome }
+	| { kind: "prepared"; preparation: PreparedToolCall };
+
+async function prepareAndStartToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	index: number,
+	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<StartedToolCall> {
+	const preparation = previousSuccessfulTextProtocolResults
+		? createRepeatedSuccessfulToolCallOutcome(previousSuccessfulTextProtocolResults[index])
+		: await prepareToolCall(currentContext, assistantMessage, toolCall, config, validationFailureTracker, signal);
+	await emitToolExecutionStart(toolCall, emit);
+	if (preparation.kind === "immediate") {
+		emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
+		return { kind: "finalized", finalized: finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory) };
+	}
+	return { kind: "prepared", preparation };
+}
+
 async function executeToolCallsSequential(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -557,31 +674,34 @@ async function executeToolCallsSequential(
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
+	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
 
-	for (const toolCall of toolCalls) {
-		const preparation = await prepareToolCall(
+	for (const [index, toolCall] of toolCalls.entries()) {
+		const started = await prepareAndStartToolCall(
 			currentContext,
 			assistantMessage,
 			toolCall,
+			index,
 			config,
 			validationFailureTracker,
+			toolFailureMemory,
+			previousSuccessfulTextProtocolResults,
 			signal,
+			emit,
 		);
-		await emitToolExecutionStart(toolCall, emit);
 		let finalized: FinalizedToolCallOutcome;
-		if (preparation.kind === "immediate") {
-			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
-			finalized = finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory);
+		if (started.kind === "finalized") {
+			finalized = started.finalized;
 		} else {
 			finalized = await executeAndFinalizePreparedToolCall(
 				currentContext,
 				assistantMessage,
-				preparation,
+				started.preparation,
 				config,
 				repairTeachTracker,
 				toolFailureMemory,
@@ -615,26 +735,28 @@ async function executeToolCallsParallel(
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
+	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
 
-	for (const toolCall of toolCalls) {
-		const preparation = await prepareToolCall(
+	for (const [index, toolCall] of toolCalls.entries()) {
+		const started = await prepareAndStartToolCall(
 			currentContext,
 			assistantMessage,
 			toolCall,
+			index,
 			config,
 			validationFailureTracker,
+			toolFailureMemory,
+			previousSuccessfulTextProtocolResults,
 			signal,
+			emit,
 		);
-		await emitToolExecutionStart(toolCall, emit);
-		if (preparation.kind === "immediate") {
-			emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
-			const finalized = finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory);
-			await emitToolExecutionEnd(finalized, emit);
-			finalizedCalls.push(finalized);
+		if (started.kind === "finalized") {
+			await emitToolExecutionEnd(started.finalized, emit);
+			finalizedCalls.push(started.finalized);
 			if (signal?.aborted) {
 				break;
 			}
@@ -645,7 +767,7 @@ async function executeToolCallsParallel(
 			const finalized = await executeAndFinalizePreparedToolCall(
 				currentContext,
 				assistantMessage,
-				preparation,
+				started.preparation,
 				config,
 				repairTeachTracker,
 				toolFailureMemory,
@@ -692,6 +814,7 @@ type ImmediateToolCallOutcome = {
 	failureCode: string;
 	correction: string;
 	diagnostic?: string;
+	repeatedSuccessfulCall?: { previousToolCallId: string };
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -720,6 +843,30 @@ type ToolRepairTeachTracker = Map<string, number>;
 
 const DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD = 3;
 const TOOL_REPAIR_TEACH_EVERY = 5;
+const REPEATED_SUCCESS_RESULT_MAX_CHARS = 2_048;
+
+function createRepeatedSuccessfulToolCallOutcome(
+	previousResult: ToolResultMessage | undefined,
+): ImmediateToolCallOutcome {
+	const previousText = previousResult?.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n")
+		.slice(0, REPEATED_SUCCESS_RESULT_MAX_CHARS);
+	const diagnostic = previousText
+		? `${REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic} Previous successful result: ${previousText}`
+		: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic;
+	return {
+		kind: "immediate",
+		result: createErrorToolResult(diagnostic),
+		isError: true,
+		phase: "execution",
+		failureCode: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.failureCode,
+		correction: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
+		diagnostic,
+		...(previousResult ? { repeatedSuccessfulCall: { previousToolCallId: previousResult.toolCallId } } : {}),
+	};
+}
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
@@ -985,9 +1132,18 @@ function finalizeRejectedToolCall(
 		outcome.diagnostic,
 		outcome.phase,
 	);
+	const failureResult = createToolFailureResult(record, outcome.result.terminate);
 	return {
 		toolCall,
-		result: createToolFailureResult(record, outcome.result.terminate),
+		result: outcome.repeatedSuccessfulCall
+			? {
+					...failureResult,
+					details: {
+						...failureResult.details,
+						piRepeatedSuccessfulCall: outcome.repeatedSuccessfulCall,
+					},
+				}
+			: failureResult,
 		isError: true,
 	};
 }

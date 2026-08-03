@@ -18,6 +18,7 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	TextToolProtocolParseEvent,
+	ThinkingContent,
 	Tool,
 	Usage,
 } from "@caupulican/pi-ai/types";
@@ -443,7 +444,10 @@ export class ToolProtocolController {
 
 	private textProtocolCalibrationContext(variant: TextToolProtocolVariant, token: string): Context {
 		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_ECHO_TOOL], { variant });
-		const instruction = `Text tool protocol calibration trial. Using the protocol above, call echo with data exactly "${token}". Output only the tool-call envelope.`;
+		const exactEnvelope = formatVariantEnvelope(variant, "echo", JSON.stringify({ data: token }));
+		const instruction =
+			`Text tool protocol calibration trial. Using the protocol above, call echo with data exactly "${token}". ` +
+			`Output only this exact tool-call envelope:\n${exactEnvelope}`;
 		return {
 			systemPrompt: `${primer}\n\n${instruction}`,
 			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
@@ -553,8 +557,11 @@ export class ToolProtocolController {
 			this.nextProbeUsageReportId(model, `text-protocol:${variant}`),
 		);
 		const text = message.content
-			.filter((block): block is TextContent => block.type === "text")
-			.map((block) => block.text)
+			.filter(
+				(block): block is TextContent | ThinkingContent =>
+					block.type === "text" || (block.type === "thinking" && !block.redacted),
+			)
+			.map((block) => (block.type === "text" ? block.text : block.thinking))
 			.join("\n")
 			.trim();
 		if (!text) return false;

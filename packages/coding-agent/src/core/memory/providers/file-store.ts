@@ -60,6 +60,34 @@ export interface FileStoreProviderOptions {
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
 	"[System Note: Below is a snapshot of persistent memory. Proactively record verified reusable project facts and user preferences with the 'memory' tool; never store transient noise.]";
 
+function fitMemoryBlockToBudget(block: string, budget: MemoryPromptBudget | undefined): string {
+	if (budget === undefined) return block;
+	if (!budget.enabled || budget.maxLines <= 0 || budget.maxChars <= 0) return "";
+	if (block.split("\n").length <= budget.maxLines && block.length <= budget.maxChars) return block;
+	// Micro-context profiles deliberately omit a block that cannot fit whole. Larger constrained
+	// profiles retain a bounded head and say explicitly that more memory exists on disk.
+	if (budget.compact) return "";
+
+	const marker = "[…memory truncated for capability budget; full files remain on disk]";
+	if (budget.maxLines < 2 || budget.maxChars <= marker.length + 1) return "";
+	const lines: string[] = [];
+	let chars = 0;
+	const contentCharLimit = budget.maxChars - marker.length - 1;
+	for (const line of block.split("\n")) {
+		if (lines.length >= budget.maxLines - 1) break;
+		const separatorChars = lines.length > 0 ? 1 : 0;
+		const remaining = contentCharLimit - chars - separatorChars;
+		if (remaining <= 0) break;
+		const rendered = line.length <= remaining ? line : `${line.slice(0, Math.max(0, remaining - 1))}…`;
+		lines.push(rendered);
+		chars += separatorChars + rendered.length;
+		if (rendered.length !== line.length) break;
+	}
+	if (lines.length === 0) return "";
+	lines.push(marker);
+	return lines.join("\n");
+}
+
 export class FileStoreProvider implements MemoryProvider {
 	public readonly name = "file-store";
 	public readonly egress = "local";
@@ -153,10 +181,7 @@ export class FileStoreProvider implements MemoryProvider {
 		}
 
 		const block = `=== Persistent Memory (file-store) ===\n${FILE_STORE_MEMORY_SYSTEM_NOTE}\n\n${blocks.join("\n\n")}`;
-		if (budget?.compact && (block.split("\n").length > budget.maxLines || block.length > budget.maxChars)) {
-			return "";
-		}
-		return block;
+		return fitMemoryBlockToBudget(block, budget);
 	}
 
 	public async prefetch(_query: string): Promise<string> {

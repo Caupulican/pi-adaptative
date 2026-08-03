@@ -1,5 +1,5 @@
 /**
- * Core lifecycle logic for pi-managed prism llama.cpp models (Bonsai-27B first), shared between the
+ * Core lifecycle logic for Pi-managed Prism llama.cpp models, shared between the
  * `/models add` install pipeline (modes/interactive/local-model-commands.ts) and the router's
  * readiness gate (local-runtime-controller.ts). ONE place owns "ensure both GGUF files exist, then
  * serve" so a turn routed to a cold Bonsai-27B and a fresh `/models add` both go through the
@@ -10,23 +10,23 @@
  * mirrors the existing local-runtime.ts (mechanics) / local-runtime-controller.ts (gate) split.
  */
 
-import { BONSAI_27B, type PrismLlamaCppRuntime, type PrismModelDescriptor } from "./llamacpp-runtime.ts";
+import type { PrismLlamaCppRuntime, PrismModelDescriptor } from "./llamacpp-runtime.ts";
+import { PRISM_LLAMACPP_DESCRIPTORS } from "./local-execution-planner.ts";
 import { PRISM_LLAMACPP_PROVIDER } from "./local-registration.ts";
 
+export { PRISM_LLAMACPP_DESCRIPTORS } from "./local-execution-planner.ts";
+export { probePrismLlamaCppServer } from "./prism-llamacpp-server-probe.ts";
+
 /**
- * Curated prism llama.cpp descriptors, keyed by repo id — matches the modelId model-ref.ts's
- * curated `PRISM_LLAMACPP_MODEL_IDS` route returns, and the id `registerPrismLlamaCppModel` writes
- * as the model's id in models.json. Add future curated prism-ml models to both places together.
+ * Curated Prism llama.cpp descriptors, keyed by repo id — the same catalog owns model-ref routing
+ * and the id `registerPrismLlamaCppModel` writes to models.json. Future curated Prism models enter
+ * through that one catalog rather than parallel identifier lists.
  *
  * Also the pi-managed-vs-user-owned discriminator (see {@link isPiManagedPrismLlamaCppModel}): a
  * `llama-cpp` provider model is gated/self-healed by pi ONLY when its id is a key here — a user's
  * own hand-configured entry (e.g. the built-in `llama-cpp/local` catalog model on port 8080,
  * pointing at a server the user runs themselves) is never touched.
  */
-export const PRISM_LLAMACPP_DESCRIPTORS: Record<string, PrismModelDescriptor> = {
-	[BONSAI_27B.repo]: BONSAI_27B,
-};
-
 /**
  * True only for a `llama-cpp` provider model pi itself registered (id present in
  * {@link PRISM_LLAMACPP_DESCRIPTORS}) — never true for a user's own hand-configured llama-cpp
@@ -73,14 +73,13 @@ export type EnsurePrismModelServedResult =
  * The SOLE path allowed to call `runtime.serve()` for a prism llama.cpp model — no caller may spawn
  * llama-server without first passing through here (both `addPrismLlamaCppModel`'s install pipeline
  * and the readiness gate's self-heal path call this, never `runtime.serve()` directly).
- * Unconditionally re-verifies BOTH GGUF files via `runtime.downloadModel()` immediately before every
+ * Unconditionally re-verifies every required GGUF file via `runtime.downloadModel()` immediately before every
  * serve — that call is idempotent (skips a re-download when the local file already matches the
  * remote size, so the happy path costs one stat) and self-heals a file that went missing from disk
  * (deleted, a partial download from a prior crash, host cleanup, etc.) by re-fetching it instead of
  * ever starting llama-server without it. The vision projector is mandatory whenever the descriptor
- * declares one (Bonsai-27B always does — see BONSAI_27B.mmprojFile): a download failure on EITHER
- * file means llama-server is never spawned. There is no text-only fallback — Bonsai-27B never
- * silently degrades to a vision-less serve because the projector went missing.
+ * declares one (the 27B descriptors do): a download failure on any required file means
+ * llama-server is never spawned. There is no text-only fallback for a vision descriptor.
  */
 export async function ensurePrismModelFilesThenServe(
 	runtime: PrismLlamaCppRuntime,
@@ -110,34 +109,11 @@ export async function ensurePrismModelFilesThenServe(
 	onProgress(`Starting ${descriptor.displayName} on 127.0.0.1:${args.port} (context ${args.numCtx})…`);
 	const served = await runtime.serve({
 		modelPath: downloadedModel.path,
+		modelAlias: descriptor.repo,
 		mmprojPath,
 		port: args.port,
 		numCtx: args.numCtx,
 	});
 	if (!served.ok) return { ok: false, stage: "serve", error: served.error };
 	return { ok: true, baseUrl: served.baseUrl };
-}
-
-const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 2_000;
-
-/**
- * Direct HTTP reachability probe against a prism llama.cpp server root (NOT the `/v1` OpenAI-compat
- * suffix models.json registers — same root/health split as llama-server's own health endpoint used
- * internally by PrismLlamaCppRuntime#serve). PrismLlamaCppRuntime has no public method for this (its
- * own equivalent, `_healthUp`, is private and scoped to a `serve()` call in progress), so the
- * readiness gate needs its own — this is deliberately independent of any single runtime instance:
- * it answers "is a server already alive at this URL", true even for a server this session never
- * spawned (started earlier, or by a different process).
- */
-export async function isPrismLlamaCppServerHealthy(
-	serverUrl: string,
-	fetchFn: typeof fetch = fetch,
-	timeoutMs: number = DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
-): Promise<boolean> {
-	try {
-		const response = await fetchFn(`${serverUrl}/health`, { signal: AbortSignal.timeout(timeoutMs) });
-		return response.ok;
-	} catch {
-		return false;
-	}
 }

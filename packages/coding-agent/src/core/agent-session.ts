@@ -514,7 +514,7 @@ export class AgentSession {
 			getToolPromptGuidelines: (name) => this._runtimeBuilder.getToolPromptGuidelines(name),
 			getModelAdaptationRules: () => this._toolProtocol.getAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
-			getContextWindow: () => this.model?.contextWindow,
+			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			getThinkingLevel: () => this.thinkingLevel,
 			// The evidence-gated tool-selection hint block — self-gated by kill switch/evidence
 			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
@@ -2362,6 +2362,7 @@ export class AgentSession {
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		try {
+			this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 			const maxGoalLoopRounds = this.settingsManager.getAutonomySettings().maxStallTurns;
 			this.agent.maxStallTurns = maxGoalLoopRounds;
 			await this._toolProtocol.ensureActiveModelProtocol();

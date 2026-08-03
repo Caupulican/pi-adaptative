@@ -401,8 +401,85 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 		expect(result.started).toBe(true);
 		expect(serveEnv?.OLLAMA_MODELS).toContain(".scratch-runtime-test/models/ollama");
 		expect(serveEnv?.OLLAMA_FLASH_ATTENTION).toBe("1");
+		expect(serveEnv?.OLLAMA_KV_CACHE_TYPE).toBe("q8_0");
 		expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
+		expect(serveEnv?.OLLAMA_MAX_LOADED_MODELS).toBe("1");
+		expect(serveEnv?.OLLAMA_MAX_QUEUE).toBe("4");
+		expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("10m");
+		expect(serveEnv?.LLAMA_ARG_CACHE_RAM).toBe("512");
+		expect(serveEnv?.LLAMA_ARG_THREADS).toBe("4");
+		expect(serveEnv?.LLAMA_ARG_THREADS_BATCH).toBe("4");
 		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("starts a low-impact validation server with a smaller cache and two threads", async () => {
+		let serveEnv: NodeJS.ProcessEnv | undefined;
+		let up = false;
+		const runtime = new OllamaRuntime({
+			agentDir: `${process.cwd()}/.scratch-runtime-test-low-impact`,
+			profileMode: "low-impact",
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				totalMemoryBytes: () => 10 * 1024 ** 3,
+				logicalCpuCount: () => 16,
+				sleepFn: async () => {},
+				fetchFn: async () => new Response("{}", { status: up ? 200 : 500 }),
+				spawnFn: (_command, _argv, options) => {
+					serveEnv = options.env;
+					up = true;
+					return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+				},
+			},
+		});
+
+		expect(await runtime.start()).toMatchObject({ started: true });
+		expect(serveEnv).toMatchObject({
+			OLLAMA_MAX_LOADED_MODELS: "1",
+			OLLAMA_NUM_PARALLEL: "1",
+			OLLAMA_MAX_QUEUE: "1",
+			OLLAMA_KEEP_ALIVE: "2m",
+			LLAMA_ARG_CACHE_RAM: "256",
+			LLAMA_ARG_THREADS: "2",
+			LLAMA_ARG_THREADS_BATCH: "2",
+		});
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("starts an isolated acceptance server against one explicit model store without changing the profile", async () => {
+		let serveEnv: NodeJS.ProcessEnv | undefined;
+		let up = false;
+		const storeDir = mkdtempSync(join(tmpdir(), "pi-acceptance-model-store-"));
+		const runtime = new OllamaRuntime({
+			agentDir: "/agent",
+			profileMode: "low-impact",
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				totalMemoryBytes: () => 10 * 1024 ** 3,
+				logicalCpuCount: () => 16,
+				sleepFn: async () => {},
+				fetchFn: async () => new Response("{}", { status: up ? 200 : 500 }),
+				spawnFn: (_command, _argv, options) => {
+					serveEnv = options.env;
+					up = true;
+					return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+				},
+			},
+		});
+
+		expect(await runtime.startWithModelsStore(storeDir)).toMatchObject({ started: true });
+		expect(serveEnv).toMatchObject({
+			OLLAMA_MODELS: storeDir,
+			OLLAMA_MAX_LOADED_MODELS: "1",
+			OLLAMA_MAX_QUEUE: "1",
+			OLLAMA_KEEP_ALIVE: "2m",
+			LLAMA_ARG_CACHE_RAM: "256",
+		});
+		expect(runtime.stop()).toEqual({ stopped: true });
+		rmSync(storeDir, { recursive: true, force: true });
 	});
 
 	it("startReuseExisting refuses when a server already responds (never double-serves)", async () => {
@@ -626,7 +703,7 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 		expect(await runtime.listResidentModels()).toEqual([{ name: "qwen3:1.7b", sizeBytes: 123 }]);
 		expect(await runtime.ensureResident("qwen3:1.7b")).toEqual({ ok: true });
 		expect(await runtime.releaseResident("qwen3:1.7b")).toEqual({ ok: true });
-		expect(requests.at(-2)?.body).toMatchObject({ model: "qwen3:1.7b", keep_alive: "30m" });
+		expect(requests.at(-2)?.body).toMatchObject({ model: "qwen3:1.7b", keep_alive: "10m" });
 		expect(requests.at(-1)?.body).toMatchObject({ model: "qwen3:1.7b", keep_alive: 0 });
 	});
 

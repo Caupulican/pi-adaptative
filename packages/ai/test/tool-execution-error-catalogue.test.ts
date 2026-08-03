@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	getToolExecutionErrorGuidance,
 	getToolExecutionErrorPolicy,
+	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
 	TOOL_EXECUTION_ERROR_CATALOGUE,
 } from "../src/utils/tool-repair/registry.ts";
 
@@ -10,6 +11,8 @@ describe("tool execution error catalogue", () => {
 		const fixtures: Record<(typeof TOOL_EXECUTION_ERROR_CATALOGUE)[number]["name"], string> = {
 			commandNotFound: "spawn rg ENOENT",
 			encodingCorruption: "PI_FILE_ENCODING_CORRUPTION: legacy.dat is not valid UTF-8 text",
+			repeatedSuccessfulCall: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic,
+			fileMutationIntentInvalid: "File mutation intent is invalid, expired, or belongs to another session",
 			fileNotFound: "ENOENT: no such file or directory, open 'missing.txt'",
 			editOldTextNotFound: "oldText failed to match the current file contents",
 			pathOutsideCwd: "Path is outside the current working directory",
@@ -68,6 +71,17 @@ describe("tool execution error catalogue", () => {
 			retainDiagnostic: false,
 			guidance:
 				"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
+		});
+	});
+
+	it("discards repeat-guard attempt memory while teaching the next action", () => {
+		expect(getToolExecutionErrorPolicy(REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic)).toEqual({
+			name: "repeatedSuccessfulCall",
+			phase: "execution",
+			failureCode: "repeated_successful_call",
+			attemptMemory: "discard",
+			retainDiagnostic: true,
+			guidance: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
 		});
 	});
 

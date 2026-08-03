@@ -1,4 +1,5 @@
 import type { FitnessRole } from "../../modes/interactive/components/fitness-role-selector.ts";
+import { ORNITH_9B_OLLAMA_REF } from "./managed-ollama-model.ts";
 
 /**
  * Curated local-model suggestions: a starting roster validated during pi-adaptative's own
@@ -72,13 +73,23 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 	},
 	{
 		name: "Ornith-1.0-9B",
-		pullRef: "hf.co/deepreinforce-ai/Ornith-1.0-9B-GGUF:Q4_K_M",
+		pullRef: ORNITH_9B_OLLAMA_REF,
 		role: "Agentic-coding worker / router cheap tier",
 		toolCalling: true,
 		assignRole: "router-cheap",
 		rationale:
 			"External candidate (not from pi's own validation research): MIT, Qwen 3.5 base, RL-trained for agentic coding with native tool-calling — the strongest local worker SHAPE in the roster. /fitness on your hardware is the validator.",
-		note: "Q4_K_M ≈ 5.6 GB weights, ~7-8 GB peak with KV — on a 10 GB box run it as the ONLY local model. Qwen 3.5 arch: confirm pi's pinned Ollama supports it and probe tool-calls with /fitness before assigning (template derives from the GGUF). Larger boxes: consider router-medium after a passed worker lane.",
+		note: "Q4_K_M ≈ 5.6 GB weights, ~7-8 GB peak with KV — on a 10 GB box run it as the ONLY local model. Pi creates a managed Qwen 3.5 renderer/parser profile with the model's recommended sampling before probing. Larger boxes: consider router-medium after a passed worker lane.",
+	},
+	{
+		name: "LFM2.5-8B-A1B",
+		pullRef: "lfm2.5:8b-a1b-q4_K_M",
+		role: "Native-tool MoE worker / router cheap tier",
+		toolCalling: true,
+		assignRole: "router-cheap",
+		rationale:
+			"Liquid AI's sparse MoE candidate is designed for agentic workflows. Pi probes native tool-calling first and only calibrates the phone protocol after native failure; /fitness must pass the task-scale tool lane on this host before assignment.",
+		note: "Q4_K_M ≈ 5.2 GB, 8.3B total / 1.5B active parameters, with a 128K-class model context. On a 10 GB host run it as the only large local resident; Pi still applies its bounded host profile and context budget.",
 	},
 	{
 		name: "Bonsai-4B (GGUF Q1_0)",
@@ -88,7 +99,7 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		assignRole: "curator",
 		rationale:
 			"Lighter Bonsai lane model for context curation and structured local analysis; the exact Q1_0 artifact keeps /models suggest one-step.",
-		note: "Recommended when Bonsai-8B is too heavy. Pi pulls this exact GGUF through managed Ollama, probes /fitness on the host, then offers the curator role.",
+		note: "Recommended when Bonsai-8B is too heavy. Pi serves the exact Q1_0 GGUF through its bounded Prism llama.cpp adapter, probes /fitness on the host, then offers the curator role.",
 	},
 	{
 		name: "Bonsai-27B (1-bit + vision)",
@@ -97,37 +108,37 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		toolCalling: false,
 		assignRole: "curator",
 		rationale:
-			"External 1-bit 27B, binary weights, 262K-class context, vision via mmproj; served by pi through prism-ml's llama.cpp build (stock llama.cpp/Ollama cannot serve these weights). /fitness on your hardware is the validator — never pre-claim tool-calling.",
+			"External 1-bit 27B, binary weights, 262K-class context, vision via mmproj; served through Pi's pinned Prism llama.cpp adapter so runtime, artifact, and projector stay one validated unit. /fitness on your hardware is the validator — never pre-claim tool-calling.",
 		note: "~3.8 GB weights + 629 MB vision projector + a one-time llama-server runtime download; CPU-served on GPU-less hosts. Pi installs the pinned prism llama.cpp runtime, downloads both files, starts llama-server, and registers the model in one step. Provider-recommended sampling is temp 0.7 / top-p 0.95 / top-k 20; models.json has no per-model default-sampling field yet, so pi cannot wire this — set it per-request/session if your workflow needs it.",
 	},
 	{
 		name: "Ternary-Bonsai-1.7B",
-		pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf",
+		pullRef: "hf.co/prism-ml/Ternary-Bonsai-1.7B-gguf:Q2_0",
 		role: "Search scout (heavy-lifter)",
 		toolCalling: false,
 		rationale:
 			"Ternary weights, very fast; strong at structured search plans. No tool-calling template — use it as a research/worker lane model, never an executor.",
-		note: "Pick a GGUF quant the runtime accepts (e.g. :Q8_0). The ternary Q2_0 build needs prism-ml's patched llama.cpp.",
+		note: "Pi pins the provider's group-128 Q2_0 artifact and its matched Prism llama.cpp runtime; no ambiguous quant selection is left to Ollama.",
 	},
 	{
 		name: "Ternary-Bonsai-4B",
-		pullRef: "hf.co/prism-ml/Ternary-Bonsai-4B-gguf",
+		pullRef: "hf.co/prism-ml/Ternary-Bonsai-4B-gguf:Q2_0",
 		role: "Context curator / reflex brain / lane analyst",
 		toolCalling: false,
 		assignRole: "curator",
 		rationale:
 			"Validated as the 'brain': strict-JSON interpretation and faithful digests. Drives context curation and the toolkit reflex interpreter. Not a tool-caller.",
-		note: "Pick a GGUF quant the runtime accepts (e.g. :Q8_0).",
+		note: "Pi pins the provider's group-128 Q2_0 artifact and its matched Prism llama.cpp runtime.",
 	},
 	{
 		name: "Ternary-Bonsai-8B",
-		pullRef: "hf.co/prism-ml/Ternary-Bonsai-8B-gguf",
+		pullRef: "hf.co/prism-ml/Ternary-Bonsai-8B-gguf:Q2_0",
 		role: "Routing judge (larger machines)",
 		toolCalling: false,
 		assignRole: "judge",
 		rationale:
 			"A judge candidate for machines with more headroom — too slow on ~16GB-class hardware in this research, kept for a bigger box.",
-		note: "Heavy: confirm tok/s with /fitness before committing. Ternary quant may need prism-ml's patched llama.cpp.",
+		note: "Heavy: confirm tok/s with /fitness before assigning it. Pi pins the Q2_0 artifact and matched Prism llama.cpp runtime.",
 	},
 	{
 		name: "needle (function-call tester, 26M)",

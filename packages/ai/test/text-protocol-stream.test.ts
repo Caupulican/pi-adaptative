@@ -172,6 +172,54 @@ describe("text tool-call protocol streaming (live-leak guard)", () => {
 		expect(finalMessage?.content?.filter((block) => block.type === "toolCall")).toHaveLength(2);
 	});
 
+	it("cancels runaway prose after a complete envelope without losing the parsed call", async () => {
+		const registration = registerFauxProvider({ tokenSize: { min: 1, max: 1 } });
+		registrations.push(registration);
+		const tools = [makeTool("echo")];
+		let providerSignal: AbortSignal | undefined;
+		registration.setResponses([
+			(_context, options) => {
+				providerSignal = options?.signal;
+				return fauxAssistantMessage(`<pi:call name="echo">{"value":"hi"}</pi:call>${"runaway ".repeat(200)}`);
+			},
+		]);
+
+		const { finalMessage } = await drainAndAssertNoLiveLeak(
+			stream(registration.getModel(), { systemPrompt: "base", messages: [], tools }, { textToolCallProtocol: true }),
+		);
+
+		expect(providerSignal?.aborted).toBe(true);
+		expect(finalMessage?.stopReason).toBe("toolUse");
+		expect(finalMessage?.content.filter((block) => block.type === "toolCall")).toMatchObject([
+			{ name: "echo", arguments: { value: "hi" }, source: "text-protocol" },
+		]);
+	});
+
+	it("allows a large following envelope to finish before stopping generation", async () => {
+		const registration = registerFauxProvider({ tokenSize: { min: 1, max: 2 } });
+		registrations.push(registration);
+		const tools = [makeTool("first"), makeTool("write")];
+		const largeValue = "x".repeat(2048);
+		let providerSignal: AbortSignal | undefined;
+		registration.setResponses([
+			(_context, options) => {
+				providerSignal = options?.signal;
+				return fauxAssistantMessage(
+					`<pi:call name="first">{"value":"ready"}</pi:call>\n<pi:call name="write">${JSON.stringify({ value: largeValue })}</pi:call>`,
+				);
+			},
+		]);
+
+		const { finalMessage } = await drainAndAssertNoLiveLeak(
+			stream(registration.getModel(), { systemPrompt: "base", messages: [], tools }, { textToolCallProtocol: true }),
+		);
+		const calls = finalMessage?.content.filter((block) => block.type === "toolCall") ?? [];
+
+		expect(providerSignal?.aborted).toBe(false);
+		expect(calls).toHaveLength(2);
+		expect(calls[1]).toMatchObject({ name: "write", arguments: { value: largeValue } });
+	});
+
 	it("releases a false-positive opener prefix once more text proves it does not match", async () => {
 		const registration = registerFauxProvider({ tokenSize: { min: 1, max: 1 } });
 		registrations.push(registration);

@@ -21,7 +21,7 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { isValidUTF8 } from "./file-encoding-policy.ts";
-import { FileMutationIntentController } from "./file-mutation-intent.ts";
+import { FileMutationIntentController, hasFileMutationIntentIdShape } from "./file-mutation-intent.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { renderToolPath, str } from "./render-utils.ts";
@@ -61,7 +61,7 @@ const editSchema = Type.Union([
 	),
 	Type.Object(
 		{
-			action: Type.Literal("commit"),
+			action: Type.Literal("edit"),
 			path: editPathSchema,
 			intentId: Type.String({ minLength: 1 }),
 			edits: Type.Array(replaceEditSchema, {
@@ -83,7 +83,7 @@ type LegacyEditToolInput = {
 };
 
 export interface EditToolDetails {
-	phase: "prepared" | "committed";
+	phase: "prepared" | "edited";
 	intentId?: string;
 	contentRef?: string;
 	/** Display-oriented diff of the changes made */
@@ -120,31 +120,37 @@ export interface EditToolOptions {
 }
 
 function prepareEditArguments(input: unknown): EditToolInput {
-	if (!input || typeof input !== "object") {
+	if (!input || typeof input !== "object" || Array.isArray(input)) {
 		return input as EditToolInput;
 	}
 
-	const args = input as Record<string, unknown>;
+	let args = input as Record<string, unknown>;
 
 	const legacy = args as LegacyEditToolInput;
-	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
-		return args as EditToolInput;
+	if (typeof legacy.oldText === "string" && typeof legacy.newText === "string") {
+		const edits = Array.isArray(legacy.edits) ? [...legacy.edits] : [];
+		edits.push({ oldText: legacy.oldText, newText: legacy.newText });
+		const { oldText: _oldText, newText: _newText, ...rest } = legacy;
+		args = { ...rest, edits };
 	}
 
-	const edits = Array.isArray(legacy.edits) ? [...legacy.edits] : [];
-	edits.push({ oldText: legacy.oldText, newText: legacy.newText });
-	const { oldText: _oldText, newText: _newText, ...rest } = legacy;
-	return { ...rest, edits } as EditToolInput;
+	if (
+		typeof args.path === "string" &&
+		(args.action === undefined || (args.action === "edit" && !hasFileMutationIntentIdShape(args.intentId)))
+	) {
+		return { action: "prepare", path: args.path };
+	}
+	return args as EditToolInput;
 }
 
 function validateEditInput(
 	input: EditToolInput,
-): { action: "prepare"; path: string } | { action: "commit"; path: string; intentId: string; edits: Edit[] } {
+): { action: "prepare"; path: string } | { action: "edit"; path: string; intentId: string; edits: Edit[] } {
 	if (input.action === "prepare") return input;
 	if (!Array.isArray(input.edits) || input.edits.length === 0) {
 		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
 	}
-	return { action: "commit", path: input.path, intentId: input.intentId, edits: input.edits };
+	return { action: "edit", path: input.path, intentId: input.intentId, edits: input.edits };
 }
 
 type RenderableEditArgs = {
@@ -198,7 +204,7 @@ function getRenderablePreviewInput(
 	if (!args) {
 		return null;
 	}
-	if (args.action !== "commit") return null;
+	if (args.action !== "edit") return null;
 
 	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
 	if (!path) {
@@ -257,7 +263,7 @@ function editsMatch(left: Edit[], right: Edit[]): boolean {
 
 function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
 	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
-	const action = args?.action === "prepare" ? "prepare" : args?.action === "commit" ? "commit" : undefined;
+	const action = args?.action === "prepare" ? "prepare" : undefined;
 	return `${theme.fg("toolTitle", theme.bold("edit"))}${action ? ` ${theme.fg("muted", action)}` : ""} ${pathDisplay}`;
 }
 
@@ -357,10 +363,10 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit existing UTF-8 text: prepare(path), then commit(path,intentId,edits). oldText must be exact, unique, and non-overlapping; optional inclusive line ranges bind matches to prior reads; stale targets are rejected.",
-		promptSnippet: "Preflight existing files; commit exact, stale-safe edits",
+			'Edit existing UTF-8 text: first call edit with action "prepare" and path, then call edit with action "edit", the accepted intentId, and edits. oldText must be exact, unique, and non-overlapping; optional inclusive line ranges bind matches to prior reads; stale targets are rejected.',
+		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
 		promptGuidelines: [
-			"Before replacements, prepare(path); then commit once with intentId and all edits.",
+			'Before replacements, call edit with action "prepare" and path; then call edit with action "edit", the returned intentId, and all edits.',
 			"oldText is exact, unique, minimal, and original-file based; pass the inclusive line range from the supplying read when known, batch separate edits, and merge overlaps.",
 		],
 		parameters: editSchema,
@@ -387,7 +393,7 @@ export function createEditToolDefinition(
 						content: [
 							{
 								type: "text" as const,
-								text: `Edit target accepted. Commit ${path} with intentId ${prepared.intentId}.`,
+								text: `Edit target accepted. Call edit again with action "edit", path ${path}, and intentId ${prepared.intentId}. The call also needs the required edits array containing every exact oldText/newText replacement. Do not omit edits.`,
 							},
 						],
 						details: { phase: "prepared" as const, intentId: prepared.intentId },
@@ -437,11 +443,11 @@ export function createEditToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Successfully replaced ${edits.length} block(s) in ${path}. Reuse exact bytes with contentRef ${contentReference.contentRef}.`,
+							text: `Successfully replaced ${edits.length} block(s) in ${path}; this edit is complete, so do not call edit again for this path. To copy these exact bytes to a different new path, prepare that different path with write first, then use contentRef ${contentReference.contentRef}.`,
 						},
 					],
 					details: {
-						phase: "committed" as const,
+						phase: "edited" as const,
 						contentRef: contentReference.contentRef,
 						diff: diffResult.diff,
 						patch,

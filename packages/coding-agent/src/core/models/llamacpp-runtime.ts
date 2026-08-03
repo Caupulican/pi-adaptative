@@ -8,6 +8,12 @@ import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/ch
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
 import {
+	deriveHostLocalInferenceProfile,
+	type LocalInferenceProfile,
+	type LocalInferenceProfileMode,
+} from "./local-inference-profile.ts";
+import { probePrismLlamaCppServer } from "./prism-llamacpp-server-probe.ts";
+import {
 	extractZipArchive,
 	fetchRuntimeDownload,
 	installRuntimeArchive,
@@ -21,10 +27,10 @@ import {
 } from "./runtime-process.ts";
 
 /**
- * Managed runtime for prism-ml 1-bit GGUF models (Bonsai-27B first). The provider requires their
- * llama.cpp fork (Q1_0_g128 hybrid-attention kernels) — stock llama.cpp/Ollama cannot serve these
- * weights — so this module owns runtime install (prebuilt release download+extract), GGUF
- * downloads, and llama-server lifecycle. Mirrors local-runtime.ts's OllamaRuntime: injectable
+ * Managed runtime for Pi's curated Prism 1-bit and ternary GGUF models. Q1_0 is available in
+ * upstream llama.cpp, while the selected group-128 Q2_0 artifacts and paired DSpark acceleration
+ * still require Prism's validated build. This module therefore owns the pinned runtime install,
+ * GGUF downloads, and llama-server lifecycle. Mirrors local-runtime.ts's OllamaRuntime: injectable
  * seams for fetch/spawn/exists, pi-owned directories under agentDir (runtimes/, models/),
  * detached+tracked child processes, onProgress as best-effort UI feedback, honest error taxonomies
  * instead of silent fallbacks.
@@ -51,23 +57,51 @@ export interface PrismModelDescriptor {
 	file: string;
 	mmprojFile?: string;
 	displayName: string;
+	architecture: "dense";
+	runtime: "prism-llamacpp";
+	family: "bonsai" | "ternary-bonsai";
+	parameterScale: "1.7B" | "4B" | "8B" | "27B";
+	weightFormat: "q1_0" | "q2_0";
+	matchedDrafter?: {
+		kind: "dspark";
+		file: string;
+		draftMax: 4;
+		minimumContext: 16_384;
+		validatedBackend: "cuda";
+	};
 }
 
-/** Curated first-model descriptor; the `/models add` wiring task consumes this. */
+/** Curated 27B descriptor shared by the full local execution catalog. */
 export const BONSAI_27B: PrismModelDescriptor = {
 	repo: "prism-ml/Bonsai-27B-gguf",
 	file: "Bonsai-27B-Q1_0.gguf",
 	mmprojFile: "Bonsai-27B-mmproj-Q8_0.gguf",
 	displayName: "Bonsai-27B (1-bit Q1_0 + vision)",
+	architecture: "dense",
+	runtime: "prism-llamacpp",
+	family: "bonsai",
+	parameterScale: "27B",
+	weightFormat: "q1_0",
+	matchedDrafter: {
+		kind: "dspark",
+		file: "Bonsai-27B-dspark-Q4_1.gguf",
+		draftMax: 4,
+		minimumContext: 16_384,
+		validatedBackend: "cuda",
+	},
 };
 
 export type PrismBackend = "cpu" | "cuda";
 export type PrismAssetKind = "tar-gz" | "zip";
 
-export interface PrismLlamaAsset {
+export interface PrismArchiveAsset {
 	name: string;
 	kind: PrismAssetKind;
+}
+
+export interface PrismLlamaAsset extends PrismArchiveAsset {
 	backend: PrismBackend;
+	companionAssets?: readonly PrismArchiveAsset[];
 }
 
 // Verbatim asset names from the pinned release (see PRISM_LLAMACPP_PINNED_RELEASE doc comment) —
@@ -81,14 +115,16 @@ const MACOS_ARM64_ASSET = "llama-prism-b9594-38c66ad-bin-macos-arm64.tar.gz";
 const MACOS_X64_ASSET = "llama-prism-b9594-38c66ad-bin-macos-x64.tar.gz";
 const WIN_X64_CPU_ASSET = "llama-bin-win-cpu-x64.zip";
 const WIN_ARM64_CPU_ASSET = "llama-bin-win-cpu-arm64.zip";
+const WIN_X64_CUDA_ASSET = "llama-prism-b1-38c66ad-bin-win-cuda-12.4-x64.zip";
+const WIN_X64_CUDA_COMPANION_ASSET = "cudart-llama-bin-win-cuda-12.4-x64.zip";
 
 /**
  * Maps a platform/arch/GPU triple to the exact Prism llama.cpp release asset for
  * {@link PRISM_LLAMACPP_PINNED_RELEASE} — verified against the real GitHub release, not guessed.
- * CPU asset by default; the CUDA 12.4 variant is only offered for linux x64 with an NVIDIA GPU
- * present (a 12.8 variant also exists upstream but has no wired caller yet). Windows CUDA needs a
- * companion `cudart-*` archive and is out of scope for v1 — Windows always resolves to the CPU zip
- * regardless of `hasNvidiaGpu`. Pure and exported so it's independently testable.
+ * CPU asset by default; CUDA 12.4 is selected for x64 Linux or Windows with an NVIDIA GPU. The
+ * pinned Windows build is incomplete without its matching `cudart-*` archive, so the resolver
+ * returns both as one mandatory installation plan. Pure and exported so it's independently
+ * testable.
  */
 export function resolvePrismLlamaAsset(
 	plat: string,
@@ -110,7 +146,16 @@ export function resolvePrismLlamaAsset(
 		return undefined;
 	}
 	if (plat === "win32") {
-		if (architecture === "x64") return { name: WIN_X64_CPU_ASSET, kind: "zip", backend: "cpu" };
+		if (architecture === "x64") {
+			return hasNvidiaGpu
+				? {
+						name: WIN_X64_CUDA_ASSET,
+						kind: "zip",
+						backend: "cuda",
+						companionAssets: [{ name: WIN_X64_CUDA_COMPANION_ASSET, kind: "zip" }],
+					}
+				: { name: WIN_X64_CPU_ASSET, kind: "zip", backend: "cpu" };
+		}
 		if (architecture === "arm64") return { name: WIN_ARM64_CPU_ASSET, kind: "zip", backend: "cpu" };
 		return undefined;
 	}
@@ -156,6 +201,9 @@ export interface PrismLlamaCppDeps {
 	hasNvidiaGpu?: () => boolean;
 	platform?: () => string;
 	arch?: () => string;
+	/** Host capacity probes used once to derive the bounded local inference profile. */
+	totalMemoryBytes?: () => number;
+	logicalCpuCount?: () => number;
 	/** Runs the extraction step for a downloaded archive. Injectable so installManaged's
 	 * download->extract->scan orchestration is testable without a real tar/unzip pipeline; defaults
 	 * to the real spawn-based extractor. */
@@ -178,6 +226,10 @@ function parseContentLength(header: string | null): number | undefined {
 	return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function modelIdentityConflictError(servedModelIds: readonly string[]): string {
+	return `model-identity-conflict:${servedModelIds.join(",") || "unknown"}`;
+}
+
 export class PrismLlamaCppRuntime {
 	private readonly _agentDir: string;
 	private readonly _fetch: typeof fetch;
@@ -191,15 +243,21 @@ export class PrismLlamaCppRuntime {
 	private readonly _extractArchiveFn: PrismExtractArchiveFn;
 	private readonly _healthPollAttempts: number;
 	private readonly _healthPollIntervalMs: number;
+	private readonly _profile: LocalInferenceProfile;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 
-	constructor(args: { agentDir: string; deps?: PrismLlamaCppDeps }) {
+	constructor(args: {
+		agentDir: string;
+		profileMode?: LocalInferenceProfileMode;
+		deps?: PrismLlamaCppDeps;
+	}) {
 		this._agentDir = args.agentDir;
 		[this._fetch, this._spawn, this._exists, this._sleep] = resolveRuntimeLifecycleDependencies(args.deps);
 		this._hasCommand = args.deps?.hasCommand ?? runtimeCommandAvailable;
 		this._hasNvidiaGpu = args.deps?.hasNvidiaGpu ?? (() => this._hasCommand("nvidia-smi"));
 		this._platform = args.deps?.platform ?? osPlatform;
 		this._arch = args.deps?.arch ?? osArch;
+		this._profile = deriveHostLocalInferenceProfile(args.profileMode ?? "balanced", args.deps);
 		this._extractArchiveFn =
 			args.deps?.extractArchive ?? ((input, destDir, kind) => this._extractArchive(input, destDir, kind));
 		this._healthPollAttempts = args.deps?.healthPollAttempts ?? DEFAULT_HEALTH_POLL_ATTEMPTS;
@@ -293,9 +351,12 @@ export class PrismLlamaCppRuntime {
 		const asset = resolvePrismLlamaAsset(this._platform(), this._arch(), this._hasNvidiaGpu());
 		if (!asset) return { ok: false, error: "unsupported-platform" };
 
-		const downloadUrl = `${PRISM_LLAMACPP_RELEASES_BASE_URL}/${PRISM_LLAMACPP_PINNED_RELEASE}/${asset.name}`;
-		const extracted = await this._installArchive(downloadUrl, asset, onProgress);
-		if (!extracted.ok) return extracted;
+		const archives: readonly PrismArchiveAsset[] = [asset, ...(asset.companionAssets ?? [])];
+		for (const archive of archives) {
+			const downloadUrl = `${PRISM_LLAMACPP_RELEASES_BASE_URL}/${PRISM_LLAMACPP_PINNED_RELEASE}/${archive.name}`;
+			const extracted = await this._installArchive(downloadUrl, archive, onProgress);
+			if (!extracted.ok) return extracted;
+		}
 
 		onProgress?.("Locating llama-server binary…");
 		const destDir = this.runtimeDir();
@@ -311,7 +372,7 @@ export class PrismLlamaCppRuntime {
 
 	private _installArchive(
 		downloadUrl: string,
-		asset: PrismLlamaAsset,
+		asset: PrismArchiveAsset,
 		onProgress?: (status: string) => void,
 	): Promise<{ ok: boolean; error?: string }> {
 		return installRuntimeArchive(
@@ -431,17 +492,6 @@ export class PrismLlamaCppRuntime {
 		return { ok: true, path: destPath };
 	}
 
-	private async _healthUp(baseUrl: string): Promise<boolean> {
-		try {
-			const response = await this._fetch(`${baseUrl}/health`, {
-				signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
-			});
-			return response.ok;
-		} catch {
-			return false;
-		}
-	}
-
 	/**
 	 * Spawn `llama-server` detached+tracked (killed on parent shutdown even if pi crashes without
 	 * calling stop()) and poll `/health` until ready. `-ngl 99` is only added when the installed
@@ -449,6 +499,7 @@ export class PrismLlamaCppRuntime {
 	 */
 	async serve(args: {
 		modelPath: string;
+		modelAlias: string;
 		mmprojPath?: string;
 		port: number;
 		numCtx: number;
@@ -459,9 +510,17 @@ export class PrismLlamaCppRuntime {
 		if (!this._exists(binaryPath)) return { ok: false, error: "binary-missing" };
 
 		const baseUrl = `http://127.0.0.1:${args.port}`;
+		const existing = await probePrismLlamaCppServer(baseUrl, args.modelAlias, this._fetch, HEALTH_CHECK_TIMEOUT_MS);
+		if (existing.status === "matching") return { ok: true, baseUrl };
+		if (existing.status === "conflict" && !this._child) {
+			return { ok: false, error: modelIdentityConflictError(existing.servedModelIds) };
+		}
+		if (this._child) this.stop();
 		const argv = [
 			"-m",
 			args.modelPath,
+			"--alias",
+			args.modelAlias,
 			...(args.mmprojPath ? ["--mmproj", args.mmprojPath] : []),
 			"--host",
 			"127.0.0.1",
@@ -469,6 +528,20 @@ export class PrismLlamaCppRuntime {
 			String(args.port),
 			"-c",
 			String(args.numCtx),
+			"--cache-ram",
+			String(this._profile.promptCacheMiB),
+			"-np",
+			String(this._profile.parallelRequests),
+			"-fa",
+			this._profile.flashAttention ? "on" : "off",
+			"-ctk",
+			this._profile.kvCacheType,
+			"-ctv",
+			this._profile.kvCacheType,
+			"-t",
+			String(this._profile.generationThreads),
+			"-tb",
+			String(this._profile.batchThreads),
 			...(manifest.backend === "cuda" ? ["-ngl", "99"] : []),
 		];
 
@@ -480,12 +553,19 @@ export class PrismLlamaCppRuntime {
 		if (child.pid) trackDetachedChildPid(child.pid);
 		child.unref?.();
 		child.on("exit", () => {
-			this._child = undefined;
+			if (this._child === child) {
+				this._child = undefined;
+			}
 		});
 		this._child = child;
 
 		for (let attempt = 0; attempt < this._healthPollAttempts; attempt++) {
-			if (await this._healthUp(baseUrl)) return { ok: true, baseUrl };
+			const probe = await probePrismLlamaCppServer(baseUrl, args.modelAlias, this._fetch, HEALTH_CHECK_TIMEOUT_MS);
+			if (probe.status === "matching") return { ok: true, baseUrl };
+			if (probe.status === "conflict") {
+				this.stop();
+				return { ok: false, error: modelIdentityConflictError(probe.servedModelIds) };
+			}
 			await this._sleep(this._healthPollIntervalMs);
 		}
 		this.stop();

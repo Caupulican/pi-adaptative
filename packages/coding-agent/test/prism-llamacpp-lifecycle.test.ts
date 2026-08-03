@@ -10,8 +10,8 @@ import {
 	derivePrismLlamaCppNumCtx,
 	ensurePrismModelFilesThenServe,
 	isPiManagedPrismLlamaCppModel,
-	isPrismLlamaCppServerHealthy,
 	PRISM_LLAMACPP_DESCRIPTORS,
+	probePrismLlamaCppServer,
 } from "../src/core/models/prism-llamacpp-lifecycle.ts";
 
 /**
@@ -94,27 +94,49 @@ describe("isPiManagedPrismLlamaCppModel", () => {
 	});
 });
 
-describe("isPrismLlamaCppServerHealthy", () => {
-	it("is true on a 200 response from <serverUrl>/health", async () => {
+describe("probePrismLlamaCppServer", () => {
+	it("requires both health and the expected server alias", async () => {
 		const urls: string[] = [];
 		const fetchFn = (async (url: string) => {
 			urls.push(String(url));
-			return new Response("{}", { status: 200 });
+			return String(url).endsWith("/v1/models")
+				? Response.json({ data: [{ id: BONSAI_27B.repo }] })
+				: Response.json({});
 		}) as unknown as typeof fetch;
-		expect(await isPrismLlamaCppServerHealthy("http://127.0.0.1:8090", fetchFn)).toBe(true);
-		expect(urls).toEqual(["http://127.0.0.1:8090/health"]);
+		expect(await probePrismLlamaCppServer("http://127.0.0.1:8090", BONSAI_27B.repo, fetchFn)).toEqual({
+			status: "matching",
+			servedModelIds: [BONSAI_27B.repo],
+		});
+		expect(urls).toEqual(["http://127.0.0.1:8090/health", "http://127.0.0.1:8090/v1/models"]);
 	});
 
-	it("is false on a non-ok response", async () => {
+	it("reports a healthy server with a different model as a conflict", async () => {
+		const fetchFn = (async (url: string) =>
+			String(url).endsWith("/v1/models")
+				? Response.json({ data: [{ id: "prism-ml/Bonsai-4B-gguf" }] })
+				: Response.json({})) as unknown as typeof fetch;
+		expect(await probePrismLlamaCppServer("http://127.0.0.1:8090", BONSAI_27B.repo, fetchFn)).toEqual({
+			status: "conflict",
+			servedModelIds: ["prism-ml/Bonsai-4B-gguf"],
+		});
+	});
+
+	it("reports down on a non-ok health response", async () => {
 		const fetchFn = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
-		expect(await isPrismLlamaCppServerHealthy("http://127.0.0.1:8090", fetchFn)).toBe(false);
+		expect(await probePrismLlamaCppServer("http://127.0.0.1:8090", BONSAI_27B.repo, fetchFn)).toEqual({
+			status: "down",
+			servedModelIds: [],
+		});
 	});
 
-	it("is false when the request throws (connection refused, etc.)", async () => {
+	it("reports down when the request throws (connection refused, etc.)", async () => {
 		const fetchFn = (async () => {
 			throw new Error("ECONNREFUSED");
 		}) as unknown as typeof fetch;
-		expect(await isPrismLlamaCppServerHealthy("http://127.0.0.1:8090", fetchFn)).toBe(false);
+		expect(await probePrismLlamaCppServer("http://127.0.0.1:8090", BONSAI_27B.repo, fetchFn)).toEqual({
+			status: "down",
+			servedModelIds: [],
+		});
 	});
 });
 

@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, test } from "node:test";
 
 import { readJsonIfExists, startPiAcceptanceRpc } from "./lib/live-acceptance-rpc.mjs";
+import { assistantReportedToolMarker, failedToolResult, successfulToolResults } from "./lib/live-tool-results.mjs";
 
 const temporaryDirectories = [];
 
@@ -115,6 +116,174 @@ test("shared JSON reads distinguish a missing file from malformed persisted stat
 	await assert.rejects(readJsonIfExists(filePath), SyntaxError);
 });
 
+test("live workflow counts each logical tool execution once", () => {
+	const successfulResult = {
+		type: "tool_execution_end",
+		toolCallId: "text-tool-1",
+		toolName: "write",
+		isError: false,
+		result: { details: { phase: "prepared", intentId: "intent" } },
+	};
+	const duplicateMessage = {
+		type: "message_end",
+		message: {
+			role: "toolResult",
+			toolCallId: "text-tool-1",
+			toolName: "write",
+			isError: false,
+			content: [{ type: "text", text: "prepared" }],
+		},
+	};
+	const failedResult = {
+		type: "tool_execution_end",
+		toolCallId: "text-tool-2",
+		toolName: "write",
+		isError: true,
+		result: { content: [{ type: "text", text: "failed" }] },
+	};
+
+	assert.deepEqual(successfulToolResults([successfulResult, duplicateMessage], "write"), [successfulResult]);
+	assert.equal(failedToolResult([successfulResult, duplicateMessage], "write"), undefined);
+	assert.equal(failedToolResult([successfulResult, duplicateMessage, failedResult], "write"), failedResult);
+});
+
+test("live workflow accepts a guarded phone repeat only after the original success and later progress", () => {
+	const firstStart = {
+		type: "tool_execution_start",
+		toolCallId: "text-tool-1",
+		toolName: "read",
+		args: { path: "marker.txt" },
+	};
+	const firstSuccess = {
+		type: "tool_execution_end",
+		toolCallId: "text-tool-1",
+		toolName: "read",
+		isError: false,
+		result: { content: [{ type: "text", text: "marker" }] },
+	};
+	const repeatStart = {
+		type: "tool_execution_start",
+		toolCallId: "text-tool-2",
+		toolName: "read",
+		args: { path: "marker.txt" },
+	};
+	const guardedRepeat = {
+		type: "tool_execution_end",
+		toolCallId: "text-tool-2",
+		toolName: "read",
+		isError: true,
+		result: {
+			details: {
+				piToolFailureDirective: {
+					failureCode: "repeated_successful_call",
+				},
+			},
+		},
+	};
+	const recovered = {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "text", text: "marker" }],
+		},
+	};
+
+	assert.equal(
+		failedToolResult([firstStart, firstSuccess, repeatStart, guardedRepeat, recovered], "read"),
+		undefined,
+	);
+	assert.equal(failedToolResult([firstStart, firstSuccess, repeatStart, guardedRepeat], "read"), guardedRepeat);
+	assert.equal(failedToolResult([repeatStart, guardedRepeat, recovered], "read"), guardedRepeat);
+	assert.equal(
+		failedToolResult(
+			[
+				{ ...firstStart, args: { path: "different.txt" } },
+				firstSuccess,
+				repeatStart,
+				guardedRepeat,
+				recovered,
+			],
+			"read",
+		),
+		guardedRepeat,
+	);
+});
+
+test("live workflow follows explicit repeat linkage when a completed mutation changes payload form", () => {
+	const firstStart = {
+		type: "tool_execution_start",
+		toolCallId: "write-1",
+		toolName: "write",
+		args: { action: "write", path: "same.txt", content: "bytes" },
+	};
+	const firstSuccess = {
+		type: "tool_execution_end",
+		toolCallId: "write-1",
+		toolName: "write",
+		isError: false,
+		result: { content: [{ type: "text", text: "write complete" }] },
+	};
+	const repeatStart = {
+		type: "tool_execution_start",
+		toolCallId: "write-2",
+		toolName: "write",
+		args: { action: "write", path: "same.txt", contentRef: "file-content:bytes" },
+	};
+	const guardedRepeat = {
+		type: "tool_execution_end",
+		toolCallId: "write-2",
+		toolName: "write",
+		isError: true,
+		result: {
+			details: {
+				piToolFailureDirective: { failureCode: "repeated_successful_call" },
+				piRepeatedSuccessfulCall: { previousToolCallId: "write-1" },
+			},
+		},
+	};
+	const recovered = {
+		type: "message_end",
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
+	};
+
+	assert.equal(
+		failedToolResult([firstStart, firstSuccess, repeatStart, guardedRepeat, recovered], "write"),
+		undefined,
+	);
+	const unlinked = {
+		...guardedRepeat,
+		result: { details: { piToolFailureDirective: { failureCode: "repeated_successful_call" } } },
+	};
+	assert.equal(failedToolResult([firstStart, firstSuccess, repeatStart, unlinked, recovered], "write"), unlinked);
+});
+
+test("live workflow requires a visible assistant answer that uses a successful tool result", () => {
+	const success = {
+		type: "tool_execution_end",
+		toolCallId: "read-1",
+		toolName: "read",
+		isError: false,
+		result: { content: [{ type: "text", text: "phone-read-marker" }] },
+	};
+	const answer = {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "text", text: "phone-read-marker" }],
+		},
+	};
+	const hiddenThinking = {
+		...answer,
+		message: { ...answer.message, content: [{ type: "thinking", thinking: "phone-read-marker" }] },
+	};
+
+	assert.equal(assistantReportedToolMarker([success, answer], "read", "phone-read-marker"), true);
+	assert.equal(assistantReportedToolMarker([answer, success], "read", "phone-read-marker"), false);
+	assert.equal(assistantReportedToolMarker([success, hiddenThinking], "read", "phone-read-marker"), false);
+});
+
 test("live acceptance scripts delegate RPC framing instead of accumulating prefixes", async () => {
 	const [owner, coldStart, textProtocol] = await Promise.all([
 		readFile(new URL("./lib/live-acceptance-rpc.mjs", import.meta.url), "utf8"),
@@ -126,5 +295,22 @@ test("live acceptance scripts delegate RPC framing instead of accumulating prefi
 	for (const source of [coldStart, textProtocol]) {
 		assert.match(source, /startPiAcceptanceRpc/);
 		assert.doesNotMatch(source, /function makeLineReader|function waitForEvent|function readJsonIfExists/);
+	}
+	assert.match(textProtocol, /waitForEvent\(\s*\(event\) => event\.type === "agent_end"/);
+	assert.doesNotMatch(textProtocol, /message\.stopReason !== "toolUse"/);
+});
+
+test("live Ollama acceptance always owns an isolated low-impact runtime", async () => {
+	const [owner, coldStart, textProtocol] = await Promise.all([
+		readFile(new URL("./lib/ollama-acceptance-runtime.mjs", import.meta.url), "utf8"),
+		readFile(new URL("./accept-local-cold-start-live.mjs", import.meta.url), "utf8"),
+		readFile(new URL("./accept-text-protocol-live.mjs", import.meta.url), "utf8"),
+	]);
+	assert.match(owner, /profileMode:\s*"low-impact"/);
+	assert.match(owner, /startWithModelsStore/);
+	for (const source of [coldStart, textProtocol]) {
+		assert.match(source, /startLowImpactAcceptanceOllama/);
+		assert.doesNotMatch(source, /OLLAMA_KEEP_ALIVE:\s*"30m"/);
+		assert.doesNotMatch(source, /OLLAMA_MAX_LOADED_MODELS:\s*"3"/);
 	}
 });

@@ -3,6 +3,7 @@ import type { Model } from "@caupulican/pi-ai";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { runModelFitnessProbe } from "../src/core/research/model-fitness.ts";
+import type { ToolProbeReport } from "../src/core/tool-protocol-controller.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -19,6 +20,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 type RunFitnessAndAssignContext = {
 	session: {
 		runModelFitness: (args: { model: string }) => Promise<unknown>;
+		probeToolCalling: (target?: string) => Promise<ToolProbeReport>;
 		modelRegistry?: ModelRegistry;
 	};
 	chatContainer: { addChild: (child: unknown) => void };
@@ -54,12 +56,22 @@ const runFitnessAndAssign = Reflect.get(InteractiveMode.prototype, "runFitnessAn
 	preselectRole?: string,
 ) => Promise<void>;
 
-function context(runModelFitness: (args: { model: string }) => Promise<unknown>) {
+function nativeToolProbe(model: string): ToolProbeReport {
+	return {
+		results: [{ model, verdict: "native", nativeGrade: "task" }],
+		table: "native",
+	};
+}
+
+function context(
+	runModelFitness: (args: { model: string }) => Promise<unknown>,
+	probeToolCalling: (target?: string) => Promise<ToolProbeReport> = async (target = "") => nativeToolProbe(target),
+) {
 	const statuses: string[] = [];
 	const errors: string[] = [];
 	let selectorOpened = false;
 	const ctx: RunFitnessAndAssignContext = {
-		session: { runModelFitness },
+		session: { runModelFitness, probeToolCalling },
 		chatContainer: { addChild: vi.fn() },
 		ui: { requestRender: vi.fn() },
 		showStatus: vi.fn((text: string) => statuses.push(text)),
@@ -71,12 +83,15 @@ function context(runModelFitness: (args: { model: string }) => Promise<unknown>)
 	return { ctx, statuses, errors, selectorOpened: () => selectorOpened };
 }
 
-function scoutContext(runModelFitness: (args: { model: string }) => Promise<unknown>) {
+function scoutContext(
+	runModelFitness: (args: { model: string }) => Promise<unknown>,
+	probeToolCalling: (target?: string) => Promise<ToolProbeReport> = async (target = "") => nativeToolProbe(target),
+) {
 	const statuses: string[] = [];
 	let selectorOpened = 0;
 	let scoutSettings = { enabled: false, model: "auto" };
 	const ctx = {
-		session: { runModelFitness },
+		session: { runModelFitness, probeToolCalling },
 		chatContainer: { addChild: vi.fn() },
 		ui: { requestRender: vi.fn() },
 		settingsManager: {
@@ -110,6 +125,7 @@ function scoutContext(runModelFitness: (args: { model: string }) => Promise<unkn
 function routerContext(
 	runModelFitness: (args: { model: string }) => Promise<unknown>,
 	startingModelRouter: RouterProbeSettings,
+	probeToolCalling: (target?: string) => Promise<ToolProbeReport> = async (target = "") => nativeToolProbe(target),
 ) {
 	const statuses: string[] = [];
 	let selectorOpened = 0;
@@ -133,7 +149,7 @@ function routerContext(
 		getAvailable: () => [model],
 	} as unknown as ModelRegistry;
 	const ctx = {
-		session: { runModelFitness, modelRegistry },
+		session: { runModelFitness, probeToolCalling, modelRegistry },
 		chatContainer: { addChild: vi.fn() },
 		ui: { requestRender: vi.fn() },
 		settingsManager: {
@@ -285,6 +301,22 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 		expect(statuses.some((line) => line.includes("failed research") && line.includes("docs/scout.md"))).toBe(true);
 	});
 
+	it("refuses scout assignment when JSON intent fitness passes but real tool execution is absent", async () => {
+		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
+		const { ctx, statuses, getScoutSettings } = scoutContext(
+			async (args) => ({ started: true, model: args.model, report }),
+			async (target = "") => ({
+				results: [{ model: target, verdict: "none", nativeGrade: "absent", diagnostic: "no protocol worked" }],
+				table: "none",
+			}),
+		);
+
+		await runFitnessAndAssign.call(ctx, "ollama/fastcontext");
+
+		expect(getScoutSettings()).toEqual({ enabled: false, model: "auto" });
+		expect(statuses.some((line) => line.includes("real tool execution") && line.includes("none"))).toBe(true);
+	});
+
 	it("persists router-think profile after assigning a router role from fitness", async () => {
 		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
 		const { ctx, selectorOpened, thinkingSelectorOutput, getModelRouterSettings } = routerContext(
@@ -305,5 +337,23 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 			cheapModel: "ollama/good-model",
 			cheapThinking: "ultra",
 		});
+	});
+
+	it("refuses a router role when the real tool probe found no usable protocol", async () => {
+		const report = await runModelFitnessProbe({ trials: 1, now: () => 0, complete: allPassingComplete });
+		const { ctx, selectorOpened, getModelRouterSettings, statuses } = routerContext(
+			async (args) => ({ started: true, model: args.model, report }),
+			{ enabled: true },
+			async (target = "") => ({
+				results: [{ model: target, verdict: "none", nativeGrade: "absent" }],
+				table: "none",
+			}),
+		);
+
+		await runFitnessAndAssign.call(ctx, "ollama/good-model");
+
+		expect(selectorOpened()).toBe(1);
+		expect(getModelRouterSettings().cheapModel).toBeUndefined();
+		expect(statuses.some((line) => line.includes("real tool execution") && line.includes("none"))).toBe(true);
 	});
 });

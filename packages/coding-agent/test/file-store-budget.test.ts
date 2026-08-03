@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolveMemoryPromptBudget } from "../src/core/context/memory-prompt-budget.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
 
 /**
@@ -47,5 +48,21 @@ describe("FileStoreProvider.systemPromptBlock read-time cap", () => {
 		const block = provider.systemPromptBlock();
 		expect(block).toContain("npm run release:patch");
 		expect(block).not.toContain("truncated");
+	});
+
+	it("honors the normal capability budget used by an 8k model", async () => {
+		writeFileSync(
+			join(agentDir, "MEMORY.md"),
+			Array.from({ length: 40 }, (_, index) => `- bounded fact ${index} ${"x".repeat(32)}`).join("\n"),
+			"utf-8",
+		);
+		const provider = new FileStoreProvider();
+		await provider.initialize("s1", { agentDir, cwd: tempDir, isChildSession: false });
+		const budget = resolveMemoryPromptBudget({ contextWindow: 8_192, configuredMaxResults: 3 });
+		const block = provider.systemPromptBlock(budget);
+
+		expect(block.length).toBeLessThanOrEqual(budget.maxChars);
+		expect(block.split("\n").length).toBeLessThanOrEqual(budget.maxLines);
+		expect(block).toContain("Persistent Memory");
 	});
 });

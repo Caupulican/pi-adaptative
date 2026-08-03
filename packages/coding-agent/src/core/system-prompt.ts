@@ -5,10 +5,13 @@
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { Extension } from "./extensions/types.ts";
+import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
 import { escapePromptXml } from "./prompt-markup.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
+	/** Capability profile that selects the stable prompt shape. Missing means full/legacy behavior. */
+	modelCapability?: Pick<ModelCapabilityProfile, "class" | "contextWindow" | "reasonCode" | "systemPromptMaxChars">;
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
 	/** Tools to include in prompt. Default: [read, bash, edit, write, context_audit] */
@@ -61,9 +64,74 @@ ENGINEERING WORKFLOW
 - Detect → Verify → Score → Gate: baseline; reproduce with a negative control; fix the lowest owner; run focused, then proportionate gates.
 - Scanner, fuzzer, log, static, and model findings are candidates until reproduced. Never weaken tests or claim success from incomplete probes.`;
 
-function formatContextFilesForPrompt(contextFiles: Array<{ path: string; content?: string }>): string {
+const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
+
+OPERATING CONTRACT
+
+- Complete the current goal within scope and granted authority. Keep progress and evidence concise.
+- Inspect relevant files and project instructions before mutation. Make the smallest coherent change and verify it with focused checks.
+- Use only active tools and follow their schemas exactly. When a call fails, use the returned error and expected shape to correct it; never repeat an unchanged failed call.
+- Keep independent reads together and mutations ordered. Report real output and unresolved failures.
+- Ask before destructive actions, credentials, publication, push/tag/release, or material scope expansion.`;
+
+const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `
+
+EXECUTION RULES
+
+- Work on one scoped task at a time. Inspect before editing, make a small coherent change, then run the narrowest useful verification.
+- Use only listed tools and exact schemas. If a tool call fails, read the returned error and expected shape, correct the call, and do not repeat it unchanged.
+- Keep independent reads together and mutations ordered. Report actual results; never claim an action you did not complete.
+- Ask before destructive actions, credentials, publication, push/tag/release, or a material scope change.`;
+
+const PI_ADAPTATIVE_CHAT_CORE_SECTION = `
+
+CHAT RULES
+
+- Answer concisely from the conversation and state uncertainty.
+- No execution tools are active. Do not claim to read files, run commands, or make changes.
+- Say when the request requires a tool-capable model or additional user-provided context.`;
+
+const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
+const LEAN_SKILL_CATALOG_BUDGET_CHARS = 500;
+
+function formatContextFilesForPrompt(
+	contextFiles: Array<{ path: string; content?: string }>,
+	options: { deferContents: boolean; canRead: boolean },
+): string {
 	if (contextFiles.length === 0) {
 		return "";
+	}
+	if (options.deferContents) {
+		const lines = [
+			"\n\n<project_context>",
+			"",
+			"Project instruction contents are deferred for this capability profile to preserve working context.",
+			options.canRead
+				? "Before editing, writing, or running a mutating command, read each relevant listed file completely before any mutation. Follow its instructions; if a file cannot fit, ask for a scoped instruction digest."
+				: "No read tool is active. Ask the user for the relevant project instructions before giving project-specific guidance.",
+			"",
+			"<deferred_project_instructions>",
+		];
+		let pathChars = 0;
+		let included = 0;
+		for (const { path } of contextFiles) {
+			const line = `  <file path="${escapePromptXml(path)}" />`;
+			if (pathChars + line.length > DEFERRED_CONTEXT_PATH_BUDGET_CHARS) break;
+			lines.push(line);
+			pathChars += line.length + 1;
+			included++;
+		}
+		const omitted = contextFiles.length - included;
+		if (omitted > 0) {
+			lines.push(`  <omitted count="${omitted}" />`);
+		}
+		lines.push("</deferred_project_instructions>", "", "</project_context>");
+		if (omitted > 0) {
+			lines.push(
+				"Do not mutate until the omitted instruction paths are supplied or a more capable profile is used.",
+			);
+		}
+		return lines.join("\n");
 	}
 
 	const lines = ["\n\n<project_context>", "", "Project-specific instructions and guidelines:", ""];
@@ -76,6 +144,61 @@ function formatContextFilesForPrompt(contextFiles: Array<{ path: string; content
 
 	lines.push("</project_context>");
 	return lines.join("\n");
+}
+
+function formatLeanSkillsForPrompt(skills: Skill[]): string {
+	const eligibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
+	if (eligibleSkills.length === 0) return "";
+	const lines = ["\n\nSpecialized skills (load only when clearly relevant):", "<available_skills>"];
+	let catalogChars = 0;
+	let included = 0;
+	for (const skill of eligibleSkills) {
+		const line = `  <skill name="${escapePromptXml(skill.name)}" location="${escapePromptXml(skill.filePath)}">${escapePromptXml(skill.description.slice(0, 120))}</skill>`;
+		if (catalogChars + line.length > LEAN_SKILL_CATALOG_BUDGET_CHARS) break;
+		lines.push(line);
+		catalogChars += line.length + 1;
+		included++;
+	}
+	lines.push("</available_skills>");
+	const omitted = eligibleSkills.length - included;
+	if (omitted > 0) lines.push(`${omitted} additional skill(s) are not preloaded on this profile.`);
+	return lines.join("\n");
+}
+
+function appendPromptResources(
+	prompt: string,
+	options: {
+		appendSection: string;
+		contextFiles: Array<{ path: string; content?: string }>;
+		skills: Skill[];
+		extensions: Extension[];
+		visibleTools: string[];
+		fullPrompt: boolean;
+		leanPrompt: boolean;
+		hasRead: boolean;
+		date: string;
+		promptCwd: string;
+		modelCapability: BuildSystemPromptOptions["modelCapability"];
+	},
+): string {
+	let result = prompt;
+	if (options.appendSection) result += options.appendSection;
+	result += formatContextFilesForPrompt(options.contextFiles, {
+		deferContents: !options.fullPrompt,
+		canRead: options.hasRead,
+	});
+	if (options.hasRead && options.skills.length > 0) {
+		if (options.fullPrompt) result += formatSkillsForPrompt(options.skills);
+		else if (options.leanPrompt) result += formatLeanSkillsForPrompt(options.skills);
+	}
+	// Extension metadata is redundant with the active tool snippets on constrained profiles.
+	if (options.fullPrompt && options.extensions.length > 0) {
+		result += formatExtensionsForPrompt(options.extensions, options.visibleTools);
+	}
+	// Day-granularity only; keep this tail stable across every call on the same calendar day.
+	result += `\nCurrent date: ${options.date}`;
+	result += `\nCurrent working directory: ${options.promptCwd}`;
+	return options.modelCapability ? enforceModelCapabilitySystemPromptBudget(result, options.modelCapability) : result;
 }
 
 /**
@@ -118,39 +241,38 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
+	const capabilityClass = options.modelCapability?.class ?? "full";
+	const fullPrompt = capabilityClass === "full";
+	const leanPrompt = capabilityClass === "lean";
 
 	const activeTools = selectedTools || ["read", "bash", "python", "edit", "write"];
 	const visibleTools = activeTools.filter((name) => !!toolSnippets?.[name]);
+	const hasRead = activeTools.includes("read");
+	const coreSection = fullPrompt
+		? PI_ADAPTATIVE_CORE_SECTION
+		: leanPrompt
+			? PI_ADAPTATIVE_LEAN_CORE_SECTION
+			: capabilityClass === "minimal"
+				? PI_ADAPTATIVE_MINIMAL_CORE_SECTION
+				: PI_ADAPTATIVE_CHAT_CORE_SECTION;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
 
-		prompt += PI_ADAPTATIVE_CORE_SECTION;
-
-		if (appendSection) {
-			prompt += appendSection;
-		}
-
-		prompt += formatContextFilesForPrompt(contextFiles);
-
-		// Append skills section (only if read tool is available)
-		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
-		if (customPromptHasRead && skills.length > 0) {
-			prompt += formatSkillsForPrompt(skills);
-		}
-
-		// Append extensions section
-		const extensions = options.extensions ?? [];
-		if (extensions.length > 0) {
-			prompt += formatExtensionsForPrompt(extensions, visibleTools);
-		}
-
-		// Add date and working directory last (day-granularity `date` only; see the
-		// cache-stability invariant on buildSystemPrompt above — do not add a per-turn timestamp).
-		prompt += `\nCurrent date: ${date}`;
-		prompt += `\nCurrent working directory: ${promptCwd}`;
-
-		return prompt;
+		prompt += coreSection;
+		return appendPromptResources(prompt, {
+			appendSection,
+			contextFiles,
+			skills,
+			extensions: options.extensions ?? [],
+			visibleTools,
+			fullPrompt,
+			leanPrompt,
+			hasRead,
+			date,
+			promptCwd,
+			modelCapability: options.modelCapability,
+		});
 	}
 
 	// Get absolute paths to documentation and examples
@@ -180,47 +302,68 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = activeTools.includes("grep");
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
-	const hasRead = activeTools.includes("read");
 	const hasReadOnlyTools = hasRead || hasGrep || hasFind || hasLs;
 
 	// File exploration guidelines
-	if (hasPowerShell && !hasGrep && !hasFind && !hasLs) {
+	if (!fullPrompt && !leanPrompt) {
+		if (hasPowerShell) addGuideline("Use powershell for Windows shell commands");
+		else if (hasBash) addGuideline("Use bash for bounded shell commands");
+		if (hasReadOnlyTools) addGuideline("Batch independent reads; keep mutations and dependent calls ordered");
+	} else if (hasPowerShell && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Use powershell for shell commands on Windows; prefer rg for search and Get-ChildItem for listing");
 	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Use bash for file operations like ls, rg, find");
 	}
-	if (hasBash || hasGrep || hasFind) {
-		addGuideline(
-			"Use scoped rg to filter text and jq to project JSON: pass explicit roots and filters, inspect only selected records natively, and route unavoidable exhaustive output to a file",
-		);
-	}
-	if (hasPython) {
-		addGuideline(
-			"Use python for bounded scripts and data shaping when clearer than shell; use read/edit/write for exact source edits",
-		);
-	}
-	if (hasReadOnlyTools) {
-		addGuideline(
-			"Issue independent read-only tool calls together in one assistant turn. Keep dependent calls, mutations, and stateful commands ordered",
-		);
+	if (fullPrompt || leanPrompt) {
+		if (hasBash || hasGrep || hasFind) {
+			addGuideline(
+				"Use scoped rg to filter text and jq to project JSON: pass explicit roots and filters, inspect only selected records natively, and route unavoidable exhaustive output to a file",
+			);
+		}
+		if (hasPython) {
+			addGuideline(
+				"Use python for bounded scripts and data shaping when clearer than shell; use read/edit/write for exact source edits",
+			);
+		}
+		if (hasReadOnlyTools) {
+			addGuideline(
+				"Issue independent read-only tool calls together in one assistant turn. Keep dependent calls, mutations, and stateful commands ordered",
+			);
+		}
 	}
 
-	for (const guideline of promptGuidelines ?? []) {
-		const normalized = guideline.trim();
-		if (normalized.length > 0) {
-			addGuideline(normalized);
+	if (fullPrompt || leanPrompt) {
+		for (const guideline of promptGuidelines ?? []) {
+			const normalized = guideline.trim();
+			if (normalized.length > 0) {
+				addGuideline(normalized);
+			}
 		}
 	}
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
 
-	let prompt = `You are Pi-Adaptative, a self-evolving assistant. Complete and deliver the user’s goals within granted authority; preserve continuity through compaction and own the integrated result.
+	const introduction = fullPrompt
+		? "You are Pi-Adaptative, a self-evolving assistant. Complete and deliver the user’s goals within granted authority; preserve continuity through compaction and own the integrated result."
+		: leanPrompt
+			? "You are Pi-Adaptative's bounded coding agent. Complete the current goal with the active surface and preserve enough evidence for handoff."
+			: capabilityClass === "minimal"
+				? "You are Pi-Adaptative's focused coding executor. Complete one scoped task with active tools and report verified results."
+				: "You are Pi-Adaptative's concise chat assistant. No execution tools are active.";
+	const toolSurfaceRule =
+		fullPrompt || leanPrompt
+			? "Use only capabilities present in the active tool surface; others may exist in the environment."
+			: "Use only the active tool surface.";
+	let prompt = `${introduction}
 
 Available tools:
 ${toolsList}
 
-Use only capabilities present in the active tool surface; others may exist in the environment.${PI_ADAPTATIVE_CORE_SECTION}${toolGuidelinesSection}
+${toolSurfaceRule}${coreSection}${toolGuidelinesSection}`;
+
+	if (fullPrompt) {
+		prompt += `
 
 PI-ADAPTATIVE DOCUMENTATION
 
@@ -230,30 +373,21 @@ Only when asked about Pi-Adaptative, read the relevant files completely from:
 - Examples: ${examplesPath}
 
 Resolve \`docs/...\` and \`examples/...\` from those roots and follow relevant Markdown cross-references before implementing.`;
-
-	if (appendSection) {
-		prompt += appendSection;
 	}
 
-	prompt += formatContextFilesForPrompt(contextFiles);
-
-	// Append skills section (only if read tool is available)
-	if (hasRead && skills.length > 0) {
-		prompt += formatSkillsForPrompt(skills);
-	}
-
-	// Append extensions section
-	const activeExtensions = options.extensions ?? [];
-	if (activeExtensions.length > 0) {
-		prompt += formatExtensionsForPrompt(activeExtensions, visibleTools);
-	}
-
-	// Add date and working directory last (day-granularity `date` only; see the
-	// cache-stability invariant on buildSystemPrompt above — do not add a per-turn timestamp).
-	prompt += `\nCurrent date: ${date}`;
-	prompt += `\nCurrent working directory: ${promptCwd}`;
-
-	return prompt;
+	return appendPromptResources(prompt, {
+		appendSection,
+		contextFiles,
+		skills,
+		extensions: options.extensions ?? [],
+		visibleTools,
+		fullPrompt,
+		leanPrompt,
+		hasRead,
+		date,
+		promptCwd,
+		modelCapability: options.modelCapability,
+	});
 }
 
 function formatExtensionsForPrompt(extensions: Extension[], visibleTools: string[]): string {

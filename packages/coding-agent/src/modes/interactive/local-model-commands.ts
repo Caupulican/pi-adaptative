@@ -28,11 +28,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
-import {
-	deriveLocalContextSizing,
-	renderOllamaContextModelfile,
-	sizedLocalModelRef,
-} from "../../core/models/context-sizing.ts";
+import { deriveLocalContextSizing } from "../../core/models/context-sizing.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { PrismLlamaCppRuntime, type PrismModelDescriptor } from "../../core/models/llamacpp-runtime.ts";
@@ -47,6 +43,7 @@ import {
 	unregisterTransformersModel,
 } from "../../core/models/local-registration.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
+import { planManagedOllamaModel } from "../../core/models/managed-ollama-model.ts";
 import { matchesInstalledLocalModel, normalizeModelSource } from "../../core/models/model-ref.ts";
 import { NeedleRuntime } from "../../core/models/needle-runtime.ts";
 import {
@@ -58,6 +55,7 @@ import {
 } from "../../core/models/prism-llamacpp-lifecycle.ts";
 import { isProbeAllFailed } from "../../core/research/model-fitness.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import type { ToolProbeResult } from "../../core/tool-protocol-controller.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { type FitnessRole, FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
@@ -111,7 +109,7 @@ export interface AssignRoleHost {
 
 /** Seam for the fitness probe + role-selector flow — matches the fitness-probe-gate test. */
 export interface RunFitnessHost {
-	readonly session: Pick<AgentSession, "runModelFitness"> & { modelRegistry?: ModelRegistry };
+	readonly session: Pick<AgentSession, "probeToolCalling" | "runModelFitness"> & { modelRegistry?: ModelRegistry };
 	readonly settingsManager: SettingsManager;
 	readonly chatContainer: Container;
 	readonly ui: TUI;
@@ -467,18 +465,22 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 					runtime: { supportsKvQuantization: true },
 				})
 			: undefined;
+	const managedPlan = planManagedOllamaModel({
+		sourceRef: pullRef,
+		modelInfo: shown.ok ? shown.info.modelInfo : {},
+		numCtx: sizing?.numCtx,
+	});
 	let registeredRef = pullRef;
-	if (sizing) {
-		const sizedRef = sizedLocalModelRef(pullRef, sizing.numCtx);
-		const created = await host.localRuntime.createFromModelfile({
-			name: sizedRef,
-			modelfile: renderOllamaContextModelfile({ from: pullRef, numCtx: sizing.numCtx }),
+	if (managedPlan) {
+		const created = await host.localRuntime.createModel({
+			name: managedPlan.name,
+			...managedPlan.create,
 		});
 		if (!created.ok) {
-			host.showStatus(`Pulled, but could not create sized context model: ${created.error}`);
+			host.showStatus(`Pulled, but could not create the managed model profile: ${created.error}`);
 			return;
 		}
-		registeredRef = sizedRef;
+		registeredRef = managedPlan.name;
 	}
 	const registration = registerLocalModel({
 		agentDir: getAgentDir(),
@@ -1023,11 +1025,30 @@ export async function runFitnessAndAssign(
 			);
 			return;
 		}
+		let toolProbe: ToolProbeResult | undefined;
+		if (preselectRole === undefined || roleRequiresToolExecution(preselectRole)) {
+			host.showStatus(`Real tool execution probe running on ${outcome.model}…`);
+			try {
+				const toolProbeReport = await host.session.probeToolCalling(outcome.model);
+				toolProbe =
+					toolProbeReport.results.find((result) => result.model === outcome.model) ??
+					(toolProbeReport.results.length === 1 ? toolProbeReport.results[0] : undefined);
+			} catch (error) {
+				host.showStatus(
+					`Real tool execution probe unavailable for ${outcome.model}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 		host.showSelector((done) => {
 			const selector = new FitnessRoleSelectorComponent(
 				outcome.model,
 				(role) => {
 					done();
+					const toolFailure = toolRoleFailure(role, toolProbe);
+					if (toolFailure) {
+						host.showStatus(`${outcome.model} not assigned as ${role}: real tool execution ${toolFailure}.`);
+						return;
+					}
 					if (role === "scout") {
 						const verdict = evaluateSurfaceFitness("scout_auto", outcome.report);
 						if (!verdict.fit) {
@@ -1052,6 +1073,25 @@ export async function runFitnessAndAssign(
 	} catch (error) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}
+}
+
+function roleRequiresToolExecution(role: FitnessRole): boolean {
+	return (
+		role === "executor" ||
+		role === "scout" ||
+		role === "router-cheap" ||
+		role === "router-medium" ||
+		role === "router-expensive"
+	);
+}
+
+function toolRoleFailure(role: FitnessRole, probe: ToolProbeResult | undefined): string | undefined {
+	if (!roleRequiresToolExecution(role)) return undefined;
+	if (!probe) return "was not proven; run /toolprobe and retry /fitness";
+	if (probe.verdict === "text-protocol") return undefined;
+	if (probe.verdict === "native" && probe.nativeGrade === "task") return undefined;
+	if (probe.verdict === "native") return `reported native ${probe.nativeGrade ?? "ungraded"}, not task-scale calls`;
+	return `probe reported none${probe.diagnostic ? ` (${probe.diagnostic})` : ""}`;
 }
 
 /** Persist a role assignment from the post-probe selector into the matching settings. */

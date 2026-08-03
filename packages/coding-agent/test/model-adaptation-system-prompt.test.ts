@@ -15,7 +15,7 @@ import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
-function createModel(id: string): Model<Api> {
+function createModel(id: string, contextWindow = 128_000): Model<Api> {
 	return {
 		id,
 		name: id,
@@ -25,7 +25,7 @@ function createModel(id: string): Model<Api> {
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 128000,
+		contextWindow,
 		maxTokens: 4096,
 	};
 }
@@ -129,6 +129,25 @@ describe("model adaptation system prompt", () => {
 			expect(session.session.agent.state.systemPrompt).not.toContain(ruleText);
 		} finally {
 			session.session.dispose();
+		}
+	});
+
+	it("keeps repair teach-back rules in the reduced prompt for a small model", async () => {
+		const model = createModel("small-model-with-rule", 8_192);
+		const ruleText = formatToolRepairStandingRule("jsonStringParse");
+		const now = new Date();
+		ModelAdaptationStore.forAgentDir(agentDir).addRule(
+			`${model.provider}/${model.id}`,
+			{ mode: "jsonStringParse", text: ruleText, addedAt: now.toISOString(), lastFiredAt: now.toISOString() },
+			now,
+		);
+
+		const created = await createSession(cwd, agentDir, model);
+		try {
+			expect(created.session.agent.state.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			expect(created.session.agent.state.systemPrompt).toContain(ruleText);
+		} finally {
+			created.session.dispose();
 		}
 	});
 });

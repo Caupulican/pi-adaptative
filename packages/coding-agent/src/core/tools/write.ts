@@ -6,15 +6,19 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { type FileContentReference, FileMutationIntentController } from "./file-mutation-intent.ts";
+import {
+	type FileContentReference,
+	FileMutationIntentController,
+	hasFileMutationIntentIdShape,
+} from "./file-mutation-intent.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const writePathSchema = Type.String({ minLength: 1 });
-const writeCommitProperties = {
-	action: Type.Literal("commit"),
+const writeActionProperties = {
+	action: Type.Literal("write"),
 	path: writePathSchema,
 	intentId: Type.String({ minLength: 1 }),
 };
@@ -28,14 +32,14 @@ const writeSchema = Type.Union([
 	),
 	Type.Object(
 		{
-			...writeCommitProperties,
+			...writeActionProperties,
 			content: Type.String(),
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
-			...writeCommitProperties,
+			...writeActionProperties,
 			contentRef: Type.String({ minLength: 1 }),
 		},
 		{ additionalProperties: false },
@@ -43,6 +47,18 @@ const writeSchema = Type.Union([
 ]);
 
 export type WriteToolInput = Static<typeof writeSchema>;
+
+function prepareWriteArguments(input: unknown): WriteToolInput {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return input as WriteToolInput;
+	const args = input as Record<string, unknown>;
+	if (
+		typeof args.path === "string" &&
+		(args.action === undefined || (args.action === "write" && !hasFileMutationIntentIdShape(args.intentId)))
+	) {
+		return { action: "prepare", path: args.path };
+	}
+	return args as WriteToolInput;
+}
 
 /**
  * Pluggable operations for the write tool.
@@ -68,7 +84,7 @@ export interface WriteToolOptions {
 }
 
 export interface WriteToolDetails {
-	phase: "prepared" | "committed";
+	phase: "prepared" | "written";
 	intentId?: string;
 	contentRef?: string;
 	byteCount?: number;
@@ -215,10 +231,10 @@ function formatWriteCall(
 	const fileContent = str(args?.content);
 	const hasContent = typeof args?.content === "string";
 	const pathDisplay = renderToolPath(rawPath, theme, cwd);
-	const action = args?.action === "prepare" ? "prepare" : args?.action === "commit" ? "commit" : undefined;
+	const action = args?.action === "prepare" ? "prepare" : undefined;
 	let text = `${theme.fg("toolTitle", theme.bold("write"))}${action ? ` ${theme.fg("muted", action)}` : ""} ${pathDisplay}`;
 
-	if (args?.action === "commit" && !hasContent && typeof args.contentRef !== "string") {
+	if (args?.action === "write" && !hasContent && typeof args.contentRef !== "string") {
 		text += `\n\n${theme.fg("error", "[invalid content arg - expected string]")}`;
 	} else if (hasContent && fileContent) {
 		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
@@ -275,13 +291,14 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Create a file without overwriting: prepare(path), then commit(path,intentId,content|contentRef). Prepare rejects collisions before content generation; commit rechecks atomically.",
+			'Create a file without overwriting: first call write with action "prepare" and path, then call write with action "write", the accepted intentId, and content or contentRef. Preparation rejects collisions before content generation; writing rechecks atomically.',
 		promptSnippet: "Preflight new paths; never overwrite",
 		promptGuidelines: [
-			"Before content generation, prepare(path); then commit with intentId and one of content or contentRef.",
+			'Before content generation, call write with action "prepare" and path; then call write with action "write", the returned intentId, and one of content or contentRef.',
 			"Write is create-only; edit existing files. Reuse contentRef for exact copies.",
 		],
 		parameters: writeSchema,
+		prepareArguments: prepareWriteArguments,
 		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const { path } = input;
 			const absolutePath = resolveToCwd(path, cwd);
@@ -301,7 +318,7 @@ export function createWriteToolDefinition(
 						content: [
 							{
 								type: "text" as const,
-								text: `Write path accepted. Commit ${path} with intentId ${prepared.intentId}.`,
+								text: `Write path accepted. Call write again with action "write", path ${path}, and intentId ${prepared.intentId}. The call also needs exactly one required payload field: content with the exact requested text, or contentRef for previously returned exact bytes. Do not omit the payload field.`,
 							},
 						],
 						details: { phase: "prepared" as const, intentId: prepared.intentId },
@@ -312,7 +329,7 @@ export function createWriteToolDefinition(
 				const contentRef =
 					"contentRef" in input && typeof input.contentRef === "string" ? input.contentRef : undefined;
 				if ((content === undefined) === (contentRef === undefined)) {
-					throw new Error("Write commit requires exactly one of content or contentRef.");
+					throw new Error('Write action "write" requires exactly one of content or contentRef.');
 				}
 				const lease = intentController.consume(input.intentId, "write", absolutePath);
 				await intentController.assertCurrent(lease, signal);
@@ -325,7 +342,7 @@ export function createWriteToolDefinition(
 						await ops.createFile(absolutePath, content);
 						contentReference = intentController.rememberContent(absolutePath, content);
 					} else {
-						if (contentRef === undefined) throw new Error("Write commit requires content or contentRef.");
+						if (contentRef === undefined) throw new Error('Write action "write" requires content or contentRef.');
 						contentReference = await intentController.copyReferencedContent(contentRef, absolutePath, signal);
 					}
 				} catch (error) {
@@ -341,11 +358,11 @@ export function createWriteToolDefinition(
 					content: [
 						{
 							type: "text" as const,
-							text: `Successfully wrote ${byteCount} bytes to ${path}. Reuse exact bytes with contentRef ${contentReference.contentRef}.`,
+							text: `Successfully wrote ${byteCount} bytes to ${path}; this write is complete, so do not call write again for this path. To copy these exact bytes to a different new path, prepare that different path first, then use contentRef ${contentReference.contentRef}.`,
 						},
 					],
 					details: {
-						phase: "committed" as const,
+						phase: "written" as const,
 						contentRef: contentReference.contentRef,
 						byteCount,
 					},

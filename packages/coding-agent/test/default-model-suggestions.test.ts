@@ -48,6 +48,18 @@ describe("default model suggestions", () => {
 		});
 	});
 
+	it("offers LFM2.5 as native-tool-first MoE without bypassing host fitness", () => {
+		const suggestion = DEFAULT_MODEL_SUGGESTIONS.find((entry) => entry.name === "LFM2.5-8B-A1B");
+		expect(suggestion).toMatchObject({
+			pullRef: "lfm2.5:8b-a1b-q4_K_M",
+			toolCalling: true,
+			assignRole: "router-cheap",
+		});
+		expect(normalizeModelSource(suggestion?.pullRef ?? "").type).toBe("local");
+		expect(suggestion?.rationale).toContain("native tool-calling first");
+		expect(suggestion?.rationale).toContain("/fitness");
+	});
+
 	it("Bonsai models are marked as non-tool-calling (lane/brain only, never executor)", () => {
 		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS.filter((s) => s.name.includes("Bonsai"))) {
 			expect(suggestion.toolCalling).toBe(false);
@@ -66,19 +78,11 @@ describe("default model suggestions", () => {
 		);
 	});
 
-	it("routes the Bonsai-27B suggestion to the curated prism-llamacpp source, never Ollama", () => {
-		const suggestion = DEFAULT_MODEL_SUGGESTIONS.find((s) => s.name === "Bonsai-27B (1-bit + vision)");
-		expect(suggestion).toBeDefined();
-		expect(suggestion).toMatchObject({
-			pullRef: "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0",
-			assignRole: "curator",
-			toolCalling: false,
-		});
-		expect(normalizeModelSource(suggestion?.pullRef ?? "")).toEqual({
-			type: "prism-llamacpp",
-			modelId: "prism-ml/Bonsai-27B-gguf",
-			ref: "hf.co/prism-ml/Bonsai-27B-gguf",
-		});
+	it("routes every Bonsai suggestion to the curated prism-llamacpp source, never Ollama", () => {
+		for (const suggestion of DEFAULT_MODEL_SUGGESTIONS.filter((entry) => entry.name.includes("Bonsai"))) {
+			const source = normalizeModelSource(suggestion.pullRef);
+			expect(source.type, suggestion.name).toBe("prism-llamacpp");
+		}
 	});
 
 	it("routes the needle suggestion to the curated needle source, never Ollama, and carries no fitness role", () => {
@@ -113,12 +117,14 @@ describe("default model suggestions", () => {
 		expect(text).toContain("qwen3:1.7b → Toolkit executor");
 		expect(text).toContain("FastContext-1.0-4B → Repository scout");
 		expect(text).toContain("Ornith-1.0-9B → Agentic-coding worker");
+		expect(text).toContain("LFM2.5-8B-A1B → Native-tool MoE worker");
+		expect(text).toContain("/models add lfm2.5:8b-a1b-q4_K_M");
 		expect(text).toContain("MiniCPM5-1B (full-base) → Full-base Transformers executor");
 		expect(text).toContain("/models add hf.co/openbmb/MiniCPM5-1B");
 		expect(text).toContain("/models add hf.co/prism-ml/Bonsai-4B-gguf:Q1_0");
 		expect(text).toContain("/models add hf.co/prism-ml/Bonsai-27B-gguf:Q1_0");
 		expect(text).toContain("Bonsai-27B (1-bit + vision)");
-		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf");
+		expect(text).toContain("/models add hf.co/prism-ml/Ternary-Bonsai-4B-gguf:Q2_0");
 		expect(text).toContain("/models add hf.co/Cactus-Compute/needle");
 		expect(text).toContain("needle (function-call tester, 26M)");
 		expect(text).toContain("[no tool-calling]");

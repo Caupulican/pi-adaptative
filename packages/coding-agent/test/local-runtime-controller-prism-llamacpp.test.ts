@@ -94,27 +94,53 @@ describe("LocalRuntimeController.ensurePrismLlamaCppModelReady (private) — ser
 			const spawnFn = vi.fn();
 			const fetchFn = (async (url: string) => {
 				fetchCalls.push(String(url));
-				return new Response("{}", { status: 200 });
+				return String(url).endsWith("/v1/models")
+					? Response.json({ data: [{ id: BONSAI_27B.repo }] })
+					: Response.json({});
 			}) as unknown as typeof fetch;
 			const ctrl = controller(agentDir, { fetchFn, spawnFn: spawnFn as never });
 
 			const result = await ensureReady(ctrl, bonsaiModel());
 
 			expect(result).toEqual({ ready: true, reason: "already_running" });
-			expect(fetchCalls).toEqual(["http://127.0.0.1:8090/health"]);
+			expect(fetchCalls).toEqual(["http://127.0.0.1:8090/health", "http://127.0.0.1:8090/v1/models"]);
 			expect(spawnFn).not.toHaveBeenCalled();
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
 
-	it("skips the health-check on a second call once confirmed up (same cache the Ollama gate uses)", async () => {
+	it("halts on a healthy server serving a different model instead of misrouting or replacing an unowned process", async () => {
+		const agentDir = scratchDir("identity-conflict");
+		try {
+			const spawnFn = vi.fn();
+			const fetchFn = (async (url: string) =>
+				String(url).endsWith("/v1/models")
+					? Response.json({ data: [{ id: "prism-ml/Bonsai-4B-gguf" }] })
+					: Response.json({})) as unknown as typeof fetch;
+			const ctrl = controller(agentDir, { fetchFn, spawnFn: spawnFn as never });
+
+			const result = await ensureReady(ctrl, bonsaiModel());
+
+			expect(result).toEqual({
+				ready: false,
+				reason: "server_model_conflict:prism-ml/Bonsai-4B-gguf",
+			});
+			expect(spawnFn).not.toHaveBeenCalled();
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("revalidates model identity on every turn because multiple models share one port", async () => {
 		const agentDir = scratchDir("cached");
 		try {
 			const fetchCalls: string[] = [];
 			const fetchFn = (async (url: string) => {
 				fetchCalls.push(String(url));
-				return new Response("{}", { status: 200 });
+				return String(url).endsWith("/v1/models")
+					? Response.json({ data: [{ id: BONSAI_27B.repo }] })
+					: Response.json({});
 			}) as unknown as typeof fetch;
 			const ctrl = controller(agentDir, { fetchFn });
 
@@ -123,8 +149,8 @@ describe("LocalRuntimeController.ensurePrismLlamaCppModelReady (private) — ser
 			const second = await ensureReady(ctrl, bonsaiModel());
 
 			expect(first.ready).toBe(true);
-			expect(second).toEqual({ ready: true, reason: "confirmed_up_cached" });
-			expect(fetchCalls.length).toBe(callsAfterFirst);
+			expect(second).toEqual({ ready: true, reason: "already_running" });
+			expect(fetchCalls.length).toBe(callsAfterFirst * 2);
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
@@ -164,6 +190,7 @@ describe("LocalRuntimeController.ensurePrismLlamaCppModelReady (private) — ser
 			const fetchFn = (async (url: string) => {
 				const u = String(url);
 				if (u.endsWith("/health")) return new Response("", { status: up ? 200 : 503 });
+				if (u.endsWith("/v1/models")) return Response.json({ data: [{ id: BONSAI_27B.repo }] });
 				downloadedUrls.push(u);
 				return new Response("fake-gguf-bytes", { status: 200 });
 			}) as unknown as typeof fetch;

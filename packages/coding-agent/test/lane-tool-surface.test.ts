@@ -130,7 +130,7 @@ describe("classified lane tool surface", () => {
 		const sourceIntent = (sourcePreparation.details as { intentId?: string } | undefined)?.intentId;
 		if (!sourceIntent) throw new Error("Expected source intent.");
 		await ownerWrite.execute("commit-source", {
-			action: "commit",
+			action: "write",
 			path: "src/source.txt",
 			intentId: sourceIntent,
 			content: "alpha\n",
@@ -143,7 +143,7 @@ describe("classified lane tool surface", () => {
 		const editIntent = (editPreparation.details as { intentId?: string } | undefined)?.intentId;
 		if (!editIntent) throw new Error("Expected edit intent.");
 		const editResult = await ownerEdit.execute("commit-edit", {
-			action: "commit",
+			action: "edit",
 			path: "src/source.txt",
 			intentId: editIntent,
 			edits: [{ oldText: "alpha", newText: "beta" }],
@@ -158,7 +158,7 @@ describe("classified lane tool surface", () => {
 		const targetIntent = (targetPreparation.details as { intentId?: string } | undefined)?.intentId;
 		if (!targetIntent) throw new Error("Expected target intent.");
 		await ownerWrite.execute("commit-target", {
-			action: "commit",
+			action: "write",
 			path: "src/target.txt",
 			intentId: targetIntent,
 			contentRef,
@@ -175,7 +175,7 @@ describe("classified lane tool surface", () => {
 		if (!foreignIntent) throw new Error("Expected foreign intent.");
 		await expect(
 			foreignWrite.execute("commit-foreign", {
-				action: "commit",
+				action: "write",
 				path: "src/foreign.txt",
 				intentId: foreignIntent,
 				contentRef,

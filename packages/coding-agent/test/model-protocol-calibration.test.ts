@@ -222,6 +222,33 @@ describe("text tool protocol calibration", () => {
 		}
 	});
 
+	it("calibrates a phone envelope emitted through the provider reasoning channel", async () => {
+		const model = createModel("reasoning-channel-model", { textProtocol: false });
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, (context) => {
+			if (isNativeReadTaskProbe(context) || isNativeEchoProbe(context)) return "no tools";
+			if (!isCalibration(context)) return "done";
+			return [
+				{
+					type: "thinking",
+					thinking: `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`,
+				},
+			];
+		});
+		try {
+			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);
+			expect(report.results).toMatchObject([
+				{ verdict: "text-protocol", variant: "tool-tag", nativeGrade: "absent" },
+			]);
+			expect(requests.find((request) => isCalibration(request.context))?.context.systemPrompt).toContain(
+				'<pi:call name="echo">{"data":"pi-calibration-1"}</pi:call>',
+			);
+		} finally {
+			created.session.dispose();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
 	it("probeToolCalling persists a 'none' verdict (not a stuck 'failed' protocol) when no variant round-trips, and /toolprotocol-reset clears a stale one", async () => {
 		const model = createModel("failing-model", { textProtocol: false });
 		const modelKey = `${model.provider}/${model.id}`;

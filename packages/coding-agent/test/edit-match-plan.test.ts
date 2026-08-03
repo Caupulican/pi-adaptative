@@ -75,7 +75,7 @@ describe("edit match plans", () => {
 		expect(source).not.toContain("fuzzyContent.split(fuzzyOldText)");
 	});
 
-	it("publishes inclusive line bounds in the commit protocol", () => {
+	it("publishes inclusive line bounds in the edit phase", () => {
 		const parameters = createEditToolDefinition(process.cwd()).parameters as {
 			anyOf?: Array<{
 				properties?: {
@@ -84,7 +84,7 @@ describe("edit match plans", () => {
 				};
 			}>;
 		};
-		const commit = parameters.anyOf?.find((variant) => variant.properties?.action?.const === "commit");
-		expect(commit?.properties?.edits?.items?.properties).toHaveProperty("range");
+		const edit = parameters.anyOf?.find((variant) => variant.properties?.action?.const === "edit");
+		expect(edit?.properties?.edits?.items?.properties).toHaveProperty("range");
 	});
 });

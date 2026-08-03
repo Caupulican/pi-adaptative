@@ -26,9 +26,9 @@ import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import {
 	ensurePrismModelFilesThenServe,
 	isPiManagedPrismLlamaCppModel,
-	isPrismLlamaCppServerHealthy,
 	PRISM_LLAMACPP_DESCRIPTORS,
 	PRISM_LLAMACPP_SERVE_PORT,
+	probePrismLlamaCppServer,
 } from "./models/prism-llamacpp-lifecycle.ts";
 import {
 	OllamaRuntimeResidencyAdapter,
@@ -45,6 +45,7 @@ const MODEL_ROUTER_TIER_ORDER: readonly ("cheap" | "medium" | "expensive")[] = [
 /** How long the #31 "install ollama now?" confirm waits before auto-dismissing (same as a "No") —
  * long enough to read and decide, short enough that an unattended session doesn't hang a turn on it. */
 const OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS = 30_000;
+const LOCAL_MODEL_ANTI_THRASH_MS = 5 * 60_000;
 
 interface LocalRuntimeReadiness {
 	ready: boolean;
@@ -256,6 +257,7 @@ export class LocalRuntimeController {
 				role: "active",
 				priority: 100,
 				nowMs,
+				antiThrashWindowMs: LOCAL_MODEL_ANTI_THRASH_MS,
 				pinActiveModel: model.id,
 				recentEvictions: this._recentEvictions,
 				// Cold model loads can take minutes. The adaptive stream owns that wait; admission
@@ -329,7 +331,7 @@ export class LocalRuntimeController {
 				loadedAdapterId,
 			});
 		}
-		const cutoff = atMs - 5 * 60_000;
+		const cutoff = atMs - LOCAL_MODEL_ANTI_THRASH_MS;
 		while (this._recentEvictions[0]?.atMs < cutoff) this._recentEvictions.shift();
 	}
 
@@ -484,13 +486,18 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_pi_managed_llama_cpp" };
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
-		const confirmedKey = this.unconfirmedKey(model, serverUrl);
-		if (!confirmedKey) {
-			return { ready: true, reason: "confirmed_up_cached" };
-		}
-		if (await isPrismLlamaCppServerHealthy(serverUrl, this.deps.prismLlamaCppDeps?.fetchFn)) {
-			this._confirmedUp.add(confirmedKey);
+		const probe = await probePrismLlamaCppServer(serverUrl, model.id, this.deps.prismLlamaCppDeps?.fetchFn);
+		if (probe.status === "matching") {
 			return { ready: true, reason: "already_running" };
+		}
+		if (probe.status === "conflict") {
+			const runtime = this.getPrismLlamaCppRuntime();
+			if (!runtime.isRunning() || !runtime.stop().stopped) {
+				return {
+					ready: false,
+					reason: `server_model_conflict:${probe.servedModelIds.join(",") || "unknown"}`,
+				};
+			}
 		}
 		const descriptor = PRISM_LLAMACPP_DESCRIPTORS[model.id];
 		if (!descriptor) {
@@ -507,7 +514,6 @@ export class LocalRuntimeController {
 		if (!served.ok) {
 			return { ready: false, reason: `${served.stage}:${served.error}` };
 		}
-		this._confirmedUp.add(confirmedKey);
 		return { ready: true, reason: "started" };
 	}
 

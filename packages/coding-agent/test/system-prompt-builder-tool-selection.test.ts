@@ -41,7 +41,13 @@ function makeDeps(overrides: Partial<SystemPromptBuilderDeps> = {}): SystemPromp
 		getToolPromptGuidelines: () => undefined,
 		getModelAdaptationRules: () => [],
 		getActiveExtensions: () => [],
-		getContextWindow: () => undefined,
+		getModelCapabilityProfile: () => ({
+			class: "full",
+			reasonCode: "test",
+			systemPromptMaxChars: undefined,
+			backgroundLanesEnabled: true,
+			laneMaxOutputTokens: 2_048,
+		}),
 		getThinkingLevel: () => "medium",
 		...overrides,
 	};

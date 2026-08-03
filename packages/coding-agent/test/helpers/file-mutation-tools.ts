@@ -23,7 +23,7 @@ function requireIntentId(details: PreparedMutationDetails | undefined): string {
 	return details.intentId;
 }
 
-/** Adapt behavior-focused legacy tests onto the model-facing prepare/commit protocol. */
+/** Adapt behavior-focused legacy tests onto the model-facing two-phase edit protocol. */
 export function withPreparedEdit(tool: EditTool): {
 	execute(toolCallId: string, input: PreparedEditInput, signal?: AbortSignal): ReturnType<EditTool["execute"]>;
 } {
@@ -33,7 +33,7 @@ export function withPreparedEdit(tool: EditTool): {
 			return tool.execute(
 				toolCallId,
 				{
-					action: "commit",
+					action: "edit",
 					path: input.path,
 					intentId: requireIntentId(prepared.details),
 					edits: input.edits,
@@ -44,7 +44,7 @@ export function withPreparedEdit(tool: EditTool): {
 	};
 }
 
-/** Adapt behavior-focused legacy tests onto the model-facing prepare/commit protocol. */
+/** Adapt behavior-focused legacy tests onto the model-facing two-phase write protocol. */
 export function withPreparedWrite(tool: WriteTool): {
 	execute(toolCallId: string, input: PreparedWriteInput, signal?: AbortSignal): ReturnType<WriteTool["execute"]>;
 } {
@@ -54,7 +54,7 @@ export function withPreparedWrite(tool: WriteTool): {
 			return tool.execute(
 				toolCallId,
 				{
-					action: "commit",
+					action: "write",
 					path: input.path,
 					intentId: requireIntentId(prepared.details),
 					content: input.content,

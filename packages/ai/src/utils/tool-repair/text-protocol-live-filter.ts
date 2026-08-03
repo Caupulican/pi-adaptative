@@ -49,9 +49,20 @@ export class TextProtocolLiveFilter {
 	private closer: string | undefined;
 	private rawLength = 0;
 	private visibleText = "";
+	private completedEnvelopes = 0;
 
 	get visible(): string {
 		return this.visibleText;
+	}
+
+	/** Number of complete envelope delimiters observed in this append-only block. */
+	get completedEnvelopeCount(): number {
+		return this.completedEnvelopes;
+	}
+
+	/** True while a suffix can still become an opener, or while an envelope body is open. */
+	get holdingPotentialEnvelope(): boolean {
+		return this.closer !== undefined || this.pending.length > 0;
 	}
 
 	advance(delta: string): string {
@@ -70,6 +81,7 @@ export class TextProtocolLiveFilter {
 		this.closer = undefined;
 		this.rawLength = fullText.length;
 		this.visibleText = "";
+		this.completedEnvelopes = 0;
 		this.consume(fullText);
 	}
 
@@ -88,6 +100,7 @@ export class TextProtocolLiveFilter {
 				}
 				this.pending = this.pending.slice(closerIndex + this.closer.length);
 				this.closer = undefined;
+				this.completedEnvelopes++;
 				continue;
 			}
 

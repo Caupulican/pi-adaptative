@@ -863,7 +863,7 @@ describe("AgentSession worker delegation", () => {
 					return fauxAssistantMessage(
 						[
 							fauxToolCall("write", {
-								action: "commit",
+								action: "write",
 								path: "src/direct.ts",
 								intentId,
 								content: "export const direct = true;\n",

@@ -274,13 +274,22 @@ describe("LocalRuntimeController.reconcile — prism llama.cpp", () => {
 		);
 	}
 
+	function configuredPrismDeps(): PrismLlamaCppDeps {
+		return {
+			fetchFn: (async (url: string) => {
+				const endpoint = String(url);
+				if (endpoint.endsWith("/health")) return new Response("", { status: 200 });
+				if (endpoint.endsWith("/v1/models")) return Response.json({ data: [{ id: BONSAI_27B.repo }] });
+				return new Response("", { status: 404 });
+			}) as unknown as typeof fetch,
+		};
+	}
+
 	it("stops and drains the singleton prism runtime when no eligible model is pi-managed prism", async () => {
 		const agentDir = scratchDir("prism-drop");
 		try {
 			writeManifest(agentDir);
-			const fetchFn = (async (url: string) =>
-				new Response("", { status: String(url).endsWith("/health") ? 200 : 404 })) as unknown as typeof fetch;
-			const ctrl = controller(agentDir, undefined, { fetchFn });
+			const ctrl = controller(agentDir, undefined, configuredPrismDeps());
 
 			const runtimeBefore = ctrl.getPrismLlamaCppRuntime();
 			await expect(ctrl.ensureIsolatedModelReady(bonsaiModel())).resolves.toBeUndefined();
@@ -299,9 +308,7 @@ describe("LocalRuntimeController.reconcile — prism llama.cpp", () => {
 		const agentDir = scratchDir("prism-keep");
 		try {
 			writeManifest(agentDir);
-			const fetchFn = (async (url: string) =>
-				new Response("", { status: String(url).endsWith("/health") ? 200 : 404 })) as unknown as typeof fetch;
-			const ctrl = controller(agentDir, undefined, { fetchFn });
+			const ctrl = controller(agentDir, undefined, configuredPrismDeps());
 			const model = bonsaiModel();
 
 			const runtimeBefore = ctrl.getPrismLlamaCppRuntime();

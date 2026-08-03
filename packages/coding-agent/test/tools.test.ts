@@ -300,7 +300,7 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 			expect(getTextOutput(result)).toContain(testFile);
-			expect(result.details?.phase).toBe("committed");
+			expect(result.details?.phase).toBe("written");
 			expect(result.details?.contentRef).toMatch(/^file-content:/);
 		});
 

@@ -48,6 +48,16 @@ describe("model capability auto-detection", () => {
 			const profile = harness.session.getModelCapabilityProfile();
 			expect(profile.class).toBe("minimal");
 			expect(profile.backgroundLanesEnabled).toBe(false);
+			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			expect(harness.session.systemPrompt).not.toContain("N+2 ARCHITECTURE");
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
+			const composition = harness.session.getContextCompositionReport();
+			expect(composition.systemPromptTokens + composition.toolSchemaTokens).toBeLessThanOrEqual(
+				profile.contextWindow! * 0.35,
+			);
+			// Prompt shaping is orthogonal to transport selection. An unflagged model still uses
+			// provider-native tool calls; capability reduction must never switch on the phone protocol.
+			expect(harness.session.agent.textToolCallProtocol).toBeUndefined();
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"bash",
@@ -78,6 +88,51 @@ describe("model capability auto-detection", () => {
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
 			expect(harness.session.getActiveToolNames()).toEqual([]);
+			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's concise chat assistant\./);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps an explicitly phone-only small model on the text protocol while using the same minimal prompt", async () => {
+		const harness = await createHarness({
+			models: [{ id: "phone-only-small", contextWindow: 8_192, textToolCallProtocol: true }],
+		});
+		try {
+			expect(harness.session.getModelCapabilityProfile().class).toBe("minimal");
+			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			harness.setResponses([fauxAssistantMessage("done")]);
+			await harness.session.prompt("Use the configured tool protocol.");
+			expect(harness.session.agent.textToolCallProtocol).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("blocks an extension from bypassing the constrained prompt budget before the provider call", async () => {
+		let providerCalled = false;
+		const harness = await createHarness({
+			models: [{ id: "small-model", contextWindow: 8_192 }],
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => ({
+						systemPrompt: `${event.systemPrompt}\n${"extension expansion ".repeat(500)}`,
+					}));
+				},
+			],
+		});
+		try {
+			harness.setResponses([
+				() => {
+					providerCalled = true;
+					return fauxAssistantMessage("must not run");
+				},
+			]);
+
+			await expect(harness.session.prompt("hello")).rejects.toThrow(
+				"minimal system prompt exceeds its 4096-character capability budget",
+			);
+			expect(providerCalled).toBe(false);
 		} finally {
 			harness.cleanup();
 		}
@@ -105,6 +160,8 @@ describe("model capability auto-detection", () => {
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("full");
 			expect(harness.session.getActiveToolNames()).toContain("goal");
+			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
+			expect(harness.session.systemPrompt).toContain("N+2 ARCHITECTURE");
 		} finally {
 			harness.cleanup();
 		}
@@ -135,9 +192,11 @@ describe("model capability auto-detection", () => {
 				"artifact_retrieve",
 			]);
 			expect(harness.session.systemPrompt).not.toContain(delegateSnippet);
+			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
 
 			await harness.session.setModel(harness.getModel("big-model")!);
 			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
+			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
 		} finally {
 			harness.cleanup();
 		}

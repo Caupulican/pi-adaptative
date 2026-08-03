@@ -133,6 +133,13 @@ export type ToolFailurePhase =
 	| "cancelled"
 	| "provisioning";
 
+export const REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE = {
+	failureCode: "repeated_successful_call",
+	diagnostic: "The identical phone tool call already succeeded and was not executed again.",
+	guidance:
+		"Use the previous successful result and continue; it is quoted in the diagnostic. Answer the user if the task is complete, or call a different required tool. Do not retry the same call unchanged.",
+} as const;
+
 interface ToolExecutionErrorCatalogueEntry {
 	name: string;
 	phase: ToolFailurePhase;
@@ -172,6 +179,28 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 			"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
 		matches(message: string): boolean {
 			return /\bPI_FILE_ENCODING_CORRUPTION\b/i.test(message);
+		},
+	},
+	{
+		name: "repeatedSuccessfulCall",
+		phase: "execution",
+		failureCode: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.failureCode,
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
+		matches(message: string): boolean {
+			return message === REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic;
+		},
+	},
+	{
+		name: "fileMutationIntentInvalid",
+		phase: "execution",
+		failureCode: "mutation_intent_invalid",
+		retainDiagnostic: true,
+		guidance:
+			'Call the same file tool with action "prepare" and the same path, wait for its result, then copy the returned intentId exactly into action "write" or "edit". Never invent or reuse an intentId.',
+		matches(message: string): boolean {
+			return /file mutation intent is invalid, expired, or belongs to another session/i.test(message);
 		},
 	},
 	{

@@ -51,6 +51,18 @@ describe("BONSAI_27B descriptor", () => {
 			file: "Bonsai-27B-Q1_0.gguf",
 			mmprojFile: "Bonsai-27B-mmproj-Q8_0.gguf",
 			displayName: "Bonsai-27B (1-bit Q1_0 + vision)",
+			architecture: "dense",
+			runtime: "prism-llamacpp",
+			family: "bonsai",
+			parameterScale: "27B",
+			weightFormat: "q1_0",
+			matchedDrafter: {
+				kind: "dspark",
+				file: "Bonsai-27B-dspark-Q4_1.gguf",
+				draftMax: 4,
+				minimumContext: 16_384,
+				validatedBackend: "cuda",
+			},
 		});
 	});
 });
@@ -98,13 +110,8 @@ describe("resolvePrismLlamaAsset", () => {
 		});
 	});
 
-	it("resolves windows CPU zips per architecture, and stays CPU even with an NVIDIA GPU (CUDA-on-Windows out of scope for v1)", () => {
+	it("resolves Windows CPU zips per architecture when no NVIDIA GPU is present", () => {
 		expect(resolvePrismLlamaAsset("win32", "x64", false)).toEqual({
-			name: "llama-bin-win-cpu-x64.zip",
-			kind: "zip",
-			backend: "cpu",
-		});
-		expect(resolvePrismLlamaAsset("win32", "x64", true)).toEqual({
 			name: "llama-bin-win-cpu-x64.zip",
 			kind: "zip",
 			backend: "cpu",
@@ -113,6 +120,15 @@ describe("resolvePrismLlamaAsset", () => {
 			name: "llama-bin-win-cpu-arm64.zip",
 			kind: "zip",
 			backend: "cpu",
+		});
+	});
+
+	it("resolves the pinned Windows x64 CUDA build with its required CUDA-runtime companion", () => {
+		expect(resolvePrismLlamaAsset("win32", "x64", true)).toEqual({
+			name: "llama-prism-b1-38c66ad-bin-win-cuda-12.4-x64.zip",
+			kind: "zip",
+			backend: "cuda",
+			companionAssets: [{ name: "cudart-llama-bin-win-cuda-12.4-x64.zip", kind: "zip" }],
 		});
 	});
 
@@ -334,6 +350,76 @@ describe("installManaged", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	it("installs both pinned Windows CUDA archives before persisting a CUDA manifest", async () => {
+		const agentDir = scratchDir("install-windows-cuda");
+		try {
+			const requestedUrls: string[] = [];
+			const extractArchive = vi.fn(async (_input: Readable, destDir: string) => {
+				mkdirSync(join(destDir, "bin"), { recursive: true });
+				writeFileSync(join(destDir, "bin", "llama-server.exe"), "");
+				return { ok: true };
+			});
+			const runtime = new PrismLlamaCppRuntime({
+				agentDir,
+				deps: {
+					platform: () => "win32",
+					arch: () => "x64",
+					hasNvidiaGpu: () => true,
+					fetchFn: (async (url: string) => {
+						requestedUrls.push(url);
+						return new Response("fake-archive-bytes", { status: 200 });
+					}) as unknown as typeof fetch,
+					extractArchive,
+				},
+			});
+
+			expect(await runtime.installManaged()).toEqual({ ok: true });
+			expect(requestedUrls).toEqual([
+				`${PRISM_LLAMACPP_RELEASES_BASE_URL}/${PRISM_LLAMACPP_PINNED_RELEASE}/llama-prism-b1-38c66ad-bin-win-cuda-12.4-x64.zip`,
+				`${PRISM_LLAMACPP_RELEASES_BASE_URL}/${PRISM_LLAMACPP_PINNED_RELEASE}/cudart-llama-bin-win-cuda-12.4-x64.zip`,
+			]);
+			expect(extractArchive).toHaveBeenCalledTimes(2);
+			const manifest = JSON.parse(
+				readFileSync(join(agentDir, "runtimes", "prism-llamacpp", "install.json"), "utf8"),
+			);
+			expect(manifest).toMatchObject({ backend: "cuda", binaryRelPath: join("bin", "llama-server.exe") });
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not mark Windows CUDA installed when its companion archive fails", async () => {
+		const agentDir = scratchDir("install-windows-cuda-companion-fail");
+		try {
+			let requests = 0;
+			const runtime = new PrismLlamaCppRuntime({
+				agentDir,
+				deps: {
+					platform: () => "win32",
+					arch: () => "x64",
+					hasNvidiaGpu: () => true,
+					fetchFn: (async () => {
+						requests += 1;
+						return requests === 1
+							? new Response("fake-main-archive", { status: 200 })
+							: new Response(null, { status: 404 });
+					}) as unknown as typeof fetch,
+					extractArchive: async (_input, destDir) => {
+						mkdirSync(join(destDir, "bin"), { recursive: true });
+						writeFileSync(join(destDir, "bin", "llama-server.exe"), "");
+						return { ok: true };
+					},
+				},
+			});
+
+			const result = await runtime.installManaged();
+			expect(result).toEqual({ ok: false, error: "download-fail: HTTP 404" });
+			expect(existsSync(join(agentDir, "runtimes", "prism-llamacpp", "install.json"))).toBe(false);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("downloadModel", () => {
@@ -471,7 +557,12 @@ describe("serve", () => {
 			agentDir: "/agent",
 			deps: { existsFn: () => false, spawnFn: spawnFn as never },
 		});
-		const result = await runtime.serve({ modelPath: "/models/m.gguf", port: 8123, numCtx: 4096 });
+		const result = await runtime.serve({
+			modelPath: "/models/m.gguf",
+			modelAlias: "acme/m",
+			port: 8123,
+			numCtx: 4096,
+		});
 		expect(result).toEqual({ ok: false, error: "binary-missing" });
 		expect(spawnFn).not.toHaveBeenCalled();
 	});
@@ -489,7 +580,12 @@ describe("serve", () => {
 				agentDir,
 				deps: { existsFn: () => false, spawnFn: spawnFn as never },
 			});
-			const result = await runtime.serve({ modelPath: "/models/m.gguf", port: 8123, numCtx: 4096 });
+			const result = await runtime.serve({
+				modelPath: "/models/m.gguf",
+				modelAlias: "acme/m",
+				port: 8123,
+				numCtx: 4096,
+			});
 			expect(result).toEqual({ ok: false, error: "binary-missing" });
 			expect(spawnFn).not.toHaveBeenCalled();
 		} finally {
@@ -497,7 +593,69 @@ describe("serve", () => {
 		}
 	});
 
-	it("spawns with exact argv (-m/--mmproj/--host/--port/-c) and no -ngl on a cpu backend, then health-polls to ready", async () => {
+	it("reuses an already-running server only when its advertised alias matches", async () => {
+		const agentDir = scratchDir("serve-existing-match");
+		try {
+			writeManifest(agentDir, {
+				release: PRISM_LLAMACPP_PINNED_RELEASE,
+				binaryRelPath: "bin/llama-server",
+				backend: "cpu",
+			});
+			const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
+			const spawnFn = vi.fn();
+			const runtime = new PrismLlamaCppRuntime({
+				agentDir,
+				deps: {
+					existsFn: (path) => path === binaryPath,
+					spawnFn: spawnFn as never,
+					fetchFn: (async (input) =>
+						String(input).endsWith("/v1/models")
+							? Response.json({ data: [{ id: "acme/m" }] })
+							: Response.json({})) as typeof fetch,
+				},
+			});
+
+			expect(
+				await runtime.serve({ modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8123, numCtx: 4096 }),
+			).toEqual({ ok: true, baseUrl: "http://127.0.0.1:8123" });
+			expect(spawnFn).not.toHaveBeenCalled();
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses an already-running different model before spawning on its port", async () => {
+		const agentDir = scratchDir("serve-existing-conflict");
+		try {
+			writeManifest(agentDir, {
+				release: PRISM_LLAMACPP_PINNED_RELEASE,
+				binaryRelPath: "bin/llama-server",
+				backend: "cpu",
+			});
+			const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
+			const spawnFn = vi.fn();
+			const runtime = new PrismLlamaCppRuntime({
+				agentDir,
+				deps: {
+					existsFn: (path) => path === binaryPath,
+					spawnFn: spawnFn as never,
+					fetchFn: (async (input) =>
+						String(input).endsWith("/v1/models")
+							? Response.json({ data: [{ id: "other/model" }] })
+							: Response.json({})) as typeof fetch,
+				},
+			});
+
+			expect(
+				await runtime.serve({ modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8123, numCtx: 4096 }),
+			).toEqual({ ok: false, error: "model-identity-conflict:other/model" });
+			expect(spawnFn).not.toHaveBeenCalled();
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("spawns with a bounded balanced profile and no -ngl on a cpu backend, then health-polls to ready", async () => {
 		const agentDir = scratchDir("serve-argv");
 		try {
 			writeManifest(agentDir, {
@@ -513,8 +671,15 @@ describe("serve", () => {
 				agentDir,
 				deps: {
 					existsFn: (path) => path === binaryPath,
+					totalMemoryBytes: () => 10 * 1024 ** 3,
+					logicalCpuCount: () => 16,
 					sleepFn: async () => {},
-					fetchFn: (async () => new Response("{}", { status: up ? 200 : 503 })) as typeof fetch,
+					fetchFn: (async (input) => {
+						if (!up) return new Response("", { status: 503 });
+						return String(input).endsWith("/v1/models")
+							? Response.json({ data: [{ id: BONSAI_27B.repo }] })
+							: Response.json({});
+					}) as typeof fetch,
 					spawnFn: (command, args) => {
 						spawnCommand = command;
 						spawnArgs = args;
@@ -525,6 +690,7 @@ describe("serve", () => {
 			});
 			const result = await runtime.serve({
 				modelPath: "/models/Bonsai-27B-Q1_0.gguf",
+				modelAlias: BONSAI_27B.repo,
 				mmprojPath: "/models/Bonsai-27B-mmproj-Q8_0.gguf",
 				port: 8123,
 				numCtx: 8192,
@@ -534,6 +700,8 @@ describe("serve", () => {
 			expect(spawnArgs).toEqual([
 				"-m",
 				"/models/Bonsai-27B-Q1_0.gguf",
+				"--alias",
+				BONSAI_27B.repo,
 				"--mmproj",
 				"/models/Bonsai-27B-mmproj-Q8_0.gguf",
 				"--host",
@@ -542,6 +710,20 @@ describe("serve", () => {
 				"8123",
 				"-c",
 				"8192",
+				"--cache-ram",
+				"512",
+				"-np",
+				"1",
+				"-fa",
+				"on",
+				"-ctk",
+				"q8_0",
+				"-ctv",
+				"q8_0",
+				"-t",
+				"4",
+				"-tb",
+				"4",
 			]);
 			expect(runtime.isRunning()).toBe(true);
 		} finally {
@@ -564,8 +746,15 @@ describe("serve", () => {
 				agentDir,
 				deps: {
 					existsFn: (path) => path === binaryPath,
+					totalMemoryBytes: () => 10 * 1024 ** 3,
+					logicalCpuCount: () => 16,
 					sleepFn: async () => {},
-					fetchFn: (async () => new Response("{}", { status: up ? 200 : 503 })) as typeof fetch,
+					fetchFn: (async (input) => {
+						if (!up) return new Response("", { status: 503 });
+						return String(input).endsWith("/v1/models")
+							? Response.json({ data: [{ id: "acme/m" }] })
+							: Response.json({});
+					}) as typeof fetch,
 					spawnFn: (_command, args) => {
 						spawnArgs = args;
 						up = true;
@@ -573,17 +762,38 @@ describe("serve", () => {
 					},
 				},
 			});
-			const result = await runtime.serve({ modelPath: "/models/m.gguf", port: 8124, numCtx: 4096 });
+			const result = await runtime.serve({
+				modelPath: "/models/m.gguf",
+				modelAlias: "acme/m",
+				port: 8124,
+				numCtx: 4096,
+			});
 			expect(result).toEqual({ ok: true, baseUrl: "http://127.0.0.1:8124" });
 			expect(spawnArgs).toEqual([
 				"-m",
 				"/models/m.gguf",
+				"--alias",
+				"acme/m",
 				"--host",
 				"127.0.0.1",
 				"--port",
 				"8124",
 				"-c",
 				"4096",
+				"--cache-ram",
+				"512",
+				"-np",
+				"1",
+				"-fa",
+				"on",
+				"-ctk",
+				"q8_0",
+				"-ctv",
+				"q8_0",
+				"-t",
+				"4",
+				"-tb",
+				"4",
 				"-ngl",
 				"99",
 			]);
@@ -616,7 +826,12 @@ describe("serve", () => {
 					spawnFn: () => fakeChild(4244),
 				},
 			});
-			const result = await runtime.serve({ modelPath: "/models/m.gguf", port: 8125, numCtx: 4096 });
+			const result = await runtime.serve({
+				modelPath: "/models/m.gguf",
+				modelAlias: "acme/m",
+				port: 8125,
+				numCtx: 4096,
+			});
 			expect(result).toEqual({ ok: false, error: "health-timeout" });
 			expect(sleeps).toHaveLength(3);
 			expect(killProcessTreeSpy).toHaveBeenCalledWith(4244);
@@ -645,14 +860,19 @@ describe("serve", () => {
 				deps: {
 					existsFn: (path) => path === binaryPath,
 					sleepFn: async () => {},
-					fetchFn: (async () => new Response("{}", { status: up ? 200 : 503 })) as typeof fetch,
+					fetchFn: (async (input) => {
+						if (!up) return new Response("", { status: 503 });
+						return String(input).endsWith("/v1/models")
+							? Response.json({ data: [{ id: "acme/m" }] })
+							: Response.json({});
+					}) as typeof fetch,
 					spawnFn: () => {
 						up = true;
 						return fakeChild(4245);
 					},
 				},
 			});
-			await runtime.serve({ modelPath: "/models/m.gguf", port: 8126, numCtx: 4096 });
+			await runtime.serve({ modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8126, numCtx: 4096 });
 			expect(trackSpy).toHaveBeenCalledWith(4245);
 			expect(runtime.isRunning()).toBe(true);
 

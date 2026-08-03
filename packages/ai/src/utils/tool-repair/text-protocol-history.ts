@@ -20,5 +20,8 @@ export function renderTextProtocolAssistantCall(toolCall: ToolCall, variant: Tex
  */
 export function renderTextProtocolToolResult(toolResult: ToolResultMessage): string {
 	const text = joinTextContent(toolResult.content);
-	return `Tool result (${toolResult.toolName}):\n${text.length > 0 ? text : "(see attached image)"}`;
+	const result = text.length > 0 ? text : "(see attached image)";
+	return toolResult.isError
+		? `Tool result (${toolResult.toolName}; failed):\n${result}\nFollow the repair or next_action before retrying; do not resend the unchanged call.`
+		: `Tool result (${toolResult.toolName}; succeeded):\n${result}\nUse this result and continue. Do not repeat this unchanged successful call.`;
 }

@@ -57,8 +57,12 @@ export function renderOllamaContextModelfile(args: { from: string; numCtx: numbe
 }
 
 export function sizedLocalModelRef(sourceRef: string, numCtx: number): string {
+	return derivedLocalModelRef(sourceRef, `ctx${numCtx}`);
+}
+
+export function derivedLocalModelRef(sourceRef: string, tag: string): string {
 	const safeSource = sourceRef.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "local-model";
-	return `pi-${safeSource}:ctx${numCtx}`;
+	return `pi-${safeSource}:${tag}`;
 }
 
 function chooseContextRung(args: {

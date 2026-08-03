@@ -105,7 +105,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-1",
-			{ action: "commit", path: filePath, intentId: "render-only", edits },
+			{ action: "edit", path: filePath, intentId: "render-only", edits },
 			{},
 			createEditToolDefinition(process.cwd()),
 			tui,
@@ -144,7 +144,7 @@ describe("edit tool TUI rendering", () => {
 		component.updateResult(
 			{
 				content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
-				details: { ...diff, phase: "committed" },
+				details: { ...diff, phase: "edited" },
 				isError: false,
 			},
 			false,
@@ -184,7 +184,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-replay",
-			{ action: "commit", path: filePath, intentId: "render-only", edits },
+			{ action: "edit", path: filePath, intentId: "render-only", edits },
 			{},
 			createEditToolDefinition(process.cwd()),
 			tui,
@@ -197,7 +197,7 @@ describe("edit tool TUI rendering", () => {
 		component.updateResult(
 			{
 				content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${filePath}.` }],
-				details: { ...diff, phase: "committed" },
+				details: { ...diff, phase: "edited" },
 				isError: false,
 			},
 			false,
@@ -230,7 +230,7 @@ describe("edit tool TUI rendering", () => {
 		const intentId = preparation.details?.intentId;
 		if (!intentId) throw new Error("Expected edit preparation to return an intent id.");
 		const args = {
-			action: "commit" as const,
+			action: "edit" as const,
 			path: "bounded-edit.txt",
 			intentId,
 			edits: [
@@ -272,7 +272,7 @@ describe("edit tool TUI rendering", () => {
 			"edit",
 			"tool-call-2",
 			{
-				action: "commit",
+				action: "edit",
 				path: filePath,
 				intentId: "render-only",
 				edits: [{ oldText: "does not exist", newText: "replacement" }],

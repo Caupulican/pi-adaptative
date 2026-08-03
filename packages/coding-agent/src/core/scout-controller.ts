@@ -1,5 +1,5 @@
 import { Agent, type AgentTool, type StreamFn } from "@caupulican/pi-agent-core";
-import type { Model } from "@caupulican/pi-ai";
+import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { registerInFlightWork } from "./reload-blockers.ts";
 
 export const SCOUT_SYSTEM_PROMPT = `You are a repository scout. You explore a codebase with read-only tools and return compact evidence. You do NOT solve tasks, write code, or modify anything.
@@ -38,7 +38,13 @@ export interface ScoutRunResult {
 
 export interface ScoutControllerDeps {
 	resolveScoutModel(): Promise<
-		{ model: Model<any>; apiKey?: string; headers?: Record<string, string> } | { failure: string }
+		| {
+				model: Model<Api>;
+				apiKey?: string;
+				headers?: Record<string, string>;
+				textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
+		  }
+		| { failure: string }
 	>;
 	getCwd(): string;
 	buildReadOnlyTools(cwd: string): AgentTool<any>[];
@@ -107,6 +113,7 @@ export class ScoutController {
 				},
 				streamFn: this.deps.streamFn,
 				getApiKey: () => modelResolution.apiKey,
+				textToolCallProtocol: modelResolution.textToolCallProtocol,
 				maxStallTurns: turnLimit,
 			});
 
