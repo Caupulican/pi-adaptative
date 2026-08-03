@@ -278,7 +278,7 @@ Worker writes use **review-after-apply** semantics: a grant-authorized direct `w
 
 Deterministic argument repair is built in and has no settings toggle; schema-valid calls still return unchanged without entering the repair layer. `PI_TOOL_REPAIR_DISABLED=1` remains only an emergency diagnostic kill switch.
 
-Text protocol precedence is: `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` kills it, then `toolRepair.textProtocol` force-enables or disables it globally, then per-model `textToolCallProtocol` applies, then a persisted `/toolprobe` text-protocol verdict applies to that exact model. Native provider tool calls still take precedence when the model emits them; the text protocol is the fallback lane for pure-text models. Failed calibration is stored per host/model and can be cleared with `/toolprotocol-reset <provider/model>`.
+Text protocol precedence is: `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` kills it; a persisted `/toolprobe` native verdict then keeps that exact model on native calls; otherwise `toolRepair.textProtocol` force-enables or disables globally, per-model `textToolCallProtocol` applies, and finally a persisted calibrated text-protocol verdict applies. The phone/text protocol is therefore a fallback lane for models without proven native calls, never a replacement for a proven native path. Failed calibration is stored per host/model and can be cleared with `/toolprotocol-reset <provider/model>`.
 
 Environment kill switches override their diagnostic layers: `PI_TOOL_REPAIR_DISABLED=1`, `PI_TOOL_REPAIR_TEACH_DISABLED=1`, and `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1`. See [Tool repair](tool-repair.md) for diagnostics, reset controls, and replay.
 

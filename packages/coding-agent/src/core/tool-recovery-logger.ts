@@ -1,8 +1,12 @@
 import { Worker } from "node:worker_threads";
+import { readToolFailureTelemetry } from "@caupulican/pi-agent-core";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
+import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import {
 	createToolArgumentValidationLogRecord,
+	createToolExecutionFailureLogRecord,
 	type ToolArgumentValidationLogRecord,
+	type ToolExecutionFailureLogRecord,
 	type ToolRecoveryLogWorkerRecord,
 } from "./tool-recovery-log-records.ts";
 
@@ -22,6 +26,8 @@ export interface ToolRecoveryLoggerStats {
 	workerStarts: number;
 	workerCrashes: number;
 	respawns: number;
+	executionFailures: number;
+	failurePhases: Partial<Record<ToolFailurePhase, number>>;
 }
 
 export interface ToolRecoveryLoggerOptions {
@@ -82,6 +88,8 @@ export class ToolRecoveryLogger {
 	private workerStarts = 0;
 	private workerCrashes = 0;
 	private respawns = 0;
+	private executionFailures = 0;
+	private readonly failurePhases: Partial<Record<ToolFailurePhase, number>> = {};
 	private respawnAttempted = false;
 	private shuttingDown = false;
 
@@ -111,6 +119,28 @@ export class ToolRecoveryLogger {
 		return record;
 	}
 
+	recordToolExecutionFailure(args: {
+		provider?: string;
+		model?: string;
+		tool: string;
+		details: unknown;
+	}): ToolExecutionFailureLogRecord | undefined {
+		if (!this.enabled) return undefined;
+		const failure = readToolFailureTelemetry(args.details);
+		if (!failure) return undefined;
+		const record = createToolExecutionFailureLogRecord({
+			...args,
+			...failure,
+			recordId: `${this.sessionId}:${this.recordSequence++}`,
+			sessionId: this.sessionId,
+			ts: this.now().toISOString(),
+		});
+		this.executionFailures++;
+		this.failurePhases[failure.phase] = (this.failurePhases[failure.phase] ?? 0) + 1;
+		this.enqueue({ eventLogPath: this.eventLogPath, failureCorpusPath: this.failureCorpusPath, record });
+		return record;
+	}
+
 	getStats(): ToolRecoveryLoggerStats {
 		return {
 			enabled: this.enabled,
@@ -121,6 +151,8 @@ export class ToolRecoveryLogger {
 			workerStarts: this.workerStarts,
 			workerCrashes: this.workerCrashes,
 			respawns: this.respawns,
+			executionFailures: this.executionFailures,
+			failurePhases: { ...this.failurePhases },
 		};
 	}
 

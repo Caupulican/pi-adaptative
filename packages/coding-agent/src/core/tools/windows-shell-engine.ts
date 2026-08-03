@@ -168,7 +168,7 @@ function degradationError(
 	outcome: Extract<PythonRuntimeOutcome, { status: "offline" | "uv-unavailable" | "python-unavailable" }>,
 ): Error {
 	return new Error(
-		`The Windows shell engine (Python) is unavailable: ${outcome.reason} The simple-command PowerShell floor still works; fix the Python runtime (uv/network) to restore pipelines, redirection, expansion, and chaining.`,
+		`The Windows shell engine (Python) is unavailable: ${outcome.reason} The simple-command PowerShell floor still works; fix the Python runtime (uv/network) to restore for loops, portable builtins such as printf, pipelines, redirection, expansion, and chaining.`,
 	);
 }
 

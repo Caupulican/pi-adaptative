@@ -10,17 +10,20 @@ import io
 import os
 import subprocess
 import threading
+import time
 from typing import BinaryIO
 
+from arithmetic import ArithmeticError, compile_arithmetic, evaluate_arithmetic
 import nodes
 import parser as parser_module
 import proc
 import tokens as tokens_module
 from context import RUNNER_BUILTINS, STATE_BUILTINS, BuiltinContext, ExecContext
-from errors import ShellExit, UnsupportedConstruct
+from errors import LoopBreak, LoopContinue, LoopControl, ShellExit, UnsupportedConstruct
 from state import ShellState
 
 DEVNULL = os.devnull
+MAX_LOOP_ITERATIONS = 1_000_000
 
 
 class _Redirected:
@@ -344,7 +347,7 @@ def _run_pipeline_elements(elements: list, ctx: ExecContext) -> int:
                 try:
                     # Pipeline stages are subshell-like: state mutations belong to the stage,
                     # never to the parent command context or a sibling stage.
-                    stage_ctx = _sub_ctx(ctx, ctx.state.copy(), sin, sout, stderr_base)
+                    stage_ctx = _sub_ctx(ctx, ctx.state.copy(), sin, sout, stderr_base, loop_depth=0)
                     results[idx] = _dispatch_element(elements[idx], stage_ctx, sin, sout, stderr_base, is_pipeline=True)
                 except UnsupportedConstruct as exc:
                     # A structured refusal from an inline stage means the WHOLE command
@@ -356,6 +359,10 @@ def _run_pipeline_elements(elements: list, ctx: ExecContext) -> int:
                     results[idx] = 1
                 except ShellExit as exc:
                     results[idx] = exc.exit_code
+                except LoopControl:
+                    # A pipeline stage is a subshell boundary. Loop control in that
+                    # stage cannot alter an enclosing loop in the parent context.
+                    results[idx] = 0
                 except BaseException as exc:  # noqa: BLE001 - any other stage failure must not crash the engine
                     # Any OTHER exception is a real per-stage failure, not a refusal: it
                     # gets a named, actionable one-line message on the merged sink (never
@@ -487,6 +494,8 @@ def _dispatch_element(
         return _execute_subshell(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     if isinstance(element, nodes.BraceGroup):
         return _execute_brace_group(element, ctx, stdin_stream, stdout_stream, stderr_stream)
+    if isinstance(element, (nodes.ForCommand, nodes.ArithmeticForCommand)):
+        return _execute_for_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     if isinstance(element, nodes.SimpleCommand):
         return _dispatch_simple_command(element, ctx, stdin_stream, stdout_stream, stderr_stream)
     raise UnsupportedConstruct("malformed-syntax", f"unrecognized pipeline element {type(element)!r}")
@@ -498,6 +507,8 @@ def _sub_ctx(
     stdin_stream: BinaryIO | int,
     stdout_stream: BinaryIO | int,
     stderr_stream: BinaryIO | int,
+    *,
+    loop_depth: int | None = None,
 ) -> ExecContext:
     return ExecContext(
         state=state,
@@ -508,11 +519,12 @@ def _sub_ctx(
         builtins=ctx.builtins,
         deadline=ctx.deadline,
         stderr=stderr_stream,
+        loop_depth=ctx.loop_depth if loop_depth is None else loop_depth,
     )
 
 
-def _execute_redirected_group(
-    node: nodes.Subshell | nodes.BraceGroup,
+def _execute_redirected_compound(
+    node: nodes.Subshell | nodes.BraceGroup | nodes.ForCommand | nodes.ArithmeticForCommand,
     ctx: ExecContext,
     stdin_stream,
     stdout_stream,
@@ -526,8 +538,18 @@ def _execute_redirected_group(
             node.redirects, ctx, stdin_stream, stdout_stream, stderr_stream, tracker
         )
         state = ctx.state.copy() if isolated else ctx.state
-        inner_ctx = _sub_ctx(ctx, state, r_in, r_out, r_err)
+        inner_ctx = _sub_ctx(
+            ctx,
+            state,
+            r_in,
+            r_out,
+            r_err,
+            loop_depth=0 if isolated else ctx.loop_depth,
+        )
         try:
+            if isinstance(node, (nodes.ForCommand, nodes.ArithmeticForCommand)):
+                inner_ctx.loop_depth += 1
+                return _execute_loop(node, inner_ctx)
             return execute(node.body, inner_ctx)
         except ShellExit as exc:
             if isolated:
@@ -538,15 +560,87 @@ def _execute_redirected_group(
 
 
 def _execute_subshell(node: nodes.Subshell, ctx: ExecContext, stdin_stream, stdout_stream, stderr_stream) -> int:
-    return _execute_redirected_group(
+    return _execute_redirected_compound(
         node, ctx, stdin_stream, stdout_stream, stderr_stream, isolated=True
     )
 
 
 def _execute_brace_group(node: nodes.BraceGroup, ctx: ExecContext, stdin_stream, stdout_stream, stderr_stream) -> int:
-    return _execute_redirected_group(
+    return _execute_redirected_compound(
         node, ctx, stdin_stream, stdout_stream, stderr_stream, isolated=False
     )
+
+
+def _execute_for_command(
+    node: nodes.ForCommand | nodes.ArithmeticForCommand,
+    ctx: ExecContext,
+    stdin_stream,
+    stdout_stream,
+    stderr_stream,
+) -> int:
+    return _execute_redirected_compound(
+        node, ctx, stdin_stream, stdout_stream, stderr_stream, isolated=False
+    )
+
+
+def _check_loop_budget(ctx: ExecContext, iteration: int) -> None:
+    if ctx.deadline is not None and time.monotonic() >= ctx.deadline:
+        raise ShellExit(124)
+    if iteration >= MAX_LOOP_ITERATIONS:
+        _write_merged(
+            _merged_sink(ctx),
+            f"for: iteration limit ({MAX_LOOP_ITERATIONS}) exceeded\n".encode("utf-8"),
+            ctx,
+        )
+        raise ShellExit(124)
+
+
+def _execute_loop_body(body: nodes.CommandList, ctx: ExecContext) -> tuple[int, str | None]:
+    try:
+        return execute(body, ctx), None
+    except LoopBreak as exc:
+        if exc.levels > 1:
+            raise LoopBreak(exc.levels - 1) from None
+        return 0, "break"
+    except LoopContinue as exc:
+        if exc.levels > 1:
+            raise LoopContinue(exc.levels - 1) from None
+        return 0, "continue"
+
+
+def _execute_loop(node: nodes.ForCommand | nodes.ArithmeticForCommand, ctx: ExecContext) -> int:
+    if isinstance(node, nodes.ForCommand):
+        values: list[str] = []
+        for item in node.items:
+            values.extend(ctx.expand_word(item, ctx))
+
+        exit_code = 0
+        for iteration, value in enumerate(values):
+            _check_loop_budget(ctx, iteration)
+            ctx.state.setenv(node.name, value)
+            exit_code, action = _execute_loop_body(node.body, ctx)
+            if action == "break":
+                return exit_code
+        return exit_code
+
+    try:
+        initializer = compile_arithmetic(node.initializer)
+        condition = compile_arithmetic(node.condition)
+        update = compile_arithmetic(node.update)
+        evaluate_arithmetic(initializer, ctx.state)
+        exit_code = 0
+        iteration = 0
+        while condition is None or evaluate_arithmetic(condition, ctx.state) != 0:
+            _check_loop_budget(ctx, iteration)
+            iteration += 1
+            exit_code, action = _execute_loop_body(node.body, ctx)
+            if action == "break":
+                return exit_code
+            evaluate_arithmetic(update, ctx.state)
+        return exit_code
+    except ArithmeticError as exc:
+        _write_merged(_merged_sink(ctx), f"bash: arithmetic: {exc}\n".encode("utf-8"), ctx)
+        return 1
 
 
 def _dispatch_simple_command(
@@ -577,7 +671,7 @@ def _dispatch_simple_command(
         name = argv[0]
 
         if name in STATE_BUILTINS:
-            return _run_state_builtin(name, argv, ctx, r_out)
+            return _run_state_builtin(name, argv, ctx, r_out, r_err)
 
         if name in RUNNER_BUILTINS:
             return _run_xargs(argv, ctx, r_in, r_out)
@@ -621,17 +715,46 @@ def _as_stream(fd_or_stream: BinaryIO | int, mode: str) -> BinaryIO:
     return fd_or_stream
 
 
-def _run_state_builtin(name: str, argv: list[str], ctx: ExecContext, out_stream: BinaryIO | int) -> int:
+def _run_state_builtin(
+    name: str,
+    argv: list[str],
+    ctx: ExecContext,
+    out_stream: BinaryIO | int,
+    error_stream: BinaryIO | int | None = None,
+) -> int:
+    diagnostic_stream = error_stream if error_stream is not None else out_stream
+    if name in ("break", "continue"):
+        if len(argv) > 2:
+            _write_merged(diagnostic_stream, f"{name}: too many arguments\n".encode("utf-8"), ctx)
+            return 1
+        try:
+            levels = int(argv[1], 10) if len(argv) == 2 else 1
+        except ValueError:
+            _write_merged(diagnostic_stream, f"{name}: {argv[1]}: numeric argument required\n".encode("utf-8"), ctx)
+            return 1
+        if levels <= 0:
+            _write_merged(diagnostic_stream, f"{name}: loop count must be positive\n".encode("utf-8"), ctx)
+            return 1
+        if ctx.loop_depth == 0:
+            _write_merged(
+                diagnostic_stream,
+                f"bash: {name}: only meaningful in a 'for', 'while', or 'until' loop\n".encode("utf-8"),
+                ctx,
+            )
+            return 0
+        control = LoopBreak if name == "break" else LoopContinue
+        raise control(min(levels, ctx.loop_depth))
+
     if name == "exit":
         if len(argv) > 2:
-            _write_merged(out_stream, b"exit: too many arguments\n", ctx)
+            _write_merged(diagnostic_stream, b"exit: too many arguments\n", ctx)
             raise ShellExit(1)
         if len(argv) == 1:
             raise ShellExit(ctx.state.last_exit_code)
         try:
             exit_code = int(argv[1], 10)
         except ValueError:
-            _write_merged(out_stream, f"exit: {argv[1]}: numeric argument required\n".encode("utf-8"), ctx)
+            _write_merged(diagnostic_stream, f"exit: {argv[1]}: numeric argument required\n".encode("utf-8"), ctx)
             raise ShellExit(2)
         raise ShellExit(exit_code & 0xFF)
 
@@ -641,16 +764,16 @@ def _run_state_builtin(name: str, argv: list[str], ctx: ExecContext, out_stream:
         if print_new_cwd:
             oldpwd = ctx.state.env.get("OLDPWD")
             if not oldpwd:
-                _write_merged(out_stream, b"cd: OLDPWD not set\n", ctx)
+                _write_merged(diagnostic_stream, b"cd: OLDPWD not set\n", ctx)
                 return 1
             target = oldpwd
         if target is None:
-            _write_merged(out_stream, b"cd: HOME not set\n", ctx)
+            _write_merged(diagnostic_stream, b"cd: HOME not set\n", ctx)
             return 1
         try:
             ctx.state.chdir(target)
         except FileNotFoundError:
-            _write_merged(out_stream, f"cd: {target}: No such file or directory\n".encode("utf-8"), ctx)
+            _write_merged(diagnostic_stream, f"cd: {target}: No such file or directory\n".encode("utf-8"), ctx)
             return 1
         if print_new_cwd:
             _write_merged(out_stream, f"{ctx.state.cwd}\n".encode("utf-8"), ctx)

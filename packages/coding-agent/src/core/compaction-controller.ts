@@ -25,6 +25,8 @@ import type { SettingsManager } from "./settings-manager.ts";
 
 export type AutoCompactionReason = "overflow" | "threshold";
 
+const COMPACTION_RETRY_PREPARATION_OPTIONS = { allowTrailingCompactionAsPrevious: true } as const;
+
 type CompactionControllerEvent =
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| {
@@ -109,6 +111,7 @@ export async function runCompactionWithRetry<T>(options: {
 export class CompactionController {
 	private manualAbortController: AbortController | undefined;
 	private autoAbortController: AbortController | undefined;
+	private autoRunPromise: Promise<boolean> | undefined;
 	private overflowRecoveryAttempted = false;
 	private readonly deps: CompactionControllerDeps;
 
@@ -127,7 +130,11 @@ export class CompactionController {
 	}
 
 	isRunning(): boolean {
-		return this.manualAbortController !== undefined || this.autoAbortController !== undefined;
+		return (
+			this.manualAbortController !== undefined ||
+			this.autoAbortController !== undefined ||
+			this.autoRunPromise !== undefined
+		);
 	}
 
 	resetOverflowRecovery(): void {
@@ -250,7 +257,7 @@ export class CompactionController {
 					const preparation = prepareCompaction(
 						branch,
 						{ ...settings, keepRecentTokens: params.keepRecentTokens },
-						{ allowTrailingCompactionAsPrevious: true },
+						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
 					if (!preparation) throw new Error("Nothing to compact (session too small)");
 					const compactionThinkingLevel = this.deps.resolveThinkingLevel(model, sessionModel);
@@ -273,7 +280,15 @@ export class CompactionController {
 					);
 					return { result };
 				},
-				buildDeterministicCheckpoint: () => ({ result: createDeterministicCompaction(initialPreparation) }),
+				buildDeterministicCheckpoint: (params) => {
+					const preparation = prepareCompaction(
+						initialBranch,
+						{ ...settings, keepRecentTokens: params.keepRecentTokens },
+						COMPACTION_RETRY_PREPARATION_OPTIONS,
+					);
+					if (!preparation) throw new Error("Nothing to compact (session too small)");
+					return { result: createDeterministicCompaction(preparation) };
+				},
 				apply: async (result) => {
 					if (signal.aborted) throw new Error("Compaction cancelled");
 					await this.applyResult(result, false);
@@ -326,7 +341,7 @@ export class CompactionController {
 
 	async check(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
 		const settings = this.deps.getAdaptedSettings();
-		if (!settings.enabled) return false;
+		if (!settings.enabled || this.isRunning()) return false;
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 
 		const model = this.deps.getModel();
@@ -404,13 +419,28 @@ export class CompactionController {
 		return Math.max(calculateContextTokens(assistantMessage.usage), estimatedTokens);
 	}
 
-	async runAuto(reason: AutoCompactionReason, willRetry: boolean): Promise<boolean> {
+	runAuto(reason: AutoCompactionReason, willRetry: boolean): Promise<boolean> {
+		if (this.autoRunPromise) return this.autoRunPromise;
+		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());
+
+		const abortController = new AbortController();
+		this.autoAbortController = abortController;
+		let runPromise: Promise<boolean>;
+		runPromise = Promise.resolve()
+			.then(() => this.runAutoOnce(reason, willRetry, abortController.signal))
+			.finally(() => {
+				if (this.autoRunPromise === runPromise) this.autoRunPromise = undefined;
+				if (this.autoAbortController === abortController) this.autoAbortController = undefined;
+			});
+		this.autoRunPromise = runPromise;
+		return runPromise;
+	}
+
+	private async runAutoOnce(reason: AutoCompactionReason, willRetry: boolean, signal: AbortSignal): Promise<boolean> {
 		const settings = this.deps.getAdaptedSettings();
 		const model = this.deps.getModel();
 		this.deps.emit({ type: "compaction_start", reason });
 		const hadQueuedMessages = this.deps.agent.hasQueuedMessages();
-		this.autoAbortController = new AbortController();
-		const signal = this.autoAbortController.signal;
 		let fromExtension = false;
 		let lastCompaction: CompactionResult | undefined;
 		let extensionCancelled = false;
@@ -444,10 +474,14 @@ export class CompactionController {
 					this.deps.resolveModelAndAuth(modelTier === "session" ? model : this.deps.resolveModel(model), model),
 				summarizeAndVerify: async (params, compactModel, apiKey, headers, branchEntries) => {
 					fromExtension = false;
-					const preparation = prepareCompaction(branchEntries, {
-						...settings,
-						keepRecentTokens: params.keepRecentTokens,
-					});
+					const preparation = prepareCompaction(
+						branchEntries,
+						{
+							...settings,
+							keepRecentTokens: params.keepRecentTokens,
+						},
+						COMPACTION_RETRY_PREPARATION_OPTIONS,
+					);
 					if (!preparation) throw new Error("already compacted");
 					const compactionThinkingLevel = this.deps.resolveThinkingLevel(compactModel, model);
 					const extension = await this.getExtensionCompaction(
@@ -483,8 +517,12 @@ export class CompactionController {
 					);
 					return { result };
 				},
-				buildDeterministicCheckpoint: () => {
-					const preparation = prepareCompaction(this.deps.sessionManager.getBranch(), settings);
+				buildDeterministicCheckpoint: (params) => {
+					const preparation = prepareCompaction(
+						this.deps.sessionManager.getBranch(),
+						{ ...settings, keepRecentTokens: params.keepRecentTokens },
+						COMPACTION_RETRY_PREPARATION_OPTIONS,
+					);
 					if (!preparation) throw new Error("already compacted");
 					fromExtension = false;
 					return { result: createDeterministicCompaction(preparation) };
@@ -552,8 +590,6 @@ export class CompactionController {
 						: `Auto-compaction failed: ${errorMessage}`,
 			});
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
-		} finally {
-			this.autoAbortController = undefined;
 		}
 	}
 

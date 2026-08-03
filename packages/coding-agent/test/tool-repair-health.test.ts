@@ -83,4 +83,27 @@ describe("tool repair health", () => {
 				.rules.map((rule) => rule.mode),
 		).toEqual(["jsonStringParse"]);
 	});
+
+	it("reports execution failures by authoritative phase", () => {
+		const store = ModelAdaptationStore.forAgentDir(tempAgentDir(), {
+			fingerprint: () => ({ id: "host", cpu: "cpu", cores: 8, totalMemGb: 32 }),
+		});
+		const report = formatToolRepairHealthReport(store, new Date("2026-07-07T00:00:00.000Z"), {
+			enabled: true,
+			queued: 0,
+			inFlight: 0,
+			dropped: 0,
+			failures: 0,
+			workerStarts: 1,
+			workerCrashes: 0,
+			respawns: 0,
+			executionFailures: 3,
+			failurePhases: { execution: 1, timeout: 1, provisioning: 1 },
+		});
+
+		expect(report).toContain("execution failures: total=3");
+		expect(report).toContain("execution=1");
+		expect(report).toContain("timeout=1");
+		expect(report).toContain("provisioning=1");
+	});
 });

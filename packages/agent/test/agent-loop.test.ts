@@ -1062,7 +1062,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(JSON.stringify(toolResult)).not.toContain("no such file or directory");
 	});
 
-	it("links repaired validation telemetry to teach state and execution outcome without arguments", async () => {
+	it("routes phone argument repairs through shared teaching and execution telemetry without argument values", async () => {
 		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
 		const tool: AgentTool<typeof toolSchema, { items: Array<{ value: string }> }> = {
 			name: "collect",
@@ -1097,6 +1097,7 @@ describe("agentLoop with AgentMessage", () => {
 									id: "tool-1",
 									name: "collect",
 									arguments: { items: JSON.stringify([{ value: "secret-value" }]) },
+									source: "text-protocol",
 								},
 							],
 							"toolUse",
@@ -1126,6 +1127,7 @@ describe("agentLoop with AgentMessage", () => {
 				repairsApplied: ["jsonStringParse"],
 				taught: "note",
 				executionOutcome: "succeeded",
+				source: "text-protocol",
 			}),
 		]);
 		expect(JSON.stringify(events)).not.toContain("secret-value");
@@ -1279,7 +1281,12 @@ describe("agentLoop with AgentMessage", () => {
 
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
 		const userPrompt: AgentMessage = createUserMessage("echo something");
-		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const validationEvents: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolArgumentValidation: (event) => validationEvents.push(event),
+		};
 
 		let callIndex = 0;
 		const streamFn = () => {
@@ -1325,8 +1332,139 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResult?.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"malformed_call"') }),
 		]);
+		expect(JSON.stringify(toolResult)).toContain('"phase":"validation"');
+		expect(validationEvents).toHaveLength(1);
+		expect(validationEvents[0]?.errorKeywords).toEqual(["malformed_call"]);
 		expect(JSON.stringify(toolResult)).toContain("complete JSON argument object");
 		expect(JSON.stringify(toolResult)).not.toContain("truncated before complete JSON");
+	});
+
+	it("classifies an unknown phone tool by tool identity before its parser error", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let executed = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				executed = true;
+				return { content: [{ type: "text", text: "should not run" }], details: {} };
+			},
+		};
+		const validationEvents: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolArgumentValidation: (event) => validationEvents.push(event),
+		};
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: callIndex++ === 0 ? "toolUse" : "stop",
+					message:
+						callIndex === 1
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "phone-unknown",
+											name: "missing",
+											arguments: {},
+											source: "text-protocol",
+											errorMessage: 'Unknown tool "missing". Valid tools: echo.',
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("call a tool")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+		const result = await stream.result();
+		const toolResult = result.find((message) => message.role === "toolResult");
+		const failureText =
+			toolResult?.role === "toolResult"
+				? toolResult.content.find((block) => block.type === "text")?.text
+				: undefined;
+
+		expect(executed).toBe(false);
+		expect(failureText).toContain('"failure_code":"unknown_tool"');
+		expect(failureText).toContain('"phase":"validation"');
+		expect(failureText).toContain("currently available tool list");
+		expect(failureText).not.toContain('"failure_code":"malformed_call"');
+		expect(validationEvents[0]?.source).toBe("text-protocol");
+		expect(validationEvents[0]?.errorKeywords).toEqual(["unknown_tool"]);
+	});
+
+	it("preserves preflight identity and diagnostics without blaming valid arguments", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let executed = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				executed = true;
+				return { content: [{ type: "text", text: "should not run" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => {
+				throw new Error("host capability lookup unavailable");
+			},
+		};
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: callIndex++ === 0 ? "toolUse" : "stop",
+					message:
+						callIndex === 1
+							? createAssistantMessage(
+									[{ type: "toolCall", id: "tool-preflight", name: "echo", arguments: { value: "ok" } }],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([createUserMessage("echo")], context, config, undefined, streamFn);
+		for await (const _ of stream) {
+			// consume
+		}
+		const result = await stream.result();
+		const toolResult = result.find((message) => message.role === "toolResult");
+		const failureText = toolResult?.content[0]?.type === "text" ? toolResult.content[0].text : "";
+		expect(executed).toBe(false);
+		expect(failureText).toContain('"failure_code":"preflight_error"');
+		expect(failureText).toContain('"phase":"preflight"');
+		expect(failureText).toContain('"diagnostic":"host capability lookup unavailable"');
+		expect(failureText).toContain("arguments were valid");
+		expect(failureText).not.toContain("change the invalid operation");
 	});
 
 	it("should execute mutated beforeToolCall args without revalidation", async () => {

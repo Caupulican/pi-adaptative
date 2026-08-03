@@ -7,6 +7,18 @@ export interface ShellToken {
 
 interface TokenizeOptions {
 	operators: boolean;
+	dialect: ShellCommandDialect;
+}
+
+export type ShellCommandDialect = "posix" | "powershell";
+
+function defaultShellCommandDialect(): ShellCommandDialect {
+	// Pi exposes Bash-like source on every platform. Native PowerShell callers opt in explicitly.
+	return "posix";
+}
+
+function hasWindowsPathPrefix(value: string): boolean {
+	return /^[A-Za-z]:/u.test(value) || value.startsWith("\\\\");
 }
 
 function pushArgument(tokens: ShellToken[], current: string): string {
@@ -22,12 +34,30 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 
 	for (let index = 0; index < input.length; index++) {
 		const char = input[index];
+		const next = input[index + 1];
 		if (escaped) {
 			current += char;
 			escaped = false;
 			continue;
 		}
-		if (char === "\\" && quote !== "'") {
+		if (options.dialect === "powershell" && char === "`" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+		if (options.dialect === "posix" && char === "\\" && quote !== "'") {
+			if (hasWindowsPathPrefix(current)) {
+				current += char;
+				continue;
+			}
+			if (current === "" && next === "\\") {
+				current = "\\\\";
+				index++;
+				continue;
+			}
+			if (quote === '"' && next !== undefined && !'"$`\\'.includes(next)) {
+				current += char;
+				continue;
+			}
 			escaped = true;
 			continue;
 		}
@@ -94,13 +124,19 @@ function tokenize(input: string, options: TokenizeOptions): ShellToken[] | null 
 }
 
 /** Tokenize one simple command while preserving the pre-existing quote/escape contract. */
-export function tokenizeCommand(command: string): string[] | null {
-	return tokenize(command, { operators: false })?.map((token) => token.value) ?? null;
+export function tokenizeCommand(
+	command: string,
+	dialect: ShellCommandDialect = defaultShellCommandDialect(),
+): string[] | null {
+	return tokenize(command, { operators: false, dialect })?.map((token) => token.value) ?? null;
 }
 
 /** Tokenize a shell command and expose quote-aware command boundaries and redirects. */
-export function tokenizeShellCommand(command: string): ShellToken[] | null {
-	return tokenize(command, { operators: true });
+export function tokenizeShellCommand(
+	command: string,
+	dialect: ShellCommandDialect = defaultShellCommandDialect(),
+): ShellToken[] | null {
+	return tokenize(command, { operators: true, dialect });
 }
 
 export interface ParsedCommand {
@@ -108,8 +144,11 @@ export interface ParsedCommand {
 	coreCommandTokens: string[];
 }
 
-export function parseCommandPrefixes(command: string): ParsedCommand | null {
-	const tokens = tokenizeCommand(command);
+export function parseCommandPrefixes(
+	command: string,
+	dialect: ShellCommandDialect = defaultShellCommandDialect(),
+): ParsedCommand | null {
+	const tokens = tokenizeCommand(command, dialect);
 	if (!tokens || tokens.length === 0) return null;
 
 	const envVars: Record<string, string> = {};

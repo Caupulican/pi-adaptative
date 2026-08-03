@@ -163,4 +163,10 @@ describe("runtime process ownership", () => {
 		expect(runtimeCommandAvailable(process.execPath)).toBe(true);
 		expect(runtimeCommandAvailable("pi-command-that-does-not-exist-7e7a99")).toBe(false);
 	});
+
+	it("accepts both Node undefined and cross-spawn null as a successful probe", () => {
+		expect(runtimeCommandAvailable("available", () => ({ error: undefined }))).toBe(true);
+		expect(runtimeCommandAvailable("available", () => ({ error: null }))).toBe(true);
+		expect(runtimeCommandAvailable("missing", () => ({ error: new Error("ENOENT") }))).toBe(false);
+	});
 });

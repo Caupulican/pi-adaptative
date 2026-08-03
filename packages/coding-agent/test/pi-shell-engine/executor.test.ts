@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -460,8 +460,12 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 
 	const RECORD_SEPARATOR = "\x1e";
 
-	function runMain(command: string, cwd: string): { stdout: string; stderr: string; frame: Record<string, unknown> } {
-		const request = JSON.stringify({ command, cwd, env: { PATH: process.env.PATH ?? "" } });
+	function runMain(
+		command: string,
+		cwd: string,
+		timeoutMs?: number,
+	): { stdout: string; stderr: string; frame: Record<string, unknown> } {
+		const request = JSON.stringify({ command, cwd, env: { PATH: process.env.PATH ?? "" }, timeoutMs });
 		const result = spawnSync(pythonPath, ["-B", join(ENGINE_DIR, "main.py")], {
 			encoding: "utf-8",
 			input: request,
@@ -512,6 +516,118 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 
 		expect(stdout).toBe("exit: too many arguments\n");
 		expect(frame.exitCode).toBe(1);
+	});
+
+	it("executes explicit for lists with printf and preserves the final loop value", () => {
+		const command = `for item in one "two words" three; do printf '[%s]\\n' "$item"; done; printf 'last=%s\\n' "$item"`;
+		const { stdout, stderr, frame } = runMain(command, tmpdir());
+
+		expect(stdout).toBe("[one]\n[two words]\n[three]\nlast=three\n");
+		expect(stderr).toBe("");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("executes nested for lists", () => {
+		const command = `for outer in a b; do for inner in 1 2; do printf '%s%s\\n' "$outer" "$inner"; done; done`;
+		const { stdout, frame } = runMain(command, tmpdir());
+
+		expect(stdout).toBe("a1\na2\nb1\nb2\n");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("accepts the positional-parameter for form and performs zero iterations without shell arguments", () => {
+		const { stdout, frame } = runMain("for item; do printf unreachable; done; printf done", tmpdir());
+
+		expect(stdout).toBe("done");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("applies continue and multi-level break to the nearest requested loops", () => {
+		const command =
+			`for outer in a b; do for inner in 1 2 3; do ` +
+			`test "$inner" = 2 && continue; printf '%s%s\n' "$outer" "$inner"; ` +
+			`test "$inner" = 3 && break 2; done; done; printf done`;
+		const { stdout, frame } = runMain(command, tmpdir());
+
+		expect(stdout).toBe("a1\na3\ndone");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("applies multi-level continue without running either loop tail", () => {
+		const command =
+			`for outer in a b; do for inner in 1 2; do printf '%s%s\n' "$outer" "$inner"; ` +
+			`continue 2; printf inner-tail; done; printf outer-tail; done`;
+		const { stdout, frame } = runMain(command, tmpdir());
+
+		expect(stdout).toBe("a1\nb1\n");
+		expect(frame.exitCode).toBe(0);
+	});
+
+	it("expands globs and command substitutions before iterating a word-list loop", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-for-expand-"));
+		writeFileSync(join(dir, "a.txt"), "a");
+		writeFileSync(join(dir, "b.txt"), "b");
+		const { stdout, frame } = runMain(`for item in *.txt $(printf extra); do printf '[%s]\n' "$item"; done`, dir);
+
+		expect(stdout).toBe("[a.txt]\n[b.txt]\n[extra]\n");
+		expect(frame.exitCode).toBe(0);
+	});
+
+	it("executes arithmetic for loops with assignments, boolean conditions, continue, and break", () => {
+		const command =
+			`for ((i=0, total=0; i<6 && total<10; i+=1, total+=i)); do ` +
+			`test "$i" = 1 && continue; printf '%s:%s\n' "$i" "$total"; ` +
+			`test "$i" = 3 && break; done; printf 'last=%s:%s\n' "$i" "$total"`;
+		const { stdout, frame } = runMain(command, tmpdir());
+
+		expect(stdout).toBe("0:0\n2:3\n3:6\nlast=3:6\n");
+		expect(frame.exitCode).toBe(0);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("keeps signed loop variables stable across decrement updates", () => {
+		const { stdout, frame } = runMain(`for ((i=1; i>=-1; i--)); do printf '%s\n' "$i"; done`, tmpdir(), 100);
+
+		expect(stdout).toBe("1\n0\n-1\n");
+		expect(frame.exitCode).toBe(0);
+	});
+
+	it("pipes and redirects an arithmetic loop as one compound command", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-for-redirect-"));
+		const output = join(dir, "loop.txt").replaceAll("\\", "/");
+		const command = `for ((i=0; i<3; i++)); do printf '%s\n' "$i"; done > "${output}"; cat "${output}" | wc -l`;
+		const { stdout, frame } = runMain(command, dir);
+
+		expect(stdout.trim()).toBe("3");
+		expect(frame.exitCode).toBe(0);
+	});
+
+	it("bounds a builtin-only infinite arithmetic loop at the request deadline", () => {
+		const { frame } = runMain("for ((;;)); do true; done", tmpdir(), 20);
+
+		expect(frame.exitCode).toBe(124);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("reports malformed arithmetic without a traceback or protocol loss", () => {
+		const { stdout, frame } = runMain("for ((i=0; i<3; i+=)); do true; done", tmpdir());
+
+		expect(stdout).toContain("bash: arithmetic:");
+		expect(stdout).not.toContain("Traceback");
+		expect(frame.exitCode).toBe(1);
+		expect(frame.unsupported).toBeNull();
+	});
+
+	it("keeps break outside a loop non-fatal and continues the command list", () => {
+		const { stdout, frame } = runMain("break; printf reached", tmpdir());
+
+		expect(stdout).toContain("only meaningful");
+		expect(stdout).toContain("reached");
+		expect(frame.exitCode).toBe(0);
 	});
 
 	describe("pipeline stages through the REAL builtin registry (architect G1/G2 fix)", () => {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Expanded tool-execution repair classification with validation, policy, preflight, execution, timeout, cancellation, and provisioning phases plus deterministic recovery guidance.
+
 ## [0.85.0] - 2026-08-02
 
 ### Changed

@@ -27,4 +27,20 @@ describe("project context candidates", () => {
 		]);
 		expect(consoleError).not.toHaveBeenCalled();
 	});
+
+	it("deduplicates filename-case aliases under Windows path semantics", () => {
+		const root = join(tmpdir(), `pi-context-case-${process.pid}-${Date.now()}`);
+		roots.push(root);
+		const cwd = join(root, "project");
+		const agentDir = join(root, "agent");
+		mkdirSync(cwd, { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(join(cwd, "CLAUDE.md"), "Canonical instructions");
+		if (process.platform !== "win32") writeFileSync(join(cwd, "CLAUDE.MD"), "Alias instructions");
+
+		const files = loadRawProjectContextFiles({ cwd, agentDir, platform: "win32" });
+
+		expect(files).toHaveLength(1);
+		expect(files[0]?.path.toLowerCase()).toBe(join(cwd, "CLAUDE.md").toLowerCase());
+	});
 });

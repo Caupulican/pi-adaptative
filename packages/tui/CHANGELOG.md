@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved submitted prompt history so repeated Up-arrow presses recall older single-line and multiline messages before restoring the draft.
+
 ## [0.85.0] - 2026-08-02
 
 ## [0.84.1] - 2026-08-02

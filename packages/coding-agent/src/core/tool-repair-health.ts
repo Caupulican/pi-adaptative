@@ -15,8 +15,14 @@ function sortProfiles(profiles: StoredModelAdaptation[]): StoredModelAdaptation[
 
 function formatLoggerStats(stats: ToolRecoveryLoggerStats | undefined): string[] {
 	if (!stats) return [];
+	const phaseCounts = Object.entries(stats.failurePhases)
+		.filter((entry): entry is [string, number] => entry[1] !== undefined && entry[1] > 0)
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([phase, count]) => `${phase}=${count}`)
+		.join(" ");
 	return [
 		`recovery logging: ${stats.enabled ? "enabled" : "disabled"} queued=${stats.queued} inFlight=${stats.inFlight} dropped=${stats.dropped} failures=${stats.failures} workerStarts=${stats.workerStarts} crashes=${stats.workerCrashes} respawns=${stats.respawns}`,
+		`execution failures: total=${stats.executionFailures}${phaseCounts ? ` ${phaseCounts}` : ""}`,
 	];
 }
 

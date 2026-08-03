@@ -140,6 +140,19 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			});
 		});
 
+		it("for loop: explicit values expand through printf and preserve the final value", () => {
+			withTmpDir((dir) => {
+				const { stdout, frame } = runEngine(
+					python,
+					`for item in one "two words"; do printf '[%s]\\n' "$item"; done`,
+					dir,
+				);
+				expect(stdout).toBe("[one]\n[two words]\n");
+				expect(frame.exitCode).toBe(0);
+				expect(frame.envDelta.item).toBe("two words");
+			});
+		});
+
 		it.each([
 			[">", "out.txt"],
 			[">>", "out.txt"],
@@ -551,6 +564,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 			["job-control", "foo &"],
 			["process-substitution", "foo <(bar)"],
 			["arithmetic-expansion", "echo $((1+1))"],
+			["arithmetic-expansion", "((1+1))"],
 			["brace-expansion", "foo {a,b,c}"],
 			["nested-shell", "bash -c foo"],
 			["exec-builtin", "exec foo"],
@@ -579,7 +593,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 
 		it("a control-flow refusal frame carries exit 2 and no partial output", () => {
 			withTmpDir((dir) => {
-				const { frame, stdout } = runEngine(python, "for x in a b; do echo $x; done", dir);
+				const { frame, stdout } = runEngine(python, "if true; then echo reached; fi", dir);
 				expect(frame.exitCode).toBe(2);
 				expect(frame.unsupported?.construct).toBe("control-flow");
 				expect(stdout.length).toBeGreaterThan(0);

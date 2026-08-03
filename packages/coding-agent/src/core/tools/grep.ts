@@ -13,7 +13,6 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
 	type BroadQueryTracker,
@@ -30,6 +29,7 @@ import {
 	hasGitignoreInTree,
 	resolveRoutedFffFinder,
 } from "./fff-search-backend.ts";
+import { type ManagedSearchToolOptions, resolveManagedSearchTool } from "./managed-search-tool.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import {
 	formatCollapsibleToolResult,
@@ -88,7 +88,7 @@ const defaultGrepOperations: GrepOperations = {
 	readFile: (p) => fsReadFile(p, "utf-8"),
 };
 
-export interface GrepToolOptions {
+export interface GrepToolOptions extends ManagedSearchToolOptions {
 	/** Custom operations for grep. Default: local filesystem plus routed FFF/rg search */
 	operations?: GrepOperations;
 	/** FFF backend for resident indexed search. Set false to force ripgrep fallback. */
@@ -514,11 +514,7 @@ export function createGrepToolDefinition(
 							}
 						}
 
-						const rgPath = await ensureTool("rg", true);
-						if (!rgPath) {
-							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
-							return;
-						}
+						const rgPath = await resolveManagedSearchTool("rg", options?.managedToolResolver);
 
 						const fileCache = new Map<string, string[]>();
 						const getFileLines = async (filePath: string): Promise<string[]> => {

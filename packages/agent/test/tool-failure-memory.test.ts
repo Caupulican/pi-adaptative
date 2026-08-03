@@ -20,6 +20,7 @@ function record(
 		operation: '{"command":"probe"}',
 		occurrence: 1,
 		state,
+		phase: state === "failed" ? "execution" : "validation",
 		failureCode,
 		correction: "Use the contract guidance.",
 	};
@@ -70,9 +71,10 @@ describe("tool failure memory", () => {
 		);
 
 		expect(assessment).toEqual({
-			failureCode: "exit_1",
+			failureCode: "invalid_option",
+			phase: "execution",
 			diagnostic: "svn: invalid option: --stat",
-			guidance: "No safe repair inferred; use the diagnostic and tool contract for the next action.",
+			guidance: "Option rejected; re-read command help and remove or replace it before retrying.",
 		});
 	});
 
@@ -80,6 +82,7 @@ describe("tool failure memory", () => {
 		const assessment = assessToolFailure("Command exited with code 1", "failed", "Error");
 
 		expect(assessment.failureCode).toBe("exit_1");
+		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toBe(
 			"No safe repair inferred because the tool returned no diagnostic; inspect its contract or request bounded diagnostics before retrying.",
@@ -96,9 +99,10 @@ describe("tool failure memory", () => {
 		);
 
 		expect(assessment).toEqual({
-			failureCode: "exit_1",
+			failureCode: "invalid_option",
+			phase: "execution",
 			diagnostic: "configdelphi: unknown option --auto",
-			guidance: "No safe repair inferred; use the diagnostic and tool contract for the next action.",
+			guidance: "Option rejected; re-read command help and remove or replace it before retrying.",
 		});
 	});
 
@@ -113,6 +117,7 @@ describe("tool failure memory", () => {
 		const assessment = assessToolFailure("ENOENT: no such file or directory, open 'missing.txt'", "failed", "Error");
 
 		expect(assessment.failureCode).toBe("enoent");
+		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toContain("list the parent directory or re-read the path");
 	});
@@ -125,6 +130,7 @@ describe("tool failure memory", () => {
 		);
 		expect(assessment).toEqual({
 			failureCode: "encoding_corruption",
+			phase: "execution",
 			guidance:
 				"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
 			attemptMemory: "discard",
@@ -222,8 +228,10 @@ describe("tool failure memory", () => {
 		if (failedText?.type !== "text" || rejectedText?.type !== "text") throw new Error("expected text records");
 
 		expect(failedText.text).toContain('"next_action":"Use the contract guidance."');
+		expect(failedText.text).toContain('"phase":"execution"');
 		expect(failedText.text).not.toContain('"repair":');
 		expect(rejectedText.text).toContain('"repair":"Use the contract guidance."');
+		expect(rejectedText.text).toContain('"phase":"validation"');
 		expect(rejectedText.text).not.toContain('"next_action":');
 	});
 

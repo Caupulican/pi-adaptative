@@ -982,14 +982,13 @@ export class Editor implements Component, Focusable {
 		this.setTextInternal(normalized);
 	}
 
-	/** Drop every live or historical reference retained by this editor instance. */
-	clear(): void {
+	private resetState(preserveHistory: boolean): void {
 		this.cancelAutocomplete();
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
 		this.pasteCounter = 0;
 		this.bracketedPaste.clear();
-		this.history = [];
+		if (!preserveHistory) this.history = [];
 		this.historyIndex = -1;
 		this.killRing = new KillRing();
 		this.undoStack.clear();
@@ -999,6 +998,11 @@ export class Editor implements Component, Focusable {
 		this.snappedFromCursorCol = null;
 		this.scrollOffset = 0;
 		this.notifyChange();
+	}
+
+	/** Drop every live or historical reference retained by this editor instance. */
+	clear(): void {
+		this.resetState(false);
 	}
 
 	/**
@@ -1242,7 +1246,7 @@ export class Editor implements Component, Focusable {
 		this.cancelAutocomplete();
 		const expanded = this.expandPasteMarkers(this.state.lines.join("\n"));
 		const result = this.privateContent ? expanded : expanded.trim();
-		this.clear();
+		this.resetState(true);
 		if (this.onSubmit) this.onSubmit(result);
 	}
 

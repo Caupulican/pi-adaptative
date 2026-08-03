@@ -7,7 +7,6 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
 	type BroadQueryTracker,
@@ -23,6 +22,7 @@ import {
 	hasGitignoreInTree,
 	resolveRoutedFffFinder,
 } from "./fff-search-backend.ts";
+import { type ManagedSearchToolOptions, resolveManagedSearchTool } from "./managed-search-tool.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import {
 	formatCollapsibleToolResult,
@@ -82,7 +82,7 @@ const defaultFindOperations: FindOperations = {
 	glob: () => [],
 };
 
-export interface FindToolOptions {
+export interface FindToolOptions extends ManagedSearchToolOptions {
 	/** Custom operations for find. Default: local filesystem plus routed FFF/fd search */
 	operations?: FindOperations;
 	/** FFF backend for resident indexed search. Set false to force fd fallback. */
@@ -474,16 +474,11 @@ export function createFindToolDefinition(
 						}
 
 						// Default implementation uses fd.
-						const fdPath = await ensureTool("fd", true);
+						const fdPath = await resolveManagedSearchTool("fd", options?.managedToolResolver);
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));
 							return;
 						}
-						if (!fdPath) {
-							settle(() => reject(new Error("fd is not available and could not be downloaded")));
-							return;
-						}
-
 						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
 						// semantics whether or not the search path is inside a git repository, without
 						// leaking sibling-directory rules the way --ignore-file (a global source) would.

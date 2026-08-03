@@ -1791,6 +1791,14 @@ export class AgentSession {
 				}
 			}
 		}
+		if (event.type === "tool_execution_end" && event.isError) {
+			this._toolRecoveryLogger.recordToolExecutionFailure({
+				provider: this.model?.provider,
+				model: this.model?.id,
+				tool: event.toolName,
+				details: event.result.details,
+			});
+		}
 
 		// Emit to extensions first
 		await this._emitExtensionEvent(event);

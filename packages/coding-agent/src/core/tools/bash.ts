@@ -234,7 +234,7 @@ export function createLocalPlatformShellOperations(
 		commandPrefix?: string;
 		operations?: BashOperations;
 		sessionKey?: string;
-		/** Route complex/state-mutating Bash constructs to the Python engine on Windows. Default: true. */
+		/** Route complex/state-mutating Bash constructs and portable builtins to the Python engine on Windows. Default: true. */
 		pythonEngine?: boolean;
 		/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
 		engineOptions?: WindowsShellEngineOptions;
@@ -311,7 +311,7 @@ export interface BashToolOptions {
 	 * tool instances (subagents) auto-generate their own key and stay isolated.
 	 */
 	sessionKey?: string;
-	/** Route complex/state-mutating Bash constructs to the Python engine on Windows. Default: true. */
+	/** Route complex/state-mutating Bash constructs and portable builtins to the Python engine on Windows. Default: true. */
 	windowsShellPythonEngine?: boolean;
 	/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
 	windowsShellEngineOptions?: WindowsShellEngineOptions;
@@ -450,7 +450,7 @@ function createShellToolDefinition(
 		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
 		: undefined;
 	const contractDescription = routesWindowsContract
-		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers). On Windows, a deterministic router converts simple commands directly to PowerShell and routes pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
+		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
 		: "Execute a Bash command in a persistent per-agent shell session: the current directory and environment variables persist across calls, and a timed-out or aborted command resets the session.";
 	return {
 		name: toolName,
@@ -462,7 +462,7 @@ function createShellToolDefinition(
 		promptGuidelines: routesWindowsContract
 			? [
 					"Use ordinary Bash-like commands on Windows; do not write PowerShell or ask the user to choose a shell.",
-					"Pipelines, redirection, expansion (variables, command substitution, globs), chaining (&&/||/;), and cd/export/unset are supported and routed to a bundled Python engine; a fixed set of named constructs (job control, process substitution, heredocs, arithmetic expansion, nested shells, and similar) fail closed with an actionable message instead of being guessed.",
+					"Word-list and arithmetic for loops, nested break/continue, printf and the documented portable builtins, pipelines, redirection, expansion (variables, command substitution, globs), chaining (&&/||/;), and cd/export/unset are supported and routed to a bundled Python engine; shell arithmetic expansion outside a for header, job control, process substitution, heredocs, nested shells, and other named constructs fail closed with an actionable message instead of being guessed.",
 					"Working directory and environment changes from cd/export/unset persist across subsequent bash calls, including calls that route to the PowerShell tier.",
 					"Supported Bash-like file commands are converted with literal-path operations; verify targets before recursive rm, cp, or mv calls.",
 					`Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, and prefer the bounded grep/find tools. Broad shell searches are rejected; use broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" only for an unavoidable exhaustive scan, then inspect the returned file with bounded reads or narrower searches.`,

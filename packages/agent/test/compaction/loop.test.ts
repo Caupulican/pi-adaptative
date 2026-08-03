@@ -344,23 +344,17 @@ describe("runCompactionLoop", () => {
 		expect(outcome.cycles).toBe(2);
 	});
 
-	it("retries with chunked on effect-not-restored and decreasing keepRecent", async () => {
+	it("uses a stricter deterministic checkpoint after a verified summary does not restore headroom", async () => {
 		const measureLiveTokens = scriptedMeasure([1400, 1300, 1300, 1300, 1300, 800]);
 		const summarizeAndVerify = vi.fn(async (params: CompactionCycleParams) => {
 			summarizeCalls += 1;
-			if (summarizeCalls === 1) {
-				expect(params.chunked).toBe(false);
-				expect(params.keepRecentTokens).toBe(1200);
-			}
-			if (summarizeCalls === 2) {
-				expect(params.chunked).toBe(true);
-				expect(params.keepRecentTokens).toBe(600);
-			}
-			if (summarizeCalls === 3) {
-				expect(params.chunked).toBe(true);
-				expect(params.keepRecentTokens).toBe(300);
-			}
+			expect(params.chunked).toBe(false);
+			expect(params.keepRecentTokens).toBe(1200);
 			return { result: createResult(`result-${summarizeCalls}`) };
+		});
+		const buildDeterministicCheckpoint = vi.fn(async (params: CompactionCycleParams) => {
+			expect(params).toMatchObject({ chunked: true, keepRecentTokens: 600, deterministicOnly: true });
+			return { result: createResult("deterministic") };
 		});
 
 		const outcome = expectSuccess(
@@ -372,7 +366,7 @@ describe("runCompactionLoop", () => {
 				getBaseKeepRecentTokens: () => 1200,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
-				buildDeterministicCheckpoint: async () => ({ result: createResult("det") }),
+				buildDeterministicCheckpoint,
 				apply: async (result) => {
 					branch.push({
 						type: "compaction",
@@ -389,8 +383,10 @@ describe("runCompactionLoop", () => {
 			}),
 		);
 
-		expect(summarizeAndVerify).toHaveBeenCalledTimes(3);
-		expect(outcome.cycles).toBe(3);
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(1);
+		expect(buildDeterministicCheckpoint).toHaveBeenCalledTimes(1);
+		expect(outcome.cycles).toBe(2);
+		expect(outcome.result.summary).toBe("deterministic");
 	});
 
 	it("re-prepares a real branch after its own compaction entry is appended", async () => {
@@ -407,7 +403,6 @@ describe("runCompactionLoop", () => {
 				);
 				expect(preparation).toBeDefined();
 				if (!preparation) throw new Error("prepare failed");
-				if (summarizeCalls === 2) previousSummaryOnRetry = preparation.previousSummary;
 				return {
 					result: {
 						summary: `summary-${summarizeCalls}`,
@@ -418,6 +413,24 @@ describe("runCompactionLoop", () => {
 				};
 			},
 		);
+		const buildDeterministicCheckpoint = vi.fn(async (params: CompactionCycleParams) => {
+			const preparation = prepareCompaction(
+				branch,
+				{ enabled: true, triggerPercent: 0.7, reserveTokens: 500, keepRecentTokens: params.keepRecentTokens },
+				{ allowTrailingCompactionAsPrevious: true },
+			);
+			expect(preparation).toBeDefined();
+			if (!preparation) throw new Error("prepare failed");
+			previousSummaryOnRetry = preparation.previousSummary;
+			return {
+				result: {
+					summary: "deterministic-summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: { readFiles: [], modifiedFiles: [] },
+				},
+			};
+		});
 
 		const outcome = expectSuccess(
 			await runCompactionLoop({
@@ -428,7 +441,7 @@ describe("runCompactionLoop", () => {
 				getBaseKeepRecentTokens: () => 600,
 				resolveModelAndAuth: async () => ({ model: createModel() }),
 				summarizeAndVerify,
-				buildDeterministicCheckpoint: async () => ({ result: createResult("det") }),
+				buildDeterministicCheckpoint,
 				apply: async (result) => {
 					branch.push({
 						type: "compaction",
@@ -445,9 +458,11 @@ describe("runCompactionLoop", () => {
 			}),
 		);
 
-		expect(summarizeAndVerify).toHaveBeenCalledTimes(2);
+		expect(summarizeAndVerify).toHaveBeenCalledTimes(1);
+		expect(buildDeterministicCheckpoint).toHaveBeenCalledTimes(1);
 		expect(previousSummaryOnRetry).toBe("summary-1");
 		expect(outcome.cycles).toBe(2);
+		expect(outcome.result.summary).toBe("deterministic-summary");
 	});
 
 	it("forces progress when failure causes an identical retry plan", async () => {

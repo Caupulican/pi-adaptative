@@ -1,4 +1,5 @@
 import type { ClassifiedError } from "@caupulican/pi-agent-core";
+import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import { redactKnownSecrets } from "./security/secret-text.ts";
 import { appendBoundedJsonLineSync, type BoundedJsonlLimits } from "./util/bounded-jsonl.ts";
 
@@ -29,7 +30,23 @@ export interface ToolValidationFailureCorpusRecord {
 	errorKeywords: string[];
 }
 
-export type FailureCorpusRecord = ProviderFailureCorpusRecord | ToolValidationFailureCorpusRecord;
+export interface ToolExecutionFailureCorpusRecord {
+	kind: "tool_execution";
+	ts: string;
+	provider?: string;
+	modelId?: string;
+	tool: string;
+	state: "failed" | "rejected";
+	phase: ToolFailurePhase;
+	failureCode: string;
+	diagnostic?: string;
+	nextAction: string;
+}
+
+export type FailureCorpusRecord =
+	| ProviderFailureCorpusRecord
+	| ToolValidationFailureCorpusRecord
+	| ToolExecutionFailureCorpusRecord;
 
 export interface FailureCorpusStats {
 	total: number;
@@ -72,6 +89,31 @@ export function createToolValidationFailureCorpusRecord(args: {
 	};
 }
 
+export function createToolExecutionFailureCorpusRecord(args: {
+	provider?: string;
+	modelId?: string;
+	tool: string;
+	state: "failed" | "rejected";
+	phase: ToolFailurePhase;
+	failureCode: string;
+	diagnostic?: string;
+	nextAction: string;
+	ts: string;
+}): ToolExecutionFailureCorpusRecord {
+	return {
+		kind: "tool_execution",
+		ts: args.ts,
+		provider: args.provider?.slice(0, MAX_DETAIL_CHARS),
+		modelId: args.modelId?.slice(0, MAX_DETAIL_CHARS),
+		tool: args.tool.slice(0, MAX_DETAIL_CHARS),
+		state: args.state,
+		phase: args.phase,
+		failureCode: args.failureCode.slice(0, MAX_DETAIL_CHARS),
+		...(args.diagnostic ? { diagnostic: redactSecrets(args.diagnostic).slice(0, MAX_DETAIL_CHARS) } : {}),
+		nextAction: redactSecrets(args.nextAction).slice(0, MAX_DETAIL_CHARS),
+	};
+}
+
 export function writeFailureCorpusRecord(filePath: string, record: FailureCorpusRecord): void {
 	appendBoundedJsonLineSync(filePath, record, FAILURE_CORPUS_LIMITS);
 }
@@ -111,6 +153,10 @@ export class FailureCorpusRecorder {
 		errorKeywords?: readonly string[];
 	}): void {
 		this.appendRecord(createToolValidationFailureCorpusRecord({ ...args, ts: this.now().toISOString() }));
+	}
+
+	recordToolExecution(args: Omit<Parameters<typeof createToolExecutionFailureCorpusRecord>[0], "ts">): void {
+		this.appendRecord(createToolExecutionFailureCorpusRecord({ ...args, ts: this.now().toISOString() }));
 	}
 
 	stats(): FailureCorpusStats {

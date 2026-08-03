@@ -131,6 +131,26 @@ describe("stable Bash-like shell contract router", () => {
 	});
 
 	describe("engine tier (options.pythonEngine)", () => {
+		it("routes engine-only builtins without requiring a pipeline operator", () => {
+			for (const command of [
+				"printf '%s\\n' one two",
+				"basename path/to/file.txt",
+				"dirname path/to/file.txt",
+				"sed 's/a/b/' file.txt",
+				"wc -l file.txt",
+				"sort file.txt",
+				"uniq file.txt",
+				"cut -c 1 file.txt",
+				"tr a-z A-Z",
+				"xargs echo",
+			]) {
+				expect(routeShellContract(command, "win32", { pythonEngine: true })).toEqual({
+					kind: "python-engine",
+					command,
+				});
+			}
+		});
+
 		it("keeps the existing PowerShell floor for simple commands with the engine enabled", () => {
 			for (const command of ["pwd", "ls -la .", "git commit -m 'msg'", "node --version"]) {
 				const route = routeShellContract(command, "win32", { pythonEngine: true });
@@ -148,6 +168,8 @@ describe("stable Bash-like shell contract router", () => {
 				"cat ~/file.txt",
 				"echo one; echo two",
 				"echo a && echo b",
+				"for item; do printf '%s\\n' \"$item\"; done",
+				"for ((i=0; i<3; i++)); do printf '%s\\n' \"$i\"; done",
 			]) {
 				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({
 					kind: "python-engine",
@@ -156,8 +178,8 @@ describe("stable Bash-like shell contract router", () => {
 			}
 		});
 
-		it("routes state mutators and controlled exit to the engine", () => {
-			for (const command of ["cd ..", "export FOO=bar", "unset FOO", "exit 0"]) {
+		it("routes state mutators and executor-owned control builtins to the engine", () => {
+			for (const command of ["cd ..", "export FOO=bar", "unset FOO", "exit 0", "break", "continue 2"]) {
 				expect(routeShellContract(command, "win32", { pythonEngine: true })).toMatchObject({
 					kind: "python-engine",
 					command,
@@ -186,7 +208,13 @@ describe("stable Bash-like shell contract router", () => {
 		});
 
 		it("does not change classification when pythonEngine is explicitly false", () => {
-			for (const command of ["cat file | grep x", "FOO=bar node script.js", "ls --color=always", "exit 0"]) {
+			for (const command of [
+				"cat file | grep x",
+				"FOO=bar node script.js",
+				"ls --color=always",
+				"printf '%s' value",
+				"exit 0",
+			]) {
 				expect(routeShellContract(command, "win32", { pythonEngine: false })).toMatchObject({
 					kind: "unsupported",
 				});

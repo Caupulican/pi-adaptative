@@ -1,4 +1,8 @@
-import { getToolExecutionAttemptMemory, getToolExecutionErrorPolicy } from "@caupulican/pi-ai/tool-repair-registry";
+import {
+	getToolExecutionAttemptMemory,
+	getToolExecutionErrorPolicy,
+	type ToolFailurePhase,
+} from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
@@ -26,6 +30,7 @@ export interface ToolFailureMemoryRecord {
 	operation: string;
 	occurrence: number;
 	state: ToolFailureState;
+	phase: ToolFailurePhase;
 	failureCode: string;
 	diagnostic?: string;
 	correction: string;
@@ -39,6 +44,8 @@ export interface ToolFailureMemoryDetails {
 export interface ToolFailureDirectiveDetails {
 	piToolFailureDirective: {
 		version: typeof TOOL_FAILURE_DIRECTIVE_VERSION;
+		state: ToolFailureState;
+		phase: ToolFailurePhase;
 		failureCode: string;
 		nextAction: string;
 	};
@@ -309,7 +316,46 @@ export function classifyToolFailure(message: string, errorClass?: string): strin
 	return boundedFailureCode(errorClass ?? "tool_error");
 }
 
-function fallbackFailureGuidance(state: ToolFailureState, hasDiagnostic: boolean): string {
+function isToolFailurePhase(value: unknown): value is ToolFailurePhase {
+	return (
+		value === "validation" ||
+		value === "policy" ||
+		value === "preflight" ||
+		value === "execution" ||
+		value === "timeout" ||
+		value === "cancelled" ||
+		value === "provisioning"
+	);
+}
+
+function inferToolFailurePhase(state: ToolFailureState, failureCode: string): ToolFailurePhase {
+	if (failureCode === "malformed_call" || failureCode === "unknown_tool" || failureCode === "invalid_arguments") {
+		return "validation";
+	}
+	if (failureCode === "blocked" || failureCode === "permission_denied") return "policy";
+	if (failureCode === "preflight_error") return "preflight";
+	if (failureCode === "aborted" || failureCode === "cancelled") return "cancelled";
+	if (failureCode === "timeout" || failureCode === "etimedout") return "timeout";
+	if (failureCode === "provisioning_failed" || failureCode === "command_not_found") return "provisioning";
+	return state === "rejected" ? "validation" : "execution";
+}
+
+function fallbackFailureGuidance(state: ToolFailureState, hasDiagnostic: boolean, phase: ToolFailurePhase): string {
+	if (phase === "preflight") {
+		return hasDiagnostic
+			? "Tool arguments were valid, but preflight failed before execution; resolve the diagnostic or host condition before retrying."
+			: "Tool arguments were valid, but preflight failed before execution; inspect host policy and capability state before retrying.";
+	}
+	if (phase === "policy")
+		return "Resolve the authority or policy restriction, or choose an allowed approach before retrying.";
+	if (phase === "cancelled")
+		return "Retry only if the operation is still required and the cancellation condition has cleared.";
+	if (phase === "timeout") return "Narrow or split the work, then retry once only when repeating it is safe.";
+	if (phase === "provisioning") {
+		return hasDiagnostic
+			? "Repair the provisioning diagnostic and retry only after the environment changes."
+			: "Inspect tool availability and request bounded provisioning diagnostics before retrying.";
+	}
 	return state === "rejected"
 		? "Re-read the current tool schema and change the invalid operation before retrying."
 		: hasDiagnostic
@@ -317,9 +363,15 @@ function fallbackFailureGuidance(state: ToolFailureState, hasDiagnostic: boolean
 			: "No safe repair inferred because the tool returned no diagnostic; inspect its contract or request bounded diagnostics before retrying.";
 }
 
-export function toolFailureCorrection(message: string, state: ToolFailureState): string {
+export function toolFailureCorrection(
+	message: string,
+	state: ToolFailureState,
+	phase: ToolFailurePhase = state === "rejected" ? "validation" : "execution",
+): string {
 	const policy = getToolExecutionErrorPolicy(message);
-	return policy ? truncate(policy.guidance, MAX_CORRECTION_CHARS) : fallbackFailureGuidance(state, false);
+	return policy
+		? truncate(policy.guidance, MAX_CORRECTION_CHARS)
+		: fallbackFailureGuidance(state, message.trim().length > 0, phase);
 }
 
 function extractFailureDiagnostic(message: string, allowUnclassifiedFallback: boolean): string | undefined {
@@ -345,6 +397,7 @@ function extractFailureDiagnostic(message: string, allowUnclassifiedFallback: bo
 
 export interface ToolFailureAssessment {
 	failureCode: string;
+	phase: ToolFailurePhase;
 	diagnostic?: string;
 	guidance: string;
 	attemptMemory?: "discard";
@@ -357,13 +410,17 @@ export function assessToolFailure(
 ): ToolFailureAssessment {
 	const policy = getToolExecutionErrorPolicy(message);
 	const diagnostic =
-		state === "failed" && !policy ? extractFailureDiagnostic(message, errorClass !== undefined) : undefined;
+		state === "failed" && (!policy || policy.retainDiagnostic)
+			? extractFailureDiagnostic(message, errorClass !== undefined || policy?.retainDiagnostic === true)
+			: undefined;
+	const failureCode = policy?.failureCode ?? classifyToolFailure(message, errorClass);
 	return {
-		failureCode: policy?.failureCode ?? classifyToolFailure(message, errorClass),
+		failureCode,
+		phase: policy?.phase ?? inferToolFailurePhase(state, failureCode),
 		...(diagnostic ? { diagnostic } : {}),
 		guidance: policy
 			? truncate(policy.guidance, MAX_CORRECTION_CHARS)
-			: fallbackFailureGuidance(state, diagnostic !== undefined),
+			: fallbackFailureGuidance(state, diagnostic !== undefined, inferToolFailurePhase(state, failureCode)),
 		...(policy?.attemptMemory === "discard" ? { attemptMemory: "discard" as const } : {}),
 	};
 }
@@ -394,8 +451,11 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		typeof candidate.correction === "string" ? truncate(candidate.correction, MAX_CORRECTION_CHARS) : undefined;
 	const correction =
 		candidate.state === "failed" && retainedCorrection === LEGACY_GENERIC_EXECUTION_CORRECTION
-			? fallbackFailureGuidance("failed", diagnostic !== undefined)
+			? fallbackFailureGuidance("failed", diagnostic !== undefined, "execution")
 			: (retainedCorrection ?? toolFailureCorrection("", candidate.state));
+	const phase = isToolFailurePhase(candidate.phase)
+		? candidate.phase
+		: inferToolFailurePhase(candidate.state, candidate.failureCode);
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: truncate(candidate.failureKey, MAX_TOOL_NAME_CHARS + 1 + TOOL_SIGNATURE_HEX_CHARS),
@@ -403,6 +463,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		operation: truncateMiddle(candidate.operation, MAX_OPERATION_CHARS),
 		occurrence: candidate.occurrence,
 		state: candidate.state,
+		phase,
 		failureCode: boundedFailureCode(candidate.failureCode),
 		diagnostic,
 		correction,
@@ -421,8 +482,42 @@ function readFailureDirective(details: unknown): ToolFailureDirectiveDetails["pi
 	}
 	return {
 		version: TOOL_FAILURE_DIRECTIVE_VERSION,
+		state: candidate.state === "rejected" ? "rejected" : "failed",
+		phase: isToolFailurePhase(candidate.phase)
+			? candidate.phase
+			: inferToolFailurePhase("failed", candidate.failureCode),
 		failureCode: boundedFailureCode(candidate.failureCode),
 		nextAction: truncate(candidate.nextAction, MAX_CORRECTION_CHARS),
+	};
+}
+
+export interface ToolFailureTelemetry {
+	state: ToolFailureState;
+	phase: ToolFailurePhase;
+	failureCode: string;
+	diagnostic?: string;
+	nextAction: string;
+}
+
+/** Read only bounded failure identity and guidance; operation arguments never cross this telemetry boundary. */
+export function readToolFailureTelemetry(details: unknown): ToolFailureTelemetry | undefined {
+	const record = readFailureRecord(details);
+	if (record) {
+		return {
+			state: record.state,
+			phase: record.phase,
+			failureCode: record.failureCode,
+			...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
+			nextAction: record.correction,
+		};
+	}
+	const directive = readFailureDirective(details);
+	if (!directive) return undefined;
+	return {
+		state: directive.state,
+		phase: directive.phase,
+		failureCode: directive.failureCode,
+		nextAction: directive.nextAction,
 	};
 }
 
@@ -491,9 +586,13 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				operation,
 				occurrence,
 				state,
+				phase: retained?.phase ?? assessment?.phase ?? inferToolFailurePhase(state, "tool_error"),
 				failureCode: retained?.failureCode ?? assessment?.failureCode ?? "tool_error",
 				diagnostic: retained?.diagnostic ?? assessment?.diagnostic,
-				correction: retained?.correction ?? assessment?.guidance ?? fallbackFailureGuidance(state, false),
+				correction:
+					retained?.correction ??
+					assessment?.guidance ??
+					fallbackFailureGuidance(state, false, inferToolFailurePhase(state, "tool_error")),
 			};
 			active.delete(failureKey);
 			active.set(failureKey, { record, sequence: sequence++ });
@@ -543,6 +642,7 @@ export function rememberToolFailure(
 	failureCode: string,
 	correction: string,
 	diagnostic?: string,
+	phase: ToolFailurePhase = inferToolFailurePhase(state, failureCode),
 ): ToolFailureMemoryRecord {
 	if (getToolExecutionAttemptMemory(failureCode) === "discard") {
 		for (const [failureKey, previous] of tracker) {
@@ -555,6 +655,7 @@ export function rememberToolFailure(
 			operation: "[discarded]",
 			occurrence: 1,
 			state,
+			phase,
 			failureCode: boundedFailureCode(failureCode),
 			diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 			correction: truncate(correction, MAX_CORRECTION_CHARS),
@@ -568,6 +669,7 @@ export function rememberToolFailure(
 		...identity,
 		occurrence: (previous?.occurrence ?? 0) + 1,
 		state,
+		phase,
 		failureCode: boundedFailureCode(failureCode),
 		diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 		correction: truncate(correction, MAX_CORRECTION_CHARS),
@@ -605,6 +707,7 @@ export function createToolFailureResult(
 					failure_key: record.failureKey,
 					occ: record.occurrence,
 					state: record.state,
+					phase: record.phase,
 					tool: record.tool,
 					failure_code: record.failureCode,
 					...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
@@ -617,6 +720,8 @@ export function createToolFailureResult(
 			? {
 					piToolFailureDirective: {
 						version: TOOL_FAILURE_DIRECTIVE_VERSION,
+						state: record.state,
+						phase: record.phase,
 						failureCode: record.failureCode,
 						nextAction: record.correction,
 					},
@@ -646,6 +751,7 @@ export function sanitizeToolFailureContext(
 				failure_key: record.failureKey,
 				occ: record.occurrence,
 				state: record.state,
+				phase: record.phase,
 				tool: record.tool,
 				operation: record.operation,
 				failure_code: record.failureCode,

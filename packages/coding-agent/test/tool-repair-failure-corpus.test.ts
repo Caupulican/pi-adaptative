@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@caupulican/pi-agent-core";
+import {
+	Agent,
+	type AgentEvent,
+	createToolFailureResult,
+	type ToolFailureMemoryRecord,
+} from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -138,5 +143,46 @@ describe("tool repair failure corpus", () => {
 		expect(existsSync(join(agentDir, "state", "tool-recovery-events.jsonl"))).toBe(false);
 		expect(existsSync(join(agentDir, "state", "failure-corpus.jsonl"))).toBe(false);
 		expect(session.getSessionStats().toolArgumentValidation.bounced).toBe(0);
+	});
+
+	it("records finalized execution failures from the session event boundary", async () => {
+		const session = createSession();
+		const failure: ToolFailureMemoryRecord = {
+			version: 1,
+			failureKey: "grep:opaque",
+			tool: "grep",
+			operation: "[bounded]",
+			occurrence: 1,
+			state: "failed",
+			phase: "timeout",
+			failureCode: "timeout",
+			diagnostic: "ripgrep timed out after 300000ms",
+			correction: "Narrow the search and retry once only if still required.",
+		};
+		const event: AgentEvent = {
+			type: "tool_execution_end",
+			toolCallId: "grep-call",
+			toolName: "grep",
+			result: createToolFailureResult(failure),
+			isError: true,
+		};
+		try {
+			await (session as unknown as { _handleAgentEvent(event: AgentEvent): Promise<void> })._handleAgentEvent(event);
+			await session.flushToolRecoveryLogsForTests();
+		} finally {
+			session.dispose();
+		}
+
+		const corpusPath = join(agentDir, "state", "failure-corpus.jsonl");
+		await waitForFile(corpusPath);
+		const corpus = JSON.parse(readFileSync(corpusPath, "utf-8").trim()) as unknown;
+		expect(corpus).toMatchObject({
+			kind: "tool_execution",
+			provider: model.provider,
+			modelId: model.id,
+			tool: "grep",
+			phase: "timeout",
+			failureCode: "timeout",
+		});
 	});
 });

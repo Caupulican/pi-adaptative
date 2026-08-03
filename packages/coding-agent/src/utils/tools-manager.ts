@@ -182,6 +182,26 @@ const TOOLS: Record<"fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
 
 export type ManagedToolName = keyof typeof TOOLS;
 
+export type ManagedToolProvisionFailureCode =
+	| "offline"
+	| "unsupported_platform"
+	| "installation_failed"
+	| "not_found_after_install"
+	| "unknown_tool";
+
+export type ManagedToolResolution =
+	| { status: "available"; path: string }
+	| { status: "unavailable"; failureCode: ManagedToolProvisionFailureCode; message: string };
+
+export type ManagedToolResolver = (tool: ManagedToolName, silent?: boolean) => Promise<ManagedToolResolution>;
+
+export function formatManagedToolProvisioningFailure(
+	tool: ManagedToolName,
+	resolution: Extract<ManagedToolResolution, { status: "unavailable" }>,
+): string {
+	return `PI_TOOL_PROVISIONING_FAILED [${resolution.failureCode}] ${tool}: ${resolution.message}`;
+}
+
 export interface PinnedToolAsset {
 	version: string;
 	assetName: string;
@@ -983,32 +1003,38 @@ async function installTermuxManagedTool(tool: ManagedToolName, silent: boolean):
 	return getToolPath(tool) ?? undefined;
 }
 
-// Ensure a tool is available, downloading if necessary
-// Returns the path to the tool, or undefined if unavailable
-export async function ensureTool(tool: ManagedToolName, silent: boolean = false): Promise<string | undefined> {
+/** Ensure a tool is available while retaining the exact bounded provisioning outcome for callers. */
+export async function ensureToolWithDiagnostics(
+	tool: ManagedToolName,
+	silent: boolean = false,
+): Promise<ManagedToolResolution> {
 	if (tool === "jscpd") {
 		try {
-			return ensureManagedJscpd();
+			return { status: "available", path: ensureManagedJscpd() };
 		} catch (error) {
+			const message = `Failed to provision jscpd: ${error instanceof Error ? error.message : String(error)}`;
 			if (!silent) {
-				console.log(chalk.yellow(`Failed to provision jscpd: ${error instanceof Error ? error.message : error}`));
+				console.log(chalk.yellow(message));
 			}
-			return undefined;
+			return { status: "unavailable", failureCode: "installation_failed", message };
 		}
 	}
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
-		return existingPath;
+		return { status: "available", path: existingPath };
 	}
 
 	const config = TOOLS[tool];
-	if (!config) return undefined;
+	if (!config) {
+		return { status: "unavailable", failureCode: "unknown_tool", message: `Unknown managed tool: ${tool}` };
+	}
 
 	if (isOfflineModeEnabled()) {
+		const message = `${config.name} not found. Offline mode enabled, skipping download.`;
 		if (!silent) {
-			console.log(chalk.yellow(`${config.name} not found. Offline mode enabled, skipping download.`));
+			console.log(chalk.yellow(message));
 		}
-		return undefined;
+		return { status: "unavailable", failureCode: "offline", message };
 	}
 
 	// On Android/Termux, upstream Linux archives target glibc/musl rather than Bionic.
@@ -1017,18 +1043,25 @@ export async function ensureTool(tool: ManagedToolName, silent: boolean = false)
 	if (platform() === "android") {
 		if (tool !== "uv") {
 			const packageName = TERMUX_PACKAGES[tool];
-			if (!silent) console.log(chalk.yellow(`${config.name} not found. Install with: pkg install ${packageName}`));
-			return undefined;
+			const message = `${config.name} not found. Install with: pkg install ${packageName}`;
+			if (!silent) console.log(chalk.yellow(message));
+			return { status: "unavailable", failureCode: "unsupported_platform", message };
 		}
 		try {
-			return await runExclusiveToolDownload(tool, () => installTermuxManagedTool(tool, silent));
+			const installedPath = await runExclusiveToolDownload(tool, () => installTermuxManagedTool(tool, silent));
+			return installedPath
+				? { status: "available", path: installedPath }
+				: {
+						status: "unavailable",
+						failureCode: "not_found_after_install",
+						message: `${config.name} installation completed but the binary was not found.`,
+					};
 		} catch (error) {
+			const message = `Failed to install ${config.name}: ${error instanceof Error ? error.message : String(error)}`;
 			if (!silent) {
-				console.log(
-					chalk.yellow(`Failed to install ${config.name}: ${error instanceof Error ? error.message : error}`),
-				);
+				console.log(chalk.yellow(message));
 			}
-			return undefined;
+			return { status: "unavailable", failureCode: "installation_failed", message };
 		}
 	}
 
@@ -1042,11 +1075,25 @@ export async function ensureTool(tool: ManagedToolName, silent: boolean = false)
 		if (!silent) {
 			console.log(chalk.dim(`${config.name} installed to ${path}`));
 		}
-		return path;
+		return path
+			? { status: "available", path }
+			: {
+					status: "unavailable",
+					failureCode: "not_found_after_install",
+					message: `${config.name} installation completed but the binary was not found.`,
+				};
 	} catch (e) {
+		const message = `Failed to download ${config.name}: ${e instanceof Error ? e.message : String(e)}`;
 		if (!silent) {
-			console.log(chalk.yellow(`Failed to download ${config.name}: ${e instanceof Error ? e.message : e}`));
+			console.log(chalk.yellow(message));
 		}
-		return undefined;
+		return { status: "unavailable", failureCode: "installation_failed", message };
 	}
+}
+
+// Compatibility projection for callers that only need a path. New tool execution paths should use
+// ensureToolWithDiagnostics so failure identity is not discarded at the provisioning boundary.
+export async function ensureTool(tool: ManagedToolName, silent: boolean = false): Promise<string | undefined> {
+	const resolution = await ensureToolWithDiagnostics(tool, silent);
+	return resolution.status === "available" ? resolution.path : undefined;
 }

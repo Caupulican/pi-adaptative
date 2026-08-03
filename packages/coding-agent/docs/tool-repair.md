@@ -11,7 +11,7 @@ Execution failures are not argument repairs. Pi removes their potentially large 
 - Repair is built-in and has no settings toggle. `PI_TOOL_REPAIR_DISABLED=1` is only an emergency diagnostic kill switch; normal configuration should leave repair on.
 - Teaching can be disabled independently with `toolRepair.teach: false` or `PI_TOOL_REPAIR_TEACH_DISABLED=1`. Repairs can still execute; the in-band "Tool argument repair note" is suppressed.
 - Tool-recovery logging can be disabled with `toolRepair.logging: false`. Repairs still run, but Pi does not enqueue recovery records or spawn the background recovery-log worker.
-- Text tool-call protocol calibration can be enabled per model with `textToolCallProtocol: true` in `models.json`. `/toolprobe [provider/model]` can also persist a host-local text-protocol verdict for one model after a live probe. Use `toolRepair.textProtocol` only as a global emergency force/kill switch; `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` always disables it.
+- Text tool-call protocol calibration can be enabled per model with `textToolCallProtocol: true` in `models.json`. `/toolprobe [provider/model]` probes native calls first and can persist a host-local text-protocol verdict only when native calls are absent. A persisted native verdict always keeps that model off the text protocol, including when global or model settings enable it. Use `toolRepair.textProtocol` only as a global emergency force/kill switch for models without native proof; `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` always disables it.
 
 Example project settings:
 
@@ -29,7 +29,7 @@ Example project settings:
 
 - Interactive tool panels show `[repaired arguments]` when execution used repaired arguments.
 - RPC `tool_execution_start`, `tool_execution_update`, and `tool_execution_end` events include a `repair` object when arguments were repaired.
-- `/toolhealth` prints model adaptation records for this host: tool-probe verdicts, calibrated or failed text protocol, learned standing rules, teach statistics, and recovery-log worker counters.
+- `/toolhealth` prints model adaptation records for this host: tool-probe verdicts, calibrated or failed text protocol, learned standing rules, teach statistics, recovery-log worker counters, and execution-failure counts by phase.
 - `/toolrule-remove <provider/model> <mode>` removes one learned standing rule from the host-local adaptation store.
 - `/toolprotocol-reset <provider/model>` removes a stored text protocol calibration or failed-calibration record so the next turn can calibrate again.
 - `/toolprobe [provider/model]` probes the current fleet or one explicit model for native tool calls first, then text-protocol fallback, persists the verdict in the host-local adaptation store, and prints a report table.
@@ -45,7 +45,7 @@ node scripts/tool-repair-replay.mjs ~/.pi/agent/state/failure-corpus.jsonl --jso
 node scripts/tool-repair-replay.mjs ~/.pi/agent/sessions/<session>.jsonl --fixtures /tmp/tool-repair-fixtures.json
 ```
 
-The replay helper reads `tool_validation` corpus records and legacy bounced `tool_argument_validation` session entries. Current recovery telemetry is written by a dedicated `node:worker_threads` worker to `state/tool-recovery-events.jsonl`; bounced records also append sanitized `tool_validation` corpus rows. Records contain shape metadata, failure modes, and error keywords; they do not store full tool arguments.
+The replay helper reads `tool_validation` corpus records and legacy bounced `tool_argument_validation` session entries. Current recovery telemetry is written by a dedicated `node:worker_threads` worker to `state/tool-recovery-events.jsonl`; bounced calls append sanitized `tool_validation` corpus rows, while rejected or failed executions append bounded `tool_execution` rows with phase, failure code, optional redacted diagnostic, and next action. Records do not store full tool arguments.
 
 ## Repair modes
 

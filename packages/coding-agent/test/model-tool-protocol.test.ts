@@ -40,6 +40,27 @@ describe("resolveModelToolProtocol", () => {
 		});
 	});
 
+	test("keeps a proven native model off the text protocol even when settings or model metadata enable it", () => {
+		const nativeProfile = adaptation({
+			toolProbe: {
+				version: MODEL_TOOL_PROTOCOL_VERSION,
+				status: "native",
+				nativeGrade: "task",
+				probedAt: "2026-08-02T00:00:00.000Z",
+			},
+		});
+		const textModel = { ...model, textToolCallProtocol: true };
+
+		expect(resolveModelToolProtocol({ model, settingsOverride: true, adaptation: nativeProfile })).toEqual({
+			protocol: undefined,
+			reasonCode: "probe_native",
+		});
+		expect(resolveModelToolProtocol({ model: textModel, adaptation: nativeProfile })).toEqual({
+			protocol: undefined,
+			reasonCode: "probe_native",
+		});
+	});
+
 	test("returns the calibrated variant for every execution lane", () => {
 		const profile = adaptation({
 			toolProbe: {

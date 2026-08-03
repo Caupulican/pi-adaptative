@@ -124,18 +124,40 @@ export function formatToolRepairStandingRule(name: ToolRepairModeName): string {
 }
 
 export type ToolExecutionAttemptMemory = "retain" | "discard";
+export type ToolFailurePhase =
+	| "validation"
+	| "policy"
+	| "preflight"
+	| "execution"
+	| "timeout"
+	| "cancelled"
+	| "provisioning";
 
 interface ToolExecutionErrorCatalogueEntry {
 	name: string;
+	phase: ToolFailurePhase;
 	guidance: string;
 	failureCode?: string;
 	attemptMemory?: ToolExecutionAttemptMemory;
+	retainDiagnostic?: boolean;
 	matches(message: string): boolean;
 }
 
 export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
+		name: "provisioningFailed",
+		phase: "provisioning",
+		failureCode: "provisioning_failed",
+		retainDiagnostic: true,
+		guidance:
+			"Provisioning failed; use the exact diagnostic, repair that cause, and retry only after the environment changes.",
+		matches(message: string): boolean {
+			return /\bPI_TOOL_PROVISIONING_FAILED\b/i.test(message);
+		},
+	},
+	{
 		name: "commandNotFound",
+		phase: "provisioning",
 		guidance: "Command was not found; check the command name or available tools before retrying.",
 		matches(message: string): boolean {
 			return /^spawn \S+ ENOENT\b/i.test(message) || /(?:^|\n|:)\s*command not found\b/i.test(message);
@@ -143,6 +165,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	},
 	{
 		name: "encodingCorruption",
+		phase: "execution",
 		failureCode: "encoding_corruption",
 		attemptMemory: "discard",
 		guidance:
@@ -153,6 +176,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	},
 	{
 		name: "fileNotFound",
+		phase: "execution",
 		guidance: "Path was not found; list the parent directory or re-read the path before retrying.",
 		matches(message: string): boolean {
 			return /\bENOENT\b/i.test(message) || /no such file or directory/i.test(message);
@@ -160,6 +184,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	},
 	{
 		name: "editOldTextNotFound",
+		phase: "execution",
 		guidance: "Re-read the target file and use the exact current text before retrying.",
 		matches(message: string): boolean {
 			return /(?:oldText|old text|exact text).*(?:not found|no match|failed to match|must match)/is.test(message);
@@ -167,9 +192,80 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	},
 	{
 		name: "pathOutsideCwd",
+		phase: "policy",
 		guidance: "Choose a path inside the current working directory, or ask before changing scope.",
 		matches(message: string): boolean {
 			return /outside (?:the )?(?:current working directory|cwd|workspace|root)/i.test(message);
+		},
+	},
+	{
+		name: "permissionDenied",
+		phase: "policy",
+		failureCode: "permission_denied",
+		retainDiagnostic: true,
+		guidance:
+			"Access was denied; verify the target path and current authority, then request or change permissions before retrying.",
+		matches(message: string): boolean {
+			return /\b(?:EACCES|EPERM)\b/i.test(message) || /(?:permission|access) (?:is )?denied/i.test(message);
+		},
+	},
+	{
+		name: "invalidOption",
+		phase: "execution",
+		failureCode: "invalid_option",
+		retainDiagnostic: true,
+		guidance: "Option rejected; re-read command help and remove or replace it before retrying.",
+		matches(message: string): boolean {
+			return /\b(?:invalid|unknown|unrecognized) (?:command-line )?(?:option|argument)\b/i.test(message);
+		},
+	},
+	{
+		name: "invalidPattern",
+		phase: "execution",
+		failureCode: "invalid_pattern",
+		retainDiagnostic: true,
+		guidance: "The search pattern was invalid; simplify it or correct its regex/glob escaping before retrying.",
+		matches(message: string): boolean {
+			return (
+				/(?:regex|regular expression|glob) (?:parse )?error\b/i.test(message) ||
+				/\bunclosed (?:group|class)\b/i.test(message)
+			);
+		},
+	},
+	{
+		name: "outputLimit",
+		phase: "execution",
+		failureCode: "output_limit",
+		guidance:
+			"Output exceeded its bound; narrow the scope, page the request, or use the retained artifact before retrying.",
+		matches(message: string): boolean {
+			return /\b(?:output|result|response).*(?:limit|truncat|too large)\b/i.test(message);
+		},
+	},
+	{
+		name: "timedOut",
+		phase: "timeout",
+		failureCode: "timeout",
+		guidance:
+			"The operation timed out; narrow or split the work, then retry once only when repeating it is safe and still required.",
+		matches(message: string): boolean {
+			return (
+				/\b(?:command|operation|process|request|tool)\s+(?:timed out|timeout(?: after)?)\b/i.test(message) ||
+				/\bETIMEDOUT\b/i.test(message)
+			);
+		},
+	},
+	{
+		name: "cancelled",
+		phase: "cancelled",
+		failureCode: "cancelled",
+		guidance:
+			"The operation was cancelled; retry only if it is still required and the cancellation condition has cleared.",
+		matches(message: string): boolean {
+			return (
+				/^(?:operation|request|tool) (?:was )?(?:aborted|cancelled|canceled)\b/i.test(message) ||
+				/\bAbortError\b/i.test(message)
+			);
 		},
 	},
 ] as const satisfies readonly ToolExecutionErrorCatalogueEntry[];
@@ -179,9 +275,11 @@ const executionErrorCatalogue: readonly ToolExecutionErrorCatalogueEntry[] = TOO
 
 export interface ToolExecutionErrorPolicy {
 	name: ToolExecutionErrorClass;
+	phase: ToolFailurePhase;
 	guidance: string;
 	failureCode?: string;
 	attemptMemory: ToolExecutionAttemptMemory;
+	retainDiagnostic: boolean;
 }
 
 export function getToolExecutionErrorPolicy(errorMessage: string): ToolExecutionErrorPolicy | undefined {
@@ -189,9 +287,11 @@ export function getToolExecutionErrorPolicy(errorMessage: string): ToolExecution
 	if (!entry) return undefined;
 	return {
 		name: entry.name as ToolExecutionErrorClass,
+		phase: entry.phase,
 		guidance: entry.guidance,
 		...(entry.failureCode ? { failureCode: entry.failureCode } : {}),
 		attemptMemory: entry.attemptMemory ?? "retain",
+		retainDiagnostic: entry.retainDiagnostic ?? false,
 	};
 }
 

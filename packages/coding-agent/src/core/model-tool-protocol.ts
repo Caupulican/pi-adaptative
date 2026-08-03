@@ -11,6 +11,7 @@ export type ModelToolProtocolReasonCode =
 	| "probe_calibration_missing"
 	| "probe_calibration_failed"
 	| "probe_calibration_invalid"
+	| "probe_native"
 	| "native_default";
 
 export interface ModelToolProtocolResolution {
@@ -22,7 +23,8 @@ export interface ModelToolProtocolResolution {
 /**
  * Resolve the effective tool-call transport for any model and execution lane.
  *
- * Explicit settings win, followed by model metadata and then graded probe evidence. A probe-driven
+ * A disabled setting and proven native capability always keep the native path active. Text-protocol
+ * settings and model metadata apply only when native capability has not been proven. A probe-driven
  * text protocol is usable only with a current, recognized calibration; otherwise the model stays on
  * native calls for this turn. Callers use the reason code for diagnostics, but never reimplement the
  * precedence or silently substitute the default dialect.
@@ -34,6 +36,9 @@ export function resolveModelToolProtocol(args: {
 }): ModelToolProtocolResolution {
 	if (args.settingsOverride === false) {
 		return { protocol: undefined, reasonCode: "settings_disabled" };
+	}
+	if (args.adaptation.toolProbe?.status === "native") {
+		return { protocol: undefined, reasonCode: "probe_native" };
 	}
 	if (args.settingsOverride === true) {
 		return { protocol: true, reasonCode: "settings_enabled" };

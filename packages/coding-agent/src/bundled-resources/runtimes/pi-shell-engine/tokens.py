@@ -20,7 +20,7 @@ _IDENT_START_RE = re.compile(r"[A-Za-z_]")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 @dataclass
 class Token:
-    kind: str  # "WORD" | "OP"
+    kind: str  # "WORD" | "OP" | "ARITH"
     text: str | None = None  # OP: exact operator text (e.g. ">>", "2>&1", "\n")
     segments: list[Segment] | None = None  # WORD: ordered segments
 
@@ -402,6 +402,26 @@ def _scan_operator(src: str, pos: int) -> tuple[str, int]:
     raise AssertionError(f"unreachable operator dispatch at {pos!r}")
 
 
+def _scan_arithmetic_group(src: str, pos: int) -> tuple[str, int]:
+    """Scan ``((...))`` as one token while allowing balanced inner parentheses."""
+    depth = 0
+    cursor = pos + 2
+    while cursor < len(src):
+        if src[cursor : cursor + 2] == "))" and depth == 0:
+            return src[pos + 2 : cursor], cursor + 2
+        char = src[cursor]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                raise UnsupportedConstruct(
+                    "malformed-syntax", "Arithmetic loop header contains an unmatched ')'."
+                )
+            depth -= 1
+        cursor += 1
+    raise _unterminated("arithmetic loop header")
+
+
 def tokenize(src: str) -> list[Token]:
     n = len(src)
     tokens: list[Token] = []
@@ -425,7 +445,10 @@ def tokenize(src: str) -> list[Token]:
             pos = n if newline == -1 else newline
             continue
         if src[pos : pos + 2] == "((":
-            raise UnsupportedConstruct("arithmetic-expansion", "Arithmetic command '((...))' is not supported.")
+            arithmetic, newpos = _scan_arithmetic_group(src, pos)
+            tokens.append(Token(kind="ARITH", text=arithmetic))
+            pos = newpos
+            continue
         if c.isdigit():
             j = pos
             while j < n and src[j].isdigit():

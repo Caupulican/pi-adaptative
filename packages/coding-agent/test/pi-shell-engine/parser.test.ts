@@ -130,6 +130,33 @@ describe("pi-shell-engine tokenizer + parser", () => {
 			expect(element.body.entries).toHaveLength(1);
 		});
 
+		it("for loop: explicit values and a command-list body", () => {
+			const ast = parseToDict(python, "for item in one 'two words'; do echo \"$item\"; done") as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("ForCommand");
+			expect(element.name).toBe("item");
+			expect(element.items).toHaveLength(2);
+			expect(element.body.entries).toHaveLength(1);
+		});
+
+		it("for loop: omitted in-list uses the positional-parameter form", () => {
+			const ast = parseToDict(python, 'for item; do echo "$item"; done') as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("ForCommand");
+			expect(element.name).toBe("item");
+			expect(element.items).toEqual([]);
+		});
+
+		it("for loop: arithmetic header remains structured", () => {
+			const ast = parseToDict(python, 'for ((i=0; i<3; i++)); do echo "$i"; done') as any;
+			const element = ast.entries[0].pipelines[0].elements[0];
+			expect(element._).toBe("ArithmeticForCommand");
+			expect(element.initializer).toBe("i=0");
+			expect(element.condition).toBe("i<3");
+			expect(element.update).toBe("i++");
+			expect(element.body.entries).toHaveLength(1);
+		});
+
 		it.each([
 			[">", "echo a > out.txt"],
 			[">>", "echo a >> out.txt"],
@@ -343,6 +370,13 @@ print("tilde-user" in UNSUPPORTED_CONSTRUCTS)
 			["malformed-syntax", "a && "],
 			["malformed-syntax", "| foo"],
 			["malformed-syntax", "echo 'unterminated"],
+			["malformed-syntax", "for 1item in one; do echo one; done"],
+			["malformed-syntax", "for item one; do echo one; done"],
+			["malformed-syntax", "for ((i=0; i<3)); do echo one; done"],
+			["malformed-syntax", "for item in one; echo one; done"],
+			["malformed-syntax", "for item in one; do echo one"],
+			["malformed-syntax", "for item in one; do done"],
+			["malformed-syntax", "for item in one; do; done"],
 		])("construct id: %s (architect amendment §1.6)", (construct, command) => {
 			const refusal = parseRefusal(python, command);
 			expect(refusal.code).toBe("unsupported");

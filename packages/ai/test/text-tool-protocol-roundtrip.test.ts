@@ -198,4 +198,50 @@ describe("text tool-call protocol round-trip", () => {
 			{ role: "tool", content: "file body", tool_call_id: "call_1" },
 		]);
 	});
+
+	it("delivers shared failure phase, diagnostic, and next action to a phone model as plain text", () => {
+		const failure =
+			'[harness] {"failure_key":"read:1","occ":1,"state":"failed","phase":"execution","tool":"read","failure_code":"enoent","diagnostic":"path not found","next_action":"List the parent directory, correct the path, then retry."}';
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "text-tool-1",
+					name: "read",
+					arguments: { path: "missing.txt" },
+					source: "text-protocol",
+				},
+			],
+			api: "openai-completions",
+			provider: "local-phone",
+			model: "phone-model",
+			usage: emptyUsage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "text-tool-1",
+			toolName: "read",
+			content: [{ type: "text", text: failure }],
+			isError: true,
+			timestamp: 2,
+		};
+
+		const messages = convertMessages(
+			buildPhoneModel(),
+			{ messages: [assistantMessage, toolResult], tools: [readTool()] },
+			compat,
+		);
+		const resultText = messages
+			.filter((message) => message.role === "user")
+			.map((message) => (typeof message.content === "string" ? message.content : ""))
+			.join("\n");
+
+		expect(messages.some((message) => message.role === "tool")).toBe(false);
+		expect(resultText).toContain('"phase":"execution"');
+		expect(resultText).toContain('"diagnostic":"path not found"');
+		expect(resultText).toContain('"next_action":"List the parent directory, correct the path, then retry."');
+	});
 });

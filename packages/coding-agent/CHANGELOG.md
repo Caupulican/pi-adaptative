@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevented concurrent and ineffective repeated auto-compaction runs in image-heavy or protected-recent contexts.
+- Fixed Windows runtime probes, case-insensitive context-file identity, Bash-like path parsing, portable `printf`, word-list and arithmetic `for` loops, and nested `break`/`continue`.
+- Preserved managed-tool provisioning causes and bounded execution-failure guidance in recovery logs, failure corpora, and `/toolhealth`.
+- Kept proven native tool-call models off the phone/text protocol and routed phone validation, repair teaching, and failure guidance through the shared tool pipeline.
+- Required the exact release ref to pass Linux and Windows CI before publishing binaries.
+
 ## [0.85.0] - 2026-08-02
 
 ### Breaking Changes

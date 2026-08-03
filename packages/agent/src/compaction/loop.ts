@@ -31,7 +31,9 @@ export interface CompactionLoopDeps {
 		headers: Record<string, string> | undefined,
 		branch: SessionEntry[],
 	): Promise<{ result: CompactionResult }>;
-	buildDeterministicCheckpoint(): Promise<{ result: CompactionResult }> | { result: CompactionResult };
+	buildDeterministicCheckpoint(
+		params: CompactionCycleParams,
+	): Promise<{ result: CompactionResult }> | { result: CompactionResult };
 	apply(result: CompactionResult): Promise<void> | void;
 	onTransition(info: { cycle: number; from: string; cause: string; detail?: string }): void;
 	getBaseKeepRecentTokens?(): number;
@@ -97,7 +99,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				return { kind: "failed", reason: "aborted", cycles: cycle - 1 };
 			}
 			try {
-				const built = await Promise.resolve(deps.buildDeterministicCheckpoint());
+				const built = await Promise.resolve(deps.buildDeterministicCheckpoint(params));
 				const result = mergeCompactionVerificationReports(built.result, pendingVerificationReports);
 				pendingVerificationReports.length = 0;
 				await deps.apply(result);
@@ -158,7 +160,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			}
 			if (lastCause === "deterministic-required") {
 				try {
-					const built = await Promise.resolve(deps.buildDeterministicCheckpoint());
+					const built = await Promise.resolve(deps.buildDeterministicCheckpoint(params));
 					const deterministicResult = mergeCompactionVerificationReports(built.result, pendingVerificationReports);
 					pendingVerificationReports.length = 0;
 					await deps.apply(deterministicResult);
@@ -237,6 +239,11 @@ function selectCycleParams(
 	} else if (cause === "effect-not-restored") {
 		params.chunked = true;
 		params.keepRecentTokens = Math.max(1, Math.floor(lastParams.keepRecentTokens / 2));
+		// The first verified summary already paid the model cost. If applying it did not restore
+		// headroom, repeating the same summarization request can stall a tool loop for minutes while
+		// protected recent/image content remains unchanged. Finish the bounded retry with the
+		// deterministic checkpoint at the stricter cut instead of buying two more equivalent calls.
+		params.deterministicOnly = true;
 	}
 
 	return params;

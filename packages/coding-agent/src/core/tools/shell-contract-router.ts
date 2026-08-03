@@ -4,7 +4,21 @@ export type ShellContractRoute =
 	| { kind: "python-engine"; command: string }
 	| { kind: "unsupported"; error: string };
 
-const ENGINE_OWNED_BUILTINS = new Set(["cd", "export", "unset", "exit"]);
+const ENGINE_OWNED_BUILTINS = new Set(["cd", "export", "unset", "exit", "break", "continue"]);
+const ENGINE_ONLY_BUILTINS = new Set([
+	"printf",
+	"basename",
+	"dirname",
+	"test",
+	"[",
+	"sed",
+	"wc",
+	"sort",
+	"uniq",
+	"cut",
+	"tr",
+	"xargs",
+]);
 
 interface TokenizeResult {
 	ok: boolean;
@@ -337,6 +351,13 @@ export function routeShellContract(
 				error: "The Bash-like 'exit' builtin requires the Windows Python shell engine so Pi can preserve its terminal result protocol.",
 			};
 		}
+	}
+	if (ENGINE_ONLY_BUILTINS.has(commandName)) {
+		if (pythonEngine) return { kind: "python-engine", command };
+		return {
+			kind: "unsupported",
+			error: `The Bash-like '${argv[0]}' builtin requires the Windows Python shell engine. Enable windowsShell.pythonEngine to use it portably.`,
+		};
 	}
 
 	if (BLOCKED_NESTED_SHELLS.has(commandName)) {

@@ -1,4 +1,4 @@
-"""Frozen AST dataclasses for the pi shell engine: word segments + command structure.
+"""AST dataclasses for the pi shell engine: word segments + command structure.
 
 Transcribed verbatim from windows-shell-workpackages-2026-07-19.md §1.4. Type tags for
 tests come from `type(node).__name__`; do NOT add a `kind` field to any node.
@@ -95,7 +95,28 @@ class BraceGroup:
     redirects: list["Redirect"]
 
 
-PipelineElement = SimpleCommand | Subshell | BraceGroup
+@dataclass
+class ForCommand:
+    """POSIX word-list loop, including the omitted-``in`` positional form."""
+
+    name: str
+    items: list["Word"]
+    body: "CommandList"
+    redirects: list["Redirect"]
+
+
+@dataclass
+class ArithmeticForCommand:
+    """Bash arithmetic loop: ``for ((init; condition; update)); do ...; done``."""
+
+    initializer: str
+    condition: str
+    update: str
+    body: "CommandList"
+    redirects: list["Redirect"]
+
+
+PipelineElement = SimpleCommand | Subshell | BraceGroup | ForCommand | ArithmeticForCommand
 
 
 @dataclass

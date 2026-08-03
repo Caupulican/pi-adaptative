@@ -55,3 +55,19 @@ class ShellExit(Exception):
     def __init__(self, exit_code: int) -> None:
         super().__init__(exit_code)
         self.exit_code = exit_code
+
+
+class LoopControl(Exception):
+    """Internal non-local control transfer consumed by enclosing loop nodes."""
+
+    def __init__(self, levels: int) -> None:
+        super().__init__(levels)
+        self.levels = levels
+
+
+class LoopBreak(LoopControl):
+    """Leave one or more enclosing loops."""
+
+
+class LoopContinue(LoopControl):
+    """Continue one or more enclosing loops."""

@@ -93,13 +93,39 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
-	it("(d) an unsupported construct returns the named refusal", async () => {
+	it("(d) word-list and arithmetic for loops execute with printf and loop control", async () => {
 		const sessionKey = freshSessionKey("refusal");
 		try {
 			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
+			const result = await tool.execute(
+				"call-d-loop",
+				{ command: `for item in one "two words"; do printf '[%s]\\n' "$item"; done` },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const content = result.content[0];
+			if (content?.type !== "text") throw new Error("expected text output");
+			expect(content.text.trim()).toBe("[one]\n[two words]");
+
+			const arithmetic = await tool.execute(
+				"call-d-arithmetic",
+				{
+					command:
+						`for ((i=0; i<5; i++)); do ` +
+						`test "$i" = 1 && continue; test "$i" = 4 && break; printf '[%s]\\n' "$i"; done`,
+				},
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const arithmeticContent = arithmetic.content[0];
+			if (arithmeticContent?.type !== "text") throw new Error("expected text output");
+			expect(arithmeticContent.text.trim()).toBe("[0]\n[2]\n[3]");
+
 			await expect(
 				tool.execute("call-d", { command: "if true; then echo hi; fi" }, undefined, undefined, undefined as never),
-			).rejects.toThrow(/control-flow|not supported|if\/for\/while/i);
+			).rejects.toThrow(/control-flow|not supported|if\/while/i);
 		} finally {
 			disposeShellExecutionSession(sessionKey);
 		}

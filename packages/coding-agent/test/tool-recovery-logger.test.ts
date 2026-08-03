@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createToolFailureResult, type ToolFailureMemoryRecord } from "@caupulican/pi-agent-core";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -114,6 +115,43 @@ describe("ToolRecoveryLogger", () => {
 			shape: [{ path: "edits", expectedType: "array", receivedType: "string", keyword: "type" }],
 		});
 		expect(JSON.stringify(corpus)).not.toContain("oldText");
+	});
+
+	it("writes sanitized execution failures with phase and deterministic next action", async () => {
+		const dir = makeTempDir();
+		const logger = createLogger(dir);
+		const failure: ToolFailureMemoryRecord = {
+			version: 1,
+			failureKey: "find:opaque",
+			tool: "find",
+			operation: "[bounded]",
+			occurrence: 1,
+			state: "failed",
+			phase: "provisioning",
+			failureCode: "provisioning_failed",
+			diagnostic: "download rejected sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+			correction: "Inspect the provisioning diagnostic and retry only after its cause changes.",
+		};
+
+		const record = logger.recordToolExecutionFailure({
+			provider: "test-provider",
+			model: "test-model",
+			tool: "find",
+			details: createToolFailureResult(failure).details,
+		});
+		expect(record).toMatchObject({ kind: "tool_execution_failure", phase: "provisioning" });
+		await logger.flush(1_000);
+
+		const corpus = JSON.parse(readFileSync(join(dir, "state", "failure-corpus.jsonl"), "utf-8").trim()) as unknown;
+		expect(corpus).toMatchObject({
+			kind: "tool_execution",
+			tool: "find",
+			phase: "provisioning",
+			failureCode: "provisioning_failed",
+			nextAction: "Inspect the provisioning diagnostic and retry only after its cause changes.",
+		});
+		expect(JSON.stringify(corpus)).not.toContain("sk-proj-");
+		expect(logger.getStats()).toMatchObject({ executionFailures: 1, failurePhases: { provisioning: 1 } });
 	});
 
 	it("bounds queued records and counts dropped entries", async () => {

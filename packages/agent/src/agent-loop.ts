@@ -5,7 +5,7 @@
 
 import { EventStream } from "@caupulican/pi-ai/event-stream";
 import { streamSimple } from "@caupulican/pi-ai/stream";
-import { formatToolRepairStandingRule } from "@caupulican/pi-ai/tool-repair-registry";
+import { formatToolRepairStandingRule, type ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, Context, ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
 	type ToolArgumentExecutionOutcome,
@@ -688,6 +688,7 @@ type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
+	phase: ToolFailurePhase;
 	failureCode: string;
 	correction: string;
 	diagnostic?: string;
@@ -851,26 +852,28 @@ async function prepareToolCall(
 	validationFailureTracker: ToolValidationFailureTracker,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	if (toolCall.errorMessage) {
-		return {
-			kind: "immediate",
-			result: createErrorToolResult(toolCall.errorMessage),
-			isError: true,
-			failureCode: "malformed_call",
-			correction: "Resend one complete JSON argument object matching the current tool schema.",
-			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
-		};
-	}
-
-	const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
 	if (!tool) {
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
 			isError: true,
+			phase: "validation",
 			failureCode: "unknown_tool",
 			correction: "Choose a tool from the currently available tool list.",
 			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
+		};
+	}
+
+	if (toolCall.errorMessage) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(toolCall.errorMessage),
+			isError: true,
+			phase: "validation",
+			failureCode: "malformed_call",
+			correction: "Resend one complete JSON argument object matching the current tool schema.",
+			validationEvent: createValidationBounceTelemetry(config, toolCall, "malformed_call"),
 		};
 	}
 
@@ -908,6 +911,7 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
+					phase: "cancelled",
 					failureCode: "aborted",
 					correction: "Retry only if the operation is still required.",
 					validationEvent,
@@ -919,6 +923,7 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult(reason),
 					isError: true,
+					phase: "policy",
 					failureCode: "blocked",
 					correction: "Choose an allowed approach or request the required authority before retrying.",
 					diagnostic: reason,
@@ -931,6 +936,7 @@ async function prepareToolCall(
 				kind: "immediate",
 				result: createErrorToolResult("Operation aborted"),
 				isError: true,
+				phase: "cancelled",
 				failureCode: "aborted",
 				correction: "Retry only if the operation is still required.",
 				validationEvent,
@@ -953,10 +959,12 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(message),
 			isError: true,
+			phase: isToolArgumentValidationError(error) ? "validation" : "preflight",
 			failureCode: isToolArgumentValidationError(error) ? "invalid_arguments" : "preflight_error",
 			correction: isToolArgumentValidationError(error)
 				? validationFailureCorrection(validationEvent, toolCall.name)
-				: toolFailureCorrection(message, "rejected"),
+				: toolFailureCorrection(message, "rejected", "preflight"),
+			diagnostic: isToolArgumentValidationError(error) ? undefined : message,
 			validationEvent,
 		};
 	}
@@ -975,6 +983,7 @@ function finalizeRejectedToolCall(
 		outcome.failureCode,
 		outcome.correction,
 		outcome.diagnostic,
+		outcome.phase,
 	);
 	return {
 		toolCall,
@@ -1257,6 +1266,7 @@ async function finalizeExecutedToolCall(
 			assessment.failureCode,
 			assessment.guidance,
 			assessment.diagnostic,
+			assessment.phase,
 		);
 		result = { ...createToolFailureResult(record, result.terminate), usage };
 	} else {

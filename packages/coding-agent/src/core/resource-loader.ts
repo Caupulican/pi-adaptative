@@ -269,16 +269,25 @@ export function loadRawProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
 	projectTrusted?: boolean;
+	/** Testable filesystem case semantics; production defaults to the current platform. */
+	platform?: NodeJS.Platform;
 }): Array<{ path: string; rawContent: string }> {
 	const resolvedCwd = resolvePath(options.cwd);
 	const resolvedAgentDir = resolvePath(options.agentDir);
+	const platform = options.platform ?? process.platform;
+	const pathIdentity = (filePath: string): string => {
+		const canonicalPath = canonicalizePath(filePath);
+		return platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
+	};
 
 	const contextFiles: Array<{ path: string; rawContent: string }> = [];
-	const seenPaths = new Set<string>();
+	const seenPathIdentities = new Set<string>();
 
 	for (const globalContext of loadRawContextFilesFromDir(resolvedAgentDir)) {
+		const identity = pathIdentity(globalContext.path);
+		if (seenPathIdentities.has(identity)) continue;
+		seenPathIdentities.add(identity);
 		contextFiles.push(globalContext);
-		seenPaths.add(globalContext.path);
 	}
 
 	if (options.projectTrusted !== false) {
@@ -288,14 +297,15 @@ export function loadRawProjectContextFiles(options: {
 		const root = resolve("/");
 
 		while (true) {
-			const contextFilesInDir = loadRawContextFilesFromDir(currentDir).filter(
-				(contextFile) => !seenPaths.has(contextFile.path),
-			);
+			const contextFilesInDir: Array<{ path: string; rawContent: string }> = [];
+			for (const contextFile of loadRawContextFilesFromDir(currentDir)) {
+				const identity = pathIdentity(contextFile.path);
+				if (seenPathIdentities.has(identity)) continue;
+				seenPathIdentities.add(identity);
+				contextFilesInDir.push(contextFile);
+			}
 			if (contextFilesInDir.length > 0) {
 				ancestorContextFiles.unshift(...contextFilesInDir);
-				for (const contextFile of contextFilesInDir) {
-					seenPaths.add(contextFile.path);
-				}
 			}
 
 			if (currentDir === root) break;

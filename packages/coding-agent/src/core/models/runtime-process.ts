@@ -94,8 +94,16 @@ export function createRuntimeCommandRunner(limits: RuntimeCommandRunnerLimits): 
 	};
 }
 
-export function runtimeCommandAvailable(command: string): boolean {
-	return spawnProcessSync(command, ["--version"], { encoding: "utf8", timeout: 5_000 }).error === undefined;
+type RuntimeCommandProbe = (
+	command: string,
+	args: string[],
+	options: { encoding: "utf8"; timeout: number },
+) => { error?: unknown };
+
+export function runtimeCommandAvailable(command: string, probe: RuntimeCommandProbe = spawnProcessSync): boolean {
+	// Node returns `undefined` on success; cross-spawn normalizes that field to `null` on Windows.
+	// Both are the absence of an error. A strict undefined check made every Windows probe fail.
+	return probe(command, ["--version"], { encoding: "utf8", timeout: 5_000 }).error == null;
 }
 
 export function runtimeSleep(ms: number): Promise<void> {

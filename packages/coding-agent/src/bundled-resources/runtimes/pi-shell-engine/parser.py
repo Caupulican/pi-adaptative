@@ -13,9 +13,11 @@ import re
 from errors import UnsupportedConstruct
 from nodes import (
     AndOr,
+    ArithmeticForCommand,
     BraceGroup,
     CommandList,
     DQ,
+    ForCommand,
     Lit,
     Pipeline,
     PipelineElement,
@@ -28,11 +30,12 @@ from nodes import (
 from tokens import Token
 
 _ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXTGLOB_RE = re.compile(r"[@!?*+]\(")
 _BRACE_EXPANSION_RE = re.compile(r"\{[^{}]*,[^{}]*\}")
 
 _JOB_CONTROL_WORDS = {"fg", "bg", "jobs", "wait", "disown"}
-_CONTROL_FLOW_WORDS = {"if", "for", "while", "until", "case", "select"}
+_CONTROL_FLOW_WORDS = {"if", "while", "until", "case", "select"}
 _ARITHMETIC_WORDS = {"let"}
 _UNSUPPORTED_BUILTIN_WORDS = {"eval", "source", ".", "alias", "trap", "set", "shopt", "read", "declare", "local"}
 _NESTED_SHELL_WORDS = {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh", "wsl"}
@@ -124,26 +127,47 @@ class _Parser:
         tok = self.peek()
         return tok is not None and tok.kind == "OP" and tok.text == text
 
+    def at_unquoted_word(self, text: str) -> bool:
+        tok = self.peek()
+        return (
+            tok is not None
+            and tok.kind == "WORD"
+            and tok.segments is not None
+            and len(tok.segments) == 1
+            and isinstance(tok.segments[0], Raw)
+            and tok.segments[0].text == text
+        )
+
+    def _at_stop(self, stop_texts: frozenset[str], stop_words: frozenset[str]) -> bool:
+        tok = self.peek()
+        if tok is None:
+            return True
+        if tok.kind == "OP":
+            return tok.text in stop_texts
+        return any(self.at_unquoted_word(word) for word in stop_words)
+
     def _skip_seps(self) -> None:
         while self.at_op(";") or self.at_op("\n"):
             self.advance()
 
-    def parse_command_list(self, stop_texts: frozenset[str]) -> CommandList:
+    def parse_command_list(
+        self, stop_texts: frozenset[str], stop_words: frozenset[str] = frozenset()
+    ) -> CommandList:
         entries = []
         separators: list[str] = []
         self._skip_seps()
         while True:
-            tok = self.peek()
-            if tok is None or (tok.kind == "OP" and tok.text in stop_texts):
+            if self._at_stop(stop_texts, stop_words):
                 break
             entries.append(self.parse_and_or())
             if self.at_op("&"):
                 raise UnsupportedConstruct(
                     "job-control", "Background execution ('&') is not supported; run commands synchronously."
                 )
-            tok = self.peek()
-            if tok is None or (tok.kind == "OP" and tok.text in stop_texts):
+            if self._at_stop(stop_texts, stop_words):
                 break
+            tok = self.peek()
+            assert tok is not None
             if tok.kind == "OP" and tok.text in (";", "\n"):
                 separators.append(self.advance().text)  # type: ignore[arg-type]
                 self._skip_seps()
@@ -194,6 +218,13 @@ class _Parser:
             self.advance()
             redirects = self._parse_redirects()
             return BraceGroup(body=body, redirects=redirects)
+        if self.at_unquoted_word("for"):
+            return self.parse_for_command()
+        if self.peek() is not None and self.peek().kind == "ARITH":
+            raise UnsupportedConstruct(
+                "arithmetic-expansion",
+                "Arithmetic commands '((...))' are supported only as a for-loop header.",
+            )
         command = self.parse_simple_command()
         if not command.assignments and not command.words and not command.redirects:
             # A fully empty SimpleCommand reached as a pipeline element means a missing
@@ -203,6 +234,103 @@ class _Parser:
                 "malformed-syntax", "Missing command: a pipeline/list element has no command word."
             )
         return command
+
+    def _parse_for_body(self) -> CommandList:
+        if not (self.at_op(";") or self.at_op("\n")):
+            raise UnsupportedConstruct(
+                "malformed-syntax", "A for loop requires ';' or a newline before 'do'."
+            )
+        self._skip_seps()
+        if not self.at_unquoted_word("do"):
+            raise UnsupportedConstruct("malformed-syntax", "A for loop is missing its 'do' keyword.")
+        self.advance()
+
+        body = self.parse_command_list(frozenset(), frozenset({"done"}))
+        if not self.at_unquoted_word("done"):
+            raise UnsupportedConstruct("malformed-syntax", "A for loop is missing its closing 'done' keyword.")
+        if not body.entries:
+            raise UnsupportedConstruct("malformed-syntax", "A for loop requires at least one command in its body.")
+        self.advance()
+        return body
+
+    @staticmethod
+    def _split_arithmetic_header(header: str) -> tuple[str, str, str]:
+        parts: list[str] = []
+        start = 0
+        depth = 0
+        for index, char in enumerate(header):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth < 0:
+                    raise UnsupportedConstruct(
+                        "malformed-syntax", "Arithmetic for header contains an unmatched ')'."
+                    )
+            elif char == ";" and depth == 0:
+                parts.append(header[start:index].strip())
+                start = index + 1
+        if depth != 0:
+            raise UnsupportedConstruct(
+                "malformed-syntax", "Arithmetic for header contains unbalanced parentheses."
+            )
+        parts.append(header[start:].strip())
+        if len(parts) != 3:
+            raise UnsupportedConstruct(
+                "malformed-syntax",
+                "An arithmetic for loop requires exactly 'initializer; condition; update'.",
+            )
+        return parts[0], parts[1], parts[2]
+
+    def parse_for_command(self) -> ForCommand | ArithmeticForCommand:
+        self.advance()  # `for`
+        arithmetic = self.peek()
+        if arithmetic is not None and arithmetic.kind == "ARITH":
+            self.advance()
+            initializer, condition, update = self._split_arithmetic_header(arithmetic.text or "")
+            body = self._parse_for_body()
+            return ArithmeticForCommand(
+                initializer=initializer,
+                condition=condition,
+                update=update,
+                body=body,
+                redirects=self._parse_redirects(),
+            )
+
+        variable = self.peek()
+        variable_name = (
+            variable.segments[0].text
+            if variable is not None
+            and variable.kind == "WORD"
+            and variable.segments is not None
+            and len(variable.segments) == 1
+            and isinstance(variable.segments[0], Raw)
+            else ""
+        )
+        if not _IDENTIFIER_RE.fullmatch(variable_name):
+            raise UnsupportedConstruct(
+                "malformed-syntax", "A for loop requires an unquoted shell variable name after 'for'."
+            )
+        self.advance()
+        items: list[Word] = []
+        if self.at_unquoted_word("in"):
+            self.advance()
+            while True:
+                tok = self.peek()
+                if tok is None or tok.kind == "OP":
+                    break
+                if tok.kind != "WORD":
+                    raise UnsupportedConstruct(
+                        "malformed-syntax", "Unexpected token in a for loop word list."
+                    )
+                items.append(Word(segments=tok.segments or []))
+                self.advance()
+        elif not (self.at_op(";") or self.at_op("\n")):
+            raise UnsupportedConstruct(
+                "malformed-syntax", "A for loop requires 'in values' or ';' after its variable name."
+            )
+        body = self._parse_for_body()
+        return ForCommand(name=variable_name, items=items, body=body, redirects=self._parse_redirects())
 
     def _parse_redirects(self) -> list[Redirect]:
         redirects: list[Redirect] = []

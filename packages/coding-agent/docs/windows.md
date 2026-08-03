@@ -13,7 +13,7 @@ Pi supports native Windows on x64 and ARM64. The Node.js package runs under Wind
 The model always sees one stable `bash` tool contract. On Windows, a deterministic router classifies every command into one of three tiers instead of parsing the full Bash grammar in one place:
 
 1. **PowerShell floor** (always available): one simple command — a bounded set of builtin translations or a quoted external argv — converted deterministically to PowerShell, exactly as before this tier existed.
-2. **Bundled Python engine** (uv-provisioned Python 3.13, on by default): pipelines, redirection, chaining, quoting, expansion, globs, and the coreutils vocabulary below, plus every state-mutating command (`cd`, `export`, `unset`), which the engine always owns so there is a single mutator.
+2. **Bundled Python engine** (uv-provisioned Python 3.13, on by default): pipelines, redirection, chaining, word-list and arithmetic `for` loops, loop control, quoting, expansion, globs, and the coreutils vocabulary below, plus every state-mutating command (`cd`, `export`, `unset`), which the engine always owns so there is a single mutator.
 
 External programs are not reimplemented. A simple `rg` call runs the installed native `rg.exe` through the persistent PowerShell floor; when a pipeline or chain requires the Python coordinator, it spawns that same `rg.exe` directly without resolving or starting PowerShell. A `.ps1` target in an engine-owned command is adapted through the same selected PowerShell executable as the floor, without starting a nested model-authored shell.
 3. **Named fail-closed refusal**: constructs outside the supported grammar (see below) return an actionable error naming the construct instead of guessing or downgrading silently.
@@ -36,7 +36,9 @@ The PowerShell tier runs with `-NoLogo -NoProfile -NonInteractive -Command` and 
 | Sequencing | `a ; b`, newline-separated, `a && b`, `a \|\| b`, `! pipeline` | Left-to-right / short-circuit / negation, bash-standard. |
 | Subshell | `( … )` | Isolated cwd/env copy — inner `cd`/`export` do not leak out. |
 | Brace group | `{ …; }` | Shares state — inner `cd`/`export` persist. |
-| Redirection | `>`, `>>`, `1>`, `1>>`, `<`, `2>`, `2>>`, `2>&1`, `&>`, `>&` | `/dev/null` maps to `os.devnull`. A builtin's stderr is merged into its own stdout (one sink) — an explicit `2>file` on a builtin does not capture its error text; external commands capture normally. |
+| For loop | `for name in words; do …; done`, `for name; do …; done`, `for ((init; condition; update)); do …; done` | Word lists expand once before iteration; the final value remains in the session environment. The omitted-list form iterates shell positional arguments, which Pi does not supply. Arithmetic clauses support integer variables, updates, assignments, comparisons, logical/bitwise operators, and signed 64-bit wrapping. |
+| Loop control | `break [N]`, `continue [N]` | Works across nested word-list and arithmetic loops. An omitted count means one; invalid counts report status 1 without crashing the coordinator. |
+| Redirection | `>`, `>>`, `1>`, `1>>`, `<`, `2>`, `2>>`, `2>&1`, `&>`, `>&` | `/dev/null` maps to `os.devnull`. Unredirected stderr shares Pi's session output; explicit stderr redirection is honored for builtins, state commands, and external programs. |
 | Quoting | `'…'`, `"…"`, `\x`, `$'…'` | Standard single/double/backslash/ANSI-C semantics. |
 | Tilde | `~`, `~/x` | Word-start, unquoted, expands to `$HOME`. `~user` is unsupported (refusal). |
 | Parameter expansion | `$VAR`, `$?`, `${VAR}`, `${V:-w}`, `${V:=w}`, `${V:+w}`, `${V:?w}`, `${#VAR}` | `$?` is the latest foreground pipeline status. POSIX `:`-prefixed (empty-or-unset) semantics only; other `${…}` operators refuse. |
@@ -53,13 +55,13 @@ Builtins: `cd`, `pwd`, `echo [-n -e -E]`, `printf`, `export`, `unset`, `exit [N]
 - `wc`/`uniq -c` column widths reproduce GNU's dynamic field width only for the single-count stdin case; multi-count/file-arg forms use fixed deterministic padding.
 - No shell-variable vs. exported-environment distinction: every `NAME=value` sets engine env.
 - Sorting is always ordinal (`LC_ALL=C`): globs, `ls`, `find`, and default `sort`.
-- A builtin's stderr is merged into its own stdout; only external commands honor an explicit `2>`.
+- Arithmetic loop variables use deterministic signed 64-bit wrapping; invalid shifts, division by zero, negative exponents, and malformed expressions return status 1 with a bounded diagnostic.
 - Globs expand only the final path segment (`dir/*.py` works; `*/x.py` matches the directory part literally).
 - `wc -m` counts UTF-8 characters (bash under `LC_ALL=C` counts bytes).
 
 ### Named unsupported constructs
 
-Each of these fails closed with a named, actionable error instead of an approximation: `job-control` (trailing `&`, `fg`/`bg`/`jobs`/`wait`/`disown`), `process-substitution` (`<(…)`/`>(…)`), `arithmetic-expansion` (`$((…))`, `((…))`, `let`), `brace-expansion` (`{a,b,c}`), `nested-shell` (`bash`/`sh`/`cmd`/`powershell`/`pwsh`/`wsl`/… as a command word), `exec-builtin`, `heredoc`/`here-string` (`<<`, `<<-`, `<<<`), `function-definition`, `control-flow` (`if`/`for`/`while`/`until`/`case`/`select`), `extended-glob` (`@(…)`, `!(…)`, etc.), `unsupported-builtin` (`eval`, `source`/`.`, `alias`, `trap`, `set`, `shopt`, `read`, `declare`, `local`), `unsupported-flag`, `posix-script` (`*.sh`, `/bin/…`), `cwd-missing`, `tilde-user`, `malformed-syntax` (unbalanced quote/paren/brace, empty pipeline element, missing redirect target), `parameter-expansion` (a `${…}` form outside the supported op set).
+Each of these fails closed with a named, actionable error instead of an approximation: `job-control` (trailing `&`, `fg`/`bg`/`jobs`/`wait`/`disown`), `process-substitution` (`<(…)`/`>(…)`), `arithmetic-expansion` (`$((…))`, standalone `((…))`, and `let`; arithmetic `for` headers are supported), `brace-expansion` (`{a,b,c}`), `nested-shell` (`bash`/`sh`/`cmd`/`powershell`/`pwsh`/`wsl`/… as a command word), `exec-builtin`, `heredoc`/`here-string` (`<<`, `<<-`, `<<<`), `function-definition`, `control-flow` (`if`/`while`/`until`/`case`/`select`), `extended-glob` (`@(…)`, `!(…)`, etc.), `unsupported-builtin` (`eval`, `source`/`.`, `alias`, `trap`, `set`, `shopt`, `read`, `declare`, `local`), `unsupported-flag`, `posix-script` (`*.sh`, `/bin/…`), `cwd-missing`, `tilde-user`, `malformed-syntax` (unbalanced quote/paren/brace, empty pipeline element, missing redirect target, malformed `for` loop), `parameter-expansion` (a `${…}` form outside the supported op set).
 
 ### State and session semantics
 
@@ -73,7 +75,7 @@ The Python interpreter and engine imports stay warm in one coordinator process p
 
 `windowsShell.pythonEngine` (default `true`) is the kill switch. Set it to `false` to restore the PowerShell-only contract verbatim: only the simple-command floor is used, and every pipeline/redirection/expansion/chaining form that would have routed to the engine instead returns the same fail-closed error it did before the engine existed.
 
-When the setting is left on but the bundled Python runtime cannot be resolved (uv missing, network failure provisioning Python 3.13, or similar), the engine tier is simply unavailable: simple commands still run on the PowerShell floor exactly as always, and any command that needs the engine returns a named error stating the Python runtime is unavailable, that the simple-command floor still works, and to fix `uv`/network to restore pipelines, redirection, expansion, and chaining. There is no silent approximation — a complex command is never downgraded to a plausible-but-wrong simple execution.
+When the setting is left on but the bundled Python runtime cannot be resolved (uv missing, network failure provisioning Python 3.13, or similar), the engine tier is simply unavailable: simple commands still run on the PowerShell floor exactly as always, and any command that needs the engine returns a named error stating the Python runtime is unavailable, that the simple-command floor still works, and to fix `uv`/network to restore loops, pipelines, redirection, expansion, and chaining. There is no silent approximation — a complex command is never downgraded to a plausible-but-wrong simple execution.
 
 The native `python` tool uses the same contract on Windows and Unix-like systems. Pi provisions a pinned uv executable, resolves or installs Python 3.13 through uv, then spawns the interpreter directly with UTF-8 and bytecode-cache suppression. Python calls default to 30 seconds. See [Native Python](python.md).
 
