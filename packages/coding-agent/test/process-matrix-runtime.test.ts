@@ -157,7 +157,7 @@ function makeHarness(overrides: Partial<ProcessMatrixRuntimeConfig> = {}): Harne
 			harness.confirmAsks.push(message);
 			return harness.confirmAnswers.shift() ?? false;
 		},
-		requestExit: () => {
+		requestExit: async () => {
 			harness.exitRequests += 1;
 		},
 		...overrides,

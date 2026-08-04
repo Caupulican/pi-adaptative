@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Serialized supervision start/stop transitions, cleaned partially started peers, awaited runtime-owned memory, GC, shell, and supervision shutdown before process-matrix and early CLI exits, and made Windows memory cleanup wait for worker termination before removing its state tree.
+
 ## [0.85.7] - 2026-08-04
 
 ### Fixed

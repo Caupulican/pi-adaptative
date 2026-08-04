@@ -82,7 +82,7 @@ export interface ProcessMatrixRuntimeConfig {
 	promptConfirm: (message: string) => Promise<boolean>;
 	/** Cooperative self-exit -- called by a worker once wound down (grace expiry or a
 	 * master-granted cleanup directive). Never called for the master's own lifecycle. */
-	requestExit: () => void;
+	requestExit: () => Promise<void>;
 	/** Stable goal/task identity. Automatic recovery requires an exact match. */
 	taskRef?: string;
 	taskSummary?: string;
@@ -707,7 +707,7 @@ async function startWorkerBranch(
 		preserveResumableOnExit = false;
 		emitRuntimeNotice(config, "process-matrix: the parent session requested a cooperative cleanup. Winding down.");
 		await stop();
-		config.requestExit();
+		await config.requestExit();
 	};
 
 	const startHealthyWatch = (): void => {
@@ -816,7 +816,7 @@ async function startWorkerBranch(
 		}
 		if (now() >= graceDeadline) {
 			await stop();
-			config.requestExit();
+			await config.requestExit();
 		}
 	};
 

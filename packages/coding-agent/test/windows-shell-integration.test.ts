@@ -267,7 +267,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 		}
 	});
 
-	it("(h) retains one PowerShell process across routed external commands and empty grep results", async () => {
+	it("(h) retains one PowerShell process across 20 routed empty searches", async () => {
 		const sessionKey = freshSessionKey("powershell-process-lifetime");
 		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-lifetime-"));
 		const sourcePath = join(root, "source.txt");
@@ -288,16 +288,19 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			};
 
 			const firstParentPid = await parentPid("call-h1");
-			const empty = await tool.execute(
-				"call-h2",
-				{ command: "grep absent source.txt" },
-				undefined,
-				undefined,
-				undefined as never,
-			);
-			const emptyContent = empty.content[0];
-			if (emptyContent?.type !== "text") throw new Error("expected text output");
-			expect(emptyContent.text).toContain("Final grep search completed with no matches.");
+			for (let index = 0; index < 20; index++) {
+				const search = hasRipgrep && index % 2 === 0 ? "rg" : "grep";
+				const empty = await tool.execute(
+					`call-h-empty-${index}`,
+					{ command: `${search} absent source.txt` },
+					undefined,
+					undefined,
+					undefined as never,
+				);
+				const emptyContent = empty.content[0];
+				if (emptyContent?.type !== "text") throw new Error("expected text output");
+				expect(emptyContent.text).toContain(`Final ${search} search completed with no matches.`);
+			}
 			expect(await parentPid("call-h3")).toBe(firstParentPid);
 			await expect(
 				tool.execute(

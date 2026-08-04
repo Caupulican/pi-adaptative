@@ -31,6 +31,7 @@ import { completedWorkerOutput } from "./worker-output-fixture.ts";
 describe("Memory subsystem integration (file-store)", () => {
 	let tempDir: string;
 	let agentDir: string;
+	const sessions: Array<{ disposeAndWait(): Promise<void> }> = [];
 
 	const newSession = async (
 		opts: {
@@ -100,6 +101,7 @@ describe("Memory subsystem integration (file-store)", () => {
 			resourceLoader,
 			isChildSession: opts.isChildSession,
 		});
+		sessions.push(session);
 		await session.bindExtensions({});
 		return session;
 	};
@@ -110,8 +112,11 @@ describe("Memory subsystem integration (file-store)", () => {
 		mkdirSync(agentDir, { recursive: true });
 	});
 
-	afterEach(() => {
-		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+	afterEach(async () => {
+		while (sessions.length > 0) await sessions.pop()?.disposeAndWait();
+		if (tempDir && existsSync(tempDir)) {
+			rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+		}
 	});
 
 	it("surfaces the `memory` tool (active) and injects MEMORY.md into the system prompt", async () => {

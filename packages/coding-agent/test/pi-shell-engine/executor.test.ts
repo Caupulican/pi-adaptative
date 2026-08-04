@@ -463,12 +463,18 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 	function runMain(
 		command: string,
 		cwd: string,
-		timeoutMs?: number,
+		options: { engineTimeoutMs?: number; processTimeoutMs?: number } = {},
 	): { stdout: string; stderr: string; frame: Record<string, unknown> } {
-		const request = JSON.stringify({ command, cwd, env: { PATH: process.env.PATH ?? "" }, timeoutMs });
+		const request = JSON.stringify({
+			command,
+			cwd,
+			env: { PATH: process.env.PATH ?? "" },
+			timeoutMs: options.engineTimeoutMs,
+		});
 		const result = spawnSync(pythonPath, ["-B", join(ENGINE_DIR, "main.py")], {
 			encoding: "utf-8",
 			input: request,
+			timeout: options.processTimeoutMs,
 		});
 		if (result.status !== 0) {
 			throw new Error(
@@ -590,7 +596,9 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 	});
 
 	it("keeps signed loop variables stable across decrement updates", () => {
-		const { stdout, frame } = runMain(`for ((i=1; i>=-1; i--)); do printf '%s\n' "$i"; done`, tmpdir(), 100);
+		const { stdout, frame } = runMain(`for ((i=1; i>=-1; i--)); do printf '%s\n' "$i"; done`, tmpdir(), {
+			processTimeoutMs: 5_000,
+		});
 
 		expect(stdout).toBe("1\n0\n-1\n");
 		expect(frame.exitCode).toBe(0);
@@ -607,7 +615,10 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 	});
 
 	it("bounds a builtin-only infinite arithmetic loop at the request deadline", () => {
-		const { frame } = runMain("for ((;;)); do true; done", tmpdir(), 20);
+		const { frame } = runMain("for ((;;)); do true; done", tmpdir(), {
+			engineTimeoutMs: 20,
+			processTimeoutMs: 5_000,
+		});
 
 		expect(frame.exitCode).toBe(124);
 		expect(frame.unsupported).toBeNull();

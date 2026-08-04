@@ -17,7 +17,11 @@ import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
+import {
+	type AgentSessionRuntime,
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionRuntime,
+} from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
 	createAgentSessionFromServices,
@@ -120,6 +124,18 @@ function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]
 		const color = diagnostic.type === "error" ? chalk.red : diagnostic.type === "warning" ? chalk.yellow : chalk.dim;
 		const prefix = diagnostic.type === "error" ? "Error: " : diagnostic.type === "warning" ? "Warning: " : "";
 		console.error(color(`${prefix}${diagnostic.message}`));
+	}
+}
+
+export async function disposeRuntimeAndExit(
+	runtime: Pick<AgentSessionRuntime, "dispose">,
+	exitCode: number,
+	exit: (code: number) => void = (code) => process.exit(code),
+): Promise<void> {
+	try {
+		await runtime.dispose();
+	} finally {
+		exit(exitCode);
 	}
 }
 
@@ -1035,7 +1051,8 @@ export async function main(args: string[], options?: MainOptions) {
 		const laneWorkerRefusal = session.getLaneWorkerRefusal();
 		if (laneWorkerRefusal) {
 			console.error(chalk.red(formatLaneWorkerRefusal(laneWorkerRefusal, boundWorktreeLaneKey)));
-			process.exit(1);
+			await disposeRuntimeAndExit(runtime, 1);
+			return;
 		}
 	}
 
@@ -1058,17 +1075,10 @@ export async function main(args: string[], options?: MainOptions) {
 			onDiagnostic: (message) => {
 				console.error(chalk.yellow(`Warning: ${message}`));
 			},
-			requestExit: (activeSession) => {
-				try {
-					activeSession.dispose();
-				} catch {
-					// Best-effort: exit must proceed even if dispose() itself throws.
-				}
-				process.exit(0);
-			},
+			requestExit: () => disposeRuntimeAndExit(runtime, 0),
 		});
-		await supervision.start(session);
 		runtime.registerSessionResource(supervision);
+		await supervision.start(session);
 	}
 
 	if (parsed.help) {
@@ -1076,13 +1086,15 @@ export async function main(args: string[], options?: MainOptions) {
 			.getExtensions()
 			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
 		printHelp(extensionFlags);
-		process.exit(0);
+		await disposeRuntimeAndExit(runtime, 0);
+		return;
 	}
 
 	if (parsed.listModels !== undefined) {
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
-		process.exit(0);
+		await disposeRuntimeAndExit(runtime, 0);
+		return;
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
@@ -1114,19 +1126,22 @@ export async function main(args: string[], options?: MainOptions) {
 	time("resolveModelScope");
 	reportDiagnostics(runtime.diagnostics);
 	if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
-		process.exit(1);
+		await disposeRuntimeAndExit(runtime, 1);
+		return;
 	}
 	time("createAgentSession");
 
 	if (appMode !== "interactive" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
-		process.exit(1);
+		await disposeRuntimeAndExit(runtime, 1);
+		return;
 	}
 
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
-		process.exit(1);
+		await disposeRuntimeAndExit(runtime, 1);
+		return;
 	}
 
 	if (appMode === "rpc") {
