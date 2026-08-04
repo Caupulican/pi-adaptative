@@ -24,6 +24,7 @@
 - Fixed simultaneous background-tool completions racing separate notification prompts: terminal handoffs are now bounded, coalesced, and serialized while every task result remains individually retrievable through `tool_task`.
 - Required Amazon Bedrock to use a durable verified profile-and-region scope, with STS/control-plane discovery, bounded runtime probes, exact model visibility, and request-level region/profile binding; `us-east-2` now resolves only US inference profiles.
 - Kept source and bundled extension loading compatible with the lean Bedrock provider entry so startup and transactional reload resolve the same module boundary.
+- Updated Undici to 8.9.0 to fix cache-directive parsing, retry framing, blob media-type, cache-control whitespace, and cookie-attribute advisories.
 - Serialized asynchronous foreground preparation and terminal background delivery under one identity-bound owner; isolated retained mutation payloads per session and lane without cross-tenant eviction; incrementally indexed worker-input handoffs for long sessions; and transactionally reconciled concurrent `MEMORY.md`/`USER.md` writers with interrupted-write recovery.
 
 ## [0.85.3] - 2026-08-03
