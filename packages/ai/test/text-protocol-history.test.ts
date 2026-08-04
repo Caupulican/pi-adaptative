@@ -146,7 +146,9 @@ describe("text-protocol-history render helpers", () => {
 		}
 
 		it("labels the result by tool name so a phone model (no tool_call_id) links it by name + order", () => {
-			expect(renderTextProtocolToolResult(makeResult("file body", "read"))).toBe("Tool result (read):\nfile body");
+			expect(renderTextProtocolToolResult(makeResult("file body", "read"))).toBe(
+				"Tool result (read; succeeded):\nfile body\nUse this result and continue. Do not repeat this unchanged successful call.",
+			);
 		});
 
 		it("joins multiple text blocks", () => {
@@ -161,7 +163,9 @@ describe("text-protocol-history render helpers", () => {
 				isError: false,
 				timestamp: 1,
 			};
-			expect(renderTextProtocolToolResult(result)).toBe("Tool result (grep):\nline 1\nline 2");
+			expect(renderTextProtocolToolResult(result)).toBe(
+				"Tool result (grep; succeeded):\nline 1\nline 2\nUse this result and continue. Do not repeat this unchanged successful call.",
+			);
 		});
 
 		it("falls back to a placeholder for image-only (no text) results", () => {
@@ -173,7 +177,18 @@ describe("text-protocol-history render helpers", () => {
 				isError: false,
 				timestamp: 1,
 			};
-			expect(renderTextProtocolToolResult(result)).toBe("Tool result (read):\n(see attached image)");
+			expect(renderTextProtocolToolResult(result)).toBe(
+				"Tool result (read; succeeded):\n(see attached image)\nUse this result and continue. Do not repeat this unchanged successful call.",
+			);
+		});
+
+		it("keeps failed results distinct and requires a repaired call", () => {
+			const result = makeResult("permission denied", "read");
+			result.isError = true;
+
+			expect(renderTextProtocolToolResult(result)).toBe(
+				"Tool result (read; failed):\npermission denied\nFollow the repair or next_action before retrying; do not resend the unchanged call.",
+			);
 		});
 	});
 });

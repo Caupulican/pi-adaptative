@@ -75,16 +75,15 @@ describe("edit match plans", () => {
 		expect(source).not.toContain("fuzzyContent.split(fuzzyOldText)");
 	});
 
-	it("publishes inclusive line bounds in the edit phase", () => {
+	it("publishes inclusive line bounds in the single-call edit schema", () => {
 		const parameters = createEditToolDefinition(process.cwd()).parameters as {
 			anyOf?: Array<{
 				properties?: {
-					action?: { const?: string };
 					edits?: { items?: { properties?: Record<string, unknown> } };
 				};
 			}>;
 		};
-		const edit = parameters.anyOf?.find((variant) => variant.properties?.action?.const === "edit");
+		const edit = parameters.anyOf?.find((variant) => variant.properties?.edits !== undefined);
 		expect(edit?.properties?.edits?.items?.properties).toHaveProperty("range");
 	});
 });

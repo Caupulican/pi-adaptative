@@ -4,6 +4,10 @@
 
 - Added bounded Amazon Bedrock identity, inference-profile discovery, and one-token model-access probes for durable region-scoped provider configuration.
 
+### Changed
+
+- Refreshed the generated text and image model catalogues with current provider availability, limits, and pricing, including DeepSeek V4 Flash 0731 and Qwen3.8 Max.
+
 ### Fixed
 
 - Classified harness-retained file-mutation retargets as bounded one-turn repairs that preserve the opaque payload reference while discarding the original failed attempt.

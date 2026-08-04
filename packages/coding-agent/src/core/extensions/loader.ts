@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import * as _bundledPiAgentCore from "@caupulican/pi-agent-core";
 import * as _bundledPiAi from "@caupulican/pi-ai";
 import * as _bundledPiAiAbortSignals from "@caupulican/pi-ai/abort-signals";
+import * as _bundledPiAiBedrockProvider from "@caupulican/pi-ai/bedrock-provider";
 import * as _bundledPiAiEventStream from "@caupulican/pi-ai/event-stream";
 import * as _bundledPiAiJsonParse from "@caupulican/pi-ai/json-parse";
 import * as _bundledPiAiOauth from "@caupulican/pi-ai/oauth";
@@ -67,6 +68,7 @@ class ExtensionFactoryTimeoutError extends Error {}
 
 const PI_AI_WORKSPACE_SUBPATHS = {
 	"abort-signals": "ai/src/utils/abort-signals.ts",
+	"bedrock-provider": "ai/src/bedrock-provider.ts",
 	"event-stream": "ai/src/utils/event-stream.ts",
 	"json-parse": "ai/src/utils/json-parse.ts",
 	oauth: "ai/src/oauth.ts",
@@ -86,6 +88,7 @@ const PI_AI_WORKSPACE_SUBPATHS = {
 
 const PI_AI_VIRTUAL_SUBPATHS: Record<keyof typeof PI_AI_WORKSPACE_SUBPATHS, unknown> = {
 	"abort-signals": _bundledPiAiAbortSignals,
+	"bedrock-provider": _bundledPiAiBedrockProvider,
 	"event-stream": _bundledPiAiEventStream,
 	"json-parse": _bundledPiAiJsonParse,
 	oauth: _bundledPiAiOauth,

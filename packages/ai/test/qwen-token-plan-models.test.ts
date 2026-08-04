@@ -6,6 +6,7 @@ const TEXT_MODELS = [
 	"MiniMax-M2.5",
 	"deepseek-v3.2",
 	"deepseek-v4-flash",
+	"deepseek-v4-flash-0731",
 	"deepseek-v4-pro",
 	"glm-5",
 	"glm-5.1",
@@ -17,6 +18,7 @@ const TEXT_MODELS = [
 	"qwen3.6-plus",
 	"qwen3.7-max",
 	"qwen3.7-plus",
+	"qwen3.8-max",
 	"qwen3.8-max-preview",
 ] as const;
 

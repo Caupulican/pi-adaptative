@@ -30,6 +30,9 @@ describe("AgentSession context window warnings and compaction adaptation", () =>
 			settings: {
 				defaultProvider: "faux",
 				defaultModel: "small-model",
+				// This regression targets compaction's context warning. Capability budgets have
+				// their own hard-failure coverage and would intentionally reject this fixture first.
+				modelCapability: { mode: "off" },
 				compaction: {
 					enabled: true,
 					reserveTokens: 1000,
