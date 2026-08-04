@@ -10,7 +10,7 @@ import { getDefaultActiveToolNames, mapToolNamesForPlatform } from "../src/core/
 import { classifyToolTrust } from "../src/core/security/untrusted-boundary.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { type BashToolOptions, createAllToolDefinitions, createBashToolDefinition } from "../src/core/tools/index.ts";
-import { disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
+import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
 import {
 	getPlatformShellToolName,
 	getShellConfig,
@@ -197,7 +197,7 @@ describe("automatic platform shell contract", () => {
 			await expect(execute("cp source-dir copied-dir")).rejects.toThrow("Command exited with code 1");
 			await expect(execute("cp -r source-dir copied-dir")).resolves.toBeDefined();
 		} finally {
-			disposePersistentShellSession(sessionKey);
+			disposeShellExecutionSession(sessionKey);
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});

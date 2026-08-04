@@ -11,6 +11,7 @@ import {
 	isComplexShellCommand,
 	tokenizeCommand,
 } from "../src/core/tools/git-filter.ts";
+import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -72,10 +73,12 @@ describe("Git Output Filter - Classification & Tokenizer", () => {
 });
 
 describe("Git Output Filter - Subcommands", () => {
+	let shellSessionKey: string;
 	let testRepoDir: string;
 
 	beforeEach(() => {
 		testRepoDir = join(tmpdir(), `pi-git-filter-test-${Date.now()}`);
+		shellSessionKey = `git-output-filter:${testRepoDir}`;
 		mkdirSync(testRepoDir, { recursive: true });
 
 		// Initialize temp git repository
@@ -91,6 +94,7 @@ describe("Git Output Filter - Subcommands", () => {
 	});
 
 	afterEach(() => {
+		disposeShellExecutionSession(shellSessionKey);
 		rmSync(testRepoDir, { recursive: true, force: true });
 	});
 
@@ -203,7 +207,7 @@ describe("Git Output Filter - Subcommands", () => {
 	});
 
 	it("bash tool should compact git status and honor env-prefix opt-outs", async () => {
-		const bash = createBashTool(testRepoDir);
+		const bash = createBashTool(testRepoDir, { sessionKey: shellSessionKey });
 
 		const compact = await bash.execute("git-status-compact", { command: "git status" });
 		expect(getTextOutput(compact)).toContain("## main");
@@ -234,7 +238,7 @@ describe("Git Output Filter - Subcommands", () => {
 				return { exitCode: 0 };
 			},
 		};
-		const bash = createBashTool(testRepoDir, { operations });
+		const bash = createBashTool(testRepoDir, { operations, sessionKey: shellSessionKey });
 
 		const result = await bash.execute("git-status-custom-ops", { command: "git status" });
 		expect(execCalled).toBe(true);
@@ -242,7 +246,7 @@ describe("Git Output Filter - Subcommands", () => {
 	});
 
 	it("bash tool should pass through explicit git log formats", async () => {
-		const bash = createBashTool(testRepoDir);
+		const bash = createBashTool(testRepoDir, { sessionKey: shellSessionKey });
 		const result = await bash.execute("git-log-format", { command: "git log --pretty=%H -n 1" });
 		const output = getTextOutput(result).trim();
 
@@ -250,10 +254,11 @@ describe("Git Output Filter - Subcommands", () => {
 	});
 
 	it("interactive bash executor should opt into git filtering only when requested", async () => {
-		const raw = await executeBashWithOperations("git status", testRepoDir, createLocalBashOperations());
+		const operations = createLocalBashOperations({ sessionKey: shellSessionKey });
+		const raw = await executeBashWithOperations("git status", testRepoDir, operations);
 		expect(raw.output).toContain("On branch main");
 
-		const filtered = await executeBashWithOperations("git status", testRepoDir, createLocalBashOperations(), {
+		const filtered = await executeBashWithOperations("git status", testRepoDir, operations, {
 			enableGitFilter: true,
 		});
 		expect(filtered.output).toContain("## main");
