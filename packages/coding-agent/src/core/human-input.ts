@@ -385,11 +385,15 @@ export function beginHumanInputRequest(
 	return snapshot;
 }
 
+function decodeHumanInputSnapshotEntry(entry: SessionEntry): HumanInputSnapshot | undefined {
+	if (entry.type !== "custom" || entry.customType !== HUMAN_INPUT_CUSTOM_TYPE) return undefined;
+	return decodeSnapshot(entry.data);
+}
+
 export function getHumanInputSnapshots(entries: readonly SessionEntry[]): HumanInputSnapshot[] {
 	const snapshots: HumanInputSnapshot[] = [];
 	for (const entry of entries) {
-		if (entry.type !== "custom" || entry.customType !== HUMAN_INPUT_CUSTOM_TYPE) continue;
-		const snapshot = decodeSnapshot(entry.data);
+		const snapshot = decodeHumanInputSnapshotEntry(entry);
 		if (snapshot) snapshots.push(snapshot);
 	}
 	return snapshots;
@@ -403,26 +407,71 @@ export function getLatestHumanInputSnapshots(source: SessionBranchEntrySource): 
 	return [...latest.values()];
 }
 
-export function getWorkerHumanInputsRequiringDelivery(source: SessionBranchEntrySource): HumanInputSnapshot[] {
-	const entries = getActiveSessionBranchEntries(source);
-	const deliveredRequestIds = new Set(
-		entries.flatMap((entry) => {
-			if (
-				entry.type !== "custom_message" ||
-				entry.customType !== HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE ||
-				!isPlainRecord(entry.details) ||
-				typeof entry.details.requestId !== "string"
-			) {
-				return [];
+/** Incremental active-branch projection for worker questions that still need context-visible delivery. */
+export class WorkerHumanInputProjection {
+	private readonly knownWorkerRequestIds = new Set<string>();
+	private readonly deliveredInputRequestIds = new Set<string>();
+	private readonly workerRequestIdByInputRequestId = new Map<string, string>();
+	private readonly requiringDelivery = new Map<string, HumanInputSnapshot>();
+
+	reset(entries: readonly SessionEntry[]): void {
+		this.knownWorkerRequestIds.clear();
+		this.deliveredInputRequestIds.clear();
+		this.workerRequestIdByInputRequestId.clear();
+		this.requiringDelivery.clear();
+		for (const entry of entries) this.apply(entry);
+	}
+
+	apply(entry: SessionEntry): void {
+		const snapshot = decodeHumanInputSnapshotEntry(entry);
+		if (snapshot) {
+			const workerRequestId = snapshot.request.workerRequestId;
+			if (snapshot.request.source === "worker" && workerRequestId !== undefined) {
+				const inputRequestId = snapshot.request.requestId;
+				this.knownWorkerRequestIds.add(workerRequestId);
+				if (!this.deliveredInputRequestIds.has(inputRequestId)) {
+					this.workerRequestIdByInputRequestId.set(inputRequestId, workerRequestId);
+					this.requiringDelivery.set(workerRequestId, snapshot);
+				}
 			}
-			return [entry.details.requestId];
-		}),
-	);
-	return getLatestHumanInputSnapshots(source)
-		.filter(
-			(snapshot) => snapshot.request.source === "worker" && !deliveredRequestIds.has(snapshot.request.requestId),
-		)
-		.sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+		}
+		if (
+			entry.type !== "custom_message" ||
+			entry.customType !== HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE ||
+			!isPlainRecord(entry.details) ||
+			typeof entry.details.requestId !== "string"
+		) {
+			return;
+		}
+		const inputRequestId = entry.details.requestId;
+		this.deliveredInputRequestIds.add(inputRequestId);
+		const workerRequestId = this.workerRequestIdByInputRequestId.get(inputRequestId);
+		if (
+			workerRequestId !== undefined &&
+			this.requiringDelivery.get(workerRequestId)?.request.requestId === inputRequestId
+		) {
+			this.requiringDelivery.delete(workerRequestId);
+		}
+		this.workerRequestIdByInputRequestId.delete(inputRequestId);
+	}
+
+	hasKnownWorkerRequest(workerRequestId: string): boolean {
+		return this.knownWorkerRequestIds.has(workerRequestId);
+	}
+
+	requiresDelivery(workerRequestId: string): boolean {
+		return this.requiringDelivery.has(workerRequestId);
+	}
+
+	getRequiringDelivery(): HumanInputSnapshot[] {
+		return [...this.requiringDelivery.values()].sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+	}
+}
+
+export function getWorkerHumanInputsRequiringDelivery(source: SessionBranchEntrySource): HumanInputSnapshot[] {
+	const projection = new WorkerHumanInputProjection();
+	projection.reset(getActiveSessionBranchEntries(source));
+	return projection.getRequiringDelivery();
 }
 
 export function getResumableHumanInputSnapshot(source: SessionBranchEntrySource): HumanInputSnapshot | undefined {

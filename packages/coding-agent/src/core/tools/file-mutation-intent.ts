@@ -21,7 +21,14 @@ let localMutationPayloadDirectory: string | undefined;
 let localMutationPayloadCleanupRegistered = false;
 let localMutationPayloadOperationTail: Promise<void> = Promise.resolve();
 let localMutationPayloadBytes = 0;
-const localMutationPayloadFiles = new Map<string, number>();
+const localMutationPayloadFiles = new Map<string, { byteLength: number; expiresAt: number }>();
+
+class MutationPayloadCapacityError extends Error {
+	constructor() {
+		super("Process mutation payload cache is full.");
+		this.name = "MutationPayloadCapacityError";
+	}
+}
 
 export type FileMutationKind = "write" | "edit";
 
@@ -46,7 +53,7 @@ export interface FileMutationIntentOperations {
 	hashFile(path: string, signal?: AbortSignal): Promise<string>;
 	readPayload(path: string): Promise<string>;
 	removeFile(path: string): Promise<void>;
-	stagePayload(content: string): Promise<string>;
+	stagePayload(content: string, ttlMs: number): Promise<string>;
 }
 
 export interface FileMutationLease {
@@ -213,28 +220,29 @@ async function getLocalMutationPayloadDirectory(): Promise<string> {
 	return localMutationPayloadDirectoryPromise;
 }
 
-async function stageLocalMutationPayload(content: string): Promise<string> {
+async function stageLocalMutationPayload(content: string, ttlMs: number): Promise<string> {
 	const byteLength = Buffer.byteLength(content, "utf8");
 	let stagedPath = "";
 	const operation = localMutationPayloadOperationTail.then(async () => {
-		while (
-			localMutationPayloadFiles.size >= LOCAL_MUTATION_PAYLOAD_PROCESS_FILE_LIMIT ||
-			localMutationPayloadBytes + byteLength > LOCAL_MUTATION_PAYLOAD_PROCESS_BYTE_LIMIT
-		) {
-			const oldest = localMutationPayloadFiles.entries().next().value;
-			if (!oldest) throw new Error("Process mutation payload cache is full.");
-			const [path, bytes] = oldest;
+		for (const [path, record] of localMutationPayloadFiles) {
+			if (record.expiresAt > Date.now()) continue;
 			localMutationPayloadFiles.delete(path);
-			localMutationPayloadBytes -= bytes;
+			localMutationPayloadBytes -= record.byteLength;
 			try {
 				await unlink(path);
 			} catch (error) {
 				if (!isMissingPathError(error)) throw error;
 			}
 		}
+		if (
+			localMutationPayloadFiles.size >= LOCAL_MUTATION_PAYLOAD_PROCESS_FILE_LIMIT ||
+			localMutationPayloadBytes + byteLength > LOCAL_MUTATION_PAYLOAD_PROCESS_BYTE_LIMIT
+		) {
+			throw new MutationPayloadCapacityError();
+		}
 		stagedPath = join(await getLocalMutationPayloadDirectory(), randomUUID());
 		await writeFile(stagedPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
-		localMutationPayloadFiles.set(stagedPath, byteLength);
+		localMutationPayloadFiles.set(stagedPath, { byteLength, expiresAt: Date.now() + ttlMs });
 		localMutationPayloadBytes += byteLength;
 	});
 	localMutationPayloadOperationTail = operation.catch(() => {});
@@ -244,10 +252,10 @@ async function stageLocalMutationPayload(content: string): Promise<string> {
 
 async function removeLocalMutationPayloadOrFile(path: string): Promise<void> {
 	const operation = localMutationPayloadOperationTail.then(async () => {
-		const byteLength = localMutationPayloadFiles.get(path);
-		if (byteLength !== undefined) {
+		const record = localMutationPayloadFiles.get(path);
+		if (record !== undefined) {
 			localMutationPayloadFiles.delete(path);
-			localMutationPayloadBytes -= byteLength;
+			localMutationPayloadBytes -= record.byteLength;
 		}
 		await unlink(path);
 	});
@@ -281,6 +289,8 @@ export class FileMutationIntentController {
 	private readonly contentReferences = new Map<string, ContentReferenceRecord>();
 	private readonly mutationPayloads = new Map<string, MutationPayloadRecord>();
 	private mutationPayloadBytes = 0;
+	private lastMutationPayloadExpiresAt = 0;
+	private mutationPayloadOperationTail: Promise<void> = Promise.resolve();
 
 	constructor(options: FileMutationIntentControllerOptions = {}) {
 		this.operations = options.operations ?? localFileMutationIntentOperations;
@@ -398,44 +408,60 @@ export class FileMutationIntentController {
 		kind: FileMutationKind,
 		payload: string,
 	): Promise<FileMutationPayloadReference | undefined> {
-		await this.pruneExpiredMutationPayloads();
-		const byteLength = Buffer.byteLength(payload, "utf8");
-		if (byteLength > this.mutationPayloadByteLimit) return undefined;
-		while (
-			this.mutationPayloads.size >= this.mutationPayloadLimit ||
-			this.mutationPayloadBytes + byteLength > this.mutationPayloadByteLimit
-		) {
-			const oldestPayloadRef = this.mutationPayloads.keys().next().value;
-			if (typeof oldestPayloadRef !== "string") return undefined;
-			await this.deleteMutationPayload(oldestPayloadRef, true);
-		}
+		return this.runMutationPayloadOperation(async () => {
+			await this.pruneExpiredMutationPayloads();
+			const byteLength = Buffer.byteLength(payload, "utf8");
+			if (byteLength > this.mutationPayloadByteLimit) return undefined;
+			while (
+				this.mutationPayloads.size >= this.mutationPayloadLimit ||
+				this.mutationPayloadBytes + byteLength > this.mutationPayloadByteLimit
+			) {
+				const oldestPayloadRef = this.mutationPayloads.keys().next().value;
+				if (typeof oldestPayloadRef !== "string") return undefined;
+				await this.deleteMutationPayload(oldestPayloadRef, true);
+			}
 
-		const sourcePath = await this.operations.stagePayload(payload);
-		const payloadRef = `${MUTATION_PAYLOAD_REFERENCE_PREFIX}${randomUUID()}`;
-		this.mutationPayloads.set(payloadRef, {
-			payloadRef,
-			kind,
-			sourcePath,
-			digest: createHash("sha256").update(payload, "utf8").digest("hex"),
-			byteLength,
-			expiresAt: this.now() + this.mutationPayloadTtlMs,
+			// Keep insertion and expiry order identical, even if the wall clock moves backward. Expiry
+			// pruning can then stop at the first live record instead of rescanning every retained payload.
+			const expiresAt = Math.max(this.lastMutationPayloadExpiresAt, this.now() + this.mutationPayloadTtlMs);
+			this.lastMutationPayloadExpiresAt = expiresAt;
+			let sourcePath: string;
+			try {
+				sourcePath = await this.operations.stagePayload(payload, this.mutationPayloadTtlMs);
+			} catch (error) {
+				if (error instanceof MutationPayloadCapacityError) return undefined;
+				throw error;
+			}
+			const payloadRef = `${MUTATION_PAYLOAD_REFERENCE_PREFIX}${randomUUID()}`;
+			this.mutationPayloads.set(payloadRef, {
+				payloadRef,
+				kind,
+				sourcePath,
+				digest: createHash("sha256").update(payload, "utf8").digest("hex"),
+				byteLength,
+				expiresAt,
+			});
+			this.mutationPayloadBytes += byteLength;
+			return { payloadRef, byteLength };
 		});
-		this.mutationPayloadBytes += byteLength;
-		return { payloadRef, byteLength };
 	}
 
 	async readMutationPayload(payloadRef: string, kind: FileMutationKind, signal?: AbortSignal): Promise<string> {
-		const record = await this.requireMutationPayload(payloadRef, kind, signal);
-		const payload = await this.operations.readPayload(record.sourcePath);
-		if (createHash("sha256").update(payload, "utf8").digest("hex") !== record.digest) {
-			await this.deleteMutationPayload(payloadRef);
-			throw new Error("Retained file mutation payload changed after it was cached.");
-		}
-		return payload;
+		return this.runMutationPayloadOperation(async () => {
+			const record = await this.requireMutationPayload(payloadRef, kind, signal);
+			const payload = await this.operations.readPayload(record.sourcePath);
+			if (createHash("sha256").update(payload, "utf8").digest("hex") !== record.digest) {
+				await this.deleteMutationPayload(payloadRef);
+				throw new Error("Retained file mutation payload changed after it was cached.");
+			}
+			return payload;
+		});
 	}
 
 	async assertMutationPayload(payloadRef: string, kind: FileMutationKind, signal?: AbortSignal): Promise<void> {
-		await this.requireVerifiedMutationPayload(payloadRef, kind, signal);
+		await this.runMutationPayloadOperation(async () => {
+			await this.requireVerifiedMutationPayload(payloadRef, kind, signal);
+		});
 	}
 
 	async assertContentReference(contentRef: string, signal?: AbortSignal): Promise<void> {
@@ -447,14 +473,31 @@ export class FileMutationIntentController {
 		targetPath: string,
 		signal?: AbortSignal,
 	): Promise<FileContentReference> {
-		const record = await this.requireVerifiedMutationPayload(payloadRef, "write", signal);
-		await this.copyVerifiedSource(record, targetPath, signal);
-		await this.deleteMutationPayload(payloadRef);
-		return this.rememberContentDigest(targetPath, record.digest, record.byteLength);
+		return this.runMutationPayloadOperation(async () => {
+			const record = await this.requireVerifiedMutationPayload(payloadRef, "write", signal);
+			await this.copyVerifiedSource(record, targetPath, signal);
+			await this.deleteMutationPayload(payloadRef);
+			return this.rememberContentDigest(targetPath, record.digest, record.byteLength);
+		});
 	}
 
 	async discardMutationPayload(payloadRef: string): Promise<void> {
-		await this.deleteMutationPayload(payloadRef);
+		await this.runMutationPayloadOperation(() => this.deleteMutationPayload(payloadRef));
+	}
+
+	/** Release every payload owned by this controller without touching another controller's files. */
+	async dispose(): Promise<void> {
+		await this.runMutationPayloadOperation(async () => {
+			let firstError: unknown;
+			for (const payloadRef of [...this.mutationPayloads.keys()]) {
+				try {
+					await this.deleteMutationPayload(payloadRef, true);
+				} catch (error) {
+					firstError ??= error;
+				}
+			}
+			if (firstError) throw firstError;
+		});
 	}
 
 	async copyReferencedContent(
@@ -624,10 +667,20 @@ export class FileMutationIntentController {
 		}
 	}
 
+	private runMutationPayloadOperation<T>(operation: () => Promise<T>): Promise<T> {
+		const run = this.mutationPayloadOperationTail.then(operation, operation);
+		this.mutationPayloadOperationTail = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
+
 	private async pruneExpiredMutationPayloads(): Promise<void> {
 		const now = this.now();
 		for (const [payloadRef, record] of this.mutationPayloads) {
-			if (record.expiresAt <= now) await this.deleteMutationPayload(payloadRef, true);
+			if (record.expiresAt > now) break;
+			await this.deleteMutationPayload(payloadRef, true);
 		}
 	}
 

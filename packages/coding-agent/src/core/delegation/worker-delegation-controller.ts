@@ -1234,6 +1234,13 @@ export class WorkerDelegationController {
 			this.writeReservations.release(startedRecord.laneId, durableHandle.attemptId, durableHandle.fencingToken);
 			this.inFlightLedgers.delete(startedRecord.laneId);
 			this.laneAbortControllers.delete(startedRecord.laneId);
+			try {
+				await toolSurface.dispose();
+			} catch (error) {
+				this.safeWarn(
+					`Worker mutation payload cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 			this.agentControl.signalStateChanged();
 			deregisterInFlight();
 		}

@@ -42,6 +42,8 @@ const WRITE_LANE_TOOL_NAME_SET = new Set<string>(WRITE_LANE_TOOL_NAMES);
 export interface LaneToolSurface {
 	/** Fresh tools owned by this lane only; no foreground tool instances or extension state leak in. */
 	tools: AgentTool[];
+	/** Release exact mutation payload leases owned by this isolated lane. */
+	dispose(): Promise<void>;
 	/** Exact names after profile globs are expanded. Safe to persist in a capability envelope. */
 	allowedTools: string[];
 	/** Exact safe-candidate names denied by the profile's block patterns. */
@@ -94,11 +96,11 @@ function resolveWriteRoots(cwd: string, writePaths: readonly string[]): string[]
 function createLaneTools(
 	cwd: string,
 	names: readonly string[],
+	fileMutationIntents: FileMutationIntentController,
 	readMemory?: (query: string) => Promise<string>,
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 ): AgentTool[] {
-	const fileMutationIntents = new FileMutationIntentController();
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
 		["grep", () => createGrepTool(cwd)],
@@ -148,6 +150,7 @@ function createLaneTools(
  * and a non-empty path scope; research therefore stays read-only regardless of profile contents.
  */
 export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneToolSurface {
+	const fileMutationIntents = new FileMutationIntentController();
 	const writeCapable = options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0;
 	const candidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
@@ -210,10 +213,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		tools: createLaneTools(
 			options.cwd,
 			allowedTools,
+			fileMutationIntents,
 			options.readMemory,
 			options.executionPolicy,
 			options.processMaxWallClockMs,
 		),
+		dispose: () => fileMutationIntents.dispose(),
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,

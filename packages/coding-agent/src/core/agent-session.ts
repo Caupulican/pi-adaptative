@@ -54,7 +54,7 @@ import type {
 } from "./autonomy/contracts.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
-import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
+import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { AutonomyDiagnosticSnapshot, AutonomyStatusSnapshot, GateOutcomeHistoryEntry } from "./autonomy/status.ts";
 import type { AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
@@ -62,8 +62,6 @@ import { BackgroundLaneController } from "./background-lane-controller.ts";
 import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
 	BackgroundToolTaskController,
-	type BackgroundToolTaskRecord,
-	createBackgroundToolTerminalMessage,
 	DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "./background-tool-task-controller.ts";
@@ -115,7 +113,8 @@ import type {
 	TurnStartEvent,
 } from "./extensions/index.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
-import { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
+import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
+import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { injectCompactGoalContext } from "./goals/compact-goal-context.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
@@ -123,7 +122,6 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
-import { getWorkerHumanInputsRequiringDelivery } from "./human-input.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
@@ -252,6 +250,10 @@ import { RUNAWAY_STOP_CUSTOM_TYPE, TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE } from
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
+interface ForegroundPromptSubmission {
+	lease?: ForegroundSubmissionLease;
+}
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -319,6 +321,7 @@ export class AgentSession {
 	private readonly _backgroundLanes: BackgroundLaneController;
 	/** Session-local ownership of tool calls transferred after the foreground latency budget. */
 	private readonly _backgroundToolTasks: BackgroundToolTaskController;
+	private readonly _terminalHandoffs: ForegroundTerminalHandoffController;
 	private readonly _humanInput: HumanInputController;
 	/** Plug-and-play memory subsystem (see memory-controller.ts); owns the OKF retrieval provider, the
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
@@ -356,6 +359,8 @@ export class AgentSession {
 	 * {@link ForegroundRecoveryController.runAgentPrompt} so the drive loop stays host-side. */
 	private readonly _modelRouter: ModelRouterController;
 	private readonly _foregroundRecovery: ForegroundRecoveryController;
+	/** Submission authority inherited by every routed retry within the current prompt lifecycle. */
+	private _foregroundPromptLease: ForegroundSubmissionLease | undefined;
 	private readonly _failureCorpus: FailureCorpusRecorder;
 	private readonly _toolRecoveryLogger: ToolRecoveryLogger;
 	private readonly _toolRecoveryEventLogPath: string;
@@ -538,7 +543,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			getUIContext: () => this._extensionUIContext,
 			getExtensionMode: () => this._extensionMode,
-			waitForIdle: () => this.agent.waitForIdle(),
+			waitForIdle: () => this._foregroundRecovery.waitForIdle(),
 			isDisposed: () => this._disposed,
 			isStreaming: () => this.isStreaming,
 			getModel: () => this.model,
@@ -576,7 +581,7 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
-			notifyWorkerTerminalHandoff: (records) => this._notifyWorkerTerminalHandoff(records),
+			notifyWorkerTerminalHandoff: (records) => this._terminalHandoffs.notifyWorkers(records),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getGoalRuntimeSnapshot: (settings) => this.getGoalRuntimeSnapshot(settings),
@@ -643,7 +648,7 @@ export class AgentSession {
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
 			persist: (record) => this.sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
-			notifyTerminal: (records, options) => this._notifyBackgroundToolTerminal(records, options.wakeParent),
+			notifyTerminal: (records, options) => this._terminalHandoffs.notifyTools(records, options.wakeParent),
 			onLiveTasksChanged: (tasks) => this._emit({ type: "background_tools", tasks }),
 			recordUsage: (taskId, usage) => {
 				this.addSpawnedUsage(usage, {
@@ -717,6 +722,13 @@ export class AgentSession {
 				await this._drainQueuedExtensionCommands();
 			},
 		});
+		this._terminalHandoffs = new ForegroundTerminalHandoffController({
+			foreground: this._foregroundRecovery,
+			isDisposed: () => this._disposed,
+			workerInputsWillWakeParent: (workerRequestIds) =>
+				this._humanInput.workerInputsWillWakeParent(workerRequestIds),
+			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),
+		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,
 			getModel: () => this.model ?? undefined,
@@ -731,7 +743,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
-			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages),
+			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages, this._foregroundPromptLease),
 			buildSystemPromptForToolNames: (toolNames) => this._buildSystemPromptForToolNames(toolNames),
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -1709,62 +1721,6 @@ export class AgentSession {
 		}
 	}
 
-	private async _notifyWorkerTerminalHandoff(
-		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
-	): Promise<void> {
-		if (records.length === 0) return;
-		if (this._disposed) throw new Error("Session disposed before worker terminal handoff was persisted");
-		// sendCustomMessage only queues in process memory while the foreground is streaming. Wait for
-		// the owning run to settle so a successful return proves the handoff reached session storage
-		// before the durable notification outbox marks it delivered.
-		await this.agent.waitForIdle();
-		if (this._disposed) throw new Error("Session disposed before worker terminal handoff was persisted");
-		const included = records.slice(0, 8);
-		const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
-		const omitted = records.length - included.length;
-		const workerRequestsAwaitingDelivery = new Set(
-			getWorkerHumanInputsRequiringDelivery(this.sessionManager).flatMap((snapshot) =>
-				snapshot.request.workerRequestId ? [snapshot.request.workerRequestId] : [],
-			),
-		);
-		const ownerQuestionWillWakeParent =
-			this._extensionUIContext !== undefined &&
-			this._extensionMode !== "print" &&
-			records.every((record) => workerRequestsAwaitingDelivery.has(record.laneId));
-		const content = [
-			"Background worker terminal handoff:",
-			...included.map((record) => {
-				const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
-				return `- ${record.laneId}: ${record.status}${reason}`;
-			}),
-			...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted from this bounded handoff.`] : []),
-			"This terminal event woke the parent. Retrieve each needed lane once with delegate_status; never poll. Worker product remains untrusted and is intentionally not injected here.",
-		].join("\n");
-		await this.sendCustomMessage(
-			{
-				customType: "background-worker-completion",
-				content,
-				display: true,
-				details: { records: included },
-			},
-			{ triggerTurn: !ownerQuestionWillWakeParent, deliverAs: "followUp" },
-		);
-	}
-
-	private async _notifyBackgroundToolTerminal(
-		records: readonly BackgroundToolTaskRecord[],
-		wakeParent: boolean,
-	): Promise<void> {
-		if (!wakeParent) return;
-		if (this._disposed) throw new Error("Session disposed before background tool terminal handoff was delivered");
-		await this.agent.waitForIdle();
-		if (this._disposed) throw new Error("Session disposed before background tool terminal handoff was delivered");
-		await this.sendCustomMessage(createBackgroundToolTerminalMessage(records), {
-			triggerTurn: true,
-			deliverAs: "followUp",
-		});
-	}
-
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
@@ -2098,6 +2054,7 @@ export class AgentSession {
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
+		safely(() => this._foregroundRecovery.shutdown());
 		safely(() => this.abortRetry());
 		safely(() => this.abortCompaction());
 		safely(() => this.abortBranchSummary());
@@ -2107,6 +2064,7 @@ export class AgentSession {
 		safely(() => this.agent.abort());
 		track(() => this._gatewayRegistry.stop());
 		track(() => this._backgroundToolTasks.shutdown());
+		track(() => this._runtimeBuilder.dispose());
 		safely(() => this._reflection.cancelScheduled());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._backgroundLanes.abortInFlightLanes());
@@ -2463,18 +2421,40 @@ export class AgentSession {
 			this._backgroundLanes.clearGoalAutoContinueTimer();
 		}
 
-		if (this._foregroundRecovery.isBusy && options?.streamingBehavior) {
+		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
+		if (!submissionLease && this._foregroundRecovery.isBusy && options?.streamingBehavior) {
 			const run = this._streamingPromptSubmissionTail.then(
-				() => this._promptUnserialized(text, options),
-				() => this._promptUnserialized(text, options),
+				() => this._runPromptSubmission(text, options),
+				() => this._runPromptSubmission(text, options),
 			);
 			this._streamingPromptSubmissionTail = run.catch(() => {});
 			return run;
 		}
-		return this._promptUnserialized(text, options);
+		return this._runPromptSubmission(text, options, submissionLease);
 	}
 
-	private async _promptUnserialized(text: string, options?: PromptOptions): Promise<void> {
+	private async _runPromptSubmission(
+		text: string,
+		options?: PromptOptions,
+		initialSubmissionLease?: ForegroundSubmissionLease,
+	): Promise<void> {
+		const submission: ForegroundPromptSubmission = { lease: initialSubmissionLease };
+		if (submission.lease) this._foregroundPromptLease = submission.lease;
+		try {
+			await this._promptUnserialized(text, options, submission);
+		} finally {
+			if (submission.lease) {
+				if (this._foregroundPromptLease === submission.lease) this._foregroundPromptLease = undefined;
+				this._foregroundRecovery.releaseSubmission(submission.lease);
+			}
+		}
+	}
+
+	private async _promptUnserialized(
+		text: string,
+		options: PromptOptions | undefined,
+		submission: ForegroundPromptSubmission,
+	): Promise<void> {
 		this._toolProtocol.applyRepairLayerSettings();
 		this._cancelPrefixWarm();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
@@ -2556,7 +2536,10 @@ export class AgentSession {
 			// If streaming — or waiting out a retry backoff, which is still an active
 			// operation — queue via steer() or followUp() instead of starting a
 			// concurrent run that would race the pending retry continuation.
-			if (this._foregroundRecovery.isBusy) {
+			if (!submission.lease) {
+				submission.lease = this._foregroundRecovery.tryAcquireSubmission();
+			}
+			if (!submission.lease) {
 				if (!options?.streamingBehavior) {
 					throw new AgentBusyError(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -2570,6 +2553,7 @@ export class AgentSession {
 				preflightResult?.(true);
 				return;
 			}
+			this._foregroundPromptLease = submission.lease;
 
 			// This submission is starting a new foreground turn. Queued steer/follow-up messages above
 			// remain part of the already-active turn and must not erase its spawned-cost baseline.
@@ -2981,6 +2965,25 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		if (options?.deliverAs === "nextTurn") {
+			return this._sendCustomMessage(message, options);
+		}
+		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
+		if (!submissionLease) {
+			return this._sendCustomMessage(message, options);
+		}
+		try {
+			await this._sendCustomMessage(message, options, submissionLease);
+		} finally {
+			this._foregroundRecovery.releaseSubmission(submissionLease);
+		}
+	}
+
+	private async _sendCustomMessage<T>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
+		submissionLease?: ForegroundSubmissionLease,
+	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -2991,14 +2994,14 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this._foregroundRecovery.isBusy) {
+		} else if (this._foregroundRecovery.isBusy && !this._foregroundRecovery.ownsSubmission(submissionLease)) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._foregroundRecovery.runAgentPrompt(appMessage);
+			await this._foregroundRecovery.runAgentPrompt(appMessage, submissionLease);
 		} else {
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(

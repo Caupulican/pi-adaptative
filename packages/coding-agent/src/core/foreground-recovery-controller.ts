@@ -1,5 +1,5 @@
 import type { Agent, AgentEvent, AgentMessage, ClassifiedError } from "@caupulican/pi-agent-core";
-import { classifyFailure, DEFAULT_RETRY_POLICY, RetryController } from "@caupulican/pi-agent-core";
+import { AgentBusyError, classifyFailure, DEFAULT_RETRY_POLICY, RetryController } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
@@ -12,6 +12,13 @@ type ForegroundRecoveryEvent =
 	| { type: "warning"; message: string }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+
+const foregroundSubmissionLeaseMarker: unique symbol = Symbol("foregroundSubmissionLease");
+
+/** Identity-bound authority to prepare and execute one logical foreground submission. */
+export interface ForegroundSubmissionLease {
+	readonly [foregroundSubmissionLeaseMarker]: true;
+}
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
@@ -32,6 +39,8 @@ export class ForegroundRecoveryController {
 	private readonly billingFailover: BillingFailoverController;
 	private lastAssistantMessage: AssistantMessage | undefined;
 	private activeRuns = 0;
+	private submissionLease: ForegroundSubmissionLease | undefined;
+	private shutdownReason: Error | undefined;
 	private readonly idleWaiters = new Set<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
 
@@ -78,10 +87,64 @@ export class ForegroundRecoveryController {
 	}
 
 	get isBusy(): boolean {
-		return this.isRunActive || this.deps.agent.state.isStreaming || this.isRetrying;
+		return (
+			this.submissionLease !== undefined || this.isRunActive || this.deps.agent.state.isStreaming || this.isRetrying
+		);
 	}
 
-	async runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	/** Atomically reserve the full foreground lifecycle, including asynchronous prompt preparation. */
+	tryAcquireSubmission(): ForegroundSubmissionLease | undefined {
+		if (this.shutdownReason || this.isBusy) return undefined;
+		const lease: ForegroundSubmissionLease = { [foregroundSubmissionLeaseMarker]: true };
+		this.submissionLease = lease;
+		return lease;
+	}
+
+	/** Wait until foreground ownership can be acquired without a check-then-act gap. */
+	async acquireSubmission(): Promise<ForegroundSubmissionLease> {
+		while (true) {
+			if (this.shutdownReason) throw this.shutdownReason;
+			const lease = this.tryAcquireSubmission();
+			if (lease) return lease;
+			await this.waitForIdle();
+		}
+	}
+
+	ownsSubmission(lease: ForegroundSubmissionLease | undefined): boolean {
+		return lease !== undefined && lease === this.submissionLease;
+	}
+
+	releaseSubmission(lease: ForegroundSubmissionLease): void {
+		if (!this.ownsSubmission(lease)) {
+			throw new Error("Cannot release foreground submission authority owned by another caller");
+		}
+		if (this.activeRuns > 0) {
+			throw new Error("Cannot release foreground submission authority while its agent run is active");
+		}
+		this.submissionLease = undefined;
+		this.resolveIdleWaiters();
+	}
+
+	async runAgentPrompt(
+		messages: AgentMessage | AgentMessage[],
+		submissionLease?: ForegroundSubmissionLease,
+	): Promise<void> {
+		let lease = submissionLease;
+		let releaseLease = false;
+		if (lease) {
+			if (!this.ownsSubmission(lease)) {
+				throw new AgentBusyError("Foreground submission authority is no longer active.");
+			}
+		} else {
+			lease = this.tryAcquireSubmission();
+			if (!lease) throw new AgentBusyError("Agent is already processing.");
+			releaseLease = true;
+		}
+		if (this.activeRuns > 0) {
+			if (releaseLease) this.releaseSubmission(lease);
+			throw new AgentBusyError("Agent is already processing.");
+		}
+
 		this.activeRuns++;
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
@@ -94,24 +157,37 @@ export class ForegroundRecoveryController {
 				goalLoopRounds++;
 			}
 		} finally {
-			this.activeRuns--;
-			if (this.activeRuns === 0) {
-				for (const resolve of this.idleWaiters) resolve();
-				this.idleWaiters.clear();
+			try {
+				await this.deps.afterRun();
+			} finally {
+				this.activeRuns--;
+				if (releaseLease) this.releaseSubmission(lease);
 			}
-			await this.deps.afterRun();
 		}
 	}
 
 	async waitForIdle(): Promise<void> {
 		while (true) {
-			if (this.activeRuns > 0) {
+			if (this.shutdownReason) return;
+			if (this.submissionLease !== undefined || this.activeRuns > 0) {
 				await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
 				continue;
 			}
 			await this.deps.agent.waitForIdle();
 			if (!this.isBusy) return;
 		}
+	}
+
+	shutdown(): void {
+		this.shutdownReason ??= new Error("Session disposed before foreground submission authority was acquired");
+		for (const resolve of this.idleWaiters) resolve();
+		this.idleWaiters.clear();
+	}
+
+	private resolveIdleWaiters(): void {
+		if (this.submissionLease !== undefined || this.activeRuns > 0) return;
+		for (const resolve of this.idleWaiters) resolve();
+		this.idleWaiters.clear();
 	}
 
 	abortRetry(): void {

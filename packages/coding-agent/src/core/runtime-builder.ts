@@ -511,6 +511,11 @@ export class RuntimeBuilder {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
+	/** Release session-owned mutation payload leases retained by the write/edit tool pair. */
+	dispose(): Promise<void> {
+		return this._fileMutationIntents.dispose();
+	}
+
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		// Re-derive from the pre-filter REQUEST, never from agent.state.tools: the active set is

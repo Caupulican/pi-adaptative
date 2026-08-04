@@ -86,6 +86,7 @@ function createExecutorHarness(
 	const gateway = new CapabilityGateway({ grant, cwd: process.cwd() });
 	const toolSurface: LaneToolSurface = {
 		tools: [],
+		dispose: async () => {},
 		allowedTools: ["read"],
 		deniedTools: [],
 		unboundAllowPatterns: [],

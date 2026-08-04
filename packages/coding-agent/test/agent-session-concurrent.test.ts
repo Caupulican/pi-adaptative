@@ -159,6 +159,84 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {}); // Ignore abort error
 	});
 
+	it("keeps the earliest prompt as foreground owner while its asynchronous input preflight is pending", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let releaseFirstInput: (() => void) | undefined;
+		const firstInputGate = new Promise<void>((resolve) => {
+			releaseFirstInput = resolve;
+		});
+		let markFirstInputEntered: (() => void) | undefined;
+		const firstInputEntered = new Promise<void>((resolve) => {
+			markFirstInputEntered = resolve;
+		});
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("input", async (event) => {
+					if (event.text === "First preparing prompt") {
+						markFirstInputEntered?.();
+						await firstInputGate;
+					}
+					return { action: "continue" };
+				});
+			},
+		]);
+		const streamedUserTexts: string[][] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: (_model, context) => {
+				streamedUserTexts.push(
+					context.messages.flatMap((message) => {
+						if (message.role !== "user") return [];
+						if (typeof message.content === "string") return [message.content];
+						return [
+							message.content
+								.filter((part): part is TextContent => part.type === "text")
+								.map((part) => part.text)
+								.join("\n"),
+						];
+					}),
+				);
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		const firstPrompt = session.prompt("First preparing prompt");
+		await firstInputEntered;
+		const secondOutcome = await session.prompt("Second racing prompt").then(
+			() => ({ status: "resolved" as const }),
+			(error: unknown) => ({ status: "rejected" as const, error }),
+		);
+		releaseFirstInput?.();
+		await expect(firstPrompt).resolves.toBeUndefined();
+
+		expect(secondOutcome.status).toBe("rejected");
+		if (secondOutcome.status === "rejected") {
+			expect(secondOutcome.error).toMatchObject({
+				message: expect.stringContaining("Agent is already processing"),
+			});
+		}
+		expect(streamedUserTexts).toEqual([["First preparing prompt"]]);
+	});
+
 	it("should allow steer() while streaming", async () => {
 		createSession();
 

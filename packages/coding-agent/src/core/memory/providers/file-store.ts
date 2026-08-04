@@ -1,11 +1,12 @@
-import { existsSync, promises as fs, mkdirSync, writeFileSync } from "fs";
-import lockfile from "proper-lockfile";
+import { createHash, randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
 import { type Static, Type } from "typebox";
 import { configFile } from "../../agent-paths.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../../resource-loader.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
+import { withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 import { UserMemoryArchive } from "./user-memory-archive.ts";
 
@@ -59,6 +60,88 @@ export interface FileStoreProviderOptions {
 
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
 	"[System Note: Below is a snapshot of persistent memory. Proactively record verified reusable project facts and user preferences with the 'memory' tool; never store transient noise.]";
+
+interface ManagedMemoryState {
+	version: 1;
+	committedDigest: string;
+	pendingDigest?: string;
+}
+
+type ManagedMemoryStateRead =
+	| { status: "missing" }
+	| { status: "valid"; state: ManagedMemoryState }
+	| { status: "invalid"; raw: string };
+
+function managedMemoryStatePath(filePath: string): string {
+	return `${filePath}.pi-managed.json`;
+}
+
+function contentDigest(content: string): string {
+	return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function isMissingFileError(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function parseManagedMemoryState(raw: string): ManagedMemoryState | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) return undefined;
+	const record = parsed as Record<string, unknown>;
+	if (record.version !== 1 || typeof record.committedDigest !== "string") return undefined;
+	if (record.pendingDigest !== undefined && typeof record.pendingDigest !== "string") return undefined;
+	return {
+		version: 1,
+		committedDigest: record.committedDigest,
+		...(typeof record.pendingDigest === "string" ? { pendingDigest: record.pendingDigest } : {}),
+	};
+}
+
+async function readManagedMemoryState(filePath: string): Promise<ManagedMemoryStateRead> {
+	try {
+		const raw = await fs.readFile(managedMemoryStatePath(filePath), "utf8");
+		const state = parseManagedMemoryState(raw);
+		return state ? { status: "valid", state } : { status: "invalid", raw };
+	} catch (error) {
+		if (isMissingFileError(error)) return { status: "missing" };
+		throw error;
+	}
+}
+
+function serializeManagedMemoryState(state: ManagedMemoryState): string {
+	return `${JSON.stringify(state)}\n`;
+}
+
+async function writeManagedMemoryState(filePath: string, state: ManagedMemoryState): Promise<void> {
+	await writeFileAtomic(managedMemoryStatePath(filePath), serializeManagedMemoryState(state), { mode: 0o600 });
+}
+
+function reconcileManagedMemoryState(
+	currentDigest: string,
+	state: ManagedMemoryState,
+): { recognized: true; state: ManagedMemoryState; changed: boolean } | { recognized: false } {
+	if (currentDigest === state.committedDigest) {
+		if (state.pendingDigest === undefined) return { recognized: true, state, changed: false };
+		return {
+			recognized: true,
+			state: { version: 1, committedDigest: state.committedDigest },
+			changed: true,
+		};
+	}
+	if (state.pendingDigest !== undefined && currentDigest === state.pendingDigest) {
+		return {
+			recognized: true,
+			state: { version: 1, committedDigest: state.pendingDigest },
+			changed: true,
+		};
+	}
+	return { recognized: false };
+}
 
 function fitMemoryBlockToBudget(block: string, budget: MemoryPromptBudget | undefined): string {
 	if (budget === undefined) return block;
@@ -123,22 +206,45 @@ export class FileStoreProvider implements MemoryProvider {
 		this.userFilePath = configFile(ctx.agentDir, "USER.md");
 		this.userArchive = new UserMemoryArchive(ctx.agentDir);
 
-		// Ensure agentDir exists
-		if (!existsSync(ctx.agentDir)) {
-			mkdirSync(ctx.agentDir, { recursive: true });
-		}
+		await fs.mkdir(ctx.agentDir, { recursive: true });
+		[this.lastWrittenMemory, this.lastWrittenUser] = await Promise.all([
+			this.initializeManagedFile(this.memoryFilePath),
+			this.initializeManagedFile(this.userFilePath),
+		]);
+	}
 
-		// Initialize files if they do not exist
-		if (!existsSync(this.memoryFilePath)) {
-			writeFileSync(this.memoryFilePath, "", "utf-8");
-		}
-		if (!existsSync(this.userFilePath)) {
-			writeFileSync(this.userFilePath, "", "utf-8");
-		}
+	private async initializeManagedFile(filePath: string): Promise<string> {
+		return withFileLock(filePath, async () => {
+			let current = "";
+			try {
+				current = await fs.readFile(filePath, "utf8");
+			} catch (error) {
+				if (!isMissingFileError(error)) throw error;
+				await writeFileAtomic(filePath, "", { mode: 0o600 });
+			}
 
-		// Load initial contents
-		this.lastWrittenMemory = await fs.readFile(this.memoryFilePath, "utf-8");
-		this.lastWrittenUser = await fs.readFile(this.userFilePath, "utf-8");
+			const currentDigest = contentDigest(current);
+			const stateRead = await readManagedMemoryState(filePath);
+			if (stateRead.status === "missing") {
+				await writeManagedMemoryState(filePath, { version: 1, committedDigest: currentDigest });
+				return current;
+			}
+			if (stateRead.status === "invalid") {
+				await writeFileAtomic(
+					`${managedMemoryStatePath(filePath)}.bak.${Date.now()}.${randomUUID()}`,
+					stateRead.raw,
+					{ mode: 0o600 },
+				);
+				await writeManagedMemoryState(filePath, { version: 1, committedDigest: currentDigest });
+				return current;
+			}
+
+			const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
+			if (reconciled.recognized && reconciled.changed) {
+				await writeManagedMemoryState(filePath, reconciled.state);
+			}
+			return current;
+		});
 	}
 
 	public systemPromptBlock(budget?: MemoryPromptBudget): string {
@@ -253,136 +359,147 @@ export class FileStoreProvider implements MemoryProvider {
 					const filePath = target === "memory" ? this.memoryFilePath : this.userFilePath;
 					const budget = target === "memory" ? FileStoreProvider.BUDGET_MEMORY : FileStoreProvider.BUDGET_USER;
 
-					let release: (() => Promise<void>) | undefined;
 					try {
-						// File lock
-						release = await lockfile.lock(filePath, { realpath: false, retries: 5 });
+						return await withFileLock(filePath, async () => {
+							const currentOnDisk = await fs.readFile(filePath, "utf8");
+							const currentDigest = contentDigest(currentOnDisk);
+							const stateRead = await readManagedMemoryState(filePath);
+							let managedState: ManagedMemoryState | undefined;
+							if (stateRead.status === "valid") {
+								const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
+								if (reconciled.recognized) {
+									managedState = reconciled.state;
+									if (reconciled.changed) await writeManagedMemoryState(filePath, reconciled.state);
+								}
+							}
+							if (!managedState) {
+								const backupPath = `${filePath}.bak.${Date.now()}`;
+								await writeFileAtomic(backupPath, currentOnDisk, { mode: 0o600 });
+								return {
+									content: [
+										{
+											type: "text",
+											text: `Error: Drift detected. The memory file has been modified out-of-band by an external process. A backup was created at ${backupPath}. Operation aborted.`,
+										},
+									],
+									details: { success: false, error: "Drift detected" },
+								};
+							}
 
-						const lastWritten = target === "memory" ? this.lastWrittenMemory : this.lastWrittenUser;
-						// Read current file content on disk for drift detection
-						const currentOnDisk = await fs.readFile(filePath, "utf-8");
-						if (currentOnDisk !== lastWritten) {
-							// Drift detected. Backup current file and refuse write.
-							const backupPath = `${filePath}.bak.${Date.now()}`;
-							await fs.writeFile(backupPath, currentOnDisk, "utf-8");
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Error: Drift detected. The memory file has been modified out-of-band by an external process. A backup was created at ${backupPath}. Operation aborted.`,
-									},
-								],
-								details: { success: false, error: "Drift detected" },
-							};
-						}
+							// A peer session's committed write is authoritative. Refresh this provider's prompt
+							// snapshot before applying the caller's mutation to that current content.
+							if (target === "memory") this.lastWrittenMemory = currentOnDisk;
+							else this.lastWrittenUser = currentOnDisk;
 
-						let newContent = currentOnDisk;
-						let archiveChanged = false;
-						if (target === "user") {
-							if (!this.userArchive) throw new Error("User memory archive is not initialized.");
-							if (action === "add") {
-								if (content === undefined) throw new Error("Parameter 'content' is required for action 'add'.");
-								const result = await this.userArchive.apply(
-									currentOnDisk,
-									{ action, content },
-									budget,
-									supersedeNearDuplicateLine,
-								);
-								newContent = result.userContent;
-								archiveChanged = result.archiveChanged;
+							let newContent = currentOnDisk;
+							let archiveChanged = false;
+							if (target === "user") {
+								if (!this.userArchive) throw new Error("User memory archive is not initialized.");
+								if (action === "add") {
+									if (content === undefined)
+										throw new Error("Parameter 'content' is required for action 'add'.");
+									const result = await this.userArchive.apply(
+										currentOnDisk,
+										{ action, content },
+										budget,
+										supersedeNearDuplicateLine,
+									);
+									newContent = result.userContent;
+									archiveChanged = result.archiveChanged;
+								} else if (action === "replace") {
+									if (content === undefined || oldContent === undefined) {
+										throw new Error(
+											"Parameters 'content' and 'oldContent' are required for action 'replace'.",
+										);
+									}
+									const result = await this.userArchive.apply(
+										currentOnDisk,
+										{ action, content, oldContent },
+										budget,
+										supersedeNearDuplicateLine,
+									);
+									newContent = result.userContent;
+									archiveChanged = result.archiveChanged;
+								} else {
+									if (oldContent === undefined)
+										throw new Error("Parameter 'oldContent' is required for action 'remove'.");
+									const result = await this.userArchive.apply(
+										currentOnDisk,
+										{ action, oldContent },
+										budget,
+										supersedeNearDuplicateLine,
+									);
+									newContent = result.userContent;
+									archiveChanged = result.archiveChanged;
+								}
+							} else if (action === "add") {
+								if (content === undefined) {
+									throw new Error("Parameter 'content' is required for action 'add'.");
+								}
+								const superseded = supersedeNearDuplicateLine(currentOnDisk, content);
+								if (superseded !== null) {
+									newContent = superseded;
+								} else {
+									newContent =
+										newContent.endsWith("\n") || newContent === ""
+											? `${newContent}${content}\n`
+											: `${newContent}\n${content}\n`;
+								}
 							} else if (action === "replace") {
 								if (content === undefined || oldContent === undefined) {
 									throw new Error("Parameters 'content' and 'oldContent' are required for action 'replace'.");
 								}
-								const result = await this.userArchive.apply(
-									currentOnDisk,
-									{ action, content, oldContent },
-									budget,
-									supersedeNearDuplicateLine,
-								);
-								newContent = result.userContent;
-								archiveChanged = result.archiveChanged;
-							} else {
-								if (oldContent === undefined)
+								if (!currentOnDisk.includes(oldContent)) {
+									throw new Error(`The content to replace ('oldContent') was not found in the file.`);
+								}
+								newContent = currentOnDisk.replace(oldContent, content);
+							} else if (action === "remove") {
+								if (oldContent === undefined) {
 									throw new Error("Parameter 'oldContent' is required for action 'remove'.");
-								const result = await this.userArchive.apply(
-									currentOnDisk,
-									{ action, oldContent },
-									budget,
-									supersedeNearDuplicateLine,
-								);
-								newContent = result.userContent;
-								archiveChanged = result.archiveChanged;
+								}
+								if (!currentOnDisk.includes(oldContent)) {
+									throw new Error(`The content to remove ('oldContent') was not found in the file.`);
+								}
+								newContent = currentOnDisk.replace(oldContent, "");
 							}
-						} else if (action === "add") {
-							if (content === undefined) {
-								throw new Error("Parameter 'content' is required for action 'add'.");
-							}
-							// Confront before write. If this fact is a near-duplicate of an existing line,
-							// supersede it in place instead of appending a redundant copy (prevents append-rot).
-							const superseded = supersedeNearDuplicateLine(currentOnDisk, content);
-							if (superseded !== null) {
-								newContent = superseded;
-							} else {
-								newContent =
-									newContent.endsWith("\n") || newContent === ""
-										? `${newContent}${content}\n`
-										: `${newContent}\n${content}\n`;
-							}
-						} else if (action === "replace") {
-							if (content === undefined || oldContent === undefined) {
-								throw new Error("Parameters 'content' and 'oldContent' are required for action 'replace'.");
-							}
-							if (!currentOnDisk.includes(oldContent)) {
-								throw new Error(`The content to replace ('oldContent') was not found in the file.`);
-							}
-							newContent = currentOnDisk.replace(oldContent, content);
-						} else if (action === "remove") {
-							if (oldContent === undefined) {
-								throw new Error("Parameter 'oldContent' is required for action 'remove'.");
-							}
-							if (!currentOnDisk.includes(oldContent)) {
-								throw new Error(`The content to remove ('oldContent') was not found in the file.`);
-							}
-							newContent = currentOnDisk.replace(oldContent, "");
-						}
 
-						// MEMORY.md remains a bounded hot document. USER.md overflow is handled above by
-						// the archive owner, which returns a bounded index instead of rejecting the write.
-						if (newContent.length > budget) {
+							if (newContent.length > budget) {
+								return {
+									content: [
+										{
+											type: "text",
+											text: `Error: Memory budget exceeded. ${target === "memory" ? "MEMORY.md" : "USER.md"} limit is ${budget} characters. Current operation would result in ${newContent.length} characters.`,
+										},
+									],
+									details: { success: false, error: "Memory budget exceeded" },
+								};
+							}
+
+							if (newContent !== currentOnDisk) {
+								const newDigest = contentDigest(newContent);
+								await writeManagedMemoryState(filePath, {
+									version: 1,
+									committedDigest: managedState.committedDigest,
+									pendingDigest: newDigest,
+								});
+								await writeFileAtomic(filePath, newContent, { mode: 0o600 });
+								await writeManagedMemoryState(filePath, { version: 1, committedDigest: newDigest });
+							}
+
+							if (target === "memory") this.lastWrittenMemory = newContent;
+							else this.lastWrittenUser = newContent;
+							if (archiveChanged || newContent !== currentOnDisk) this.options.onDurableMemoryChanged?.();
+
 							return {
 								content: [
 									{
 										type: "text",
-										text: `Error: Memory budget exceeded. ${target === "memory" ? "MEMORY.md" : "USER.md"} limit is ${budget} characters. Current operation would result in ${newContent.length} characters.`,
+										text: `Successfully updated ${target === "memory" ? "MEMORY.md" : "USER.md"}.`,
 									},
 								],
-								details: { success: false, error: "Memory budget exceeded" },
+								details: { success: true },
 							};
-						}
-
-						// Atomic write
-						const tmpPath = `${filePath}.tmp`;
-						await fs.writeFile(tmpPath, newContent, "utf-8");
-						await fs.rename(tmpPath, filePath);
-
-						// Update in-memory tracker
-						if (target === "memory") {
-							this.lastWrittenMemory = newContent;
-						} else {
-							this.lastWrittenUser = newContent;
-						}
-						if (archiveChanged || newContent !== currentOnDisk) this.options.onDurableMemoryChanged?.();
-
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Successfully updated ${target === "memory" ? "MEMORY.md" : "USER.md"}.`,
-								},
-							],
-							details: { success: true },
-						};
+						});
 					} catch (err) {
 						return {
 							content: [
@@ -393,10 +510,6 @@ export class FileStoreProvider implements MemoryProvider {
 							],
 							details: { success: false, error: String(err) },
 						};
-					} finally {
-						if (release) {
-							await release();
-						}
 					}
 				},
 			},

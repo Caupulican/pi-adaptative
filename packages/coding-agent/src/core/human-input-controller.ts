@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, ImageContent, Model, ToolResultMessage } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ExtensionContext, ExtensionUIContext } from "./extensions/index.ts";
@@ -7,13 +7,12 @@ import {
 	beginHumanInputRequest,
 	createHumanInputRequest,
 	formatHumanInputAnswerText,
-	getLatestHumanInputSnapshots,
 	getResumableHumanInputSnapshot,
-	getWorkerHumanInputsRequiringDelivery,
 	HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
 	type HumanInputRequest,
 	type HumanInputSnapshot,
 	resolveHumanInput,
+	WorkerHumanInputProjection,
 } from "./human-input.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
@@ -46,6 +45,10 @@ export class HumanInputController {
 	private readonly deps: HumanInputControllerDeps;
 	private tail: Promise<void> = Promise.resolve();
 	private readonly activeRequestIds = new Set<string>();
+	private indexedSessionManager: SessionManager | undefined;
+	private indexedLeafId: string | null = null;
+	private workerInputIndexInitialized = false;
+	private readonly workerInputProjection = new WorkerHumanInputProjection();
 
 	constructor(deps: HumanInputControllerDeps) {
 		this.deps = deps;
@@ -53,10 +56,8 @@ export class HumanInputController {
 
 	queueWorkerInput(request: WorkerHumanInputRequest): void {
 		const sessionManager = this.deps.getSessionManager();
-		const existing = getLatestHumanInputSnapshots(sessionManager).find(
-			(snapshot) => snapshot.request.workerRequestId === request.workerRequestId,
-		);
-		if (existing) return;
+		this.synchronizeWorkerInputIndex();
+		if (this.workerInputProjection.hasKnownWorkerRequest(request.workerRequestId)) return;
 		const blockerText = request.blockers
 			.slice(0, 4)
 			.map((blocker) => blocker.slice(0, 500))
@@ -84,13 +85,27 @@ export class HumanInputController {
 			acceptsImages: false,
 		});
 		beginHumanInputRequest(sessionManager, question);
+		this.synchronizeWorkerInputIndex();
 		if (!this.deps.isStreaming()) this.scheduleWorkerInput(question);
 	}
 
 	schedulePendingWorkerInputs(): void {
-		for (const snapshot of getWorkerHumanInputsRequiringDelivery(this.deps.getSessionManager())) {
+		for (const snapshot of this.getWorkerInputsRequiringDelivery()) {
 			this.scheduleWorkerInput(snapshot);
 		}
+	}
+
+	/** True when every terminal lane already has a durable owner question scheduled for delivery. */
+	workerInputsWillWakeParent(workerRequestIds: readonly string[]): boolean {
+		if (
+			workerRequestIds.length === 0 ||
+			this.deps.getUIContext() === undefined ||
+			this.deps.getExtensionMode() === "print"
+		) {
+			return false;
+		}
+		this.synchronizeWorkerInputIndex();
+		return workerRequestIds.every((workerRequestId) => this.workerInputProjection.requiresDelivery(workerRequestId));
 	}
 
 	async resumePending(): Promise<boolean> {
@@ -161,7 +176,7 @@ export class HumanInputController {
 			resumed = true;
 		}
 
-		for (const workerInput of getWorkerHumanInputsRequiringDelivery(sessionManager)) {
+		for (const workerInput of this.getWorkerInputsRequiringDelivery()) {
 			if (this.activeRequestIds.has(workerInput.request.requestId)) continue;
 			this.activeRequestIds.add(workerInput.request.requestId);
 			try {
@@ -193,6 +208,48 @@ export class HumanInputController {
 			});
 	}
 
+	private getWorkerInputsRequiringDelivery(): HumanInputSnapshot[] {
+		this.synchronizeWorkerInputIndex();
+		return this.workerInputProjection.getRequiringDelivery();
+	}
+
+	private synchronizeWorkerInputIndex(): void {
+		const sessionManager = this.deps.getSessionManager();
+		const currentLeafId = sessionManager.getLeafId();
+		if (!this.workerInputIndexInitialized || this.indexedSessionManager !== sessionManager) {
+			this.rebuildWorkerInputIndex(sessionManager);
+			return;
+		}
+		if (currentLeafId === this.indexedLeafId) return;
+
+		const appendedEntries: SessionEntry[] = [];
+		let cursor = currentLeafId;
+		while (cursor !== null && cursor !== this.indexedLeafId) {
+			const entry = sessionManager.getEntry(cursor);
+			if (!entry) {
+				this.rebuildWorkerInputIndex(sessionManager);
+				return;
+			}
+			appendedEntries.push(entry);
+			cursor = entry.parentId;
+		}
+		if (cursor !== this.indexedLeafId) {
+			this.rebuildWorkerInputIndex(sessionManager);
+			return;
+		}
+		for (let index = appendedEntries.length - 1; index >= 0; index--) {
+			this.workerInputProjection.apply(appendedEntries[index]!);
+		}
+		this.indexedLeafId = currentLeafId;
+	}
+
+	private rebuildWorkerInputIndex(sessionManager: SessionManager): void {
+		this.workerInputProjection.reset(sessionManager.getBranch());
+		this.indexedSessionManager = sessionManager;
+		this.indexedLeafId = sessionManager.getLeafId();
+		this.workerInputIndexInitialized = true;
+	}
+
 	private async resolveWorkerInput(initial: HumanInputSnapshot): Promise<boolean> {
 		const ui = this.deps.getUIContext();
 		if (!ui || this.deps.getExtensionMode() === "print") return false;
@@ -208,6 +265,7 @@ export class HumanInputController {
 						getImageStore: () => this.deps.getImageStore(),
 					})
 				: { snapshot: initial, imageContents: [] };
+		this.synchronizeWorkerInputIndex();
 		await this.deps.waitForIdle();
 		if (this.deps.isDisposed()) return false;
 		await this.deps.sendCustomMessage(
@@ -226,6 +284,7 @@ export class HumanInputController {
 			},
 			{ triggerTurn: true, deliverAs: "followUp" },
 		);
+		this.synchronizeWorkerInputIndex();
 		return true;
 	}
 }

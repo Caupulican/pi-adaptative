@@ -1,7 +1,8 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
+import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import {
 	appendHumanInputSnapshot,
 	beginHumanInputRequest,
@@ -12,6 +13,7 @@ import {
 	HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
 	resolveHumanInput,
 } from "../src/core/human-input.ts";
+import { HumanInputController } from "../src/core/human-input-controller.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const questions = [
@@ -218,6 +220,69 @@ describe("durable human input", () => {
 			requestId: request.requestId,
 		});
 		expect(getWorkerHumanInputsRequiringDelivery(sessionManager)).toEqual([]);
+
+		const replayed = SessionManager.inMemory();
+		const replayedRequest = createHumanInputRequest({
+			source: "worker",
+			workerRequestId: "worker-replayed",
+			questions,
+			acceptsImages: false,
+		});
+		replayed.appendCustomMessageEntry(HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE, "replayed", false, {
+			requestId: replayedRequest.requestId,
+		});
+		beginHumanInputRequest(replayed, replayedRequest);
+		expect(getWorkerHumanInputsRequiringDelivery(replayed)).toEqual([]);
+	});
+
+	it("indexes appended worker-input state without rescanning the long active branch", () => {
+		const sessionManager = SessionManager.inMemory();
+		const controller = new HumanInputController({
+			getSessionManager: () => sessionManager,
+			getUIContext: () => ({}) as ExtensionUIContext,
+			getExtensionMode: () => "rpc",
+			waitForIdle: async () => {},
+			isDisposed: () => false,
+			isStreaming: () => false,
+			getModel: () => undefined,
+			getArtifactStore: createInMemoryArtifactStore,
+			getImageStore: () => undefined,
+			runAgentPrompt: async () => {},
+			sendCustomMessage: async () => {},
+			emitWarning: () => {},
+		});
+		const branchSpy = vi.spyOn(sessionManager, "getBranch");
+		const entrySpy = vi.spyOn(sessionManager, "getEntry");
+		const request = createHumanInputRequest({
+			source: "worker",
+			workerRequestId: "worker-long-session",
+			questions,
+			acceptsImages: false,
+		});
+		beginHumanInputRequest(sessionManager, request);
+		const requestLeafId = sessionManager.getLeafId();
+		if (!requestLeafId) throw new Error("Worker request entry was not persisted");
+
+		expect(controller.workerInputsWillWakeParent(["worker-long-session"])).toBe(true);
+		expect(branchSpy).toHaveBeenCalledTimes(1);
+		for (let index = 0; index < 1_000; index++) {
+			sessionManager.appendCustomEntry("unrelated-long-session-state", { index });
+			expect(controller.workerInputsWillWakeParent(["worker-long-session"])).toBe(true);
+		}
+
+		expect(branchSpy).toHaveBeenCalledTimes(1);
+		expect(entrySpy).toHaveBeenCalledTimes(1_000);
+		sessionManager.appendCustomMessageEntry(HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE, "delivered", false, {
+			requestId: request.requestId,
+		});
+		expect(controller.workerInputsWillWakeParent(["worker-long-session"])).toBe(false);
+		expect(controller.workerInputsWillWakeParent(["negative-control-worker"])).toBe(false);
+		expect(branchSpy).toHaveBeenCalledTimes(1);
+		expect(entrySpy).toHaveBeenCalledTimes(1_001);
+
+		sessionManager.branch(requestLeafId);
+		expect(controller.workerInputsWillWakeParent(["worker-long-session"])).toBe(true);
+		expect(branchSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("replays the original tool call through AgentSession after a restart boundary", async () => {

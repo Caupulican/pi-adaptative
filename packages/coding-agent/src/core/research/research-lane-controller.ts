@@ -157,6 +157,7 @@ export class ResearchLaneController {
 			"lane",
 			`research:${startedRecord.laneId}`,
 		);
+		let toolSurface: LaneToolSurface | undefined;
 		try {
 			let spentUsage: Usage | undefined;
 			const workspaceSources = await this.deps.collectWorkspaceSources({
@@ -165,17 +166,18 @@ export class ResearchLaneController {
 				maxSources: settings.maxSources,
 			});
 			const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
-			const toolSurface = createLaneToolSurface({
+			const activeToolSurface = createLaneToolSurface({
 				cwd: this.deps.getCwd(),
 				profile: laneProfile,
 				deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 			});
-			this.warnUnboundToolGrants(laneProfile, toolSurface);
+			toolSurface = activeToolSurface;
+			this.warnUnboundToolGrants(laneProfile, activeToolSurface);
 			const result = await runResearch({
 				query: demand.query,
 				context: demand.context,
 				sources: workspaceSources,
-				envelope: this.buildEnvelope(maxUsd, laneProfile, toolSurface),
+				envelope: this.buildEnvelope(maxUsd, laneProfile, activeToolSurface),
 				maxUsd,
 				maxSources: settings.maxSources,
 				maxFindings: settings.maxFindings,
@@ -192,9 +194,9 @@ export class ResearchLaneController {
 						model,
 						thinkingLevel: resolveModelThinkingLevel(model, laneProfile?.thinking),
 						maxTokens: laneCapability.laneMaxOutputTokens,
-						tools: toolSurface.tools,
+						tools: activeToolSurface.tools,
 						maxTurns: 6,
-						beforeToolCall: toolSurface.beforeToolCall,
+						beforeToolCall: activeToolSurface.beforeToolCall,
 						signal,
 						cacheRetention: "short",
 						laneKind: "research",
@@ -249,6 +251,12 @@ export class ResearchLaneController {
 			this.deps.emit({ type: "warning", message: `Research lane failed: ${message}` });
 			return { started: true, record };
 		} finally {
+			try {
+				await toolSurface?.dispose();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.deps.emit({ type: "warning", message: `Research lane payload cleanup failed: ${message}` });
+			}
 			this._isRunning = false;
 			deregisterInFlight();
 		}

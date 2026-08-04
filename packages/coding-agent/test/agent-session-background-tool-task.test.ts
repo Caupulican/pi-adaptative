@@ -6,7 +6,7 @@ import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
 	type BackgroundToolTaskRecord,
 } from "../src/core/background-tool-task-controller.ts";
-import { createHarness } from "./test-harness.ts";
+import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
 
 const slowParameters = Type.Object({});
 
@@ -190,6 +190,99 @@ describe("AgentSession background tool tasks", () => {
 		} finally {
 			unsubscribe();
 			releaseSlow?.();
+			harness.cleanup();
+		}
+	});
+
+	it("waits for asynchronous foreground preflight before delivering a terminal handoff", async () => {
+		let releaseSlow: (() => void) | undefined;
+		const slowCompletion = new Promise<void>((resolve) => {
+			releaseSlow = resolve;
+		});
+		let releasePreflight: (() => void) | undefined;
+		const preflightGate = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		let markPreflightEntered: (() => void) | undefined;
+		const preflightEntered = new Promise<void>((resolve) => {
+			markPreflightEntered = resolve;
+		});
+		const slowTool: AgentTool<typeof slowParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic slow test tool",
+			parameters: slowParameters,
+			execute: async () => {
+				await slowCompletion;
+				return { content: [{ type: "text" as const, text: "slow result" }], details: {} };
+			},
+		};
+		const harness = await createHarnessWithExtensions({
+			baseToolsOverride: { slow: slowTool },
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async (event) => {
+						if (event.text === "foreground preflight owner") {
+							markPreflightEntered?.();
+							await preflightGate;
+						}
+						return { action: "continue" };
+					});
+				},
+			],
+			responses: [
+				{ toolCalls: [{ id: "slow-call", name: "slow", args: {} }] },
+				"foreground continued",
+				"preflight owner completed",
+				"background completion acknowledged",
+			],
+		});
+		harness.session.setActiveToolsByName(["slow", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+		let sawRunning = false;
+		let markTaskTerminal: (() => void) | undefined;
+		const taskTerminal = new Promise<void>((resolve) => {
+			markTaskTerminal = resolve;
+		});
+		let markHandoffReply: (() => void) | undefined;
+		const handoffReply = new Promise<void>((resolve) => {
+			markHandoffReply = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "background_tools") {
+				if (event.tasks.length > 0) sawRunning = true;
+				if (sawRunning && event.tasks.length === 0) markTaskTerminal?.();
+			}
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			const text = event.message.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			if (text.includes("background completion acknowledged")) markHandoffReply?.();
+		});
+
+		try {
+			await harness.session.prompt("start slow work");
+			const foregroundPrompt = harness.session.prompt("foreground preflight owner");
+			await preflightEntered;
+			releaseSlow?.();
+			await taskTerminal;
+
+			expect(harness.faux.callCount).toBe(2);
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom" && entry.customType === "background-tool-completion"),
+			).toBe(false);
+
+			releasePreflight?.();
+			await foregroundPrompt;
+			await handoffReply;
+			expect(harness.faux.callCount).toBe(4);
+		} finally {
+			unsubscribe();
+			releaseSlow?.();
+			releasePreflight?.();
 			harness.cleanup();
 		}
 	});
