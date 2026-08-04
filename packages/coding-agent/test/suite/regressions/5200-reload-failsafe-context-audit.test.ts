@@ -148,7 +148,9 @@ describe("reload failsafe and context audit", () => {
 					model: "anthropic/claude-haiku-4-5",
 					thinking: "high",
 					resources: {
-						extensions: { allow: ["*"] },
+						// The rollback invariant needs only these inline generations. A wildcard imports every
+						// bundled extension before the intended failure and makes the test platform-load sensitive.
+						extensions: { allow: ["<inline:1>", "<inline:2>"] },
 						tools: { allow: ["stable_tool"] },
 						agents: { block: ["*"] },
 					},

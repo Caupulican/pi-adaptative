@@ -1060,7 +1060,9 @@ Content`,
 			// so the load half of this regression needs an explicit extension grant. Discovery
 			// below must include the path regardless of any grant — that is the editor's universe.
 			settingsManager.addInlineResourceProfileDefinitions({
-				default: { extensions: { allow: ["*"] } },
+				// Grant only the fixture under test. A wildcard imports every bundled extension and
+				// makes this external-root discovery regression depend on unrelated Windows startup cost.
+				default: { extensions: { allow: ["my-ext"] } },
 			});
 			settingsManager.setRuntimeResourceProfiles(["default"]);
 			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
