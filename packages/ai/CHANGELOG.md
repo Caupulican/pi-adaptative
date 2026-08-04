@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed Groq and OpenRouter model metadata, replacing retired Groq Qwen3 32B and Llama 4 Scout entries with Qwen3.6 27B and mapping Pi reasoning levels to Groq's supported reasoning toggle.
+
 ## [0.85.5] - 2026-08-04
 
 ### Changed

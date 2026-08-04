@@ -592,7 +592,7 @@ export const IMAGE_MODELS = {
 		} satisfies ImagesModel<"openrouter-images">,
 		"x-ai/grok-imagine-image-quality": {
 			id: "x-ai/grok-imagine-image-quality",
-			name: "xAI: Grok Imagine Image Quality",
+			name: "SpaceXAI: Grok Imagine Image Quality",
 			api: "openrouter-images",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
