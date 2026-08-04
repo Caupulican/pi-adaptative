@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed OpenRouter pricing for MiniMax M2.7 and Mistral Small 3.2 24B from the generated provider catalogue.
+
 ## [0.85.4] - 2026-08-04
 
 ### Added
