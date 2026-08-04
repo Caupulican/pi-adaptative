@@ -1,7 +1,13 @@
-import type { Agent, AgentEvent, AgentMessage, ClassifiedError } from "@caupulican/pi-agent-core";
-import { AgentBusyError, classifyFailure, DEFAULT_RETRY_POLICY, RetryController } from "@caupulican/pi-agent-core";
+import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
+import {
+	type ClassifiedError,
+	classifyFailure,
+	DEFAULT_RETRY_POLICY,
+	RetryController,
+} from "@caupulican/pi-agent-core/reliability";
+import type { AgentEvent, AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { isContextOverflow } from "@caupulican/pi-ai";
+import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import type { ModelRegistry } from "./model-registry.ts";

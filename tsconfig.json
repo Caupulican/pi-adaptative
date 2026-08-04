@@ -17,7 +17,33 @@
 			"@caupulican/pi-ai/dist/*": ["./packages/ai/src/*"],
 			"@caupulican/pi-agent-core": ["./packages/agent/src/index.ts"],
 			"@caupulican/pi-agent-core/node": ["./packages/agent/src/node.ts"],
+			"@caupulican/pi-agent-core/agent": ["./packages/agent/src/agent.ts"],
+			"@caupulican/pi-agent-core/agent-loop": ["./packages/agent/src/agent-loop.ts"],
+			"@caupulican/pi-agent-core/compaction": ["./packages/agent/src/compaction/index.ts"],
+			"@caupulican/pi-agent-core/compaction/*": ["./packages/agent/src/compaction/*"],
+			"@caupulican/pi-agent-core/message-retention": [
+				"./packages/agent/src/session/message-retention.ts"
+			],
+			"@caupulican/pi-agent-core/messages": ["./packages/agent/src/messages.ts"],
 			"@caupulican/pi-agent-core/paths": ["./packages/agent/src/utils/paths.ts"],
+			"@caupulican/pi-agent-core/process-tree": [
+				"./packages/agent/src/reliability/process-tree.ts"
+			],
+			"@caupulican/pi-agent-core/reliability": [
+				"./packages/agent/src/reliability/index.ts"
+			],
+			"@caupulican/pi-agent-core/session": [
+				"./packages/agent/src/session/session-manager.ts"
+			],
+			"@caupulican/pi-agent-core/shell-output": [
+				"./packages/agent/src/utils/shell-output.ts"
+			],
+			"@caupulican/pi-agent-core/tool-failure-memory": [
+				"./packages/agent/src/tool-failure-memory.ts"
+			],
+			"@caupulican/pi-agent-core/truncate": ["./packages/agent/src/utils/truncate.ts"],
+			"@caupulican/pi-agent-core/types": ["./packages/agent/src/types.ts"],
+			"@caupulican/pi-agent-core/usage": ["./packages/agent/src/usage.ts"],
 			"@caupulican/pi-agent-core/*": ["./packages/agent/src/*"],
 			"@caupulican/pi-adaptative": ["./packages/coding-agent/src/index.ts"],
 			"@caupulican/pi-adaptative/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],

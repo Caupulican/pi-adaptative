@@ -2,17 +2,15 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { convertToLlm } from "@caupulican/pi-agent-core";
 import {
-	assertValidSessionId,
 	type CompactionPreparation,
 	type CompactionResult,
 	createDeterministicCompaction,
 	estimateContextTokens,
 	prepareCompaction,
-	type SessionContext,
-	SessionManager,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/compaction/compaction";
+import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import { assertValidSessionId, type SessionContext, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { Message, Usage } from "@caupulican/pi-ai";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";

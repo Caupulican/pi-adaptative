@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import type { Tool, ToolArgumentValidationOptions } from "@caupulican/pi-ai";
-import { validateToolArguments } from "@caupulican/pi-ai";
+import { validateToolArguments } from "@caupulican/pi-ai/validation";
 import { Type } from "typebox";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";

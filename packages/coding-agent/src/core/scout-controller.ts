@@ -1,4 +1,5 @@
-import { Agent, type AgentTool, type StreamFn } from "@caupulican/pi-agent-core";
+import { Agent } from "@caupulican/pi-agent-core/agent";
+import type { AgentTool, StreamFn } from "@caupulican/pi-agent-core/types";
 import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { registerInFlightWork } from "./reload-blockers.ts";
 

@@ -23,17 +23,20 @@
  * the pipeline — keeping the transform the one place the two subsystems meet.
  */
 
-import { type AgentMessage, addUsage, createEmptyUsage } from "@caupulican/pi-agent-core";
 import {
-	type CompactionEntry,
 	calculateContextTokens,
 	estimateTokens,
 	getApplicableAssistantUsageInfo,
+} from "@caupulican/pi-agent-core/compaction/compaction";
+import { TokenBudget } from "@caupulican/pi-agent-core/compaction/token-budget";
+import {
+	type CompactionEntry,
 	getLatestCompactionEntry,
 	type SessionEntry,
 	type SessionManager,
-	TokenBudget,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/session";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";

@@ -28,6 +28,7 @@ import {
 	stripResourceProfileBlocks,
 } from "./resource-profile-blocks.ts";
 import { collectResourceFilesRecursively, isResourcePathWithin, readResourceDirectory } from "./resource-traversal.ts";
+import { scanContextFileThreats, stripInvisibleUnicode } from "./security/context-threat-scanner.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileKind,
@@ -37,6 +38,13 @@ import {
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
+
+export {
+	hasInvisibleUnicode,
+	scanContextFileThreats,
+	stripInvisibleUnicode,
+	type ThreatScope,
+} from "./security/context-threat-scanner.ts";
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -76,6 +84,8 @@ export interface ResourceLoader {
 	getLoadedExtension(path: string): Extension | undefined;
 	removeLoadedExtension(path: string): Extension | undefined;
 	loadSingleExtension(path: string): Promise<{ extension: Extension | null; error: string | null }>;
+	/** Load one draft against a fresh runtime without mutating the live extension generation. */
+	loadIsolatedExtension?(path: string, cwd: string): Promise<{ extension: Extension | null; error: string | null }>;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceReloadOptions): Promise<void>;
 	commitReload?(): void | Promise<void>;
@@ -125,66 +135,6 @@ function resolvePromptInput(input: string | undefined, description: string): str
 }
 
 /**
- * Threat-pattern scope (Hermes-parity #31). `context` patterns apply to any attacker-influenced text
- * injected into context (context files, recalled memory). `strict` patterns are additionally checked on
- * HIGH-PRIVILEGE writes (memory writes, skill installs) where a false positive is cheap (user-mediated)
- * but a miss can persist an exfiltration/backdoor. A `strict` scan is a SUPERSET of `context`.
- */
-export type ThreatScope = "context" | "strict";
-
-const THREAT_PATTERNS: Array<{ label: string; pattern: RegExp; scope: ThreatScope }> = [
-	{
-		label: "instruction override",
-		pattern:
-			/\b(?:ignore|disregard|override|bypass)\b.{0,80}\b(?:previous|prior|above|system|developer|agent)\b.{0,80}\binstructions?\b/i,
-		scope: "context",
-	},
-	{
-		label: "secret exfiltration",
-		pattern:
-			/\b(?:reveal|print|dump|exfiltrate|send|upload)\b.{0,80}\b(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?|\.env)\b/i,
-		scope: "context",
-	},
-	{
-		label: "hidden instruction",
-		pattern: /\b(?:do not tell|don't tell|hide this from)\b.{0,80}\b(?:user|operator|developer)\b/i,
-		scope: "context",
-	},
-	{
-		label: "role hijack",
-		pattern: /\byou\s+are\s+(?:\w+\s+){0,4}now\s+(?:a|an|the)\s+\w+/i,
-		scope: "context",
-	},
-	{
-		label: "system prompt leak",
-		pattern: /\b(?:output|print|reveal|repeat|show)\b.{0,40}\b(?:system|initial|developer)\b.{0,20}\bprompt\b/i,
-		scope: "context",
-	},
-	// strict-only (high-privilege write paths): credential exfil, backdoors, persistence.
-	{
-		label: "credential exfil command",
-		pattern:
-			/\b(?:curl|wget|fetch|invoke-webrequest|nc)\b.{0,100}\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/i,
-		scope: "strict",
-	},
-	{
-		label: "ssh backdoor",
-		pattern: /authorized_keys|(?:~|\$HOME)\/\.ssh\b/i,
-		scope: "strict",
-	},
-	{
-		label: "secret file read",
-		pattern: /\bcat\b.{0,40}(?:\.env\b|\.netrc|\.pgpass|\.npmrc|\.pypirc|credentials)/i,
-		scope: "strict",
-	},
-	{
-		label: "data exfil to url",
-		pattern: /\b(?:send|post|upload|exfiltrate|transmit|curl|wget)\b.{0,80}https?:\/\//i,
-		scope: "strict",
-	},
-];
-
-/**
  * Genuinely-dangerous invisible / bidi-control characters used to HIDE instructions or visually reorder
  * text (Trojan-Source): zero-width space (U+200B), bidi embeddings/overrides (U+202A\u2013U+202E), word-joiner
  * + invisible math operators (U+2060\u2013U+2064), bidi isolates + deprecated format controls (U+2066\u2013U+206F),
@@ -195,34 +145,6 @@ const THREAT_PATTERNS: Array<{ label: string; pattern: RegExp; scope: ThreatScop
  * sequences; stripping them corrupts real text (bug #35). The Trojan-Source reorder attack relies on the
  * embeddings/overrides/isolates above, which are still stripped. (Hermes-parity #31/#35.)
  */
-const INVISIBLE_UNICODE_RE = /[\u200B\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
-
-/** True if `content` contains any invisible/bidi-control character. */
-export function hasInvisibleUnicode(content: string): boolean {
-	INVISIBLE_UNICODE_RE.lastIndex = 0;
-	return INVISIBLE_UNICODE_RE.test(content);
-}
-
-/**
- * Strip invisible/bidi-control characters, returning the cleaned text and how many were removed. Used on
- * READ paths (context files, recalled memory) — strip-and-continue rather than block, so benign
- * international text isn't rejected wholesale while hidden payloads are neutralized (agy's layered policy).
- */
-export function stripInvisibleUnicode(content: string): { cleaned: string; removed: number } {
-	let removed = 0;
-	const cleaned = content.replace(INVISIBLE_UNICODE_RE, () => {
-		removed++;
-		return "";
-	});
-	return { cleaned, removed };
-}
-
-export function scanContextFileThreats(content: string, scope: ThreatScope = "context"): string[] {
-	return THREAT_PATTERNS.filter((p) => (scope === "strict" || p.scope === "context") && p.pattern.test(content)).map(
-		({ label }) => label,
-	);
-}
-
 function sanitizeContextFileContent(filePath: string, content: string): string {
 	const profileFreeContent = stripResourceProfileBlocks(content);
 	// Strip-and-continue for hidden/bidi-control chars: don't reject a whole file for benign zero-width
@@ -680,6 +602,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.extensionsResult.extensions.push(loaded);
 		}
 		return result;
+	}
+
+	async loadIsolatedExtension(
+		extensionPath: string,
+		cwd: string,
+	): Promise<{ extension: Extension | null; error: string | null }> {
+		return loadExtension(extensionPath, cwd, createEventBus(), createExtensionRuntime(), {
+			fresh: true,
+			agentDir: this.agentDir,
+		});
 	}
 
 	/**

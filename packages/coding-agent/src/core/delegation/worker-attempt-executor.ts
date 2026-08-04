@@ -1,7 +1,8 @@
 import path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
-import { addUsage, createEmptyUsage, sanitizeToolFailureContext } from "@caupulican/pi-agent-core";
-import { compact } from "@caupulican/pi-agent-core/node";
+import { compact } from "@caupulican/pi-agent-core/compaction/compaction";
+import { sanitizeToolFailureContext } from "@caupulican/pi-agent-core/tool-failure-memory";
+import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import type { WorkerRequest } from "../autonomy/contracts.ts";

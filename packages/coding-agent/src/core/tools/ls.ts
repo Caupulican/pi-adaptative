@@ -1,6 +1,6 @@
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "@caupulican/pi-agent-core/node";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "@caupulican/pi-agent-core/truncate";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";

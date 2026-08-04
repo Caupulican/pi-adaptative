@@ -9,8 +9,8 @@
 import { randomBytes } from "node:crypto";
 import type { WriteStream } from "node:fs";
 import { join } from "node:path";
-import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core";
-import { DEFAULT_MAX_BYTES, truncateTail } from "@caupulican/pi-agent-core/node";
+import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
+import { DEFAULT_MAX_BYTES, truncateTail } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../config.ts";
 import { stripAnsi } from "../utils/ansi.ts";
 import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";

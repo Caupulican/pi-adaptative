@@ -1,8 +1,9 @@
 import { resetCapabilitiesCache, setCapabilities } from "@caupulican/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getMarkdownTheme, highlightCode, initTheme } from "../src/modes/interactive/theme/theme.ts";
-import * as syntaxHighlight from "../src/utils/syntax-highlight.ts";
 import { highlight, renderHighlightedHtml, supportsLanguage } from "../src/utils/syntax-highlight.ts";
+
+vi.mock("../src/utils/syntax-highlight.ts", { spy: true });
 
 describe("syntax highlight renderer", () => {
 	it("renders highlighted spans with the provided theme", () => {
@@ -111,7 +112,7 @@ describe("theme syntax highlighting", () => {
 	});
 
 	it("preserves the distinct plain and themed fallbacks when highlighting fails", () => {
-		vi.spyOn(syntaxHighlight, "highlight").mockImplementation(() => {
+		vi.mocked(highlight).mockImplementation(() => {
 			throw new Error("forced highlight failure");
 		});
 

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Added repository-only source conditions to supported provider and utility exports so native TypeScript tests resolve their authoritative modules without a Vite transform graph.
+
 ## [0.85.7] - 2026-08-04
 
 ## [0.85.6] - 2026-08-04

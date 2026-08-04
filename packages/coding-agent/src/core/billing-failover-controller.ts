@@ -1,5 +1,5 @@
-import type { Agent } from "@caupulican/pi-agent-core";
-import { type ClassifiedError, classifyFailure } from "@caupulican/pi-agent-core";
+import type { Agent } from "@caupulican/pi-agent-core/agent";
+import { type ClassifiedError, classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { decideBillingFailover } from "./billing-failover.ts";
 import type { ModelRegistry } from "./model-registry.ts";

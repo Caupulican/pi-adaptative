@@ -9,6 +9,7 @@ import {
 	getParentPid,
 	getParentSessionId,
 	getProcessTaskRef,
+	localProcessMatrixStore,
 	PI_ORCHESTRATION_AGENT_ID_ENV,
 	PI_PARENT_PID_ENV,
 	PI_PARENT_SESSION_ENV,
@@ -17,7 +18,6 @@ import {
 	type ProcessMatrixRuntimeConfig,
 	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
-import * as processMatrixStore from "../src/core/process-matrix/store.ts";
 import { buildEntryId, listEntries, readEntry, writeEntry } from "../src/core/process-matrix/store.ts";
 import { applyAdoption, beginWindDown } from "../src/core/process-matrix/supervisor.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
@@ -1194,10 +1194,10 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			resumable: { lastCode: "resumable", agent: base.agent, taskRef: "goal-1" },
 		};
 		await writeEntry(harness.agentDir, orphan);
-		const originalWriteEntryIfUnchanged = processMatrixStore.writeEntryIfUnchanged;
 		let failLaunchedPidWrite = true;
-		vi.spyOn(processMatrixStore, "writeEntryIfUnchanged").mockImplementation(
-			async (agentDir, entryId, expected, next) => {
+		harness.config.store = {
+			...localProcessMatrixStore,
+			writeEntryIfUnchanged: async (agentDir, entryId, expected, next) => {
 				if (
 					failLaunchedPidWrite &&
 					entryId === orphan.entryId &&
@@ -1207,9 +1207,9 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 					failLaunchedPidWrite = false;
 					throw new Error("injected pid-record write failure");
 				}
-				return originalWriteEntryIfUnchanged(agentDir, entryId, expected, next);
+				return localProcessMatrixStore.writeEntryIfUnchanged(agentDir, entryId, expected, next);
 			},
-		);
+		};
 
 		const handle = await startProcessMatrixRuntime(harness.config);
 		await awaitState(

@@ -1,8 +1,7 @@
 import { type ChildProcess, execSync, spawn } from "child_process";
 import { readFileSync } from "fs";
-import { dirname, join } from "path";
+import { join } from "path";
 import { Type } from "typebox";
-import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { complete, stream } from "../src/stream.ts";
@@ -15,9 +14,6 @@ import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-u
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
 import { resolveApiKey } from "./oauth.ts";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
@@ -226,7 +222,7 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Strea
 	}
 
 	// Read the test image
-	const imagePath = join(__dirname, "data", "red-circle.png");
+	const imagePath = join(import.meta.dirname, "data", "red-circle.png");
 	const imageBuffer = readFileSync(imagePath);
 	const base64Image = imageBuffer.toString("base64");
 

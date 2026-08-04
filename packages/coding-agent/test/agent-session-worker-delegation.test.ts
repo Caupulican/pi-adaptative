@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type AssistantMessage, type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import { describe, expect, it, vi } from "vitest";
 import { getPrivateLaneDeniedPaths } from "../src/core/autonomy/lane-private-paths.ts";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
@@ -24,7 +25,7 @@ import { createWorkerExecutionContract } from "../src/core/orchestration/worker-
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./orchestration-profile-fixture.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
-import { createTestResourceLoader } from "./utilities.ts";
+import { createTestResourceLoader } from "./suite/test-resources.ts";
 
 const WORKER_JSON =
 	'{"summary":"The validator blocks out-of-scope changes.","status":"completed","findings":[{"summary":"Deny lists override allow lists","confidence":0.8}]}';

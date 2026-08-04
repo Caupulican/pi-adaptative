@@ -153,7 +153,6 @@ export {
 } from "./write.ts";
 
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	type ArtifactRetrieveToolOptions,
 	createArtifactRetrieveTool,
@@ -162,6 +161,7 @@ import {
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
+	createDefaultExtensionifyRuntimeOptions,
 	createExtensionifyTool,
 	createExtensionifyToolDefinition,
 	type ExtensionifyToolOptions,
@@ -174,37 +174,12 @@ import { createPythonTool, createPythonToolDefinition, type PythonToolOptions } 
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createSkillAuditTool, createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyTool, createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
+import { createToolDefinitionWithRuntime, type ToolDef, type ToolName } from "./tool-definition-factory.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
+export { allToolNames, type ToolDef, type ToolName } from "./tool-definition-factory.ts";
+
 export type Tool = AgentTool<any>;
-export type ToolDef = ToolDefinition<any, any>;
-export type ToolName =
-	| "read"
-	| "bash"
-	| "python"
-	| "edit"
-	| "write"
-	| "grep"
-	| "find"
-	| "ls"
-	| "skill_audit"
-	| "skillify"
-	| "extensionify"
-	| "artifact_retrieve";
-export const allToolNames: Set<ToolName> = new Set([
-	"read",
-	"bash",
-	"python",
-	"edit",
-	"write",
-	"grep",
-	"find",
-	"ls",
-	"skill_audit",
-	"skillify",
-	"extensionify",
-	"artifact_retrieve",
-]);
 
 export interface ToolsOptions {
 	read?: ReadToolOptions;
@@ -239,34 +214,10 @@ function withSharedFileMutationIntents(options?: ToolsOptions): ToolsOptions {
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
-	switch (toolName) {
-		case "read":
-			return createReadToolDefinition(cwd, options?.read);
-		case "bash":
-			return createBashToolDefinition(cwd, options?.bash);
-		case "python":
-			return createPythonToolDefinition(cwd, options?.python);
-		case "edit":
-			return createEditToolDefinition(cwd, options?.edit);
-		case "write":
-			return createWriteToolDefinition(cwd, options?.write);
-		case "grep":
-			return createGrepToolDefinition(cwd, options?.grep);
-		case "find":
-			return createFindToolDefinition(cwd, options?.find);
-		case "ls":
-			return createLsToolDefinition(cwd, options?.ls);
-		case "skill_audit":
-			return createSkillAuditToolDefinition(cwd, options?.skill_audit);
-		case "skillify":
-			return createSkillifyToolDefinition(cwd, options?.skillify);
-		case "extensionify":
-			return createExtensionifyToolDefinition(cwd, options?.extensionify);
-		case "artifact_retrieve":
-			return createArtifactRetrieveToolDefinition(cwd, options?.artifact_retrieve);
-		default:
-			throw new Error(`Unknown tool name: ${toolName}`);
-	}
+	return createToolDefinitionWithRuntime(toolName, cwd, {
+		...options,
+		extensionify: createDefaultExtensionifyRuntimeOptions(options?.extensionify),
+	});
 }
 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { classifyFailure } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
+import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type {
 	GoalContinuationLoopOptions,

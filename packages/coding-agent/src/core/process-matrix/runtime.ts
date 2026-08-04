@@ -65,6 +65,26 @@ export {
 	PI_TASK_REF_ENV,
 } from "../process-identity.ts";
 
+/** Storage boundary for the process-matrix coordinator. Runtime state transitions depend on this
+ * port, while the filesystem adapter remains the single production implementation. */
+export interface ProcessMatrixStorePort {
+	listEntries: typeof listEntries;
+	readEntry: typeof readEntry;
+	removeEntryIfUnchanged: typeof removeEntryIfUnchanged;
+	writeEntry: typeof writeEntry;
+	writeEntryIfUnchanged: typeof writeEntryIfUnchanged;
+	writeEntryIfUnchangedSync: typeof writeEntryIfUnchangedSync;
+}
+
+export const localProcessMatrixStore: ProcessMatrixStorePort = Object.freeze({
+	listEntries,
+	readEntry,
+	removeEntryIfUnchanged,
+	writeEntry,
+	writeEntryIfUnchanged,
+	writeEntryIfUnchangedSync,
+});
+
 export interface ProcessMatrixRuntimeConfig {
 	agentDir: string;
 	/** Canonical logical identity for this process and any exact-session resume. */
@@ -91,6 +111,8 @@ export interface ProcessMatrixRuntimeConfig {
 	/** Starts a replacement OS process for a dead resumable worker. Completion is an event-driven
 	 * terminal signal; worker product remains in its persisted session/artifacts. */
 	resumeWorker?: (payload: ResumablePayload) => Promise<ResumeWorkerLaunchOutcome>;
+	/** Injectable only at the storage boundary; defaults to the atomic local filesystem adapter. */
+	store?: ProcessMatrixStorePort;
 }
 
 export type ResumeWorkerLaunchOutcome =
@@ -108,6 +130,10 @@ export interface ProcessMatrixRuntimeHandle {
 
 const NOOP_HANDLE: ProcessMatrixRuntimeHandle = { stop: () => {} };
 export const PROCESS_MATRIX_RESUMABLE_RETENTION_MS = 30 * 24 * 60 * 60_000;
+
+function resolveProcessMatrixStore(config: ProcessMatrixRuntimeConfig): ProcessMatrixStorePort {
+	return config.store ?? localProcessMatrixStore;
+}
 
 function describeError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -159,6 +185,7 @@ async function startMasterBranch(
 	config: ProcessMatrixRuntimeConfig,
 	now: () => number,
 ): Promise<ProcessMatrixRuntimeHandle> {
+	const store = resolveProcessMatrixStore(config);
 	let entry = buildMasterEntry({
 		agent: config.agent,
 		pid: process.pid,
@@ -166,7 +193,7 @@ async function startMasterBranch(
 		now: nowIso(now),
 	});
 	try {
-		await writeEntry(config.agentDir, entry);
+		await store.writeEntry(config.agentDir, entry);
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: failed to register master entry: ${describeError(error)}`);
 	}
@@ -179,7 +206,8 @@ async function startMasterBranch(
 		if (stopped || !ownsEntry || heartbeatTask) return;
 		const expected = entry;
 		const next = applyHeartbeat(expected, nowIso(now));
-		heartbeatTask = writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)
+		heartbeatTask = store
+			.writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)
 			.then((written) => {
 				if (written) {
 					entry = next;
@@ -206,7 +234,7 @@ async function startMasterBranch(
 		if (!ownsEntry) return;
 		try {
 			const closed = markClosed(entry, nowIso(now));
-			if (writeEntryIfUnchangedSync(config.agentDir, entry, closed)) entry = closed;
+			if (store.writeEntryIfUnchangedSync(config.agentDir, entry, closed)) entry = closed;
 		} catch {
 			// Best-effort only -- see module doc.
 		}
@@ -227,7 +255,7 @@ async function startMasterBranch(
 			await heartbeatTask;
 			if (ownsEntry) {
 				const closed = markClosed(entry, nowIso(now));
-				if (await writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, closed)) entry = closed;
+				if (await store.writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, closed)) entry = closed;
 			}
 			await maintenance;
 		},
@@ -239,9 +267,10 @@ async function reconcileAndRunOrphanScan(
 	now: () => number,
 	signal: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	let entries: ProcessMatrixEntry[];
 	try {
-		entries = await listEntries(config.agentDir);
+		entries = await store.listEntries(config.agentDir);
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: reconciliation failed to list entries: ${describeError(error)}`);
 		return;
@@ -258,7 +287,7 @@ async function reconcileAndRunOrphanScan(
 		Promise.all(
 			reconciled.prunedEntryIds.map((entryId) => {
 				const original = originalByEntryId.get(entryId);
-				return original ? removeEntryIfUnchanged(config.agentDir, original) : false;
+				return original ? store.removeEntryIfUnchanged(config.agentDir, original) : false;
 			}),
 		),
 		Promise.all(
@@ -266,7 +295,7 @@ async function reconcileAndRunOrphanScan(
 				.filter((entry) => recoveredEntryIdSet.has(entry.entryId))
 				.map((entry) => {
 					const original = originalByEntryId.get(entry.entryId);
-					return original ? writeEntryIfUnchanged(config.agentDir, entry.entryId, original, entry) : false;
+					return original ? store.writeEntryIfUnchanged(config.agentDir, entry.entryId, original, entry) : false;
 				}),
 		),
 	]);
@@ -283,7 +312,7 @@ async function reconcileAndRunOrphanScan(
 			`process-matrix: pruned ${prunedCount} terminal or expired entr${prunedCount === 1 ? "y" : "ies"}`,
 		);
 	}
-	const currentEntries = await listEntries(config.agentDir);
+	const currentEntries = await store.listEntries(config.agentDir);
 	await deliverTerminalNotifications(config, currentEntries, now, signal);
 	if (signal.aborted) return;
 	await runOrphanScan(config, currentEntries, now, signal);
@@ -295,6 +324,7 @@ async function deliverTerminalNotifications(
 	now: () => number,
 	signal: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	for (const entry of entries) {
 		if (
 			signal.aborted ||
@@ -315,7 +345,7 @@ async function deliverTerminalNotifications(
 		}
 		try {
 			const delivered = markTerminalNotificationDelivered(entry, nowIso(now));
-			if (!(await writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, delivered))) {
+			if (!(await store.writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, delivered))) {
 				config.onDiagnostic?.(
 					`process-matrix: terminal handoff changed before acknowledgement for ${entry.entryId}`,
 				);
@@ -339,6 +369,7 @@ async function runOrphanScan(
 	now: () => number,
 	signal: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	const orphans = detectOrphanedWorkers(entries, {
 		isPidAlive: config.isProcessAlive,
 		ownSessionId: config.agent.resumeContext.sessionId,
@@ -391,7 +422,7 @@ async function runOrphanScan(
 		if (!cleanup || signal.aborted) continue;
 		const windingDown = beginWindDown(orphan, "user_cleanup", nowIso(now));
 		try {
-			if (!(await writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, windingDown))) {
+			if (!(await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, windingDown))) {
 				config.onDiagnostic?.(`process-matrix: cleanup skipped because ${orphan.entryId} changed`);
 			}
 		} catch (error) {
@@ -428,14 +459,15 @@ async function adoptLiveOrphan(
 	orphan: ProcessMatrixEntry,
 	signal: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	if (signal.aborted) return;
 	const adopted = applyAdoption(orphan, {
 		parentPid: process.pid,
 		parentSessionId: config.agent.resumeContext.sessionId,
 	});
 	try {
-		if (!(await writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, adopted))) return;
-		if (signal.aborted) await writeEntryIfUnchanged(config.agentDir, orphan.entryId, adopted, orphan);
+		if (!(await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, adopted))) return;
+		if (signal.aborted) await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, adopted, orphan);
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: failed to write adoption for ${orphan.entryId}: ${describeError(error)}`);
 	}
@@ -446,6 +478,7 @@ async function resumeDeadOrphan(
 	orphan: ProcessMatrixEntry,
 	signal: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	if (signal.aborted) return;
 	const payload = orphan.resumable;
 	if (!payload || !config.resumeWorker) {
@@ -460,21 +493,21 @@ async function resumeDeadOrphan(
 	});
 	let launched: Extract<ResumeWorkerLaunchOutcome, { started: true }>;
 	try {
-		if (!(await writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, claimed))) return;
+		if (!(await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, claimed))) return;
 		if (signal.aborted) {
-			await writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
+			await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
 			return;
 		}
 		const launchOutcome = await config.resumeWorker(payload);
 		if (!launchOutcome.started) {
-			await writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
+			await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
 			config.onDiagnostic?.(`process-matrix: failed to resume ${orphan.entryId}: ${launchOutcome.reason}`);
 			return;
 		}
 		launched = launchOutcome;
 	} catch (error) {
 		try {
-			await writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
+			await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, claimed, orphan);
 		} catch {
 			// The original resumable record remains the intended recovery state.
 		}
@@ -487,7 +520,7 @@ async function resumeDeadOrphan(
 			// Bridge the interval before the replacement can self-register. Without its real PID here, a
 			// restarted master can mistake this live replacement for the original dead process and spawn
 			// a duplicate.
-			await writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, launchedEntry);
+			await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, launchedEntry);
 		} catch (error) {
 			config.onDiagnostic?.(
 				`process-matrix: failed to record resumed worker pid for ${orphan.entryId}: ${describeError(error)}`,
@@ -515,18 +548,19 @@ async function persistResumedWorkerTerminal(
 	result: { code: number | null; signal: NodeJS.Signals | null },
 	lifetime: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	try {
 		const observedAt = new Date().toISOString();
 		const terminal = markTerminal(claimed, result, observedAt);
-		if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, terminal)) {
+		if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, claimed, terminal)) {
 			if (lifetime.aborted) return;
 			await notifyResumedWorkerTerminal(config, terminal, lifetime);
 			return;
 		}
-		const selfRegistered = await readEntry(config.agentDir, claimed.entryId);
+		const selfRegistered = await store.readEntry(config.agentDir, claimed.entryId);
 		if (selfRegistered?.pid === claimed.pid) {
 			const registeredTerminal = markTerminal(selfRegistered, result, observedAt);
-			if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, selfRegistered, registeredTerminal)) {
+			if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, selfRegistered, registeredTerminal)) {
 				if (lifetime.aborted) return;
 				await notifyResumedWorkerTerminal(config, registeredTerminal, lifetime);
 				return;
@@ -536,12 +570,12 @@ async function persistResumedWorkerTerminal(
 		// untouched pre-launch claim proves no newer process has taken this logical entry. Upgrade it
 		// to the actual exited process before persisting its terminal handoff.
 		const fallbackTerminal = markTerminal({ ...preLaunchClaim, pid: claimed.pid }, result, observedAt);
-		if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, preLaunchClaim, fallbackTerminal)) {
+		if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, preLaunchClaim, fallbackTerminal)) {
 			if (lifetime.aborted) return;
 			await notifyResumedWorkerTerminal(config, fallbackTerminal, lifetime);
 			return;
 		}
-		if (await writeEntryIfUnchanged(config.agentDir, claimed.entryId, undefined, terminal)) {
+		if (await store.writeEntryIfUnchanged(config.agentDir, claimed.entryId, undefined, terminal)) {
 			if (lifetime.aborted) return;
 			await notifyResumedWorkerTerminal(config, terminal, lifetime);
 			return;
@@ -559,12 +593,13 @@ async function notifyResumedWorkerTerminal(
 	terminal: ProcessMatrixEntry,
 	lifetime: AbortSignal,
 ): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
 	if (lifetime.aborted) return;
 	try {
 		await config.notify(formatTerminalNotification(terminal));
 		if (lifetime.aborted) return;
 		const delivered = markTerminalNotificationDelivered(terminal, new Date().toISOString());
-		if (!(await writeEntryIfUnchanged(config.agentDir, terminal.entryId, terminal, delivered))) {
+		if (!(await store.writeEntryIfUnchanged(config.agentDir, terminal.entryId, terminal, delivered))) {
 			config.onDiagnostic?.(
 				`process-matrix: terminal handoff changed before acknowledgement for ${terminal.entryId}`,
 			);
@@ -585,6 +620,7 @@ async function startWorkerBranch(
 	initialParentPid: number,
 	now: () => number,
 ): Promise<ProcessMatrixRuntimeHandle> {
+	const store = resolveProcessMatrixStore(config);
 	const parentSessionId = getParentSessionId();
 	const taskRef = (getProcessTaskRef() ?? config.taskRef)?.trim().slice(0, 512) || undefined;
 	const taskSummary = config.taskSummary?.trim().slice(0, 2_000) || undefined;
@@ -607,7 +643,7 @@ async function startWorkerBranch(
 		...(taskSummary !== undefined ? { taskSummary } : {}),
 	});
 	try {
-		await writeEntry(config.agentDir, entry);
+		await store.writeEntry(config.agentDir, entry);
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: failed to register worker entry: ${describeError(error)}`);
 	}
@@ -624,7 +660,7 @@ async function startWorkerBranch(
 		if (preserveResumableOnExit) return;
 		try {
 			const terminal = markTerminal(entry, { code, signal: null }, nowIso(now));
-			if (writeEntryIfUnchangedSync(config.agentDir, entry, terminal)) entry = terminal;
+			if (store.writeEntryIfUnchangedSync(config.agentDir, entry, terminal)) entry = terminal;
 		} catch {
 			// Best-effort. Dead-pid reconciliation remains authoritative.
 		}
@@ -644,11 +680,11 @@ async function startWorkerBranch(
 				const expected = entry;
 				const terminal = markTerminal(expected, { code: null, signal: null }, nowIso(now));
 				try {
-					if (await writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, terminal)) {
+					if (await store.writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, terminal)) {
 						entry = terminal;
 						break;
 					}
-					const current = await readEntry(config.agentDir, expected.entryId);
+					const current = await store.readEntry(config.agentDir, expected.entryId);
 					if (current?.pid !== process.pid || current.startedAt !== generationStartedAt) {
 						config.onDiagnostic?.("process-matrix: worker entry ownership moved to a newer process generation");
 						break;
@@ -676,11 +712,11 @@ async function startWorkerBranch(
 		failureContext: string,
 	): Promise<boolean> => {
 		try {
-			if (await writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)) {
+			if (await store.writeEntryIfUnchanged(config.agentDir, expected.entryId, expected, next)) {
 				entry = next;
 				return true;
 			}
-			const current = await readEntry(config.agentDir, expected.entryId);
+			const current = await store.readEntry(config.agentDir, expected.entryId);
 			if (current?.pid === process.pid) entry = current;
 			else {
 				stopped = true;
@@ -726,7 +762,7 @@ async function startWorkerBranch(
 		// attached to an unrelated process forever. The parent session's own fresh master entry binds
 		// PID to a durable identity and proves that that exact session is still heartbeating.
 		if (!currentParentSessionId || !config.isProcessAlive(currentParentPid)) return false;
-		const parent = await readEntry(config.agentDir, buildEntryId("master", currentParentSessionId));
+		const parent = await store.readEntry(config.agentDir, buildEntryId("master", currentParentSessionId));
 		if (!parent || parent.role !== "master" || parent.agent.resumeContext.sessionId !== currentParentSessionId)
 			return false;
 		if (parent.pid !== currentParentPid || parent.status !== "running") return false;
@@ -742,7 +778,7 @@ async function startWorkerBranch(
 			return;
 		}
 		// Still healthy: also poll for a master-initiated cooperative-cleanup directive.
-		const fresh = await readEntry(config.agentDir, entry.entryId);
+		const fresh = await store.readEntry(config.agentDir, entry.entryId);
 		if (!fresh) return;
 		const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
 		if (directive.code !== "user_cleanup") return;
@@ -781,7 +817,7 @@ async function startWorkerBranch(
 
 	const graceTick = async (graceDeadline: number): Promise<void> => {
 		if (stopped) return;
-		const fresh = await readEntry(config.agentDir, entry.entryId);
+		const fresh = await store.readEntry(config.agentDir, entry.entryId);
 		if (fresh) {
 			const directive = pollWorkerDirective(fresh, currentParentPid, { isPidAlive: config.isProcessAlive });
 			if (directive.code === "adopt" && fresh.parentSessionId) {

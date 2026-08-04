@@ -5,7 +5,15 @@ import { describe, expect, it } from "vitest";
 import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
 import { createWindowsShellEngineOperations } from "../src/core/tools/windows-shell-engine.ts";
 
-const ENGINE_MAIN = join(__dirname, "..", "src", "bundled-resources", "runtimes", "pi-shell-engine", "main.py");
+const ENGINE_MAIN = join(
+	import.meta.dirname,
+	"..",
+	"src",
+	"bundled-resources",
+	"runtimes",
+	"pi-shell-engine",
+	"main.py",
+);
 
 function resolvePython(): string | null {
 	for (const candidate of [process.env.PI_TEST_PYTHON, "python3", "python"]) {

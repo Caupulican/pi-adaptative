@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { getSessionEntryUsage } from "@caupulican/pi-agent-core";
-import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/node";
+import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/session";
+import { getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
 import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
 

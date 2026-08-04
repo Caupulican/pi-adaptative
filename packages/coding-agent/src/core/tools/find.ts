@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "@caupulican/pi-agent-core/node";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "@caupulican/pi-agent-core/truncate";
 import { spawn } from "child_process";
 import { minimatch } from "minimatch";
 import path from "path";

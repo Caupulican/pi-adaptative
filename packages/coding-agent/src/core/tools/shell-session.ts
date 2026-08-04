@@ -35,7 +35,7 @@
 
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
-import { createSilenceWatchdog } from "@caupulican/pi-agent-core";
+import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
 import { spawn } from "child_process";
 import { getShellConfig, getShellEnv, type PlatformShellToolName } from "../../utils/shell.ts";
 import { PersistentProcessCoordinator } from "./persistent-process-coordinator.ts";

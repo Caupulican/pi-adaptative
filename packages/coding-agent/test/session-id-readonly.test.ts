@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { waitForChildProcessWithTermination } from "../src/utils/child-process.ts";
 
-const cliPath = resolve(__dirname, "../src/cli.ts");
+const cliPath = resolve(import.meta.dirname, "../src/cli.ts");
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -67,7 +67,7 @@ async function runCli(
 			...process.env,
 			[ENV_AGENT_DIR]: dirs.agentDir,
 			PI_OFFLINE: "1",
-			TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+			TSX_TSCONFIG_PATH: resolve(import.meta.dirname, "../../../tsconfig.json"),
 		},
 		stdio: ["ignore", "ignore", "pipe"],
 	});

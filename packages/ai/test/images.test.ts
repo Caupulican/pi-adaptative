@@ -1,13 +1,9 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { getImageModel } from "../src/image-models.ts";
 import { generateImages } from "../src/images.ts";
 import type { ImageContent, ImagesContext, ImagesModel, ProviderImagesOptions } from "../src/types.ts";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 type ImagesOptionsWithExtras = ProviderImagesOptions & Record<string, unknown>;
 
@@ -50,7 +46,7 @@ async function handleImageInput<TApi extends string>(model: ImagesModel<TApi>, o
 		return;
 	}
 
-	const imagePath = join(__dirname, "data", "red-circle.png");
+	const imagePath = join(import.meta.dirname, "data", "red-circle.png");
 	const imageBuffer = readFileSync(imagePath);
 	const imageContent: ImageContent = {
 		type: "image",

@@ -7,133 +7,32 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import * as _bundledPiAgentCore from "@caupulican/pi-agent-core";
-import * as _bundledPiAi from "@caupulican/pi-ai";
-import * as _bundledPiAiAbortSignals from "@caupulican/pi-ai/abort-signals";
-import * as _bundledPiAiBedrockProvider from "@caupulican/pi-ai/bedrock-provider";
-import * as _bundledPiAiEventStream from "@caupulican/pi-ai/event-stream";
-import * as _bundledPiAiJsonParse from "@caupulican/pi-ai/json-parse";
-import * as _bundledPiAiOauth from "@caupulican/pi-ai/oauth";
-import * as _bundledPiAiOverflow from "@caupulican/pi-ai/overflow";
-import * as _bundledPiAiProviderRetry from "@caupulican/pi-ai/provider-retry";
-import * as _bundledPiAiStream from "@caupulican/pi-ai/stream";
-import * as _bundledPiAiStreamingLines from "@caupulican/pi-ai/streaming-lines";
-import * as _bundledPiAiTextToolProtocol from "@caupulican/pi-ai/text-tool-protocol";
-import * as _bundledPiAiToolRepairRegistry from "@caupulican/pi-ai/tool-repair-registry";
-import * as _bundledPiAiTypeboxHelpers from "@caupulican/pi-ai/typebox-helpers";
-import * as _bundledPiAiTypes from "@caupulican/pi-ai/types";
-import * as _bundledPiAiUsage from "@caupulican/pi-ai/usage";
-import * as _bundledPiAiUuid from "@caupulican/pi-ai/uuid";
-import * as _bundledPiAiValidation from "@caupulican/pi-ai/validation";
-import * as _bundledPiAiValidationPath from "@caupulican/pi-ai/validation-path";
-import type { KeyId } from "@caupulican/pi-tui";
-import * as _bundledPiTui from "@caupulican/pi-tui";
 import { createJiti } from "jiti/static";
-// Static imports of packages that extensions may use.
-// These MUST be static so Bun bundles them into the compiled binary.
-// The virtualModules option then makes them available to extensions.
-import * as _bundledTypebox from "typebox";
-import * as _bundledTypeboxCompile from "typebox/compile";
-import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
-// NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
-// avoiding a circular dependency. Extensions can import from @caupulican/pi-adaptative.
-import * as _bundledPiCodingAgent from "../../index.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { cacheFile } from "../agent-paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
-import type { ExecOptions } from "../exec.ts";
-import { execCommand } from "../exec.ts";
-import { createSyntheticSourceInfo } from "../source-info.ts";
 import { resolveExtensionIndexEntry } from "./entry-resolution.ts";
-import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
-import { createExtensionStorage } from "./storage.ts";
-import type {
-	Extension,
-	ExtensionAPI,
-	ExtensionFactory,
-	ExtensionRuntime,
-	LoadExtensionsResult,
-	MessageRenderer,
-	ProviderConfig,
-	RegisteredCommand,
-	ToolDefinition,
-} from "./types.ts";
+import {
+	createExtension,
+	createExtensionAPI,
+	createExtensionRuntime,
+	EXTENSION_FACTORY_TIMEOUT_MS,
+	ExtensionFactoryTimeoutError,
+	restoreExtensionLoadRuntime,
+	runExtensionFactory,
+	snapshotExtensionLoadRuntime,
+} from "./factory-runtime.ts";
+import { disposeExtensionEventSubscriptions, isExtensionGenerationInactive } from "./lifecycle.ts";
+import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult, ToolDefinition } from "./types.ts";
+import {
+	getBundledExtensionVirtualModules,
+	PI_AGENT_CORE_EXTENSION_SUBPATHS,
+	PI_AI_EXTENSION_SUBPATHS,
+} from "./virtual-modules.ts";
 
-const EXTENSION_FACTORY_TIMEOUT_MS = 30_000;
-const EXTENSION_DISPOSAL_TIMEOUT_MS = 5_000;
-const inactiveExtensions = new WeakSet<Extension>();
-
-class ExtensionFactoryTimeoutError extends Error {}
-
-const PI_AI_WORKSPACE_SUBPATHS = {
-	"abort-signals": "ai/src/utils/abort-signals.ts",
-	"bedrock-provider": "ai/src/bedrock-provider.ts",
-	"event-stream": "ai/src/utils/event-stream.ts",
-	"json-parse": "ai/src/utils/json-parse.ts",
-	oauth: "ai/src/oauth.ts",
-	overflow: "ai/src/utils/overflow.ts",
-	"provider-retry": "ai/src/utils/provider-retry.ts",
-	stream: "ai/src/stream.ts",
-	"streaming-lines": "ai/src/utils/streaming-lines.ts",
-	"text-tool-protocol": "ai/src/utils/tool-repair/text-protocol.ts",
-	"tool-repair-registry": "ai/src/utils/tool-repair/registry.ts",
-	"typebox-helpers": "ai/src/utils/typebox-helpers.ts",
-	types: "ai/src/types.ts",
-	usage: "ai/src/usage.ts",
-	uuid: "ai/src/utils/uuid.ts",
-	validation: "ai/src/utils/validation.ts",
-	"validation-path": "ai/src/utils/validation-path.ts",
-} as const;
-
-const PI_AI_VIRTUAL_SUBPATHS: Record<keyof typeof PI_AI_WORKSPACE_SUBPATHS, unknown> = {
-	"abort-signals": _bundledPiAiAbortSignals,
-	"bedrock-provider": _bundledPiAiBedrockProvider,
-	"event-stream": _bundledPiAiEventStream,
-	"json-parse": _bundledPiAiJsonParse,
-	oauth: _bundledPiAiOauth,
-	overflow: _bundledPiAiOverflow,
-	"provider-retry": _bundledPiAiProviderRetry,
-	stream: _bundledPiAiStream,
-	"streaming-lines": _bundledPiAiStreamingLines,
-	"text-tool-protocol": _bundledPiAiTextToolProtocol,
-	"tool-repair-registry": _bundledPiAiToolRepairRegistry,
-	"typebox-helpers": _bundledPiAiTypeboxHelpers,
-	types: _bundledPiAiTypes,
-	usage: _bundledPiAiUsage,
-	uuid: _bundledPiAiUuid,
-	validation: _bundledPiAiValidation,
-	"validation-path": _bundledPiAiValidationPath,
-};
-
-function piAiVirtualModules(packageName: string): Record<string, unknown> {
-	return Object.fromEntries([
-		[packageName, _bundledPiAi],
-		...Object.entries(PI_AI_VIRTUAL_SUBPATHS).map(([subpath, module]) => [`${packageName}/${subpath}`, module]),
-	]);
-}
-
-/** Modules available to extensions via virtualModules (for compiled Bun binary) */
-const VIRTUAL_MODULES: Record<string, unknown> = {
-	typebox: _bundledTypebox,
-	"typebox/compile": _bundledTypeboxCompile,
-	"typebox/value": _bundledTypeboxValue,
-	"@sinclair/typebox": _bundledTypebox,
-	"@sinclair/typebox/compile": _bundledTypeboxCompile,
-	"@sinclair/typebox/value": _bundledTypeboxValue,
-	"@caupulican/pi-agent-core": _bundledPiAgentCore,
-	"@caupulican/pi-tui": _bundledPiTui,
-	...piAiVirtualModules("@caupulican/pi-ai"),
-	"@caupulican/pi-adaptative": _bundledPiCodingAgent,
-	"@earendil-works/pi-agent-core": _bundledPiAgentCore,
-	"@earendil-works/pi-tui": _bundledPiTui,
-	...piAiVirtualModules("@earendil-works/pi-ai"),
-	"@earendil-works/pi-coding-agent": _bundledPiCodingAgent,
-	"@mariozechner/pi-agent-core": _bundledPiAgentCore,
-	"@mariozechner/pi-tui": _bundledPiTui,
-	...piAiVirtualModules("@mariozechner/pi-ai"),
-	"@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
-};
+export { createExtensionRuntime, loadExtensionFromFactory } from "./factory-runtime.ts";
+export { disposeExtensionEventSubscriptions } from "./lifecycle.ts";
 
 function uniquePaths(paths: string[]): string[] {
 	return [...new Set(paths)];
@@ -200,15 +99,16 @@ function getAliases(): Record<string, string> {
 
 	const piCodingAgentEntry = packageIndex;
 	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/src/index.ts", "@caupulican/pi-agent-core");
-	const piAgentCoreNodeEntry = resolveWorkspaceOrImport("agent/src/node.ts", "@caupulican/pi-agent-core/node");
-	const piAgentCorePathsEntry = resolveWorkspaceOrImport(
-		"agent/src/utils/paths.ts",
-		"@caupulican/pi-agent-core/paths",
+	const piAgentCoreSubpathEntries = Object.fromEntries(
+		Object.entries(PI_AGENT_CORE_EXTENSION_SUBPATHS).map(([subpath, workspacePath]) => [
+			subpath,
+			resolveWorkspaceOrImport(workspacePath, `@caupulican/pi-agent-core/${subpath}`),
+		]),
 	);
 	const piTuiEntry = resolveWorkspaceOrImport("tui/src/index.ts", "@caupulican/pi-tui");
 	const piAiEntry = resolveWorkspaceOrImport("ai/src/index.ts", "@caupulican/pi-ai");
 	const piAiSubpathEntries = Object.fromEntries(
-		Object.entries(PI_AI_WORKSPACE_SUBPATHS).map(([subpath, workspacePath]) => [
+		Object.entries(PI_AI_EXTENSION_SUBPATHS).map(([subpath, workspacePath]) => [
 			subpath,
 			resolveWorkspaceOrImport(workspacePath, `@caupulican/pi-ai/${subpath}`),
 		]),
@@ -218,25 +118,24 @@ function getAliases(): Record<string, string> {
 			...Object.entries(piAiSubpathEntries).map(([subpath, entry]) => [`${packageName}/${subpath}`, entry]),
 			[packageName, piAiEntry],
 		]);
+	const piAgentCoreAliases = (packageName: string): Record<string, string> =>
+		Object.fromEntries([
+			...Object.entries(piAgentCoreSubpathEntries).map(([subpath, entry]) => [`${packageName}/${subpath}`, entry]),
+			[packageName, piAgentCoreEntry],
+		]);
 
 	_aliases = {
-		"@caupulican/pi-agent-core/node": piAgentCoreNodeEntry,
-		"@caupulican/pi-agent-core/paths": piAgentCorePathsEntry,
+		...piAgentCoreAliases("@caupulican/pi-agent-core"),
 		...piAiAliases("@caupulican/pi-ai"),
 		"@caupulican/pi-adaptative": piCodingAgentEntry,
-		"@caupulican/pi-agent-core": piAgentCoreEntry,
 		"@caupulican/pi-tui": piTuiEntry,
-		"@earendil-works/pi-agent-core/node": piAgentCoreNodeEntry,
-		"@earendil-works/pi-agent-core/paths": piAgentCorePathsEntry,
+		...piAgentCoreAliases("@earendil-works/pi-agent-core"),
 		...piAiAliases("@earendil-works/pi-ai"),
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
-		"@earendil-works/pi-agent-core": piAgentCoreEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
-		"@mariozechner/pi-agent-core/node": piAgentCoreNodeEntry,
-		"@mariozechner/pi-agent-core/paths": piAgentCorePathsEntry,
+		...piAgentCoreAliases("@mariozechner/pi-agent-core"),
 		...piAiAliases("@mariozechner/pi-ai"),
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
-		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
@@ -249,362 +148,8 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
-
 function yieldToEventLoop(): Promise<void> {
 	return new Promise((resolve) => setImmediate(resolve));
-}
-
-/**
- * Create a runtime with throwing stubs for action methods.
- * Runner.bindCore() replaces these with real implementations.
- */
-export function createExtensionRuntime(): ExtensionRuntime {
-	const notInitialized = () => {
-		throw new Error("Extension runtime not initialized. Action methods cannot be called during extension loading.");
-	};
-	const state: { staleMessage?: string } = {};
-	const assertActive = () => {
-		if (state.staleMessage) {
-			throw new Error(state.staleMessage);
-		}
-	};
-
-	const providersByExtension = new Map<string, Set<string>>();
-	const providerRegistrations = new Map<string, { config: ProviderConfig; extensionPath?: string }>();
-	const memoryProvidersByExtension = new Map<string, Set<Parameters<ExtensionRuntime["registerMemoryProvider"]>[0]>>();
-	const contextMemoryProvidersByExtension = new Map<
-		string,
-		Set<Parameters<ExtensionRuntime["registerContextMemoryProvider"]>[0]>
-	>();
-	const extensionStorageOwners = new Map<string, Extension>();
-
-	const runtime: ExtensionRuntime = {
-		sendMessage: notInitialized,
-		sendUserMessage: notInitialized,
-		appendEntry: notInitialized,
-		setSessionName: notInitialized,
-		getSessionName: notInitialized,
-		setLabel: notInitialized,
-		getActiveTools: notInitialized,
-		getAllTools: notInitialized,
-		setActiveTools: notInitialized,
-		// registerTool() is valid during extension load; refresh is only needed post-bind.
-		refreshTools: () => {},
-		getCommands: notInitialized,
-		setModel: notInitialized,
-		getThinkingLevel: notInitialized,
-		setThinkingLevel: notInitialized,
-		getExternalResourceRoots: notInitialized,
-		registerMemoryProvider: notInitialized,
-		registerContextMemoryProvider: notInitialized,
-		reportSpawnedUsage: notInitialized,
-		reportManagedLane: notInitialized,
-		flagValues: new Map(),
-		pendingProviderRegistrations: [],
-		assertActive,
-		invalidate: (message) => {
-			state.staleMessage ??= message ?? DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE;
-		},
-		// Pre-bind: queue registrations so bindCore() can flush them once the
-		// model registry is available. bindCore() replaces both with direct calls.
-		registerProvider: (name, config, extensionPath = "<unknown>") => {
-			runtime.pendingProviderRegistrations.push({ name, config, extensionPath });
-		},
-		unregisterProvider: (name) => {
-			runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((r) => r.name !== name);
-		},
-		providersByExtension,
-		providerRegistrations,
-		getProvidersForExtension: (extensionPath: string) => {
-			return [...(providersByExtension.get(extensionPath) ?? [])];
-		},
-		memoryProvidersByExtension,
-		contextMemoryProvidersByExtension,
-		extensionStorageOwners,
-	};
-
-	return runtime;
-}
-
-/**
- * Create the ExtensionAPI for an extension.
- * Registration methods write to the extension object.
- * Action methods delegate to the shared runtime.
- */
-function createExtensionAPI(
-	extension: Extension,
-	runtime: ExtensionRuntime,
-	cwd: string,
-	eventBus: EventBus,
-	agentDir: string,
-): ExtensionAPI {
-	// A factory can time out while its promise continues running. Route every later API call through
-	// an extension-generation guard so stale async work cannot register tools, handlers, or providers.
-	const sharedRuntime = runtime;
-	runtime = new Proxy(sharedRuntime, {
-		get(target, property, receiver) {
-			if (property === "assertActive") {
-				return () => {
-					target.assertActive();
-					if (inactiveExtensions.has(extension)) {
-						throw new Error(`Extension generation is no longer active: ${extension.path}`);
-					}
-				};
-			}
-			return Reflect.get(target, property, receiver);
-		},
-	});
-
-	const api = {
-		getStorage(namespace: string) {
-			runtime.assertActive();
-			if (extension.storage) {
-				if (extension.storage.namespace !== namespace) {
-					throw new Error(
-						`Extension ${extension.path} already owns storage namespace ${extension.storage.namespace}; cannot also use ${namespace}`,
-					);
-				}
-				return extension.storage;
-			}
-			const storage = createExtensionStorage(agentDir, namespace, runtime.assertActive, (disposer) =>
-				extension.disposers.push(disposer),
-			);
-			const previousOwner = runtime.extensionStorageOwners.get(namespace);
-			if (previousOwner && previousOwner.path !== extension.path) {
-				throw new Error(
-					`Extension storage namespace ${namespace} is already owned by ${previousOwner.path}; ${extension.path} cannot also use it`,
-				);
-			}
-			runtime.extensionStorageOwners.set(namespace, extension);
-			extension.disposers.push(() => {
-				if (runtime.extensionStorageOwners.get(namespace) !== extension) return;
-				if (previousOwner && !inactiveExtensions.has(previousOwner)) {
-					runtime.extensionStorageOwners.set(namespace, previousOwner);
-				} else {
-					runtime.extensionStorageOwners.delete(namespace);
-				}
-			});
-			extension.storage = storage;
-			return storage;
-		},
-
-		// Registration methods - write to extension
-		on(event: string, handler: HandlerFn): void {
-			runtime.assertActive();
-			const list = extension.handlers.get(event) ?? [];
-			list.push(handler);
-			extension.handlers.set(event, list);
-		},
-
-		registerTool(tool: ToolDefinition): void {
-			runtime.assertActive();
-			extension.tools.set(tool.name, {
-				definition: tool,
-				sourceInfo: extension.sourceInfo,
-			});
-			runtime.refreshTools();
-		},
-
-		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
-			runtime.assertActive();
-			extension.commands.set(name, {
-				name,
-				sourceInfo: extension.sourceInfo,
-				...options,
-			});
-		},
-
-		registerShortcut(
-			shortcut: KeyId,
-			options: {
-				description?: string;
-				handler: (ctx: import("./types.ts").ExtensionContext) => Promise<void> | void;
-			},
-		): void {
-			runtime.assertActive();
-			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
-		},
-
-		registerFlag(
-			name: string,
-			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
-		): void {
-			runtime.assertActive();
-			extension.flags.set(name, { name, extensionPath: extension.path, ...options });
-			if (options.default !== undefined && !runtime.flagValues.has(name)) {
-				runtime.flagValues.set(name, options.default);
-			}
-		},
-
-		registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
-			runtime.assertActive();
-			extension.messageRenderers.set(customType, renderer as MessageRenderer);
-		},
-
-		// Flag access - checks extension registered it, reads from runtime
-		getFlag(name: string): boolean | string | undefined {
-			runtime.assertActive();
-			if (!extension.flags.has(name)) return undefined;
-			return runtime.flagValues.get(name);
-		},
-
-		// Action methods - delegate to shared runtime
-		sendMessage(message, options): void {
-			runtime.assertActive();
-			runtime.sendMessage(message, options);
-		},
-
-		sendUserMessage(content, options): void {
-			runtime.assertActive();
-			runtime.sendUserMessage(content, options);
-		},
-
-		appendEntry(customType: string, data?: unknown): void {
-			runtime.assertActive();
-			runtime.appendEntry(customType, data);
-		},
-
-		setSessionName(name: string): void {
-			runtime.assertActive();
-			runtime.setSessionName(name);
-		},
-
-		getSessionName(): string | undefined {
-			runtime.assertActive();
-			return runtime.getSessionName();
-		},
-
-		setLabel(entryId: string, label: string | undefined): void {
-			runtime.assertActive();
-			runtime.setLabel(entryId, label);
-		},
-
-		exec(command: string, args: string[], options?: ExecOptions) {
-			runtime.assertActive();
-			return execCommand(command, args, options?.cwd ?? cwd, options);
-		},
-
-		getActiveTools(): string[] {
-			runtime.assertActive();
-			return runtime.getActiveTools();
-		},
-
-		getAllTools() {
-			runtime.assertActive();
-			return runtime.getAllTools();
-		},
-
-		setActiveTools(toolNames: string[]): void {
-			runtime.assertActive();
-			runtime.setActiveTools(toolNames);
-		},
-
-		getCommands() {
-			runtime.assertActive();
-			return runtime.getCommands();
-		},
-
-		getExternalResourceRoots() {
-			runtime.assertActive();
-			return runtime.getExternalResourceRoots();
-		},
-
-		registerMemoryProvider(provider) {
-			runtime.assertActive();
-			runtime.registerMemoryProvider(provider);
-			const providers = runtime.memoryProvidersByExtension.get(extension.path) ?? new Set();
-			providers.add(provider);
-			runtime.memoryProvidersByExtension.set(extension.path, providers);
-		},
-
-		registerContextMemoryProvider(provider) {
-			runtime.assertActive();
-			runtime.registerContextMemoryProvider(provider);
-			const providers = runtime.contextMemoryProvidersByExtension.get(extension.path) ?? new Set();
-			providers.add(provider);
-			runtime.contextMemoryProvidersByExtension.set(extension.path, providers);
-		},
-
-		reportSpawnedUsage(usage, opts) {
-			runtime.assertActive();
-			runtime.reportSpawnedUsage(usage, opts);
-		},
-
-		reportManagedLane(event) {
-			runtime.assertActive();
-			runtime.reportManagedLane(event);
-		},
-
-		setModel(model) {
-			runtime.assertActive();
-			return runtime.setModel(model);
-		},
-
-		getThinkingLevel() {
-			runtime.assertActive();
-			return runtime.getThinkingLevel();
-		},
-
-		setThinkingLevel(level) {
-			runtime.assertActive();
-			runtime.setThinkingLevel(level);
-		},
-
-		registerProvider(name: string, config: ProviderConfig) {
-			runtime.assertActive();
-			runtime.registerProvider(name, config, extension.path);
-		},
-
-		unregisterProvider(name: string) {
-			runtime.assertActive();
-			runtime.unregisterProvider(name, extension.path);
-		},
-
-		onDispose(fn: () => void | Promise<void>): void {
-			runtime.assertActive();
-			extension.disposers.push(fn);
-		},
-
-		// Track bus subscriptions per extension generation so hot reloads can
-		// unsubscribe replaced generations (see disposeExtensionEventSubscriptions).
-		events: {
-			emit: (channel: string, data: unknown) => {
-				runtime.assertActive();
-				eventBus.emit(channel, data);
-			},
-			on: (channel: string, handler: (data: unknown) => void) => {
-				runtime.assertActive();
-				const unsubscribe = eventBus.on(channel, handler);
-				extension.eventUnsubscribes.push(unsubscribe);
-				return unsubscribe;
-			},
-		},
-	} as ExtensionAPI;
-
-	return api;
-}
-
-async function runExtensionFactory(
-	factory: ExtensionFactory,
-	api: ExtensionAPI,
-	timeoutMs: number = EXTENSION_FACTORY_TIMEOUT_MS,
-): Promise<void> {
-	let timeout: ReturnType<typeof setTimeout> | undefined;
-	const completion = Promise.resolve().then(() => factory(api));
-	try {
-		await Promise.race([
-			completion,
-			new Promise<never>((_resolve, reject) => {
-				timeout = setTimeout(
-					() => reject(new ExtensionFactoryTimeoutError(`Extension factory timed out after ${timeoutMs}ms`)),
-					Math.max(0, timeoutMs),
-				);
-			}),
-		]);
-	} finally {
-		if (timeout) clearTimeout(timeout);
-	}
 }
 
 async function loadExtensionModule(
@@ -631,7 +176,9 @@ async function loadExtensionModule(
 		fsCache: transformCacheAgentDir ? cacheFile(transformCacheAgentDir, "jiti-transforms") : false,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
 		// In Node.js/dev: use aliases to resolve to node_modules paths
-		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
+		...(isBunBinary
+			? { virtualModules: getBundledExtensionVirtualModules(), tryNative: false }
+			: { alias: getAliases() }),
 	});
 
 	// Every call gets a fresh jiti instance with moduleCache disabled. Do not append a query string:
@@ -652,123 +199,6 @@ async function loadExtensionModule(
 		return typeof factory !== "function" ? undefined : factory;
 	} finally {
 		if (timeout) clearTimeout(timeout);
-	}
-}
-
-/**
- * Create an Extension object with empty collections.
- */
-function createExtension(extensionPath: string, resolvedPath: string): Extension {
-	const source =
-		extensionPath.startsWith("<") && extensionPath.endsWith(">")
-			? extensionPath.slice(1, -1).split(":")[0] || "temporary"
-			: "local";
-	const baseDir = extensionPath.startsWith("<") ? undefined : path.dirname(resolvedPath);
-
-	return {
-		path: extensionPath,
-		resolvedPath,
-		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
-		handlers: new Map(),
-		tools: new Map(),
-		messageRenderers: new Map(),
-		commands: new Map(),
-		flags: new Map(),
-		shortcuts: new Map(),
-		eventUnsubscribes: [],
-		disposers: [],
-	};
-}
-
-/**
- * Unsubscribe a replaced extension generation's pi.events handlers from the shared
- * event bus and invoke cleanup callbacks. Without this, every hot reload leaves the
- * previous generation's handlers subscribed, pinning the old module graph in memory
- * and double-processing events.
- */
-export async function disposeExtensionEventSubscriptions(
-	extensions: Extension[],
-	options: { deactivate?: boolean; timeoutMs?: number } = {},
-): Promise<void> {
-	const deadline = Date.now() + (options.timeoutMs ?? EXTENSION_DISPOSAL_TIMEOUT_MS);
-	for (const extension of extensions) {
-		if (options.deactivate ?? true) inactiveExtensions.add(extension);
-		// Unsubscribe event listeners
-		for (const unsubscribe of extension.eventUnsubscribes) {
-			try {
-				unsubscribe();
-			} catch {
-				// Disposal must never break a reload.
-			}
-		}
-		extension.eventUnsubscribes.length = 0;
-
-		// Invoke every cleanup callback, but never let one unresolved async disposer block reload or
-		// shutdown indefinitely. Late continuations retain rejection handlers and the inactive API guard.
-		for (const disposer of extension.disposers) {
-			try {
-				const result = disposer();
-				if (result !== undefined) {
-					const completion = Promise.resolve(result).catch(() => undefined);
-					const remainingMs = Math.max(0, deadline - Date.now());
-					if (remainingMs > 0) {
-						let timeout: ReturnType<typeof setTimeout> | undefined;
-						await Promise.race([
-							completion,
-							new Promise<void>((resolve) => {
-								timeout = setTimeout(resolve, remainingMs);
-							}),
-						]);
-						if (timeout) clearTimeout(timeout);
-					}
-				}
-			} catch {
-				// Disposal must never break a reload.
-			}
-		}
-		extension.disposers.length = 0;
-	}
-}
-
-interface ExtensionLoadRuntimeSnapshot {
-	pendingProviderRegistrations: ExtensionRuntime["pendingProviderRegistrations"];
-	flagValues: Map<string, boolean | string>;
-	providerRegistrations: ExtensionRuntime["providerRegistrations"];
-}
-
-function snapshotExtensionLoadRuntime(runtime: ExtensionRuntime): ExtensionLoadRuntimeSnapshot {
-	return {
-		pendingProviderRegistrations: [...runtime.pendingProviderRegistrations],
-		flagValues: new Map(runtime.flagValues),
-		providerRegistrations: new Map(runtime.providerRegistrations),
-	};
-}
-
-function restoreExtensionLoadRuntime(runtime: ExtensionRuntime, snapshot: ExtensionLoadRuntimeSnapshot): void {
-	for (const [name, current] of runtime.providerRegistrations) {
-		const previous = snapshot.providerRegistrations.get(name);
-		if (!previous || previous.config !== current.config || previous.extensionPath !== current.extensionPath) {
-			try {
-				runtime.unregisterProvider(name, current.extensionPath);
-			} catch {
-				// Preserve the original factory failure; reload rollback remains the outer safety net.
-			}
-		}
-	}
-	for (const [name, previous] of snapshot.providerRegistrations) {
-		const current = runtime.providerRegistrations.get(name);
-		if (current?.config === previous.config && current.extensionPath === previous.extensionPath) continue;
-		try {
-			runtime.registerProvider(name, previous.config, previous.extensionPath);
-		} catch {
-			// Preserve the original factory failure; reload rollback remains the outer safety net.
-		}
-	}
-
-	runtime.pendingProviderRegistrations = snapshot.pendingProviderRegistrations;
-	runtime.flagValues.clear();
-	for (const [name, value] of snapshot.flagValues) {
-		runtime.flagValues.set(name, value);
 	}
 }
 
@@ -855,7 +285,7 @@ function createLazyExtension(
 	const extension = createExtension(extensionPath, resolvedPath);
 	let restoreLazyToolPlaceholders = (): void => {};
 	const load = async (): Promise<void> => {
-		if (inactiveExtensions.has(extension)) {
+		if (isExtensionGenerationInactive(extension)) {
 			throw new Error(`Lazy extension generation is no longer active: ${extension.path}`);
 		}
 		if (extension.lazy?.loaded) return;
@@ -911,32 +341,6 @@ function createLazyExtension(
 		}
 	};
 	restoreLazyToolPlaceholders();
-	return extension;
-}
-
-/**
- * Create an Extension from an inline factory function.
- */
-export async function loadExtensionFromFactory(
-	factory: ExtensionFactory,
-	cwd: string,
-	eventBus: EventBus,
-	runtime: ExtensionRuntime,
-	extensionPath = "<inline>",
-	options: { factoryTimeoutMs?: number; agentDir?: string } = {},
-): Promise<Extension> {
-	const extension = createExtension(extensionPath, extensionPath);
-	const resolvedCwd = resolvePath(cwd);
-	const resolvedAgentDir = resolvePath(options.agentDir ?? getAgentDir());
-	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus, resolvedAgentDir);
-	const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime);
-	try {
-		await runExtensionFactory(factory, api, options.factoryTimeoutMs);
-	} catch (err) {
-		await disposeExtensionEventSubscriptions([extension]);
-		restoreExtensionLoadRuntime(runtime, runtimeSnapshot);
-		throw err;
-	}
 	return extension;
 }
 

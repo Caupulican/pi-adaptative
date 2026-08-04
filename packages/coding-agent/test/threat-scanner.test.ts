@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../src/core/resource-loader.ts";
+import {
+	hasInvisibleUnicode,
+	scanContextFileThreats,
+	stripInvisibleUnicode,
+} from "../src/core/security/context-threat-scanner.ts";
 
 /**
  * Threat-scanner breadth (Hermes-parity #31): scoped patterns (context vs strict) + invisible/bidi

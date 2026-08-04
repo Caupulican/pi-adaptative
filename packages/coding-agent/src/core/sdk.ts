@@ -1,5 +1,7 @@
-import { Agent, type AgentMessage, convertToLlm, type ThinkingLevel } from "@caupulican/pi-agent-core";
-import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/node";
+import { Agent } from "@caupulican/pi-agent-core/agent";
+import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { type Api, type Message, type Model, resolveModelThinkingLevel, streamSimple } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";

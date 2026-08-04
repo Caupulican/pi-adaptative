@@ -1,4 +1,5 @@
-import { type Api, getSupportedThinkingLevels, type Model } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
+import type { Api, Model } from "@caupulican/pi-ai/types";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationModelBinding, OrchestrationProfile } from "./contracts.ts";
 

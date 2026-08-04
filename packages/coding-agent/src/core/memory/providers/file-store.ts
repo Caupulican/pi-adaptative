@@ -4,7 +4,11 @@ import { type Static, Type } from "typebox";
 import { configFile } from "../../agent-paths.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
-import { hasInvisibleUnicode, scanContextFileThreats, stripInvisibleUnicode } from "../../resource-loader.ts";
+import {
+	hasInvisibleUnicode,
+	scanContextFileThreats,
+	stripInvisibleUnicode,
+} from "../../security/context-threat-scanner.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import { withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";

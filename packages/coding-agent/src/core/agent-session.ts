@@ -1,32 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
+import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
+import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
+import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
+import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
+import {
+	DEFAULT_STREAM_IDLE,
+	type StreamIdleOptions,
+	withStreamIdleWatchdog,
+} from "@caupulican/pi-agent-core/reliability";
+import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import type {
-	Agent,
 	AgentContext,
 	AgentEvent,
 	AgentMessage,
 	AgentState,
 	AgentTool,
 	StreamFn,
-	StreamIdleOptions,
 	ThinkingLevel,
 	ToolValidationEscalationEvent,
-} from "@caupulican/pi-agent-core";
-import {
-	AgentBusyError,
-	type CustomMessage,
-	compactToolResultDetailsForRetention,
-	createCustomMessage,
-	DEFAULT_STREAM_IDLE,
-	withStreamIdleWatchdog,
-} from "@caupulican/pi-agent-core";
-import type {
-	BranchSummaryEntry,
-	CompactionResult,
-	CompactionSettings,
-	SessionManager,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/types";
 import type {
 	Api,
 	AssistantMessage,
@@ -38,7 +32,9 @@ import type {
 	TextContent,
 	Usage,
 } from "@caupulican/pi-ai";
-import { cleanupSessionResources, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai/models";
+import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
+import { streamSimple } from "@caupulican/pi-ai/stream";
 import { getAgentDir } from "../config.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";

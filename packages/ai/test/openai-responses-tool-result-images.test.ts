@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { ResponseFunctionCallOutputItemList } from "openai/resources/responses/responses.js";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
@@ -10,9 +9,6 @@ import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-u
 import { resolveApiKey } from "./oauth.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 const oauthTokens = await Promise.all([resolveApiKey("github-copilot"), resolveApiKey("openai-codex")]);
 const [githubCopilotToken, openaiCodexToken] = oauthTokens;
@@ -55,7 +51,7 @@ async function verifyToolResultImagesStayInFunctionCallOutput<TApi extends Api>(
 		return;
 	}
 
-	const imagePath = join(__dirname, "data", "red-circle.png");
+	const imagePath = join(import.meta.dirname, "data", "red-circle.png");
 	const base64Image = readFileSync(imagePath).toString("base64");
 	const toolText = "A red circle with a diameter of 100 pixels.";
 

@@ -3,7 +3,8 @@
  */
 
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { type Api, type KnownProvider, type Model, modelsAreEqual, resolveModelThinkingLevel } from "@caupulican/pi-ai";
+import { modelsAreEqual, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type { Api, KnownProvider, Model } from "@caupulican/pi-ai/types";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";

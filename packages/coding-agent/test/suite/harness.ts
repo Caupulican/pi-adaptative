@@ -5,20 +5,23 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import { Agent, convertToLlm } from "@caupulican/pi-agent-core";
-import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { Agent } from "@caupulican/pi-agent-core/agent";
+import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import type {
 	FauxModelDefinition,
 	FauxProviderRegistration,
 	FauxResponseStep,
-	Model,
 	RegisterFauxProviderOptions,
-} from "@caupulican/pi-ai";
-import { registerFauxProvider } from "@caupulican/pi-ai";
-import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
+} from "@caupulican/pi-ai/faux";
+import { registerFauxProvider } from "@caupulican/pi-ai/faux";
+import type { Model } from "@caupulican/pi-ai/types";
+import { onTestFinished } from "vitest";
+import { AgentSession, type AgentSessionConfig, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
+import type { ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import type { LocalRuntimeDeps } from "../../src/core/models/local-runtime.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../../src/core/orchestration/contracts.ts";
@@ -26,12 +29,11 @@ import { OrchestrationProfileStore } from "../../src/core/orchestration/profile-
 import type { collectWorkspaceSources } from "../../src/core/research/workspace-collector.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
 	createTestResourceLoader,
-} from "../utilities.ts";
+} from "./test-resources.ts";
 
 type MessageTextPart = { type: "text"; text: string };
 
@@ -73,7 +75,7 @@ export interface HarnessOptions {
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
 	excludedToolNames?: string[];
-	resourceLoader?: ResourceLoader;
+	resourceLoader?: AgentSessionConfig["resourceLoader"];
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	/**
@@ -104,7 +106,7 @@ export interface Harness {
 	events: AgentSessionEvent[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 function createTempDir(): string {
@@ -254,6 +256,22 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		events.push(event);
 	});
 
+	let cleanupPromise: Promise<void> | undefined;
+	const cleanup = (): Promise<void> => {
+		cleanupPromise ??= (async () => {
+			try {
+				await session.disposeAndWait();
+			} finally {
+				fauxProvider.unregister();
+				if (existsSync(tempDir)) {
+					rmSync(tempDir, { recursive: true, maxRetries: 5, retryDelay: 100 });
+				}
+			}
+		})();
+		return cleanupPromise;
+	};
+	onTestFinished(cleanup);
+
 	return {
 		session,
 		sessionManager,
@@ -270,12 +288,6 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},
 		tempDir,
-		cleanup() {
-			session.dispose();
-			fauxProvider.unregister();
-			if (existsSync(tempDir)) {
-				rmSync(tempDir, { recursive: true });
-			}
-		},
+		cleanup,
 	};
 }

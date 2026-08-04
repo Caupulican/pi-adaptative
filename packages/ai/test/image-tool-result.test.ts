@@ -35,7 +35,7 @@ async function handleToolWithImageResult<TApi extends Api>(model: Model<TApi>, o
 	}
 
 	// Read the test image
-	const imagePath = join(__dirname, "data", "red-circle.png");
+	const imagePath = join(import.meta.dirname, "data", "red-circle.png");
 	const imageBuffer = readFileSync(imagePath);
 	const base64Image = imageBuffer.toString("base64");
 
@@ -126,7 +126,7 @@ async function handleToolWithTextAndImageResult<TApi extends Api>(
 	}
 
 	// Read the test image
-	const imagePath = join(__dirname, "data", "red-circle.png");
+	const imagePath = join(import.meta.dirname, "data", "red-circle.png");
 	const imageBuffer = readFileSync(imagePath);
 	const base64Image = imageBuffer.toString("base64");
 

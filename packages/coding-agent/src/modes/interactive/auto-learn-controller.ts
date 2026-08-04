@@ -12,7 +12,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { isAutoLearnSessionId } from "@caupulican/pi-agent-core/node";
+import { isAutoLearnSessionId } from "@caupulican/pi-agent-core/session";
 import type { Model } from "@caupulican/pi-ai";
 import type { SelectItem } from "@caupulican/pi-tui";
 import { spawn } from "child_process";

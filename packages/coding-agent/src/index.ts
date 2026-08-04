@@ -161,9 +161,7 @@ export type {
 	WriteToolCallEvent,
 } from "./core/extensions/index.ts";
 export {
-	createExtensionRuntime,
 	defineTool,
-	discoverAndLoadExtensions,
 	ExtensionRunner,
 	isBashToolResult,
 	isEditToolResult,
@@ -176,6 +174,7 @@ export {
 	wrapRegisteredTool,
 	wrapRegisteredTools,
 } from "./core/extensions/index.ts";
+export { createExtensionRuntime, discoverAndLoadExtensions } from "./core/extensions/loader.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
 export {

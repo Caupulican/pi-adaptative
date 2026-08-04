@@ -66,7 +66,7 @@ import {
 	type ToolInfo,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
-import { disposeExtensionEventSubscriptions } from "./extensions/loader.ts";
+import { disposeExtensionEventSubscriptions } from "./extensions/lifecycle.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -110,7 +110,6 @@ import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
-import { allToolNames, createToolDefinition, type ToolsOptions } from "./tools/index.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createProfileWriterToolDefinition } from "./tools/profile-writer.ts";
@@ -121,6 +120,11 @@ import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
+import {
+	allToolNames,
+	createToolDefinitionWithRuntime,
+	type ToolDefinitionOptions,
+} from "./tools/tool-definition-factory.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
@@ -786,7 +790,8 @@ export class RuntimeBuilder {
 		// ever written and no retrieval promise made.
 		const toolArtifactStore =
 			!baseToolsOverride && toolAccess.allows("artifact_retrieve") ? this.deps.getToolArtifactStore() : undefined;
-		const toolOptions: ToolsOptions = {
+		const resourceLoader = this.deps.getResourceLoader();
+		const toolOptions: ToolDefinitionOptions = {
 			read: { autoResizeImages },
 			bash: {
 				commandPrefix: shellCommandPrefix,
@@ -804,6 +809,15 @@ export class RuntimeBuilder {
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },
+			extensionify: {
+				agentDir: this.deps.getAgentDir(),
+				loadExtension: async ({ extensionPath, cwd }) => {
+					if (!resourceLoader.loadIsolatedExtension) {
+						return { extension: null, error: "Isolated extension loading is unavailable in this runtime" };
+					}
+					return resourceLoader.loadIsolatedExtension(extensionPath, cwd);
+				},
+			},
 		};
 		this._baseToolDefinitions = baseToolsOverride
 			? new Map(
@@ -814,7 +828,7 @@ export class RuntimeBuilder {
 			: new Map(
 					[...allToolNames]
 						.filter((name) => toolAccess.allows(name))
-						.map((name) => [name, createToolDefinition(name, this.deps.getCwd(), toolOptions)]),
+						.map((name) => [name, createToolDefinitionWithRuntime(name, this.deps.getCwd(), toolOptions)]),
 				);
 		const toolTaskDependencies = this.deps.getToolTaskDependencies?.();
 		if (toolTaskDependencies && toolAccess.allows("tool_task")) {

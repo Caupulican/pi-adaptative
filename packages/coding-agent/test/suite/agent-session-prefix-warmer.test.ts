@@ -1,8 +1,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, convertToLlm, type StreamFn } from "@caupulican/pi-agent-core";
-import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { Agent } from "@caupulican/pi-agent-core/agent";
+import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { StreamFn } from "@caupulican/pi-agent-core/types";
 import {
 	type Api,
 	type AssistantMessage,

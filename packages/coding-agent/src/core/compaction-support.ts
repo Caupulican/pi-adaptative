@@ -6,8 +6,8 @@
  * persistence, notification, and cancellation; AgentSession keeps compatibility delegations at
  * established regression seams.
  */
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { type CompactionSettings, summarizerCanIngest } from "@caupulican/pi-agent-core/node";
+import { type CompactionSettings, summarizerCanIngest } from "@caupulican/pi-agent-core/compaction/compaction";
+import type { ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";

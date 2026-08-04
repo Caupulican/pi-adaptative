@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import { readToolFailureTelemetry } from "@caupulican/pi-agent-core";
+import { readToolFailureTelemetry } from "@caupulican/pi-agent-core/tool-failure-memory";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import {

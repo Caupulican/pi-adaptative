@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	decodeResourceSelection,
@@ -265,34 +268,30 @@ describe("Library Manage UX - Increment 2", () => {
 		});
 
 		it("should resolve extension dir index.ts/js or package.json entry", () => {
-			const fs = require("node:fs");
-			const path = require("node:path");
-			const os = require("node:os");
-
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-test-ext-"));
+			const tempDir = mkdtempSync(join(tmpdir(), "pi-test-ext-"));
 			try {
 				// Case 1: index.ts exists
-				const extTsDir = path.join(tempDir, "ext-ts");
-				fs.mkdirSync(extTsDir);
-				fs.writeFileSync(path.join(extTsDir, "index.ts"), "ts");
-				expect(resolveResourceEditPath("ext-ts", extTsDir, "extensions")).toBe(path.join(extTsDir, "index.ts"));
+				const extTsDir = join(tempDir, "ext-ts");
+				mkdirSync(extTsDir);
+				writeFileSync(join(extTsDir, "index.ts"), "ts");
+				expect(resolveResourceEditPath("ext-ts", extTsDir, "extensions")).toBe(join(extTsDir, "index.ts"));
 
 				// Case 2: index.js exists (no index.ts)
-				const extJsDir = path.join(tempDir, "ext-js");
-				fs.mkdirSync(extJsDir);
-				fs.writeFileSync(path.join(extJsDir, "index.js"), "js");
-				expect(resolveResourceEditPath("ext-js", extJsDir, "extensions")).toBe(path.join(extJsDir, "index.js"));
+				const extJsDir = join(tempDir, "ext-js");
+				mkdirSync(extJsDir);
+				writeFileSync(join(extJsDir, "index.js"), "js");
+				expect(resolveResourceEditPath("ext-js", extJsDir, "extensions")).toBe(join(extJsDir, "index.js"));
 
 				// Case 3: package.json with main exists
-				const extPkgDir = path.join(tempDir, "ext-pkg");
-				fs.mkdirSync(extPkgDir);
-				fs.writeFileSync(path.join(extPkgDir, "package.json"), JSON.stringify({ main: "src/entry.js" }));
-				const entryPath = path.join(extPkgDir, "src/entry.js");
-				fs.mkdirSync(path.join(extPkgDir, "src"));
-				fs.writeFileSync(entryPath, "entry");
+				const extPkgDir = join(tempDir, "ext-pkg");
+				mkdirSync(extPkgDir);
+				writeFileSync(join(extPkgDir, "package.json"), JSON.stringify({ main: "src/entry.js" }));
+				const entryPath = join(extPkgDir, "src/entry.js");
+				mkdirSync(join(extPkgDir, "src"));
+				writeFileSync(entryPath, "entry");
 				expect(resolveResourceEditPath("ext-pkg", extPkgDir, "extensions")).toBe(entryPath);
 			} finally {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				rmSync(tempDir, { recursive: true, force: true });
 			}
 		});
 	});

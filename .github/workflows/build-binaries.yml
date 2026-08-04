@@ -257,6 +257,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - name: Verify native TypeScript test toolchain
+        run: |
+          npm ls vite@8.2.0 vitest@4.1.10 --depth=0
+          node node_modules/vitest/vitest.mjs --version
+          node node_modules/vite/bin/vite.js --version
+
       - name: Build
         # Deterministic CI: use the COMMITTED model catalogs instead of refetching live pricing
         # that can drift between the release commit and this run (drift fails the artifact
@@ -269,6 +275,8 @@ jobs:
         run: npm run check
 
       - name: Test
+        env:
+          NODE_OPTIONS: --conditions=pi-source
         run: npm test
 
       - name: Verify release artifacts are committed

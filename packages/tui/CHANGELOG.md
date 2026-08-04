@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Added explicit package exports with a repository-only source condition while retaining distribution and package metadata subpath access.
+
 ## [0.85.7] - 2026-08-04
 
 ## [0.85.6] - 2026-08-04

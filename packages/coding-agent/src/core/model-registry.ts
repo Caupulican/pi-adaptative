@@ -2,24 +2,22 @@
  * Model registry - manages built-in and custom models, provides API key resolution.
  */
 
-import {
-	type AnthropicMessagesCompat,
-	type Api,
-	type AssistantMessageEventStream,
-	type Context,
-	getEnvAuthHeaders,
-	getModels,
-	getProviders,
-	type KnownProvider,
-	type Model,
-	type OAuthProviderInterface,
-	type OpenAICompletionsCompat,
-	type OpenAIResponsesCompat,
-	registerApiProvider,
-	resetApiProviders,
-	type SimpleStreamOptions,
-} from "@caupulican/pi-ai";
-import { registerOAuthProvider, resetOAuthProviders } from "@caupulican/pi-ai/oauth";
+import { registerApiProvider } from "@caupulican/pi-ai/api-registry";
+import { getEnvAuthHeaders } from "@caupulican/pi-ai/env-api-keys";
+import { getModels, getProviders } from "@caupulican/pi-ai/models";
+import { type OAuthProviderInterface, registerOAuthProvider, resetOAuthProviders } from "@caupulican/pi-ai/oauth";
+import { resetApiProviders } from "@caupulican/pi-ai/register-builtins";
+import type {
+	AnthropicMessagesCompat,
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	KnownProvider,
+	Model,
+	OpenAICompletionsCompat,
+	OpenAIResponsesCompat,
+	SimpleStreamOptions,
+} from "@caupulican/pi-ai/types";
 import { formatValidationPath } from "@caupulican/pi-ai/validation-path";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";

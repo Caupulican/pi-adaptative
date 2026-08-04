@@ -9,6 +9,7 @@ import {
 	PRISM_LLAMACPP_PINNED_RELEASE,
 	type PrismLlamaCppDeps,
 } from "../src/core/models/llamacpp-runtime.ts";
+import type { ManagedRuntimeChild } from "../src/core/models/runtime-process.ts";
 
 /**
  * Readiness-gate tests for pi-managed prism llama.cpp models: "usable when needed" (self-healing
@@ -32,13 +33,15 @@ function writeManifest(
 	writeFileSync(join(runtimeDir, "install.json"), JSON.stringify(manifest));
 }
 
-function fakeChild(pid: number): {
-	pid: number;
-	kill: ReturnType<typeof vi.fn>;
-	unref: ReturnType<typeof vi.fn>;
-	on: ReturnType<typeof vi.fn>;
-} {
-	return { pid, kill: vi.fn(), unref: vi.fn(), on: vi.fn() };
+function fakeChild(pid: number): ManagedRuntimeChild {
+	let child: ManagedRuntimeChild;
+	child = {
+		pid,
+		kill: () => true,
+		unref: () => {},
+		on: ((_event: string, _listener: (...args: unknown[]) => void) => child) as ManagedRuntimeChild["on"],
+	};
+	return child;
 }
 
 /** BONSAI_27B.mmprojFile is optional on the descriptor type (future non-vision prism models could

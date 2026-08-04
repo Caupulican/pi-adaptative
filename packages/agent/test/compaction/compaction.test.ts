@@ -32,7 +32,7 @@ import type { AgentMessage, StreamFn } from "../../src/types.ts";
 // ============================================================================
 
 function loadLargeSessionEntries(): SessionEntry[] {
-	const sessionPath = join(__dirname, "fixtures/large-session.jsonl");
+	const sessionPath = join(import.meta.dirname, "fixtures/large-session.jsonl");
 	const content = readFileSync(sessionPath, "utf-8");
 	const entries = parseSessionEntries(content);
 	migrateSessionEntries(entries); // Add id/parentId for v1 fixtures

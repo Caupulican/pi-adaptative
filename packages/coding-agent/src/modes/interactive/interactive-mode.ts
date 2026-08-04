@@ -5,8 +5,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type AgentMessage, getToolCallRepairInfo, type ToolCallRepairInfo } from "@caupulican/pi-agent-core";
+import { getToolCallRepairInfo } from "@caupulican/pi-agent-core/agent-loop";
 import type { SessionContext, SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
+import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
 import {

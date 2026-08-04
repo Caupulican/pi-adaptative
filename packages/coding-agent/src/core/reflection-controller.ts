@@ -13,26 +13,20 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-	type Agent,
-	type AgentContext,
-	type AgentLoopConfig,
-	type AgentMessage,
-	runAgentLoop,
-	startAgentProviderRequest,
-	type ThinkingLevel,
-} from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import {
-	type Api,
-	type AssistantMessage,
-	type Message,
-	type Model,
-	resolveModelThinkingLevel,
-	type SimpleStreamOptions,
-	type TextContent,
-	type Usage,
-} from "@caupulican/pi-ai";
+import type { Agent } from "@caupulican/pi-agent-core/agent";
+import { runAgentLoop, startAgentProviderRequest } from "@caupulican/pi-agent-core/agent-loop";
+import type { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AgentContext, AgentLoopConfig, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type {
+	Api,
+	AssistantMessage,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+	Usage,
+} from "@caupulican/pi-ai/types";
 import {
 	computeLaneAffinityKey,
 	DEFAULT_ISOLATED_LANE_KIND,

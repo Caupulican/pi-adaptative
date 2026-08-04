@@ -1,4 +1,4 @@
-import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "@caupulican/pi-agent-core";
+import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import * as undici from "undici";
 
 // The default stays strictly greater than the stall watchdog's quiet bound (600s — see

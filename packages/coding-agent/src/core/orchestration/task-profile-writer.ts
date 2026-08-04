@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type {

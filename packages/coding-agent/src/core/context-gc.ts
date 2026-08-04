@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { estimateTokens } from "@caupulican/pi-agent-core/node";
+import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
 import { boundedTextPreview } from "./text-preview.ts";

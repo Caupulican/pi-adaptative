@@ -1,7 +1,5 @@
-import type { Agent, AgentMessage, RetryPolicy, ThinkingLevel } from "@caupulican/pi-agent-core";
-import { classifyFailure, computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "@caupulican/pi-agent-core";
+import type { Agent } from "@caupulican/pi-agent-core/agent";
 import {
-	type CompactionEntry,
 	type CompactionPreparation,
 	type CompactionResult,
 	type CompactionSettings,
@@ -9,14 +7,21 @@ import {
 	compact,
 	createDeterministicCompaction,
 	estimateContextTokens,
-	getLatestCompactionEntry,
 	prepareCompaction,
-	runCompactionLoop,
-	type SessionManager,
 	shouldCompact,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/compaction/compaction";
+import { runCompactionLoop } from "@caupulican/pi-agent-core/compaction/loop";
+import {
+	classifyFailure,
+	computeRetryDelayMs,
+	DEFAULT_RETRY_POLICY,
+	type RetryPolicy,
+	sleepAbortable,
+} from "@caupulican/pi-agent-core/reliability";
+import { type CompactionEntry, getLatestCompactionEntry, type SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
-import { isContextOverflow } from "@caupulican/pi-ai";
+import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";

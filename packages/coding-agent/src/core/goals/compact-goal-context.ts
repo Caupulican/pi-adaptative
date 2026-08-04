@@ -1,4 +1,5 @@
-import { type AgentMessage, createCustomMessage } from "@caupulican/pi-agent-core";
+import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { TextContent } from "@caupulican/pi-ai";
 import { escapePromptXmlText } from "../prompt-markup.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";

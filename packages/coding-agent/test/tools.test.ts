@@ -25,7 +25,9 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "../src/index.ts";
-import * as shellModule from "../src/utils/shell.ts";
+import { getShellConfig } from "../src/utils/shell.ts";
+
+vi.mock("../src/utils/shell.ts", { spy: true });
 
 const readTool = createReadTool(process.cwd());
 const writeTool = createWriteTool(process.cwd());
@@ -77,6 +79,7 @@ describe("Coding Agent Tools", () => {
 		for (const key of activeShellSessionKeys.splice(0)) disposeShellExecutionSession(key);
 		// Clean up test directory
 		rmSync(testDir, { recursive: true, force: true });
+		vi.clearAllMocks();
 	});
 
 	describe("read tool", () => {
@@ -602,7 +605,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should handle process spawn errors", async () => {
-			vi.spyOn(shellModule, "getShellConfig").mockReturnValueOnce({
+			vi.mocked(getShellConfig).mockReturnValueOnce({
 				shell: "/nonexistent-shell-path-xyz123",
 				args: ["-c"],
 			});
@@ -613,7 +616,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should pass shellPath through to shell resolution", async () => {
-			const getShellConfigSpy = vi.spyOn(shellModule, "getShellConfig");
+			const getShellConfigSpy = vi.mocked(getShellConfig);
 			const bashWithCustomShell = bashToolFor(testDir, {
 				shellPath: "/custom/bash",
 				operations: {

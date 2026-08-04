@@ -2,7 +2,7 @@
  * Core modules shared between all run modes.
  */
 
-export type { CompactionResult } from "@caupulican/pi-agent-core/node";
+export type { CompactionResult } from "@caupulican/pi-agent-core/compaction/compaction";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -43,7 +43,6 @@ export {
 	type BuildSystemPromptOptions,
 	type ContextEvent,
 	defineTool,
-	discoverAndLoadExtensions,
 	type ExecOptions,
 	type ExecResult,
 	type Extension,
@@ -78,6 +77,7 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export { discoverAndLoadExtensions } from "./extensions/loader.ts";
 export * from "./orchestration/capability-gateway.ts";
 export * from "./orchestration/contracts.ts";
 export * from "./orchestration/event-store.ts";

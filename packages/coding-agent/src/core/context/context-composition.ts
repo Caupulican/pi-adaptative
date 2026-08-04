@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { estimateTokens } from "@caupulican/pi-agent-core/node";
+import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { CurationTelemetrySnapshot } from "./brain-curator.ts";
 
 /**

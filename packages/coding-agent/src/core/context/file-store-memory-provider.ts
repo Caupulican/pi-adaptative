@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { scanContextFileThreats, stripInvisibleUnicode } from "../resource-loader.ts";
+import { scanContextFileThreats, stripInvisibleUnicode } from "../security/context-threat-scanner.ts";
 import type { MemoryScope } from "./context-item.ts";
 import { fetchLocalMemoryItem, searchLocalMemoryItems, tokenOverlapScore } from "./local-memory-search.ts";
 import type {

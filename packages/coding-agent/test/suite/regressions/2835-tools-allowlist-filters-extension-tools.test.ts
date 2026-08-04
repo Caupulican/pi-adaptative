@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { getModel } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

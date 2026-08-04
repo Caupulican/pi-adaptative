@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { Agent } from "@caupulican/pi-agent-core";
-import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { Agent } from "@caupulican/pi-agent-core/agent";
+import { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, Message, Model } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -12,8 +12,8 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-vi.mock("@caupulican/pi-agent-core/node", async (importOriginal) => ({
-	...(await importOriginal<typeof import("@caupulican/pi-agent-core/node")>()),
+vi.mock("@caupulican/pi-agent-core/compaction/compaction", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@caupulican/pi-agent-core/compaction/compaction")>()),
 	calculateContextTokens: (usage: {
 		input: number;
 		output: number;

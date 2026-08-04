@@ -1,5 +1,6 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { resolveModelThinkingLevel, type Usage } from "@caupulican/pi-ai";
+import type { SessionManager } from "@caupulican/pi-agent-core/session";
+import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type { Usage } from "@caupulican/pi-ai/types";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,

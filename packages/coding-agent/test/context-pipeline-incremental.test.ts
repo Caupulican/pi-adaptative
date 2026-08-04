@@ -20,12 +20,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
-import * as agentNode from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ContextAuditReport } from "../src/core/context/context-audit.ts";
-import * as contextItemModule from "../src/core/context/context-item.ts";
+import { estimateByteLength, estimateTokensFromText } from "../src/core/context/context-item.ts";
 import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
+
+vi.mock("@caupulican/pi-agent-core/compaction/compaction", { spy: true });
+vi.mock("../src/core/context/context-item.ts", { spy: true });
 
 const tempDirs: string[] = [];
 
@@ -132,8 +135,8 @@ describe("ContextPipeline incremental memo: audit", () => {
 			reproducible: true,
 		});
 
-		const tokenizeSpy = vi.spyOn(contextItemModule, "estimateTokensFromText");
-		const byteSpy = vi.spyOn(contextItemModule, "estimateByteLength");
+		const tokenizeSpy = vi.mocked(estimateTokensFromText);
+		const byteSpy = vi.mocked(estimateByteLength);
 
 		/** Runs the memoized hot path, records the expensive-work delta it alone incurred, then
 		 * forces a full recompute (cold memo) and asserts it is byte-identical to the memoized
@@ -253,7 +256,7 @@ describe("ContextPipeline incremental memo: token estimate", () => {
 	it("is byte-identical to a forced full recompute across a growing conversation and skips re-tokenizing unchanged messages", () => {
 		const turnIndexRef = { value: 0 };
 		const pipeline = createPipeline(turnIndexRef);
-		const tokensSpy = vi.spyOn(agentNode, "estimateTokens");
+		const tokensSpy = vi.mocked(estimateTokens);
 
 		function tokenRound(messages: AgentMessage[]): { tokens: number; calls: number } {
 			const before = tokensSpy.mock.calls.length;
@@ -285,7 +288,7 @@ describe("ContextPipeline incremental memo: token estimate", () => {
 	it("only tokenizes the trailing window after the last usable assistant usage, and reuses it across round trips", () => {
 		const turnIndexRef = { value: 0 };
 		const pipeline = createPipeline(turnIndexRef);
-		const tokensSpy = vi.spyOn(agentNode, "estimateTokens");
+		const tokensSpy = vi.mocked(estimateTokens);
 
 		const usageAssistant = assistantMessageWithUsage("done", 10, 1234);
 		const base: AgentMessage[] = [userMessage("go", 0), usageAssistant];

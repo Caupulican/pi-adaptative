@@ -11,13 +11,17 @@ import { getModel, type OAuthCredentials, type OAuthProvider } from "@caupulican
 import { getOAuthApiKey } from "@caupulican/pi-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createEventBus } from "../src/core/event-bus.ts";
-import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/core/extensions/index.ts";
-import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { createCodingTools } from "../src/index.ts";
+import { createCodingTools } from "../src/core/tools/index.ts";
+import { createTestResourceLoader } from "./suite/test-resources.ts";
+
+export {
+	type CreateTestExtensionsResultInput,
+	type CreateTestResourceLoaderOptions,
+	createTestExtensionsResult,
+	createTestResourceLoader,
+} from "./suite/test-resources.ts";
 
 /**
  * API key for authenticated tests. Tests using this should be wrapped in
@@ -174,76 +178,6 @@ export interface TestSessionContext {
 	sessionManager: SessionManager;
 	tempDir: string;
 	cleanup: () => void;
-}
-
-export interface CreateTestExtensionsResultInput {
-	factory: ExtensionFactory;
-	path?: string;
-}
-
-export async function createTestExtensionsResult(
-	inputs: Array<ExtensionFactory | CreateTestExtensionsResultInput>,
-	cwd = process.cwd(),
-): Promise<LoadExtensionsResult> {
-	const runtime = createExtensionRuntime();
-	const eventBus = createEventBus();
-	const extensions: Extension[] = [];
-
-	for (const [index, input] of inputs.entries()) {
-		const factory = typeof input === "function" ? input : input.factory;
-		const extensionPath =
-			typeof input === "function" ? `<inline:${index + 1}>` : (input.path ?? `<inline:${index + 1}>`);
-		extensions.push(await loadExtensionFromFactory(factory, cwd, eventBus, runtime, extensionPath));
-	}
-
-	return {
-		extensions,
-		errors: [],
-		runtime,
-	};
-}
-
-export interface CreateTestResourceLoaderOptions {
-	extensionsResult?: LoadExtensionsResult;
-}
-
-export function createTestResourceLoader(options: CreateTestResourceLoaderOptions = {}): ResourceLoader {
-	const extensionsResult = options.extensionsResult ?? {
-		extensions: [],
-		errors: [],
-		runtime: createExtensionRuntime(),
-	};
-
-	const loader: ResourceLoader = {
-		getExtensions: () => extensionsResult,
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getActiveSkills() {
-			return this.getSkills().skills;
-		},
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getActivePrompts() {
-			return this.getPrompts().prompts;
-		},
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getActiveThemes() {
-			return this.getThemes().themes;
-		},
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getAgentsDiagnostics: () => [],
-		getDiscoverableSkillPaths: () => [],
-		getDiscoverablePromptPaths: () => [],
-		getDiscoverableAgentsFilePaths: () => [],
-		getSystemPrompt: () => undefined,
-		getAppendSystemPrompt: () => [],
-		getLoadedExtension: () => undefined,
-		removeLoadedExtension: () => undefined,
-		loadSingleExtension: async () => ({ extension: null, error: "Not implemented in mock" }),
-		extendResources: () => {},
-		reload: async () => {},
-		getDiscoverableExtensionPaths: async () => extensionsResult.extensions.map((e) => e.path),
-	};
-
-	return loader;
 }
 
 /**

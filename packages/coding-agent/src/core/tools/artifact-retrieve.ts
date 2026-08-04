@@ -1,5 +1,5 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { formatSize } from "@caupulican/pi-agent-core/node";
+import { formatSize } from "@caupulican/pi-agent-core/truncate";
 import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";

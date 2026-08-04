@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult } from "@caupulican/pi-agent-core/node";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../../config.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 

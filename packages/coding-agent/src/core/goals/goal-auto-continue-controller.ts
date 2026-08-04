@@ -1,4 +1,4 @@
-import { AgentBusyError } from "@caupulican/pi-agent-core";
+import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type {
 	AgentSessionEvent,
 	GoalContinuationLoopOptions,

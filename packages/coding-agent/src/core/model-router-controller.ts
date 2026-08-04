@@ -34,7 +34,7 @@
 import type { Agent, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
-import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai";
+import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai/models";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,

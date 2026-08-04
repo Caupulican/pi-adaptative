@@ -12,7 +12,7 @@
  * becomes an implicit execution limit.
  */
 
-import { AgentBusyError } from "@caupulican/pi-agent-core";
+import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,

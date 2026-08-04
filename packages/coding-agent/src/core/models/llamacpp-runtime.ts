@@ -177,6 +177,12 @@ export interface PrismDownloadResult {
 
 export type PrismServeResult = { ok: true; baseUrl: string } | { ok: false; error: string };
 
+export interface PrismProcessLifecycle {
+	track(pid: number): void;
+	untrack(pid: number): void;
+	terminate(pid: number): void;
+}
+
 interface PrismInstallManifest {
 	release: string;
 	binaryRelPath: string;
@@ -211,6 +217,7 @@ export interface PrismLlamaCppDeps {
 	/** Health-poll bounds for serve(); default ~120s (240 * 500ms), both overridable for tests. */
 	healthPollAttempts?: number;
 	healthPollIntervalMs?: number;
+	processLifecycle?: PrismProcessLifecycle;
 }
 
 const EXTRACTION_TIMEOUT_MS = 10 * 60_000;
@@ -244,6 +251,7 @@ export class PrismLlamaCppRuntime {
 	private readonly _healthPollAttempts: number;
 	private readonly _healthPollIntervalMs: number;
 	private readonly _profile: LocalInferenceProfile;
+	private readonly _processLifecycle: PrismProcessLifecycle;
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 
 	constructor(args: {
@@ -262,6 +270,11 @@ export class PrismLlamaCppRuntime {
 			args.deps?.extractArchive ?? ((input, destDir, kind) => this._extractArchive(input, destDir, kind));
 		this._healthPollAttempts = args.deps?.healthPollAttempts ?? DEFAULT_HEALTH_POLL_ATTEMPTS;
 		this._healthPollIntervalMs = args.deps?.healthPollIntervalMs ?? DEFAULT_HEALTH_POLL_INTERVAL_MS;
+		this._processLifecycle = args.deps?.processLifecycle ?? {
+			track: trackDetachedChildPid,
+			untrack: untrackDetachedChildPid,
+			terminate: killProcessTree,
+		};
 	}
 
 	runtimeDir(): string {
@@ -550,7 +563,7 @@ export class PrismLlamaCppRuntime {
 			stdio: "ignore",
 			env: process.env,
 		});
-		if (child.pid) trackDetachedChildPid(child.pid);
+		if (child.pid) this._processLifecycle.track(child.pid);
 		child.unref?.();
 		child.on("exit", () => {
 			if (this._child === child) {
@@ -577,8 +590,8 @@ export class PrismLlamaCppRuntime {
 		if (!child) return { stopped: false };
 		this._child = undefined;
 		if (child.pid) {
-			untrackDetachedChildPid(child.pid);
-			killProcessTree(child.pid);
+			this._processLifecycle.untrack(child.pid);
+			this._processLifecycle.terminate(child.pid);
 		}
 		return { stopped: true };
 	}

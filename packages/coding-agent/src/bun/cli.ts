@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../core/extensions/bundled-virtual-modules.ts";
 import { APP_NAME } from "../config.ts";
 
 process.title = APP_NAME;

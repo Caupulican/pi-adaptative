@@ -6,7 +6,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/node";
+import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/session";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";

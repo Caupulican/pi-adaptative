@@ -1,8 +1,16 @@
 ## [Unreleased]
 
+### Changed
+
+- Upgraded the pinned test toolchain to Vite 8.2 and Vitest 4.1, enabled the native Node module runner, and made Linux and Windows workflows verify and use the same source-resolution contract.
+- Split extension loading, factory execution, virtual-module catalogs, threat scanning, extensionification, and tool-definition construction into explicit lifecycle owners, and replaced broad cross-package barrels with narrow owner imports.
+
 ### Fixed
 
 - Serialized supervision start/stop transitions, cleaned partially started peers, awaited runtime-owned memory, GC, shell, and supervision shutdown before process-matrix and early CLI exits, and made Windows memory cleanup wait for worker termination before removing its state tree.
+- Made suite cleanup await idempotent session disposal before unregistering providers and deleting state, preventing background workers, extension runtimes, and Windows file handles from leaking across tests.
+- Isolated draft extension validation from the live generation, bounded extension factory and disposal lifecycles, and fenced process-matrix storage and llama process ownership behind injected adapters.
+- Removed the Vite transform graph from targeted source tests and narrowed heavyweight test fixtures, reducing cold focused-test startup from roughly 7–12 seconds to roughly 2–3 seconds.
 
 ## [0.85.7] - 2026-08-04
 

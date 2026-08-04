@@ -5,7 +5,7 @@ import { delimiter, dirname, join, relative } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as nodeZlib from "node:zlib";
-import { StreamingLineDecoder } from "@caupulican/pi-ai";
+import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import { getBundledResourcesDir } from "../../config.ts";
 import {
 	type ChildProcessTerminationResult,

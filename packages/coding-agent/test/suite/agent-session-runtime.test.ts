@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
-import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {

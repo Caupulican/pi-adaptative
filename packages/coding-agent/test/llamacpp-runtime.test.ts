@@ -10,7 +10,7 @@ import {
 	PrismLlamaCppRuntime as ProductionPrismLlamaCppRuntime,
 	resolvePrismLlamaAsset,
 } from "../src/core/models/llamacpp-runtime.ts";
-import * as shellModule from "../src/utils/shell.ts";
+import type { ManagedRuntimeChild } from "../src/core/models/runtime-process.ts";
 
 class PrismLlamaCppRuntime extends ProductionPrismLlamaCppRuntime {
 	constructor(args: ConstructorParameters<typeof ProductionPrismLlamaCppRuntime>[0]) {
@@ -18,13 +18,15 @@ class PrismLlamaCppRuntime extends ProductionPrismLlamaCppRuntime {
 	}
 }
 
-function fakeChild(pid: number | undefined): {
-	pid: number | undefined;
-	kill: ReturnType<typeof vi.fn>;
-	unref: ReturnType<typeof vi.fn>;
-	on: ReturnType<typeof vi.fn>;
-} {
-	return { pid, kill: vi.fn(), unref: vi.fn(), on: vi.fn() };
+function fakeChild(pid: number | undefined): ManagedRuntimeChild {
+	let child: ManagedRuntimeChild;
+	child = {
+		pid,
+		kill: () => true,
+		unref: () => {},
+		on: ((_event: string, _listener: (...args: unknown[]) => void) => child) as ManagedRuntimeChild["on"],
+	};
+	return child;
 }
 
 function scratchDir(name: string): string {
@@ -811,8 +813,8 @@ describe("serve", () => {
 				backend: "cpu",
 			});
 			const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
-			const killProcessTreeSpy = vi.spyOn(shellModule, "killProcessTree").mockImplementation(() => {});
-			const untrackSpy = vi.spyOn(shellModule, "untrackDetachedChildPid").mockImplementation(() => {});
+			const terminate = vi.fn<(pid: number) => void>();
+			const untrack = vi.fn<(pid: number) => void>();
 			const sleeps: number[] = [];
 			const runtime = new PrismLlamaCppRuntime({
 				agentDir,
@@ -824,6 +826,7 @@ describe("serve", () => {
 					healthPollAttempts: 3,
 					fetchFn: (async () => new Response("", { status: 503 })) as typeof fetch,
 					spawnFn: () => fakeChild(4244),
+					processLifecycle: { track: () => {}, untrack, terminate },
 				},
 			});
 			const result = await runtime.serve({
@@ -834,8 +837,8 @@ describe("serve", () => {
 			});
 			expect(result).toEqual({ ok: false, error: "health-timeout" });
 			expect(sleeps).toHaveLength(3);
-			expect(killProcessTreeSpy).toHaveBeenCalledWith(4244);
-			expect(untrackSpy).toHaveBeenCalledWith(4244);
+			expect(terminate).toHaveBeenCalledWith(4244);
+			expect(untrack).toHaveBeenCalledWith(4244);
 			expect(runtime.isRunning()).toBe(false);
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
@@ -851,9 +854,9 @@ describe("serve", () => {
 				backend: "cpu",
 			});
 			const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
-			const killProcessTreeSpy = vi.spyOn(shellModule, "killProcessTree").mockImplementation(() => {});
-			const untrackSpy = vi.spyOn(shellModule, "untrackDetachedChildPid").mockImplementation(() => {});
-			const trackSpy = vi.spyOn(shellModule, "trackDetachedChildPid").mockImplementation(() => {});
+			const terminate = vi.fn<(pid: number) => void>();
+			const untrack = vi.fn<(pid: number) => void>();
+			const track = vi.fn<(pid: number) => void>();
 			let up = false;
 			const runtime = new PrismLlamaCppRuntime({
 				agentDir,
@@ -870,15 +873,16 @@ describe("serve", () => {
 						up = true;
 						return fakeChild(4245);
 					},
+					processLifecycle: { track, untrack, terminate },
 				},
 			});
 			await runtime.serve({ modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8126, numCtx: 4096 });
-			expect(trackSpy).toHaveBeenCalledWith(4245);
+			expect(track).toHaveBeenCalledWith(4245);
 			expect(runtime.isRunning()).toBe(true);
 
 			expect(runtime.stop()).toEqual({ stopped: true });
-			expect(untrackSpy).toHaveBeenCalledWith(4245);
-			expect(killProcessTreeSpy).toHaveBeenCalledWith(4245);
+			expect(untrack).toHaveBeenCalledWith(4245);
+			expect(terminate).toHaveBeenCalledWith(4245);
 			expect(runtime.isRunning()).toBe(false);
 
 			expect(runtime.stop()).toEqual({ stopped: false });

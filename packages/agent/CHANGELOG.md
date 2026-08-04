@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Added repository-only source exports for the supported agent, compaction, reliability, session, and utility owners so native TypeScript tests resolve narrow modules without loading built barrels.
+
 ## [0.85.7] - 2026-08-04
 
 ## [0.85.6] - 2026-08-04

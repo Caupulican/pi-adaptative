@@ -30,7 +30,7 @@ describe.skipIf(process.platform === "win32")("issue #2791 fs.watch error event 
 		mkdirSync(themesDir, { recursive: true });
 
 		// Copy dark.json as "custom-test" theme
-		const darkThemePath = join(__dirname, "../../../src/modes/interactive/theme/dark.json");
+		const darkThemePath = join(import.meta.dirname, "../../../src/modes/interactive/theme/dark.json");
 		const darkTheme = JSON.parse(readFileSync(darkThemePath, "utf-8"));
 		darkTheme.name = "custom-test";
 		writeFileSync(join(themesDir, "custom-test.json"), JSON.stringify(darkTheme, null, 2));
@@ -41,7 +41,9 @@ describe.skipIf(process.platform === "win32")("issue #2791 fs.watch error event 
 	});
 
 	it("process should survive an error event on the theme FSWatcher", () => {
-		const themeModuleUrl = pathToFileURL(join(__dirname, "../../../src/modes/interactive/theme/theme.ts")).href;
+		const themeModuleUrl = pathToFileURL(
+			join(import.meta.dirname, "../../../src/modes/interactive/theme/theme.ts"),
+		).href;
 		const agentDir = join(tempRoot, "agent");
 
 		// Script that sets up the watcher and emits a synthetic error on it.

@@ -1,5 +1,5 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import { convertToLlm } from "@caupulican/pi-agent-core";
+import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";

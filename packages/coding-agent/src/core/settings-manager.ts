@@ -1,4 +1,4 @@
-import { DEFAULT_COMPACTION_SETTINGS } from "@caupulican/pi-agent-core/node";
+import { DEFAULT_COMPACTION_SETTINGS } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { Transport } from "@caupulican/pi-ai";
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "fs";

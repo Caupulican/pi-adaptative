@@ -8,15 +8,103 @@
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
+			"pi-source": "./src/index.ts",
 			"import": "./dist/index.js"
 		},
 		"./node": {
 			"types": "./dist/node.d.ts",
+			"pi-source": "./src/node.ts",
 			"import": "./dist/node.js"
+		},
+		"./agent": {
+			"types": "./dist/agent.d.ts",
+			"pi-source": "./src/agent.ts",
+			"import": "./dist/agent.js"
+		},
+		"./agent-loop": {
+			"types": "./dist/agent-loop.d.ts",
+			"pi-source": "./src/agent-loop.ts",
+			"import": "./dist/agent-loop.js"
+		},
+		"./compaction": {
+			"types": "./dist/compaction/index.d.ts",
+			"pi-source": "./src/compaction/index.ts",
+			"import": "./dist/compaction/index.js"
+		},
+		"./compaction/branch-summarization": {
+			"types": "./dist/compaction/branch-summarization.d.ts",
+			"pi-source": "./src/compaction/branch-summarization.ts",
+			"import": "./dist/compaction/branch-summarization.js"
+		},
+		"./compaction/compaction": {
+			"types": "./dist/compaction/compaction.d.ts",
+			"pi-source": "./src/compaction/compaction.ts",
+			"import": "./dist/compaction/compaction.js"
+		},
+		"./compaction/loop": {
+			"types": "./dist/compaction/loop.d.ts",
+			"pi-source": "./src/compaction/loop.ts",
+			"import": "./dist/compaction/loop.js"
+		},
+		"./compaction/token-budget": {
+			"types": "./dist/compaction/token-budget.d.ts",
+			"pi-source": "./src/compaction/token-budget.ts",
+			"import": "./dist/compaction/token-budget.js"
+		},
+		"./message-retention": {
+			"types": "./dist/session/message-retention.d.ts",
+			"pi-source": "./src/session/message-retention.ts",
+			"import": "./dist/session/message-retention.js"
+		},
+		"./messages": {
+			"types": "./dist/messages.d.ts",
+			"pi-source": "./src/messages.ts",
+			"import": "./dist/messages.js"
 		},
 		"./paths": {
 			"types": "./dist/utils/paths.d.ts",
+			"pi-source": "./src/utils/paths.ts",
 			"import": "./dist/utils/paths.js"
+		},
+		"./process-tree": {
+			"types": "./dist/reliability/process-tree.d.ts",
+			"pi-source": "./src/reliability/process-tree.ts",
+			"import": "./dist/reliability/process-tree.js"
+		},
+		"./reliability": {
+			"types": "./dist/reliability/index.d.ts",
+			"pi-source": "./src/reliability/index.ts",
+			"import": "./dist/reliability/index.js"
+		},
+		"./session": {
+			"types": "./dist/session/session-manager.d.ts",
+			"pi-source": "./src/session/session-manager.ts",
+			"import": "./dist/session/session-manager.js"
+		},
+		"./shell-output": {
+			"types": "./dist/utils/shell-output.d.ts",
+			"pi-source": "./src/utils/shell-output.ts",
+			"import": "./dist/utils/shell-output.js"
+		},
+		"./tool-failure-memory": {
+			"types": "./dist/tool-failure-memory.d.ts",
+			"pi-source": "./src/tool-failure-memory.ts",
+			"import": "./dist/tool-failure-memory.js"
+		},
+		"./truncate": {
+			"types": "./dist/utils/truncate.d.ts",
+			"pi-source": "./src/utils/truncate.ts",
+			"import": "./dist/utils/truncate.js"
+		},
+		"./types": {
+			"types": "./dist/types.d.ts",
+			"pi-source": "./src/types.ts",
+			"import": "./dist/types.js"
+		},
+		"./usage": {
+			"types": "./dist/usage.d.ts",
+			"pi-source": "./src/usage.ts",
+			"import": "./dist/usage.js"
 		},
 		"./package.json": "./package.json"
 	},
@@ -57,8 +145,8 @@
 	},
 	"devDependencies": {
 		"@types/node": "24.12.4",
-		"@vitest/coverage-v8": "3.2.7",
+		"@vitest/coverage-v8": "4.1.10",
 		"typescript": "7.0.2",
-		"vitest": "3.2.7"
+		"vitest": "4.1.10"
 	}
 }

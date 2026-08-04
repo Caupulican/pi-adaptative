@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
-import { type AgentTool, createSilenceWatchdog } from "@caupulican/pi-agent-core";
+import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
 	type TruncationResult,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/truncate";
+import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";

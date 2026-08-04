@@ -11,7 +11,7 @@ import {
 	type StdioPipe,
 } from "node:child_process";
 import type { Readable } from "node:stream";
-import { killTree } from "@caupulican/pi-agent-core/node";
+import { killTree } from "@caupulican/pi-agent-core/process-tree";
 import crossSpawn from "cross-spawn";
 
 const EXIT_STDIO_GRACE_MS = 100;

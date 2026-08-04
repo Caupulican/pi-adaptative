@@ -1,5 +1,5 @@
 import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core";
-import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core";
+import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core/messages";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import {
 	type Container,

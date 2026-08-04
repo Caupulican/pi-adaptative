@@ -13,7 +13,7 @@ import { totalmem } from "node:os";
 import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model } from "@caupulican/pi-ai";
-import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai";
+import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai/models";
 import type { AgentSessionEvent, ModelCycleResult } from "./agent-session-contracts.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";

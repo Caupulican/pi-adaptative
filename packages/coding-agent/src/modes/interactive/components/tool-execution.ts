@@ -3,7 +3,7 @@ import {
 	MAX_TUI_RETAINED_DETAILS_BYTES,
 	type ToolCallRepairInfo,
 } from "@caupulican/pi-agent-core";
-import { truncateHead } from "@caupulican/pi-agent-core/node";
+import { truncateHead } from "@caupulican/pi-agent-core/truncate";
 import {
 	Box,
 	type Component,

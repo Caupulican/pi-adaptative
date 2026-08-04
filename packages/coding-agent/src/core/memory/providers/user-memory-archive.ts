@@ -3,7 +3,7 @@ import { type Dirent, promises as fs } from "node:fs";
 import { join } from "node:path";
 import { okfMemoryDir } from "../../agent-paths.ts";
 import { formatOkfMemoryDocument, parseOkfMemoryDocument } from "../../context/okf-memory.ts";
-import { hasInvisibleUnicode, scanContextFileThreats } from "../../resource-loader.ts";
+import { hasInvisibleUnicode, scanContextFileThreats } from "../../security/context-threat-scanner.ts";
 
 const ARCHIVE_DIR_NAME = "user-preferences";
 const ARCHIVE_INDEX_NAME = "index.okf.md";

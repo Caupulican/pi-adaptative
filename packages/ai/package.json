@@ -8,106 +8,162 @@
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
+			"pi-source": "./src/index.ts",
 			"import": "./dist/index.js"
+		},
+		"./api-registry": {
+			"types": "./dist/api-registry.d.ts",
+			"pi-source": "./src/api-registry.ts",
+			"import": "./dist/api-registry.js"
 		},
 		"./anthropic": {
 			"types": "./dist/providers/anthropic.d.ts",
+			"pi-source": "./src/providers/anthropic.ts",
 			"import": "./dist/providers/anthropic.js"
 		},
 		"./azure-openai-responses": {
 			"types": "./dist/providers/azure-openai-responses.d.ts",
+			"pi-source": "./src/providers/azure-openai-responses.ts",
 			"import": "./dist/providers/azure-openai-responses.js"
 		},
 		"./google": {
 			"types": "./dist/providers/google.d.ts",
+			"pi-source": "./src/providers/google.ts",
 			"import": "./dist/providers/google.js"
 		},
 		"./google-vertex": {
 			"types": "./dist/providers/google-vertex.d.ts",
+			"pi-source": "./src/providers/google-vertex.ts",
 			"import": "./dist/providers/google-vertex.js"
 		},
 		"./mistral": {
 			"types": "./dist/providers/mistral.d.ts",
+			"pi-source": "./src/providers/mistral.ts",
 			"import": "./dist/providers/mistral.js"
+		},
+		"./models": {
+			"types": "./dist/models.d.ts",
+			"pi-source": "./src/models.ts",
+			"import": "./dist/models.js"
 		},
 		"./openai-codex-responses": {
 			"types": "./dist/providers/openai-codex-responses.d.ts",
+			"pi-source": "./src/providers/openai-codex-responses.ts",
 			"import": "./dist/providers/openai-codex-responses.js"
 		},
 		"./openai-completions": {
 			"types": "./dist/providers/openai-completions.d.ts",
+			"pi-source": "./src/providers/openai-completions.ts",
 			"import": "./dist/providers/openai-completions.js"
 		},
 		"./openai-responses": {
 			"types": "./dist/providers/openai-responses.d.ts",
+			"pi-source": "./src/providers/openai-responses.ts",
 			"import": "./dist/providers/openai-responses.js"
 		},
 		"./oauth": {
 			"types": "./dist/oauth.d.ts",
+			"pi-source": "./src/oauth.ts",
 			"import": "./dist/oauth.js"
 		},
 		"./event-stream": {
 			"types": "./dist/utils/event-stream.d.ts",
+			"pi-source": "./src/utils/event-stream.ts",
 			"import": "./dist/utils/event-stream.js"
+		},
+		"./env-api-keys": {
+			"types": "./dist/env-api-keys.d.ts",
+			"pi-source": "./src/env-api-keys.ts",
+			"import": "./dist/env-api-keys.js"
+		},
+		"./faux": {
+			"types": "./dist/providers/faux.d.ts",
+			"pi-source": "./src/providers/faux.ts",
+			"import": "./dist/providers/faux.js"
 		},
 		"./json-parse": {
 			"types": "./dist/utils/json-parse.d.ts",
+			"pi-source": "./src/utils/json-parse.ts",
 			"import": "./dist/utils/json-parse.js"
 		},
 		"./overflow": {
 			"types": "./dist/utils/overflow.d.ts",
+			"pi-source": "./src/utils/overflow.ts",
 			"import": "./dist/utils/overflow.js"
 		},
 		"./provider-retry": {
 			"types": "./dist/utils/provider-retry.d.ts",
+			"pi-source": "./src/utils/provider-retry.ts",
 			"import": "./dist/utils/provider-retry.js"
+		},
+		"./register-builtins": {
+			"types": "./dist/providers/register-builtins.d.ts",
+			"pi-source": "./src/providers/register-builtins.ts",
+			"import": "./dist/providers/register-builtins.js"
 		},
 		"./stream": {
 			"types": "./dist/stream.d.ts",
+			"pi-source": "./src/stream.ts",
 			"import": "./dist/stream.js"
+		},
+		"./session-resources": {
+			"types": "./dist/session-resources.d.ts",
+			"pi-source": "./src/session-resources.ts",
+			"import": "./dist/session-resources.js"
 		},
 		"./streaming-lines": {
 			"types": "./dist/utils/streaming-lines.d.ts",
+			"pi-source": "./src/utils/streaming-lines.ts",
 			"import": "./dist/utils/streaming-lines.js"
 		},
 		"./text-tool-protocol": {
 			"types": "./dist/utils/tool-repair/text-protocol.d.ts",
+			"pi-source": "./src/utils/tool-repair/text-protocol.ts",
 			"import": "./dist/utils/tool-repair/text-protocol.js"
 		},
 		"./tool-repair-registry": {
 			"types": "./dist/utils/tool-repair/registry.d.ts",
+			"pi-source": "./src/utils/tool-repair/registry.ts",
 			"import": "./dist/utils/tool-repair/registry.js"
 		},
 		"./typebox-helpers": {
 			"types": "./dist/utils/typebox-helpers.d.ts",
+			"pi-source": "./src/utils/typebox-helpers.ts",
 			"import": "./dist/utils/typebox-helpers.js"
 		},
 		"./types": {
 			"types": "./dist/types.d.ts",
+			"pi-source": "./src/types.ts",
 			"import": "./dist/types.js"
 		},
 		"./usage": {
 			"types": "./dist/usage.d.ts",
+			"pi-source": "./src/usage.ts",
 			"import": "./dist/usage.js"
 		},
 		"./validation": {
 			"types": "./dist/utils/validation.d.ts",
+			"pi-source": "./src/utils/validation.ts",
 			"import": "./dist/utils/validation.js"
 		},
 		"./validation-path": {
 			"types": "./dist/utils/validation-path.d.ts",
+			"pi-source": "./src/utils/validation-path.ts",
 			"import": "./dist/utils/validation-path.js"
 		},
 		"./uuid": {
 			"types": "./dist/utils/uuid.d.ts",
+			"pi-source": "./src/utils/uuid.ts",
 			"import": "./dist/utils/uuid.js"
 		},
 		"./abort-signals": {
 			"types": "./dist/utils/abort-signals.d.ts",
+			"pi-source": "./src/utils/abort-signals.ts",
 			"import": "./dist/utils/abort-signals.js"
 		},
 		"./bedrock-provider": {
 			"types": "./dist/bedrock-provider.d.ts",
+			"pi-source": "./src/bedrock-provider.ts",
 			"import": "./dist/bedrock-provider.js"
 		}
 	},
@@ -163,6 +219,6 @@
 	"devDependencies": {
 		"@types/node": "24.12.4",
 		"canvas": "3.2.3",
-		"vitest": "3.2.7"
+		"vitest": "4.1.10"
 	}
 }

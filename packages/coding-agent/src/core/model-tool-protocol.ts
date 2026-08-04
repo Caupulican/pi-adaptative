@@ -1,4 +1,5 @@
-import { type Api, isTextToolProtocolVariant, type Model, type SimpleStreamOptions } from "@caupulican/pi-ai";
+import { isTextToolProtocolVariant } from "@caupulican/pi-ai/text-tool-protocol";
+import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai/types";
 import type { ModelAdaptationProfile } from "./models/adaptation-store.ts";
 
 export const MODEL_TOOL_PROTOCOL_VERSION = 1;
