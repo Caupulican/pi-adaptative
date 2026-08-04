@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Isolated external-resource discovery and reload-rollback regressions from unrelated bundled-extension imports so native Windows release validation retains deterministic time bounds.
+
 ## [0.85.6] - 2026-08-04
 
 ## [0.85.5] - 2026-08-04
