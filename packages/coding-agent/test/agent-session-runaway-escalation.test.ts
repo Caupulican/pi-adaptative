@@ -28,9 +28,11 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 
 		const harness = await createHarness({
 			tools: [stuckTool],
-			settings: { autonomy: { maxStallTurns: 2 } },
 		});
 		try {
+			// This test exercises the core identical-call backstop directly. The autonomy
+			// maxStallTurns setting belongs to goal continuation and must not configure it.
+			harness.session.agent.maxStallTurns = 2;
 			// The faux provider always returns the identical tool call; the backstop must stop the run
 			// well before all queued responses are consumed.
 			harness.setResponses(
