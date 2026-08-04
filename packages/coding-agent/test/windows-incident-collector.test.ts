@@ -13,13 +13,28 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getShellConfig } from "../src/utils/shell.ts";
 
-function resolvePowerShell(): string | undefined {
+const isWslHost = process.platform !== "win32" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
+
+function findExecutableOnPath(name: string): string | undefined {
+	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+		if (!directory) continue;
+		const candidate = join(directory, name);
+		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+function resolveNativeWindowsPowerShell(): string | undefined {
 	const configured = process.env.PI_TEST_POWERSHELL;
-	if (configured) return configured;
+	if (configured && (process.platform === "win32" || isWslHost)) return configured;
+	if (process.platform !== "win32") {
+		if (!isWslHost) return undefined;
+		return findExecutableOnPath("pwsh.exe") ?? findExecutableOnPath("powershell.exe");
+	}
 	try {
 		return getShellConfig(undefined, "powershell").shell;
 	} catch {
@@ -27,7 +42,7 @@ function resolvePowerShell(): string | undefined {
 	}
 }
 
-const powerShell = resolvePowerShell();
+const powerShell = resolveNativeWindowsPowerShell();
 const collectorPath = resolve(process.cwd(), "../../scripts/collect-pi-incident.ps1");
 const wslCollectorPath = resolve(process.cwd(), "../../scripts/collect-pi-incident.sh");
 const scratchDirectories: string[] = [];
@@ -38,22 +53,26 @@ describe("Windows incident collector portability", () => {
 		expect(source).not.toContain("Get-FileHash");
 		expect(source).toContain("function Get-FileSha256");
 	});
+
+	it.runIf(isWslHost && powerShell !== undefined)("converts WSL paths before native Windows invocation", () => {
+		const sourcePath = realpathSync.native(tmpdir());
+		const convertedPath = pathForPowerShell(sourcePath);
+		expect(convertedPath).not.toBe(sourcePath);
+		expect(convertedPath).toMatch(/^(?:[A-Za-z]:\\|\\\\)/u);
+	});
 });
 
-const powerShellRunsOnWindows =
-	powerShell !== undefined &&
-	spawnSync(
-		powerShell,
-		["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "[Environment]::OSVersion.Platform"],
-		{ encoding: "utf8", timeout: 5_000, windowsHide: true },
-	).stdout.trim() === "Win32NT";
-
 function pathForPowerShell(path: string): string {
-	if (process.platform === "win32" || !powerShellRunsOnWindows) return path;
-	const converted = spawnSync("wslpath", ["-w", path], {
+	if (process.platform === "win32") return path;
+	if (!isWslHost) throw new Error(`Cannot convert a non-WSL path for native PowerShell: ${path}`);
+	const conversion = spawnSync("wslpath", ["-w", path], {
 		encoding: "utf8",
 		timeout: 5_000,
-	}).stdout.trim();
+	});
+	const converted = conversion.stdout.trim();
+	if (conversion.status !== 0) {
+		throw new Error(`Could not convert WSL path for native PowerShell: ${path}: ${conversion.stderr.trim()}`);
+	}
 	if (!converted) throw new Error(`Could not convert WSL path for native PowerShell: ${path}`);
 	return converted;
 }
@@ -136,7 +155,7 @@ describe.runIf(process.platform === "win32" || powerShell !== undefined)("native
 		}
 
 		const collectorEnv: NodeJS.ProcessEnv = { ...process.env, PI_TUI_WRITE_LOG: tuiLog };
-		if (process.platform !== "win32" && powerShellRunsOnWindows) {
+		if (isWslHost) {
 			collectorEnv.WSLENV = [process.env.WSLENV, "PI_TUI_WRITE_LOG/p"].filter(Boolean).join(":");
 		}
 		const collected = spawnSync(
