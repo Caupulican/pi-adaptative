@@ -14,6 +14,7 @@ import type {
 	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core";
 import {
+	AgentBusyError,
 	type CustomMessage,
 	compactToolResultDetailsForRetention,
 	createCustomMessage,
@@ -352,7 +353,7 @@ export class AgentSession {
 	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
 	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
-	 * {@link _runAgentPrompt} so the drive loop stays host-side. */
+	 * {@link ForegroundRecoveryController.runAgentPrompt} so the drive loop stays host-side. */
 	private readonly _modelRouter: ModelRouterController;
 	private readonly _foregroundRecovery: ForegroundRecoveryController;
 	private readonly _failureCorpus: FailureCorpusRecorder;
@@ -543,7 +544,7 @@ export class AgentSession {
 			getModel: () => this.model,
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getImageStore: () => this._getSessionImageStore(),
-			runAgentPrompt: (messages) => this._runAgentPrompt(messages),
+			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages),
 			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
@@ -591,6 +592,8 @@ export class AgentSession {
 			// to this controller's own `continueGoalLoopExclusive` guard, so routing through it here would
 			// recurse into the guard from inside itself instead of driving the actual continuation pass.
 			continueGoalLoop: (options) => this._goals.continueLoop(options),
+			isForegroundBusy: () => this._foregroundRecovery.isBusy,
+			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 		});
 		this._memory = new MemoryController({
@@ -705,6 +708,14 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			checkCompaction: (message) => this._checkCompaction(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
+			prepareRun: async () => {
+				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
+				await this._toolProtocol.ensureActiveModelProtocol();
+			},
+			afterRun: async () => {
+				this._flushPendingBashMessages();
+				await this._drainQueuedExtensionCommands();
+			},
 		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,
@@ -720,7 +731,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
-			runAgentPrompt: (messages) => this._runAgentPrompt(messages),
+			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages),
 			buildSystemPromptForToolNames: (toolNames) => this._buildSystemPromptForToolNames(toolNames),
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -1147,7 +1158,10 @@ export class AgentSession {
 		const previousTransformContext = this.agent.transformContext?.bind(this.agent);
 		this.agent.transformContext = async (messages, signal) => {
 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
-			const authoritativeMessages = this.agent.state.messages.length > 0 ? this.agent.state.messages : transformed;
+			// The agent loop may deliberately project a safer request context (for example, removing a
+			// failed mutation attempt after retaining its payload). Replacing that projection with raw
+			// session state would disclose the discarded attempt and defeat tool-failure repair.
+			const authoritativeMessages = transformed;
 			let currentMessages = authoritativeMessages;
 			try {
 				if (
@@ -2363,24 +2377,6 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-		try {
-			this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
-			const maxGoalLoopRounds = this.settingsManager.getAutonomySettings().maxStallTurns;
-			this.agent.maxStallTurns = maxGoalLoopRounds;
-			await this._toolProtocol.ensureActiveModelProtocol();
-			let goalLoopRounds = 1;
-			await this.agent.prompt(messages);
-			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this._handlePostAgentRun())) {
-				await this.agent.continue();
-				goalLoopRounds++;
-			}
-		} finally {
-			this._flushPendingBashMessages();
-			await this._drainQueuedExtensionCommands();
-		}
-	}
-
 	/**
 	 * Re-enter an interrupted ask_question call from its durable request snapshot. Pending requests
 	 * are presented again; already-checkpointed answers are replayed without asking twice. The
@@ -2453,10 +2449,6 @@ export class AgentSession {
 		return this._modelRouter.getStatus(formatLabel);
 	}
 
-	private async _handlePostAgentRun(): Promise<boolean> {
-		return this._foregroundRecovery.handlePostAgentRun();
-	}
-
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -2471,7 +2463,7 @@ export class AgentSession {
 			this._backgroundLanes.clearGoalAutoContinueTimer();
 		}
 
-		if ((this.isStreaming || this.isRetrying) && options?.streamingBehavior) {
+		if (this._foregroundRecovery.isBusy && options?.streamingBehavior) {
 			const run = this._streamingPromptSubmissionTail.then(
 				() => this._promptUnserialized(text, options),
 				() => this._promptUnserialized(text, options),
@@ -2564,9 +2556,9 @@ export class AgentSession {
 			// If streaming — or waiting out a retry backoff, which is still an active
 			// operation — queue via steer() or followUp() instead of starting a
 			// concurrent run that would race the pending retry continuation.
-			if (this.isStreaming || this.isRetrying) {
+			if (this._foregroundRecovery.isBusy) {
 				if (!options?.streamingBehavior) {
-					throw new Error(
+					throw new AgentBusyError(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
@@ -2753,7 +2745,7 @@ export class AgentSession {
 			// while the hook was running remain queued for the following turn.
 			this._pendingNextTurnMessages.splice(0, pendingNextTurnCount);
 		} catch (error) {
-			// The turn never reached _runAgentPrompt, so the authoritative message_start that would
+			// The turn never reached the foreground run, so the authoritative message_start that would
 			// normally consume this entry (see _handleAgentEvent) never fires — un-register it here
 			// instead of leaking the reference.
 			if (userMessage) {
@@ -2999,14 +2991,14 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.isStreaming) {
+		} else if (this._foregroundRecovery.isBusy) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._runAgentPrompt(appMessage);
+			await this._foregroundRecovery.runAgentPrompt(appMessage);
 		} else {
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(
@@ -3470,7 +3462,7 @@ export class AgentSession {
 			},
 			{
 				getModel: () => this.model,
-				isIdle: () => !this.isStreaming,
+				isIdle: () => !this._foregroundRecovery.isBusy,
 				getSignal: () => this.agent.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {

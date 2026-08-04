@@ -117,6 +117,7 @@ describe("AgentSession model and extension characterization", () => {
 	});
 
 	it("allows extension tool_call handlers to block tool execution", async () => {
+		let providerSawBlockedGuidance = false;
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -138,21 +139,15 @@ describe("AgentSession model and extension characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
 			(context) => {
-				const toolResult = context.messages.find((message) => message.role === "toolResult");
-				const errorText =
-					toolResult?.role === "toolResult"
-						? toolResult.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
-								.map((part) => part.text)
-								.join("\n")
-						: "";
-				return fauxAssistantMessage(errorText);
+				providerSawBlockedGuidance = (context.systemPrompt ?? "").includes("Blocked by test");
+				return fauxAssistantMessage("block observed");
 			},
 		]);
 
 		await harness.session.prompt("hi");
 
-		expect(getAssistantTexts(harness).some((text) => text.includes("Blocked by test"))).toBe(true);
+		expect(providerSawBlockedGuidance).toBe(true);
+		expect(getAssistantTexts(harness)).toContain("block observed");
 		expect(
 			harness.session.messages.find((message) => message.role === "toolResult" && message.isError),
 		).toBeDefined();
@@ -205,16 +200,24 @@ describe("AgentSession model and extension characterization", () => {
 	});
 
 	it("allows extension context handlers to modify messages before the LLM call", async () => {
+		let contextHandlerCalls = 0;
 		const harness = await createHarness({
 			extensionFactories: [
 				(pi) => {
-					pi.on("context", async (event) => ({
-						messages: event.messages.map((message) =>
-							message.role === "user"
-								? { ...message, content: [{ type: "text", text: "rewritten" }], timestamp: message.timestamp }
-								: message,
-						),
-					}));
+					pi.on("context", async (event) => {
+						contextHandlerCalls++;
+						return {
+							messages: event.messages.map((message) =>
+								message.role === "user"
+									? {
+											...message,
+											content: [{ type: "text", text: "rewritten" }],
+											timestamp: message.timestamp,
+										}
+									: message,
+							),
+						};
+					});
 				},
 			],
 		});
@@ -237,6 +240,7 @@ describe("AgentSession model and extension characterization", () => {
 		await harness.session.prompt("original");
 
 		expect(providerUserText).toBe("rewritten");
+		expect(contextHandlerCalls).toBe(1);
 		const storedUserMessage = harness.session.messages.find((message) => message.role === "user");
 		expect(storedUserMessage?.role).toBe("user");
 		if (storedUserMessage?.role === "user") {

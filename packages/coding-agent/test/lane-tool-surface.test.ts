@@ -106,8 +106,8 @@ describe("classified lane tool surface", () => {
 
 		expect(await gate(surface, "read", { path: path.join(cwd, "README.md") })).toBeUndefined();
 		expect((await gate(surface, "read", { path: path.join(outside, "secret.txt") }))?.block).toBe(true);
-		expect(await gate(surface, "write", { action: "prepare", path: "src/ok.ts" })).toBeUndefined();
-		expect((await gate(surface, "write", { action: "prepare", path: "outside.ts" }))?.block).toBe(true);
+		expect(await gate(surface, "write", { path: "src/ok.ts", content: "ok" })).toBeUndefined();
+		expect((await gate(surface, "write", { path: "outside.ts", content: "blocked" }))?.block).toBe(true);
 	});
 
 	it("shares one mutation authority inside a lane and isolates it from another lane", async () => {
@@ -123,61 +123,29 @@ describe("classified lane tool surface", () => {
 		const ownerEdit = owner.tools.find((tool) => tool.name === "edit");
 		if (!ownerWrite || !ownerEdit) throw new Error("Expected lane mutation tools.");
 
-		const sourcePreparation = await ownerWrite.execute("prepare-source", {
-			action: "prepare",
+		await ownerWrite.execute("write-source", {
 			path: "src/source.txt",
-		} as never);
-		const sourceIntent = (sourcePreparation.details as { intentId?: string } | undefined)?.intentId;
-		if (!sourceIntent) throw new Error("Expected source intent.");
-		await ownerWrite.execute("commit-source", {
-			action: "write",
-			path: "src/source.txt",
-			intentId: sourceIntent,
 			content: "alpha\n",
 		} as never);
 
-		const editPreparation = await ownerEdit.execute("prepare-edit", {
-			action: "prepare",
+		const editResult = await ownerEdit.execute("edit-source", {
 			path: "src/source.txt",
-		} as never);
-		const editIntent = (editPreparation.details as { intentId?: string } | undefined)?.intentId;
-		if (!editIntent) throw new Error("Expected edit intent.");
-		const editResult = await ownerEdit.execute("commit-edit", {
-			action: "edit",
-			path: "src/source.txt",
-			intentId: editIntent,
 			edits: [{ oldText: "alpha", newText: "beta" }],
 		} as never);
 		const contentRef = (editResult.details as { contentRef?: string } | undefined)?.contentRef;
 		if (!contentRef) throw new Error("Expected edit content reference.");
 
-		const targetPreparation = await ownerWrite.execute("prepare-target", {
-			action: "prepare",
+		await ownerWrite.execute("write-target", {
 			path: "src/target.txt",
-		} as never);
-		const targetIntent = (targetPreparation.details as { intentId?: string } | undefined)?.intentId;
-		if (!targetIntent) throw new Error("Expected target intent.");
-		await ownerWrite.execute("commit-target", {
-			action: "write",
-			path: "src/target.txt",
-			intentId: targetIntent,
 			contentRef,
 		} as never);
 		expect(readFileSync(path.join(cwd, "src", "target.txt"), "utf8")).toBe("beta\n");
 
 		const foreignWrite = createSurface().tools.find((tool) => tool.name === "write");
 		if (!foreignWrite) throw new Error("Expected foreign write tool.");
-		const foreignPreparation = await foreignWrite.execute("prepare-foreign", {
-			action: "prepare",
-			path: "src/foreign.txt",
-		} as never);
-		const foreignIntent = (foreignPreparation.details as { intentId?: string } | undefined)?.intentId;
-		if (!foreignIntent) throw new Error("Expected foreign intent.");
 		await expect(
-			foreignWrite.execute("commit-foreign", {
-				action: "write",
+			foreignWrite.execute("write-foreign", {
 				path: "src/foreign.txt",
-				intentId: foreignIntent,
 				contentRef,
 			} as never),
 		).rejects.toThrow(/content reference.*session|invalid.*content reference/i);

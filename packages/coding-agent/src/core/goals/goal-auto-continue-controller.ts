@@ -1,3 +1,4 @@
+import { AgentBusyError } from "@caupulican/pi-agent-core";
 import type {
 	AgentSessionEvent,
 	GoalContinuationLoopOptions,
@@ -16,6 +17,8 @@ export interface GoalAutoContinueControllerDeps {
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	hasInFlightLaneForGoal(goalId: string): boolean;
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
+	isForegroundBusy(): boolean;
+	waitForForegroundIdle(): Promise<void>;
 	markGoalToolUnavailable(): void;
 	emit(event: AgentSessionEvent): void;
 }
@@ -64,17 +67,32 @@ export class GoalAutoContinueController {
 
 	async continueExclusive(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		if (this._isContinuing) return this.skippedResult(options, "already_continuing");
-		if (this.deps.isDisposed()) return this.skippedResult(options, "session_disposed");
-		if (!this.deps.isGoalToolActive()) {
-			this.deps.markGoalToolUnavailable();
-			return this.skippedResult(options, "goal_tool_unavailable");
-		}
+		const initialGuard = this.unavailableResult(options);
+		if (initialGuard) return initialGuard;
 		this._isContinuing = true;
 		try {
-			return await this.deps.continueGoalLoop(options);
+			while (true) {
+				if (this.deps.isForegroundBusy()) await this.deps.waitForForegroundIdle();
+				const postWaitGuard = this.unavailableResult(options);
+				if (postWaitGuard) return postWaitGuard;
+				try {
+					return await this.deps.continueGoalLoop(options);
+				} catch (error) {
+					// A different foreground owner can acquire the Agent after the idle event but before
+					// prompt admission. Wait for that exact run and retry without terminalizing the goal.
+					if (!(error instanceof AgentBusyError)) throw error;
+				}
+			}
 		} finally {
 			this._isContinuing = false;
 		}
+	}
+
+	private unavailableResult(options: GoalContinuationLoopOptions): GoalContinuationLoopResult | undefined {
+		if (this.deps.isDisposed()) return this.skippedResult(options, "session_disposed");
+		if (this.deps.isGoalToolActive()) return undefined;
+		this.deps.markGoalToolUnavailable();
+		return this.skippedResult(options, "goal_tool_unavailable");
 	}
 
 	private async runScheduled(): Promise<void> {

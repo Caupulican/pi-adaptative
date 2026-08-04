@@ -12,7 +12,9 @@ import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 type RoutedTurnPrivateAccess = {
-	_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+	_foregroundRecovery: {
+		runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+	};
 	_modelRouter: {
 		runRoutedTurn: (
 			messages: AgentMessage | AgentMessage[],
@@ -78,7 +80,7 @@ describe("profile-set session thinking composes with per-tier router thinking", 
 
 		let thinkingDuringRoutedTurn: string | undefined;
 		// Stub the actual model call — the routed-turn swap around it is what's under test.
-		(session as unknown as RoutedTurnPrivateAccess)._runAgentPrompt = async () => {
+		(session as unknown as RoutedTurnPrivateAccess)._foregroundRecovery.runAgentPrompt = async () => {
 			thinkingDuringRoutedTurn = session.thinkingLevel;
 		};
 

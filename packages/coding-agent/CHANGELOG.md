@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed model-visible `action` and `intentId` phases from `write` and `edit`; callers now send one semantic mutation containing the path and payload while the harness owns preflight.
+
 ### Added
 
 - Added a Pi-managed local execution path for the complete Bonsai and Ternary-Bonsai GGUF families through a pinned Prism llama.cpp runtime, with exact model identity checks, bounded host-derived resource profiles, warm residency, validated paired-drafter policy, and complete Windows x64 CUDA archive installation.
@@ -8,11 +12,15 @@
 ### Changed
 
 - Shape and hard-gate the stable system prompt from the same model-capability profile that filters tools and lanes: lean, minimal, and chat models receive bounded role-specific contracts, oversized project instructions are deferred by path, constrained static memory obeys its prompt budget, and aggregate expansion is rejected after extension overrides without changing native-versus-phone tool protocol selection.
-- Renamed the filesystem mutation protocol's second phases from the Git-like `commit` term to the explicit `write` and `edit` actions, with preparation guidance and compatibility handling shaped for constrained local models.
+- Made `write` and `edit` single-call model operations while keeping path/capability preflight, serialized stale-target rechecks, and exclusive create semantics harness-owned.
 
 ### Fixed
 
-- Hardened phone-protocol tool execution for non-native local models with reasoning-channel envelope recovery, parallel-call identity, dependent prepare/write/edit examples, bounded corrective teaching after failures, and protection against repeating an already-successful mutation.
+- Hardened phone-protocol tool execution for non-native local models with reasoning-channel envelope recovery, parallel-call identity, single-call write/edit examples, bounded corrective teaching after failures, and protection against repeating an already-successful mutation.
+- Prevented write/edit safety preparation from duplicating model tool calls; edit now also rechecks target identity immediately before writing and discards preview plans when source bytes differ, preserving and reporting external changes.
+- Retained an exact, digest-verified write or edit payload after a target-only collision or path failure so repair needs only a corrected path; references are session-isolated, bounded, expiring, kind-checked, and consumed after a successful mutation, while invalid references and non-target failures are never presented as retargetable.
+- Prevented active goals from becoming permanently blocked by an `Agent is already processing` race: foreground ownership now spans retry/follow-up idle gaps, background handoffs queue into that owner, and goal continuation waits event-first without counting rejected admission as a turn or failure.
+- Kept sanitized tool-failure projections authoritative through session context extensions and invoked each extension context handler once per provider request.
 - Fixed simultaneous background-tool completions racing separate notification prompts: terminal handoffs are now bounded, coalesced, and serialized while every task result remains individually retrievable through `tool_task`.
 - Required Amazon Bedrock to use a durable verified profile-and-region scope, with STS/control-plane discovery, bounded runtime probes, exact model visibility, and request-level region/profile binding; `us-east-2` now resolves only US inference profiles.
 

@@ -9,7 +9,6 @@ import {
 	utf8ByteLength,
 } from "../src/core/tools/file-encoding-policy.ts";
 import { createEditTool, createWriteTool } from "../src/index.ts";
-import { withPreparedEdit, withPreparedWrite } from "./helpers/file-mutation-tools.ts";
 
 describe("File Encoding Policy - Unit Tests", () => {
 	describe("isValidUTF8", () => {
@@ -70,14 +69,14 @@ describe("File Encoding Policy - Unit Tests", () => {
 
 describe("File Encoding Policy - Tool Integration Tests", () => {
 	let testDir: string;
-	let editTool: ReturnType<typeof withPreparedEdit>;
-	let writeTool: ReturnType<typeof withPreparedWrite>;
+	let editTool: ReturnType<typeof createEditTool>;
+	let writeTool: ReturnType<typeof createWriteTool>;
 
 	beforeEach(() => {
 		testDir = join(tmpdir(), `pi-encoding-integration-test-${Date.now()}`);
 		mkdirSync(testDir, { recursive: true });
-		editTool = withPreparedEdit(createEditTool(testDir));
-		writeTool = withPreparedWrite(createWriteTool(testDir));
+		editTool = createEditTool(testDir);
+		writeTool = createWriteTool(testDir);
 	});
 
 	afterEach(() => {

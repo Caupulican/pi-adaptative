@@ -1,7 +1,7 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/index.ts";
+import { Agent, AgentBusyError } from "../src/index.ts";
 import type { AgentTool } from "../src/types.ts";
 
 // Mock stream that mimics AssistantMessageEventStream
@@ -365,7 +365,9 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(true);
 
 		// Second prompt should reject
-		await expect(agent.prompt("Second message")).rejects.toThrow(
+		const secondPrompt = agent.prompt("Second message");
+		await expect(secondPrompt).rejects.toBeInstanceOf(AgentBusyError);
+		await expect(secondPrompt).rejects.toThrow(
 			"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 		);
 
@@ -401,7 +403,9 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(true);
 
 		// continue() should reject
-		await expect(agent.continue()).rejects.toThrow(
+		const concurrentContinuation = agent.continue();
+		await expect(concurrentContinuation).rejects.toBeInstanceOf(AgentBusyError);
+		await expect(concurrentContinuation).rejects.toThrow(
 			"Agent is already processing. Wait for completion before continuing.",
 		);
 

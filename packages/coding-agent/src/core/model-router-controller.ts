@@ -15,10 +15,10 @@
  * (resolveCurationModelIfFit) collaborators — is reached through narrow deps accessors rather than the
  * whole AgentSession.
  *
- * Drive-path boundary (deliberate): the actual agent.prompt()/continue() loop stays host-side in
- * AgentSession._runAgentPrompt; this controller's parallel routed drive path ({@link runRoutedTurn})
- * owns only the route decision/escalation/tier bookkeeping and delegates every agent turn back through
- * {@link ModelRouterControllerDeps.runAgentPrompt}, so the drive-loop logic is never duplicated. The
+ * Drive-path boundary (deliberate): the actual agent.prompt()/continue() loop belongs to the
+ * session-owned ForegroundRecoveryController; this controller's parallel routed drive path
+ * ({@link runRoutedTurn}) owns only route decision/escalation/tier bookkeeping and delegates every
+ * agent turn through {@link ModelRouterControllerDeps.runAgentPrompt}, so the drive loop is never duplicated. The
  * host keeps a one-line delegation at each call-in: the routing prep + routed-turn entry in
  * _promptUnserialized, the beforeToolCall MUTATION escalation branch ({@link
  * maybeEscalateToolCall}), the tool-name-agnostic VALIDATION-FAILURE escalation branch for cloud
@@ -134,7 +134,7 @@ export interface ModelRouterControllerDeps {
 	getReflectionSignal(): AbortSignal;
 	/** Base (extension-free) system prompt — the tier swap only sheds tools when the turn is on it. */
 	getBaseSystemPrompt(): string;
-	/** The host-side drive loop (agent.prompt()/continue()); the routed drive path delegates every turn here. */
+	/** The session-owned foreground drive loop; the routed path delegates every turn here. */
 	runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void>;
 	/** Rebuilds the system prompt for a filtered tool surface (routed-model capability shedding). */
 	buildSystemPromptForToolNames(toolNames: string[]): string;
@@ -164,7 +164,7 @@ export interface ModelRouterControllerDeps {
 
 /**
  * Owns the model-router turn routing extracted from {@link AgentSession}. See the module header for the
- * drive-path boundary that keeps the agent.prompt()/continue() loop host-side.
+ * drive-path boundary that keeps the agent.prompt()/continue() loop in its foreground lifecycle owner.
  */
 export class ModelRouterController {
 	/** Active model-router intent for the current transient routed turn, if any. */

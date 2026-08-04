@@ -8,9 +8,11 @@
  * !streamingBehavior` guard and threw "Agent is already processing" — caught (as a warning) on the
  * idle path, but UNHANDLED on the manual path (`/goal start` had no try/catch).
  *
- * `BackgroundLaneController.continueGoalLoopExclusive` is now the single owner of that mutex:
+ * `BackgroundLaneController.continueGoalLoopExclusive` is now the single owner of that mutex and
+ * foreground admission:
  * every entry point (idle timer AND `AgentSession.continueGoalLoop`, which BOTH `/goal start` and
- * `/goal-continue` call) is routed through it, so at most one loop is ever in flight per session.
+ * `/goal-continue` call) is routed through it, so at most one loop is ever in flight per session and
+ * it waits for the complete logical foreground run rather than racing an idle gap between retries.
  *
  * Two levels of coverage:
  *  - Deterministic guard-mechanics tests drive `BackgroundLaneController` directly with a
@@ -47,6 +49,40 @@ function makeSnapshot(goalId: string): GoalRuntimeSnapshot {
 }
 
 describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)", () => {
+	it("does not enter the raw goal loop until the active foreground owner has become idle", async () => {
+		let foregroundBusy = true;
+		let releaseForeground: (() => void) | undefined;
+		const foregroundIdle = new Promise<void>((resolve) => {
+			releaseForeground = () => {
+				foregroundBusy = false;
+				resolve();
+			};
+		});
+		let rawLoopCalls = 0;
+
+		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getGoalRuntimeSnapshot: () => makeSnapshot("g1"),
+			continueGoalLoop: async () => {
+				rawLoopCalls++;
+				return { turnsSubmitted: 1, stopReason: "max_turns_reached", finalSnapshot: makeSnapshot("g1") };
+			},
+			isForegroundBusy: () => foregroundBusy,
+			waitForForegroundIdle: () => foregroundIdle,
+		} as never);
+
+		const resultPromise = controller.continueGoalLoopExclusive({ maxTurns: 1, maxStallTurns: 20 });
+		await Promise.resolve();
+		expect(rawLoopCalls).toBe(0);
+
+		releaseForeground?.();
+		await expect(resultPromise).resolves.toEqual(
+			expect.objectContaining({ stopReason: "max_turns_reached", turnsSubmitted: 1 }),
+		);
+		expect(rawLoopCalls).toBe(1);
+	});
+
 	it("returns already_continuing with a full snapshot for a second call racing an in-flight loop, and invokes the raw loop exactly once", async () => {
 		let releaseFirst: ((result: GoalContinuationLoopResult) => void) | undefined;
 		const firstCallResult = new Promise<GoalContinuationLoopResult>((resolve) => {
@@ -62,6 +98,8 @@ describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)",
 				rawLoopCalls++;
 				return firstCallResult;
 			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
 		} as never);
 
 		const firstPromise = controller.continueGoalLoopExclusive({ maxTurns: 1, maxStallTurns: 20 });
@@ -94,6 +132,8 @@ describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)",
 			isGoalToolActive: () => true,
 			getGoalRuntimeSnapshot: () => makeSnapshot("g1"),
 			continueGoalLoop: () => firstCallResult,
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
 		} as never);
 
 		const firstPromise = controller.continueGoalLoopExclusive({ maxTurns: 1, maxStallTurns: 20 });
@@ -130,6 +170,8 @@ describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)",
 			continueGoalLoop: async () => {
 				throw new Error("must not run");
 			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
 			markGoalToolUnavailable: () => {
 				stopCalls++;
 				if (state) state = applyGoalEvent(state, { type: "block_goal", reason: "tool unavailable", now: "T1" });
@@ -161,6 +203,144 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000, intervalMs 
 }
 
 describe("AgentSession goal-continuation single-flight mutex (end-to-end)", () => {
+	it("waits for an active foreground run, then continues without blocking the goal or counting a rejected turn", async () => {
+		const harness = await createHarness();
+		let releaseForeground: (() => void) | undefined;
+		const foregroundGate = new Promise<void>((resolve) => {
+			releaseForeground = resolve;
+		});
+		try {
+			seedOpenGoal(harness);
+			harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
+			harness.setResponses([
+				async () => {
+					await foregroundGate;
+					return fauxAssistantMessage("foreground settled");
+				},
+				fauxAssistantMessage("goal continuation settled"),
+			]);
+
+			const foreground = harness.session.prompt("foreground work", { autoContinueGoal: false });
+			await waitUntil(() => harness.session.isStreaming);
+			const continuation = harness.session.continueGoalLoop({
+				maxTurns: 1,
+				maxStallTurns: 20,
+				maxWallClockMinutes: 0,
+			});
+
+			releaseForeground?.();
+			await foreground;
+			const result = await continuation;
+
+			expect(result.stopReason).toBe("max_turns_reached");
+			expect(result.turnsSubmitted).toBe(1);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				continuationTurnsUsed: 1,
+			});
+			expect(harness.eventsOfType("warning").some((event) => event.message.includes("already processing"))).toBe(
+				false,
+			);
+		} finally {
+			releaseForeground?.();
+			harness.cleanup();
+		}
+	});
+
+	it("waits across the visually idle retry gap instead of terminalizing the goal with an admission error", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 100 } },
+		});
+		let retryStarted: (() => void) | undefined;
+		const retryStart = new Promise<void>((resolve) => {
+			retryStarted = resolve;
+		});
+		try {
+			seedOpenGoal(harness);
+			harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
+			harness.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") retryStarted?.();
+			});
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("foreground retry settled"),
+				fauxAssistantMessage("goal continuation settled"),
+			]);
+
+			const foreground = harness.session.prompt("foreground work", { autoContinueGoal: false });
+			await retryStart;
+			expect(harness.session.isStreaming).toBe(false);
+			expect(harness.session.isRetrying).toBe(true);
+			const continuation = harness.session.continueGoalLoop({
+				maxTurns: 1,
+				maxStallTurns: 20,
+				maxWallClockMinutes: 0,
+			});
+
+			await foreground;
+			const result = await continuation;
+
+			expect(result).toMatchObject({ stopReason: "max_turns_reached", turnsSubmitted: 1 });
+			expect(harness.faux.state.callCount).toBe(3);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				continuationTurnsUsed: 1,
+			});
+			expect(harness.eventsOfType("warning").some((event) => event.message.includes("already processing"))).toBe(
+				false,
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("queues a background handoff during the visually idle retry gap instead of starting an interleaved run", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 100 } },
+		});
+		let retryStarted: (() => void) | undefined;
+		const retryStart = new Promise<void>((resolve) => {
+			retryStarted = resolve;
+		});
+		try {
+			harness.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") retryStarted?.();
+			});
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("foreground retry consumed the handoff"),
+				fauxAssistantMessage("queued handoff settled"),
+			]);
+
+			const foreground = harness.session.prompt("foreground work", { autoContinueGoal: false });
+			await retryStart;
+			expect(harness.session.isStreaming).toBe(false);
+			await harness.session.sendCustomMessage(
+				{
+					customType: "background-tool-completion",
+					content: "bounded terminal handoff",
+					display: true,
+					details: {},
+				},
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+			await foreground;
+
+			// One failed request, one retry, then one orderly follow-up turn for the queued handoff.
+			expect(harness.faux.state.callCount).toBe(3);
+			expect(
+				harness.session.messages.filter(
+					(message) => message.role === "custom" && message.customType === "background-tool-completion",
+				),
+			).toHaveLength(1);
+			expect(harness.eventsOfType("warning").some((event) => event.message.includes("already processing"))).toBe(
+				false,
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("serializes a racing idle auto-continue and a manual continueGoalLoop call: exactly one drives, the other returns already_continuing, no unhandled rejection or double-processing warning", async () => {
 		const harness = await createHarness();
 		const unhandledRejections: unknown[] = [];

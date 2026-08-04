@@ -70,6 +70,10 @@ export interface BackgroundLaneControllerDeps
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	/** Drive-loop boundary: the session's bounded goal-continuation loop (owns `prompt()`, not us). */
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
+	/** True while the session owns a foreground prompt/retry/follow-up run. */
+	isForegroundBusy(): boolean;
+	/** Resolve only after the complete foreground retry/follow-up run releases the session. */
+	waitForForegroundIdle(): Promise<void>;
 	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
 	markGoalToolUnavailable(): void;
 }
@@ -118,6 +122,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			getGoalRuntimeSnapshot: deps.getGoalRuntimeSnapshot,
 			hasInFlightLaneForGoal: (goalId) => this._hasInFlightLaneForGoal(goalId),
 			continueGoalLoop: deps.continueGoalLoop,
+			isForegroundBusy: deps.isForegroundBusy,
+			waitForForegroundIdle: deps.waitForForegroundIdle,
 			markGoalToolUnavailable: deps.markGoalToolUnavailable,
 			emit: deps.emit,
 		});

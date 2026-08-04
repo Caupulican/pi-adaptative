@@ -148,7 +148,24 @@ function createRemoteIntentOps(remote: string, remoteCwd: string, localCwd: stri
 			if (!digest || !/^[0-9a-f]{64}$/i.test(digest)) throw new Error(`Invalid remote sha256 for ${p}`);
 			return digest.toLowerCase();
 		},
+		readPayload: (p) =>
+			sshExec(remote, `cat -- ${shellQuote(toRemote(p))}`).then((output) => output.toString("utf8")),
 		removeFile: (p) => sshExec(remote, `rm -- ${shellQuote(toRemote(p))}`).then(() => {}),
+		async stagePayload(content) {
+			const stagedPath = (await sshExec(remote, `umask 077; mktemp "\${TMPDIR:-/tmp}/pi-file-mutation.XXXXXXXXXX"`))
+				.toString("utf8")
+				.trim();
+			if (!stagedPath.startsWith("/") || stagedPath.includes("\n")) {
+				throw new Error("Remote mktemp returned an invalid mutation payload path.");
+			}
+			try {
+				await sshExec(remote, `cat > ${shellQuote(stagedPath)}`, content);
+				return stagedPath;
+			} catch (error) {
+				await sshExec(remote, `rm -f -- ${shellQuote(stagedPath)}`).catch(() => {});
+				throw error;
+			}
+		},
 	};
 }
 

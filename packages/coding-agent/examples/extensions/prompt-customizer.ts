@@ -37,13 +37,13 @@ function addToolGuidance(options: BuildSystemPromptOptions, basePrompt: string):
 
 	if (hasTool("edit")) {
 		parts.push(
-			"• Use `edit` action=prepare before generating precise replacements, then commit with the returned intent. Match exact content including whitespace.",
+			"• Use `edit` once with the target path and precise replacements. The harness owns preflight and rejects stale targets. Match exact content including whitespace.",
 		);
 	}
 
 	if (hasTool("write")) {
 		parts.push(
-			"• Use `write` action=prepare before generating content; commit creates a new file and never overwrites.",
+			"• Use `write` once with the target path and content. The harness owns preflight, and creation never overwrites an existing file.",
 		);
 	}
 

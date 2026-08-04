@@ -3,6 +3,7 @@
  * Used by both edit.ts (for execution) and tool-execution.ts (for preview rendering).
  */
 
+import { createHash } from "node:crypto";
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
@@ -18,6 +19,10 @@ export function detectLineEnding(content: string): "\r\n" | "\n" {
 
 export function normalizeToLF(text: string): string {
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+export function digestNormalizedEditSource(content: string): string {
+	return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string {
@@ -571,6 +576,7 @@ export interface EditDiffError {
 
 export interface EditPlannedDiffResult extends EditDiffResult {
 	plan: EditMatchPlan;
+	sourceDigest: string;
 }
 
 /**
@@ -603,7 +609,11 @@ export async function computeEditsPlannedDiff(
 		const { baseContent, newContent } = applyEditMatchPlan(normalizedContent, plan, path);
 
 		// Generate the diff
-		return { ...generateDiffString(baseContent, newContent), plan };
+		return {
+			...generateDiffString(baseContent, newContent),
+			plan,
+			sourceDigest: digestNormalizedEditSource(normalizedContent),
+		};
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };
 	}

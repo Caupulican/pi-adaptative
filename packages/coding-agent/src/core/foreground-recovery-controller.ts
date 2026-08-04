@@ -1,4 +1,4 @@
-import type { Agent, AgentEvent, ClassifiedError } from "@caupulican/pi-agent-core";
+import type { Agent, AgentEvent, AgentMessage, ClassifiedError } from "@caupulican/pi-agent-core";
 import { classifyFailure, DEFAULT_RETRY_POLICY, RetryController } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai";
@@ -22,13 +22,17 @@ export interface ForegroundRecoveryControllerDeps {
 	emit(event: ForegroundRecoveryEvent): void;
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 	onSuccessfulAssistant(): void;
+	prepareRun(): Promise<void>;
+	afterRun(): Promise<void>;
 }
 
-/** Owns foreground retry/failover/compaction recovery ordering and its response latch. */
+/** Owns the complete logical foreground run plus retry/failover/compaction recovery ordering. */
 export class ForegroundRecoveryController {
 	private readonly retry: RetryController;
 	private readonly billingFailover: BillingFailoverController;
 	private lastAssistantMessage: AssistantMessage | undefined;
+	private activeRuns = 0;
+	private readonly idleWaiters = new Set<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
@@ -67,6 +71,47 @@ export class ForegroundRecoveryController {
 
 	get isRetrying(): boolean {
 		return this.retry.isRetrying;
+	}
+
+	get isRunActive(): boolean {
+		return this.activeRuns > 0;
+	}
+
+	get isBusy(): boolean {
+		return this.isRunActive || this.deps.agent.state.isStreaming || this.isRetrying;
+	}
+
+	async runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		this.activeRuns++;
+		try {
+			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
+			this.deps.agent.maxStallTurns = maxGoalLoopRounds;
+			await this.deps.prepareRun();
+			let goalLoopRounds = 1;
+			await this.deps.agent.prompt(messages);
+			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this.handlePostAgentRun())) {
+				await this.deps.agent.continue();
+				goalLoopRounds++;
+			}
+		} finally {
+			this.activeRuns--;
+			if (this.activeRuns === 0) {
+				for (const resolve of this.idleWaiters) resolve();
+				this.idleWaiters.clear();
+			}
+			await this.deps.afterRun();
+		}
+	}
+
+	async waitForIdle(): Promise<void> {
+		while (true) {
+			if (this.activeRuns > 0) {
+				await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
+				continue;
+			}
+			await this.deps.agent.waitForIdle();
+			if (!this.isBusy) return;
+		}
 	}
 
 	abortRetry(): void {

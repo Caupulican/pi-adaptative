@@ -6,7 +6,6 @@ import { createEditTool } from "../src/core/tools/edit.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
-import { withPreparedEdit } from "./helpers/file-mutation-tools.ts";
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -101,28 +100,26 @@ describe("withFileMutationQueue", () => {
 });
 
 describe("built-in edit and write tools", () => {
-	it("fails closed when two prepared edits race on the same file", async () => {
+	it("fails closed when two concurrently preflighted edits race on the same file", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "parallel-edit.txt");
 		await writeFile(filePath, "alpha\nbeta\ngamma\n", "utf8");
 
 		const intentController = new FileMutationIntentController();
-		const editTool = withPreparedEdit(
-			createEditTool(dir, {
-				operations: {
-					readFile: async (path) => {
-						const buffer = await readFile(path);
-						await delay(30);
-						return buffer;
-					},
-					writeFile: async (path, content) => {
-						await delay(30);
-						await writeFile(path, content, "utf8");
-					},
+		const editTool = createEditTool(dir, {
+			operations: {
+				readFile: async (path) => {
+					const buffer = await readFile(path);
+					await delay(30);
+					return buffer;
 				},
-				intentController,
-			}),
-		);
+				writeFile: async (path, content) => {
+					await delay(30);
+					await writeFile(path, content, "utf8");
+				},
+			},
+			intentController,
+		});
 
 		const outcomes = await Promise.allSettled([
 			editTool.execute("call-1", { path: filePath, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
@@ -135,28 +132,26 @@ describe("built-in edit and write tools", () => {
 		expect(["ALPHA\nbeta\ngamma\n", "alpha\nBETA\ngamma\n"]).toContain(content);
 	});
 
-	it("shares the queue so write preflight cannot pass while an edit owns an existing file", async () => {
+	it("rejects write preflight while an edit owns an existing target", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "mixed.txt");
 		await writeFile(filePath, "original\n", "utf8");
 
 		const intentController = new FileMutationIntentController();
-		const editTool = withPreparedEdit(
-			createEditTool(dir, {
-				operations: {
-					readFile: async (path) => {
-						const buffer = await readFile(path);
-						await delay(30);
-						return buffer;
-					},
-					writeFile: async (path, content) => {
-						await delay(30);
-						await writeFile(path, content, "utf8");
-					},
+		const editTool = createEditTool(dir, {
+			operations: {
+				readFile: async (path) => {
+					const buffer = await readFile(path);
+					await delay(30);
+					return buffer;
 				},
-				intentController,
-			}),
-		);
+				writeFile: async (path, content) => {
+					await delay(30);
+					await writeFile(path, content, "utf8");
+				},
+			},
+			intentController,
+		});
 		const writeTool = createWriteTool(dir, { intentController });
 
 		const editPromise = editTool.execute("call-1", {
@@ -164,10 +159,12 @@ describe("built-in edit and write tools", () => {
 			edits: [{ oldText: "original", newText: "edited" }],
 		});
 		await delay(5);
-		const writePreparation = writeTool.execute("call-2", { action: "prepare", path: filePath });
+		const rejectedWrite = expect(
+			writeTool.execute("call-2", { path: filePath, content: "must not overwrite" }),
+		).rejects.toThrow(/already exists|collision/i);
 
 		await editPromise;
-		await expect(writePreparation).rejects.toThrow(/already exists|collision/i);
+		await rejectedWrite;
 
 		const content = await readFile(filePath, "utf8");
 		expect(content).toBe("edited\n");
@@ -192,24 +189,17 @@ describe("built-in edit and write tools", () => {
 			intentController,
 		});
 
-		const prepared = await writeTool.execute("prepare-1", { action: "prepare", path: filePath });
-		const intentId = prepared.details?.intentId;
-		if (!intentId) throw new Error("Expected write preparation to return an intent id.");
 		const controller = new AbortController();
-		const firstWrite = writeTool.execute(
-			"call-1",
-			{ action: "write", path: filePath, intentId, content: "first\n" },
-			controller.signal,
-		);
+		const firstWrite = writeTool.execute("call-1", { path: filePath, content: "first\n" }, controller.signal);
 		await firstWriteStarted.promise;
 		controller.abort();
 
-		const secondPreparation = writeTool.execute("prepare-2", { action: "prepare", path: filePath });
-		expect(await resolvesWithin(secondPreparation, 20)).toBe(false);
+		const secondWrite = writeTool.execute("call-2", { path: filePath, content: "second\n" });
+		expect(await resolvesWithin(secondWrite, 20)).toBe(false);
 
 		finishFirstWrite.resolve();
 		await expect(firstWrite).rejects.toThrow("Operation aborted");
-		await expect(secondPreparation).rejects.toThrow(/already exists|collision/i);
+		await expect(secondWrite).rejects.toThrow(/already exists|collision|stale/i);
 
 		const content = await readFile(filePath, "utf8");
 		expect(content).toBe("first\n");
@@ -245,16 +235,11 @@ describe("built-in edit and write tools", () => {
 			intentController,
 		});
 
-		const firstPreparation = await editTool.execute("prepare-1", { action: "prepare", path: filePath });
-		const firstIntentId = firstPreparation.details?.intentId;
-		if (!firstIntentId) throw new Error("Expected edit preparation to return an intent id.");
 		const controller = new AbortController();
 		const firstEdit = editTool.execute(
 			"call-1",
 			{
-				action: "edit",
 				path: filePath,
-				intentId: firstIntentId,
 				edits: [{ oldText: "alpha", newText: "ALPHA" }],
 			},
 			controller.signal,
@@ -262,18 +247,17 @@ describe("built-in edit and write tools", () => {
 		await firstWriteStarted.promise;
 		controller.abort();
 
-		const secondPreparation = editTool.execute("prepare-2", { action: "prepare", path: filePath });
-		expect(await resolvesWithin(secondPreparation, 20)).toBe(false);
+		const staleSecondEdit = editTool.execute("call-2", {
+			path: filePath,
+			edits: [{ oldText: "beta", newText: "BETA" }],
+		});
+		expect(await resolvesWithin(staleSecondEdit, 20)).toBe(false);
 
 		finishFirstWrite.resolve();
 		await expect(firstEdit).rejects.toThrow("Operation aborted");
-		const preparedSecond = await secondPreparation;
-		const secondIntentId = preparedSecond.details?.intentId;
-		if (!secondIntentId) throw new Error("Expected edit preparation to return an intent id.");
-		await editTool.execute("call-2", {
-			action: "edit",
+		await expect(staleSecondEdit).rejects.toThrow(/changed|stale/i);
+		await editTool.execute("call-3", {
 			path: filePath,
-			intentId: secondIntentId,
 			edits: [{ oldText: "beta", newText: "BETA" }],
 		});
 

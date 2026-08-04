@@ -75,13 +75,8 @@ function createEchoTool(onExecute?: () => void): AgentTool<typeof toolSchema, { 
 const echoTool = createEchoTool();
 
 const writeLikeSchema = Type.Union([
-	Type.Object({ action: Type.Literal("prepare"), path: Type.String() }),
-	Type.Object({
-		action: Type.Literal("write"),
-		path: Type.String(),
-		content: Type.Optional(Type.String()),
-		contentRef: Type.Optional(Type.String()),
-	}),
+	Type.Object({ path: Type.String(), content: Type.String() }),
+	Type.Object({ path: Type.String(), contentRef: Type.String() }),
 ]);
 
 const identityConverter = (messages: AgentMessage[]): Message[] =>
@@ -280,7 +275,7 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((event) => event.type === "tool_execution_end" && event.isError)).toHaveLength(0);
 	});
 
-	it("guards a completed phone write by action and path when the model changes payload representation", async () => {
+	it("guards a completed phone write by path when the model changes payload representation", async () => {
 		let executions = 0;
 		const writeLikeTool: AgentTool<typeof writeLikeSchema, { phase: string }> = {
 			name: "write",
@@ -310,10 +305,10 @@ describe("runaway-loop backstop", () => {
 									name: "write",
 									arguments:
 										turn === 1
-											? { action: "write", path: "same.txt", content: "bytes" }
+											? { path: "same.txt", content: "bytes" }
 											: turn === 2
-												? { action: "write", path: "same.txt", contentRef: "file-content:bytes" }
-												: { action: "prepare", path: "same.txt" },
+												? { path: "same.txt", contentRef: "file-content:bytes" }
+												: { path: "same.txt", content: "different bytes" },
 									source: "text-protocol",
 								},
 							],

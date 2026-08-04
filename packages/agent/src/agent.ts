@@ -162,6 +162,14 @@ type ActiveRun = {
 	abortController: AbortController;
 };
 
+/** A second foreground operation tried to acquire an Agent that still owns an active run. */
+export class AgentBusyError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AgentBusyError";
+	}
+}
+
 /**
  * Stateful wrapper around the low-level agent loop.
  *
@@ -357,7 +365,7 @@ export class Agent {
 	async prompt(input: string, images?: ImageContent[]): Promise<void>;
 	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
 		if (this.activeRun) {
-			throw new Error(
+			throw new AgentBusyError(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
 		}
@@ -368,7 +376,7 @@ export class Agent {
 	/** Continue from the current transcript. The last message must be a user or tool-result message. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
-			throw new Error("Agent is already processing. Wait for completion before continuing.");
+			throw new AgentBusyError("Agent is already processing. Wait for completion before continuing.");
 		}
 
 		const lastMessage = this._state.messages[this._state.messages.length - 1];
@@ -494,7 +502,7 @@ export class Agent {
 
 	private async runWithLifecycle(executor: (signal: AbortSignal) => Promise<void>): Promise<void> {
 		if (this.activeRun) {
-			throw new Error("Agent is already processing.");
+			throw new AgentBusyError("Agent is already processing.");
 		}
 
 		const abortController = new AbortController();

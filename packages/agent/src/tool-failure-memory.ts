@@ -47,6 +47,7 @@ export interface ToolFailureDirectiveDetails {
 		state: ToolFailureState;
 		phase: ToolFailurePhase;
 		failureCode: string;
+		diagnostic?: string;
 		nextAction: string;
 	};
 }
@@ -487,6 +488,8 @@ function readFailureDirective(details: unknown): ToolFailureDirectiveDetails["pi
 			? candidate.phase
 			: inferToolFailurePhase("failed", candidate.failureCode),
 		failureCode: boundedFailureCode(candidate.failureCode),
+		diagnostic:
+			typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 		nextAction: truncate(candidate.nextAction, MAX_CORRECTION_CHARS),
 	};
 }
@@ -517,6 +520,7 @@ export function readToolFailureTelemetry(details: unknown): ToolFailureTelemetry
 		state: directive.state,
 		phase: directive.phase,
 		failureCode: directive.failureCode,
+		...(directive.diagnostic ? { diagnostic: directive.diagnostic } : {}),
 		nextAction: directive.nextAction,
 	};
 }
@@ -723,6 +727,7 @@ export function createToolFailureResult(
 						state: record.state,
 						phase: record.phase,
 						failureCode: record.failureCode,
+						...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
 						nextAction: record.correction,
 					},
 				}
@@ -765,6 +770,7 @@ export function sanitizeToolFailureContext(
 			escapePromptData(
 				JSON.stringify({
 					failure_code: directive.failureCode,
+					...(directive.diagnostic ? { diagnostic: directive.diagnostic } : {}),
 					next_action: directive.nextAction,
 					attempt_memory: "discarded",
 				}),

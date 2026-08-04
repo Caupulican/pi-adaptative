@@ -10,6 +10,7 @@ import {
 	applyEditsToNormalizedContent,
 	computeEditsPlannedDiff,
 	detectLineEnding,
+	digestNormalizedEditSource,
 	type Edit,
 	type EditDiffError,
 	type EditDiffResult,
@@ -21,7 +22,11 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { isValidUTF8 } from "./file-encoding-policy.ts";
-import { FileMutationIntentController, hasFileMutationIntentIdShape } from "./file-mutation-intent.ts";
+import {
+	FileMutationIntentController,
+	type FileMutationLease,
+	FileMutationPreflightError,
+} from "./file-mutation-intent.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { renderToolPath, str } from "./render-utils.ts";
@@ -54,19 +59,17 @@ const editPathSchema = Type.String({ minLength: 1 });
 const editSchema = Type.Union([
 	Type.Object(
 		{
-			action: Type.Literal("prepare"),
 			path: editPathSchema,
+			edits: Type.Array(replaceEditSchema, {
+				minItems: 1,
+			}),
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
-			action: Type.Literal("edit"),
 			path: editPathSchema,
-			intentId: Type.String({ minLength: 1 }),
-			edits: Type.Array(replaceEditSchema, {
-				minItems: 1,
-			}),
+			payloadRef: Type.String({ minLength: 1 }),
 		},
 		{ additionalProperties: false },
 	),
@@ -74,17 +77,15 @@ const editSchema = Type.Union([
 
 export type EditToolInput = Static<typeof editSchema>;
 type LegacyEditToolInput = {
-	action?: unknown;
 	path?: unknown;
-	intentId?: unknown;
 	edits?: unknown;
+	payloadRef?: unknown;
 	oldText?: unknown;
 	newText?: unknown;
 };
 
 export interface EditToolDetails {
-	phase: "prepared" | "edited";
-	intentId?: string;
+	phase: "edited";
 	contentRef?: string;
 	/** Display-oriented diff of the changes made */
 	diff?: string;
@@ -115,7 +116,7 @@ const defaultEditOperations: EditOperations = {
 export interface EditToolOptions {
 	/** Custom operations for file editing. Default: local filesystem */
 	operations?: EditOperations;
-	/** Session-owned two-phase intent and exact-content-reference authority. */
+	/** Session-owned harness preflight and exact-content-reference authority. */
 	intentController?: FileMutationIntentController;
 }
 
@@ -134,31 +135,38 @@ function prepareEditArguments(input: unknown): EditToolInput {
 		args = { ...rest, edits };
 	}
 
-	if (
-		typeof args.path === "string" &&
-		(args.action === undefined || (args.action === "edit" && !hasFileMutationIntentIdShape(args.intentId)))
-	) {
-		return { action: "prepare", path: args.path };
-	}
 	return args as EditToolInput;
+}
+
+function validateEdits(edits: unknown): Edit[] {
+	if (!Array.isArray(edits) || edits.length === 0) {
+		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
+	}
+	for (const edit of edits) {
+		if (
+			typeof edit !== "object" ||
+			edit === null ||
+			typeof edit.oldText !== "string" ||
+			typeof edit.newText !== "string"
+		) {
+			throw new Error("Edit tool input is invalid. Every edit requires string oldText and newText fields.");
+		}
+	}
+	return edits as Edit[];
 }
 
 function validateEditInput(
 	input: EditToolInput,
-): { action: "prepare"; path: string } | { action: "edit"; path: string; intentId: string; edits: Edit[] } {
-	if (input.action === "prepare") return input;
-	if (!Array.isArray(input.edits) || input.edits.length === 0) {
-		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
-	}
-	return { action: "edit", path: input.path, intentId: input.intentId, edits: input.edits };
+): { path: string; edits: Edit[]; payloadRef?: undefined } | { path: string; edits?: undefined; payloadRef: string } {
+	if ("payloadRef" in input) return { path: input.path, payloadRef: input.payloadRef };
+	return { path: input.path, edits: validateEdits(input.edits) };
 }
 
 type RenderableEditArgs = {
-	action?: string;
 	path?: string;
 	file_path?: string;
-	intentId?: string;
 	edits?: Edit[];
+	payloadRef?: string;
 	oldText?: string;
 	newText?: string;
 };
@@ -198,40 +206,36 @@ function getEditCallRenderComponent(state: EditRenderState, lastComponent: unkno
 	return component;
 }
 
-function getRenderablePreviewInput(
-	args: RenderableEditArgs | undefined,
-): { path: string; intentId: string; edits: Edit[] } | null {
+function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
 	if (!args) {
 		return null;
 	}
-	if (args.action !== "edit") return null;
 
 	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
 	if (!path) {
 		return null;
 	}
-	if (typeof args.intentId !== "string" || args.intentId.length === 0) return null;
 
 	if (
 		Array.isArray(args.edits) &&
 		args.edits.length > 0 &&
 		args.edits.every((edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string")
 	) {
-		return { path, intentId: args.intentId, edits: args.edits };
+		return { path, edits: args.edits };
 	}
 
 	if (typeof args.oldText === "string" && typeof args.newText === "string") {
-		return { path, intentId: args.intentId, edits: [{ oldText: args.oldText, newText: args.newText }] };
+		return { path, edits: [{ oldText: args.oldText, newText: args.newText }] };
 	}
 
 	return null;
 }
 
 interface CachedEditMatchPlan {
-	intentId: string;
 	absolutePath: string;
 	edits: Edit[];
 	plan: EditMatchPlan;
+	sourceDigest: string;
 	diff: string;
 	firstChangedLine: number | undefined;
 }
@@ -263,8 +267,7 @@ function editsMatch(left: Edit[], right: Edit[]): boolean {
 
 function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
 	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
-	const action = args?.action === "prepare" ? "prepare" : undefined;
-	return `${theme.fg("toolTitle", theme.bold("edit"))}${action ? ` ${theme.fg("muted", action)}` : ""} ${pathDisplay}`;
+	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
 function formatEditResult(
@@ -294,6 +297,35 @@ function formatEditResult(
 	}
 
 	return undefined;
+}
+
+async function editPathFailureWithRetainedPayload(
+	error: FileMutationPreflightError,
+	validated:
+		| { path: string; edits: Edit[]; payloadRef?: undefined }
+		| { path: string; edits?: undefined; payloadRef: string },
+	intentController: FileMutationIntentController,
+	signal?: AbortSignal,
+): Promise<Error> {
+	const failureIdentity = error.reason === "edit_missing" ? "edit_missing (ENOENT)" : "edit_not_file";
+	if (validated.payloadRef) {
+		await intentController.assertMutationPayload(validated.payloadRef, "edit", signal);
+		return new Error(
+			`PI_FILE_MUTATION_RETARGET ${failureIdentity}: payloadRef ${validated.payloadRef}. Choose only a corrected path naming an existing file; the exact valid edit payload is retained for full revalidation.`,
+		);
+	}
+
+	try {
+		const retained = await intentController.retainMutationPayload("edit", JSON.stringify(validated.edits));
+		if (retained) {
+			return new Error(
+				`PI_FILE_MUTATION_RETARGET ${failureIdentity}: payloadRef ${retained.payloadRef}. Choose only a corrected path naming an existing file; the exact valid edit payload is retained for full revalidation.`,
+			);
+		}
+	} catch {
+		// The path failure remains authoritative when the bounded retry cache is unavailable.
+	}
+	return new Error(`${error.message} The edit payload could not be retained within the secure retry-cache bound.`);
 }
 
 function getEditHeaderBg(
@@ -363,10 +395,11 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			'Edit existing UTF-8 text: first call edit with action "prepare" and path, then call edit with action "edit", the accepted intentId, and edits. oldText must be exact, unique, and non-overlapping; optional inclusive line ranges bind matches to prior reads; stale targets are rejected.',
+			"Edit existing UTF-8 text in one call. Send path and all edits; after a path-only failure, reuse the returned payloadRef with only the corrected path. The harness preflights, revalidates, and stale-checks every exact replacement.",
 		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
 		promptGuidelines: [
-			'Before replacements, call edit with action "prepare" and path; then call edit with action "edit", the returned intentId, and all edits.',
+			"Call edit once with path and all replacements; preparation and stale-target checks are harness-owned.",
+			"If a path failure returns payloadRef, choose the correct existing path and reuse that reference instead of regenerating edits.",
 			"oldText is exact, unique, minimal, and original-file based; pass the inclusive line range from the supplying read when known, batch separate edits, and merge overlaps.",
 		],
 		parameters: editSchema,
@@ -376,6 +409,18 @@ export function createEditToolDefinition(
 			const validated = validateEditInput(input);
 			const { path } = validated;
 			const absolutePath = resolveToCwd(path, cwd);
+			let lease: FileMutationLease;
+			try {
+				lease = await intentController.prepare("edit", absolutePath, signal, path);
+			} catch (error) {
+				if (
+					error instanceof FileMutationPreflightError &&
+					(error.reason === "edit_missing" || error.reason === "edit_not_file")
+				) {
+					throw await editPathFailureWithRetainedPayload(error, validated, intentController, signal);
+				}
+				throw error;
+			}
 
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the
@@ -387,21 +432,16 @@ export function createEditToolDefinition(
 				};
 
 				throwIfAborted();
-				if (validated.action === "prepare") {
-					const prepared = await intentController.prepare("edit", absolutePath, signal, path);
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `Edit target accepted. Call edit again with action "edit", path ${path}, and intentId ${prepared.intentId}. The call also needs the required edits array containing every exact oldText/newText replacement. Do not omit edits.`,
-							},
-						],
-						details: { phase: "prepared" as const, intentId: prepared.intentId },
-					};
+				let payloadRef: string | undefined;
+				let edits: Edit[];
+				if (validated.edits !== undefined) {
+					edits = validated.edits;
+				} else {
+					payloadRef = validated.payloadRef;
+					edits = validateEdits(
+						JSON.parse(await intentController.readMutationPayload(payloadRef, "edit", signal)),
+					);
 				}
-
-				const { edits, intentId } = validated;
-				const lease = intentController.consume(intentId, "edit", absolutePath);
 				await intentController.assertCurrent(lease, signal);
 				throwIfAborted();
 
@@ -419,31 +459,36 @@ export function createEditToolDefinition(
 				const { bom, text: content } = stripBom(rawContent);
 				const originalEnding = detectLineEnding(content);
 				const normalizedContent = normalizeToLF(content);
-				const cachedForIntent = cachedMatchPlan?.intentId === intentId ? cachedMatchPlan : undefined;
-				if (cachedForIntent) cachedMatchPlan = undefined;
+				const cachedForInput =
+					cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
+						? cachedMatchPlan
+						: undefined;
+				if (cachedForInput) cachedMatchPlan = undefined;
 				const matchPlanReused =
-					cachedForIntent !== undefined &&
-					cachedForIntent.absolutePath === absolutePath &&
-					editsMatch(cachedForIntent.edits, edits);
+					cachedForInput !== undefined &&
+					cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
 				const { baseContent, newContent } = matchPlanReused
-					? applyEditMatchPlan(normalizedContent, cachedForIntent.plan, path)
+					? applyEditMatchPlan(normalizedContent, cachedForInput.plan, path)
 					: applyEditsToNormalizedContent(normalizedContent, edits, path);
 				throwIfAborted();
 
 				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+				await intentController.assertCurrent(lease, signal);
+				throwIfAborted();
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 				const contentReference = intentController.rememberContent(absolutePath, finalContent);
+				if (payloadRef) await intentController.discardMutationPayload(payloadRef);
 
 				const diffResult = matchPlanReused
-					? { diff: cachedForIntent.diff, firstChangedLine: cachedForIntent.firstChangedLine }
+					? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
 					: generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Successfully replaced ${edits.length} block(s) in ${path}; this edit is complete, so do not call edit again for this path. To copy these exact bytes to a different new path, prepare that different path with write first, then use contentRef ${contentReference.contentRef}.`,
+							text: `Successfully replaced ${edits.length} block(s) in ${path}; this edit is complete, so do not call edit again for this path. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
 						},
 					],
 					details: {
@@ -475,10 +520,10 @@ export function createEditToolDefinition(
 					if (component.previewRequestId === requestId) {
 						if (!("error" in preview) && !options?.operations) {
 							cachedMatchPlan = {
-								intentId: previewInput.intentId,
 								absolutePath: resolveToCwd(previewInput.path, context.cwd),
 								edits: snapshotEdits(previewInput.edits),
 								plan: preview.plan,
+								sourceDigest: preview.sourceDigest,
 								diff: preview.diff,
 								firstChangedLine: preview.firstChangedLine,
 							};

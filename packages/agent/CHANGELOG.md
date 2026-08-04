@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added a typed `AgentBusyError` so session coordinators can retry transient prompt-admission races without treating them as terminal model or goal failures.
+
+### Fixed
+
+- Preserved bounded failure diagnostics when unsafe tool-attempt arguments are discarded from provider context, so repair guidance can retain an opaque harness reference without re-exposing the failed payload.
+
 ## [0.85.3] - 2026-08-03
 
 ## [0.85.2] - 2026-08-03

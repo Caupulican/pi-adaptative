@@ -12,6 +12,7 @@
  * becomes an implicit execution limit.
  */
 
+import { AgentBusyError } from "@caupulican/pi-agent-core";
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
@@ -136,6 +137,9 @@ export class GoalLoopController {
 			try {
 				result = await this.continueGoalOnce(options);
 			} catch (error) {
+				// Prompt admission did not happen. A concurrent foreground owner is transient session
+				// coordination, not a consumed goal turn and not evidence that the goal is blocked.
+				if (error instanceof AgentBusyError) throw error;
 				turnsSubmitted++;
 				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt, usageCursor });
 				this.deps.recordGoalContinuationFailure(error);

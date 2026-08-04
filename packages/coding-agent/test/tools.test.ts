@@ -26,11 +26,10 @@ import {
 	createWriteTool,
 } from "../src/index.ts";
 import * as shellModule from "../src/utils/shell.ts";
-import { withPreparedEdit, withPreparedWrite } from "./helpers/file-mutation-tools.ts";
 
 const readTool = createReadTool(process.cwd());
-const writeTool = withPreparedWrite(createWriteTool(process.cwd()));
-const editTool = withPreparedEdit(createEditTool(process.cwd()));
+const writeTool = createWriteTool(process.cwd());
+const editTool = createEditTool(process.cwd());
 const bashTool = createBashTool(process.cwd());
 const grepTool = createGrepTool(process.cwd());
 const findTool = createFindTool(process.cwd());
@@ -359,7 +358,7 @@ describe("Coding Agent Tools", () => {
 					path: missingFile,
 					edits: [{ oldText: "hello", newText: "world" }],
 				}),
-			).rejects.toThrow(`Could not edit file: ${missingFile}. Error code: ENOENT.`);
+			).rejects.toThrow(/PI_FILE_MUTATION_RETARGET edit_missing \(ENOENT\).*payloadRef.*corrected path/is);
 		});
 
 		it("should fail if text appears multiple times", async () => {
@@ -499,15 +498,13 @@ describe("Coding Agent Tools", () => {
 					},
 				},
 			});
-			const genericFailureTool = withPreparedEdit(
-				createEditTool(testDir, {
-					operations: {
-						readFile: async () => Buffer.from("hello\n", "utf-8"),
-						writeFile: async () => {},
-					},
-					intentController,
-				}),
-			);
+			const genericFailureTool = createEditTool(testDir, {
+				operations: {
+					readFile: async () => Buffer.from("hello\n", "utf-8"),
+					writeFile: async () => {},
+				},
+				intentController,
+			});
 
 			await expect(
 				genericFailureTool.execute("test-call-16", {

@@ -59,10 +59,12 @@ export {
 	type FileMutationIntentOperations,
 	type FileMutationKind,
 	type FileMutationLease,
+	type FileMutationPayloadReference,
+	FileMutationPreflightError,
+	type FileMutationPreflightFailureReason,
 	type FilePathIdentity,
 	type FilePathInspection,
 	localFileMutationIntentOperations,
-	type PreparedFileMutation,
 } from "./file-mutation-intent.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {

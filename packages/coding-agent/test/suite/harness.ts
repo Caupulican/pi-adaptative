@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@caupulican/pi-agent-core";
+import type { AgentTool } from "@caupulican/pi-agent-core";
 import { Agent, convertToLlm } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type {
@@ -223,11 +223,6 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				status: response.status,
 				headers: response.headers,
 			});
-		},
-		transformContext: async (messages: AgentMessage[]) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner) return messages;
-			return runner.emitContext(messages);
 		},
 	});
 	const extensionsResult = options.extensionFactories

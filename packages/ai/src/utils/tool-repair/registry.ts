@@ -193,14 +193,15 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
-		name: "fileMutationIntentInvalid",
+		name: "fileMutationRetarget",
 		phase: "execution",
-		failureCode: "mutation_intent_invalid",
+		failureCode: "mutation_retarget_required",
+		attemptMemory: "discard",
 		retainDiagnostic: true,
 		guidance:
-			'Call the same file tool with action "prepare" and the same path, wait for its result, then copy the returned intentId exactly into action "write" or "edit". Never invent or reuse an intentId.',
+			"The mutation payload is already retained by the harness. Choose only the corrected target path and reuse the exact payloadRef from the diagnostic; do not regenerate content or edits.",
 		matches(message: string): boolean {
-			return /file mutation intent is invalid, expired, or belongs to another session/i.test(message);
+			return /\bPI_FILE_MUTATION_RETARGET\b/i.test(message);
 		},
 	},
 	{

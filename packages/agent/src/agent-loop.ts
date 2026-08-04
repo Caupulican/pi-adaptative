@@ -188,8 +188,8 @@ function textProtocolOperationArguments(toolCall: AgentToolCall): unknown {
 	const args: unknown = toolCall.arguments;
 	if (!args || typeof args !== "object" || Array.isArray(args)) return args ?? null;
 	const record = args as Record<string, unknown>;
-	if ((record.action === "write" || record.action === "edit") && typeof record.path === "string") {
-		return { action: record.action, path: record.path };
+	if ((toolCall.name === "write" || toolCall.name === "edit") && typeof record.path === "string") {
+		return { path: record.path };
 	}
 	return args;
 }
@@ -228,12 +228,7 @@ function repeatsSuccessfulTextProtocolBatch(
 		if (currentArgs?.path !== previousArgs?.path) return false;
 		const phase = toolResultPhase(previousResult);
 		if (phase === "written") return toolCall.name === "write" && previousCall.name === "write";
-		return (
-			phase === "edited" &&
-			toolCall.name === "edit" &&
-			previousCall.name === "edit" &&
-			currentArgs?.action === "edit"
-		);
+		return phase === "edited" && toolCall.name === "edit" && previousCall.name === "edit";
 	});
 }
 

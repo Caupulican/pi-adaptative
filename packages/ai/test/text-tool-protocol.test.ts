@@ -92,26 +92,24 @@ describe("text tool-call protocol", () => {
 		);
 	});
 
-	it("teaches union-shaped two-phase mutation tools without invented intent IDs", () => {
+	it("teaches union-shaped mutation tools as one semantic call without harness fields", () => {
 		const writeTool: Tool = {
 			name: "write",
-			description: "Create a file through a two-phase write workflow",
+			description: "Create a file without overwriting",
 			parameters: {
 				anyOf: [
 					{
 						type: "object",
-						properties: { action: { const: "prepare" }, path: { type: "string" } },
-						required: ["action", "path"],
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
 					},
 					{
 						type: "object",
 						properties: {
-							action: { const: "write" },
 							path: { type: "string" },
-							intentId: { type: "string" },
-							content: { type: "string" },
+							contentRef: { type: "string" },
 						},
-						required: ["action", "path", "intentId", "content"],
+						required: ["path", "contentRef"],
 					},
 				],
 			} as Tool["parameters"],
@@ -119,14 +117,9 @@ describe("text tool-call protocol", () => {
 
 		const primer = generateTextToolProtocolPrimer([writeTool]);
 
-		expect(primer).toContain(
-			"Call action prepare first, wait for its tool result, then copy the returned intentId exactly. Never invent or reuse an intentId.",
-		);
-		expect(primer).toContain('<pi:call name="write">{"action":"prepare","path":"src/index.ts"}</pi:call>');
-		expect(primer).toContain(
-			'<pi:call name="write">{"action":"write","path":"src/index.ts","intentId":"RETURNED_INTENT_ID","content":"text"}</pi:call>',
-		);
+		expect(primer).toContain('<pi:call name="write">{"path":"src/index.ts","content":"text"}</pi:call>');
 		expect(primer).not.toContain('<pi:call name="write">{}</pi:call>');
+		expect(primer).not.toMatch(/\b(?:prepare|intentId)\b/);
 		expect(primer).not.toMatch(/\bcommit\b/i);
 	});
 

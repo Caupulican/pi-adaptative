@@ -9,7 +9,7 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import {
 	type FileContentReference,
 	FileMutationIntentController,
-	hasFileMutationIntentIdShape,
+	FileMutationPreflightError,
 } from "./file-mutation-intent.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -17,48 +17,31 @@ import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const writePathSchema = Type.String({ minLength: 1 });
-const writeActionProperties = {
-	action: Type.Literal("write"),
-	path: writePathSchema,
-	intentId: Type.String({ minLength: 1 }),
-};
 const writeSchema = Type.Union([
 	Type.Object(
 		{
-			action: Type.Literal("prepare"),
 			path: writePathSchema,
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			...writeActionProperties,
 			content: Type.String(),
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
-			...writeActionProperties,
+			path: writePathSchema,
 			contentRef: Type.String({ minLength: 1 }),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			path: writePathSchema,
+			payloadRef: Type.String({ minLength: 1 }),
 		},
 		{ additionalProperties: false },
 	),
 ]);
 
 export type WriteToolInput = Static<typeof writeSchema>;
-
-function prepareWriteArguments(input: unknown): WriteToolInput {
-	if (!input || typeof input !== "object" || Array.isArray(input)) return input as WriteToolInput;
-	const args = input as Record<string, unknown>;
-	if (
-		typeof args.path === "string" &&
-		(args.action === undefined || (args.action === "write" && !hasFileMutationIntentIdShape(args.intentId)))
-	) {
-		return { action: "prepare", path: args.path };
-	}
-	return args as WriteToolInput;
-}
 
 /**
  * Pluggable operations for the write tool.
@@ -79,13 +62,12 @@ const defaultWriteOperations: WriteOperations = {
 export interface WriteToolOptions {
 	/** Custom operations for file writing. Default: local filesystem */
 	operations?: WriteOperations;
-	/** Session-owned two-phase intent and exact-content-reference authority. */
+	/** Session-owned harness preflight and exact-content-reference authority. */
 	intentController?: FileMutationIntentController;
 }
 
 export interface WriteToolDetails {
-	phase: "prepared" | "written";
-	intentId?: string;
+	phase: "written";
 	contentRef?: string;
 	byteCount?: number;
 }
@@ -221,7 +203,7 @@ function getWriteHighlightCache(
 }
 
 function formatWriteCall(
-	args: { action?: string; path?: string; file_path?: string; content?: string; contentRef?: string } | undefined,
+	args: { path?: string; file_path?: string; content?: string; contentRef?: string; payloadRef?: string } | undefined,
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	cache: WriteHighlightCache | undefined,
@@ -231,10 +213,9 @@ function formatWriteCall(
 	const fileContent = str(args?.content);
 	const hasContent = typeof args?.content === "string";
 	const pathDisplay = renderToolPath(rawPath, theme, cwd);
-	const action = args?.action === "prepare" ? "prepare" : undefined;
-	let text = `${theme.fg("toolTitle", theme.bold("write"))}${action ? ` ${theme.fg("muted", action)}` : ""} ${pathDisplay}`;
+	let text = `${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}`;
 
-	if (args?.action === "write" && !hasContent && typeof args.contentRef !== "string") {
+	if (!hasContent && typeof args?.contentRef !== "string" && typeof args?.payloadRef !== "string") {
 		text += `\n\n${theme.fg("error", "[invalid content arg - expected string]")}`;
 	} else if (hasContent && fileContent) {
 		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
@@ -256,9 +237,41 @@ function formatWriteCall(
 		}
 	} else if (args?.contentRef) {
 		text += `\n\n${theme.fg("muted", `reuse ${args.contentRef}`)}`;
+	} else if (args?.payloadRef) {
+		text += `\n\n${theme.fg("muted", `retarget ${args.payloadRef}`)}`;
 	}
 
 	return text;
+}
+
+async function writeCollisionWithRetainedPayload(
+	error: FileMutationPreflightError,
+	input: WriteToolInput,
+	intentController: FileMutationIntentController,
+	signal?: AbortSignal,
+): Promise<Error> {
+	const retargetError = (reference: string): Error =>
+		new Error(
+			`PI_FILE_MUTATION_RETARGET write_collision: ${reference}. Choose only a corrected path; the exact valid write payload is retained.`,
+		);
+	if ("contentRef" in input) {
+		await intentController.assertContentReference(input.contentRef, signal);
+		return retargetError(`contentRef ${input.contentRef}`);
+	}
+	if ("payloadRef" in input) {
+		await intentController.assertMutationPayload(input.payloadRef, "write", signal);
+		return retargetError(`payloadRef ${input.payloadRef}`);
+	}
+
+	try {
+		const retained = await intentController.retainMutationPayload("write", input.content);
+		if (retained) {
+			return retargetError(`payloadRef ${retained.payloadRef}`);
+		}
+	} catch {
+		// The collision remains authoritative when the bounded retry cache is unavailable.
+	}
+	return new Error(`${error.message} The payload could not be retained within the secure retry-cache bound.`);
 }
 
 function formatWriteResult(
@@ -291,87 +304,88 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			'Create a file without overwriting: first call write with action "prepare" and path, then call write with action "write", the accepted intentId, and content or contentRef. Preparation rejects collisions before content generation; writing rechecks atomically.',
+			"Create a new file without overwriting. Send path and exactly one of content or contentRef. After a path-only collision, use the returned payloadRef with only a corrected path. The harness owns preflight, bounded payload retention, and atomic rechecks.",
 		promptSnippet: "Preflight new paths; never overwrite",
 		promptGuidelines: [
-			'Before content generation, call write with action "prepare" and path; then call write with action "write", the returned intentId, and one of content or contentRef.',
+			"Call write once with path and exactly one of content or contentRef; preparation and collision checks are harness-owned.",
+			"If a collision result returns payloadRef, choose a new path and reuse that reference instead of regenerating content.",
 			"Write is create-only; edit existing files. Reuse contentRef for exact copies.",
 		],
 		parameters: writeSchema,
-		prepareArguments: prepareWriteArguments,
 		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const { path } = input;
 			const absolutePath = resolveToCwd(path, cwd);
-			return withFileMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
-				const throwIfAborted = (): void => {
-					if (signal?.aborted) throw new Error("Operation aborted");
-				};
+			const content = "content" in input && typeof input.content === "string" ? input.content : undefined;
+			const contentRef =
+				"contentRef" in input && typeof input.contentRef === "string" ? input.contentRef : undefined;
+			const payloadRef =
+				"payloadRef" in input && typeof input.payloadRef === "string" ? input.payloadRef : undefined;
+			if ([content, contentRef, payloadRef].filter((value) => value !== undefined).length !== 1) {
+				throw new Error("Write requires exactly one of content, contentRef, or payloadRef.");
+			}
+			try {
+				const lease = await intentController.prepare("write", absolutePath, signal, path);
+				return await withFileMutationQueue(absolutePath, async () => {
+					// Do not reject from an abort event listener here: that would release the
+					// mutation queue while an in-flight filesystem operation may still finish.
+					// Checking signal.aborted after each await observes the same aborts while
+					// keeping the queue locked until the current operation has settled.
+					const throwIfAborted = (): void => {
+						if (signal?.aborted) throw new Error("Operation aborted");
+					};
 
-				throwIfAborted();
-				if (input.action === "prepare") {
-					const prepared = await intentController.prepare("write", absolutePath, signal, path);
+					throwIfAborted();
+					await intentController.assertCurrent(lease, signal);
+					await ops.mkdir(dirname(absolutePath));
+					throwIfAborted();
+
+					let contentReference: FileContentReference;
+					try {
+						if (content !== undefined) {
+							await ops.createFile(absolutePath, content);
+							contentReference = intentController.rememberContent(absolutePath, content);
+						} else if (contentRef !== undefined) {
+							contentReference = await intentController.copyReferencedContent(contentRef, absolutePath, signal);
+						} else {
+							if (payloadRef === undefined) throw new Error("Write requires a payload reference.");
+							contentReference = await intentController.copyMutationPayload(payloadRef, absolutePath, signal);
+						}
+					} catch (error) {
+						if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") {
+							throw new FileMutationPreflightError(
+								"write_collision",
+								`Write collision: ${path} already exists; no content was overwritten.`,
+							);
+						}
+						throw error;
+					}
+					throwIfAborted();
+
+					const byteCount = contentReference.byteLength;
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `Write path accepted. Call write again with action "write", path ${path}, and intentId ${prepared.intentId}. The call also needs exactly one required payload field: content with the exact requested text, or contentRef for previously returned exact bytes. Do not omit the payload field.`,
+								text: `Successfully wrote ${byteCount} bytes to ${path}; this write is complete, so do not call write again for this path. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
 							},
 						],
-						details: { phase: "prepared" as const, intentId: prepared.intentId },
-					};
-				}
-
-				const content = "content" in input && typeof input.content === "string" ? input.content : undefined;
-				const contentRef =
-					"contentRef" in input && typeof input.contentRef === "string" ? input.contentRef : undefined;
-				if ((content === undefined) === (contentRef === undefined)) {
-					throw new Error('Write action "write" requires exactly one of content or contentRef.');
-				}
-				const lease = intentController.consume(input.intentId, "write", absolutePath);
-				await intentController.assertCurrent(lease, signal);
-				await ops.mkdir(dirname(absolutePath));
-				throwIfAborted();
-
-				let contentReference: FileContentReference;
-				try {
-					if (content !== undefined) {
-						await ops.createFile(absolutePath, content);
-						contentReference = intentController.rememberContent(absolutePath, content);
-					} else {
-						if (contentRef === undefined) throw new Error('Write action "write" requires content or contentRef.');
-						contentReference = await intentController.copyReferencedContent(contentRef, absolutePath, signal);
-					}
-				} catch (error) {
-					if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") {
-						throw new Error(`Write collision: ${path} already exists; no content was overwritten.`);
-					}
-					throw error;
-				}
-				throwIfAborted();
-
-				const byteCount = contentReference.byteLength;
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `Successfully wrote ${byteCount} bytes to ${path}; this write is complete, so do not call write again for this path. To copy these exact bytes to a different new path, prepare that different path first, then use contentRef ${contentReference.contentRef}.`,
+						details: {
+							phase: "written" as const,
+							contentRef: contentReference.contentRef,
+							byteCount,
 						},
-					],
-					details: {
-						phase: "written" as const,
-						contentRef: contentReference.contentRef,
-						byteCount,
-					},
-				};
-			});
+					};
+				});
+			} catch (error) {
+				if (error instanceof FileMutationPreflightError && error.reason === "write_collision") {
+					throw await writeCollisionWithRetainedPayload(error, input, intentController, signal);
+				}
+				throw error;
+			}
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as
-				| { action?: string; path?: string; file_path?: string; content?: string; contentRef?: string }
+				| { path?: string; file_path?: string; content?: string; contentRef?: string; payloadRef?: string }
 				| undefined;
 			const rawPath = str(renderArgs?.file_path ?? renderArgs?.path);
 			const fileContent = str(renderArgs?.content);

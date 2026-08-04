@@ -860,16 +860,14 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			const component = new ToolExecutionComponent(
 				"write",
 				"tool-write-bounded-preview",
-				{ action: "write", path: "preview.ts", intentId: "intent", content },
+				{ path: "preview.ts", content },
 				{},
 				createWriteToolDefinition(process.cwd()),
 				createFakeTui(),
 				process.cwd(),
 			);
 			component.updateArgs({
-				action: "write",
 				path: "preview.ts",
-				intentId: "intent",
 				content: `${content}\nconst done = true;`,
 			});
 			component.setArgsComplete();

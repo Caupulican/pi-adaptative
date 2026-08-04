@@ -12,7 +12,8 @@ describe("tool execution error catalogue", () => {
 			commandNotFound: "spawn rg ENOENT",
 			encodingCorruption: "PI_FILE_ENCODING_CORRUPTION: legacy.dat is not valid UTF-8 text",
 			repeatedSuccessfulCall: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic,
-			fileMutationIntentInvalid: "File mutation intent is invalid, expired, or belongs to another session",
+			fileMutationRetarget:
+				"PI_FILE_MUTATION_RETARGET: retained as payloadRef file-mutation:123e4567-e89b-12d3-a456-426614174000",
 			fileNotFound: "ENOENT: no such file or directory, open 'missing.txt'",
 			editOldTextNotFound: "oldText failed to match the current file contents",
 			pathOutsideCwd: "Path is outside the current working directory",
@@ -82,6 +83,17 @@ describe("tool execution error catalogue", () => {
 			attemptMemory: "discard",
 			retainDiagnostic: true,
 			guidance: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
+		});
+	});
+
+	it("retains only the bounded retarget reference while discarding the original mutation attempt", () => {
+		const diagnostic =
+			"PI_FILE_MUTATION_RETARGET: retained as payloadRef file-mutation:123e4567-e89b-12d3-a456-426614174000";
+		expect(getToolExecutionErrorPolicy(diagnostic)).toMatchObject({
+			name: "fileMutationRetarget",
+			failureCode: "mutation_retarget_required",
+			attemptMemory: "discard",
+			retainDiagnostic: true,
 		});
 	});
 

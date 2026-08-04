@@ -7,8 +7,9 @@ not exercised.
 
 ## Required invariants
 
-1. Validate cheap authority, path, identity, availability, and collision facts before asking the model for a
-   large payload.
+1. Validate cheap authority, path, identity, availability, and collision facts at the earliest harness-owned
+   execution boundary, before payload processing or mutation. Never make the model coordinate preparation, and
+   recheck mutable facts inside the serialized mutation boundary immediately before the write.
 2. Keep coordinators, payload handles, mutable queues, and retry state session-owned unless cross-session
    coordination is the explicit invariant.
 3. Store large bytes once, outside the JavaScript heap where practical. Context and telemetry retain bounded
@@ -23,10 +24,10 @@ not exercised.
 
 | Boundary | Root cause | Fix | Evidence gate |
 | --- | --- | --- | --- |
-| Write collision | `write` accepted the full content before discovering an occupied destination and could overwrite it. | Two-phase `prepare`/`commit`, path-only collision and parent checks, single-use session intent, and final `wx` no-clobber create. | `test/file-mutation-preflight.test.ts`; `test/file-encoding-policy.test.ts` |
-| Missing/stale edit | `edit` accepted replacement payloads before existence checks and could apply a plan prepared against older bytes. | Path-only preparation records file identity; commit consumes the intent and rejects a missing or changed target. | `test/file-mutation-preflight.test.ts`; `test/file-mutation-queue.test.ts` |
+| Write collision | `write` accepted the full content before discovering an occupied destination and could overwrite it. | One semantic model call; the harness preflights collision and parent access, rechecks inside the path queue, and finishes with atomic no-clobber creation. When the generated payload is valid and only the name collides, its exact bytes move to a bounded session cache so repair supplies only a corrected path and opaque reference. | `test/file-mutation-preflight.test.ts`; `test/file-encoding-policy.test.ts`; `test/phone-filesystem-workflow.test.ts` |
+| Missing/stale edit | `edit` accepted replacement payloads before existence checks and could apply a plan prepared against older bytes. | One semantic model call; the harness snapshots path identity, rechecks after queue admission and immediately before writing, and rejects missing or changed targets. Valid edits paired with only a missing/non-file path receive the same bounded retarget treatment and are fully revalidated against each corrected candidate. | `test/file-mutation-preflight.test.ts`; `test/file-mutation-queue.test.ts`; `test/phone-filesystem-workflow.test.ts` |
 | Repeated exact content | Copying identical generated content to another destination required retransmitting it. | Successful writes/edits return a session-local `contentRef`; the bounded controller hashes the source and performs exclusive verified copies without retaining bytes on the JS heap. | `test/file-mutation-preflight.test.ts` |
-| Encoding corruption | An unsafe text edit could be remembered as a retryable operation and teach repair/re-read loops. | The central execution-error catalogue classifies `PI_FILE_ENCODING_CORRUPTION` as change-approach, consumes the edit intent, retains no operation arguments, exposes one bounded directive, and expires it after the next assistant response. | `packages/ai/test/tool-execution-error-catalogue.test.ts`; `packages/agent/test/tool-failure-memory.test.ts` |
+| Encoding corruption | An unsafe text edit could be remembered as a retryable operation and teach repair/re-read loops. | The central execution-error catalogue classifies `PI_FILE_ENCODING_CORRUPTION` as change-approach, retains no operation arguments, exposes one bounded directive, and expires it after the next assistant response. | `packages/ai/test/tool-execution-error-catalogue.test.ts`; `packages/agent/test/tool-failure-memory.test.ts` |
 | Edit preview flattening | Preview rendering used `JSON.stringify({ path, edits })` during render and result settlement, copying the complete edit payload. | Constant-size request generations fence asynchronous previews; partial renders do not scan accumulated edits. | `test/edit-tool-no-full-redraw.test.ts` |
 | Write preview flattening | Collapsed streamed previews compared the complete prior content prefix, split and highlighted complete snapshots, and retained duplicate full line arrays. | Collapsed rendering inspects at most 8,192 characters, caches by argument-generation identity, and performs one allocation-free final line count; complete text is materialized only on explicit expansion. | `test/tool-execution-component.test.ts` |
 | Loop/failure payload retention | Stall and failure signatures serialized complete tool arguments and stored the normalized string in the loop window. | A streaming structural fingerprint returns 32 hex characters; failure display keeps a bounded structural preview and never serializes the original payload. | `packages/agent/test/tool-failure-memory.test.ts` |
@@ -74,11 +75,12 @@ the interpreter. An invalid working directory can therefore waste the entire gen
 
 Required design:
 
-- Add a path-only/runtime-only prepare action for inline-code mode and a path/runtime prepare action for script
-  mode.
-- Commit consumes a single-use session intent. Runtime failure or coordinator reset invalidates the intent; the
-  code is not stored as retry memory.
-- Do not add a legacy one-phase fallback.
+- Keep one semantic model call. The harness owns cwd/runtime preflight at the start of execution and performs no
+  code evaluation or process creation until it passes.
+- Runtime failure or coordinator reset invalidates any internal lease; code is not stored as retry memory and
+  no preparation token is exposed to the model.
+- If a provider exposes a complete path before the remaining arguments, speculative streaming preflight may
+  warm the same authority check, but final execution remains authoritative and provider-neutral.
 
 Acceptance evidence: invalid cwd/runtime tests prove that no `code` field was accepted; stale and cross-session
 intents fail; successful warm preparation meets the same p95 budget as P0.1.
@@ -102,8 +104,8 @@ path traversal, and cleanup-failure probes; parent session remains responsive an
 
 ### P0.4 Close edit's external-writer race
 
-Evidence: edit commit verifies identity before `readFile()` and later overwrites by path. A non-Pi writer can
-replace the file after the identity check but before the final write.
+Evidence: edit now verifies identity before `readFile()` and again immediately before `writeFile()`. A non-Pi
+writer can still replace the file in the final check/write gap because the adapter overwrites by path.
 
 Required design: bind read/compare/commit to a file handle or an adapter-owned compare-and-replace primitive;
 fail closed when identity changes. Define Windows replace/share semantics explicitly and preserve BOM/newlines.
@@ -139,9 +141,9 @@ same-timestamp replacement, Windows sharing violations, abort, and cleanup failu
 - **Ropes/piece tables for provider payloads:** rejected at the network boundary. Providers still require a
   contiguous JSON/body representation; chunked message ownership, pruning before formatting, and one terminal
   serialization are the useful controls.
-- **Two-phase preflight for `read`, `grep`, `find`, `ls`, and artifact retrieval:** rejected unless new evidence
-  shows large arguments. Their requests are small, outputs are bounded or artifact-backed, and an extra model
-  round trip would cost more than the local validation.
+- **Model-visible two-call preflight for `read`, `grep`, `find`, `ls`, and artifact retrieval:** rejected unless
+  new evidence shows large arguments. Their requests are small, outputs are bounded or artifact-backed, and an
+  extra model round trip would cost more than harness-owned validation.
 - **Replacing native JSON globally:** rejected without per-boundary benchmarks. Several provider transports
   require JSON text; changing parsers cannot remove serialization and may add copies. Optimize duplicate
   serialization and retained ownership first.
@@ -150,11 +152,12 @@ same-timestamp replacement, Windows sharing violations, abort, and cleanup failu
 
 ## Incomplete probes
 
-- Windows timing distributions for local and SSH-backed prepare/commit.
+- Windows timing distributions for local and SSH-backed automatic preflight/final mutation.
+- Live SSH round-trip coverage for remote retained-payload staging, expiry, retarget, and cleanup; the adapter is compile-checked but this cycle used no SSH fixture.
 - Heap/GC profiles for multi-megabyte skill drafts and extension smoke tests.
 - External-writer race reproduction on NTFS with antivirus/indexer sharing behavior.
-- Provider-specific cost of the extra prepare turn versus rejected-payload tokens across native and text tool
-  protocols.
+- Provider-specific rejected-payload cost when a one-call mutation fails preflight after response completion,
+  plus the portability and cancellation semantics of speculative streaming preflight.
 - Persistent Python protocol throughput and reset cost; no implementation exists yet, so prior process-spawn
   timings are not acceptance evidence.
 

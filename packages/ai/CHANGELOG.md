@@ -4,6 +4,10 @@
 
 - Added bounded Amazon Bedrock identity, inference-profile discovery, and one-token model-access probes for durable region-scoped provider configuration.
 
+### Fixed
+
+- Classified harness-retained file-mutation retargets as bounded one-turn repairs that preserve the opaque payload reference while discarding the original failed attempt.
+
 ## [0.85.3] - 2026-08-03
 
 ## [0.85.2] - 2026-08-03

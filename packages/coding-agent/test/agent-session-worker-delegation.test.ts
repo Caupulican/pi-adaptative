@@ -848,30 +848,15 @@ describe("AgentSession worker delegation", () => {
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("write", { action: "prepare", path: "src/direct.ts" })], {
-					stopReason: "toolUse",
-				}),
-				(context) => {
-					const preparation = context.messages.findLast(
-						(message) => message.role === "toolResult" && message.toolName === "write",
-					);
-					const intentId =
-						preparation?.role === "toolResult"
-							? (preparation.details as { intentId?: unknown } | undefined)?.intentId
-							: undefined;
-					if (typeof intentId !== "string") throw new Error("Expected write preparation intent.");
-					return fauxAssistantMessage(
-						[
-							fauxToolCall("write", {
-								action: "write",
-								path: "src/direct.ts",
-								intentId,
-								content: "export const direct = true;\n",
-							}),
-						],
-						{ stopReason: "toolUse" },
-					);
-				},
+				fauxAssistantMessage(
+					[
+						fauxToolCall("write", {
+							path: "src/direct.ts",
+							content: "export const direct = true;\n",
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
 				fauxAssistantMessage('{"summary":"direct write complete","status":"completed","actions":[]}'),
 			]);
 
@@ -1066,7 +1051,7 @@ describe("AgentSession worker delegation", () => {
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("write", { action: "prepare", path: "outside.ts" })], {
+				fauxAssistantMessage([fauxToolCall("write", { path: "outside.ts", content: "must not be written" })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage('{"summary":"write was refused","status":"completed"}'),
@@ -1090,9 +1075,15 @@ describe("AgentSession worker delegation", () => {
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("edit", { action: "prepare", path: "src/missing.ts" })], {
-					stopReason: "toolUse",
-				}),
+				fauxAssistantMessage(
+					[
+						fauxToolCall("edit", {
+							path: "src/missing.ts",
+							edits: [{ oldText: "before", newText: "after" }],
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
 				fauxAssistantMessage('{"summary":"edit failed","status":"completed"}'),
 			]);
 

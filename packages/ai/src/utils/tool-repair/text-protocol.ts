@@ -483,7 +483,6 @@ function stringExampleForProperty(propertyName: string | undefined): string {
 	if (propertyName === "oldText") return "foo";
 	if (propertyName === "newText") return "bar";
 	if (propertyName === "content") return "text";
-	if (propertyName === "intentId") return "RETURNED_INTENT_ID";
 	return "value";
 }
 
@@ -607,30 +606,6 @@ function exampleTools(tools: readonly Tool[]): Tool[] {
 	return examples;
 }
 
-function actionForSchema(schema: Record<string, unknown>): string | undefined {
-	const action = schemaRecord(schemaRecord(schema.properties)?.action);
-	return typeof action?.const === "string" ? action.const : undefined;
-}
-
-function dependentActionSchemas(tool: Tool): Record<string, unknown>[] {
-	const alternatives = schemaAlternatives(tool.parameters);
-	return alternatives.some((schema) => actionForSchema(schema) === "prepare") &&
-		alternatives.some((schema) => {
-			const action = actionForSchema(schema);
-			return action !== undefined && action !== "prepare";
-		})
-		? alternatives
-		: [];
-}
-
-function exampleArgumentsForSchema(schema: Record<string, unknown>): Record<string, unknown> {
-	const properties = schemaRecord(schema.properties);
-	if (!properties) return {};
-	const args: Record<string, unknown> = {};
-	for (const name of requiredPropertyNames(schema)) args[name] = exampleValueForSchema(properties[name], name);
-	return args;
-}
-
 function protocolHeader(variant: TextToolProtocolVariant): string[] {
 	return [
 		"Text tool-call protocol is enabled. To call a tool, emit an envelope in exactly this shape:",
@@ -648,24 +623,9 @@ export function generateTextToolProtocolPrimer(tools: readonly Tool[], options?:
 	const variant = options?.variant ?? DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT;
 	const lines = [...protocolHeader(variant), "Examples:"];
 	for (const tool of exampleTools(tools)) {
-		if (dependentActionSchemas(tool).length > 0) continue;
 		lines.push(
 			formatVariantEnvelope(variant, tool.name, JSON.stringify(exampleArgumentsForParameters(tool.parameters))),
 		);
-	}
-	const dependentTools = tools
-		.map((tool) => ({ tool, schemas: dependentActionSchemas(tool) }))
-		.filter((entry) => entry.schemas.length > 0);
-	if (dependentTools.length > 0) {
-		lines.push(
-			"Dependent action workflows:",
-			"Call action prepare first, wait for its tool result, then copy the returned intentId exactly. Never invent or reuse an intentId.",
-		);
-		for (const { tool, schemas } of dependentTools) {
-			for (const schema of schemas) {
-				lines.push(formatVariantEnvelope(variant, tool.name, JSON.stringify(exampleArgumentsForSchema(schema))));
-			}
-		}
 	}
 	lines.push("Available tools:");
 	for (const tool of tools) {

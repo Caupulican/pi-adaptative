@@ -10,12 +10,31 @@ import {
 } from "../src/core/tools/file-mutation-intent.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 
-interface PreparedMutationDetails {
-	intentId: string;
-}
-
 interface CompletedMutationDetails {
 	contentRef?: string;
+}
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
+}
+
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+	try {
+		await promise;
+		throw new Error("Expected operation to reject.");
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+}
+
+function retainedPayloadRef(message: string): string {
+	const match = message.match(/\bfile-mutation:[0-9a-f-]+\b/i);
+	if (!match) throw new Error(`Expected retained mutation payload reference in: ${message}`);
+	return match[0];
 }
 
 describe("file mutation preflight", () => {
@@ -30,7 +49,7 @@ describe("file mutation preflight", () => {
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
-	it("publishes disjoint path-only prepare and single-payload mutation schemas", () => {
+	it("publishes single-call mutation schemas without harness-owned preparation fields", () => {
 		const write = createWriteTool(testDir);
 		const edit = createEditTool(testDir);
 		const validate = (tool: typeof write | typeof edit, id: string, args: Record<string, unknown>) =>
@@ -40,183 +59,391 @@ describe("file mutation preflight", () => {
 				{ repairEnabled: false },
 			);
 
-		expect(() =>
-			validate(write, "write-prepare-with-content", {
-				action: "prepare",
-				path: "new.txt",
-				content: "must not be accepted before preflight",
+		expect(validate(write, "write-content", { path: "new.txt", content: "one" })).toMatchObject({
+			path: "new.txt",
+			content: "one",
+		});
+		expect(
+			validate(write, "write-retarget", {
+				path: "renamed.txt",
+				payloadRef: "file-mutation:123e4567-e89b-12d3-a456-426614174000",
 			}),
-		).toThrow();
+		).toMatchObject({ path: "renamed.txt" });
+		expect(
+			validate(edit, "edit-replacement", {
+				path: "existing.txt",
+				edits: [{ oldText: "before", newText: "after" }],
+			}),
+		).toMatchObject({ path: "existing.txt" });
+		expect(
+			validate(edit, "edit-retarget", {
+				path: "corrected.txt",
+				payloadRef: "file-mutation:123e4567-e89b-12d3-a456-426614174000",
+			}),
+		).toMatchObject({ path: "corrected.txt" });
 		expect(() =>
-			validate(write, "write-ambiguous-commit", {
-				action: "write",
+			validate(write, "write-leaked-harness-fields", {
 				path: "new.txt",
 				intentId: "intent",
+				action: "write",
 				content: "one",
-				contentRef: "file-content:other",
 			}),
 		).toThrow();
 		expect(() =>
-			validate(edit, "edit-empty-commit", {
-				action: "edit",
+			validate(edit, "edit-leaked-harness-fields", {
 				path: "existing.txt",
 				intentId: "intent",
-				edits: [],
+				action: "edit",
+				edits: [{ oldText: "before", newText: "after" }],
 			}),
 		).toThrow();
-		expect(
-			validate(write, "write-content-commit", {
-				action: "write",
-				path: "new.txt",
-				intentId: "intent",
-				content: "",
-			}),
-		).toMatchObject({ content: "" });
 	});
 
-	it("rejects a write collision during the path-only prepare call", async () => {
+	it("preflights an existing write target before invoking the mutation operation", async () => {
 		const path = join(testDir, "owned.txt");
 		writeFileSync(path, "original", "utf8");
-		const tool = createWriteTool(testDir);
+		let createCalls = 0;
+		const intentController = new FileMutationIntentController();
+		const tool = createWriteTool(testDir, {
+			operations: {
+				mkdir: async () => {},
+				createFile: async () => {
+					createCalls++;
+				},
+			},
+			intentController,
+		});
 
-		await expect(tool.execute("prepare-existing", { action: "prepare", path } as never)).rejects.toThrow(
+		await expect(tool.execute("write-existing", { path, content: "replacement" })).rejects.toThrow(
 			/already exists|collision/i,
 		);
+		expect(createCalls).toBe(0);
 		expect(readFileSync(path, "utf8")).toBe("original");
 	});
 
-	it("teaches every required second-phase field without Git terminology", async () => {
-		const writePath = join(testDir, "new.txt");
-		const editPath = join(testDir, "existing.txt");
-		writeFileSync(editPath, "before", "utf8");
-		const writePrepared = await createWriteTool(testDir).execute("prepare-write-help", {
-			action: "prepare",
-			path: writePath,
-		} as never);
-		const editPrepared = await createEditTool(testDir).execute("prepare-edit-help", {
-			action: "prepare",
-			path: editPath,
-		} as never);
-		const writeHelp = writePrepared.content.find((block) => block.type === "text")?.text ?? "";
-		const editHelp = editPrepared.content.find((block) => block.type === "text")?.text ?? "";
-
-		expect(writeHelp).toContain('action "write"');
-		expect(writeHelp).toContain("intentId");
-		expect(writeHelp).toContain("content");
-		expect(writeHelp).toContain("required");
-		expect(editHelp).toContain('action "edit"');
-		expect(editHelp).toContain("intentId");
-		expect(editHelp).toContain("edits");
-		expect(editHelp).toContain("required");
-		expect(`${writeHelp}\n${editHelp}`).not.toMatch(/\bcommit\b/i);
-	});
-
-	it("reuses one stable intent for duplicate unchanged prepares", async () => {
-		const writePath = join(testDir, "duplicate-write.txt");
-		const writeTool = createWriteTool(testDir);
-		const firstWrite = await writeTool.execute("prepare-write-1", { action: "prepare", path: writePath } as never);
-		const secondWrite = await writeTool.execute("prepare-write-2", {
-			action: "prepare",
-			path: writePath,
-		} as never);
-		expect((secondWrite.details as PreparedMutationDetails).intentId).toBe(
-			(firstWrite.details as PreparedMutationDetails).intentId,
-		);
-		const written = await writeTool.execute("write-after-duplicate-prepare", {
-			action: "write",
-			path: writePath,
-			intentId: (firstWrite.details as PreparedMutationDetails).intentId,
-			content: "created",
-		} as never);
-		expect(readFileSync(writePath, "utf8")).toBe("created");
-		const writeResultText = written.content.find((block) => block.type === "text")?.text ?? "";
-		expect(writeResultText).toContain("write is complete");
-		expect(writeResultText).toContain("different new path");
-
-		const editPath = join(testDir, "duplicate-edit.txt");
-		writeFileSync(editPath, "before", "utf8");
-		const editTool = createEditTool(testDir);
-		const firstEdit = await editTool.execute("prepare-edit-1", { action: "prepare", path: editPath } as never);
-		const secondEdit = await editTool.execute("prepare-edit-2", { action: "prepare", path: editPath } as never);
-		expect((secondEdit.details as PreparedMutationDetails).intentId).toBe(
-			(firstEdit.details as PreparedMutationDetails).intentId,
-		);
-		const edited = await editTool.execute("edit-after-duplicate-prepare", {
-			action: "edit",
-			path: editPath,
-			intentId: (firstEdit.details as PreparedMutationDetails).intentId,
-			edits: [{ oldText: "before", newText: "after" }],
-		} as never);
-		expect(readFileSync(editPath, "utf8")).toBe("after");
-		const editResultText = edited.content.find((block) => block.type === "text")?.text ?? "";
-		expect(editResultText).toContain("edit is complete");
-		expect(editResultText).toContain("different new path");
-	});
-
-	it("refreshes an edit intent when the target changes between prepares", async () => {
-		const path = join(testDir, "changed-between-prepares.txt");
-		writeFileSync(path, "first", "utf8");
-		const tool = createEditTool(testDir);
-		const first = await tool.execute("prepare-before-change", { action: "prepare", path } as never);
-		writeFileSync(path, "second", "utf8");
-		const second = await tool.execute("prepare-after-change", { action: "prepare", path } as never);
-		const firstIntentId = (first.details as PreparedMutationDetails).intentId;
-		const secondIntentId = (second.details as PreparedMutationDetails).intentId;
-
-		expect(secondIntentId).not.toBe(firstIntentId);
-		await expect(
-			tool.execute("edit-with-stale-preparation", {
-				action: "edit",
-				path,
-				intentId: firstIntentId,
-				edits: [{ oldText: "second", newText: "third" }],
-			} as never),
-		).rejects.toThrow(/intent.*invalid|expired/i);
-	});
-
-	it("requires an accepted create intent and rechecks it atomically when writing", async () => {
-		const path = join(testDir, "raced.txt");
+	it("retains a valid write payload after a name collision so only the target must be corrected", async () => {
+		const collidedPath = join(testDir, "occupied.txt");
+		const correctedPath = join(testDir, "available.txt");
+		writeFileSync(collidedPath, "original", "utf8");
 		const tool = createWriteTool(testDir);
-		const prepared = await tool.execute("prepare-create", { action: "prepare", path } as never);
-		const intentId = (prepared.details as PreparedMutationDetails).intentId;
 
-		writeFileSync(path, "won by another process", "utf8");
-		await expect(
-			tool.execute("commit-create", { action: "write", path, intentId, content: "must not overwrite" } as never),
-		).rejects.toThrow(/already exists|collision|stale/i);
-		expect(readFileSync(path, "utf8")).toBe("won by another process");
+		const collision = await rejectionMessage(
+			tool.execute("write-collision", { path: collidedPath, content: "generated once\n" }),
+		);
+		const payloadRef = retainedPayloadRef(collision);
+		expect(collision).toContain("only a corrected path");
+
+		await tool.execute("write-retarget", { path: correctedPath, payloadRef } as never);
+
+		expect(readFileSync(collidedPath, "utf8")).toBe("original");
+		expect(readFileSync(correctedPath, "utf8")).toBe("generated once\n");
 	});
 
-	it("rejects a missing edit target during the path-only prepare call", async () => {
+	it("preflights a missing edit target before invoking read or write operations", async () => {
 		const path = join(testDir, "missing.txt");
-		const tool = createEditTool(testDir);
+		let operationCalls = 0;
+		const intentController = new FileMutationIntentController();
+		const tool = createEditTool(testDir, {
+			operations: {
+				readFile: async () => {
+					operationCalls++;
+					return Buffer.from("");
+				},
+				writeFile: async () => {
+					operationCalls++;
+				},
+			},
+			intentController,
+		});
 
-		await expect(tool.execute("prepare-missing", { action: "prepare", path } as never)).rejects.toThrow(
-			/ENOENT|does not exist|not found/i,
-		);
+		await expect(
+			tool.execute("edit-missing", { path, edits: [{ oldText: "before", newText: "after" }] }),
+		).rejects.toThrow(/ENOENT|does not exist|not found/i);
+		expect(operationCalls).toBe(0);
 		expect(existsSync(path)).toBe(false);
 	});
 
-	it("rejects an edit when the prepared file changed before editing", async () => {
+	it("retains valid edits after a path-only failure and revalidates them against the corrected target", async () => {
+		const missingPath = join(testDir, "wrong-name.txt");
+		const wrongCandidatePath = join(testDir, "wrong-candidate.txt");
+		const correctedPath = join(testDir, "actual-name.txt");
+		const replayPath = join(testDir, "edit-replay.txt");
+		const tool = createEditTool(testDir);
+
+		const missing = await rejectionMessage(
+			tool.execute("edit-missing-retain", {
+				path: missingPath,
+				edits: [{ oldText: "before", newText: "after" }],
+			}),
+		);
+		const payloadRef = retainedPayloadRef(missing);
+		expect(missing).toContain("only a corrected path");
+		writeFileSync(wrongCandidatePath, "unrelated\n", "utf8");
+		writeFileSync(correctedPath, "before\n", "utf8");
+		writeFileSync(replayPath, "before\n", "utf8");
+
+		await expect(
+			tool.execute("edit-retarget-wrong-candidate", { path: wrongCandidatePath, payloadRef } as never),
+		).rejects.toThrow(/exact text|could not find/i);
+		await tool.execute("edit-retarget", { path: correctedPath, payloadRef } as never);
+		await expect(tool.execute("edit-retarget-replay", { path: replayPath, payloadRef } as never)).rejects.toThrow(
+			/invalid|expired/i,
+		);
+
+		expect(readFileSync(wrongCandidatePath, "utf8")).toBe("unrelated\n");
+		expect(readFileSync(correctedPath, "utf8")).toBe("after\n");
+		expect(readFileSync(replayPath, "utf8")).toBe("before\n");
+	});
+
+	it("keeps retained mutation payloads isolated to their owning tool session", async () => {
+		const collidedPath = join(testDir, "owned-collision.txt");
+		const foreignPath = join(testDir, "foreign-target.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		const owner = createWriteTool(testDir);
+		const foreign = createWriteTool(testDir);
+		const collision = await rejectionMessage(
+			owner.execute("write-owner-collision", { path: collidedPath, content: "private payload" }),
+		);
+		const payloadRef = retainedPayloadRef(collision);
+
+		await expect(
+			foreign.execute("write-foreign-retarget", { path: foreignPath, payloadRef } as never),
+		).rejects.toThrow(/session|invalid|expired/i);
+		expect(existsSync(foreignPath)).toBe(false);
+	});
+
+	it("rejects a wrong-kind retained payload before claiming that only the target is wrong", async () => {
+		const collidedPath = join(testDir, "wrong-kind-collision.txt");
+		const missingEditPath = join(testDir, "wrong-kind-edit.txt");
+		const correctedWritePath = join(testDir, "wrong-kind-corrected.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		const intentController = new FileMutationIntentController();
+		const write = createWriteTool(testDir, { intentController });
+		const edit = createEditTool(testDir, { intentController });
+		const collision = await rejectionMessage(
+			write.execute("write-wrong-kind-source", { path: collidedPath, content: "write payload" }),
+		);
+		const payloadRef = retainedPayloadRef(collision);
+
+		const wrongKind = await rejectionMessage(
+			edit.execute("edit-wrong-kind", { path: missingEditPath, payloadRef } as never),
+		);
+
+		expect(wrongKind).toMatch(/for write, not edit/i);
+		expect(wrongKind).not.toContain("PI_FILE_MUTATION_RETARGET");
+		await write.execute("write-after-wrong-kind", { path: correctedWritePath, payloadRef } as never);
+		expect(readFileSync(correctedWritePath, "utf8")).toBe("write payload");
+	});
+
+	it("does not describe an invalid reference collision as a valid retained payload", async () => {
+		const collidedPath = join(testDir, "invalid-reference-collision.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		const tool = createWriteTool(testDir);
+
+		const invalidReference = await rejectionMessage(
+			tool.execute("write-invalid-reference", {
+				path: collidedPath,
+				payloadRef: "file-mutation:123e4567-e89b-12d3-a456-426614174000",
+			} as never),
+		);
+
+		expect(invalidReference).toMatch(/invalid|expired|another session/i);
+		expect(invalidReference).not.toContain("PI_FILE_MUTATION_RETARGET");
+		const invalidContentReference = await rejectionMessage(
+			tool.execute("write-invalid-content-reference", {
+				path: collidedPath,
+				contentRef: "file-content:123e4567-e89b-12d3-a456-426614174000",
+			}),
+		);
+		expect(invalidContentReference).toMatch(/invalid|expired|another session/i);
+		expect(invalidContentReference).not.toContain("PI_FILE_MUTATION_RETARGET");
+		expect(readFileSync(collidedPath, "utf8")).toBe("occupied");
+	});
+
+	it("retargets a valid content reference after a path-only collision without regenerating bytes", async () => {
+		const sourcePath = join(testDir, "content-ref-source.txt");
+		const collidedPath = join(testDir, "content-ref-collision.txt");
+		const correctedPath = join(testDir, "content-ref-corrected.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		const tool = createWriteTool(testDir);
+		const source = await tool.execute("write-content-ref-source", { path: sourcePath, content: "exact source\n" });
+		const contentRef = (source.details as CompletedMutationDetails).contentRef;
+		if (!contentRef) throw new Error("Expected a content reference.");
+
+		const collision = await rejectionMessage(
+			tool.execute("write-content-ref-collision", { path: collidedPath, contentRef }),
+		);
+		expect(collision).toContain(`contentRef ${contentRef}`);
+		expect(collision).toContain("write_collision");
+		await tool.execute("write-content-ref-retarget", { path: correctedPath, contentRef });
+
+		expect(readFileSync(collidedPath, "utf8")).toBe("occupied");
+		expect(readFileSync(correctedPath, "utf8")).toBe("exact source\n");
+	});
+
+	it("consumes a retained write payload exactly once", async () => {
+		const collidedPath = join(testDir, "single-use-collision.txt");
+		const firstTarget = join(testDir, "single-use-first.txt");
+		const replayTarget = join(testDir, "single-use-replay.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		const tool = createWriteTool(testDir);
+		const collision = await rejectionMessage(
+			tool.execute("write-single-use-source", { path: collidedPath, content: "one use" }),
+		);
+		const payloadRef = retainedPayloadRef(collision);
+
+		await tool.execute("write-single-use-first", { path: firstTarget, payloadRef } as never);
+		await expect(
+			tool.execute("write-single-use-replay", { path: replayTarget, payloadRef } as never),
+		).rejects.toThrow(/invalid|expired/i);
+
+		expect(readFileSync(firstTarget, "utf8")).toBe("one use");
+		expect(existsSync(replayTarget)).toBe(false);
+	});
+
+	it("does not retain a valid payload for a non-target write failure", async () => {
+		const parentFile = join(testDir, "not-a-directory");
+		const targetPath = join(parentFile, "child.txt");
+		writeFileSync(parentFile, "occupied parent", "utf8");
+		const tool = createWriteTool(testDir);
+
+		const failure = await rejectionMessage(
+			tool.execute("write-invalid-parent", { path: targetPath, content: "must not be cached" }),
+		);
+
+		expect(failure).toMatch(/parent path is not a directory/i);
+		expect(failure).not.toContain("PI_FILE_MUTATION_RETARGET");
+		expect(failure).not.toContain("payloadRef");
+		expect(readFileSync(parentFile, "utf8")).toBe("occupied parent");
+	});
+
+	it("does not retain a colliding payload beyond the configured byte bound", async () => {
+		const collidedPath = join(testDir, "bounded-collision.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		const intentController = new FileMutationIntentController({ mutationPayloadByteLimit: 4 });
+		const tool = createWriteTool(testDir, { intentController });
+
+		const collision = await rejectionMessage(
+			tool.execute("write-over-cache-bound", { path: collidedPath, content: "five!" }),
+		);
+
+		expect(collision).toContain("could not be retained");
+		expect(collision).not.toContain("payloadRef");
+		expect(readFileSync(collidedPath, "utf8")).toBe("occupied");
+	});
+
+	it("expires retained mutation payloads before a delayed retarget", async () => {
+		const collidedPath = join(testDir, "expiring-collision.txt");
+		const correctedPath = join(testDir, "expired-target.txt");
+		writeFileSync(collidedPath, "occupied", "utf8");
+		let now = 1_000;
+		const intentController = new FileMutationIntentController({
+			mutationPayloadTtlMs: 10,
+			now: () => now,
+		});
+		const tool = createWriteTool(testDir, { intentController });
+		const collision = await rejectionMessage(
+			tool.execute("write-expiring-payload", { path: collidedPath, content: "temporary" }),
+		);
+		const payloadRef = retainedPayloadRef(collision);
+		now += 11;
+
+		await expect(
+			tool.execute("write-expired-retarget", { path: correctedPath, payloadRef } as never),
+		).rejects.toThrow(/invalid|expired/i);
+		expect(existsSync(correctedPath)).toBe(false);
+	});
+
+	it("rechecks a write target after preflight and before exclusive creation", async () => {
+		const path = join(testDir, "raced.txt");
+		let targetInspections = 0;
+		let createCalls = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && ++targetInspections === 2) writeFileSync(path, "won by another process", "utf8");
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createWriteTool(testDir, {
+			operations: {
+				mkdir: async () => {},
+				createFile: async () => {
+					createCalls++;
+				},
+			},
+			intentController,
+		});
+
+		await expect(tool.execute("write-raced", { path, content: "must not overwrite" })).rejects.toThrow(
+			/already exists|collision|stale/i,
+		);
+		expect(targetInspections).toBe(2);
+		expect(createCalls).toBe(0);
+		expect(readFileSync(path, "utf8")).toBe("won by another process");
+	});
+
+	it("rechecks edit identity after preflight and rejects an externally changed target", async () => {
 		const path = join(testDir, "stale.txt");
 		writeFileSync(path, "alpha\nbeta\n", "utf8");
-		const tool = createEditTool(testDir);
-		const prepared = await tool.execute("prepare-edit", { action: "prepare", path } as never);
-		const intentId = (prepared.details as PreparedMutationDetails).intentId;
+		let targetInspections = 0;
+		let writeCalls = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && ++targetInspections === 2) writeFileSync(path, "external change\n", "utf8");
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createEditTool(testDir, {
+			operations: {
+				readFile: async (target) => readFileSync(target),
+				writeFile: async () => {
+					writeCalls++;
+				},
+			},
+			intentController,
+		});
 
-		writeFileSync(path, "external change\n", "utf8");
 		await expect(
-			tool.execute("commit-edit", {
-				action: "edit",
-				path,
-				intentId,
-				edits: [{ oldText: "alpha", newText: "ALPHA" }],
-			} as never),
+			tool.execute("edit-stale", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
 		).rejects.toThrow(/changed|stale/i);
+		expect(targetInspections).toBe(2);
+		expect(writeCalls).toBe(0);
 		expect(readFileSync(path, "utf8")).toBe("external change\n");
 	});
 
-	it("uses the intent authority as the only edit access-check path", async () => {
+	it("rechecks edit identity immediately before writing and preserves a concurrent external change", async () => {
+		const path = join(testDir, "changed-after-read.txt");
+		writeFileSync(path, "alpha\nbeta\n", "utf8");
+		let writeCalls = 0;
+		const intentController = new FileMutationIntentController();
+		const tool = createEditTool(testDir, {
+			operations: {
+				readFile: async (target) => {
+					const original = readFileSync(target);
+					writeFileSync(target, "external change after read\n", "utf8");
+					return original;
+				},
+				writeFile: async () => {
+					writeCalls++;
+				},
+			},
+			intentController,
+		});
+
+		await expect(
+			tool.execute("edit-changed-after-read", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
+		).rejects.toThrow(/changed during edit execution/i);
+		expect(writeCalls).toBe(0);
+		expect(readFileSync(path, "utf8")).toBe("external change after read\n");
+	});
+
+	it("uses the preflight authority as the only edit access-check path", async () => {
 		const path = join(testDir, "single-access-owner.txt");
 		writeFileSync(path, "alpha\n", "utf8");
 		let accessCalls = 0;
@@ -235,32 +462,25 @@ describe("file mutation preflight", () => {
 			intentController,
 		});
 
-		const prepared = await tool.execute("prepare-access-owner", { action: "prepare", path } as never);
-		await tool.execute("commit-access-owner", {
-			action: "edit",
+		await tool.execute("edit-access-owner", {
 			path,
-			intentId: (prepared.details as PreparedMutationDetails).intentId,
 			edits: [{ oldText: "alpha", newText: "ALPHA" }],
-		} as never);
+		});
 
-		expect(accessCalls).toBe(2);
+		expect(accessCalls).toBe(3);
 	});
 
-	it("discards an encoding-blocked edit intent and requires a byte-safe approach", async () => {
+	it("keeps invalid UTF-8 bytes unchanged on repeated semantic edit attempts", async () => {
 		const path = join(testDir, "corrupt.dat");
 		const originalBytes = Buffer.from([0xff, 0xfe, 0x80, 0xbf]);
 		writeFileSync(path, originalBytes);
 		const tool = createEditTool(testDir);
-		const firstPrepare = await tool.execute("prepare-corrupt", { action: "prepare", path } as never);
-		const firstIntentId = (firstPrepare.details as PreparedMutationDetails).intentId;
-		const edits = [{ oldText: "alpha", newText: "ALPHA" }];
+		const input = { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] };
 
-		await expect(
-			tool.execute("commit-corrupt", { action: "edit", path, intentId: firstIntentId, edits } as never),
-		).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION.*exact text replacement.*unsafe/is);
-		await expect(
-			tool.execute("replay-corrupt", { action: "edit", path, intentId: firstIntentId, edits } as never),
-		).rejects.toThrow(/intent.*invalid|expired/i);
+		await expect(tool.execute("edit-corrupt", input)).rejects.toThrow(
+			/PI_FILE_ENCODING_CORRUPTION.*exact text replacement.*unsafe/is,
+		);
+		await expect(tool.execute("edit-corrupt-retry", input)).rejects.toThrow(/PI_FILE_ENCODING_CORRUPTION/is);
 		expect(readFileSync(path)).toEqual(originalBytes);
 	});
 
@@ -268,52 +488,62 @@ describe("file mutation preflight", () => {
 		const sourcePath = join(testDir, "source.txt");
 		const targetPath = join(testDir, "nested", "target.txt");
 		const tool = createWriteTool(testDir);
-		const sourceIntent = (await tool.execute("prepare-source", { action: "prepare", path: sourcePath } as never))
-			.details as PreparedMutationDetails;
-		const sourceResult = await tool.execute("commit-source", {
-			action: "write",
-			path: sourcePath,
-			intentId: sourceIntent.intentId,
-			content: "same bytes\n",
-		} as never);
+		const sourceResult = await tool.execute("write-source", { path: sourcePath, content: "same bytes\n" });
 		const contentRef = (sourceResult.details as CompletedMutationDetails).contentRef;
 		expect(contentRef).toMatch(/^file-content:/);
 
-		const targetIntent = (await tool.execute("prepare-target", { action: "prepare", path: targetPath } as never))
-			.details as PreparedMutationDetails;
-		await tool.execute("commit-target", {
-			action: "write",
-			path: targetPath,
-			intentId: targetIntent.intentId,
-			contentRef,
-		} as never);
+		await tool.execute("write-target", { path: targetPath, contentRef: contentRef ?? "" });
 
 		expect(readFileSync(targetPath, "utf8")).toBe("same bytes\n");
 	});
 
-	it("does not accept an intent created by another tool session", async () => {
-		const path = join(testDir, "isolated.txt");
+	it("does not accept a content reference created by another tool session", async () => {
+		const sourcePath = join(testDir, "source.txt");
+		const targetPath = join(testDir, "isolated.txt");
 		const owner = createWriteTool(testDir);
 		const foreign = createWriteTool(testDir);
-		const prepared = await owner.execute("prepare-owner", { action: "prepare", path } as never);
-		const intentId = (prepared.details as PreparedMutationDetails).intentId;
+		const sourceResult = await owner.execute("write-owner", { path: sourcePath, content: "private" });
+		const contentRef = (sourceResult.details as CompletedMutationDetails).contentRef;
 
 		await expect(
-			foreign.execute("commit-foreign", { action: "write", path, intentId, content: "no" } as never),
-		).rejects.toThrow(/intent.*invalid|unknown intent|session/i);
-		expect(existsSync(path)).toBe(false);
+			foreign.execute("write-foreign", { path: targetPath, contentRef: contentRef ?? "" }),
+		).rejects.toThrow(/content reference.*session|invalid.*content reference/i);
+		expect(existsSync(targetPath)).toBe(false);
 	});
 
-	it("consumes an intent exactly once under concurrent writes", async () => {
-		const path = join(testDir, "single-use.txt");
-		const tool = createWriteTool(testDir);
-		const prepared = await tool.execute("prepare-once", { action: "prepare", path } as never);
-		const intentId = (prepared.details as PreparedMutationDetails).intentId;
+	it("allows exactly one of two concurrent writes after both early preflights pass", async () => {
+		const path = join(testDir, "single-create.txt");
+		const bothPreflightsReached = createDeferred();
+		let initialInspections = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && initialInspections < 2) {
+						initialInspections++;
+						if (initialInspections === 2) bothPreflightsReached.resolve();
+						await bothPreflightsReached.promise;
+					}
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createWriteTool(testDir, {
+			operations: {
+				mkdir: async (target) => {
+					mkdirSync(target, { recursive: true });
+				},
+				createFile: async (target, content) => writeFileSync(target, content, { encoding: "utf8", flag: "wx" }),
+			},
+			intentController,
+		});
 
 		const outcomes = await Promise.allSettled([
-			tool.execute("commit-once-a", { action: "write", path, intentId, content: "a" } as never),
-			tool.execute("commit-once-b", { action: "write", path, intentId, content: "b" } as never),
+			tool.execute("write-a", { path, content: "a" }),
+			tool.execute("write-b", { path, content: "b" }),
 		]);
+
+		expect(initialInspections).toBe(2);
 		expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
 		expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
 		expect(["a", "b"]).toContain(readFileSync(path, "utf8"));
@@ -323,28 +553,12 @@ describe("file mutation preflight", () => {
 		const sourcePath = join(testDir, "changing-source.txt");
 		const targetPath = join(testDir, "must-not-exist.txt");
 		const tool = createWriteTool(testDir);
-		const sourceIntent = (
-			await tool.execute("prepare-changing-source", { action: "prepare", path: sourcePath } as never)
-		).details as PreparedMutationDetails;
-		const sourceResult = await tool.execute("commit-changing-source", {
-			action: "write",
-			path: sourcePath,
-			intentId: sourceIntent.intentId,
-			content: "original",
-		} as never);
+		const sourceResult = await tool.execute("write-changing-source", { path: sourcePath, content: "original" });
 		const contentRef = (sourceResult.details as CompletedMutationDetails).contentRef;
 		writeFileSync(sourcePath, "changed", "utf8");
-		const targetIntent = (
-			await tool.execute("prepare-changed-target", { action: "prepare", path: targetPath } as never)
-		).details as PreparedMutationDetails;
 
 		await expect(
-			tool.execute("commit-changed-target", {
-				action: "write",
-				path: targetPath,
-				intentId: targetIntent.intentId,
-				contentRef,
-			} as never),
+			tool.execute("write-changed-target", { path: targetPath, contentRef: contentRef ?? "" }),
 		).rejects.toThrow(/source changed/i);
 		expect(existsSync(targetPath)).toBe(false);
 	});
@@ -354,13 +568,7 @@ describe("file mutation preflight", () => {
 		const tool = createWriteTool(testDir, { intentController });
 		const writeAndReference = async (name: string, content: string): Promise<string> => {
 			const path = join(testDir, name);
-			const prepared = await tool.execute(`prepare-${name}`, { action: "prepare", path } as never);
-			const result = await tool.execute(`commit-${name}`, {
-				action: "write",
-				path,
-				intentId: (prepared.details as PreparedMutationDetails).intentId,
-				content,
-			} as never);
+			const result = await tool.execute(`write-${name}`, { path, content });
 			const contentRef = (result.details as CompletedMutationDetails).contentRef;
 			if (!contentRef) throw new Error("Expected a content reference.");
 			return contentRef;
@@ -368,16 +576,10 @@ describe("file mutation preflight", () => {
 		const evictedRef = await writeAndReference("first.txt", "first");
 		await writeAndReference("second.txt", "second");
 		const targetPath = join(testDir, "evicted-target.txt");
-		const prepared = await tool.execute("prepare-evicted-target", { action: "prepare", path: targetPath } as never);
 
-		await expect(
-			tool.execute("commit-evicted-target", {
-				action: "write",
-				path: targetPath,
-				intentId: (prepared.details as PreparedMutationDetails).intentId,
-				contentRef: evictedRef,
-			} as never),
-		).rejects.toThrow(/invalid|expired/i);
+		await expect(tool.execute("write-evicted-target", { path: targetPath, contentRef: evictedRef })).rejects.toThrow(
+			/invalid|expired/i,
+		);
 		expect(existsSync(targetPath)).toBe(false);
 	});
 });

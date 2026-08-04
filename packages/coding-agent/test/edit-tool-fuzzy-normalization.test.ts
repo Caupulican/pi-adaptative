@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import { generateDiffString, normalizeToLF } from "../src/core/tools/edit-diff.ts";
-import { withPreparedEdit } from "./helpers/file-mutation-tools.ts";
 
 const tempDirs: string[] = [];
 
@@ -25,7 +24,7 @@ describe("edit tool fuzzy matching", () => {
 		const before = "target — line\nunrelated “quote”  \n";
 		await writeFile(filePath, before, "utf8");
 
-		const tool = withPreparedEdit(createEditTool(dir));
+		const tool = createEditTool(dir);
 		const result = await tool.execute("tool-1", {
 			path: "fuzzy.txt",
 			edits: [{ oldText: "target - line", newText: "target - changed" }],
@@ -41,7 +40,7 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "exact.txt");
 		await writeFile(filePath, "target - line\nunrelated “quote”  \n", "utf8");
 
-		const tool = withPreparedEdit(createEditTool(dir));
+		const tool = createEditTool(dir);
 		await tool.execute("tool-1", {
 			path: "exact.txt",
 			edits: [{ oldText: "target - line", newText: "target - changed" }],
@@ -55,7 +54,7 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "crlf.txt");
 		await writeFile(filePath, "alpha — one\r\nbeta\r\n", "utf8");
 
-		const tool = withPreparedEdit(createEditTool(dir));
+		const tool = createEditTool(dir);
 		await tool.execute("tool-1", {
 			path: "crlf.txt",
 			edits: [{ oldText: "alpha - one", newText: "alpha - two" }],
@@ -69,7 +68,7 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "duplicates.txt");
 		await writeFile(filePath, "x - y\nx — y\n", "utf8");
 
-		const tool = withPreparedEdit(createEditTool(dir));
+		const tool = createEditTool(dir);
 		await tool.execute("tool-1", {
 			path: "duplicates.txt",
 			edits: [{ oldText: "x - y", newText: "ascii changed" }],
@@ -83,7 +82,7 @@ describe("edit tool fuzzy matching", () => {
 		const filePath = join(dir, "fuzzy-duplicates.txt");
 		await writeFile(filePath, "x — y\nx – y\n", "utf8");
 
-		const tool = withPreparedEdit(createEditTool(dir));
+		const tool = createEditTool(dir);
 		await expect(
 			tool.execute("tool-1", {
 				path: "fuzzy-duplicates.txt",

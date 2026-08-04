@@ -20,27 +20,26 @@ afterEach(async () => {
 describe("edit tool prepareArguments", () => {
 	it("keeps legacy fields out of the public schema", () => {
 		const definition = createEditToolDefinition(process.cwd());
-		const variants = (definition.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> }).anyOf;
-		expect(variants).toBeDefined();
-		for (const variant of variants ?? []) {
-			expect(variant.properties).not.toHaveProperty("oldText");
-			expect(variant.properties).not.toHaveProperty("newText");
+		const alternatives = (definition.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> }).anyOf;
+		expect(alternatives).toHaveLength(2);
+		for (const alternative of alternatives ?? []) {
+			expect(alternative.properties).not.toHaveProperty("oldText");
+			expect(alternative.properties).not.toHaveProperty("newText");
+			expect(alternative.properties).not.toHaveProperty("action");
+			expect(alternative.properties).not.toHaveProperty("intentId");
 		}
+		expect(alternatives?.some((alternative) => alternative.properties?.payloadRef !== undefined)).toBe(true);
 	});
 
 	it("folds top-level oldText/newText into edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			oldText: "before",
 			newText: "after",
 		});
 		expect(prepared).toEqual({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: [{ oldText: "before", newText: "after" }],
 		});
 	});
@@ -48,17 +47,13 @@ describe("edit tool prepareArguments", () => {
 	it("appends legacy replacement to existing edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: [{ oldText: "a", newText: "b" }],
 			oldText: "c",
 			newText: "d",
 		});
 		expect(prepared).toEqual({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: [
 				{ oldText: "a", newText: "b" },
 				{ oldText: "c", newText: "d" },
@@ -69,9 +64,7 @@ describe("edit tool prepareArguments", () => {
 	it("passes through valid input unchanged", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const input = {
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: [{ oldText: "a", newText: "b" }],
 		};
 		const prepared = definition.prepareArguments!(input);
@@ -91,19 +84,8 @@ describe("edit tool prepareArguments", () => {
 		await writeFile(filePath, "before\n", "utf8");
 
 		const definition = createEditToolDefinition(dir);
-		const preparation = await definition.execute(
-			"tool-prepare",
-			{ action: "prepare", path: "legacy.txt" },
-			undefined,
-			undefined,
-			{} as ExtensionContext,
-		);
-		const intentId = preparation.details?.intentId;
-		if (!intentId) throw new Error("Expected edit preparation to return an intent id.");
 		const prepared = definition.prepareArguments!({
-			action: "edit",
 			path: "legacy.txt",
-			intentId,
 			oldText: "before",
 			newText: "after",
 		});
@@ -112,7 +94,7 @@ describe("edit tool prepareArguments", () => {
 		const resultText = result.content[0];
 		if (resultText?.type !== "text") throw new Error("Expected edit result text.");
 		expect(result.details?.contentRef).toMatch(/^file-content:/);
-		expect(resultText.text).toContain("Successfully replaced 1 block(s) in legacy.txt.");
+		expect(resultText.text).toContain("Successfully replaced 1 block(s) in legacy.txt;");
 		expect(resultText.text).toContain(`contentRef ${result.details?.contentRef}`);
 		expect(await readFile(filePath, "utf8")).toBe("after\n");
 	});
@@ -122,15 +104,11 @@ describe("edit tool stringified edits", () => {
 	it("leaves JSON-string edits for the shared validation repair layer", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
 		});
 		expect(prepared).toEqual({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
 		});
 	});
@@ -138,15 +116,11 @@ describe("edit tool stringified edits", () => {
 	it("leaves edits alone when the string is not valid JSON", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: "not json",
 		});
 		expect(prepared).toEqual({
-			action: "edit",
 			path: "file.txt",
-			intentId: "intent-1",
 			edits: "not json",
 		});
 	});

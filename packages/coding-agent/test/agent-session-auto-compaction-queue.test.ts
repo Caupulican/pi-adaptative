@@ -146,17 +146,19 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const internals = session as unknown as {
-			_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
-			_handlePostAgentRun: () => Promise<boolean>;
+			_foregroundRecovery: {
+				runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+				handlePostAgentRun: () => Promise<boolean>;
+			};
 		};
-		vi.spyOn(internals, "_handlePostAgentRun")
+		vi.spyOn(internals._foregroundRecovery, "handlePostAgentRun")
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(false);
 
-		await internals._runAgentPrompt({
+		await internals._foregroundRecovery.runAgentPrompt({
 			role: "user",
 			content: [{ type: "text", text: "keep working" }],
 			timestamp: Date.now(),
@@ -172,16 +174,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 		vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const internals = session as unknown as {
-			_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
-			_handlePostAgentRun: () => Promise<boolean>;
+			_foregroundRecovery: {
+				runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+				handlePostAgentRun: () => Promise<boolean>;
+			};
 		};
-		vi.spyOn(internals, "_handlePostAgentRun")
+		vi.spyOn(internals._foregroundRecovery, "handlePostAgentRun")
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(true)
 			.mockResolvedValueOnce(false);
 
-		await internals._runAgentPrompt({
+		await internals._foregroundRecovery.runAgentPrompt({
 			role: "user",
 			content: [{ type: "text", text: "keep working" }],
 			timestamp: Date.now(),

@@ -122,22 +122,6 @@ describe("tool failure memory", () => {
 		expect(assessment.guidance).toContain("list the parent directory or re-read the path");
 	});
 
-	it("teaches recovery from an invalid file-mutation intent instead of halting", () => {
-		const assessment = assessToolFailure(
-			"File mutation intent is invalid, expired, or belongs to another session.",
-			"failed",
-			"Error",
-		);
-
-		expect(assessment).toEqual({
-			failureCode: "mutation_intent_invalid",
-			phase: "execution",
-			diagnostic: "File mutation intent is invalid, expired, or belongs to another session.",
-			guidance:
-				'Call the same file tool with action "prepare" and the same path, wait for its result, then copy the returned intentId exactly into action "write" or "edit". Never invent or reuse an intentId.',
-		});
-	});
-
 	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {
 		const assessment = assessToolFailure(
 			"PI_FILE_ENCODING_CORRUPTION: corrupt.dat is not valid UTF-8 text",
@@ -156,7 +140,7 @@ describe("tool failure memory", () => {
 		const failure = rememberToolFailure(
 			tracker,
 			"edit",
-			{ path: "corrupt.dat", intentId: "secret-attempt", edits: [{ oldText: "payload", newText: "next" }] },
+			{ path: "corrupt.dat", edits: [{ oldText: "payload", newText: "next" }] },
 			"failed",
 			assessment.failureCode,
 			assessment.guidance,
@@ -176,7 +160,6 @@ describe("tool failure memory", () => {
 						name: "edit",
 						arguments: {
 							path: "corrupt.dat",
-							intentId: "secret-attempt",
 							edits: [{ oldText: "payload", newText: "next" }],
 						},
 					},
@@ -208,7 +191,6 @@ describe("tool failure memory", () => {
 		const nextRequest = sanitizeToolFailureContext(failedTurn, "base");
 		expect(nextRequest.messages).toEqual([]);
 		expect(nextRequest.systemPrompt).toContain("Change approach");
-		expect(nextRequest.systemPrompt).not.toContain("secret-attempt");
 		expect(nextRequest.systemPrompt).not.toContain("payload");
 		expect(nextRequest.systemPrompt).not.toContain("corrupt.dat");
 
@@ -236,6 +218,79 @@ describe("tool failure memory", () => {
 			"base",
 		);
 		expect(afterAgentChangedApproach.systemPrompt).toBe("base");
+	});
+
+	it("teaches a retained mutation retarget without preserving generated content", () => {
+		const payloadRef = "file-mutation:123e4567-e89b-12d3-a456-426614174000";
+		const assessment = assessToolFailure(
+			`Write collision. PI_FILE_MUTATION_RETARGET: exact payload retained as payloadRef ${payloadRef}.`,
+			"failed",
+			"Error",
+		);
+
+		expect(assessment).toMatchObject({
+			failureCode: "mutation_retarget_required",
+			phase: "execution",
+			attemptMemory: "discard",
+			diagnostic: expect.stringContaining(payloadRef),
+			guidance: expect.stringContaining("corrected target path"),
+		});
+		const tracker = new Map();
+		const failure = rememberToolFailure(
+			tracker,
+			"write",
+			{ path: "occupied.txt", content: "GENERATED_CONTENT_MUST_NOT_SURVIVE" },
+			"failed",
+			assessment.failureCode,
+			assessment.guidance,
+			assessment.diagnostic,
+			assessment.phase,
+		);
+		expect(tracker.size).toBe(0);
+		const result = createToolFailureResult(failure);
+		expect(JSON.stringify(result)).toContain(payloadRef);
+		expect(JSON.stringify(result)).not.toContain("GENERATED_CONTENT_MUST_NOT_SURVIVE");
+		const nextRequest = sanitizeToolFailureContext(
+			[
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "retarget-call",
+							name: "write",
+							arguments: { path: "occupied.txt", content: "GENERATED_CONTENT_MUST_NOT_SURVIVE" },
+						},
+					],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "retarget-call",
+					toolName: "write",
+					content: result.content,
+					details: result.details,
+					isError: true,
+					timestamp: 2,
+				},
+			],
+			"base",
+		);
+		expect(nextRequest.messages).toEqual([]);
+		expect(nextRequest.systemPrompt).toContain(payloadRef);
+		expect(nextRequest.systemPrompt).not.toContain("GENERATED_CONTENT_MUST_NOT_SURVIVE");
 	});
 
 	it("labels rejected-argument guidance as repair and execution guidance as next_action", () => {
