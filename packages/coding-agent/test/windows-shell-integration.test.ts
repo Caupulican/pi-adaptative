@@ -213,7 +213,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 	it.skipIf(!hasRipgrep)("(g) invokes native rg.exe through both the simple and combined routes", async () => {
 		const sessionKey = freshSessionKey("native-ripgrep");
 		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-rg-"));
-		const sourcePath = join(root, "source.txt");
+		const sourcePath = join(root, "Hairware 7 (Release).txt");
 		writeFileSync(sourcePath, "needle\nother\nmiss\n", "utf8");
 
 		try {
@@ -241,6 +241,73 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			const combinedContent = combined.content[0];
 			if (combinedContent?.type !== "text") throw new Error("expected text output");
 			expect(combinedContent.text).toBe("needle\nother\n");
+
+			const noMatch = await tool.execute(
+				"call-g3",
+				{
+					command:
+						`printf '%s\\n' '--- first search ---'; rg -n 'absent' '${source}'; ` +
+						`printf '%s\\n' '--- final search ---'; rg -n 'absent' '${source}';`,
+				},
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const noMatchContent = noMatch.content[0];
+			if (noMatchContent?.type !== "text") throw new Error("expected text output");
+			expect(noMatchContent.text).toContain("--- final search ---");
+			expect(noMatchContent.text).toContain("Final rg search completed with no matches.");
+
+			await expect(
+				tool.execute("call-g4", { command: `rg '(' '${source}'` }, undefined, undefined, undefined as never),
+			).rejects.toThrow("Command exited with code 2");
+		} finally {
+			disposeShellExecutionSession(sessionKey);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("(h) retains one PowerShell process across routed external commands and empty grep results", async () => {
+		const sessionKey = freshSessionKey("powershell-process-lifetime");
+		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-lifetime-"));
+		const sourcePath = join(root, "source.txt");
+		writeFileSync(sourcePath, "needle\n", "utf8");
+		try {
+			const tool = createBashToolDefinition(root, { sessionKey });
+			const parentPid = async (toolCallId: string): Promise<string> => {
+				const result = await tool.execute(
+					toolCallId,
+					{ command: 'node -e "console.log(process.ppid)"' },
+					undefined,
+					undefined,
+					undefined as never,
+				);
+				const content = result.content[0];
+				if (content?.type !== "text") throw new Error("expected text output");
+				return content.text.trim();
+			};
+
+			const firstParentPid = await parentPid("call-h1");
+			const empty = await tool.execute(
+				"call-h2",
+				{ command: "grep absent source.txt" },
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			const emptyContent = empty.content[0];
+			if (emptyContent?.type !== "text") throw new Error("expected text output");
+			expect(emptyContent.text).toContain("Final grep search completed with no matches.");
+			expect(await parentPid("call-h3")).toBe(firstParentPid);
+			await expect(
+				tool.execute(
+					"call-h4",
+					{ command: "pi-command-that-does-not-exist --version" },
+					undefined,
+					undefined,
+					undefined as never,
+				),
+			).rejects.toThrow("Command exited with code 1");
 		} finally {
 			disposeShellExecutionSession(sessionKey);
 			rmSync(root, { recursive: true, force: true });

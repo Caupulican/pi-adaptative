@@ -753,7 +753,7 @@ export class ContextPipeline {
 						}
 					: undefined,
 			});
-			this._latestContextGcReport = result.report;
+			if (writePayloads) this._latestContextGcReport = result.report;
 			// Only release/reclaim on the real per-turn pass (writePayloads=true), never on
 			// the read-only status-report path (getContextGcReport with writePayloads=false),
 			// so merely inspecting the report can't have side effects.
@@ -770,7 +770,7 @@ export class ContextPipeline {
 				savedTokens: 0,
 				records: [],
 			};
-			this._latestContextGcReport = report;
+			if (writePayloads) this._latestContextGcReport = report;
 			return { messages, report };
 		}
 	}

@@ -14,7 +14,8 @@ describe("stable Bash-like shell contract router", () => {
 		expect(route).toMatchObject({ kind: "powershell", argv: ["git", "commit", "-m", "fix users bug"] });
 		if (route.kind !== "powershell") throw new Error("Expected PowerShell route");
 		expect(route.command).toContain("& 'git' 'commit' '-m' 'fix users bug'");
-		expect(route.command).toContain("exit $LASTEXITCODE");
+		expect(route.command).toContain("__pi_complete_status $__pi_external_code");
+		expect(route.command).toContain("else { exit $__pi_external_code }");
 	});
 
 	it("keeps native ripgrep on the lowest-overhead route for each command shape", () => {
@@ -69,7 +70,10 @@ describe("stable Bash-like shell contract router", () => {
 		expect(powershellCommand("echo -n hi")).toContain("[Console]::Out.Write((@('hi') -join ' '))");
 		expect(powershellCommand("echo -nn hi")).toContain("[Console]::Out.Write((@('hi') -join ' '))");
 		expect(powershellCommand("echo -value")).toContain("[Console]::Out.WriteLine((@('-value') -join ' '))");
-		expect(powershellCommand("grep missing file.txt")).toContain("if ($matches.Count -eq 0) { exit 1 }");
+		expect(powershellCommand("grep missing file.txt")).toContain("if ($matches.Count -eq 0) { $__pi_grep_code = 1 }");
+		expect(powershellCommand("grep missing file.txt")).toContain(
+			"catch { [Console]::Error.WriteLine($_.Exception.Message); $__pi_grep_code = 2 }",
+		);
 		expect(powershellCommand("rm -f missing.txt")).not.toContain("else { throw");
 		expect(powershellCommand("rm missing.txt")).toContain("else { throw");
 		expect(powershellCommand("mkdir existing")).not.toContain("-Force");

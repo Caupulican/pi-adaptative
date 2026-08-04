@@ -53,6 +53,22 @@ describe("grep/find result-limit notices", () => {
 		expect(result.details).toEqual({ matchLimitReached: 2 });
 	});
 
+	it("distinguishes a native ripgrep empty result from an invalid-pattern failure", async () => {
+		writeFileSync(join(tempRoot, "a.txt"), "needle\n");
+		const def = createGrepToolDefinition(tempRoot, { fff: false });
+		const ctx = {} as Parameters<typeof def.execute>[4];
+
+		const empty = (await def.execute(
+			"call-empty",
+			{ pattern: "absent" },
+			undefined,
+			undefined,
+			ctx,
+		)) as TextToolResult;
+		expect(getText(empty)).toBe("No matches found");
+		await expect(def.execute("call-invalid", { pattern: "(" }, undefined, undefined, ctx)).rejects.toThrow();
+	});
+
 	async function runFind(paths: string[], limit: number): Promise<{ result: TextToolResult; observedLimit: number }> {
 		let observedLimit = 0;
 		const operations: FindOperations = {

@@ -450,3 +450,58 @@ export function assessShellSearchScope(command: string, cwd: string): SearchScop
 
 	return assessCurrent();
 }
+
+/**
+ * Ripgrep and grep reserve exit code 1 for a successful search with zero matches. Shell lists
+ * return the final command's status, so compound diagnostics ending in either search must preserve
+ * that semantic instead of turning an empty result into a tool failure. This scans the
+ * already-bounded command once and only accepts an unambiguous final invocation; syntax, IO, and
+ * regex errors remain exit code 2.
+ */
+export function expectedContentSearchNoMatch(
+	command: string,
+	exitCode: number | null,
+): ShellContentSearchTool | undefined {
+	if (exitCode !== 1) return undefined;
+	const tokens = tokenizeShellCommand(command);
+	if (!tokens) return undefined;
+
+	let invocation: string[] = [];
+	let ignoreRedirectTarget = false;
+	let connector: string | undefined;
+	let invocationConnector: string | undefined;
+	let finalInvocation: string[] | undefined;
+	let finalInvocationConnector: string | undefined;
+	const finishInvocation = () => {
+		if (invocation.length > 0) {
+			finalInvocation = invocation;
+			finalInvocationConnector = invocationConnector;
+		}
+		invocation = [];
+		invocationConnector = undefined;
+	};
+	for (const token of tokens) {
+		if (token.kind === "arg") {
+			if (!ignoreRedirectTarget) {
+				if (invocation.length === 0) invocationConnector = connector;
+				invocation.push(token.value);
+			}
+			continue;
+		}
+		if (token.kind === "redirect") {
+			ignoreRedirectTarget = true;
+			continue;
+		}
+		finishInvocation();
+		ignoreRedirectTarget = false;
+		connector = token.value;
+	}
+	finishInvocation();
+
+	// `prior && search` can return the prior command's exit 1 without executing the search.
+	if (!finalInvocation || finalInvocationConnector === "&&") return undefined;
+	const normalizedInvocation = stripInvocationPrefixes(finalInvocation);
+	const name = commandName(normalizedInvocation[0] ?? "");
+	if (name === "rg" || name === "ripgrep") return "rg";
+	return name === "grep" ? "grep" : undefined;
+}

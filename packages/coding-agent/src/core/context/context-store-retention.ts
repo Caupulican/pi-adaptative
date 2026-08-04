@@ -58,7 +58,7 @@ function legacyContextStores(agentDir: string): LegacyContextStore[] {
 
 function isRecognizedPayload(kind: ContextStoreKind, name: string): boolean {
 	if (kind === "gc") return /^[0-9a-f]{1,64}\.txt$/.test(name);
-	return /^[0-9a-f]{1,64}(?:\.payload|\.meta\.json)$/.test(name);
+	return /^[0-9a-f]{1,64}(?:\.payload|\.meta\.json|\.refs)$/.test(name);
 }
 
 function isRealDirectory(path: string): boolean {
@@ -75,7 +75,13 @@ function recognizedPayloads(sourceDir: string, kind: ContextStoreKind): string[]
 		const entries = readdirSync(sourceDir, { withFileTypes: true });
 		if (entries.length > MAX_LEGACY_FILES_PER_SESSION) return undefined;
 		return entries
-			.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && isRecognizedPayload(kind, entry.name))
+			.filter(
+				(entry) =>
+					(entry.isFile() ||
+						(kind === "artifacts" && entry.isDirectory() && /^[0-9a-f]{1,64}\.refs$/.test(entry.name))) &&
+					!entry.isSymbolicLink() &&
+					isRecognizedPayload(kind, entry.name),
+			)
 			.map((entry) => entry.name);
 	} catch {
 		return undefined;

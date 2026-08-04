@@ -99,7 +99,7 @@ describe("bash broad-search guard", () => {
 	});
 
 	it("rejects a broad scan before execution and teaches the bounded alternatives", async () => {
-		const tool = createBashTool("/repo", { operations, outputDirectory });
+		const tool = createBashTool("/repo", { operations, outputDirectory, platform: "linux" });
 
 		await expect(tool.execute("search-1", { command: "rg needle" })).rejects.toThrow(
 			/narrow.*path.*glob.*broadSearch="route-to-file"/is,
@@ -128,4 +128,44 @@ describe("bash broad-search guard", () => {
 		expect(details?.fullOutputPath).toBeDefined();
 		expect(readFileSync(details?.fullOutputPath ?? "", "utf-8")).toBe("src/a.ts:needle\nsrc/b.ts:needle\n");
 	});
+
+	it.each([
+		[
+			"ripgrep",
+			"printf '%s\\n' '--- first search ---'; rg -n TBits src/PBAppBook.cpp; printf '%s\\n' '--- final search ---'; rg -n TBits src/Hairware",
+		],
+		["ripgrep with a trailing separator", "rg -n TBits src/Hairware;"],
+		["grep", "grep TBits src/Hairware.cpp"],
+		["piped grep", "printf '%s\\n' value | grep TBits"],
+	])("treats a final %s exit 1 as a successful zero-match search", async (_label, command) => {
+		operations.exec = async (_command, _cwd, { onData }) => {
+			onData(Buffer.from("--- final search ---\n", "utf-8"));
+			return { exitCode: 1 };
+		};
+		const tool = createBashTool("/repo", { operations, outputDirectory, platform: "linux" });
+
+		const result = await tool.execute("search-no-match", { command });
+		const text = result.content.map((item) => (item.type === "text" ? item.text : "")).join("");
+
+		expect(text).toContain("--- final search ---");
+		expect(text).toContain("completed with no matches");
+	});
+
+	it.each(["rg needle src", "grep needle src/file.txt"])(
+		"keeps content-search exit 2 authoritative for %s",
+		async (command) => {
+			operations.exec = async () => ({ exitCode: 2 });
+			const tool = createBashTool("/repo", { operations, outputDirectory });
+			await expect(tool.execute("search-error", { command })).rejects.toThrow("Command exited with code 2");
+		},
+	);
+
+	it.each(["false", "false && rg needle src", "false && grep needle src/file.txt"])(
+		"keeps unrelated or unexecuted-search exit 1 authoritative for %s",
+		async (command) => {
+			operations.exec = async () => ({ exitCode: 1 });
+			const commandTool = createBashTool("/repo", { operations, outputDirectory, platform: "linux" });
+			await expect(commandTool.execute("command-error", { command })).rejects.toThrow("Command exited with code 1");
+		},
+	);
 });

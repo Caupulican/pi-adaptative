@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/node";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
 import { boundedTextPreview } from "./text-preview.ts";
+import { withFileLockSync, writeFileAtomicSync } from "./util/atomic-file.ts";
 
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean;
@@ -348,8 +349,9 @@ function maybeStoreOriginal(options: ContextGcOptions, key: string, original: st
 		const storageDir = options.acquireStorageDir?.() ?? options.storageDir;
 		const path = storagePathFor(storageDir, key);
 		if (!path || !storageDir) return undefined;
-		mkdirSync(storageDir, { recursive: true });
-		if (!existsSync(path)) writeFileSync(path, original, "utf8");
+		withFileLockSync(path, () => {
+			if (!existsSync(path)) writeFileAtomicSync(path, original);
+		});
 		return path;
 	} catch {
 		return undefined;

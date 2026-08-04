@@ -135,6 +135,23 @@ describe("automatic platform shell contract", () => {
 		expect(content.text).toContain("pi-shell-router-ok");
 	});
 
+	it("preserves routed statuses through the explicit per-command PowerShell fallback", async () => {
+		if (process.platform !== "win32") return;
+		const cwd = mkdtempSync(join(tmpdir(), "pi-powershell-per-command-"));
+		try {
+			writeFileSync(join(cwd, "visible.txt"), "needle\n");
+			const tool = createBashToolDefinition(cwd, { shellPath: getShellConfig(undefined, "powershell").shell });
+			const execute = (command: string) =>
+				tool.execute("call-windows-per-command", { command }, undefined, undefined, undefined as never);
+
+			await expect(execute('node -e "process.exit(7)"')).rejects.toThrow("Command exited with code 7");
+			await expect(execute("grep absent visible.txt")).resolves.toBeDefined();
+			await expect(execute("grep needle missing.txt")).rejects.toThrow("Command exited with code 2");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves routed builtin status and flag semantics through native PowerShell", async () => {
 		if (process.platform !== "win32") return;
 		const cwd = mkdtempSync(join(tmpdir(), "pi-powershell-contract-"));
@@ -156,8 +173,16 @@ describe("automatic platform shell contract", () => {
 			const echoContent = echoResult.content[0];
 			if (echoContent?.type !== "text") throw new Error("Expected routed shell text output");
 			expect(echoContent.text).toBe("hi");
-			await expect(execute("grep missing visible.txt")).rejects.toThrow("Command exited with code 1");
-			await expect(execute("grep ONE visible.txt")).rejects.toThrow("Command exited with code 1");
+			const missingGrep = await execute("grep missing visible.txt");
+			const missingGrepContent = missingGrep.content[0];
+			if (missingGrepContent?.type !== "text") throw new Error("Expected routed shell text output");
+			expect(missingGrepContent.text).toContain("completed with no matches");
+			const caseSensitiveGrep = await execute("grep ONE visible.txt");
+			const caseSensitiveGrepContent = caseSensitiveGrep.content[0];
+			if (caseSensitiveGrepContent?.type !== "text") throw new Error("Expected routed shell text output");
+			expect(caseSensitiveGrepContent.text).toContain("completed with no matches");
+			await expect(execute("grep needle missing.txt")).rejects.toThrow("Command exited with code 2");
+			await expect(execute("grep '[' visible.txt")).rejects.toThrow("Command exited with code 2");
 			const plainList = await execute("ls");
 			const plainListContent = plainList.content[0];
 			if (plainListContent?.type !== "text") throw new Error("Expected routed shell text output");

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ContextGcReport } from "../src/core/context-gc.ts";
+import { type ContextGcReport, getContextGcSettings } from "../src/core/context-gc.ts";
 import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
 
 const tempDirs: string[] = [];
@@ -21,14 +21,24 @@ function createPipeline(): ContextPipeline {
 			({ getSessionId: () => "session", getBranch: () => [], getEntries: () => [] }) as unknown as ReturnType<
 				ContextPipelineDeps["getSessionManager"]
 			>,
-		getSettingsManager: () => ({}) as ReturnType<ContextPipelineDeps["getSettingsManager"]>,
+		getSettingsManager: () =>
+			({
+				getContextGcSettings: () => ({
+					...getContextGcSettings(),
+					preserveRecentMessages: 0,
+					minToolResultChars: 1,
+					tools: ["bash"],
+				}),
+				getContextCurationSettings: () => ({ enabled: false }),
+			}) as ReturnType<ContextPipelineDeps["getSettingsManager"]>,
 		getModelRegistry: () => ({}) as ReturnType<ContextPipelineDeps["getModelRegistry"]>,
 		getModel: () => undefined,
 		getAgentDir: () => agentDir,
 		getCwd: () => agentDir,
 		getActiveToolNames: () => [],
 		isDisposed: () => false,
-		getMemoryManager: () => ({}) as ReturnType<ContextPipelineDeps["getMemoryManager"]>,
+		getMemoryManager: () =>
+			({ getContextMarkers: () => [] }) as unknown as ReturnType<ContextPipelineDeps["getMemoryManager"]>,
 		addSpawnedUsage: () => undefined,
 		runIsolatedCompletion: async () => {
 			throw new Error("not used by artifact release coverage");
@@ -37,6 +47,28 @@ function createPipeline(): ContextPipeline {
 }
 
 describe("ContextPipeline packed artifact release", () => {
+	it("does not let a read-only GC projection replace the latest committed pass report", () => {
+		const pipeline = createPipeline();
+		const packedMessages: AgentMessage[] = [
+			{
+				role: "toolResult",
+				toolCallId: "bash-call-1",
+				toolName: "bash",
+				content: [{ type: "text", text: "stale output" }],
+				isError: false,
+				timestamp: 0,
+			},
+		];
+		const currentMessages: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "current" }], timestamp: 1 },
+		];
+
+		expect(pipeline.applyContextGc(packedMessages, true).report.packedCount).toBe(1);
+		expect(pipeline.getContextGcReport(currentMessages).packedCount).toBe(0);
+
+		expect(pipeline.getContextGcReport().packedCount).toBe(1);
+	});
+
 	it("releases and cleans a run_toolkit_script artifact when context GC packs its tool result", () => {
 		const pipeline = createPipeline();
 		const store = pipeline.getToolArtifactStore();

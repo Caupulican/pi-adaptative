@@ -29,7 +29,11 @@ import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
-import { assessShellSearchScope, BROAD_SEARCH_OUTPUT_ROUTE } from "./search-command-guard.ts";
+import {
+	assessShellSearchScope,
+	BROAD_SEARCH_OUTPUT_ROUTE,
+	expectedContentSearchNoMatch,
+} from "./search-command-guard.ts";
 import { routeShellContract } from "./shell-contract-router.ts";
 import {
 	createShellOutputProjector,
@@ -804,8 +808,24 @@ function createShellToolDefinition(
 				const candidateProjection = finishProjection(exitCode);
 				const snapshot = await finishOutput(candidateProjection !== undefined);
 				const projection = candidateProjection && snapshot.fullOutputPath ? candidateProjection : undefined;
-				const { text: outputText, details } = formatOutput(snapshot, "(no output)", projection);
+				const expectedNoMatch = expectedContentSearchNoMatch(command, exitCode);
+				const { text: outputText, details } = formatOutput(
+					snapshot,
+					expectedNoMatch ? "(no matches)" : "(no output)",
+					projection,
+				);
 				if (exitCode !== 0 && exitCode !== null) {
+					if (expectedNoMatch) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: appendStatus(outputText, `Final ${expectedNoMatch} search completed with no matches.`),
+								},
+							],
+							details,
+						};
+					}
 					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
 				}
 				return { content: [{ type: "text", text: outputText }], details };

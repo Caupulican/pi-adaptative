@@ -1,6 +1,6 @@
 import type { Agent, AgentMessage } from "@caupulican/pi-agent-core";
 import { type CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, Model } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { CompactionController, type CompactionControllerDeps } from "../src/core/compaction-controller.ts";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
@@ -17,7 +17,7 @@ function createModel(): Model<"openai-completions"> {
 		reasoning: false,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 2_000,
+		contextWindow: 4_000,
 		maxTokens: 1_000,
 	};
 }
@@ -25,6 +25,26 @@ function createModel(): Model<"openai-completions"> {
 function scriptedMeasure(values: number[]): () => number {
 	let index = 0;
 	return () => values[Math.min(index++, values.length - 1)] ?? 0;
+}
+
+function assistantWithUsage(tokens: number, timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "continued" }],
+		api: "openai-completions",
+		provider: "test",
+		model: "compaction-test",
+		usage: {
+			input: tokens - 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: tokens,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp,
+	};
 }
 
 function createFixture(options: {
@@ -67,6 +87,10 @@ function createFixture(options: {
 		streamFn: undefined,
 		hasQueuedMessages: () => false,
 	} as unknown as Agent;
+	let controller: CompactionController;
+	const runAutoCompaction = vi.fn((reason: "overflow" | "threshold", willRetry: boolean) =>
+		controller.runAuto(reason, willRetry),
+	);
 
 	const deps: CompactionControllerDeps = {
 		agent,
@@ -75,7 +99,7 @@ function createFixture(options: {
 		getModel: () => model as Model<Api>,
 		getAdaptedSettings: () => ({
 			enabled: true,
-			reserveTokens: 1_000,
+			reserveTokens: 3_000,
 			keepRecentTokens: 1_200,
 			triggerPercent: 0,
 		}),
@@ -97,15 +121,17 @@ function createFixture(options: {
 		refreshAfterCompaction: () => {},
 		getFailureCorpus: () => ({}) as FailureCorpusRecorder,
 		measureLiveContextTokens: options.measureLiveContextTokens,
-		runAutoCompaction: async () => false,
+		runAutoCompaction,
 		compactWithRetry,
 	};
+	controller = new CompactionController(deps);
 
 	return {
-		controller: new CompactionController(deps),
+		controller,
 		compactWithRetry,
 		entryIds,
 		events,
+		runAutoCompaction,
 		sessionManager,
 	};
 }
@@ -139,6 +165,49 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(events.filter((event) => event.type === "warning")).toEqual([
 			expect.objectContaining({ message: expect.stringContaining("cycle 2: effect-not-restored") }),
 		]);
+	});
+
+	it("does not re-enter an ineffective threshold frontier after one small message", async () => {
+		const { compactWithRetry, controller, events, runAutoCompaction, sessionManager } = createFixture({
+			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500, 2_501]),
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+		await controller.runAuto("threshold", false);
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "small follow-up" }],
+			timestamp: Date.now() + 100,
+		});
+
+		await controller.check(assistantWithUsage(2_501, Date.now() + 1_000));
+
+		expect(runAutoCompaction).not.toHaveBeenCalled();
+		expect(compactWithRetry).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(2);
+		expect(events.at(-1)).toMatchObject({
+			type: "compaction_end",
+			result: undefined,
+			skipReason: expect.stringContaining("waiting for materially new compactable history"),
+		});
+	});
+
+	it("retries threshold compaction after material context growth", async () => {
+		const { compactWithRetry, controller, runAutoCompaction, sessionManager } = createFixture({
+			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500, 3_101, 900, 900]),
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+		await controller.runAuto("threshold", false);
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "material follow-up" }],
+			timestamp: Date.now() + 100,
+		});
+
+		await controller.check(assistantWithUsage(3_101, Date.now() + 1_000));
+
+		expect(runAutoCompaction).toHaveBeenCalledWith("threshold", false);
+		expect(compactWithRetry).toHaveBeenCalledTimes(2);
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(3);
 	});
 
 	it("coalesces concurrent threshold checks into one compaction run", async () => {

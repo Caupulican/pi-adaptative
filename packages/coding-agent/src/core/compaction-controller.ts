@@ -26,6 +26,20 @@ import type { SettingsManager } from "./settings-manager.ts";
 export type AutoCompactionReason = "overflow" | "threshold";
 
 const COMPACTION_RETRY_PREPARATION_OPTIONS = { allowTrailingCompactionAsPrevious: true } as const;
+const INEFFECTIVE_THRESHOLD_SKIP_REASON =
+	"previous auto-compaction did not restore headroom; waiting for materially new compactable history";
+
+interface IneffectiveThresholdFrontier {
+	provider: string;
+	modelId: string;
+	contextWindow: number;
+	autoCompactionTriggerTokens: number | undefined;
+	reserveTokens: number;
+	keepRecentTokens: number;
+	triggerPercent: number | undefined;
+	tokensAfter: number;
+	retryAtTokens: number;
+}
 
 type CompactionControllerEvent =
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
@@ -113,6 +127,7 @@ export class CompactionController {
 	private autoAbortController: AbortController | undefined;
 	private autoRunPromise: Promise<boolean> | undefined;
 	private overflowRecoveryAttempted = false;
+	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
 	private readonly deps: CompactionControllerDeps;
 
 	constructor(deps: CompactionControllerDeps) {
@@ -189,6 +204,10 @@ export class CompactionController {
 		const projectedMessages = projectContextGc(messages);
 		const projectedTokens = this.deps.estimateCurrentContextTokens(projectedMessages);
 		if (!shouldCompact(projectedTokens, contextWindow, settings, triggerTokens)) return false;
+		if (this.shouldDeferThresholdRetry(projectedTokens, model, settings)) {
+			this.emitIneffectiveThresholdSkip();
+			return false;
+		}
 
 		const latestBefore = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
 		await this.deps.runAutoCompaction("threshold", false);
@@ -197,6 +216,7 @@ export class CompactionController {
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		this.ineffectiveThresholdFrontier = undefined;
 		this.deps.disconnectAgent();
 		await this.deps.abortForeground();
 		this.manualAbortController = new AbortController();
@@ -401,6 +421,10 @@ export class CompactionController {
 			}
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings, model?.autoCompactionTriggerTokens)) {
+			if (model && this.shouldDeferThresholdRetry(contextTokens, model, settings)) {
+				this.emitIneffectiveThresholdSkip();
+				return false;
+			}
 			return this.deps.runAutoCompaction("threshold", false);
 		}
 		return false;
@@ -566,6 +590,8 @@ export class CompactionController {
 
 			const result = outcome.kind === "success" ? outcome.result : lastCompaction;
 			if (!result) throw new Error("Auto-compaction succeeded without a result");
+			if (reason === "threshold") this.recordThresholdFrontier(model, settings, margin);
+			else this.ineffectiveThresholdFrontier = undefined;
 			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			if (willRetry) {
 				const messages = this.deps.agent.state.messages;
@@ -591,6 +617,65 @@ export class CompactionController {
 			});
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 		}
+	}
+
+	private shouldDeferThresholdRetry(contextTokens: number, model: Model<Api>, settings: CompactionSettings): boolean {
+		const frontier = this.ineffectiveThresholdFrontier;
+		if (!frontier) return false;
+		if (
+			frontier.provider !== model.provider ||
+			frontier.modelId !== model.id ||
+			frontier.contextWindow !== model.contextWindow ||
+			frontier.autoCompactionTriggerTokens !== model.autoCompactionTriggerTokens ||
+			frontier.reserveTokens !== settings.reserveTokens ||
+			frontier.keepRecentTokens !== settings.keepRecentTokens ||
+			frontier.triggerPercent !== settings.triggerPercent ||
+			contextTokens < frontier.tokensAfter ||
+			contextTokens >= frontier.retryAtTokens
+		) {
+			this.ineffectiveThresholdFrontier = undefined;
+			return false;
+		}
+		return true;
+	}
+
+	private recordThresholdFrontier(model: Model<Api>, settings: CompactionSettings, margin: number): void {
+		try {
+			const tokensAfter = this.deps.measureLiveContextTokens();
+			if (
+				!Number.isFinite(tokensAfter) ||
+				!shouldCompact(tokensAfter + margin, model.contextWindow, settings, model.autoCompactionTriggerTokens)
+			) {
+				this.ineffectiveThresholdFrontier = undefined;
+				return;
+			}
+			const minimumGrowth = Math.max(1, margin, Math.floor(settings.keepRecentTokens / 2));
+			this.ineffectiveThresholdFrontier = {
+				provider: model.provider,
+				modelId: model.id,
+				contextWindow: model.contextWindow,
+				autoCompactionTriggerTokens: model.autoCompactionTriggerTokens,
+				reserveTokens: settings.reserveTokens,
+				keepRecentTokens: settings.keepRecentTokens,
+				triggerPercent: settings.triggerPercent,
+				tokensAfter,
+				retryAtTokens: Math.min(Number.MAX_SAFE_INTEGER, tokensAfter + minimumGrowth),
+			};
+		} catch {
+			this.ineffectiveThresholdFrontier = undefined;
+		}
+	}
+
+	private emitIneffectiveThresholdSkip(): void {
+		this.deps.emit({ type: "compaction_start", reason: "threshold" });
+		this.deps.emit({
+			type: "compaction_end",
+			reason: "threshold",
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+			skipReason: INEFFECTIVE_THRESHOLD_SKIP_REASON,
+		});
 	}
 
 	async compactWithRetry(

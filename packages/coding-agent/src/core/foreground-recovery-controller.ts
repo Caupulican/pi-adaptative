@@ -148,7 +148,6 @@ export class ForegroundRecoveryController {
 		this.activeRuns++;
 		try {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
-			this.deps.agent.maxStallTurns = maxGoalLoopRounds;
 			await this.deps.prepareRun();
 			let goalLoopRounds = 1;
 			await this.deps.agent.prompt(messages);

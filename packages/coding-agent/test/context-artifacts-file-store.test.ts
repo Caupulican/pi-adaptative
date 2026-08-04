@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import {
 	generateArtifactId,
 	isMissingArtifactMarker,
 } from "../src/core/context/context-artifacts.ts";
+import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 function makeRequest(overrides: Partial<ArtifactWriteRequest> = {}): ArtifactWriteRequest {
 	return {
@@ -90,8 +91,8 @@ describe("createFileArtifactStore", () => {
 			const { ref } = storeA.write(makeRequest());
 			storeA.addReference(ref.id, "context-item-1");
 
-			// Reference state is persisted in the sidecar metadata, not just in memory, so
-			// a fresh instance must still honor it.
+			// Reference state is persisted in holder markers, not just in memory, so a fresh
+			// instance must still honor it.
 			const storeB = createFileArtifactStore({ baseDir });
 			const deleted = storeB.cleanup();
 
@@ -123,11 +124,64 @@ describe("createFileArtifactStore", () => {
 			expect(deleted).toContain(ref.id);
 		});
 
+		it("migrates legacy shared reference arrays to bounded holder markers", () => {
+			const storeA = createFileArtifactStore({ baseDir });
+			const { ref } = storeA.write(makeRequest());
+			const metadataPath = join(baseDir, `${ref.id}.meta.json`);
+			const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as {
+				ref: typeof ref;
+				references: string[];
+			};
+			metadata.references = ["legacy-holder"];
+			writeFileSync(metadataPath, JSON.stringify(metadata), "utf8");
+
+			const storeB = createFileArtifactStore({ baseDir });
+			expect(storeB.referenceCount(ref.id)).toBe(1);
+			expect((JSON.parse(readFileSync(metadataPath, "utf8")) as { references: string[] }).references).toEqual([]);
+			expect(readdirSync(join(baseDir, `${ref.id}.refs`))).toHaveLength(1);
+			expect(storeB.cleanup()).not.toContain(ref.id);
+		});
+
 		it("addReference/removeReference return false for an id that does not exist on disk", () => {
 			const store = createFileArtifactStore({ baseDir });
 			expect(store.addReference("0123456789abcdef01234567", "holder-1")).toBe(false);
 			expect(store.removeReference("0123456789abcdef01234567", "holder-1")).toBe(false);
 		});
+
+		it("preserves every reference added concurrently by separate runtime tenants", async () => {
+			const store = createFileArtifactStore({ baseDir });
+			const { ref } = store.write(makeRequest());
+			const workerPath = join(baseDir, "artifact-reference-worker.mjs");
+			const artifactStoreModule = new URL("../src/core/context/context-artifacts.ts", import.meta.url).href;
+			writeFileSync(
+				workerPath,
+				`import { createFileArtifactStore } from ${JSON.stringify(artifactStoreModule)};
+import { parentPort, workerData } from "node:worker_threads";
+const { baseDir, artifactId, prefix, iterations } = workerData;
+const workerStore = createFileArtifactStore({ baseDir });
+for (let index = 0; index < iterations; index++) {
+	if (!workerStore.addReference(artifactId, prefix + index)) throw new Error("reference rejected");
+}
+parentPort.postMessage({ done: true });
+`,
+				"utf8",
+			);
+			const iterations = 150;
+
+			await runSignaledWorkerThreads(workerPath, [
+				{ baseDir, artifactId: ref.id, prefix: "foreground-", iterations },
+				{ baseDir, artifactId: ref.id, prefix: "background-", iterations },
+			]);
+
+			expect(store.referenceCount(ref.id)).toBe(iterations * 2);
+			const meta = JSON.parse(readFileSync(join(baseDir, `${ref.id}.meta.json`), "utf8")) as {
+				references: string[];
+			};
+			expect(meta.references).toEqual([]);
+			expect(readdirSync(join(baseDir, `${ref.id}.refs`))).toHaveLength(iterations * 2);
+			expect(store.cleanup()).not.toContain(ref.id);
+			expect(store.has(ref.id)).toBe(true);
+		}, 20_000);
 	});
 
 	describe("missing artifact markers", () => {

@@ -148,9 +148,16 @@ function powershellArray(values: readonly string[]): string {
 	return `@(${values.map(quotePowerShell).join(", ")})`;
 }
 
+const POWERSHELL_STATUS_FUNCTION = "__pi_complete_status";
+
+/** Keep persistent sessions alive; fall back to a real process exit for one-shot/custom hosts. */
+function completePowerShellStatus(code: string): string {
+	return `if (Test-Path -LiteralPath 'Function:\\${POWERSHELL_STATUS_FUNCTION}') { ${POWERSHELL_STATUS_FUNCTION} ${code} } else { exit ${code} }`;
+}
+
 function externalCommand(argv: readonly string[]): string {
 	const invocation = `& ${argv.map(quotePowerShell).join(" ")}`;
-	return `${invocation}\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nif (-not $?) { exit 1 }`;
+	return `$global:LASTEXITCODE = $null\n${invocation}\n$__pi_external_succeeded = $?\n$__pi_external_code = if ($null -ne $global:LASTEXITCODE) { [int]$global:LASTEXITCODE } elseif ($__pi_external_succeeded) { 0 } else { 1 }\n${completePowerShellStatus("$__pi_external_code")}`;
 }
 
 function parseFlags(
@@ -205,7 +212,7 @@ function routeHeadOrTail(argv: readonly string[], tail: boolean): string | undef
 
 function routeGrep(argv: readonly string[]): string | undefined {
 	if (argv.length !== 3 || argv[1].startsWith("-") || argv[2].startsWith("-")) return undefined;
-	return `[string[]]$matches = @(Select-String -LiteralPath ${quotePowerShell(argv[2])} -Pattern ${quotePowerShell(argv[1])} -CaseSensitive -ErrorAction Stop | ForEach-Object { $_.Line }); if ($matches.Count -eq 0) { exit 1 }; $matches`;
+	return `$__pi_grep_code = 0; try { [string[]]$matches = @(Select-String -LiteralPath ${quotePowerShell(argv[2])} -Pattern ${quotePowerShell(argv[1])} -CaseSensitive -ErrorAction Stop | ForEach-Object { $_.Line }); if ($matches.Count -eq 0) { $__pi_grep_code = 1 } else { $matches } } catch { [Console]::Error.WriteLine($_.Exception.Message); $__pi_grep_code = 2 }; ${completePowerShellStatus("$__pi_grep_code")}`;
 }
 
 function routeFind(argv: readonly string[]): string | undefined {
@@ -273,8 +280,8 @@ function routeBuiltIn(argv: readonly string[]): string | undefined {
 		const method = valueIndex > 1 ? "Write" : "WriteLine";
 		return `[Console]::Out.${method}((${powershellArray(argv.slice(valueIndex))} -join ' '))`;
 	}
-	if (command === "true" && argv.length === 1) return "exit 0";
-	if (command === "false" && argv.length === 1) return "exit 1";
+	if (command === "true" && argv.length === 1) return completePowerShellStatus("0");
+	if (command === "false" && argv.length === 1) return completePowerShellStatus("1");
 	if (command === "which" && argv.length === 2) {
 		return `(Get-Command -Name ${quotePowerShell(argv[1])} -CommandType Application -ErrorAction Stop).Source`;
 	}

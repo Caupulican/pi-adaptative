@@ -5,6 +5,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAgentSession } from "../src/core/sdk.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("createAgentSession session manager defaults", () => {
 	let tempDir: string;
@@ -65,6 +66,18 @@ describe("createAgentSession session manager defaults", () => {
 		expect(session.sessionManager).toBe(sessionManager);
 		expect(session.sessionManager.isPersisted()).toBe(false);
 
+		await session.disposeAndWait();
+	});
+
+	it("does not reuse the goal continuation budget as the identical-tool-call guard", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+		const settingsManager = SettingsManager.inMemory({ autonomy: { maxStallTurns: 20 } });
+
+		const { session } = await createAgentSession({ cwd, agentDir, model: model!, settingsManager });
+
+		// Undefined delegates to pi-agent-core's independent DEFAULT_MAX_STALL_TURNS (12).
+		expect(session.agent.maxStallTurns).toBeUndefined();
 		await session.disposeAndWait();
 	});
 

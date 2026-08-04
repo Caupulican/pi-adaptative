@@ -143,6 +143,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 	it("should cap the agent continuation loop using autonomy goal loop rounds", async () => {
 		settingsManager.setAutonomySettings({ mode: "full", maxStallTurns: 3 });
+		session.agent.maxStallTurns = 7;
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const internals = session as unknown as {
@@ -165,12 +166,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 
 		expect(promptSpy).toHaveBeenCalledTimes(1);
-		expect(session.agent.maxStallTurns).toBe(3);
+		expect(session.agent.maxStallTurns).toBe(7);
 		expect(continueSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("should treat zero autonomy max stall turns as unlimited foreground continuations", async () => {
 		settingsManager.setAutonomySettings({ mode: "full", maxStallTurns: 0 });
+		session.agent.maxStallTurns = 7;
 		vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const internals = session as unknown as {
@@ -191,7 +193,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		});
 
-		expect(session.agent.maxStallTurns).toBe(0);
+		expect(session.agent.maxStallTurns).toBe(7);
 		expect(continueSpy).toHaveBeenCalledTimes(3);
 	});
 

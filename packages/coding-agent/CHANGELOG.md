@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Treated final ripgrep and grep exit code 1 as successful zero-match results across Linux and Windows, preserved PowerShell grep IO/regex failures as exit code 2, kept routed external commands in the persistent Windows shell, and kept goal-continuation budgets independent from the core identical-tool-call runaway guard.
+- Prevented later turns from re-entering an auto-compaction frontier that failed to restore headroom until materially new compactable history exists, while preserving overflow recovery.
+- Serialized context-GC payload and artifact ownership updates across processes, replaced quadratic shared reference-array rewrites with bounded holder markers, and kept read-only GC projections from replacing the latest committed report.
+
 ## [0.85.4] - 2026-08-04
 
 ### Breaking Changes
