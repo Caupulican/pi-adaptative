@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
 import type { WorkerConversation } from "../src/core/delegation/worker-conversation-store.ts";
 import type { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
@@ -134,5 +135,196 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(coordinator.cancelWorkerAgent("agent-1", "owner_cancelled")).toMatchObject({ status: "canceled" });
 		expect(abortLane).toHaveBeenLastCalledWith("worker-1", "owner_cancelled");
 		expect(cancelLane).toHaveBeenCalledWith("worker-1", "owner_cancelled");
+	});
+
+	it("keeps an expected reply open until durable enqueue and reuses it after an interrupted acknowledgement", () => {
+		const agentDir = root();
+		const requester = registeredAgent({ agentId: "agent-1", rootAgentId: "agent-1" });
+		const responder = registeredAgent({
+			agentId: "agent-2",
+			parentAgentId: "agent-1",
+			rootAgentId: "agent-1",
+			depth: 1,
+		});
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ "agent-1": requester, "agent-2": responder })[agentId],
+			getTaskRuntimeSnapshot: () => ({
+				agents: { "agent-1": requester, "agent-2": responder },
+				attempts: {},
+			}),
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId: "parent-1",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+		const responderMailbox = new WorkerAgentMailbox({
+			agentDir,
+			parentSessionId: "parent-1",
+			agentId: "agent-2",
+		});
+		const request = responderMailbox.enqueue({
+			kind: "follow_up",
+			content: "Return exact evidence.",
+			senderAgentId: "agent-1",
+			expectReply: true,
+		});
+		responderMailbox.acknowledgeDelivered(request.messageId);
+		const requesterMailbox = new WorkerAgentMailbox({
+			agentDir,
+			parentSessionId: "parent-1",
+			agentId: "agent-1",
+		});
+		for (let index = 0; index < 64; index++) {
+			requesterMailbox.enqueue({ kind: "follow_up", content: `occupied ${index}` });
+		}
+
+		expect(() =>
+			coordinator.sendWorkerAgentMessage("agent-1", "Exact evidence.", {
+				senderAgentId: "agent-2",
+				replyToMessageId: request.messageId,
+			}),
+		).toThrow("message limit");
+		expect(responderMailbox.awaitingReplies()).toEqual([expect.objectContaining({ messageId: request.messageId })]);
+
+		requesterMailbox.acknowledgeDelivered(requesterMailbox.pending()[0]!.messageId);
+		const markReplied = vi.spyOn(WorkerAgentMailbox.prototype, "markReplied").mockImplementationOnce(() => {
+			throw new Error("simulated reply acknowledgement interruption");
+		});
+		expect(() =>
+			coordinator.sendWorkerAgentMessage("agent-1", "Exact evidence.", {
+				senderAgentId: "agent-2",
+				replyToMessageId: request.messageId,
+			}),
+		).toThrow("simulated reply acknowledgement interruption");
+		markReplied.mockRestore();
+		const committedReply = requesterMailbox.pending().find((message) => message.content === "Exact evidence.");
+		expect(committedReply).toBeDefined();
+		expect(responderMailbox.awaitingReplies()).toEqual([expect.objectContaining({ messageId: request.messageId })]);
+
+		const retriedReply = coordinator.sendWorkerAgentMessage("agent-1", "Exact evidence.", {
+			senderAgentId: "agent-2",
+			replyToMessageId: request.messageId,
+		});
+		expect(retriedReply).toMatchObject({ queued: true, messageId: committedReply?.messageId });
+		expect(requesterMailbox.pending().filter((message) => message.content === "Exact evidence.")).toHaveLength(1);
+		expect(responderMailbox.awaitingReplies()).toEqual([]);
+	});
+
+	it("limits peer visibility to one tree and destructive control to the caller's subtree", () => {
+		const rootAgent = registeredAgent({ agentId: "root", rootAgentId: "root" });
+		const child = registeredAgent({
+			agentId: "child",
+			parentAgentId: "root",
+			rootAgentId: "root",
+			depth: 1,
+		});
+		const sibling = registeredAgent({
+			agentId: "sibling",
+			parentAgentId: "root",
+			rootAgentId: "root",
+			depth: 1,
+		});
+		const foreign = registeredAgent({ agentId: "foreign", rootAgentId: "foreign" });
+		const agents = { root: rootAgent, child, sibling, foreign };
+		const attempts = {
+			"attempt-root": { ...activeAttempt("running"), attemptId: "attempt-root", taskId: "root" },
+			"attempt-child": { ...activeAttempt("running"), attemptId: "attempt-child", taskId: "child" },
+			"attempt-sibling": { ...activeAttempt("running"), attemptId: "attempt-sibling", taskId: "sibling" },
+		};
+		const lifecycle = {
+			getAgent: (agentId: string) => agents[agentId as keyof typeof agents],
+			getTaskRuntimeSnapshot: () => ({ agents, attempts }),
+			getLatestAgentAttempt: (agentId: string) =>
+				attempts[`attempt-${agentId}` as keyof typeof attempts] as AttemptRuntimeState | undefined,
+		} as unknown as WorkerLifecycle;
+		const cancelLane = vi.fn(() => ({ laneId: "child", type: "worker" as const, status: "canceled" as const }));
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-1",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane,
+		});
+
+		expect(coordinator.listWorkerAgents({ callerAgentId: "child" }).map((agent) => agent.agentId)).toEqual([
+			"root",
+			"child",
+			"sibling",
+		]);
+		expect(() => coordinator.cancelWorkerAgent("root", "agent_cancelled", { callerAgentId: "child" })).toThrow(
+			"outside its control subtree",
+		);
+		expect(() => coordinator.cancelWorkerAgent("sibling", "agent_cancelled", { callerAgentId: "child" })).toThrow(
+			"outside its control subtree",
+		);
+		expect(coordinator.cancelWorkerAgent("child", "agent_cancelled", { callerAgentId: "root" })).toMatchObject({
+			status: "canceled",
+		});
+		expect(cancelLane).toHaveBeenCalledOnce();
+	});
+
+	it("waits on a queued stable agent id while yielding and restoring the caller's scheduler slot", async () => {
+		const parent = registeredAgent({
+			agentId: "parent",
+			rootAgentId: "parent",
+			status: "active",
+			activeAttemptId: "attempt-parent",
+		});
+		const child = registeredAgent({
+			agentId: "child",
+			parentAgentId: "parent",
+			rootAgentId: "parent",
+			depth: 1,
+		});
+		let childAttempt = {
+			...activeAttempt("queued"),
+			attemptId: "attempt-child",
+			taskId: "child",
+			dispatch: { ...activeAttempt("queued").dispatch, logicalLaneId: "child" },
+		};
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ parent, child })[agentId as "parent" | "child"],
+			getLatestAgentAttempt: (agentId: string) => (agentId === "child" ? childAttempt : activeAttempt("running")),
+			getTaskRuntimeSnapshot: () => ({ agents: { parent, child }, attempts: { "attempt-child": childAttempt } }),
+		} as unknown as WorkerLifecycle;
+		const releaseYield = vi.fn();
+		const yieldCapacity = vi.fn(() => releaseYield);
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-1",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+			yieldCapacity,
+		});
+
+		const waiting = coordinator.waitForWorkerAgent("child", 10_000, { callerAgentId: "parent" });
+		expect(yieldCapacity).toHaveBeenCalledWith("parent", "child");
+		childAttempt = { ...childAttempt, status: "completed" };
+		coordinator.signalStateChanged();
+
+		await expect(waiting).resolves.toEqual({ status: "idle" });
+		expect(releaseYield).toHaveBeenCalledOnce();
 	});
 });

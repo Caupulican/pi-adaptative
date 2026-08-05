@@ -190,6 +190,48 @@ describe("worker runtime construction", () => {
 		expect(() => controller.sendWorkerAgentMessage("agent-1", "do not load")).toThrow("UAC surface");
 		expect(internals._workers).toBeUndefined();
 	});
+
+	it("forwards recursive caller scope through the session-level worker-control boundary", async () => {
+		const listWorkerAgents = vi.fn(() => []);
+		const readWorkerAgentTranscript = vi.fn(() => ({
+			agentId: "child",
+			cursor: 0,
+			messages: [],
+		}));
+		const interruptWorkerAgent = vi.fn(() => ({ interrupted: false }));
+		const resumeWorkerAgent = vi.fn(() => ({ started: false }));
+		const cancelWorkerAgent = vi.fn(() => undefined);
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const agentControl = {
+			listWorkerAgents,
+			readWorkerAgentTranscript,
+			interruptWorkerAgent,
+			resumeWorkerAgent,
+			cancelWorkerAgent,
+			waitForWorkerAgent,
+		};
+		const controller = new BackgroundLaneController({ isDelegateToolActive: () => true } as never);
+		(
+			controller as unknown as {
+				_workers: { getAgentControl(): typeof agentControl };
+			}
+		)._workers = { getAgentControl: () => agentControl };
+		const scope = { callerAgentId: "parent" };
+
+		controller.listWorkerAgents(scope);
+		controller.readWorkerAgentTranscript("child", { cursor: 2, maxMessages: 3, ...scope });
+		controller.interruptWorkerAgent("child", scope);
+		controller.resumeWorkerAgent("child", scope);
+		controller.cancelWorkerAgent("child", "agent_cancelled", scope);
+		await controller.waitForWorkerAgent("child", 1_000, scope);
+
+		expect(listWorkerAgents).toHaveBeenCalledWith(scope);
+		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("child", { cursor: 2, maxMessages: 3, ...scope });
+		expect(interruptWorkerAgent).toHaveBeenCalledWith("child", scope);
+		expect(resumeWorkerAgent).toHaveBeenCalledWith("child", scope);
+		expect(cancelWorkerAgent).toHaveBeenCalledWith("child", "agent_cancelled", scope);
+		expect(waitForWorkerAgent).toHaveBeenCalledWith("child", 1_000, scope);
+	});
 });
 
 describe("worker execution locality", () => {

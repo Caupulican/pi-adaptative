@@ -1,3 +1,4 @@
+import { mapToolNamesForPlatform } from "../default-tool-surface.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapability } from "../tool-capability-policy.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
 
@@ -20,9 +21,6 @@ export const ORCHESTRATION_PROFILE_TOOL_NAMES = [
 	"profile_writer",
 ] as const;
 
-/** Kernel control tools are available to every in-process agent and inherited by descendants. */
-export const INHERITED_ORCHESTRATION_TOOL_NAMES = ["delegate"] as const;
-
 /**
  * Manifest-only lane catalogue. It contains no tool factories, so policy compilation can omit
  * denied tools before their executable implementations are constructed.
@@ -34,14 +32,10 @@ export function buildLaneToolManifests(
 	const enabled = new Set(enabledToolNames);
 	const manifests: ToolCapabilityManifest[] = [];
 
-	for (const toolName of new Set([...profile.toolNames, ...INHERITED_ORCHESTRATION_TOOL_NAMES])) {
+	for (const toolName of new Set(mapToolNamesForPlatform(profile.toolNames))) {
 		if (!enabled.has(toolName)) continue;
 		const policy = getToolCapabilityPolicy(toolName);
-		const capability = INHERITED_ORCHESTRATION_TOOL_NAMES.includes(
-			toolName as (typeof INHERITED_ORCHESTRATION_TOOL_NAMES)[number],
-		)
-			? "workflow.delegate"
-			: resolveProfileToolCapability(profile, toolName);
+		const capability = resolveProfileToolCapability(profile, toolName);
 		if (!capability || !policy) continue;
 		manifests.push({
 			toolName,

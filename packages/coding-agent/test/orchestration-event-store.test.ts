@@ -44,7 +44,7 @@ function writeConcurrentAppendWorker(agentDir: string): string {
 		workerPath,
 		`import { parentPort, workerData } from "node:worker_threads";
 import { OrchestrationEventStore } from ${JSON.stringify(eventStoreModule)};
-const { agentDir, sessionId, writerId, iterations } = workerData;
+const { agentDir, sessionId, writerId, iterations, sharedIdempotencyKey } = workerData;
 let eventSequence = 0;
 const store = new OrchestrationEventStore({
 	agentDir,
@@ -56,7 +56,7 @@ for (let index = 0; index < iterations; index++) {
 		type: "objective.created",
 		aggregateId: \`objective-\${writerId}-\${index}\`,
 		actor: "kernel",
-		idempotencyKey: \`writer-\${writerId}-event-\${index}\`,
+		idempotencyKey: sharedIdempotencyKey ?? \`writer-\${writerId}-event-\${index}\`,
 		payload: { writerId, index },
 	});
 }
@@ -123,6 +123,29 @@ describe("OrchestrationEventStore", () => {
 		expect(notifications).toHaveLength(1);
 	});
 
+	it("does not amplify one durable append into per-key derived-index files", () => {
+		const store = makeStore("single-write");
+		const input = {
+			type: "attempt.queued" as const,
+			aggregateId: "task-1",
+			actor: "runtime" as const,
+			idempotencyKey: "queue-task-1-attempt-1",
+			payload: { attemptId: "attempt-1" },
+		};
+
+		const first = store.append(input);
+
+		expect(readdirSync(store.eventsDir)).toEqual(["0000000000000001.json"]);
+		expect(existsSync(store.cursorPath)).toBe(true);
+		expect(existsSync(store.idempotencyDir)).toBe(false);
+		const reopened = new OrchestrationEventStore({
+			agentDir: store.rootDir.split(`${join("state", "orchestration")}`)[0]!,
+			sessionId: "single-write",
+		});
+		expect(reopened.append(input)).toEqual(first);
+		expect(reopened.readAll()).toEqual([first]);
+	});
+
 	it("preserves every unique append from simultaneous independent writers", async () => {
 		const agentDir = makeAgentDir();
 		const sessionId = "shared-concurrent-session";
@@ -144,6 +167,28 @@ describe("OrchestrationEventStore", () => {
 		expect(new Set(events.map((event) => event.idempotencyKey)).size).toBe(events.length);
 		expect(new Set(events.map((event) => event.eventId)).size).toBe(events.length);
 	}, 20_000);
+
+	it("commits one event when independent writers race the same idempotency key", async () => {
+		const agentDir = makeAgentDir();
+		const sessionId = "shared-idempotency-session";
+		const workerPath = writeConcurrentAppendWorker(agentDir);
+		const sharedIdempotencyKey = "shared-operation";
+
+		await runSignaledWorkerThreads(
+			workerPath,
+			["first", "second"].map((writerId) => ({
+				agentDir,
+				sessionId,
+				writerId,
+				iterations: 1,
+				sharedIdempotencyKey,
+			})),
+		);
+
+		const events = new OrchestrationEventStore({ agentDir, sessionId }).readAll();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ ordinal: 1, idempotencyKey: sharedIdempotencyKey });
+	});
 
 	it("isolates independent session event tails beneath one agent directory", () => {
 		const agentDir = makeAgentDir();
@@ -178,7 +223,7 @@ describe("OrchestrationEventStore", () => {
 			actor: "kernel",
 			payload: {},
 		});
-		unlinkSync(store.cursorPath);
+		rmSync(store.cursorPath, { force: true });
 
 		const second = store.append({
 			type: "objective.paused",
@@ -222,7 +267,7 @@ describe("OrchestrationEventStore", () => {
 		expect(() => store.readAll()).toThrow(/ENOTDIR|not a directory/i);
 	});
 
-	it("rebuilds an idempotency marker from a committed crash tail", () => {
+	it("deduplicates from a committed event when derived indexes are absent", () => {
 		const store = makeStore();
 		const input = {
 			type: "attempt.queued" as const,
@@ -232,7 +277,7 @@ describe("OrchestrationEventStore", () => {
 			payload: { attemptId: "attempt-1" },
 		};
 		const first = store.append(input);
-		unlinkSync(store.cursorPath);
+		rmSync(store.cursorPath, { force: true });
 
 		const replayed = store.append(input);
 

@@ -1161,8 +1161,27 @@ describe("AgentSession worker delegation", () => {
 			workerOrchestrationProfile: pinned,
 			additionalOrchestrationProfiles: [replacement],
 		});
+		let releaseFirst = () => {};
+		let signalQueued!: () => void;
+		let signalAllTerminal!: () => void;
+		const queued = new Promise<void>((resolve) => {
+			signalQueued = resolve;
+		});
+		const allTerminal = new Promise<void>((resolve) => {
+			signalAllTerminal = resolve;
+		});
+		const terminalLaneIds = new Set<string>();
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type !== "delegate_workers") return;
+			if (
+				harness.session.getLaneRecords().some((record) => record.type === "worker" && record.status === "queued")
+			) {
+				signalQueued();
+			}
+			for (const record of event.terminalSinceFlush) terminalLaneIds.add(record.laneId);
+			if (terminalLaneIds.size === 2) signalAllTerminal();
+		});
 		try {
-			let releaseFirst!: () => void;
 			const firstWorkerResponse = new Promise<AssistantMessage>((resolve) => {
 				releaseFirst = () => resolve(fauxAssistantMessage('{"summary":"first worker done","status":"completed"}'));
 			});
@@ -1194,13 +1213,7 @@ describe("AgentSession worker delegation", () => {
 			]);
 
 			await harness.session.prompt("Delegate both workers", { autoContinueGoal: false });
-			await vi.waitFor(() =>
-				expect(
-					harness.session
-						.getLaneRecords()
-						.some((record) => record.type === "worker" && record.status === "queued"),
-				).toBe(true),
-			);
+			await queued;
 			new OrchestrationProfileStore({
 				agentDir: harness.tempDir,
 				cwd: harness.tempDir,
@@ -1224,17 +1237,20 @@ describe("AgentSession worker delegation", () => {
 			});
 			releaseFirst();
 
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
+			await allTerminal;
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
 			expect(workerModelIds).toEqual([
 				pinned.modelPolicy.candidates[0]?.modelId,
 				pinned.modelPolicy.candidates[0]?.modelId,
 			]);
 			expect(workerReasoning).toEqual(["low", "low"]);
 			expect(workerToolNames).toEqual([
-				["read", "write", "delegate"],
-				["read", "write", "delegate"],
+				["read", "write"],
+				["read", "write"],
 			]);
 		} finally {
+			unsubscribe();
+			releaseFirst();
 			harness.cleanup();
 		}
 	});

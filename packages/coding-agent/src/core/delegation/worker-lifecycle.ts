@@ -427,7 +427,7 @@ export class WorkerLifecycle {
 
 	getLatestAgentAttempt(agentId: string): AttemptRuntimeState | undefined {
 		return Object.values(this.ledger.runtime.getSnapshot().attempts)
-			.filter((attempt) => attempt.agentId === agentId)
+			.filter((attempt) => attempt.agentId === agentId || attempt.dispatch.logicalLaneId === agentId)
 			.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 			.at(-1);
 	}

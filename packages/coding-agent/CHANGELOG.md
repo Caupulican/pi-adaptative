@@ -10,9 +10,11 @@
 
 ### Fixed
 
+- Made recursive worker orchestration parent-aware: queued children now have stable identities, waiting parents yield scheduler capacity, terminal children deliver one durable idempotent parent handoff, peer controls stay tree-scoped, reply replay is atomic, explicit leaf grants remain non-delegating, and concurrent descendants share cumulative provider budgets.
 - Counted durable agent attempts that ended before their first usage checkpoint when reconstructing a root tree's cumulative attempt budget after restart.
 - Resolved omitted adaptive-agent reasoning from the selected model's supported default instead of assuming `medium` and rejecting non-reasoning models.
 - Chunked wall-clock timers above the host timer limit and saturated durable lease timestamps at the maximum representable date so unrestricted safe-integer budgets cannot overflow into immediate timeouts or failed starts.
+- Removed per-event idempotency marker files from the bounded orchestration event store and made its corruption cursor a non-atomic derived overwrite, reducing Windows filesystem and security-scanner churn while retaining exact cross-process deduplication and cursor recovery.
 
 ## [0.85.8] - 2026-08-05
 

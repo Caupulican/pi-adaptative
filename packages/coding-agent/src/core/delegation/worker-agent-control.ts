@@ -58,13 +58,19 @@ export interface WorkerAgentMessageOptions {
 	expectReply?: boolean;
 }
 
+export interface WorkerAgentControlScope {
+	callerAgentId?: string;
+}
+
+export interface WorkerAgentTranscriptOptions extends WorkerAgentControlScope {
+	cursor?: number;
+	maxMessages?: number;
+}
+
 /** One canonical host port for model-facing logical-agent controls. */
 export interface WorkerAgentControlPort {
-	listWorkerAgents(): AgentBindingContract[];
-	readWorkerAgentTranscript(
-		agentId: string,
-		options?: { cursor?: number; maxMessages?: number },
-	): WorkerAgentTranscriptPage;
+	listWorkerAgents(scope?: WorkerAgentControlScope): AgentBindingContract[];
+	readWorkerAgentTranscript(agentId: string, options?: WorkerAgentTranscriptOptions): WorkerAgentTranscriptPage;
 	sendWorkerAgentMessage(
 		agentId: string,
 		message: string,
@@ -75,12 +81,16 @@ export interface WorkerAgentControlPort {
 		message: string,
 		options?: WorkerAgentMessageOptions,
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string };
-	interruptWorkerAgent(agentId: string): { interrupted: boolean; reason?: string };
-	resumeWorkerAgent(agentId: string): { started: boolean; record?: LaneRecord; skipReason?: string };
-	cancelWorkerAgent(agentId: string, reasonCode?: string): LaneRecord | undefined;
+	interruptWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): { interrupted: boolean; reason?: string };
+	resumeWorkerAgent(
+		agentId: string,
+		scope?: WorkerAgentControlScope,
+	): { started: boolean; record?: LaneRecord; skipReason?: string };
+	cancelWorkerAgent(agentId: string, reasonCode?: string, scope?: WorkerAgentControlScope): LaneRecord | undefined;
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,
+		scope?: WorkerAgentControlScope,
 	): Promise<{ status: "active" | "suspended" | "idle" | "unknown" }>;
 }
 
@@ -228,6 +238,8 @@ export class WorkerAgentMailbox {
 		threadId?: string;
 		replyToMessageId?: string;
 		expectReply?: boolean;
+		/** Host-owned retry identity; callers cannot choose durable message ids directly. */
+		idempotencyKey?: string;
 	}): WorkerAgentMessage {
 		const content = input.content.trim();
 		if (!content) throw new TypeError("A worker control message is required.");
@@ -239,8 +251,22 @@ export class WorkerAgentMailbox {
 		const senderAgentId = normalizeOptionalIdentity(input.senderAgentId, "sender agent id");
 		const threadId = normalizeOptionalIdentity(input.threadId, "thread id");
 		const replyToMessageId = normalizeOptionalIdentity(input.replyToMessageId, "reply message id");
+		const idempotencyKey = input.idempotencyKey?.trim();
+		if (input.idempotencyKey !== undefined && (!idempotencyKey || idempotencyKey.length > 2_048)) {
+			throw new TypeError("Worker control idempotency key is invalid.");
+		}
 		const message: WorkerAgentMessage = {
-			messageId: `worker-message-${randomUUID()}`,
+			messageId: idempotencyKey
+				? `worker-message-${createHash("sha256")
+						.update("pi-worker-agent-message-v1")
+						.update("\0")
+						.update(this.parentSessionId)
+						.update("\0")
+						.update(this.agentId)
+						.update("\0")
+						.update(idempotencyKey)
+						.digest("hex")}`
+				: `worker-message-${randomUUID()}`,
 			kind: input.kind,
 			content,
 			...(senderAgentId ? { senderAgentId } : {}),
@@ -249,14 +275,30 @@ export class WorkerAgentMailbox {
 			...(input.expectReply === true ? { expectReply: true } : {}),
 			createdAt: new Date().toISOString(),
 		};
+		let queued = message;
+		let created = false;
 		this.update((state) => {
+			const existing = state.messages.find((candidate) => candidate.messageId === message.messageId);
+			if (existing) {
+				const sameIntent =
+					existing.kind === message.kind &&
+					existing.content === message.content &&
+					existing.senderAgentId === message.senderAgentId &&
+					existing.threadId === message.threadId &&
+					existing.replyToMessageId === message.replyToMessageId &&
+					existing.expectReply === message.expectReply;
+				if (!sameIntent) throw new Error("Worker control idempotency identity conflicts with an existing message.");
+				queued = existing;
+				return state;
+			}
 			if (state.messages.filter((candidate) => candidate.deliveredAt === undefined).length >= MAX_MAILBOX_MESSAGES) {
 				throw new Error(`Worker agent mailbox reached its ${MAX_MAILBOX_MESSAGES} message limit.`);
 			}
+			created = true;
 			return { ...state, messages: [...state.messages, message] };
 		});
-		this.notify();
-		return structuredClone(message);
+		if (created) this.notify();
+		return structuredClone(queued);
 	}
 
 	pending(kind?: WorkerAgentMessageKind): WorkerAgentMessage[] {
@@ -280,11 +322,18 @@ export class WorkerAgentMailbox {
 			.map((message) => structuredClone(message));
 	}
 
-	markReplied(messageId: string): void {
-		this.markTimestamp(messageId, "repliedAt");
+	getMessage(messageId: string): WorkerAgentMessage | undefined {
+		const normalized = messageId.trim();
+		if (!normalized) throw new TypeError("A worker control message id is required.");
+		const message = this.read().messages.find((candidate) => candidate.messageId === normalized);
+		return message ? structuredClone(message) : undefined;
 	}
 
-	private markTimestamp(messageId: string, field: "deliveredAt" | "repliedAt"): void {
+	markReplied(messageId: string): boolean {
+		return this.markTimestamp(messageId, "repliedAt");
+	}
+
+	private markTimestamp(messageId: string, field: "deliveredAt" | "repliedAt"): boolean {
 		const normalized = messageId.trim();
 		if (!normalized) throw new TypeError("A worker control message id is required.");
 		let changed = false;
@@ -297,6 +346,7 @@ export class WorkerAgentMailbox {
 			return changed ? { ...state, messages: pruneDeliveredHistory(messages) } : state;
 		});
 		if (changed) this.notify();
+		return changed;
 	}
 
 	subscribe(listener: () => void): () => void {

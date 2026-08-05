@@ -95,6 +95,7 @@ export class DelegationOrchestrationLedger {
 			...(input.goal ? { goal: input.goal } : {}),
 			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
+			dispatchMetadata: { logicalLaneId: input.laneId },
 		});
 	}
 

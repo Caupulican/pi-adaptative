@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
-import { getPlatformShellToolName } from "../../utils/shell.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -14,6 +13,7 @@ import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
+import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -23,6 +23,7 @@ import type {
 	AttemptUsageSnapshot,
 	ExecutionGrant,
 	OrchestrationProfile,
+	ResourcePointer,
 	WorkerExecutionContract,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
@@ -160,6 +161,12 @@ interface PreparedWorkerAttempt {
 	attempt?: AttemptRuntimeState;
 }
 
+interface PreparedWorkerAgent {
+	conversation: WorkerConversation;
+	resources: readonly ResourcePointer[];
+	resourceSystemPrompt: string;
+}
+
 export class WorkerDelegationController {
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
@@ -175,6 +182,7 @@ export class WorkerDelegationController {
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
 	private readonly publishedTerminalAttemptIds = new Set<string>();
+	private readonly yieldedCapacityAttemptIds = new Set<string>();
 	private readonly conversations = new WorkerConversationStore();
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
@@ -241,6 +249,7 @@ export class WorkerDelegationController {
 				if (terminal) this.publishTerminalRecord(terminal);
 				return terminal;
 			},
+			yieldCapacity: (callerAgentId, targetAgentId) => this.yieldWorkerCapacity(callerAgentId, targetAgentId),
 		});
 		this.writeReservations = new WorkerWriteReservationCoordinator({
 			agentDir: this.deps.getAgentDir(),
@@ -670,9 +679,36 @@ export class WorkerDelegationController {
 	}
 
 	private publishTerminalRecord(record: LaneRecord): void {
-		const attemptId = this.lifecycle?.getActiveAttempt(record.laneId)?.attemptId;
+		const attempt = this.lifecycle?.getActiveAttempt(record.laneId);
+		const attemptId = attempt?.attemptId;
 		if (attemptId && this.publishedTerminalAttemptIds.has(attemptId)) return;
-		this.recordTerminal(record);
+		const childAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
+		const parentAgentId = this.lifecycle.getAgent(childAgentId)?.parentAgentId ?? attempt?.dispatch.parentAgentId;
+		let handedOffToParent = false;
+		if (attemptId && parentAgentId) {
+			try {
+				this.agentControl.deliverWorkerTerminalHandoff({
+					parentAgentId,
+					childAgentId,
+					terminalAttemptId: attemptId,
+					record,
+				});
+				handedOffToParent = true;
+			} catch (error) {
+				this.safeWarn(
+					`Worker terminal handoff for ${record.laneId} failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		if (handedOffToParent) {
+			const notification = this.lifecycle.getTerminalNotification(record.laneId);
+			if (notification?.status === "pending") {
+				this.lifecycle.markNotificationsDelivered([notification.notificationId]);
+			}
+			this.notifications.statusChanged();
+		} else {
+			this.recordTerminal(record);
+		}
 		appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 		this.deps.emitAutonomyTelemetry({
 			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerTerminal,
@@ -685,6 +721,7 @@ export class WorkerDelegationController {
 				costUsd: record.costUsd ?? null,
 			},
 		});
+		this.agentControl.signalStateChanged();
 		if (attemptId) this.publishedTerminalAttemptIds.add(attemptId);
 	}
 
@@ -701,7 +738,31 @@ export class WorkerDelegationController {
 	}
 
 	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings): boolean {
-		return this.getWorkerLifecycle().getRunningCount() < settings.maxConcurrent;
+		const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
+		let yielded = 0;
+		for (const attemptId of [...this.yieldedCapacityAttemptIds]) {
+			const status = snapshot.attempts[attemptId]?.status;
+			if (status === "leased" || status === "running") yielded += 1;
+			else this.yieldedCapacityAttemptIds.delete(attemptId);
+		}
+		return Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) < settings.maxConcurrent;
+	}
+
+	private yieldWorkerCapacity(callerAgentId: string, targetAgentId: string): () => void {
+		const caller = this.lifecycle.getAgent(callerAgentId);
+		const target = this.lifecycle.getAgent(targetAgentId);
+		if (!caller || !target || caller.rootAgentId !== target.rootAgentId) return () => undefined;
+		const attempt = this.lifecycle.getLatestAgentAttempt(caller.agentId);
+		if (!attempt || (attempt.status !== "leased" && attempt.status !== "running")) return () => undefined;
+		this.yieldedCapacityAttemptIds.add(attempt.attemptId);
+		this.scheduler.drain();
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
+			if (!this.deps.isDisposed()) this.scheduler.drain();
+		};
 	}
 
 	private workerDispatchAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission {
@@ -767,6 +828,56 @@ export class WorkerDelegationController {
 		return { executionPlan: admission.executionPlan, lifecycle, ...prepared };
 	}
 
+	private ensurePreparedAgent(
+		prepared: PreparedWorkerAttempt,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+	): PreparedWorkerAgent {
+		if (!prepared.attempt) throw new Error("Prepared worker attempt is missing.");
+		const immutableWorker = prepared.attempt.dispatch.executionContract?.worker;
+		if (!immutableWorker) throw new Error("Prepared worker execution contract is missing.");
+		const agentId = prepared.attempt.agentId ?? prepared.attempt.dispatch.logicalLaneId ?? prepared.record.laneId;
+		const existing = prepared.lifecycle.getAgent(agentId);
+		if (existing) {
+			const conversation = this.conversations.open({
+				agentDir: this.deps.getAgentDir(),
+				resumeContext: existing.resumeContext,
+				expectedLogicalAgentId: existing.agentId,
+			});
+			const materialized = materializeWorkerResourceBundle(existing.resumeContext.contextPointers);
+			if (!materialized.ok) throw new Error(`worker_resource_materialization_${materialized.code}`);
+			return {
+				conversation,
+				resources: materialized.pointers,
+				resourceSystemPrompt: materialized.systemPrompt,
+			};
+		}
+		const selected = selectWorkerResourcePointers(immutableWorker.resourcePointers, admission.resourcePointerIds);
+		if (!selected.ok) throw new Error(selected.reason);
+		const materialized = materializeWorkerResourceBundle(selected.pointers);
+		if (!materialized.ok) throw new Error(`worker_resource_materialization_${materialized.code}`);
+		const conversation = this.conversations.ensure({
+			agentDir: this.deps.getAgentDir(),
+			parentSessionId: this.deps.getSessionId(),
+			logicalAgentId: agentId,
+			cwd: this.deps.getCwd(),
+			orchestrationProfileId: immutableWorker.profile.profileId,
+			modelRef: `${immutableWorker.modelBinding.provider}/${immutableWorker.modelBinding.modelId}`,
+			resourceProfileNames: immutableWorker.profile.resourceProfileNames,
+			contextPointers: materialized.pointers,
+		});
+		prepared.lifecycle.ensureAgent({
+			agentId,
+			...(prepared.attempt.dispatch.parentAgentId ? { parentAgentId: prepared.attempt.dispatch.parentAgentId } : {}),
+			role: immutableWorker.profile.role,
+			resumeContext: conversation.getResumeContext(),
+		});
+		return {
+			conversation,
+			resources: materialized.pointers,
+			resourceSystemPrompt: materialized.systemPrompt,
+		};
+	}
+
 	start(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
@@ -789,15 +900,19 @@ export class WorkerDelegationController {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
-			let record: LaneRecord;
+			let record: LaneRecord | undefined;
 			try {
-				record = this.prepareWorkerAttempt(request, admission).record;
+				const prepared = this.prepareWorkerAttempt(request, admission);
+				record = prepared.record;
+				this.ensurePreparedAgent(prepared, admission);
 			} catch (error) {
+				if (record) this.cancelAndPublish(this.lifecycle, record.laneId, "worker_conversation_unavailable");
 				this.safeWarn(
 					`Worker dispatch was not persisted: ${error instanceof Error ? error.message : String(error)}`,
 				);
 				return { started: false, skipReason: "orchestration_ledger_error" };
 			}
+			if (!record) return { started: false, skipReason: "orchestration_attempt_missing" };
 			this.scheduler.enqueue(
 				record,
 				{ ...request, profileId: shipment.profile.profileId },
@@ -856,48 +971,29 @@ export class WorkerDelegationController {
 		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
 		const { executionPlan, lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
+		let preparedAgent: PreparedWorkerAgent;
+		try {
+			preparedAgent = this.ensurePreparedAgent(prepared, admission);
+		} catch (error) {
+			this.cancelAndPublish(lifecycle, prepared.record.laneId, "worker_conversation_unavailable");
+			this.safeWarn(`Worker conversation setup failed: ${error instanceof Error ? error.message : String(error)}`);
+			return { started: false, skipReason: "worker_conversation_unavailable" };
+		}
 		const durableTask = lifecycle.getTask(prepared.record.laneId);
 		if (!durableTask) return { started: false, skipReason: "orchestration_task_missing" };
 		const immutableWorker = prepared.attempt.dispatch.executionContract?.worker;
 		if (!immutableWorker) return { started: false, skipReason: "orchestration_execution_contract_missing" };
-		const selectedResources = selectWorkerResourcePointers(
-			immutableWorker.resourcePointers,
-			prepared.attempt.dispatch.resourcePointerIds.length > 0
-				? prepared.attempt.dispatch.resourcePointerIds
-				: admission.resourcePointerIds,
-		);
-		if (!selectedResources.ok) {
-			this.cancelAndPublish(lifecycle, prepared.record.laneId, selectedResources.reason);
-			return { started: false, skipReason: selectedResources.reason };
-		}
 		let grant: ExecutionGrant;
-		let workerResourceSystemPrompt: string;
+		const workerResourceSystemPrompt = preparedAgent.resourceSystemPrompt;
 		if (prepared.attempt.grant) {
 			if (
-				!this.recovery.durableGrantIsStillPermitted(
-					prepared.attempt.grant,
-					executionPlan,
-					selectedResources.pointers,
-				)
+				!this.recovery.durableGrantIsStillPermitted(prepared.attempt.grant, executionPlan, preparedAgent.resources)
 			) {
 				this.cancelAndPublish(lifecycle, prepared.record.laneId, "recovered_grant_revoked");
 				return { started: false, skipReason: "recovered_grant_revoked" };
 			}
 			grant = prepared.attempt.grant;
-			const materialized = materializeWorkerResourceBundle(grant.resources);
-			if (!materialized.ok) {
-				const reason = `worker_resource_materialization_${materialized.code}`;
-				this.cancelAndPublish(lifecycle, prepared.record.laneId, reason);
-				return { started: false, skipReason: reason };
-			}
-			workerResourceSystemPrompt = materialized.systemPrompt;
 		} else {
-			const materialized = materializeWorkerResourceBundle(selectedResources.pointers);
-			if (!materialized.ok) {
-				const reason = `worker_resource_materialization_${materialized.code}`;
-				this.cancelAndPublish(lifecycle, prepared.record.laneId, reason);
-				return { started: false, skipReason: reason };
-			}
 			const compiled = compileWorkerExecutionGrant({
 				target: {
 					objectiveId: durableTask.task.objectiveId,
@@ -906,7 +1002,7 @@ export class WorkerDelegationController {
 				},
 				profile: orchestrationProfile,
 				plan: executionPlan,
-				resources: materialized.pointers,
+				resources: preparedAgent.resources,
 			});
 			if (!compiled.ok) {
 				this.cancelAndPublish(lifecycle, prepared.record.laneId, compiled.reasonCodes.join(","));
@@ -914,7 +1010,6 @@ export class WorkerDelegationController {
 			}
 			lifecycle.bindGrant(prepared.attempt.attemptId, compiled.grant);
 			grant = compiled.grant;
-			workerResourceSystemPrompt = materialized.systemPrompt;
 		}
 		const immutableProfile = immutableWorker.profile;
 		// Follow-up tasks deliberately receive unique task ids while retaining the original logical
@@ -925,44 +1020,8 @@ export class WorkerDelegationController {
 			this.cancelAndPublish(lifecycle, prepared.record.laneId, "orchestration_agent_missing");
 			return { started: false, skipReason: "orchestration_agent_missing" };
 		}
-		let conversation: WorkerConversation;
-		try {
-			if (registeredAgent) {
-				// Recovery must trust only the registered resume context; reconstructing one here could
-				// silently redirect a logical worker to a different transcript or resource scope.
-				conversation = this.conversations.open({
-					agentDir: this.deps.getAgentDir(),
-					resumeContext: registeredAgent.resumeContext,
-					expectedLogicalAgentId: registeredAgent.agentId,
-				});
-				if (prepared.attempt.status === "suspended") this.recovery.repairInterruptedToolResults(conversation);
-			} else {
-				conversation = this.conversations.ensure({
-					agentDir: this.deps.getAgentDir(),
-					parentSessionId: this.deps.getSessionId(),
-					logicalAgentId: agentId,
-					cwd: this.deps.getCwd(),
-					orchestrationProfileId: immutableProfile.profileId,
-					modelRef: `${prepared.attempt.dispatch.executionContract!.worker.modelBinding.provider}/${prepared.attempt.dispatch.executionContract!.worker.modelBinding.modelId}`,
-					resourceProfileNames: immutableProfile.resourceProfileNames,
-					contextPointers: grant.resources,
-				});
-				lifecycle.ensureAgent({
-					agentId,
-					...(prepared.attempt.dispatch.parentAgentId
-						? { parentAgentId: prepared.attempt.dispatch.parentAgentId }
-						: {}),
-					role: immutableProfile.role,
-					resumeContext: conversation.getResumeContext(),
-				});
-			}
-		} catch (error) {
-			if (prepared.attempt.status !== "suspended") {
-				this.cancelAndPublish(lifecycle, prepared.record.laneId, "worker_conversation_unavailable");
-			}
-			this.safeWarn(`Worker conversation setup failed: ${error instanceof Error ? error.message : String(error)}`);
-			return { started: false, skipReason: "worker_conversation_unavailable" };
-		}
+		const conversation = preparedAgent.conversation;
+		if (prepared.attempt.status === "suspended") this.recovery.repairInterruptedToolResults(conversation);
 		const reservation = this.writeReservations.acquire(prepared.record.laneId, prepared.attempt, executionPlan);
 		if (reservation.kind === "denied") {
 			this.cancelAndPublish(lifecycle, prepared.record.laneId, reservation.reasonCode);
@@ -1044,8 +1103,7 @@ export class WorkerDelegationController {
 			seeds: collectWorkerTreeBudgetSeeds(lifecycle.getTaskRuntimeSnapshot(), agentBinding.rootAgentId),
 			initialUsage,
 		});
-		const platformShellToolName = getPlatformShellToolName();
-		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === platformShellToolName);
+		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === STABLE_SHELL_TOOL_NAME);
 		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
 		if (shellSessionKey) this.shellSessionKeys.add(shellSessionKey);
 		const toolSurface = createLaneToolSurface({

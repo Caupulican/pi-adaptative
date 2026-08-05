@@ -180,7 +180,12 @@ describe("delegate logical-agent controls", () => {
 
 		expect(JSON.stringify(listed.content)).toContain("agent-2");
 		expect(JSON.stringify(transcript.content)).toContain("EXACT_PEER_MESSAGE");
-		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("agent-2", { cursor: 1, maxMessages: 1 });
+		expect(listWorkerAgents).toHaveBeenCalledWith({ callerAgentId: "agent-1" });
+		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("agent-2", {
+			cursor: 1,
+			maxMessages: 1,
+			callerAgentId: "agent-1",
+		});
 		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-2", "Please reply with evidence.", {
 			senderAgentId: "agent-1",
 			threadId: "thread-1",

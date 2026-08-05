@@ -5,9 +5,11 @@ import type { AgentBindingContract } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import {
 	type WorkerAgentControlPort,
+	type WorkerAgentControlScope,
 	WorkerAgentMailbox,
 	type WorkerAgentMessage,
 	type WorkerAgentMessageOptions,
+	type WorkerAgentTranscriptOptions,
 } from "./worker-agent-control.ts";
 import { type WorkerConversation, WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
@@ -26,6 +28,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	statusChanged(): void;
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
+	yieldCapacity?(callerAgentId: string, targetAgentId: string): () => void;
 }
 
 /**
@@ -48,19 +51,21 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return this.options.processOwnerId;
 	}
 
-	listWorkerAgents(): AgentBindingContract[] {
+	listWorkerAgents(scope: WorkerAgentControlScope = {}): AgentBindingContract[] {
 		this.requireControl();
-		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents).sort(
-			(left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt),
-		);
+		const agents = Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents);
+		const caller = scope.callerAgentId ? this.requireKnownAgent(scope.callerAgentId) : undefined;
+		return agents
+			.filter((agent) => !caller || agent.rootAgentId === caller.rootAgentId)
+			.sort((left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt));
 	}
 
 	readWorkerAgentTranscript(
 		agentId: string,
-		options: { cursor?: number; maxMessages?: number } = {},
+		options: WorkerAgentTranscriptOptions = {},
 	): ReturnType<WorkerAgentControlPort["readWorkerAgentTranscript"]> {
 		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
+		const agent = this.requireVisibleAgent(agentId, options);
 		const cursor = options.cursor ?? 0;
 		const maxMessages = options.maxMessages ?? 16;
 		if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TypeError("Worker transcript cursor is invalid.");
@@ -92,9 +97,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentMessageOptions = {},
 	): { messageId: string; queued: true } {
 		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
-		this.acknowledgePeerReply(options);
-		const queued = this.getMailbox(agent.agentId).enqueue({ kind: "follow_up", content: message, ...options });
+		const agent = this.requireVisibleAgent(agentId, { callerAgentId: options.senderAgentId });
+		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options);
 		this.signalStateChanged();
 		return { messageId: queued.messageId, queued: true };
 	}
@@ -105,21 +109,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentMessageOptions = {},
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string } {
 		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
+		const agent = this.requireVisibleAgent(agentId, { callerAgentId: options.senderAgentId });
 		const canonicalAgentId = agent.agentId;
-		this.acknowledgePeerReply(options);
-		const active = agent.activeAttemptId
-			? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[agent.activeAttemptId]
-			: undefined;
-		if (active?.status === "running" || active?.status === "leased") {
-			const queued = this.getMailbox(canonicalAgentId).enqueue({ kind: "steer", content: message, ...options });
+		const active = this.latestAgentAttempt(agent);
+		if (active?.status === "queued" || active?.status === "running" || active?.status === "leased") {
+			const queued = this.enqueuePeerMessage(agent, "steer", message, options);
 			this.signalStateChanged();
 			return { started: false, steering: true, messageId: queued.messageId };
 		}
 		if (agent.status !== "registered") {
 			return { started: false, steering: false, messageId: "", skipReason: `agent_${agent.status}` };
 		}
-		const queued = this.getMailbox(canonicalAgentId).enqueue({ kind: "follow_up", content: message, ...options });
+		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options);
 		try {
 			const prepared = this.options
 				.getLifecycle()
@@ -139,8 +140,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 	}
 
-	interruptWorkerAgent(agentId: string): { interrupted: boolean; reason?: string } {
-		const { agent, attempt } = this.controlledAgentAttempt(agentId);
+	interruptWorkerAgent(
+		agentId: string,
+		scope: WorkerAgentControlScope = {},
+	): { interrupted: boolean; reason?: string } {
+		const { agent, attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (!attempt || (attempt.status !== "running" && attempt.status !== "leased")) {
 			return { interrupted: false, reason: "agent_not_running" };
 		}
@@ -154,8 +158,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 	}
 
-	resumeWorkerAgent(agentId: string): { started: boolean; record?: LaneRecord; skipReason?: string } {
-		const { attempt } = this.controlledAgentAttempt(agentId);
+	resumeWorkerAgent(
+		agentId: string,
+		scope: WorkerAgentControlScope = {},
+	): { started: boolean; record?: LaneRecord; skipReason?: string } {
+		const { attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (!attempt || attempt.status !== "suspended") return { started: false, skipReason: "agent_not_suspended" };
 		const record = this.options.getLifecycle().getRecord(attempt.taskId);
 		if (!record) return { started: false, skipReason: "orchestration_projection_missing" };
@@ -165,8 +172,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return { started: true, record };
 	}
 
-	cancelWorkerAgent(agentId: string, reasonCode = "agent_cancelled"): LaneRecord | undefined {
-		const { attempt } = this.controlledAgentAttempt(agentId);
+	cancelWorkerAgent(
+		agentId: string,
+		reasonCode = "agent_cancelled",
+		scope: WorkerAgentControlScope = {},
+	): LaneRecord | undefined {
+		const { attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (!attempt) return undefined;
 		this.options.abortLane(attempt.taskId, reasonCode);
 		const record = this.options.cancelLane(attempt.taskId, reasonCode);
@@ -178,23 +189,34 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs = 30_000,
+		scope: WorkerAgentControlScope = {},
 	): Promise<{ status: "active" | "suspended" | "idle" | "unknown" }> {
 		this.requireControl();
 		const canonicalAgentId = agentId.trim();
+		if (!canonicalAgentId) throw new Error("Logical worker agent id is required.");
+		const target = this.options.getLifecycle().getAgent(canonicalAgentId);
+		if (target) this.requireVisibleAgent(canonicalAgentId, scope);
 		const boundedTimeoutMs = Number.isFinite(timeoutMs)
 			? Math.max(1, Math.min(Math.floor(timeoutMs), 300_000))
 			: 30_000;
 		const currentStatus = (): "active" | "suspended" | "idle" | "unknown" => {
 			const agent = this.options.getLifecycle().getAgent(canonicalAgentId);
 			if (!agent) return "unknown";
-			if (agent.status === "active" || agent.status === "resuming") return "active";
-			if (agent.status === "suspended") return "suspended";
+			const attempt = this.latestAgentAttempt(agent);
+			if (attempt?.status === "suspended" || agent.status === "suspended") return "suspended";
+			if (attempt?.status === "queued" || attempt?.status === "leased" || attempt?.status === "running") {
+				return "active";
+			}
 			return "idle";
 		};
 		const immediate = currentStatus();
 		if (immediate !== "active") return Promise.resolve({ status: immediate });
 		return new Promise((resolve) => {
 			let settled = false;
+			let releaseYield = (): void => undefined;
+			let unsubscribeMailbox = (): void => undefined;
+			let unsubscribeState = (): void => undefined;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
 			const settle = () => {
 				if (settled) return;
 				const next = currentStatus();
@@ -202,19 +224,27 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				settled = true;
 				unsubscribeMailbox();
 				unsubscribeState();
-				clearTimeout(timeout);
+				if (timeout) clearTimeout(timeout);
+				releaseYield();
 				resolve({ status: next });
 			};
-			const unsubscribeMailbox = this.getMailbox(canonicalAgentId).subscribe(settle);
-			const unsubscribeState = this.subscribeStateChanges(settle);
-			const timeout = setTimeout(() => {
+			unsubscribeMailbox = this.getMailbox(canonicalAgentId).subscribe(settle);
+			unsubscribeState = this.subscribeStateChanges(settle);
+			timeout = setTimeout(() => {
 				if (settled) return;
 				settled = true;
 				unsubscribeMailbox();
 				unsubscribeState();
+				releaseYield();
 				resolve({ status: currentStatus() });
 			}, boundedTimeoutMs);
 			if (typeof timeout === "object" && "unref" in timeout) timeout.unref();
+			if (scope.callerAgentId && this.options.yieldCapacity) {
+				const yielded = this.options.yieldCapacity(scope.callerAgentId, canonicalAgentId);
+				if (settled) yielded();
+				else releaseYield = yielded;
+			}
+			settle();
 		});
 	}
 
@@ -247,6 +277,45 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		for (const listener of this.stateListeners) listener();
 	}
 
+	/** Route a terminal child edge to its owning parent without injecting into an active model turn. */
+	deliverWorkerTerminalHandoff(args: {
+		parentAgentId: string;
+		childAgentId: string;
+		terminalAttemptId: string;
+		record: LaneRecord;
+	}): { messageId: string; started: boolean } {
+		const parent = this.requireKnownAgent(args.parentAgentId);
+		const latest = this.latestAgentAttempt(parent);
+		const active = latest?.status === "queued" || latest?.status === "leased" || latest?.status === "running";
+		const content = [
+			"Worker terminal handoff",
+			`childAgentId=${args.childAgentId}`,
+			`laneId=${args.record.laneId}`,
+			`status=${args.record.status}`,
+			...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
+			`Read the exact child evidence with delegate action="transcript" agentId="${args.childAgentId}".`,
+		].join("\n");
+		const queued = this.getMailbox(parent.agentId).enqueue({
+			kind: active ? "steer" : "follow_up",
+			content,
+			senderAgentId: args.childAgentId,
+			idempotencyKey: `terminal-handoff:${args.terminalAttemptId}`,
+		});
+		let started = false;
+		if (!active && parent.status === "registered") {
+			const prepared = this.options.getLifecycle().prepareAgentTurn({
+				agentId: parent.agentId,
+				instructions: content,
+			});
+			this.options.scheduler.enqueue(prepared.record, this.options.recoveredRequest(prepared.attempt));
+			this.options.statusChanged();
+			this.options.scheduler.drain();
+			started = true;
+		}
+		this.signalStateChanged();
+		return { messageId: queued.messageId, started };
+	}
+
 	private requireControl(): void {
 		if (!this.options.isControlAvailable()) {
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
@@ -261,15 +330,47 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return agent;
 	}
 
-	private controlledAgentAttempt(agentId: string): {
+	private requireVisibleAgent(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
+		const target = this.requireKnownAgent(agentId);
+		if (!scope.callerAgentId) return target;
+		const caller = this.requireKnownAgent(scope.callerAgentId);
+		if (caller.rootAgentId !== target.rootAgentId) {
+			throw new Error(`Logical worker agent '${target.agentId}' is outside the caller's agent tree.`);
+		}
+		return target;
+	}
+
+	private requireControllableAgent(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
+		const target = this.requireVisibleAgent(agentId, scope);
+		if (!scope.callerAgentId) return target;
+		const caller = this.requireKnownAgent(scope.callerAgentId);
+		let cursor: AgentBindingContract | undefined = target;
+		const visited = new Set<string>();
+		while (cursor && !visited.has(cursor.agentId)) {
+			if (cursor.agentId === caller.agentId) return target;
+			visited.add(cursor.agentId);
+			cursor = cursor.parentAgentId ? this.options.getLifecycle().getAgent(cursor.parentAgentId) : undefined;
+		}
+		throw new Error(`Logical worker agent '${target.agentId}' is outside its control subtree.`);
+	}
+
+	private latestAgentAttempt(agent: AgentBindingContract): AttemptRuntimeState | undefined {
+		const lifecycle = this.options.getLifecycle();
+		const latest = lifecycle.getLatestAgentAttempt?.(agent.agentId);
+		if (latest) return latest;
+		return agent.activeAttemptId ? lifecycle.getTaskRuntimeSnapshot().attempts[agent.activeAttemptId] : undefined;
+	}
+
+	private controlledAgentAttempt(
+		agentId: string,
+		scope: WorkerAgentControlScope,
+	): {
 		agent: AgentBindingContract;
 		attempt: AttemptRuntimeState | undefined;
 	} {
 		this.requireControl();
-		const agent = this.requireKnownAgent(agentId);
-		const attempt = agent.activeAttemptId
-			? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[agent.activeAttemptId]
-			: undefined;
+		const agent = this.requireControllableAgent(agentId, scope);
+		const attempt = this.latestAgentAttempt(agent);
 		return { agent, attempt };
 	}
 
@@ -291,10 +392,39 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return () => this.stateListeners.delete(listener);
 	}
 
-	private acknowledgePeerReply(options: WorkerAgentMessageOptions): void {
-		if (!options.senderAgentId || !options.replyToMessageId) return;
-		this.requireKnownAgent(options.senderAgentId);
-		this.getMailbox(options.senderAgentId).markReplied(options.replyToMessageId);
+	private enqueuePeerMessage(
+		target: AgentBindingContract,
+		kind: "steer" | "follow_up",
+		content: string,
+		options: WorkerAgentMessageOptions,
+	): WorkerAgentMessage {
+		if (!options.replyToMessageId) {
+			return this.getMailbox(target.agentId).enqueue({ kind, content, ...options });
+		}
+		if (!options.senderAgentId) throw new Error("A worker reply requires its sender agent identity.");
+		const sender = this.requireKnownAgent(options.senderAgentId);
+		if (sender.rootAgentId !== target.rootAgentId)
+			throw new Error("A worker reply target is outside its agent tree.");
+		const senderMailbox = this.getMailbox(sender.agentId);
+		const request = senderMailbox.getMessage(options.replyToMessageId);
+		if (!request || request.expectReply !== true || request.deliveredAt === undefined) {
+			throw new Error("Worker reply does not reference a delivered reply-expected message.");
+		}
+		if (request.senderAgentId !== target.agentId) {
+			throw new Error("Worker reply target does not match the original requester.");
+		}
+		if (request.threadId && options.threadId && request.threadId !== options.threadId) {
+			throw new Error("Worker reply thread conflicts with the original request.");
+		}
+		const queued = this.getMailbox(target.agentId).enqueue({
+			kind,
+			content,
+			...options,
+			...(request.threadId && !options.threadId ? { threadId: request.threadId } : {}),
+			idempotencyKey: `peer-reply:${sender.agentId}:${request.messageId}`,
+		});
+		senderMailbox.markReplied(request.messageId);
+		return queued;
 	}
 
 	private mailboxMessage(message: WorkerAgentMessage): AgentMessage {

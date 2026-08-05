@@ -58,10 +58,20 @@ export interface GatewayUsageSnapshot {
 	wallClockMs: number;
 }
 
+export interface ProviderBudgetReservation {
+	maxTokens: number;
+	release(): void;
+}
+
 export interface SharedCapabilityBudget {
 	assertBudgetAvailable(subject: string): void;
 	recordAttemptUsage(usage: GatewayUsageSnapshot): void;
 	remainingTokens(): number | undefined;
+	reserveProviderBudget(
+		requestedMaxTokens: number,
+		subject: string,
+		signal?: AbortSignal,
+	): Promise<ProviderBudgetReservation>;
 }
 
 /** Persistable cumulative usage from a prior active segment; excludes restart downtime. */
@@ -242,9 +252,35 @@ export class CapabilityGateway {
 		this.sharedBudget?.assertBudgetAvailable(subject);
 	}
 
+	async reserveProviderBudget(
+		requestedMaxTokens: number,
+		subject = "provider",
+		signal?: AbortSignal,
+	): Promise<ProviderBudgetReservation> {
+		if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0) {
+			throw new Error("CapabilityGateway: provider token reservation must be a positive safe integer.");
+		}
+		this.assertBudgetAvailable(subject);
+		const localRemaining = this.remainingAttemptTokenBudget();
+		const maxTokens = Math.min(requestedMaxTokens, localRemaining ?? requestedMaxTokens);
+		if (maxTokens <= 0) {
+			this.deny(subject, "token_budget_exhausted", "Token budget exhausted.");
+		}
+		if (this.sharedBudget) return this.sharedBudget.reserveProviderBudget(maxTokens, subject, signal);
+		if (signal?.aborted) throw signal.reason;
+		return {
+			maxTokens,
+			release: () => undefined,
+		};
+	}
+
+	remainingAttemptTokenBudget(): number | undefined {
+		const maximum = this.grant.budget.maxTokens;
+		return maximum === undefined ? undefined : Math.max(0, maximum - this.totalTokens);
+	}
+
 	remainingTokenBudget(): number | undefined {
-		const local = this.grant.budget.maxTokens;
-		const localRemaining = local === undefined ? undefined : Math.max(0, local - this.totalTokens);
+		const localRemaining = this.remainingAttemptTokenBudget();
 		const sharedRemaining = this.sharedBudget?.remainingTokens();
 		if (localRemaining === undefined) return sharedRemaining;
 		if (sharedRemaining === undefined) return localRemaining;

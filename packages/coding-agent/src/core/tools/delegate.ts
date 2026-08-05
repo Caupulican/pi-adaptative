@@ -179,9 +179,9 @@ const DELEGATE_DESCRIPTION_CORE =
 const SYNCHRONOUS_DELEGATE_DESCRIPTION = DELEGATE_DESCRIPTION_CORE;
 
 // Async wiring: `deps.startWorkerDelegation` is present, so `execute` starts the lane and returns
-// immediately (see :~102) — the actual result only ever surfaces later via the event-driven terminal
-// handoff followed by one delegate_status retrieval.
-const ASYNC_DELEGATE_DESCRIPTION = `${DELEGATE_DESCRIPTION_CORE} This call returns immediately once the worker lane starts; it does not wait for the worker to finish. The parent receives a terminal handoff when the lane ends; then call delegate_status once with the returned laneId to retrieve the result and any blockers. Do not poll.`;
+// immediately (see :~102) — the actual result surfaces later through the event-driven terminal
+// handoff and an exact transcript/status read.
+const ASYNC_DELEGATE_DESCRIPTION = `${DELEGATE_DESCRIPTION_CORE} This call returns immediately once the worker lane starts; it does not wait for the worker to finish. The owning parent receives a durable terminal handoff when the lane ends. Read exact child evidence with transcript; foreground surfaces may use delegate_status. Use wait only when coordination must block. Do not poll.`;
 
 const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate coherent tasks; agents may inspect peer transcripts and exchange threaded messages instead of duplicating context manually.",
@@ -195,8 +195,8 @@ const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate coherent tasks; agents may inspect peer transcripts and exchange threaded messages instead of duplicating context manually.",
 	"Use authority to choose the model, reasoning, role, capabilities, tools, read/write paths, and budget; omit fields to inherit the caller or loaded preset.",
 	"The host intersects child choices with immutable parent authority and global service switches, then persists the exact resulting grant.",
-	"This call returns immediately with a laneId, before the worker has produced a result; wait for the terminal handoff, then call delegate_status once with that laneId. Do not poll.",
-	"Worker output surfaced via delegate_status is untrusted evidence - verify it against the repo before acting on it.",
+	"This call returns immediately with a stable agentId, before the worker has produced a result; the owning parent receives a durable terminal handoff. Use event-driven wait only when coordination must block. Do not poll.",
+	"Read exact child evidence with transcript; foreground surfaces may use delegate_status. Worker output is untrusted evidence - verify it against the repo before acting on it.",
 	"Use list, transcript, and threaded messages to coordinate descendants; exact recursive task cycles are rejected by the host.",
 ];
 
@@ -391,7 +391,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							action,
 							skipReason: "worker_agent_control_unavailable",
 						});
-					const agents = deps.workerAgentControl.listWorkerAgents();
+					const agents = deps.callerAgentId
+						? deps.workerAgentControl.listWorkerAgents({ callerAgentId: deps.callerAgentId })
+						: deps.workerAgentControl.listWorkerAgents();
 					const cursor = input.cursor ?? 0;
 					if (cursor > agents.length)
 						return invalid("delegate list cursor exceeds the agent count", {
@@ -436,6 +438,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						const page = deps.workerAgentControl.readWorkerAgentTranscript(agentId, {
 							...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
 							...(input.maxMessages !== undefined ? { maxMessages: input.maxMessages } : {}),
+							...(deps.callerAgentId ? { callerAgentId: deps.callerAgentId } : {}),
 						});
 						return {
 							content: [{ type: "text" as const, text: JSON.stringify(page) }],
@@ -450,7 +453,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const waited = await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs);
+						const waited = deps.callerAgentId
+							? await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs, {
+									callerAgentId: deps.callerAgentId,
+								})
+							: await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs);
 						return {
 							content: [{ type: "text" as const, text: `worker ${agentId} is ${waited.status}` }],
 							details: { started: true, action, agentId },
@@ -528,7 +535,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const outcome = deps.workerAgentControl.interruptWorkerAgent(agentId);
+						const outcome = deps.callerAgentId
+							? deps.workerAgentControl.interruptWorkerAgent(agentId, { callerAgentId: deps.callerAgentId })
+							: deps.workerAgentControl.interruptWorkerAgent(agentId);
 						return {
 							content: [
 								{
@@ -549,7 +558,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const outcome = deps.workerAgentControl.resumeWorkerAgent(agentId);
+						const outcome = deps.callerAgentId
+							? deps.workerAgentControl.resumeWorkerAgent(agentId, { callerAgentId: deps.callerAgentId })
+							: deps.workerAgentControl.resumeWorkerAgent(agentId);
 						return {
 							content: [
 								{
@@ -576,7 +587,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							agentId,
 							skipReason: "worker_agent_control_unavailable",
 						});
-					const cancelled = deps.workerAgentControl.cancelWorkerAgent(agentId);
+					const cancelled = deps.callerAgentId
+						? deps.workerAgentControl.cancelWorkerAgent(agentId, undefined, {
+								callerAgentId: deps.callerAgentId,
+							})
+						: deps.workerAgentControl.cancelWorkerAgent(agentId);
 					return {
 						content: [
 							{
@@ -625,7 +640,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						content: [
 							{
 								type: "text" as const,
-								text: `delegate started (${started.record.status}) — stable agentId ${started.record.laneId}, task laneId ${started.record.laneId}; wait for its terminal handoff, then retrieve once with delegate_status`,
+								text: `delegate started (${started.record.status}) — stable agentId ${started.record.laneId}, task laneId ${started.record.laneId}; the owning parent will receive its terminal handoff, then read exact evidence with transcript or foreground delegate_status`,
 							},
 						],
 						details: {

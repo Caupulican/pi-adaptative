@@ -1,6 +1,6 @@
 import path from "node:path";
-import { getPlatformShellToolName } from "../../utils/shell.ts";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type {
 	ExecutionGrant,
 	HarnessCapability,
@@ -19,8 +19,6 @@ import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
-const INHERITED_CONTROL_TOOL_NAMES = ["delegate"] as const;
-const PLATFORM_SHELL_TOOL_NAME = getPlatformShellToolName();
 
 export interface WorkerExecutionPlan {
 	toolManifests: readonly ToolCapabilityManifest[];
@@ -61,7 +59,7 @@ export function narrowWorkerExecutionPlan(
 	admitted: WorkerExecutionAuthorityContract,
 	current: WorkerExecutionPlan,
 ): WorkerExecutionPlan {
-	const admittedTools = new Set(admitted.toolNames);
+	const admittedTools = new Set(mapToolNamesForPlatform(admitted.toolNames));
 	const admittedCapabilities = new Set(admitted.capabilities);
 	const toolManifests = current.toolManifests.filter(
 		(manifest) =>
@@ -82,7 +80,7 @@ export function narrowWorkerExecutionPlan(
 		deniedPaths: [...new Set([...admitted.deniedPaths, ...current.deniedPaths].map((entry) => path.resolve(entry)))],
 		readMemory: grantedTools.has("memory"),
 		writeEnabled,
-		processEnabled: grantedTools.has("run_process") || grantedTools.has("bash") || grantedTools.has("powershell"),
+		processEnabled: grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME),
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
 	};
 }
@@ -97,6 +95,7 @@ export function buildWorkerExecutionPlan(args: {
 	requestedReadPaths?: readonly string[];
 	requestedWritePaths?: readonly string[];
 }): WorkerExecutionPlan {
+	const profileToolNames = new Set(mapToolNamesForPlatform(args.profile.toolNames));
 	const grantsRead =
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
 		args.profile.capabilityCeiling.includes("worktree.read");
@@ -106,18 +105,14 @@ export function buildWorkerExecutionPlan(args: {
 		(args.profile.capabilityCeiling.includes("filesystem.write") ||
 			args.profile.capabilityCeiling.includes("worktree.mutate"));
 	const memoryEligible =
-		args.memoryEnabled &&
-		args.profile.toolNames.includes("memory") &&
-		args.profile.capabilityCeiling.includes("memory.query");
+		args.memoryEnabled && profileToolNames.has("memory") && args.profile.capabilityCeiling.includes("memory.query");
 	const processEligible =
 		args.profile.capabilityCeiling.includes("process.exec") ||
 		args.profile.capabilityCeiling.includes("tests.execute");
 	const enabledProcessToolNames = processEligible
 		? [
-				...(args.profile.executionPolicy && args.profile.toolNames.includes("run_process")
-					? (["run_process"] as const)
-					: []),
-				...(args.profile.toolNames.includes(PLATFORM_SHELL_TOOL_NAME) ? [PLATFORM_SHELL_TOOL_NAME] : []),
+				...(args.profile.executionPolicy && profileToolNames.has("run_process") ? (["run_process"] as const) : []),
+				...(profileToolNames.has(STABLE_SHELL_TOOL_NAME) ? [STABLE_SHELL_TOOL_NAME] : []),
 			]
 		: [];
 	const enabledToolNames = [
@@ -125,7 +120,9 @@ export function buildWorkerExecutionPlan(args: {
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
 		...(memoryEligible ? (["memory"] as const) : []),
 		...enabledProcessToolNames,
-		...INHERITED_CONTROL_TOOL_NAMES,
+		...(profileToolNames.has("delegate") && args.profile.capabilityCeiling.includes("workflow.delegate")
+			? (["delegate"] as const)
+			: []),
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
@@ -134,7 +131,7 @@ export function buildWorkerExecutionPlan(args: {
 	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	const readMemory = grantedTools.has("memory");
-	const processEnabled = grantedTools.has("run_process") || grantedTools.has("bash") || grantedTools.has("powershell");
+	const processEnabled = grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME);
 	const budget = intersectRiskBudgets(
 		args.profile.budget,
 		...(args.settings.maxUsd > 0 ? [{ maxCostUsd: args.settings.maxUsd }] : []),
@@ -181,7 +178,7 @@ export function compileWorkerExecutionGrant(args: {
 		role: args.profile.role,
 		requiredCapabilities: args.plan.requiredCapabilities,
 		requestedCapabilities: args.plan.requiredCapabilities,
-		authorityCapabilities: [...new Set([...args.profile.capabilityCeiling, "workflow.delegate" as const])],
+		authorityCapabilities: args.profile.capabilityCeiling,
 		requestedTools: args.plan.toolManifests.map((manifest) => manifest.toolName),
 		toolManifests: args.plan.toolManifests,
 		resources: args.resources,

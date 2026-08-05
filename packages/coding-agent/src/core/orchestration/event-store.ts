@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
@@ -25,7 +25,6 @@ const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
 const MAX_SNAPSHOT_DIRECTORY_ENTRIES = 8;
 const MAX_CURSOR_BYTES = 64 * 1024;
 const MAX_BASELINE_BYTES = 64 * 1024;
-const MAX_IDEMPOTENCY_MARKER_BYTES = 64 * 1024;
 /** Full current task state plus retained idempotency evidence; intentionally above the 16MiB tail cap. */
 const MAX_PROJECTION_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
@@ -36,14 +35,11 @@ interface EventCursor {
 }
 
 interface SynchronizedIndexes {
+	baselineOrdinal: number;
+	baselineDigest: string | undefined;
 	lastOrdinal: number;
 	tailBytes: number;
-}
-
-interface IdempotencyMarker {
-	version: 1;
-	key: string;
-	ordinal: number;
+	idempotencyEvents: Map<string, OrchestrationEvent>;
 }
 
 interface ProjectionSnapshotContent {
@@ -75,6 +71,7 @@ interface SnapshotFileSignature {
 interface VerifiedSnapshotBaseline {
 	baseline: SnapshotBaseline;
 	signature: SnapshotFileSignature;
+	idempotencyEvents: OrchestrationEvent[];
 }
 
 export interface OrchestrationEventStoreOptions {
@@ -176,10 +173,13 @@ function positiveSafeInteger(value: number | undefined, fallback: number, maximu
 }
 
 /**
- * Append-only event tail with a replaceable full-state projection snapshot. Atomic rename prevents
- * torn records. Snapshot publication is two-phase (payload, then small baseline pointer), after which
- * covered event/idempotency files are pruned. A crash at any point leaves either the old replay prefix
- * or the new verified snapshot authoritative; ordinals never reset.
+ * Append-only event tail with a replaceable full-state projection snapshot. Each immutable event is
+ * its own commit record: idempotency data is derived directly from the bounded tail, while a small
+ * mutable cursor remains only as a corruption high-water mark. Atomic rename prevents torn event
+ * records without multiplying one transition into per-key marker files and atomic cursor rewrites.
+ * Snapshot publication is two-phase (payload, then small baseline pointer), after which covered event
+ * and legacy-index files are pruned. A crash at any point leaves either the old replay prefix or the
+ * new verified snapshot authoritative; ordinals never reset.
  */
 export class OrchestrationEventStore {
 	readonly rootDir: string;
@@ -195,6 +195,7 @@ export class OrchestrationEventStore {
 	private readonly maxIdempotencyEvents: number;
 	private readonly listeners = new Set<(event: OrchestrationEvent) => void>();
 	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
+	private synchronizedIndexes: SynchronizedIndexes | undefined;
 
 	constructor(options: OrchestrationEventStoreOptions) {
 		this.rootDir = orchestrationEventStoreDir(options.agentDir, options.sessionId);
@@ -227,10 +228,10 @@ export class OrchestrationEventStore {
 
 	append(input: AppendOrchestrationEventInput, options: { expectedLastOrdinal?: number } = {}): OrchestrationEvent {
 		const committed = withFileLockSync(this.cursorPath, (): { event: OrchestrationEvent; appended: boolean } => {
-			const cursor = this.synchronizeIndexesUnlocked();
-			const actual = cursor.lastOrdinal;
+			const indexes = this.synchronizeIndexesUnlocked();
+			const actual = indexes.lastOrdinal;
 			if (input.idempotencyKey) {
-				const existing = this.readIdempotentEventUnlocked(input.idempotencyKey);
+				const existing = indexes.idempotencyEvents.get(input.idempotencyKey);
 				if (existing) return { event: existing, appended: false };
 			}
 			if (options.expectedLastOrdinal !== undefined) {
@@ -259,23 +260,20 @@ export class OrchestrationEventStore {
 				"Orchestration event",
 				"Orchestration event exceeds its configured tail byte limit.",
 			);
-			const serializedMarker = input.idempotencyKey
-				? this.serializeIdempotencyMarker(input.idempotencyKey, ordinal)
-				: undefined;
+			const nextTailBytes = indexes.tailBytes + Buffer.byteLength(serializedEvent);
 			const serializedCursor = serializeBounded(
-				{
-					version: 1,
-					lastOrdinal: ordinal,
-					tailBytes: cursor.tailBytes + Buffer.byteLength(serializedEvent),
-				} satisfies EventCursor,
+				{ version: 1, lastOrdinal: ordinal, tailBytes: nextTailBytes } satisfies EventCursor,
 				MAX_CURSOR_BYTES,
 				"Orchestration cursor",
 			);
 			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent);
-			if (input.idempotencyKey && serializedMarker) {
-				this.writeIdempotencyMarkerUnlocked(input.idempotencyKey, serializedMarker);
-			}
-			writeFileAtomicSync(this.cursorPath, serializedCursor);
+			indexes.lastOrdinal = ordinal;
+			indexes.tailBytes = nextTailBytes;
+			if (input.idempotencyKey) indexes.idempotencyEvents.set(input.idempotencyKey, next);
+			// The immutable event is authoritative. The cursor is only a corruption high-water mark,
+			// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
+			// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
+			writeFileSync(this.cursorPath, serializedCursor, "utf-8");
 			return { event: next, appended: true };
 		});
 
@@ -322,12 +320,24 @@ export class OrchestrationEventStore {
 
 	/** Replace a large replay prefix with one verified current-state snapshot and a bounded tail. */
 	compactIfNeeded(throughOrdinal: number, projection: () => JsonObject): boolean {
-		const baselineBeforeLock = this.readBaselineUnlocked()?.throughOrdinal ?? 0;
+		const baselineBeforeLock = this.readBaselineUnlocked();
+		const baselineOrdinalBeforeLock = baselineBeforeLock?.throughOrdinal ?? 0;
+		const cachedIndexes = this.synchronizedIndexes;
+		if (
+			cachedIndexes?.baselineOrdinal === baselineOrdinalBeforeLock &&
+			cachedIndexes.baselineDigest === baselineBeforeLock?.digest &&
+			cachedIndexes.lastOrdinal === throughOrdinal &&
+			throughOrdinal - baselineOrdinalBeforeLock < this.maxTailEvents &&
+			cachedIndexes.tailBytes < this.maxTailBytes
+		) {
+			return false;
+		}
 		const cursorBeforeLock = parseCursor(this.cursorPath);
 		if (
+			!cachedIndexes &&
 			cursorBeforeLock?.lastOrdinal === throughOrdinal &&
 			cursorBeforeLock.tailBytes !== undefined &&
-			throughOrdinal - baselineBeforeLock < this.maxTailEvents &&
+			throughOrdinal - baselineOrdinalBeforeLock < this.maxTailEvents &&
 			cursorBeforeLock.tailBytes < this.maxTailBytes
 		) {
 			return false;
@@ -394,6 +404,16 @@ export class OrchestrationEventStore {
 				if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
 			}
 			writeFileAtomicSync(this.cursorPath, serializedCursor);
+			this.verifiedSnapshotBaseline = undefined;
+			this.synchronizedIndexes = {
+				baselineOrdinal: throughOrdinal,
+				baselineDigest: digest,
+				lastOrdinal: throughOrdinal,
+				tailBytes: 0,
+				idempotencyEvents: new Map(
+					idempotencyEvents.map((event) => [event.idempotencyKey!, structuredClone(event)]),
+				),
+			};
 			return true;
 		});
 	}
@@ -593,7 +613,7 @@ export class OrchestrationEventStore {
 	 * The baseline pointer remains small and is reread each time; an immutable snapshot is reparsed only
 	 * when its pointer or filesystem identity changes.
 	 */
-	private readVerifiedSnapshotBaselineUnlocked(): SnapshotBaseline | undefined {
+	private readVerifiedSnapshotBaselineUnlocked(): VerifiedSnapshotBaseline | undefined {
 		const baseline = this.readBaselineUnlocked();
 		if (!baseline) {
 			this.verifiedSnapshotBaseline = undefined;
@@ -610,9 +630,12 @@ export class OrchestrationEventStore {
 			cached.signature.mtimeMs === signature.mtimeMs &&
 			cached.signature.ctimeMs === signature.ctimeMs
 		) {
-			return baseline;
+			return cached;
 		}
-		this.readProjectionSnapshotUnlocked();
+		const snapshot = this.readProjectionSnapshotUnlocked();
+		if (!snapshot) {
+			throw new OrchestrationEventStoreError("Orchestration projection snapshot is unavailable.");
+		}
 		const verifiedSignature = this.snapshotFileSignatureUnlocked(baseline);
 		if (
 			verifiedSignature.size !== signature.size ||
@@ -621,8 +644,12 @@ export class OrchestrationEventStore {
 		) {
 			throw new OrchestrationEventStoreError("Orchestration projection snapshot changed while being verified.");
 		}
-		this.verifiedSnapshotBaseline = { baseline, signature };
-		return baseline;
+		this.verifiedSnapshotBaseline = {
+			baseline,
+			signature,
+			idempotencyEvents: snapshot.idempotencyEvents.map((event) => structuredClone(event)),
+		};
+		return this.verifiedSnapshotBaseline;
 	}
 
 	private snapshotFileSignatureUnlocked(baseline: SnapshotBaseline): SnapshotFileSignature {
@@ -664,123 +691,65 @@ export class OrchestrationEventStore {
 		return parsed;
 	}
 
-	private idempotencyPath(key: string): string {
-		return join(this.idempotencyDir, `${createHash("sha256").update(key).digest("hex")}.json`);
-	}
-
-	private serializeIdempotencyMarker(key: string, ordinal: number): string {
-		return serializeBounded(
-			{ version: 1, key, ordinal } satisfies IdempotencyMarker,
-			MAX_IDEMPOTENCY_MARKER_BYTES,
-			"Orchestration idempotency marker",
-		);
-	}
-
-	private writeIdempotencyMarkerUnlocked(key: string, serializedMarker: string): void {
-		writeFileAtomicSync(this.idempotencyPath(key), serializedMarker);
-	}
-
-	private readIdempotentEventUnlocked(key: string): OrchestrationEvent | undefined {
-		const markerPath = this.idempotencyPath(key);
-		if (!existsSync(markerPath)) {
-			return this.readProjectionSnapshotUnlocked()?.idempotencyEvents.find((event) => event.idempotencyKey === key);
-		}
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(
-				readBoundedTextFileSync(markerPath, MAX_IDEMPOTENCY_MARKER_BYTES, "Orchestration idempotency marker"),
-			);
-		} catch (error) {
-			throw new OrchestrationEventStoreError(
-				`Failed to parse orchestration idempotency marker: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			throw new OrchestrationEventStoreError("Invalid orchestration idempotency marker.");
-		}
-		const marker = parsed as Record<string, unknown>;
-		if (
-			marker.version !== 1 ||
-			marker.key !== key ||
-			!Number.isSafeInteger(marker.ordinal) ||
-			Number(marker.ordinal) < 1
-		) {
-			throw new OrchestrationEventStoreError("Invalid orchestration idempotency marker.");
-		}
-		const ordinal = Number(marker.ordinal);
-		if (!existsSync(join(this.eventsDir, eventFileName(ordinal)))) {
-			const retained = this.readProjectionSnapshotUnlocked()?.idempotencyEvents.find(
-				(event) => event.idempotencyKey === key && event.ordinal === ordinal,
-			);
-			if (retained) return retained;
-		}
-		const event = this.readEventFileUnlocked(eventFileName(ordinal));
-		if (event.ordinal !== ordinal || event.idempotencyKey !== key) {
-			throw new OrchestrationEventStoreError("Orchestration idempotency marker does not match its event.");
-		}
-		return event;
-	}
-
 	/**
-	 * Reconcile only the crash tail when an event rename committed before its marker/cursor. Normal
-	 * appends read directory metadata plus one marker, never the accumulated event payload prefix.
+	 * Reconcile the bounded immutable tail into an in-memory index. Independent writers are detected
+	 * from new ordinals while holding the shared lock, so normal same-process appends parse only events
+	 * committed by other writers. A bounded mutable cursor remains derived corruption evidence; legacy
+	 * per-key marker files are no longer needed or rewritten.
 	 */
 	private synchronizeIndexesUnlocked(): SynchronizedIndexes {
 		const names = this.eventFileNamesUnlocked();
-		const baselineOrdinal = this.readVerifiedSnapshotBaselineUnlocked()?.throughOrdinal ?? 0;
+		const verifiedBaseline = this.readVerifiedSnapshotBaselineUnlocked();
+		const baselineOrdinal = verifiedBaseline?.baseline.throughOrdinal ?? 0;
+		const baselineDigest = verifiedBaseline?.baseline.digest;
 		this.assertReadableTailUnlocked(names, baselineOrdinal);
 		const highestEventOrdinal = names.length > 0 ? Number(EVENT_FILE_PATTERN.exec(names.at(-1)!)?.[1] ?? 0) : 0;
 		const highest = Math.max(baselineOrdinal, highestEventOrdinal);
-		const cursor = parseCursor(this.cursorPath);
 		if (
-			cursor?.lastOrdinal === highest &&
-			cursor.tailBytes !== undefined &&
-			(highest > baselineOrdinal || cursor.tailBytes === 0)
+			this.synchronizedIndexes?.baselineOrdinal === baselineOrdinal &&
+			this.synchronizedIndexes.baselineDigest === baselineDigest &&
+			this.synchronizedIndexes.lastOrdinal > highest
 		) {
-			return { lastOrdinal: highest, tailBytes: cursor.tailBytes };
-		}
-		if (cursor && cursor.lastOrdinal > highest) {
 			throw new OrchestrationEventStoreError(
-				`Orchestration cursor ${cursor.lastOrdinal} is ahead of the last committed event ${highest}.`,
+				`Orchestration cursor ${this.synchronizedIndexes.lastOrdinal} is ahead of the last committed event ${highest}.`,
 			);
 		}
-		const rebuildFrom = Math.max(
-			baselineOrdinal + 1,
-			cursor && cursor.lastOrdinal >= baselineOrdinal && cursor.lastOrdinal <= highest
-				? cursor.lastOrdinal + 1
-				: baselineOrdinal + 1,
-		);
+		const cached = this.synchronizedIndexes;
+		const canExtendCached =
+			cached?.baselineOrdinal === baselineOrdinal &&
+			cached.baselineDigest === baselineDigest &&
+			cached.lastOrdinal >= baselineOrdinal &&
+			cached.lastOrdinal <= highest;
+		if (canExtendCached && cached.lastOrdinal === highest) return cached;
+
+		const indexes: SynchronizedIndexes = canExtendCached
+			? cached
+			: {
+					baselineOrdinal,
+					baselineDigest,
+					lastOrdinal: baselineOrdinal,
+					tailBytes: 0,
+					idempotencyEvents: new Map(
+						(verifiedBaseline?.idempotencyEvents ?? []).map((event) => [
+							event.idempotencyKey!,
+							structuredClone(event),
+						]),
+					),
+				};
+		const scanFrom = indexes.lastOrdinal + 1;
 		for (const name of names) {
 			const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
-			if (ordinal < rebuildFrom || ordinal <= baselineOrdinal) continue;
+			if (ordinal < scanFrom || ordinal <= baselineOrdinal) continue;
 			const event = this.readEventFileUnlocked(name);
 			if (event.ordinal !== ordinal) {
 				throw new OrchestrationEventStoreError(`Event ordinal does not match file name: ${name}`);
 			}
-			if (event.idempotencyKey) {
-				this.writeIdempotencyMarkerUnlocked(
-					event.idempotencyKey,
-					this.serializeIdempotencyMarker(event.idempotencyKey, ordinal),
-				);
-			}
+			if (event.idempotencyKey) indexes.idempotencyEvents.set(event.idempotencyKey, event);
+			indexes.tailBytes += statSync(join(this.eventsDir, name)).size;
+			indexes.lastOrdinal = ordinal;
 		}
-		const tailBytes = names.reduce((total, name) => {
-			const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
-			if (ordinal <= baselineOrdinal) return total;
-			try {
-				return total + statSync(join(this.eventsDir, name)).size;
-			} catch {
-				return total;
-			}
-		}, 0);
-		writeFileAtomicSync(
-			this.cursorPath,
-			serializeBounded(
-				{ version: 1, lastOrdinal: highest, tailBytes } satisfies EventCursor,
-				MAX_CURSOR_BYTES,
-				"Orchestration cursor",
-			),
-		);
-		return { lastOrdinal: highest, tailBytes };
+		indexes.lastOrdinal = highest;
+		this.synchronizedIndexes = indexes;
+		return indexes;
 	}
 }

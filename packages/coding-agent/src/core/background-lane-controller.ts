@@ -25,7 +25,12 @@ import type {
 import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
-import type { WorkerAgentControlPort, WorkerAgentMessageOptions } from "./delegation/worker-agent-control.ts";
+import type {
+	WorkerAgentControlPort,
+	WorkerAgentControlScope,
+	WorkerAgentMessageOptions,
+	WorkerAgentTranscriptOptions,
+} from "./delegation/worker-agent-control.ts";
 import {
 	WorkerDelegationController,
 	type WorkerDelegationControllerDeps,
@@ -349,15 +354,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/** Durable logical-worker controls. Each checks UAC before materializing worker state. */
-	listWorkerAgents(): ReturnType<WorkerAgentControlPort["listWorkerAgents"]> {
+	listWorkerAgents(scope?: WorkerAgentControlScope): ReturnType<WorkerAgentControlPort["listWorkerAgents"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().listWorkerAgents();
+		return this._getWorkerController().getAgentControl().listWorkerAgents(scope);
 	}
 
 	readWorkerAgentTranscript(
 		agentId: string,
-		options?: { cursor?: number; maxMessages?: number },
+		options?: WorkerAgentTranscriptOptions,
 	): ReturnType<WorkerAgentControlPort["readWorkerAgentTranscript"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
@@ -384,31 +389,35 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().followUpWorkerAgent(agentId, message, options);
 	}
 
-	interruptWorkerAgent(agentId: string): { interrupted: boolean; reason?: string } {
+	interruptWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): { interrupted: boolean; reason?: string } {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().interruptWorkerAgent(agentId);
+		return this._getWorkerController().getAgentControl().interruptWorkerAgent(agentId, scope);
 	}
 
-	resumeWorkerAgent(agentId: string): { started: boolean; record?: LaneRecord; skipReason?: string } {
+	resumeWorkerAgent(
+		agentId: string,
+		scope?: WorkerAgentControlScope,
+	): { started: boolean; record?: LaneRecord; skipReason?: string } {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().resumeWorkerAgent(agentId);
+		return this._getWorkerController().getAgentControl().resumeWorkerAgent(agentId, scope);
 	}
 
-	cancelWorkerAgent(agentId: string, reasonCode?: string): LaneRecord | undefined {
+	cancelWorkerAgent(agentId: string, reasonCode?: string, scope?: WorkerAgentControlScope): LaneRecord | undefined {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().cancelWorkerAgent(agentId, reasonCode);
+		return this._getWorkerController().getAgentControl().cancelWorkerAgent(agentId, reasonCode, scope);
 	}
 
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,
+		scope?: WorkerAgentControlScope,
 	): Promise<{ status: "active" | "suspended" | "idle" | "unknown" }> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().waitForWorkerAgent(agentId, timeoutMs);
+		return this._getWorkerController().getAgentControl().waitForWorkerAgent(agentId, timeoutMs, scope);
 	}
 
 	/** Run one worker immediately; used by focused integrations and tests. */

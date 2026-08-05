@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
-import { getPlatformShellToolName } from "../../utils/shell.ts";
+import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
 	CapabilityGateway,
 	CapabilityGatewayDeniedError,
@@ -32,7 +32,6 @@ const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const MEMORY_LANE_TOOL_NAME = "memory" as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
-const PLATFORM_SHELL_TOOL_NAME = getPlatformShellToolName();
 const MAX_LANE_MEMORY_QUERY_CHARS = 4_096;
 const laneMemorySchema = Type.Object({
 	query: Type.String({
@@ -127,7 +126,7 @@ function createLaneTools(
 		);
 	}
 	if (shellSessionKey) {
-		factories.set(PLATFORM_SHELL_TOOL_NAME, () => createBashTool(cwd, { sessionKey: shellSessionKey }));
+		factories.set(STABLE_SHELL_TOOL_NAME, () => createBashTool(cwd, { sessionKey: shellSessionKey }));
 	}
 	if (readMemory) {
 		factories.set(MEMORY_LANE_TOOL_NAME, () => ({
@@ -180,7 +179,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		...(options.readMemory ? [MEMORY_LANE_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
-		...(options.shellSessionKey ? [PLATFORM_SHELL_TOOL_NAME] : []),
+		...(options.shellSessionKey ? [STABLE_SHELL_TOOL_NAME] : []),
 	];
 	for (const name of additionalTools.keys()) {
 		if (builtInCandidateNames.includes(name as (typeof builtInCandidateNames)[number])) {
@@ -224,7 +223,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		capabilities: [
 			"filesystem.read",
 			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory.query"] as const) : []),
-			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) || allowedToolSet.has(PLATFORM_SHELL_TOOL_NAME)
+			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) || allowedToolSet.has(STABLE_SHELL_TOOL_NAME)
 				? (["process.exec"] as const)
 				: []),
 		],

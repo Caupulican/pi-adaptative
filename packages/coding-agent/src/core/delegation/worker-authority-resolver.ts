@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
-import { getPlatformShellToolName } from "../../utils/shell.ts";
+import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import {
 	type HarnessCapability,
@@ -15,7 +15,6 @@ import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
-const PLATFORM_SHELL_TOOL_NAME = getPlatformShellToolName();
 const DEFAULT_TOOL_NAMES = [
 	"read",
 	"grep",
@@ -24,7 +23,7 @@ const DEFAULT_TOOL_NAMES = [
 	"write",
 	"edit",
 	"memory",
-	PLATFORM_SHELL_TOOL_NAME,
+	STABLE_SHELL_TOOL_NAME,
 	"delegate",
 ] as const;
 const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set([...CLASSIFIED_LANE_TOOL_NAMES, "delegate"]);
@@ -56,11 +55,6 @@ export type WorkerAuthorityResolution =
 			requestedWritePaths?: readonly string[];
 	  }
 	| { ok: false; reason: string };
-
-function preferredToolCapability(toolName: string): HarnessCapability | undefined {
-	if (toolName === "memory") return "memory.query";
-	return getToolCapabilityPolicy(toolName)?.capabilityCandidates[0];
-}
 
 function selectModelBinding(
 	authority: WorkerDelegationAuthorityRequest | undefined,
@@ -97,26 +91,29 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
 	if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };
 
-	const requestedToolNames = [
-		...(input.authority?.toolNames ?? input.base?.profile.toolNames ?? DEFAULT_TOOL_NAMES),
-		"delegate",
-	];
-	const toolNames = [...new Set(requestedToolNames)];
-	const unavailableTools = toolNames.filter((toolName) => !AVAILABLE_TOOL_NAMES.has(toolName));
+	const requestedToolNames = mapToolNamesForPlatform(
+		input.authority?.toolNames ?? input.base?.profile.toolNames ?? DEFAULT_TOOL_NAMES,
+	);
+	const uniqueToolNames = [...new Set(requestedToolNames)];
+	const unavailableTools = uniqueToolNames.filter((toolName) => !AVAILABLE_TOOL_NAMES.has(toolName));
 	if (unavailableTools.length > 0) {
 		return { ok: false, reason: `orchestration_tool_unavailable:${unavailableTools.join(",")}` };
 	}
 	const capabilities = new Set<HarnessCapability>(
 		input.authority?.capabilities ?? input.base?.profile.capabilityCeiling ?? DEFAULT_CAPABILITIES,
 	);
-	for (const toolName of toolNames) {
+	const toolNames: string[] = [];
+	for (const toolName of uniqueToolNames) {
 		const policy = getToolCapabilityPolicy(toolName);
 		if (!policy) return { ok: false, reason: `orchestration_tool_unclassified:${toolName}` };
-		if (policy.capabilityCandidates.some((capability) => capabilities.has(capability))) continue;
-		const capability = preferredToolCapability(toolName);
-		if (capability) capabilities.add(capability);
+		if (policy.capabilityCandidates.some((capability) => capabilities.has(capability))) {
+			toolNames.push(toolName);
+			continue;
+		}
+		if (input.authority?.toolNames !== undefined) {
+			return { ok: false, reason: `orchestration_tool_capability_missing:${toolName}` };
+		}
 	}
-	capabilities.add("workflow.delegate");
 	const budget = structuredClone(input.authority?.budget ?? input.base?.profile.budget ?? {});
 	const role = input.authority?.role ?? input.base?.profile.role ?? "orchestrator";
 	const now = new Date().toISOString();

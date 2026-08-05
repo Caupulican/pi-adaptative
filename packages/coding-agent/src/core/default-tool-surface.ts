@@ -8,10 +8,12 @@
  * `bash` is the stable agent shell contract on every platform; its finite grammar routes to
  * PowerShell on Windows. `python` is a separate bounded, uv-managed execution contract.
  */
+export const STABLE_SHELL_TOOL_NAME = "bash" as const;
+
 export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.platform): readonly string[] {
 	return [
 		"read",
-		"bash",
+		STABLE_SHELL_TOOL_NAME,
 		"python",
 		"edit",
 		"write",
@@ -37,7 +39,7 @@ export function mapToolNamesForPlatform(
 ): string[] {
 	const mapped: string[] = [];
 	for (const name of names) {
-		const resolved = name === "powershell" ? "bash" : name;
+		const resolved = name === "powershell" ? STABLE_SHELL_TOOL_NAME : name;
 		if (!mapped.includes(resolved)) mapped.push(resolved);
 	}
 	return mapped;

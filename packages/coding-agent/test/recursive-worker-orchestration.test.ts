@@ -1,10 +1,13 @@
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
-import type { Message } from "@caupulican/pi-ai/types";
-import { describe, expect, it, vi } from "vitest";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import type { AssistantMessage, Message } from "@caupulican/pi-ai/types";
+import { describe, expect, it } from "vitest";
+import { STABLE_SHELL_TOOL_NAME } from "../src/core/default-tool-surface.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { type AgentBindingContract, ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
+
+const UNAVAILABLE_SHELL_TOOL_NAME = "cmd";
 
 interface AgentTranscriptPage {
 	agentId: string;
@@ -24,33 +27,135 @@ function treeControl(session: object): AgentTreeControl {
 }
 
 describe("recursive worker orchestration", () => {
-	it("lets a worker recursively delegate inherited authority without a depth or fan-out profile grant", async () => {
-		const harness = await createHarness({ settings: { workerDelegation: { enabled: true, maxConcurrent: 3 } } });
+	it("lets a parent yield the default single scheduler slot and consume its child's terminal handoff", async () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "recursive-wait",
+			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
+			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
+			toolNames: ["read", "delegate"],
+		});
+		const harness = await createHarness({ workerOrchestrationProfile: profile });
 		try {
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Inspect the child invariant." })], {
+				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Produce child evidence." })], {
 					stopReason: "toolUse",
 				}),
-				fauxAssistantMessage('{"summary":"child complete","status":"completed"}'),
-				fauxAssistantMessage('{"summary":"parent complete","status":"completed"}'),
+				fauxAssistantMessage(
+					[fauxToolCall("delegate", { action: "wait", agentId: "worker-2", timeoutMs: 10_000 })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage('{"summary":"CHILD_TERMINAL_EVIDENCE","status":"completed"}'),
+				fauxAssistantMessage(
+					[fauxToolCall("delegate", { action: "transcript", agentId: "worker-2", maxMessages: 16 })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage('{"summary":"parent integrated child evidence","status":"completed"}'),
+			]);
+
+			const parent = await harness.session.runWorkerDelegationOnce({
+				instructions: "Delegate, wait event-first, and inspect the child transcript.",
+			});
+
+			expect(parent.record?.status).toBe("succeeded");
+			expect(harness.settingsManager.getWorkerDelegationSettings().maxConcurrent).toBe(1);
+			expect(harness.getPendingResponseCount()).toBe(0);
+			const parentTranscript = treeControl(harness.session).readWorkerAgentTranscript("worker-1", {
+				maxMessages: 64,
+			});
+			expect(JSON.stringify(parentTranscript.messages)).toContain("CHILD_TERMINAL_EVIDENCE");
+			expect(JSON.stringify(parentTranscript.messages)).toContain("Worker terminal handoff");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("lets a worker recursively delegate inherited authority without a depth or fan-out profile grant", async () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "recursive-handoff",
+			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
+			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
+			toolNames: ["read", "delegate"],
+		});
+		const harness = await createHarness({
+			workerOrchestrationProfile: profile,
+			settings: { workerDelegation: { enabled: true, maxConcurrent: 3 } },
+		});
+		let releaseChild!: () => void;
+		const childResponse = new Promise<AssistantMessage>((resolve) => {
+			releaseChild = () => resolve(fauxAssistantMessage('{"summary":"child complete","status":"completed"}'));
+		});
+		const terminalLaneIds = new Set<string>();
+		let signalTreeTerminal!: () => void;
+		let signalFinalWakeReply!: () => void;
+		const treeTerminal = new Promise<void>((resolve) => {
+			signalTreeTerminal = resolve;
+		});
+		const finalWakeReply = new Promise<void>((resolve) => {
+			signalFinalWakeReply = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "delegate_workers") {
+				for (const record of event.terminalSinceFlush) terminalLaneIds.add(record.laneId);
+				if (terminalLaneIds.size === 3) signalTreeTerminal();
+			}
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				JSON.stringify(event.message.content).includes("foreground observed continuation terminal")
+			) {
+				signalFinalWakeReply();
+			}
+		});
+		try {
+			let rootCalls = 0;
+			let foregroundHandoffs = 0;
+			const routeResponse: FauxResponseFactory = (context) => {
+				const messages = JSON.stringify(context.messages);
+				const isWorker =
+					context.systemPrompt?.includes("autonomous agent in a durable orchestration tree") ?? false;
+				if (!isWorker) {
+					foregroundHandoffs += 1;
+					return fauxAssistantMessage(
+						foregroundHandoffs === 1
+							? '{"summary":"foreground observed root terminal","status":"completed"}'
+							: '{"summary":"foreground observed continuation terminal","status":"completed"}',
+					);
+				}
+				if (messages.includes("Worker terminal handoff")) {
+					return fauxAssistantMessage('{"summary":"parent integrated terminal handoff","status":"completed"}');
+				}
+				if (messages.includes("Delegate one child and report when it starts.")) {
+					rootCalls += 1;
+					return rootCalls === 1
+						? fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Inspect the child invariant." })], {
+								stopReason: "toolUse",
+							})
+						: fauxAssistantMessage('{"summary":"parent complete","status":"completed"}');
+				}
+				return childResponse;
+			};
+			harness.setResponses([
+				routeResponse,
+				routeResponse,
+				routeResponse,
+				routeResponse,
+				routeResponse,
+				routeResponse,
 			]);
 
 			const parent = await harness.session.runWorkerDelegationOnce({
 				instructions: "Delegate one child and report when it starts.",
 			});
 			expect(parent.record?.status).toBe("succeeded");
-			await vi.waitFor(() =>
-				expect(harness.session.getLaneRecords().filter((record) => record.type === "worker")).toHaveLength(2),
-			);
-			await vi.waitFor(() => {
-				const records = harness.session.getLaneRecords().filter((record) => record.type === "worker");
-				expect(records.map((record) => record.status)).toEqual(["succeeded", "succeeded"]);
-			});
+			releaseChild();
+			await Promise.all([treeTerminal, finalWakeReply]);
+			expect(terminalLaneIds.size).toBe(3);
 			expect(harness.session.getLaneRecords().filter((record) => record.type === "worker")).toEqual([
 				expect.objectContaining({ status: "succeeded" }),
 				expect.objectContaining({ status: "succeeded" }),
+				expect.objectContaining({ status: "succeeded" }),
 			]);
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(3);
 
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
@@ -70,9 +175,11 @@ describe("recursive worker orchestration", () => {
 			}
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
+			unsubscribe();
+			releaseChild();
 			await harness.cleanup();
 		}
-	});
+	}, 15_000);
 
 	it("lists the complete session tree and pages exact peer transcript messages", async () => {
 		const harness = await createHarness();
@@ -204,7 +311,7 @@ describe("recursive worker orchestration", () => {
 					model: { provider, modelId: "selected" },
 					thinkingLevel: "low",
 					capabilities: ["filesystem.read", "process.exec", "workflow.delegate"],
-					toolNames: ["read", "bash", "delegate"],
+					toolNames: ["read", STABLE_SHELL_TOOL_NAME, "delegate"],
 					readPaths: ["."],
 					budget: { maxTokens: 8_192, maxToolCalls: 64 },
 				},
@@ -214,7 +321,7 @@ describe("recursive worker orchestration", () => {
 			expect(run.record?.status).toBe("succeeded");
 			expect(seenModel).toBe("selected");
 			expect(seenReasoning).toBe("low");
-			expect(seenTools).toEqual(["read", "bash", "delegate"]);
+			expect(seenTools).toEqual(["read", STABLE_SHELL_TOOL_NAME, "delegate"]);
 			expect(harness.settingsManager.getWorkerDelegationSettings().maxConcurrent).toBe(128);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
@@ -225,7 +332,7 @@ describe("recursive worker orchestration", () => {
 				modelBinding: { provider, modelId: "selected", thinkingLevel: "low" },
 				authority: {
 					capabilities: ["filesystem.read", "process.exec", "workflow.delegate"],
-					toolNames: ["read", "bash", "delegate"],
+					toolNames: ["read", STABLE_SHELL_TOOL_NAME, "delegate"],
 				},
 			});
 		} finally {
@@ -273,6 +380,66 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
+	it("rejects an unavailable shell alias before provider execution", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute"}')]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Try to request the other platform's shell.",
+				authority: {
+					capabilities: ["process.exec"],
+					toolNames: [UNAVAILABLE_SHELL_TOOL_NAME],
+				},
+			});
+
+			expect(run).toEqual({
+				started: false,
+				skipReason: `orchestration_tool_unavailable:${UNAVAILABLE_SHELL_TOOL_NAME}`,
+			});
+			expect(harness.getPendingResponseCount()).toBe(1);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("canonicalizes a legacy powershell authority to the stable shell contract", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
+		});
+		try {
+			let tools: string[] = [];
+			harness.setResponses([
+				(context) => {
+					tools = context.tools?.map((tool) => tool.name) ?? [];
+					return fauxAssistantMessage('{"summary":"legacy shell canonicalized","status":"completed"}');
+				},
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Use the stored legacy shell name.",
+				authority: {
+					capabilities: ["process.exec"],
+					toolNames: ["powershell"],
+				},
+			});
+
+			expect(run.record?.status).toBe("succeeded");
+			expect(tools).toEqual([STABLE_SHELL_TOOL_NAME]);
+			const snapshot = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			}).getTaskRuntimeSnapshot();
+			expect(Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.authority.toolNames).toEqual([
+				STABLE_SHELL_TOOL_NAME,
+			]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("uses the maximum host-permitted local surface when neither a profile nor authority override is supplied", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
@@ -291,7 +458,48 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual(["read", "grep", "find", "ls", "memory", "write", "edit", "bash", "delegate"]);
+			expect(tools).toEqual([
+				"read",
+				"grep",
+				"find",
+				"ls",
+				"memory",
+				"write",
+				"edit",
+				STABLE_SHELL_TOOL_NAME,
+				"delegate",
+			]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("honors an explicit non-delegating leaf authority", async () => {
+		const harness = await createHarness({
+			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
+		});
+		try {
+			let tools: string[] = [];
+			harness.setResponses([
+				(context) => {
+					tools = context.tools?.map((tool) => tool.name) ?? [];
+					return fauxAssistantMessage('{"summary":"leaf complete","status":"completed"}');
+				},
+			]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Run as a non-delegating leaf.",
+				authority: { capabilities: [] },
+			});
+
+			expect(run.record?.status).toBe("succeeded");
+			expect(tools).toEqual([]);
+			const snapshot = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			}).getTaskRuntimeSnapshot();
+			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual([]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual([]);
 		} finally {
 			await harness.cleanup();
 		}
@@ -301,6 +509,8 @@ describe("recursive worker orchestration", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "global-budget",
 			model: { provider: "faux", id: "faux-1", maxTokens: 6_000 },
+			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
+			toolNames: ["read", "delegate"],
 		});
 		profile.budget = { ...profile.budget, maxTokens: 6_000 };
 		const harness = await createHarness({ workerOrchestrationProfile: profile });
@@ -343,8 +553,9 @@ describe("recursive worker orchestration", () => {
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		try {
+			const command = "printf SHELL_CAPABILITY_OK";
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "printf SHELL_CAPABILITY_OK" })], {
+				fauxAssistantMessage([fauxToolCall(STABLE_SHELL_TOOL_NAME, { command })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage('{"summary":"shell executed","status":"completed"}'),
@@ -353,7 +564,7 @@ describe("recursive worker orchestration", () => {
 				instructions: "Prove the local shell capability.",
 				authority: {
 					capabilities: ["process.exec", "workflow.delegate"],
-					toolNames: ["bash", "delegate"],
+					toolNames: [STABLE_SHELL_TOOL_NAME, "delegate"],
 				},
 			});
 			if (!run.record) throw new Error("Expected shell worker record.");
@@ -362,7 +573,11 @@ describe("recursive worker orchestration", () => {
 			const transcript = treeControl(harness.session).readWorkerAgentTranscript(run.record.laneId, {
 				maxMessages: 64,
 			});
-			expect(JSON.stringify(transcript.messages)).toContain("SHELL_CAPABILITY_OK");
+			const shellResult = transcript.messages.find(
+				(message) => message.role === "toolResult" && message.toolName === STABLE_SHELL_TOOL_NAME,
+			);
+			expect(shellResult).toMatchObject({ role: "toolResult", isError: false });
+			expect(JSON.stringify(shellResult?.content)).toContain("SHELL_CAPABILITY_OK");
 		} finally {
 			await harness.cleanup();
 		}
@@ -395,7 +610,7 @@ describe("recursive worker orchestration", () => {
 				parentAgentId: root.record.laneId,
 				authority: {
 					capabilities: ["process.exec", "workflow.delegate"],
-					toolNames: ["bash", "delegate"],
+					toolNames: [STABLE_SHELL_TOOL_NAME, "delegate"],
 				},
 			});
 

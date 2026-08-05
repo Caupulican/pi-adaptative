@@ -40,7 +40,9 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(definition.description).toContain("Do not poll");
 
 		const guidelines = definition.promptGuidelines ?? [];
-		expect(guidelines.some((line) => line.includes("delegate_status") && line.includes("laneId"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("exact child evidence") && line.includes("delegate_status"))).toBe(
+			true,
+		);
 		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("Do not poll"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
 	});
@@ -97,7 +99,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(result.details).toEqual({ started: false, skipReason: "budget_exhausted" });
 	});
 
-	it("leaves the execute path unchanged in async mode", async () => {
+	it("reports the parent-aware retrieval path in async mode", async () => {
 		const definition = createDelegateToolDefinition({
 			startWorkerDelegation: () => ({
 				started: true,
@@ -119,7 +121,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toBe(
-			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; wait for its terminal handoff, then retrieve once with delegate_status",
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then read exact evidence with transcript or foreground delegate_status",
 		);
 		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
 	});
