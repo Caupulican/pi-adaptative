@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
 	CredentialManager,
@@ -122,6 +125,41 @@ describe("CredentialManager", () => {
 			API_USER: "owner@example.com",
 			API_PASSWORD: "correct horse battery staple",
 		});
+	});
+
+	it("matches an activated canonical project through an equivalent directory alias", async () => {
+		const sandbox = await mkdtemp(join(tmpdir(), "pi-credential-environment-alias-"));
+		try {
+			const realRoot = join(sandbox, "real-project");
+			const aliasRoot = join(sandbox, "project-alias");
+			await mkdir(join(realRoot, "packages", "app"), { recursive: true });
+			await symlink(realRoot, aliasRoot, process.platform === "win32" ? "junction" : "dir");
+			const canonicalRoot = await realpath(realRoot);
+			const storage = new MemoryCredentialStorage();
+			storage.records.set("deploy", {
+				profile: "deploy",
+				variables: [{ name: "DEPLOY_TOKEN", value: "available-through-alias" }],
+				projectKeys: [alphaProjectKey],
+			});
+			const manager = new CredentialManager({
+				storage,
+				resolveProject: async () => ({
+					key: alphaProjectKey,
+					root: canonicalRoot,
+					label: "real-project",
+					portable: true,
+				}),
+				initialSessionKey: "valid-session",
+			});
+
+			await manager.activateForProject(aliasRoot, "deploy");
+
+			expect(manager.getEnvironmentForCwd(join(aliasRoot, "packages", "app"))).toEqual({
+				DEPLOY_TOKEN: "available-through-alias",
+			});
+		} finally {
+			await rm(sandbox, { recursive: true, force: true });
+		}
 	});
 
 	it("clears activated values and invalidates the provider session when locked", async () => {

@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { parseDotenvDocument, validateDotenvValue, validateDotenvVariableName } from "./secret-dotenv.ts";
 
@@ -160,7 +161,7 @@ function validateProjectIdentity(identity: CredentialProjectIdentity): Credentia
 	) {
 		throw new CredentialManagerError("invalid_project_identity", "The current project identity is invalid.");
 	}
-	return { ...identity, root: resolve(identity.root) };
+	return { ...identity, root: canonicalizeExistingPath(identity.root) };
 }
 
 export function validateCredentialProfileRecord(record: CredentialProfileRecord): CredentialProfileRecord {
@@ -214,6 +215,15 @@ function validateSessionKey(sessionKey: string): string {
 function isPathInside(root: string, target: string): boolean {
 	const pathFromRoot = relative(root, target);
 	return pathFromRoot === "" || (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot));
+}
+
+function canonicalizeExistingPath(path: string): string {
+	const absolute = resolve(path);
+	try {
+		return realpathSync.native(absolute);
+	} catch {
+		return absolute;
+	}
 }
 
 function cloneEnvironment(values: Record<string, string>): Record<string, string> {
@@ -419,12 +429,18 @@ export class CredentialManager {
 
 	getEnvironmentForCwd(cwd: string): Record<string, string> | undefined {
 		const target = resolve(cwd);
+		const direct = this.findActiveEnvironment(target);
+		const selected = direct ?? this.findActiveEnvironment(canonicalizeExistingPath(target));
+		return selected ? cloneEnvironment(selected.values) : undefined;
+	}
+
+	private findActiveEnvironment(target: string): ActiveCredentialEnvironment | undefined {
 		let selected: ActiveCredentialEnvironment | undefined;
 		for (const active of this.activeEnvironments.values()) {
 			if (!isPathInside(active.root, target)) continue;
 			if (!selected || active.root.length > selected.root.length) selected = active;
 		}
-		return selected ? cloneEnvironment(selected.values) : undefined;
+		return selected;
 	}
 
 	hasEnvironmentForCwd(cwd: string): boolean {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Matched active project credentials across canonical, symlinked, and Windows short-path working directories, and aligned orchestration regression gates with explicit non-delegating leaf profiles and effective profile-free capability telemetry.
+
 ## [0.86.0] - 2026-08-05
 
 ### Breaking Changes

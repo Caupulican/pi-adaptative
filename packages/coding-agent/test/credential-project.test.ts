@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createPortableGitProjectKey, resolveCredentialProject } from "../src/core/secrets/credential-project.ts";
 
@@ -32,8 +32,9 @@ describe("credential project identity", () => {
 		);
 
 		const identity = await resolveCredentialProject(join(root, "packages", "app"));
+		const canonicalRoot = await realpath(root);
 
-		expect(identity).toMatchObject({ root, label: root.split("/").at(-1), portable: true });
+		expect(identity).toMatchObject({ root: canonicalRoot, label: basename(canonicalRoot), portable: true });
 		expect(identity.key).toBe(createPortableGitProjectKey("https://github.com/Private/Remote.git"));
 		expect(JSON.stringify(identity)).not.toContain("Private/Remote");
 	});
@@ -44,9 +45,10 @@ describe("credential project identity", () => {
 
 		const first = await resolveCredentialProject(root);
 		const second = await resolveCredentialProject(root);
+		const canonicalRoot = await realpath(root);
 
 		expect(first).toEqual(second);
-		expect(first).toMatchObject({ root, portable: false });
+		expect(first).toMatchObject({ root: canonicalRoot, portable: false });
 		expect(first.key).toMatch(/^local:[a-f0-9]{64}$/);
 	});
 
@@ -64,8 +66,9 @@ describe("credential project identity", () => {
 		);
 
 		const identity = await resolveCredentialProject(root);
+		const canonicalRoot = await realpath(root);
 
-		expect(identity).toMatchObject({ root, portable: true });
+		expect(identity).toMatchObject({ root: canonicalRoot, portable: true });
 		expect(identity.key).toBe(createPortableGitProjectKey("git@github.com:Example/Portable.git"));
 	});
 });

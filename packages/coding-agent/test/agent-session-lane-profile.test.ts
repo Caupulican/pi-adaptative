@@ -298,7 +298,7 @@ describe("profile-shipped lanes", () => {
 		expect(run.record?.status).toBe("succeeded");
 		expect(seenSystemPrompt?.startsWith(SUBAGENT_CORE_SYSTEM_PROMPT)).toBe(true);
 		expect(seenSystemPrompt).toContain("Answer with a single JSON summary field.");
-		expect(seenSystemPrompt).toContain("bounded specialist worker");
+		expect(seenSystemPrompt).toContain("autonomous agent in a durable orchestration tree");
 		expect(seenSystemPrompt).toContain("workspace tools are read-only");
 	});
 });
