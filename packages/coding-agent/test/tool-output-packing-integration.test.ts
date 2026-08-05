@@ -150,12 +150,15 @@ describe("Slice B: artifact-backed tool output first capture (grep/find)", () =>
 
 	it("large find output becomes a digest + artifact handle; the artifact holds the exact raw payload", async () => {
 		// Only the byte cap (50KB) should be able to trigger packing here (the line cap was
-		// deliberately disabled -- see the regression test above), so use enough
-		// long-enough filenames to exceed 50KB, not just enough to exceed 2000 lines.
-		const fileCount = 6000;
-		for (let i = 0; i < fileCount; i++) {
-			writeFileSync(join(testDir, `file-with-a-longer-name-${i}.txt`), "x");
-		}
+		// deliberately disabled -- see the regression test above). A bounded deep tree
+		// exceeds that byte threshold with 64 directory entries instead of thousands of
+		// Defender-observed file writes on Windows.
+		const directoryCount = 64;
+		const directorySegments = Array.from(
+			{ length: directoryCount },
+			(_, index) => `nested-output-segment-xxxxxxxx-${index.toString().padStart(2, "0")}`,
+		);
+		mkdirSync(join(testDir, ...directorySegments), { recursive: true });
 
 		const store = createInMemoryArtifactStore();
 		const findTool = createFindTool(process.cwd(), { artifactStore: store });
@@ -163,7 +166,7 @@ describe("Slice B: artifact-backed tool output first capture (grep/find)", () =>
 		const result = toToolResult(
 			await findTool.execute(
 				"tc-large-find",
-				{ pattern: "*.txt", path: testDir, limit: fileCount + 1000 },
+				{ pattern: "*", path: testDir, limit: directoryCount + 1000 },
 				undefined,
 				undefined,
 			),
@@ -175,14 +178,14 @@ describe("Slice B: artifact-backed tool output first capture (grep/find)", () =>
 		expect(isMissingArtifactMarker(record)).toBe(false);
 		if (!isMissingArtifactMarker(record)) {
 			expect(record.ref.toolName).toBe("find");
-			// Exact raw payload, not the bounded preview: the last generated file must be
+			// Exact raw payload, not the bounded preview: the deepest generated entry must be
 			// present, and the artifact must contain far more lines than any bounded
 			// preview the model sees (proving it captured the untruncated list).
-			expect(record.content).toContain(`file-with-a-longer-name-${fileCount - 1}.txt`);
+			expect(record.content).toContain(directorySegments.at(-1));
 			const previewLineCount = getTextOutput(result).split("\n").length;
 			const artifactLineCount = record.content.split("\n").length;
 			expect(artifactLineCount).toBeGreaterThan(previewLineCount);
-			expect(artifactLineCount).toBeGreaterThanOrEqual(fileCount); // "./" header + fileCount entries
+			expect(artifactLineCount).toBeGreaterThanOrEqual(directoryCount);
 		}
 		expect(getTextOutput(result)).toContain(`artifact tool-output:${artifactId}`);
 	});

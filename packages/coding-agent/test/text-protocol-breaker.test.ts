@@ -190,7 +190,7 @@ describe("text-protocol circuit breaker", () => {
 				),
 			).toBe(true);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -219,7 +219,7 @@ describe("text-protocol circuit breaker", () => {
 				),
 			).toBe(true);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -239,7 +239,7 @@ describe("text-protocol circuit breaker", () => {
 				ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`).protocol,
 			).toBeUndefined();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -261,7 +261,7 @@ describe("text-protocol circuit breaker", () => {
 			expect(requests.every((request) => !isCalibration(request.context))).toBe(true);
 			expect(requests[0]?.options?.textToolCallProtocol).toBe(true);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -309,7 +309,7 @@ describe("text-protocol circuit breaker", () => {
 			expect(requests.every((request) => !isCalibration(request.context))).toBe(true);
 			expect(requests[0]?.options?.textToolCallProtocol).toBeFalsy();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -350,7 +350,7 @@ describe("text-protocol circuit breaker", () => {
 			// TEXT_TOOL_PROTOCOL_STEER_INTERVAL-th) queues another (count 2). The 6th is throttled again.
 			expect(pendingCountAfterEachCall).toEqual([1, 1, 1, 1, 2, 2]);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -389,7 +389,7 @@ describe("text-protocol circuit breaker", () => {
 			expect(payload).toContain("emit exactly this envelope shape");
 			expect(payload).toContain(`<pi:call name="TOOL">{"arg":"value"}</pi:call>`);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});

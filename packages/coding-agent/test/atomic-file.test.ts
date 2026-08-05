@@ -74,6 +74,24 @@ describe("writeFileAtomicSync / writeFileAtomic", () => {
 		expect(payloads).toContain(readFileSync(filePath, "utf-8"));
 		expect(fs.readdirSync(dir).filter((name) => name.includes(".tmp"))).toEqual([]);
 	});
+
+	it("a failed standalone write releases its same-target queue", async () => {
+		const dir = tempDir();
+		const filePath = join(dir, "data.json");
+		const failure = Object.assign(new Error("invalid rename"), { code: "EINVAL" });
+		const realRename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = vi
+			.spyOn(fs.promises, "rename")
+			.mockRejectedValueOnce(failure)
+			.mockImplementation((...args) => realRename(...args));
+		try {
+			await expect(writeFileAtomic(filePath, "first")).rejects.toBe(failure);
+			await expect(writeFileAtomic(filePath, "second")).resolves.toBeUndefined();
+			expect(readFileSync(filePath, "utf-8")).toBe("second");
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
 });
 
 describe("rename retry (win32 Defender/indexer transient EPERM/EACCES/EBUSY)", () => {
@@ -296,6 +314,33 @@ describe("withFileLockSync / withFileLock", () => {
 
 		const release = await lockfile.lock(filePath, { realpath: false });
 		await release();
+	});
+
+	it("keeps unrelated async lock paths concurrent", async () => {
+		const dir = tempDir();
+		const firstPath = join(dir, "first.json");
+		const secondPath = join(dir, "second.json");
+		let releaseFirst: (() => void) | undefined;
+		let markFirstEntered: (() => void) | undefined;
+		const firstEntered = new Promise<void>((resolve) => {
+			markFirstEntered = resolve;
+		});
+		const holdFirst = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+
+		const first = withFileLock(firstPath, async () => {
+			markFirstEntered?.();
+			await holdFirst;
+		});
+		await firstEntered;
+		let secondEntered = false;
+		await withFileLock(secondPath, () => {
+			secondEntered = true;
+		});
+		expect(secondEntered).toBe(true);
+		releaseFirst?.();
+		await first;
 	});
 
 	it("async: two logically-concurrent read-modify-writes never lose an update", async () => {

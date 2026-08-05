@@ -5,7 +5,7 @@
  * test/context-artifacts-file-store.test.ts).
  */
 
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
@@ -96,13 +96,17 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 		});
 		harnesses.push(harness);
 
-		const fileCount = 6000;
-		for (let i = 0; i < fileCount; i++) {
-			writeFileSync(join(harness.tempDir, `file-with-a-longer-name-${i}.txt`), "x");
-		}
+		// A bounded deep tree produces an artifact-sized find payload with 64 directory entries,
+		// avoiding thousands of Defender-observed file writes on Windows.
+		const directoryCount = 64;
+		const directorySegments = Array.from(
+			{ length: directoryCount },
+			(_, index) => `nested-output-segment-xxxxxxxx-${index.toString().padStart(2, "0")}`,
+		);
+		mkdirSync(join(harness.tempDir, ...directorySegments), { recursive: true });
 
 		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("find", { pattern: "*.txt", path: ".", limit: fileCount + 1000 })], {
+			fauxAssistantMessage([fauxToolCall("find", { pattern: "*", path: ".", limit: directoryCount + 1000 })], {
 				stopReason: "toolUse",
 			}),
 			fauxAssistantMessage("done"),
@@ -119,7 +123,7 @@ describe("AgentSession live tool construction wires a session-scoped file Artifa
 		const record = recreatedStore.read(artifactId);
 		expect(isMissingArtifactMarker(record)).toBe(false);
 		if (!isMissingArtifactMarker(record)) {
-			expect(record.content).toContain(`file-with-a-longer-name-${fileCount - 1}.txt`);
+			expect(record.content).toContain(directorySegments.at(-1));
 			expect(record.ref.toolName).toBe("find");
 		}
 	});

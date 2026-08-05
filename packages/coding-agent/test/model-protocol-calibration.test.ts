@@ -180,14 +180,14 @@ describe("text tool protocol calibration", () => {
 			try {
 				await second.session.prompt("second real work");
 			} finally {
-				second.session.dispose();
+				await second.session.disposeAndWait();
 				second.modelRegistry.unregisterProvider(model.provider);
 			}
 			expect(secondRequests.filter((request) => isCalibration(request.context))).toHaveLength(0);
 			expect(secondRequests).toHaveLength(1);
 			expect(secondRequests[0]?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-tag" });
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -217,7 +217,7 @@ describe("text tool protocol calibration", () => {
 			expect(requests[0]?.options?.textToolCallProtocol).toMatchObject({ variant: "tool-call" });
 			expect(requests[0]?.context.systemPrompt ?? "").not.toContain("pi-calibration-");
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -244,7 +244,7 @@ describe("text tool protocol calibration", () => {
 				'<pi:call name="echo">{"data":"pi-calibration-1"}</pi:call>',
 			);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -280,7 +280,7 @@ describe("text tool protocol calibration", () => {
 			expect(created.session.resetToolProtocolCalibration(modelKey)).toBe(true);
 			expect(store.get(modelKey).protocol).toBeUndefined();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -309,7 +309,7 @@ describe("text tool protocol calibration", () => {
 			expect(calibrationRequests.length).toBeGreaterThan(0);
 			expect(calibrationRequests.every((request) => !("tools" in request.context))).toBe(true);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -352,7 +352,7 @@ describe("text tool protocol calibration", () => {
 			expect(requests.filter((request) => isCalibration(request.context))).toHaveLength(0);
 			expect(requests[0]?.options?.textToolCallProtocol).toBeFalsy();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -364,7 +364,7 @@ describe("text tool protocol calibration", () => {
 		try {
 			await created.session.prompt("native work");
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);
 		}
 
@@ -445,7 +445,7 @@ describe("text tool protocol calibration", () => {
 			expect(report.table).toContain("Native grade");
 			expect(report.table).toContain("text-provider/text-model | text-protocol | tool-tag | echo-only");
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			for (const model of [nativeModel, taskOnlyModel, textModel, noneModel]) {
 				created.modelRegistry.unregisterProvider(model.provider);
 			}

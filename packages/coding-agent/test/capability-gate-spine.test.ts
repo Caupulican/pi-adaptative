@@ -212,7 +212,7 @@ describe("capability-gate spine", () => {
 			expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: "read-only-target" }));
 			await spy.mock.results[0]?.value;
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -241,7 +241,7 @@ describe("capability-gate spine", () => {
 			};
 			expect(protocolResolver._resolveModelToolProtocol(phone).protocol).toEqual({ variant: "tool-tag" });
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -268,7 +268,7 @@ describe("capability-gate spine", () => {
 			};
 			expect(protocolResolver._resolveModelToolProtocol(native).protocol).toBeUndefined();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -303,7 +303,7 @@ describe("capability-gate spine", () => {
 
 			expect(probeSpy).not.toHaveBeenCalled();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -316,7 +316,7 @@ describe("capability-gate spine", () => {
 			created.session.agent.onToolValidationEscalation?.(escalationEvent(driver, "write"));
 			expect(abortSpy).not.toHaveBeenCalled();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -334,7 +334,7 @@ describe("capability-gate spine", () => {
 			expect(spy).toHaveBeenCalledTimes(1);
 			await spy.mock.results[0]?.value;
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -356,7 +356,7 @@ describe("capability-gate spine", () => {
 			created.session.agent.onToolValidationEscalation?.(escalationEvent(phone, "bash"));
 			expect(spy).not.toHaveBeenCalled();
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 
@@ -385,7 +385,7 @@ describe("capability-gate spine", () => {
 			});
 			expect(abortSpy).toHaveBeenCalledTimes(1);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 });

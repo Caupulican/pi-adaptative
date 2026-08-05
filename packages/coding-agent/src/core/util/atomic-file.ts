@@ -20,7 +20,7 @@
 
 import { randomUUID } from "node:crypto";
 import { promises as fsPromises, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 
 /**
@@ -174,6 +174,43 @@ function blockingSleepMs(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+type PendingPathOperations = Map<string, Promise<void>>;
+
+const pendingAsyncFileLockTails: PendingPathOperations = new Map();
+const pendingAtomicWriteTails: PendingPathOperations = new Map();
+
+function pathOperationKey(filePath: string): string {
+	const absolutePath = resolve(filePath);
+	return process.platform === "win32" ? absolutePath.toLowerCase() : absolutePath;
+}
+
+/**
+ * Queue only operations that target the same platform path. This prevents same-process callers
+ * from entering synchronized OS retry storms without imposing a process-wide or cross-tenant
+ * bottleneck. The tail always resolves and self-removes, including after a failed operation.
+ */
+async function withSerializedPathOperation<T>(
+	tails: PendingPathOperations,
+	filePath: string,
+	fn: () => Promise<T>,
+): Promise<T> {
+	const key = pathOperationKey(filePath);
+	const preceding = tails.get(key) ?? Promise.resolve();
+	let releaseTail: (() => void) | undefined;
+	const tail = new Promise<void>((resolveTail) => {
+		releaseTail = resolveTail;
+	});
+	tails.set(key, tail);
+
+	await preceding;
+	try {
+		return await fn();
+	} finally {
+		releaseTail?.();
+		if (tails.get(key) === tail) tails.delete(key);
+	}
+}
+
 /**
  * Acquire a proper-lockfile sync lock with bounded retry on `ELOCKED` (proper-lockfile's sync API
  * itself forbids `retries > 0`; see {@link AtomicFileLockOptions.retries}).
@@ -257,24 +294,26 @@ export async function withFileLock<T>(
 	fn: () => Promise<T> | T,
 	options?: AtomicFileLockOptions,
 ): Promise<T> {
-	await ensureLockDir(filePath, options?.lockfilePath);
-	const release = await lockfile.lock(filePath, {
-		lockfilePath: options?.lockfilePath,
-		realpath: options?.realpath ?? DEFAULT_REALPATH,
-		retries: {
-			retries: retryCount(options ?? {}),
-			factor: options?.retryFactor ?? 2,
-			minTimeout: options?.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS,
-			maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
-		},
-		stale: options?.stale,
+	return withSerializedPathOperation(pendingAsyncFileLockTails, options?.lockfilePath ?? filePath, async () => {
+		await ensureLockDir(filePath, options?.lockfilePath);
+		const release = await lockfile.lock(filePath, {
+			lockfilePath: options?.lockfilePath,
+			realpath: options?.realpath ?? DEFAULT_REALPATH,
+			retries: {
+				retries: retryCount(options ?? {}),
+				factor: options?.retryFactor ?? 2,
+				minTimeout: options?.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS,
+				maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
+			},
+			stale: options?.stale,
+		});
+		try {
+			return await fn();
+		} finally {
+			// See {@link withFileLockSync} — cleanup failures must not mask fn()'s outcome.
+			await release().catch(() => {});
+		}
 	});
-	try {
-		return await fn();
-	} finally {
-		// See {@link withFileLockSync} — cleanup failures must not mask fn()'s outcome.
-		await release().catch(() => {});
-	}
 }
 
 /**
@@ -285,6 +324,21 @@ export async function withFileLock<T>(
  */
 function temporaryPath(filePath: string): string {
 	return `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+}
+
+/**
+ * Async standalone overwrites can legitimately target the same file at once. Unique temporary
+ * names prevent writers from corrupting each other's staging files, but Windows still serializes
+ * replacement renames internally. Letting every writer retry in lockstep creates a thundering herd
+ * that can exhaust the bounded Defender/indexer retry budget even though no external process owns
+ * the destination. Keep one FIFO tail per destination inside this process so each destination has
+ * one writer at a time; writes to different destinations remain fully parallel. The tail is always
+ * resolved and removed, including after a failed write, so one failure cannot poison later writes
+ * or retain tenant paths indefinitely. File-lock queues are separate from atomic-write queues so a
+ * write inside a held advisory lock never waits on itself.
+ */
+async function withSerializedAtomicWrite<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+	return withSerializedPathOperation(pendingAtomicWriteTails, filePath, fn);
 }
 
 /** Remove one invocation's temporary path without masking the original write/rename failure. */
@@ -324,15 +378,17 @@ export async function writeFileAtomic(
 	content: string,
 	options?: AtomicFileWriteOptions,
 ): Promise<void> {
-	await fsPromises.mkdir(dirname(filePath), { recursive: true });
-	const tmpPath = temporaryPath(filePath);
-	let renamed = false;
-	try {
-		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
-		await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
-		await renameWithRetry(tmpPath, filePath);
-		renamed = true;
-	} finally {
-		if (!renamed) await removeTemporaryPath(tmpPath);
-	}
+	await withSerializedAtomicWrite(filePath, async () => {
+		await fsPromises.mkdir(dirname(filePath), { recursive: true });
+		const tmpPath = temporaryPath(filePath);
+		let renamed = false;
+		try {
+			// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
+			await fsPromises.writeFile(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
+			await renameWithRetry(tmpPath, filePath);
+			renamed = true;
+		} finally {
+			if (!renamed) await removeTemporaryPath(tmpPath);
+		}
+	});
 }

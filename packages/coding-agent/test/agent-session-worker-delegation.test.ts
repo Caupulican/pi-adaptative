@@ -1102,6 +1102,16 @@ describe("AgentSession worker delegation", () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, maxConcurrent: 1 } },
 		});
+		const terminalLaneIds = new Set<string>();
+		let signalAllTerminal!: () => void;
+		const allTerminal = new Promise<void>((resolve) => {
+			signalAllTerminal = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type !== "delegate_workers") return;
+			for (const record of event.terminalSinceFlush) terminalLaneIds.add(record.laneId);
+			if (terminalLaneIds.size === 2) signalAllTerminal();
+		});
 		try {
 			harness.setResponses([
 				fauxAssistantMessage(
@@ -1117,8 +1127,9 @@ describe("AgentSession worker delegation", () => {
 			]);
 
 			await harness.session.prompt("Delegate both scouts", { autoContinueGoal: false });
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
+			await allTerminal;
 
+			expect(terminalLaneIds.size).toBe(2);
 			expect(harness.session.getWorkerClaimSnapshots().map((claim) => claim.summary)).toEqual([
 				"first worker done",
 				"second worker done",
@@ -1126,6 +1137,7 @@ describe("AgentSession worker delegation", () => {
 			expect(workerLaneRecords(harness).map((record) => record.status)).toEqual(["succeeded", "succeeded"]);
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
+			unsubscribe();
 			harness.cleanup();
 		}
 	});

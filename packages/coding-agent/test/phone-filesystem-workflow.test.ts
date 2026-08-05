@@ -166,7 +166,7 @@ describe("non-native phone filesystem workflow", () => {
 				},
 			]);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -255,7 +255,7 @@ describe("non-native phone filesystem workflow", () => {
 				payloadRef: expect.stringMatching(/^file-mutation:/),
 			});
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});
@@ -347,7 +347,7 @@ describe("non-native phone filesystem workflow", () => {
 				payloadRef: expect.stringMatching(/^file-mutation:/),
 			});
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
 		}
 	});

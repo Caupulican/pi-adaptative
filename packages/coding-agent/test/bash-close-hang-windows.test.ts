@@ -118,6 +118,10 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 		const bashTool = createBashTool(testDir, { sessionKey });
 
 		try {
+			// Keep the close-hang deadline scoped to the inherited-handle behavior. A cold
+			// PowerShell startup has its own coverage and can exceed this guard under suite load.
+			const warmup = await bashTool.execute("test-warmup", { command: "node --version" }, controller.signal);
+			expect(getTextOutput(warmup)).toMatch(/^v\d+/);
 			const result = await withTimeout(bashTool.execute("test-call", { command }, controller.signal), 3000, () => {
 				controller.abort();
 			});

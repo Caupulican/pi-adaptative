@@ -88,7 +88,7 @@ describe("model adaptation system prompt", () => {
 			first.session.agent.onToolArgumentValidation?.(repairEvent(model));
 			first.session.agent.onToolArgumentValidation?.(repairEvent(model));
 		} finally {
-			first.session.dispose();
+			await first.session.disposeAndWait();
 		}
 
 		const stored = ModelAdaptationStore.forAgentDir(agentDir).get(`${model.provider}/${model.id}`);
@@ -98,14 +98,14 @@ describe("model adaptation system prompt", () => {
 		try {
 			expect(second.session.agent.state.systemPrompt).toContain(ruleText);
 		} finally {
-			second.session.dispose();
+			await second.session.disposeAndWait();
 		}
 
 		const other = await createSession(cwd, agentDir, otherModel);
 		try {
 			expect(other.session.agent.state.systemPrompt).not.toContain(ruleText);
 		} finally {
-			other.session.dispose();
+			await other.session.disposeAndWait();
 		}
 	});
 
@@ -128,7 +128,7 @@ describe("model adaptation system prompt", () => {
 		try {
 			expect(session.session.agent.state.systemPrompt).not.toContain(ruleText);
 		} finally {
-			session.session.dispose();
+			await session.session.disposeAndWait();
 		}
 	});
 
@@ -147,7 +147,7 @@ describe("model adaptation system prompt", () => {
 			expect(created.session.agent.state.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
 			expect(created.session.agent.state.systemPrompt).toContain(ruleText);
 		} finally {
-			created.session.dispose();
+			await created.session.disposeAndWait();
 		}
 	});
 });
