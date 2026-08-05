@@ -10,6 +10,8 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"edit",
 	"memory",
 	"run_process",
+	"bash",
+	"powershell",
 ] as const;
 export const ORCHESTRATION_PROFILE_TOOL_NAMES = [
 	...CLASSIFIED_LANE_TOOL_NAMES,
@@ -17,6 +19,9 @@ export const ORCHESTRATION_PROFILE_TOOL_NAMES = [
 	"delegate_status",
 	"profile_writer",
 ] as const;
+
+/** Kernel control tools are available to every in-process agent and inherited by descendants. */
+export const INHERITED_ORCHESTRATION_TOOL_NAMES = ["delegate"] as const;
 
 /**
  * Manifest-only lane catalogue. It contains no tool factories, so policy compilation can omit
@@ -29,10 +34,14 @@ export function buildLaneToolManifests(
 	const enabled = new Set(enabledToolNames);
 	const manifests: ToolCapabilityManifest[] = [];
 
-	for (const toolName of profile.toolNames) {
+	for (const toolName of new Set([...profile.toolNames, ...INHERITED_ORCHESTRATION_TOOL_NAMES])) {
 		if (!enabled.has(toolName)) continue;
 		const policy = getToolCapabilityPolicy(toolName);
-		const capability = resolveProfileToolCapability(profile, toolName);
+		const capability = INHERITED_ORCHESTRATION_TOOL_NAMES.includes(
+			toolName as (typeof INHERITED_ORCHESTRATION_TOOL_NAMES)[number],
+		)
+			? "workflow.delegate"
+			: resolveProfileToolCapability(profile, toolName);
 		if (!capability || !policy) continue;
 		manifests.push({
 			toolName,

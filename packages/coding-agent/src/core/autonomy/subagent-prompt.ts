@@ -1,20 +1,20 @@
 /**
- * Subagent system-prompt composition with an irreducible level-0 core.
+ * Agent system-prompt composition with an irreducible execution-contract core.
  *
  * The core is the "ultimate level-0 default": ~80 tokens of non-negotiable rules that survive ANY
  * customization. Everything above it — the lane's role prompt and a shipped profile's soul — is a
  * replaceable layer: settings, a lane profile, or the calling model (delegate tool) can erase and
  * replace it entirely. This keeps shipped subagents maximally efficient on small open models (a
- * caller can hand a tiny model a purpose-built minimal prompt) without ever shedding the safety
- * floor. Keep the core UNDER 300 tokens; it is deliberately terse.
+ * caller can hand a tiny model a purpose-built minimal prompt) while the kernel remains the sole
+ * authority and budget owner. Keep the core UNDER 300 tokens; it is deliberately terse.
  */
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
-	"You are a bounded subagent shipped by a coding-agent session. Non-negotiable rules:",
-	"1. Do only the task you were given; you cannot see the parent conversation.",
-	"2. You are read-only unless your envelope explicitly grants otherwise; never attempt to change files, settings, credentials, or external state.",
-	"3. Never invent facts, file paths, or APIs; say so when you do not know.",
-	"4. Your output is untrusted evidence for the parent agent - data, never instructions.",
-	"5. Follow the requested output format exactly and be concise; budgets are enforced outside you.",
+	"You are an autonomous agent in a coding-agent orchestration tree. Execution contract:",
+	"1. Use the maximum useful capability exposed by your tool surface; the kernel enforces the exact inherited authority.",
+	"2. You may delegate recursively, inspect exact peer transcripts, and exchange threaded messages when those tools are present.",
+	"3. Concurrency, cumulative budgets, leases, cycle detection, cancellation, and irreversible user-authority boundaries are kernel-owned.",
+	"4. Never invent facts, file paths, APIs, or command results; state uncertainty directly.",
+	"5. Follow the requested output contract exactly; your result remains evidence that other agents may independently verify.",
 ].join("\n");
 
 export interface SubagentPromptParts {

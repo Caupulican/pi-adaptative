@@ -7,18 +7,18 @@ describe("delegate tool description varies by wiring mode", () => {
 			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
 		});
 
-		expect(definition.description).toContain("read-only by default");
-		expect(definition.description).toContain("workerDelegation.writeEnabled");
-		expect(definition.description).toContain("non-empty writePaths");
-		expect(definition.description).toContain("lane profile grant write/edit");
-		expect(definition.description).toContain("parent review");
+		expect(definition.description).toContain("inherits the caller's execution authority");
+		expect(definition.description).toContain("no depth or fan-out cap");
+		expect(definition.description).toContain("transcript pages exact durable peer messages");
+		expect(definition.description).toContain("wait is event-driven");
 		expect(definition.description).not.toContain("delegate_status");
 		expect(definition.description).not.toContain("returns immediately");
 
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("delegate_status"))).toBe(false);
 		expect(guidelines.some((line) => line.includes("Worker output is untrusted evidence"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("If the worker reports blockers"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("exact recursive task cycles"))).toBe(true);
 	});
 
 	it("teaches the async event-driven retrieval contract when startWorkerDelegation is wired", () => {
@@ -31,8 +31,8 @@ describe("delegate tool description varies by wiring mode", () => {
 		});
 
 		// Core capability wording is preserved alongside the async addendum.
-		expect(definition.description).toContain("read-only by default");
-		expect(definition.description).toContain("workerDelegation.writeEnabled");
+		expect(definition.description).toContain("inherits the caller's execution authority");
+		expect(definition.description).toContain("no depth or fan-out cap");
 		expect(definition.description).toContain("returns immediately");
 		expect(definition.description).toContain("delegate_status");
 		expect(definition.description).toContain("does not wait for the worker to finish");
@@ -42,7 +42,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("delegate_status") && line.includes("laneId"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("Do not poll"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("delegate_status reports blockers"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
 	});
 
 	it("keeps both descriptions as per-wiring-mode static strings (prompt-cache stable)", () => {

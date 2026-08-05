@@ -3,8 +3,13 @@ import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
-import { type WorkerAgentControlPort, WorkerAgentMailbox, type WorkerAgentMessage } from "./worker-agent-control.ts";
-import type { WorkerConversation } from "./worker-conversation-store.ts";
+import {
+	type WorkerAgentControlPort,
+	WorkerAgentMailbox,
+	type WorkerAgentMessage,
+	type WorkerAgentMessageOptions,
+} from "./worker-agent-control.ts";
+import { type WorkerConversation, WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
@@ -33,6 +38,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly options: WorkerAgentControlCoordinatorOptions;
 	private readonly mailboxes = new Map<string, WorkerAgentMailbox>();
 	private readonly stateListeners = new Set<() => void>();
+	private readonly conversations = new WorkerConversationStore();
 
 	constructor(options: WorkerAgentControlCoordinatorOptions) {
 		this.options = options;
@@ -42,10 +48,53 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return this.options.processOwnerId;
 	}
 
-	sendWorkerAgentMessage(agentId: string, message: string): { messageId: string; queued: true } {
+	listWorkerAgents(): AgentBindingContract[] {
+		this.requireControl();
+		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents).sort(
+			(left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt),
+		);
+	}
+
+	readWorkerAgentTranscript(
+		agentId: string,
+		options: { cursor?: number; maxMessages?: number } = {},
+	): ReturnType<WorkerAgentControlPort["readWorkerAgentTranscript"]> {
 		this.requireControl();
 		const agent = this.requireKnownAgent(agentId);
-		const queued = this.getMailbox(agent.agentId).enqueue({ kind: "follow_up", content: message });
+		const cursor = options.cursor ?? 0;
+		const maxMessages = options.maxMessages ?? 16;
+		if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TypeError("Worker transcript cursor is invalid.");
+		if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 64) {
+			throw new TypeError("Worker transcript page size must be from 1 through 64 messages.");
+		}
+		const transcript = this.conversations
+			.open({
+				agentDir: this.options.agentDir,
+				resumeContext: agent.resumeContext,
+				expectedLogicalAgentId: agent.agentId,
+			})
+			.getRawTranscript();
+		if (cursor > transcript.length) throw new TypeError("Worker transcript cursor exceeds the transcript length.");
+		const messages = transcript.slice(cursor, cursor + maxMessages);
+		const nextCursor = cursor + messages.length;
+		return {
+			agentId: agent.agentId,
+			cursor,
+			totalMessages: transcript.length,
+			messages,
+			...(nextCursor < transcript.length ? { nextCursor } : {}),
+		};
+	}
+
+	sendWorkerAgentMessage(
+		agentId: string,
+		message: string,
+		options: WorkerAgentMessageOptions = {},
+	): { messageId: string; queued: true } {
+		this.requireControl();
+		const agent = this.requireKnownAgent(agentId);
+		this.acknowledgePeerReply(options);
+		const queued = this.getMailbox(agent.agentId).enqueue({ kind: "follow_up", content: message, ...options });
 		this.signalStateChanged();
 		return { messageId: queued.messageId, queued: true };
 	}
@@ -53,22 +102,24 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	followUpWorkerAgent(
 		agentId: string,
 		message: string,
+		options: WorkerAgentMessageOptions = {},
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string } {
 		this.requireControl();
 		const agent = this.requireKnownAgent(agentId);
 		const canonicalAgentId = agent.agentId;
+		this.acknowledgePeerReply(options);
 		const active = agent.activeAttemptId
 			? this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[agent.activeAttemptId]
 			: undefined;
 		if (active?.status === "running" || active?.status === "leased") {
-			const queued = this.getMailbox(canonicalAgentId).enqueue({ kind: "steer", content: message });
+			const queued = this.getMailbox(canonicalAgentId).enqueue({ kind: "steer", content: message, ...options });
 			this.signalStateChanged();
 			return { started: false, steering: true, messageId: queued.messageId };
 		}
 		if (agent.status !== "registered") {
 			return { started: false, steering: false, messageId: "", skipReason: `agent_${agent.status}` };
 		}
-		const queued = this.getMailbox(canonicalAgentId).enqueue({ kind: "follow_up", content: message });
+		const queued = this.getMailbox(canonicalAgentId).enqueue({ kind: "follow_up", content: message, ...options });
 		try {
 			const prepared = this.options
 				.getLifecycle()
@@ -187,7 +238,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	/** Acknowledge only after the exact child transcript message has been durably appended. */
 	acknowledgeMailboxMessage(agentId: string, message: { role: string; content: unknown }): void {
 		if (message.role !== "user" || typeof message.content !== "string") return;
-		const messageId = /^\[Worker control (worker-message-[^\]]+)\]\n/.exec(message.content)?.[1];
+		const messageId = /^\[Worker control (worker-message-[^\]\s]+)(?: [^\]]+)?\]\n/.exec(message.content)?.[1];
 		if (messageId) this.getMailbox(agentId).acknowledgeDelivered(messageId);
 	}
 
@@ -240,10 +291,22 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return () => this.stateListeners.delete(listener);
 	}
 
+	private acknowledgePeerReply(options: WorkerAgentMessageOptions): void {
+		if (!options.senderAgentId || !options.replyToMessageId) return;
+		this.requireKnownAgent(options.senderAgentId);
+		this.getMailbox(options.senderAgentId).markReplied(options.replyToMessageId);
+	}
+
 	private mailboxMessage(message: WorkerAgentMessage): AgentMessage {
+		const metadata = [
+			message.senderAgentId ? `from=${message.senderAgentId}` : undefined,
+			message.threadId ? `thread=${message.threadId}` : undefined,
+			message.replyToMessageId ? `replyTo=${message.replyToMessageId}` : undefined,
+			message.expectReply ? "replyExpected=true" : undefined,
+		].filter((value): value is string => value !== undefined);
 		return {
 			role: "user",
-			content: `[Worker control ${message.messageId}]\n${message.content}`,
+			content: `[Worker control ${message.messageId}${metadata.length > 0 ? ` ${metadata.join(" ")}` : ""}]\n${message.content}`,
 			timestamp: Date.now(),
 		};
 	}

@@ -1,8 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { AgentContext } from "@caupulican/pi-agent-core";
+import type { AgentContext, AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
 import {
@@ -48,6 +49,53 @@ describe("classified lane tool surface", () => {
 		expect(first.allowedTools).not.toContain("delegate");
 		expect(first.allowedTools).not.toContain("ask_question");
 		expect(first.allowedTools).not.toContain("bash");
+	});
+
+	it("materializes an owner-injected recursive delegation tool through the compiled grant", async () => {
+		const delegateTool: AgentTool = {
+			name: "delegate",
+			label: "delegate",
+			description: "Spawn or communicate with agents in this orchestration tree.",
+			parameters: Type.Object({}, { additionalProperties: false }),
+			execute: async () => ({ content: [{ type: "text" as const, text: "started" }], details: undefined }),
+		};
+		const manifest: ToolCapabilityManifest = {
+			toolName: "delegate",
+			moduleSpecifier: "runtime:delegate",
+			capabilities: ["workflow.delegate"],
+			roles: ["implementer"],
+			enforcements: ["control-plane"],
+		};
+		const grant: ExecutionGrant = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			grantId: "recursive-grant",
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "implementer",
+			capabilities: ["workflow.delegate"],
+			allowedTools: ["delegate"],
+			resources: [],
+			readPaths: [],
+			writePaths: [],
+			deniedPaths: [],
+			budget: { maxToolCalls: 2 },
+			policyVersion: "recursive-v1",
+			decisionTrace: [],
+			issuedAt: "2026-08-04T00:00:00.000Z",
+		};
+
+		const surface = createLaneToolSurface({
+			cwd,
+			grant,
+			toolManifests: [manifest],
+			additionalTools: [delegateTool],
+		});
+
+		expect(surface.allowedTools).toEqual(["delegate"]);
+		expect(surface.tools).toEqual([delegateTool]);
+		expect(await gate(surface, "delegate", {})).toBeUndefined();
 	});
 
 	it("denies all tools for active profiles with a missing or empty tools kind", () => {

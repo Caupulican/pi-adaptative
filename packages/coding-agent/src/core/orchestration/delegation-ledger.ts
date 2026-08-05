@@ -24,6 +24,7 @@ export interface DelegationLedgerOptions {
 export interface PrepareDelegationInput {
 	laneId: string;
 	instructions: string;
+	parentAgentId?: string;
 	executionContract: WorkerExecutionContract;
 	requiredCapabilities: readonly HarnessCapability[];
 	goal?: GoalState;
@@ -89,6 +90,7 @@ export class DelegationOrchestrationLedger {
 			role: profile.role,
 			requiredCapabilities: input.requiredCapabilities,
 			riskBudget: profile.budget,
+			...(input.parentAgentId ? { parentAgentId: input.parentAgentId } : {}),
 			executionContract: input.executionContract,
 			...(input.goal ? { goal: input.goal } : {}),
 			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
@@ -187,6 +189,7 @@ export class DelegationOrchestrationLedger {
 		role: WorkerRole;
 		requiredCapabilities: readonly HarnessCapability[];
 		riskBudget: RiskBudget;
+		parentAgentId?: string;
 		goal?: GoalState;
 		goalId?: string;
 		verificationOfTaskId?: string;
@@ -258,6 +261,7 @@ export class DelegationOrchestrationLedger {
 			profileId: input.profileId,
 			instructions: input.instructions,
 			resourcePointerIds: input.taskContext?.resourcePointerIds ?? [],
+			...(input.parentAgentId ? { parentAgentId: input.parentAgentId } : {}),
 			requirementIds: input.taskContext?.requirementIds ?? [],
 			...(input.executionContract ? { executionContract: input.executionContract } : {}),
 			...input.dispatchMetadata,

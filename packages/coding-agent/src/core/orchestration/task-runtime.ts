@@ -38,6 +38,8 @@ import { type OrchestrationEventStore, OrchestrationSnapshotRequiredError } from
 import { validateRiskBudget } from "./risk-budget.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
 
+const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
+
 export interface ObjectiveRuntimeState {
 	objective: ObjectiveContract;
 	taskIds: readonly string[];
@@ -130,6 +132,7 @@ export interface DurableTaskRuntimeOptions {
 
 export interface RegisterAgentInput {
 	agentId?: string;
+	parentAgentId?: string;
 	role: AgentBindingContract["role"];
 	resumeContext: AgentResumeContext;
 }
@@ -174,7 +177,12 @@ function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number):
 	] as const) {
 		record(candidate[field], `orchestration projection snapshot.${field}`);
 	}
-	return structuredClone(candidate) as unknown as TaskRuntimeProjection;
+	const normalized = structuredClone(candidate) as unknown as TaskRuntimeProjection;
+	const agents = normalized.agents as Record<string, AgentBindingContract>;
+	for (const [agentId, agent] of Object.entries(agents)) {
+		agents[agentId] = normalizeAgentBinding(agent, `orchestration projection snapshot.agents.${agentId}`);
+	}
+	return normalized;
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -263,6 +271,7 @@ const DISPATCH_FIELDS = new Set([
 	"profileId",
 	"instructions",
 	"resourcePointerIds",
+	"parentAgentId",
 	"requirementIds",
 	"executionKind",
 	"logicalLaneId",
@@ -282,6 +291,7 @@ function dispatchFromValue(value: unknown, label: string): OrchestrationDispatch
 		throw new DurableTaskRuntimeError(`${label}.executionKind is invalid.`);
 	}
 	const logicalLaneId = optionalDispatchIdentifier(dispatch.logicalLaneId, `${label}.logicalLaneId`);
+	const parentAgentId = optionalDispatchIdentifier(dispatch.parentAgentId, `${label}.parentAgentId`);
 	const provider = optionalDispatchIdentifier(
 		dispatch.provider,
 		`${label}.provider`,
@@ -311,6 +321,7 @@ function dispatchFromValue(value: unknown, label: string): OrchestrationDispatch
 		profileId: dispatchIdentifier(dispatch.profileId, `${label}.profileId`),
 		instructions: dispatchInstructions(dispatch.instructions, `${label}.instructions`),
 		resourcePointerIds: dispatchIdentifierArray(dispatch.resourcePointerIds, `${label}.resourcePointerIds`),
+		...(parentAgentId ? { parentAgentId } : {}),
 		requirementIds:
 			dispatch.requirementIds === undefined
 				? []
@@ -412,8 +423,26 @@ function resultFromPayload(payload: JsonObject): WorkerResultContract {
 	return structuredClone(record(payload.result, "result")) as unknown as WorkerResultContract;
 }
 
+function normalizeAgentBinding(value: unknown, label: string): AgentBindingContract {
+	const agent = structuredClone(record(value, label)) as unknown as AgentBindingContract;
+	if (!agent.agentId?.trim()) throw new DurableTaskRuntimeError(`${label}.agentId is required.`);
+	const parentAgentId = agent.parentAgentId?.trim();
+	const rootAgentId = agent.rootAgentId?.trim() || agent.agentId;
+	const depth = agent.depth ?? 0;
+	if (!rootAgentId || !Number.isSafeInteger(depth) || depth < 0) {
+		throw new DurableTaskRuntimeError(`${label} lineage is invalid.`);
+	}
+	if (parentAgentId && depth === 0) throw new DurableTaskRuntimeError(`${label} child lineage depth is invalid.`);
+	return {
+		...agent,
+		...(parentAgentId ? { parentAgentId } : {}),
+		rootAgentId,
+		depth,
+	};
+}
+
 function agentFromPayload(payload: JsonObject): AgentBindingContract {
-	return structuredClone(record(payload.agent, "agent")) as unknown as AgentBindingContract;
+	return normalizeAgentBinding(payload.agent, "agent");
 }
 
 function approvalFromPayload(payload: JsonObject): ApprovalRequestContract {
@@ -673,6 +702,15 @@ export function reduceOrchestrationEvent(
 			const agent = agentFromPayload(event.payload);
 			if (agents[agent.agentId])
 				throw new DurableTaskRuntimeError(`Agent '${agent.agentId}' was registered more than once.`);
+			if (agent.parentAgentId) {
+				const parent = agents[agent.parentAgentId];
+				if (!parent) throw new DurableTaskRuntimeError(`Unknown parent agent '${agent.parentAgentId}'.`);
+				if (agent.rootAgentId !== parent.rootAgentId || agent.depth !== parent.depth + 1) {
+					throw new DurableTaskRuntimeError(`Agent '${agent.agentId}' lineage conflicts with its parent.`);
+				}
+			} else if (agent.rootAgentId !== agent.agentId || agent.depth !== 0) {
+				throw new DurableTaskRuntimeError(`Root agent '${agent.agentId}' lineage is invalid.`);
+			}
 			agents[agent.agentId] = agent;
 			break;
 		}
@@ -1027,9 +1065,24 @@ export class DurableTaskRuntime {
 		} catch (error) {
 			throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
 		}
+		const parentAgentId = input.parentAgentId?.trim();
+		const parent = parentAgentId ? this.state.agents[parentAgentId] : undefined;
+		if (parentAgentId && !parent) {
+			throw new DurableTaskRuntimeError(`Unknown parent agent '${parentAgentId}'.`);
+		}
+		if (parent?.status === "retired") {
+			throw new DurableTaskRuntimeError(`Parent agent '${parentAgentId}' is retired.`);
+		}
+		const depth = parent ? parent.depth + 1 : 0;
+		if (!Number.isSafeInteger(depth)) {
+			throw new DurableTaskRuntimeError("Agent lineage depth exceeds the durable numeric range.");
+		}
 		const agent: AgentBindingContract = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 			...identity,
+			...(parent ? { parentAgentId: parent.agentId } : {}),
+			rootAgentId: parent?.rootAgentId ?? identity.agentId,
+			depth,
 			role: input.role,
 			status: "registered",
 			createdAt: now,
@@ -1859,13 +1912,14 @@ export class DurableTaskRuntime {
 	private issueLease(attempt: AttemptRuntimeState, ownerId: string, ttlMs: number): AttemptLease {
 		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
 		const issuedAtMs = this.now();
+		const expiresAtMs = issuedAtMs + Math.min(ttlMs, MAX_DATE_EPOCH_MS - issuedAtMs);
 		return {
 			leaseId: `lease-${this.createId()}`,
 			attemptId: attempt.attemptId,
 			ownerId,
 			fencingToken: (attempt.lease?.fencingToken ?? 0) + 1,
 			issuedAt: new Date(issuedAtMs).toISOString(),
-			expiresAt: new Date(issuedAtMs + ttlMs).toISOString(),
+			expiresAt: new Date(expiresAtMs).toISOString(),
 		};
 	}
 

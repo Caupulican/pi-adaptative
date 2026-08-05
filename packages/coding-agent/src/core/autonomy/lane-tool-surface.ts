@@ -1,10 +1,12 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import { getPlatformShellToolName } from "../../utils/shell.ts";
 import {
 	CapabilityGateway,
 	CapabilityGatewayDeniedError,
 	type GatewayInitialUsage,
+	type SharedCapabilityBudget,
 } from "../orchestration/capability-gateway.ts";
 import type {
 	ExecutionGrant,
@@ -14,6 +16,7 @@ import type {
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { wrapToolWithCredentialExposureGuard } from "../secrets/credential-exposure-guard.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
+import { createBashTool } from "../tools/bash.ts";
 import { createEditTool } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { createFindTool } from "../tools/find.ts";
@@ -29,6 +32,7 @@ const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const MEMORY_LANE_TOOL_NAME = "memory" as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
+const PLATFORM_SHELL_TOOL_NAME = getPlatformShellToolName();
 const MAX_LANE_MEMORY_QUERY_CHARS = 4_096;
 const laneMemorySchema = Type.Object({
 	query: Type.String({
@@ -69,11 +73,17 @@ export interface LaneToolSurfaceOptions {
 	/** Present only for process-capable owner profiles; absent means no process tool is materialized. */
 	executionPolicy?: OrchestrationExecutionPolicy;
 	processMaxWallClockMs?: number;
+	/** Stable per-agent shell identity. Omitted when the compiled plan does not grant a host shell. */
+	shellSessionKey?: string;
 	/** Compiled policy path. When present, it is the only authorization source for this surface. */
 	grant?: ExecutionGrant;
 	toolManifests?: readonly ToolCapabilityManifest[];
+	/** Runtime-owned classified tools composed specifically for this lane (for example delegation control). */
+	additionalTools?: readonly AgentTool[];
 	/** Durable cumulative active usage to seed the compiled grant's gateway on resume. */
 	initialUsage?: GatewayInitialUsage;
+	/** Root-tree aggregate meter shared by this attempt and every descendant. */
+	sharedBudget?: SharedCapabilityBudget;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -97,9 +107,11 @@ function createLaneTools(
 	cwd: string,
 	names: readonly string[],
 	fileMutationIntents: FileMutationIntentController,
+	additionalTools: ReadonlyMap<string, AgentTool>,
 	readMemory?: (query: string) => Promise<string>,
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
+	shellSessionKey?: string,
 ): AgentTool[] {
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
@@ -113,6 +125,9 @@ function createLaneTools(
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>
 			createRunProcessTool(cwd, { policy: executionPolicy, maxWallClockMs: processMaxWallClockMs }),
 		);
+	}
+	if (shellSessionKey) {
+		factories.set(PLATFORM_SHELL_TOOL_NAME, () => createBashTool(cwd, { sessionKey: shellSessionKey }));
 	}
 	if (readMemory) {
 		factories.set(MEMORY_LANE_TOOL_NAME, () => ({
@@ -136,6 +151,8 @@ function createLaneTools(
 		}));
 	}
 	return names.flatMap((name) => {
+		const additional = additionalTools.get(name);
+		if (additional) return [additional];
 		const factory = factories.get(name);
 		return factory ? [wrapToolWithCredentialExposureGuard(factory(), cwd)] : [];
 	});
@@ -144,20 +161,33 @@ function createLaneTools(
 /**
  * Materialize a fresh, fail-closed tool surface for one isolated lane.
  *
- * Profiles select only from classified built-ins. Opaque extension tools, shell, memory, goals,
- * and `delegate` are never candidates, so a wildcard cannot manufacture unknown authority or
- * recursively spawn more workers. Write/edit additionally require the explicit worker write switch
- * and a non-empty path scope; research therefore stays read-only regardless of profile contents.
+ * Admission selects classified built-ins plus runtime-owned injected controls. A compiled grant is
+ * the only authority source for worker lanes; host shell and recursive delegation are materialized
+ * when named by that grant. Write/edit additionally require the global write switch and a positive
+ * path scope.
  */
 export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneToolSurface {
 	const fileMutationIntents = new FileMutationIntentController();
+	const additionalTools = new Map<string, AgentTool>();
+	for (const tool of options.additionalTools ?? []) {
+		if (!tool.name.trim()) throw new Error("An injected lane tool must have a name.");
+		if (additionalTools.has(tool.name)) throw new Error(`Injected lane tool '${tool.name}' is duplicated.`);
+		additionalTools.set(tool.name, tool);
+	}
 	const writeCapable = options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0;
-	const candidateNames = [
+	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(options.readMemory ? [MEMORY_LANE_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
+		...(options.shellSessionKey ? [PLATFORM_SHELL_TOOL_NAME] : []),
 	];
+	for (const name of additionalTools.keys()) {
+		if (builtInCandidateNames.includes(name as (typeof builtInCandidateNames)[number])) {
+			throw new Error(`Injected lane tool '${name}' conflicts with a built-in lane tool.`);
+		}
+	}
+	const candidateNames = [...builtInCandidateNames, ...additionalTools.keys()];
 	const patterns = strictLaneProfilePatterns(options.profile);
 	const compiledToolNames = new Set(options.grant?.allowedTools ?? []);
 	const deniedTools = candidateNames.filter((name) =>
@@ -185,6 +215,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				grant: options.grant,
 				cwd: options.cwd,
 				...(options.initialUsage !== undefined ? { initialUsage: options.initialUsage } : {}),
+				...(options.sharedBudget ? { sharedBudget: options.sharedBudget } : {}),
 			})
 		: undefined;
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
@@ -193,7 +224,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		capabilities: [
 			"filesystem.read",
 			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory.query"] as const) : []),
-			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ? (["process.exec"] as const) : []),
+			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) || allowedToolSet.has(PLATFORM_SHELL_TOOL_NAME)
+				? (["process.exec"] as const)
+				: []),
 		],
 		allowedTools,
 		deniedTools,
@@ -214,9 +247,11 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.cwd,
 			allowedTools,
 			fileMutationIntents,
+			additionalTools,
 			options.readMemory,
 			options.executionPolicy,
 			options.processMaxWallClockMs,
+			options.shellSessionKey,
 		),
 		dispose: () => fileMutationIntents.dispose(),
 		allowedTools,

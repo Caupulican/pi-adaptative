@@ -55,7 +55,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 - [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
 - [tmux agent manager](tmux-agent-manager.md) - bundled event-driven external-provider teams with parent wake handoffs.
-- [Task worker profiles](worker-profiles.md) - immutable session-scoped worker profiles with bounded model and tool authority.
+- [Task worker presets](worker-profiles.md) - optional immutable session presets for recursive agents with model-authored authority.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
 - [Resource profiles & library](resources.md) - curate extensions, skills, and agents per project or situation; share a catalog; install and back up.
 - [Self-adaptation](self-adaptation.md) - draft live skills/extensions and run evidence-backed Pi harness improvement loops.

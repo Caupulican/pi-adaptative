@@ -3,6 +3,7 @@ import {
 	type ApprovalRequestContract,
 	type CapabilityDecision,
 	type ExecutionGrant,
+	HARNESS_CAPABILITIES,
 	type HarnessCapability,
 	ORCHESTRATION_SCHEMA_VERSION,
 	type ResourcePointer,
@@ -13,13 +14,13 @@ import {
 import { exceededRiskBudgetFields, intersectRiskBudgets, validateRiskBudget } from "./risk-budget.ts";
 
 export const DEFAULT_ROLE_CAPABILITY_CEILINGS: Readonly<Record<WorkerRole, readonly HarnessCapability[]>> = {
-	orchestrator: ["workflow.delegate"],
-	planner: ["workflow.plan"],
-	explorer: ["filesystem.read", "worktree.read", "network.http", "service.mcp", "memory.query"],
-	implementer: ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate", "memory.query"],
-	operator: ["filesystem.read", "worktree.read", "process.exec", "tests.execute", "network.http", "service.mcp"],
-	verifier: ["filesystem.read", "worktree.read", "process.exec", "tests.execute", "network.http", "service.mcp"],
-	database: ["memory.query", "memory.mutate"],
+	orchestrator: HARNESS_CAPABILITIES,
+	planner: HARNESS_CAPABILITIES,
+	explorer: HARNESS_CAPABILITIES,
+	implementer: HARNESS_CAPABILITIES,
+	operator: HARNESS_CAPABILITIES,
+	verifier: HARNESS_CAPABILITIES,
+	database: HARNESS_CAPABILITIES,
 };
 
 export interface CompileExecutionGrantInput {

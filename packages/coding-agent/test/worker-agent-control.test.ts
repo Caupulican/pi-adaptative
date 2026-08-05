@@ -37,6 +37,30 @@ describe("WorkerAgentMailbox", () => {
 		expect(mailbox.pending("steer")).toEqual([]);
 	});
 
+	it("persists peer thread identity and reply expectations through delivery", () => {
+		const mailbox = new WorkerAgentMailbox({ agentDir: root(), parentSessionId: "parent-1", agentId: "agent-2" });
+		const notice = mailbox.enqueue({
+			kind: "follow_up",
+			content: "Can you verify the scheduler invariant?",
+			senderAgentId: "agent-1",
+			threadId: "thread-scheduler",
+			expectReply: true,
+		});
+
+		mailbox.acknowledgeDelivered(notice.messageId);
+		expect(mailbox.awaitingReplies()).toEqual([
+			expect.objectContaining({
+				messageId: notice.messageId,
+				senderAgentId: "agent-1",
+				threadId: "thread-scheduler",
+				expectReply: true,
+			}),
+		]);
+
+		mailbox.markReplied(notice.messageId);
+		expect(mailbox.awaitingReplies()).toEqual([]);
+	});
+
 	it("rejects oversized messages before any durable write", () => {
 		const mailbox = new WorkerAgentMailbox({ agentDir: root(), parentSessionId: "parent-1", agentId: "agent-1" });
 

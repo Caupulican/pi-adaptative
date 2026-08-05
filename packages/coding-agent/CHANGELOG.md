@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Added durable recursive worker-agent trees with inherited delegation, exact paginated peer transcripts, threaded messages, event-driven agent controls, platform-shell execution, and model-authored model/reasoning/tool/capability/path/budget selection.
+
+### Changed
+
+- Changed orchestration profiles into optional presets: profile-free agents receive the maximum host-permitted core surface, direct project writes are enabled by default, roles are labels unless the host supplies a ceiling, root budgets are cumulative, and the global scheduler replaces framework depth, fan-out, and per-profile concurrency caps.
+
+### Fixed
+
+- Counted durable agent attempts that ended before their first usage checkpoint when reconstructing a root tree's cumulative attempt budget after restart.
+- Resolved omitted adaptive-agent reasoning from the selected model's supported default instead of assuming `medium` and rejecting non-reasoning models.
+- Chunked wall-clock timers above the host timer limit and saturated durable lease timestamps at the maximum representable date so unrestricted safe-integer budgets cannot overflow into immediate timeouts or failed starts.
+
 ## [0.85.8] - 2026-08-05
 
 ### Changed

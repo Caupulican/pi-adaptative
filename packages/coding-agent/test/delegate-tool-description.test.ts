@@ -16,22 +16,22 @@ describe("delegate tool capability description", () => {
 
 		expect(settings.getWorkerDelegationSettings()).toMatchObject({ writeEnabled: true, writePaths: ["src"] });
 		expect(definition.description).toBe(descriptionBefore);
-		expect(definition.description).toContain("owner-authored profile fixes memory");
-		expect(definition.description).toContain("workerDelegation.writeEnabled");
-		expect(definition.description).toContain("non-empty writePaths");
-		expect(definition.description).toContain("writes additionally require");
-		expect(definition.description).toContain("parent review");
+		expect(definition.description).toContain("inherits the caller's execution authority");
+		expect(definition.description).toContain("loaded profile as a preset");
+		expect(definition.description).toContain("host scheduler manages concurrency");
+		expect(definition.description).toContain("no depth or fan-out cap");
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
 				instructions?: { description?: string };
 				profileId?: { description?: string };
+				authority?: object;
 			};
 		};
-		expect(parameters.properties?.instructions?.description).toContain("workerDelegation.writeEnabled");
-		expect(parameters.properties?.instructions?.description).toContain("path-scoped");
-		expect(parameters.properties?.profileId?.description).toContain("Regular sessions must omit");
-		expect((definition.promptGuidelines ?? []).join("\n")).toContain("Never invent, create, or edit profiles");
+		expect(parameters.properties?.instructions?.description).toContain("inherits the caller's full admitted grant");
+		expect(parameters.properties?.profileId?.description).toContain("preset, not an authority allowlist");
+		expect(parameters.properties?.authority).toBeDefined();
+		expect((definition.promptGuidelines ?? []).join("\n")).toContain("authority to choose the model");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 

@@ -46,6 +46,26 @@ describe("runBoundedCompletion", () => {
 		}
 	});
 
+	it("chunks wall-clock budgets larger than the host timer limit", async () => {
+		vi.useFakeTimers();
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		try {
+			const controller = new AbortController();
+			const pending = runBoundedCompletion({
+				maxWallClockMs: Number.MAX_SAFE_INTEGER,
+				signal: controller.signal,
+				execute: () => new Promise(() => {}),
+			});
+
+			expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(2_147_483_647);
+			controller.abort();
+			expect((await pending).failure).toEqual({ status: "canceled", reasonCode: "external_abort" });
+		} finally {
+			setTimeoutSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
 	it("observes a late executor rejection after returning a timeout", async () => {
 		vi.useFakeTimers();
 		try {

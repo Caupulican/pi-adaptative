@@ -132,10 +132,10 @@ describe("OrchestrationProfileRegistry", () => {
 		).toThrow("Dispatch request is invalid");
 	});
 
-	it("rejects unrestricted process tools even when process authority exists", () => {
-		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "bash"] }))).toThrow(
-			"cannot expose unrestricted process tools",
-		);
+	it("admits the platform shell as real process authority while keeping run_process policy-bound", () => {
+		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "bash"] }))).not.toThrow();
+		const { executionPolicy: _executionPolicy, ...withoutProcessPolicy } = profile();
+		expect(() => validateOrchestrationProfile(withoutProcessPolicy)).toThrow("must declare executionPolicy");
 	});
 
 	it("caps profile process output at the shared execution-plane ceiling", () => {

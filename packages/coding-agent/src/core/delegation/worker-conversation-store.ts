@@ -330,7 +330,9 @@ export class WorkerConversation {
 			if (entry.type !== "message" || entry.message.role !== "user" || typeof entry.message.content !== "string") {
 				continue;
 			}
-			const messageId = /^\[Worker control (worker-message-[^\]]+)\]\n/.exec(entry.message.content)?.[1];
+			const messageId = /^\[Worker control (worker-message-[^\]\s]+)(?: [^\]]+)?\]\n/.exec(
+				entry.message.content,
+			)?.[1];
 			if (!messageId || !unresolved.delete(messageId)) continue;
 			delivered.add(messageId);
 			if (unresolved.size === 0) break;

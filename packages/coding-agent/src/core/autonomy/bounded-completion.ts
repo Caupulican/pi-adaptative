@@ -20,6 +20,8 @@ export interface BoundedCompletionOutcome {
 
 type ExecutorSettlement = { kind: "completion"; completion: BoundedCompletion } | { kind: "error"; error: unknown };
 
+const MAX_HOST_TIMER_DELAY_MS = 2_147_483_647;
+
 function abortFailure(args: {
 	externalSignal?: AbortSignal;
 	timeoutSignal: AbortSignal;
@@ -43,17 +45,25 @@ export async function runBoundedCompletion(args: {
 	});
 	const onExternalAbort = (): void => resolveAbort();
 	args.signal?.addEventListener("abort", onExternalAbort, { once: true });
-	const timeoutTimer =
-		args.maxWallClockMs > 0
-			? setTimeout(() => {
-					timeoutController.abort();
-					resolveAbort();
-				}, args.maxWallClockMs)
-			: undefined;
-	if (timeoutTimer && typeof timeoutTimer === "object" && "unref" in timeoutTimer) {
-		const { unref } = timeoutTimer as { unref?: () => void };
-		unref?.call(timeoutTimer);
-	}
+	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+	let remainingWallClockMs = args.maxWallClockMs;
+	const armTimeout = (): void => {
+		const delayMs = Math.min(remainingWallClockMs, MAX_HOST_TIMER_DELAY_MS);
+		timeoutTimer = setTimeout(() => {
+			remainingWallClockMs -= delayMs;
+			if (remainingWallClockMs > 0) {
+				armTimeout();
+				return;
+			}
+			timeoutController.abort();
+			resolveAbort();
+		}, delayMs);
+		if (typeof timeoutTimer === "object" && "unref" in timeoutTimer) {
+			const { unref } = timeoutTimer as { unref?: () => void };
+			unref?.call(timeoutTimer);
+		}
+	};
+	if (args.maxWallClockMs > 0) armTimeout();
 	const signals: AbortSignal[] = [timeoutController.signal];
 	if (args.signal) signals.push(args.signal);
 	const signal = AbortSignal.any(signals);

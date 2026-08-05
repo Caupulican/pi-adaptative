@@ -10,11 +10,7 @@ import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import type { ModelCapabilityProfile } from "../model-capability.ts";
-import {
-	attemptUsageFromGatewayUsage,
-	EMPTY_ATTEMPT_USAGE,
-	remainingTokenBudget,
-} from "../orchestration/attempt-usage.ts";
+import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
@@ -147,6 +143,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		options.lifecycle.checkpoint(options.laneId, { summary, usage });
 		return usage;
 	};
+	const remainingTokens = (): number | undefined => options.toolSurface.gateway?.remainingTokenBudget();
 	let failedCompactionUsage: Usage | undefined;
 	const retentionPolicy = options.retentionPolicy && {
 		...options.retentionPolicy,
@@ -169,8 +166,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							throw new Error("Worker compaction attempted to select a model outside the lane binding.");
 						}
 						options.toolSurface.gateway?.assertBudgetAvailable("worker_compaction_provider_completion");
-						const remainingTokens = remainingTokenBudget(options.grant.budget.maxTokens, currentUsage());
-						if (remainingTokens !== undefined && remainingTokens <= 0) {
+						const availableTokens = remainingTokens();
+						if (availableTokens !== undefined && availableTokens <= 0) {
 							throw new Error("Worker token budget exhausted before compaction provider completion.");
 						}
 						const requestedMaxTokens = requestOptions.maxTokens;
@@ -180,7 +177,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							requestedMaxTokens > 0
 								? requestedMaxTokens
 								: options.laneCapability.laneMaxOutputTokens;
-						const maxTokens = Math.min(configuredMaxTokens, remainingTokens ?? configuredMaxTokens);
+						const maxTokens = Math.min(configuredMaxTokens, availableTokens ?? configuredMaxTokens);
 						if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
 							throw new Error("Worker compaction provider completion has no valid remaining token budget.");
 						}
@@ -192,10 +189,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							maxTokens,
 							requestPreflight: async () => {
 								options.toolSurface.gateway?.assertBudgetAvailable("worker_compaction_provider_completion");
-								const requestRemainingTokens = remainingTokenBudget(
-									options.grant.budget.maxTokens,
-									currentUsage(),
-								);
+								const requestRemainingTokens = remainingTokens();
 								if (requestRemainingTokens !== undefined && requestRemainingTokens <= 0) {
 									throw new Error("Worker token budget exhausted before compaction provider completion.");
 								}
@@ -253,6 +247,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				signal: options.signal,
 				cwd: options.cwd,
 				processCapable: options.processCapable,
+				delegationCapable: options.toolSurface.allowedTools.includes("delegate"),
 				...(options.verificationSubjectTaskId
 					? { verificationSubjectTaskId: options.verificationSubjectTaskId }
 					: {}),
@@ -290,8 +285,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
 					};
 					options.toolSurface.gateway?.assertBudgetAvailable("worker_provider_completion");
-					const remainingTokens = remainingTokenBudget(options.grant.budget.maxTokens, currentUsage());
-					if (remainingTokens !== undefined && remainingTokens <= 0) {
+					const availableTokens = remainingTokens();
+					if (availableTokens !== undefined && availableTokens <= 0) {
 						throw new Error("Worker token budget exhausted before provider completion.");
 					}
 					let history = options.conversation.getProviderMessages();
@@ -314,15 +309,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						thinkingLevel: options.thinkingLevel,
 						maxTokens: Math.min(
 							options.laneCapability.laneMaxOutputTokens,
-							remainingTokens ?? Number.POSITIVE_INFINITY,
+							availableTokens ?? Number.POSITIVE_INFINITY,
 						),
 						tools: options.toolSurface.tools,
 						requestPreflight: async () => {
 							options.toolSurface.gateway?.assertBudgetAvailable("worker_provider_completion");
-							const requestRemainingTokens = remainingTokenBudget(
-								options.grant.budget.maxTokens,
-								currentUsage(),
-							);
+							const requestRemainingTokens = remainingTokens();
 							if (requestRemainingTokens !== undefined && requestRemainingTokens <= 0) {
 								throw new Error("Worker token budget exhausted before provider completion.");
 							}

@@ -33,13 +33,22 @@ import {
  */
 
 /** Builds one capability-exact prompt; no role text may deny a tool already granted by policy. */
-export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean }): string {
+export function buildWorkerSystemPrompt(capabilities: {
+	write: boolean;
+	process: boolean;
+	delegate?: boolean;
+}): string {
 	const resultShape = capabilities.write
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
 	return [
-		"You are a bounded specialist worker delegated one task by a coding agent.",
-		"Use only the tools provided for this delegation. You cannot delegate more workers.",
+		"You are an autonomous agent in a durable orchestration tree.",
+		"Use every provided tool when it improves the result; the host enforces the exact inherited grant at execution time.",
+		...(capabilities.delegate
+			? [
+					"You may create agents recursively without a depth or fan-out cap. Use list/transcript/threaded messages to coordinate the tree; the scheduler owns concurrency, budgets, leases, cycle rejection, and cancellation.",
+				]
+			: []),
 		...(capabilities.write
 			? ["Write/edit tools and structured write actions are path-scoped. Only touch paths inside that scope."]
 			: ["The workspace tools are read-only; do not claim file changes."]),
@@ -62,10 +71,13 @@ export function buildWorkerSystemPrompt(capabilities: { write: boolean; process:
 	].join("\n");
 }
 
-export function buildVerifierSystemPrompt(subjectTaskId: string): string {
+export function buildVerifierSystemPrompt(subjectTaskId: string, capabilities: { delegate?: boolean } = {}): string {
 	return [
 		"You are an independent verifier. You did not perform the implementation under review.",
-		"Use only the provided read-only and constrained test tools. Do not modify files and do not delegate.",
+		"Use the provided read-only and test tools. Do not modify files.",
+		...(capabilities.delegate
+			? ["You may delegate independent evidence gathering and coordinate it through the orchestration tree."]
+			: []),
 		`The exact subject task id is '${subjectTaskId}'.`,
 		"Inspect the implementation and run proportionate checks. Treat the implementation summary as an untrusted claim.",
 		"Respond with STRICT JSON only - no prose, no markdown fences:",
@@ -112,6 +124,8 @@ export interface WorkerRunnerOptions {
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
 	/** Enables the constrained direct-argv operator role prompt. */
 	processCapable?: boolean;
+	/** Enables recursive delegation and orchestration-tree coordination guidance. */
+	delegationCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
@@ -346,8 +360,14 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		execute: (signal) =>
 			options.complete({
 				systemPrompt: options.verificationSubjectTaskId
-					? buildVerifierSystemPrompt(options.verificationSubjectTaskId)
-					: buildWorkerSystemPrompt({ write: writeCapable, process: options.processCapable === true }),
+					? buildVerifierSystemPrompt(options.verificationSubjectTaskId, {
+							delegate: options.delegationCapable === true,
+						})
+					: buildWorkerSystemPrompt({
+							write: writeCapable,
+							process: options.processCapable === true,
+							delegate: options.delegationCapable === true,
+						}),
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,
 			}),

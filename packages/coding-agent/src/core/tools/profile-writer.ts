@@ -59,10 +59,10 @@ export function createProfileWriterToolDefinition(writer: TaskProfileWriterPort)
 		name: "profile_writer",
 		label: "profile_writer",
 		description:
-			"Inspect authorized worker bases or create an immutable session profile that only narrows a base. Pi assigns its id; model and thinking must be available.",
-		promptSnippet: "Inspect or narrow a session worker profile",
+			"Inspect authorized worker bases or create an optional immutable session preset that only narrows a base. Direct delegation does not require a profile.",
+		promptSnippet: "Inspect or create an optional session worker preset",
 		promptGuidelines: [
-			"Inspect when bases or models are unknown; create only a task-specific narrowing.",
+			"Use this only when a reusable task-specific preset helps; delegate.authority can select execution directly.",
 			"Pass the returned profileId unchanged to delegate; never invent ids or write one-off profile files.",
 		],
 		parameters: profileWriterSchema,

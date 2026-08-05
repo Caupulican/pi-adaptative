@@ -116,6 +116,7 @@ export class WorkerRecoveryCoordinator {
 		return {
 			instructions: attempt.dispatch.instructions,
 			profileId: attempt.dispatch.profileId,
+			...(attempt.dispatch.parentAgentId ? { parentAgentId: attempt.dispatch.parentAgentId } : {}),
 			...(verificationOfTaskId ? { verificationOfTaskId } : {}),
 			...(task
 				? {

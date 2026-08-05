@@ -117,8 +117,37 @@ describe("ExecutionPolicyCompiler", () => {
 		expect(result).toMatchObject({ outcome: "deny", reasonCodes: ["tool_enforcement_missing:unsafe_shell"] });
 	});
 
-	it("denies required authority that the role can never receive", () => {
+	it("treats roles as scheduling labels when immutable authority grants the capability", () => {
 		const result = compiler().compile({
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "planner",
+			requiredCapabilities: ["process.exec"],
+			authorityCapabilities: ["process.exec"],
+			requestedTools: [],
+			toolManifests: manifests,
+			policyVersion: "policy-1",
+		});
+
+		expect(result).toMatchObject({
+			outcome: "allow",
+			grant: { role: "planner", capabilities: ["process.exec"] },
+		});
+	});
+
+	it("honors an explicit host-supplied role ceiling when an embedding chooses one", () => {
+		const roleCapabilityCeilings = {
+			orchestrator: ["workflow.delegate" as const],
+			planner: ["workflow.plan" as const],
+			explorer: ["filesystem.read" as const],
+			implementer: ["filesystem.write" as const],
+			operator: ["process.exec" as const],
+			verifier: ["tests.execute" as const],
+			database: ["memory.query" as const],
+		};
+		const result = new ExecutionPolicyCompiler({ roleCapabilityCeilings }).compile({
 			objectiveId: "objective-1",
 			taskId: "task-1",
 			attemptId: "attempt-1",

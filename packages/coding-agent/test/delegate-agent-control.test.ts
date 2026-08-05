@@ -11,6 +11,13 @@ const context = {} as ExtensionContext;
 
 function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerAgentControlPort {
 	return {
+		listWorkerAgents: () => [],
+		readWorkerAgentTranscript: (agentId) => ({
+			agentId,
+			cursor: 0,
+			totalMessages: 0,
+			messages: [],
+		}),
 		sendWorkerAgentMessage: () => ({ messageId: "unused", queued: true }),
 		followUpWorkerAgent: () => ({ started: false, steering: false, messageId: "unused" }),
 		interruptWorkerAgent: () => ({ interrupted: false }),
@@ -36,6 +43,39 @@ describe("delegate logical-agent controls", () => {
 		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Inspect the failure" });
 		expect(result.details).toMatchObject({ started: true, agentId: "lane-1", laneId: "lane-1" });
 		expect(JSON.stringify(tool.parameters)).not.toContain("oneOf");
+	});
+
+	it("forwards a model-authored capability specification instead of requiring a profile cage", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "lane-free", type: "worker" as const, status: "queued" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const authority = {
+			role: "operator" as const,
+			model: { provider: "faux", modelId: "selected" },
+			thinkingLevel: "high" as const,
+			capabilities: ["filesystem.read" as const, "process.exec" as const, "workflow.delegate" as const],
+			toolNames: ["read", "bash", "delegate"],
+			readPaths: ["."],
+			budget: { maxTokens: 8_192, maxToolCalls: 64 },
+		};
+
+		await tool.execute(
+			"call",
+			{ instructions: "Use the strongest useful local tools.", authority },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(startWorkerDelegation).toHaveBeenCalledWith({
+			instructions: "Use the strongest useful local tools.",
+			authority,
+		});
 	});
 
 	it("bounds the owner profile catalog injected into the model prompt while retaining its total", () => {
@@ -74,6 +114,79 @@ describe("delegate logical-agent controls", () => {
 		);
 		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-1", "Check the focused test");
 		expect(sent.details).toMatchObject({ action: "send", agentId: "agent-1", queued: true });
+	});
+
+	it("lets an agent list peers, read exact transcript pages, and send threaded reply-expected messages", async () => {
+		const listWorkerAgents = vi.fn(() => [
+			{
+				schemaVersion: 1 as const,
+				agentId: "agent-2",
+				parentAgentId: "agent-1",
+				rootAgentId: "agent-1",
+				depth: 1,
+				role: "explorer" as const,
+				status: "registered" as const,
+				resumeContext: {
+					provider: "pi" as const,
+					sessionId: "peer-session",
+					cwd: "/repo",
+					resourceProfileNames: [],
+					contextPointers: [],
+				},
+				createdAt: "2026-08-04T00:00:00.000Z",
+				updatedAt: "2026-08-04T00:00:00.000Z",
+			},
+		]);
+		const readWorkerAgentTranscript = vi.fn(() => ({
+			agentId: "agent-2",
+			cursor: 1,
+			totalMessages: 3,
+			messages: [{ role: "user" as const, content: "EXACT_PEER_MESSAGE", timestamp: 1 }],
+			nextCursor: 2,
+		}));
+		const sendWorkerAgentMessage = vi.fn(() => ({ messageId: "message-2", queued: true as const }));
+		const tool = createDelegateToolDefinition({
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			callerAgentId: "agent-1",
+			workerAgentControl: workerAgentControl({
+				listWorkerAgents,
+				readWorkerAgentTranscript,
+				sendWorkerAgentMessage,
+			}),
+		});
+
+		const listed = await tool.execute("call", { action: "list" }, undefined, undefined, context);
+		const transcript = await tool.execute(
+			"call",
+			{ action: "transcript", agentId: "agent-2", cursor: 1, maxMessages: 1 },
+			undefined,
+			undefined,
+			context,
+		);
+		await tool.execute(
+			"call",
+			{
+				action: "send",
+				agentId: "agent-2",
+				message: "Please reply with evidence.",
+				threadId: "thread-1",
+				replyToMessageId: "message-1",
+				expectReply: true,
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(JSON.stringify(listed.content)).toContain("agent-2");
+		expect(JSON.stringify(transcript.content)).toContain("EXACT_PEER_MESSAGE");
+		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("agent-2", { cursor: 1, maxMessages: 1 });
+		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-2", "Please reply with evidence.", {
+			senderAgentId: "agent-1",
+			threadId: "thread-1",
+			replyToMessageId: "message-1",
+			expectReply: true,
+		});
 	});
 
 	it("rejects oversized control payloads before invoking worker routing", async () => {

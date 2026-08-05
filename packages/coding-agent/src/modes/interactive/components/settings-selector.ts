@@ -43,6 +43,7 @@ import {
 	DEFAULT_WORKER_DELEGATION_ENABLED,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
+	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
 } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -203,7 +204,7 @@ function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
 	if (!(settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED)) return "disabled";
 	const maxUsd = settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD;
-	return `enabled ($${maxUsd}/worker)`;
+	return `enabled ($${maxUsd}/tree)`;
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {
@@ -1136,38 +1137,83 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 				id: "worker-delegation-enabled",
 				label: "Enabled",
 				description:
-					"Allow capable models to run bounded profile-bound workers; enabled by default, and explicit false is a hard off-switch",
+					"Allow capable models to create autonomous recursive agent trees; enabled by default, and explicit false is a hard off-switch",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
 			},
 			{
 				id: "worker-delegation-max-usd",
-				label: "Budget per worker",
-				description: "USD budget per delegated worker; breaches mark the lane budget_exhausted in diagnostics",
+				label: "Budget per agent tree",
+				description: "Cumulative USD budget shared by a root agent and every descendant; 0 disables this ceiling",
 				currentValue: String(this.state.maxUsd),
-				values: RESEARCH_LANE_MAX_USD_VALUES,
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Agent Tree USD Budget",
+						"Enter any nonnegative finite number. Zero disables the settings-level cost ceiling.",
+						String(this.state.maxUsd),
+						(value) => {
+							const maxUsd = Number(value.trim());
+							if (Number.isFinite(maxUsd) && maxUsd >= 0) {
+								this.state = { ...this.state, maxUsd };
+								onChange({ ...this.state }, this.scope);
+							}
+							done(String(this.state.maxUsd));
+						},
+						() => done(),
+						"nonnegative number; invalid input keeps the current value",
+					),
 			},
 			{
 				id: "worker-delegation-max-wall-clock-ms",
-				label: "Max milliseconds",
-				description: "Wall-clock budget per delegated worker; 0 disables the time budget",
+				label: "Tree active milliseconds",
+				description: "Cumulative active wall-clock budget across the agent tree; 0 disables the time budget",
 				currentValue: String(this.state.maxWallClockMs),
-				values: RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES,
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Agent Tree Active Time",
+						"Enter cumulative active milliseconds as a nonnegative safe integer. Zero disables the time ceiling.",
+						String(this.state.maxWallClockMs),
+						(value) => {
+							const maxWallClockMs = Number(value.trim());
+							if (Number.isSafeInteger(maxWallClockMs) && maxWallClockMs >= 0) {
+								this.state = { ...this.state, maxWallClockMs };
+								onChange({ ...this.state }, this.scope);
+							}
+							done(String(this.state.maxWallClockMs));
+						},
+						() => done(),
+						"nonnegative safe integer; invalid input keeps the current value",
+					),
 			},
 			{
 				id: "worker-delegation-write-enabled",
 				label: "Allow file writes",
 				description:
-					"Let workers change files (code-writing lane). Requires write paths below; actions apply through the envelope path scope",
-				currentValue: String(this.state.writeEnabled ?? false),
+					"Let agents change files through direct write/edit tools; default scope is the current workspace and explicit false revokes it",
+				currentValue: String(this.state.writeEnabled ?? DEFAULT_WORKER_DELEGATION_WRITE_ENABLED),
 				values: ["true", "false"],
 			},
 			{
 				id: "worker-delegation-max-concurrent",
 				label: "Max concurrent workers",
-				description: "How many delegated workers may run at once",
+				description: "Global scheduler concurrency; delegation depth and fan-out have no framework cap",
 				currentValue: String(this.state.maxConcurrent ?? 1),
-				values: ["1", "2", "3"],
+				submenu: (_currentValue, done) =>
+					new TextInputSubmenu(
+						"Global Worker Concurrency",
+						"Enter any positive safe integer. This limits simultaneously running agents, not tree depth or fan-out.",
+						String(this.state.maxConcurrent ?? 1),
+						(value) => {
+							const maxConcurrent = Number(value.trim());
+							if (Number.isSafeInteger(maxConcurrent) && maxConcurrent > 0) {
+								this.state = { ...this.state, maxConcurrent };
+								onChange({ ...this.state }, this.scope);
+							}
+							done(String(this.state.maxConcurrent ?? 1));
+						},
+						() => done(),
+						"positive safe integer; invalid input keeps the current value",
+					),
 			},
 		];
 
@@ -2246,7 +2292,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "worker-delegation",
 				label: "Worker Delegation",
 				description:
-					"Default-on for capable models: bounded profile-bound workers remain available at every thinking level; Ultra reinforces proactive use",
+					"Default-on autonomous agent trees: recursive delegation, inherited authority, and optional execution presets; Ultra reinforces proactive use",
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
 				submenu: (_currentValue, done) =>
 					new WorkerDelegationSettingsSubmenu(

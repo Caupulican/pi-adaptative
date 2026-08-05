@@ -21,6 +21,30 @@ function settings(overrides: Partial<ResolvedWorkerDelegationSettings> = {}): Re
 }
 
 describe("buildWorkerExecutionPlan", () => {
+	it("adds recursive orchestration control independently of a task profile's data-plane tools", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "recursive-by-default",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["filesystem.read"],
+			toolNames: ["read"],
+		});
+
+		const plan = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+
+		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read", "delegate"]);
+		expect(plan.requiredCapabilities).toEqual(["filesystem.read", "workflow.delegate"]);
+		expect(workerExecutionAuthorityFromPlan(plan)).toMatchObject({
+			toolNames: ["read", "delegate"],
+			capabilities: ["filesystem.read", "workflow.delegate"],
+		});
+	});
+
 	it("derives effective capabilities from materialized profile tools, not the broader ceiling", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "read-only",
@@ -37,8 +61,8 @@ describe("buildWorkerExecutionPlan", () => {
 			memoryEnabled: true,
 		});
 
-		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read"]);
-		expect(plan.requiredCapabilities).toEqual(["filesystem.read"]);
+		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read", "delegate"]);
+		expect(plan.requiredCapabilities).toEqual(["filesystem.read", "workflow.delegate"]);
 		expect(plan.writeEnabled).toBe(false);
 		expect(plan.writePaths).toEqual([]);
 		expect(plan.readMemory).toBe(false);
@@ -129,8 +153,8 @@ describe("buildWorkerExecutionPlan", () => {
 
 		const effective = narrowWorkerExecutionPlan(workerExecutionAuthorityFromPlan(admitted), widened);
 
-		expect(effective.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read"]);
-		expect(effective.requiredCapabilities).toEqual(["filesystem.read"]);
+		expect(effective.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read", "delegate"]);
+		expect(effective.requiredCapabilities).toEqual(["filesystem.read", "workflow.delegate"]);
 		expect(effective.writeEnabled).toBe(false);
 		expect(effective.writePaths).toEqual([]);
 		expect(effective.deniedPaths).toEqual([resolve("/repo/private"), resolve("/repo/new-private")]);

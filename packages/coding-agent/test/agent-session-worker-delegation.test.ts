@@ -132,7 +132,7 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("enforces the architect profile's immutable worker-profile allowlist", async () => {
+	it("rejects an unknown profile by identity instead of treating architect metadata as an authority allowlist", async () => {
 		const now = new Date().toISOString();
 		const architect: OrchestrationProfile = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -172,14 +172,14 @@ describe("AgentSession worker delegation", () => {
 			});
 			expect(denied).toMatchObject({
 				started: false,
-				skipReason: "orchestration_profile_not_authorized_for_orchestrator",
+				skipReason: "orchestration_profile_not_found",
 			});
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("keeps the owner-selected default profile authoritative when a regular agent invents a profile id", async () => {
+	it("honors explicit preset identity and rejects a profile id that is not loaded", async () => {
 		const ownerDefault = workerProfile("owner-default-worker");
 		const harness = await createHarness({
 			models: [
@@ -202,9 +202,9 @@ describe("AgentSession worker delegation", () => {
 				profileId: "invented-at-runtime",
 			});
 
-			expect(run.started).toBe(true);
-			expect(selectedModelId).toBe("owner-default-worker");
-			expect(run.record?.profileId).toBe(ownerDefault.profileId);
+			expect(run).toEqual({ started: false, skipReason: "orchestration_profile_not_found" });
+			expect(selectedModelId).toBe("");
+			expect(harness.getPendingResponseCount()).toBe(1);
 		} finally {
 			harness.cleanup();
 		}
@@ -297,7 +297,7 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("runs bounded read-only delegation by default on a capable model", async () => {
+	it("runs project-capable delegation by default on a capable model", async () => {
 		const harness = await createHarness();
 		try {
 			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
@@ -305,6 +305,8 @@ describe("AgentSession worker delegation", () => {
 			expect(run.started).toBe(true);
 			expect(getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0]?.envelope.capabilities).toEqual([
 				"filesystem.read",
+				"filesystem.write",
+				"workflow.delegate",
 			]);
 		} finally {
 			harness.cleanup();
@@ -873,8 +875,8 @@ describe("AgentSession worker delegation", () => {
 				{ request: { source: "worker", workerRequestId: run.record?.laneId }, status: "pending" },
 			]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
-			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
-			expect(request?.envelope.allowedTools).not.toContain("delegate");
+			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit", "delegate"]);
+			expect(request?.envelope.allowedTools).toContain("delegate");
 		} finally {
 			harness.cleanup();
 		}
@@ -1168,7 +1170,7 @@ describe("AgentSession worker delegation", () => {
 			const workerReasoning: unknown[] = [];
 			const workerToolNames: string[][] = [];
 			const routeResponse: FauxResponseFactory = (context, options, _state, model) => {
-				if (!context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")) {
+				if (!context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")) {
 					return fauxAssistantMessage("Delegations started.");
 				}
 				workerModelIds.push(model.id);
@@ -1228,7 +1230,10 @@ describe("AgentSession worker delegation", () => {
 				pinned.modelPolicy.candidates[0]?.modelId,
 			]);
 			expect(workerReasoning).toEqual(["low", "low"]);
-			expect(workerToolNames).toEqual([["read"], ["read"]]);
+			expect(workerToolNames).toEqual([
+				["read", "write", "delegate"],
+				["read", "write", "delegate"],
+			]);
 		} finally {
 			harness.cleanup();
 		}
@@ -1245,7 +1250,7 @@ describe("AgentSession worker delegation", () => {
 			};
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")
+			context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
 		let resolveTerminal!: () => void;
@@ -1334,7 +1339,7 @@ describe("AgentSession worker delegation", () => {
 			signalForegroundStarted = resolve;
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("You are a bounded subagent shipped by a coding-agent session")
+			context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
 		const heldForegroundResponse: FauxResponseFactory = () => {
@@ -1416,12 +1421,16 @@ describe("AgentSession worker delegation", () => {
 	it("lets the model delegate through the delegate tool in a full turn", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
+			const routeResponse: FauxResponseFactory = (context) =>
+				context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
+					? fauxAssistantMessage(WORKER_JSON)
+					: fauxAssistantMessage("Delegation reviewed.");
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Scout the validation rules" })], {
 					stopReason: "toolUse",
 				}),
-				fauxAssistantMessage(WORKER_JSON),
-				fauxAssistantMessage("Delegation reviewed."),
+				routeResponse,
+				routeResponse,
 			]);
 
 			await harness.session.prompt("Please delegate a scout task", { autoContinueGoal: false });

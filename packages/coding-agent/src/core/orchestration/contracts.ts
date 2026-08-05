@@ -19,7 +19,6 @@ export const MAX_ORCHESTRATION_MODEL_ID_LENGTH = 512;
 export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
 export const MAX_ORCHESTRATION_COLLECTION_LENGTH = 64;
 export const MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH = 16 * 1024;
-/** Runtime worker-delegation setting ceiling; profile policy may narrow it but never exceed it. */
 /** Matches the bounded worker/process result contract retained by the execution plane. */
 export const MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES = 512 * 1024;
 export const MAX_WORKER_AUTHORITY_PATHS = 64;
@@ -115,6 +114,12 @@ export interface AgentIdentityContract {
 /** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
 export interface AgentBindingContract extends AgentIdentityContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
+	/** Direct creator in the durable orchestration tree. Root agents omit this field. */
+	parentAgentId?: string;
+	/** Stable root identity retained across arbitrary recursive delegation depth. */
+	rootAgentId: string;
+	/** Informational lineage depth. It is observed and persisted, never used as an admission cap. */
+	depth: number;
 	role: WorkerRole;
 	status: AgentBindingStatus;
 	activeAttemptId?: string;
@@ -218,10 +223,11 @@ export interface OrchestrationProfile {
 	capabilityCeiling: readonly HarnessCapability[];
 	toolNames: readonly string[];
 	resourceProfileNames: readonly string[];
-	/** Worker profiles this orchestrator may dispatch. Empty for non-orchestrator profiles. */
+	/** Optional preset-routing metadata retained for authored profiles; never an admission allowlist. */
 	dispatchProfileIds: readonly string[];
 	executionPolicy?: OrchestrationExecutionPolicy;
 	budget: RiskBudget;
+	/** Authored scheduling hint retained in the snapshot; the global scheduler owns actual concurrency. */
 	maxConcurrent: number;
 	leaseTtlMs: number;
 	requireIndependentVerification: boolean;
@@ -262,12 +268,14 @@ export interface WorkerExecutionContract {
 	verifier?: WorkerProfileExecutionContract;
 }
 
-/** The orchestrator may select only a profile and task; model/thinking fields are intentionally absent. */
+/** Durable dispatch metadata. Model/tool choices are retained in the runtime-owned executionContract. */
 export interface OrchestrationDispatchRequest {
 	taskId: string;
 	profileId: string;
 	instructions: string;
 	resourcePointerIds: readonly string[];
+	/** Direct logical-agent creator for recursively delegated in-process work. */
+	parentAgentId?: string;
 	/** Runtime-owned goal/task correlation. Omitted by legacy records and normalized to an empty list. */
 	requirementIds?: readonly string[];
 	/** Execution owner. Omitted on legacy records and normalized to in-process. */

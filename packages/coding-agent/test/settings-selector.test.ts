@@ -156,6 +156,71 @@ describe("settings selector", () => {
 		expect(output).toContain("unbounded turns, stall 20, auto on");
 	});
 
+	it("presents delegation as a recursive tree and does not clamp scheduler concurrency to three", () => {
+		const onWorkerDelegationChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				workerDelegation: {
+					enabled: true,
+					maxUsd: 0.5,
+					maxWallClockMs: 120_000,
+					maxConcurrent: 64,
+				},
+			}),
+			makeCallbacks({ onWorkerDelegationChange }),
+		);
+
+		selector.getSettingsList().handleInput("worker delegation");
+		expect(selector.render(180).join("\n")).toContain("$0.5/tree");
+		selector.getSettingsList().handleInput("\r");
+		for (let index = 0; index < 5; index++) selector.getSettingsList().handleInput("\x1b[B");
+		expect(selector.render(180).join("\n")).toContain("Global scheduler concurrency");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[3~");
+		selector.getSettingsList().handleInput("\x1b[3~");
+		selector.getSettingsList().handleInput("128");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onWorkerDelegationChange).toHaveBeenLastCalledWith(
+			expect.objectContaining({ maxConcurrent: 128 }),
+			"global",
+		);
+	});
+
+	it("accepts arbitrary nonnegative tree budgets from the delegation settings UI", () => {
+		const onWorkerDelegationChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				workerDelegation: {
+					enabled: true,
+					maxUsd: 0.5,
+					maxWallClockMs: 120_000,
+				},
+			}),
+			makeCallbacks({ onWorkerDelegationChange }),
+		);
+
+		selector.getSettingsList().handleInput("worker delegation");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		for (let index = 0; index < 3; index++) selector.getSettingsList().handleInput("\x1b[3~");
+		selector.getSettingsList().handleInput("25000");
+		selector.getSettingsList().handleInput("\r");
+		expect(onWorkerDelegationChange).toHaveBeenLastCalledWith(expect.objectContaining({ maxUsd: 25_000 }), "global");
+
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+		for (let index = 0; index < 6; index++) selector.getSettingsList().handleInput("\x1b[3~");
+		selector.getSettingsList().handleInput("604800000");
+		selector.getSettingsList().handleInput("\r");
+		expect(onWorkerDelegationChange).toHaveBeenLastCalledWith(
+			expect.objectContaining({ maxWallClockMs: 604_800_000 }),
+			"global",
+		);
+	});
+
 	it("persists goal continue turns from the Autonomy submenu", () => {
 		const onAutonomyChange = vi.fn();
 		const selector = new SettingsSelectorComponent(

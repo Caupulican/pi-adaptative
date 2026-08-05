@@ -49,7 +49,9 @@ second line of defense, not the main implementation.
   context paths before content loading. Live extension loading repeats the profile check before
   import.
 - Isolated research and worker lanes create fresh tools only for their expanded lane grant. They do
-  not copy the foreground registry, extensions, skills, shell, or mutable memory surface.
+  not copy the foreground registry, extensions, or skills. Native agents may materialize fresh
+  memory, write/edit, platform-shell, and recursive-delegation adapters when their immutable grant
+  and live service switches admit them.
 - Worker orchestration state is lazily materialized only when the active surface grants `delegate`
   (or a managed-lane terminal report requires the shared notifier); worker-role sessions allocate no
   worker scheduler, lifecycle store, or notification coordinator.
@@ -65,20 +67,23 @@ footprint must omit that extension at the resource layer, not merely block one o
 
 ## Child work contracts
 
-Owner-authored orchestration profiles are the routing authority. A profile fixes role, ordered model
-policy, exact thinking level, tool names, resource profiles, semantic capability ceiling, budgets,
-concurrency, lease duration, and verification policy. An architect profile additionally declares the
-only worker profile IDs it may dispatch. The model-facing dispatch request contains a task, profile
-ID, instructions, and resource pointers; it has no model, thinking, tool, budget, or concurrency
-override fields.
+The model-facing `delegate` request can choose role label, authenticated model, exact supported
+reasoning level, classified tools, semantic capabilities, read/write paths, and budget. An optional
+owner-authored orchestration profile supplies reusable defaults; it is not a dispatch allowlist.
+Profile-free roots start from the foreground model and maximum host-permitted classified core
+surface. Descendants inherit immutable parent execution authority by default. The host validates and
+materializes every choice, intersects it with parent authority and live global switches, and persists
+the exact resulting contract before execution. Built-in roles are routing/audit labels unless an
+embedding supplies an explicit role ceiling.
 
 The durable control plane is an append-only session event store projected into objectives, DAG
 tasks, attempts, leases, checkpoints, logical agent bindings, typed results, and a notification
 outbox. Every result carries its attempt lease and fencing token. A stale worker therefore cannot
-win a race after retry or resume. In-process isolated completions have no resumable transcript: an
-interrupted lease is fenced and its persisted dispatch is re-queued as a new attempt. A process-backed
-Pi worker instead retains its logical agent ID and resume context and is woken with `/resume` against
-the same session, worktree, orchestration profile, and checkpoint pointers when present.
+win a race after retry or resume. In-process agents retain durable logical identity, lineage, exact
+transcript, mailbox, immutable execution contract, and checkpoint usage across interruption and
+resume. A process-backed Pi worker similarly retains its logical agent ID and resume context and is
+woken with `/resume` against the same session, worktree, orchestration preset, and checkpoint
+pointers when present.
 
 Policy is a mandatory pre-lease gate. An attempt cannot lease without a compiled execution grant.
 When compilation crosses owner authority or budget, the gate persists a typed approval request and
@@ -91,17 +96,24 @@ Acceptance is a runtime invariant, not a worker claim. Task criterion IDs must r
 objective, a completed criterion-bound result must carry trusted evidence for every linked criterion,
 and an objective cannot close until all required criteria have trusted evidence in its task results.
 
-In-process workers are bounded child loops with fresh context, a synthetic cache-affinity key, a
-profile-pinned model and exact reasoning level, a construction-filtered tool surface,
-turn/time/token/tool/cost bounds, and parent validation of the result. Process-capable profiles may
-expose `run_process`, which uses an exact executable allowlist, direct argv, a scoped environment,
-bounded output, and process-tree termination; unrestricted shell is not inherited. Worker output is
-untrusted; the parent retrieves it through `delegate_status` after a terminal lane event. A profile
-that requires independent verification names a separate owner-pinned verifier profile. The runtime
-automatically dispatches that verifier as a durable task, withholds the implementation's terminal
-handoff, and reconciles the typed verdict before the implementation can become accepted. Restart
-recovery closes both persistence gaps: an implementation awaiting a not-yet-created verifier is
-re-dispatched, while a persisted verifier result awaiting reconciliation is applied exactly once.
+In-process agents have fresh context, a synthetic cache-affinity key, a selected model and exact
+reasoning level, and a construction-filtered tool surface. They inherit `delegate`, may inspect exact
+paginated transcripts for any logical peer in the session tree, exchange threaded messages, and may
+materialize a persistent per-agent platform shell. There is no framework depth or fan-out cap; one
+global scheduler owns concurrency and durable queuing, one root coordinator owns cumulative
+token/cost/tool/active-time/attempt budgets, and exact ancestor task cycles are rejected. `run_process`
+keeps its separate exact executable allowlist, direct argv, scoped environment, bounded output, and
+process-tree termination contract. The platform shell is real host process authority, not container
+isolation or a path-scoped substitute for `write`/`edit`.
+
+Worker output remains untrusted evidence. The parent receives a bounded terminal event and retrieves
+lane results explicitly; raw peer transcripts require an explicit `transcript` action and are paged
+only for context size. A preset that requires independent verification names a separate owner-pinned
+verifier profile. The runtime automatically dispatches that verifier as a durable task, withholds the
+implementation's terminal handoff, and reconciles the typed verdict before the implementation can
+become accepted. Restart recovery closes both persistence gaps: an implementation awaiting a
+not-yet-created verifier is re-dispatched, while a persisted verifier result awaiting reconciliation
+is applied exactly once.
 
 Out-of-process managed workers use the same lifecycle shape:
 

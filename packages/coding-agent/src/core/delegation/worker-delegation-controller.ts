@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { getPlatformShellToolName } from "../../utils/shell.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -40,16 +41,20 @@ import {
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
+import { createDelegateToolDefinition } from "../tools/delegate.ts";
+import { disposePersistentShellSession } from "../tools/shell-session.ts";
+import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import type { WorkerAgentControlPort } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
+import { resolveWorkerAuthority } from "./worker-authority-resolver.ts";
 import {
 	type WorkerConversation,
 	type WorkerConversationRetentionPolicy,
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
-import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
+import { parseWorkerDelegationAuthorityRequest, type WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { type WorkerDispatchAdmission, WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import {
 	buildWorkerExecutionPlan,
@@ -66,6 +71,7 @@ import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
+import { collectWorkerTreeBudgetSeeds, WorkerTreeBudgetCoordinator } from "./worker-tree-budget-coordinator.ts";
 import { WorkerWriteReservationCoordinator } from "./worker-write-reservation-coordinator.ts";
 
 export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
@@ -165,10 +171,12 @@ export class WorkerDelegationController {
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
+	private readonly shellSessionKeys = new Set<string>();
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
 	private readonly publishedTerminalAttemptIds = new Set<string>();
 	private readonly conversations = new WorkerConversationStore();
+	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
 	private readonly inFlightLedgers = new Map<
 		string,
@@ -360,6 +368,8 @@ export class WorkerDelegationController {
 
 		this.scheduler.cancelQueued();
 		this.writeReservations.dispose();
+		for (const shellSessionKey of this.shellSessionKeys) disposePersistentShellSession(shellSessionKey);
+		this.shellSessionKeys.clear();
 	}
 
 	private getWorkerLifecycle(): WorkerLifecycle {
@@ -375,7 +385,6 @@ export class WorkerDelegationController {
 			getResourceLoader: () => this.deps.getResourceLoader(),
 			getModelRegistry: () => this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
-			getActiveOrchestrationProfile: () => this.deps.getActiveOrchestrationProfile?.(),
 			getTaskProfileStore: () => this.getTaskProfileStore(),
 			onDiagnostic: (message) => this.safeWarn(message),
 		});
@@ -483,6 +492,25 @@ export class WorkerDelegationController {
 			: { ok: false, skipReason: `independent_verifier_unavailable:${resolved.reason}` };
 	}
 
+	private hasExactRecursiveCycle(parentAgentId: string, instructions: string, profileId: string): boolean {
+		const normalizedInstructions = instructions.trim();
+		const visited = new Set<string>();
+		let current = this.lifecycle.getAgent(parentAgentId);
+		while (current) {
+			if (visited.has(current.agentId)) return true;
+			visited.add(current.agentId);
+			const attempt = this.lifecycle.getLatestAgentAttempt(current.agentId);
+			if (
+				attempt?.dispatch.instructions.trim() === normalizedInstructions &&
+				attempt.dispatch.profileId === profileId
+			) {
+				return true;
+			}
+			current = current.parentAgentId ? this.lifecycle.getAgent(current.parentAgentId) : undefined;
+		}
+		return false;
+	}
+
 	/** Single admission contract shared by enqueue, scheduler revalidation, and execution. */
 	private resolveWorkerAdmission(
 		request: WorkerDelegationRequest,
@@ -494,16 +522,57 @@ export class WorkerDelegationController {
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
 		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
+		const parentAgent = request.parentAgentId ? this.lifecycle.getAgent(request.parentAgentId) : undefined;
+		if (request.parentAgentId && !parentAgent) {
+			return { ok: false, skipReason: "orchestration_parent_agent_unknown" };
+		}
+		const parentAttempt = parentAgent ? this.lifecycle.getLatestAgentAttempt(parentAgent.agentId) : undefined;
+		const parentContract = parentAttempt?.dispatch.executionContract;
+		if (parentAgent && !parentContract) {
+			return { ok: false, skipReason: "orchestration_parent_authority_missing" };
+		}
 		if (pinnedContract && request.profileId && request.profileId !== pinnedContract.worker.profile.profileId) {
 			return { ok: false, skipReason: "orchestration_execution_contract_mismatch" };
 		}
-		const resolved = pinnedContract
-			? this.getWorkerProfileResolver().resolveContract(pinnedContract.worker)
-			: this.resolveWorkerShipment(request, settings);
-		if (!resolved.ok) {
-			return { ok: false, skipReason: "skipReason" in resolved ? resolved.skipReason : resolved.reason };
+		let authority = request.authority;
+		if (!pinnedContract && authority) {
+			try {
+				authority = parseWorkerDelegationAuthorityRequest(authority);
+			} catch (error) {
+				return {
+					ok: false,
+					skipReason: `orchestration_authority_invalid:${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
 		}
-		const shipment = "shipment" in resolved ? resolved.shipment : resolved.resolved;
+		let baseShipment: ResolvedWorkerProfile | undefined;
+		if (pinnedContract) {
+			const pinned = this.getWorkerProfileResolver().resolveContract(pinnedContract.worker);
+			if (!pinned.ok) return { ok: false, skipReason: pinned.reason };
+			baseShipment = pinned.resolved;
+		} else if (!request.profileId && parentContract) {
+			const inherited = this.getWorkerProfileResolver().resolveContract(parentContract.worker);
+			if (!inherited.ok) return { ok: false, skipReason: inherited.reason };
+			baseShipment = inherited.resolved;
+		} else if (request.profileId || settings.orchestrationProfile) {
+			const configured = this.resolveWorkerShipment(request, settings);
+			if (!configured.ok) return configured;
+			baseShipment = configured.shipment;
+		}
+		const adaptive = pinnedContract
+			? { ok: true as const, shipment: baseShipment! }
+			: resolveWorkerAuthority({
+					authority,
+					...(baseShipment ? { base: baseShipment } : {}),
+					...(this.deps.getModel() ? { foregroundModel: this.deps.getModel() } : {}),
+					modelRegistry: this.deps.getModelRegistry(),
+					isModelExhausted: (model) => this.deps.isModelExhausted(model),
+				});
+		if (!adaptive.ok) return { ok: false, skipReason: adaptive.reason };
+		const shipment = adaptive.shipment;
+		if (parentAgent && this.hasExactRecursiveCycle(parentAgent.agentId, instructions, shipment.profile.profileId)) {
+			return { ok: false, skipReason: "recursive_delegation_cycle" };
+		}
 		if (request.verificationOfTaskId && shipment.profile.role !== "verifier") {
 			return { ok: false, skipReason: "verification_profile_role_mismatch" };
 		}
@@ -537,9 +606,15 @@ export class WorkerDelegationController {
 				: shipment.resourcePointers.map((pointer) => pointer.id),
 		);
 		if (!selectedResources.ok) return { ok: false, skipReason: selectedResources.reason };
-		const currentExecutionPlan = this.buildWorkerExecutionPlan(shipment.profile, settings);
-		const executionPlan = pinnedContract
-			? narrowWorkerExecutionPlan(pinnedContract.worker.authority, currentExecutionPlan)
+		const currentExecutionPlan = this.buildWorkerExecutionPlan(
+			shipment.profile,
+			settings,
+			adaptive.requestedReadPaths,
+			adaptive.requestedWritePaths,
+		);
+		const inheritedAuthority = pinnedContract?.worker.authority ?? parentContract?.worker.authority;
+		const executionPlan = inheritedAuthority
+			? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
 			: currentExecutionPlan;
 		const executionContract =
 			pinnedContract ??
@@ -625,18 +700,15 @@ export class WorkerDelegationController {
 		return record;
 	}
 
-	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings, profile: OrchestrationProfile): boolean {
-		const lifecycle = this.getWorkerLifecycle();
-		if (lifecycle.getRunningCount() >= settings.maxConcurrent) return false;
-		return lifecycle.getRunningCount(profile.profileId) < profile.maxConcurrent;
+	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings): boolean {
+		return this.getWorkerLifecycle().getRunningCount() < settings.maxConcurrent;
 	}
 
 	private workerDispatchAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission {
 		const contract = this.getWorkerLifecycle().getActiveAttempt(record.laneId)?.dispatch.executionContract;
 		const admission = this.resolveWorkerAdmission(request, contract);
 		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
-		if (!this.hasWorkerCapacity(admission.settings, admission.shipment.profile))
-			return { action: "wait", reason: "capacity" };
+		if (!this.hasWorkerCapacity(admission.settings)) return { action: "wait", reason: "capacity" };
 		const attempt = this.getWorkerLifecycle().getActiveAttempt(record.laneId);
 		if (!attempt) return { action: "cancel", reasonCode: "orchestration_attempt_missing" };
 		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
@@ -647,6 +719,8 @@ export class WorkerDelegationController {
 	private buildWorkerExecutionPlan(
 		profile: OrchestrationProfile,
 		settings: ResolvedWorkerDelegationSettings,
+		requestedReadPaths?: readonly string[],
+		requestedWritePaths?: readonly string[],
 	): WorkerExecutionPlan {
 		return buildWorkerExecutionPlan({
 			profile,
@@ -655,6 +729,8 @@ export class WorkerDelegationController {
 			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 			foregroundMaxCostUsd: this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
 			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
+			...(requestedReadPaths ? { requestedReadPaths } : {}),
+			...(requestedWritePaths ? { requestedWritePaths } : {}),
 		});
 	}
 
@@ -676,6 +752,7 @@ export class WorkerDelegationController {
 		const goal = this.deps.getGoalStateSnapshot();
 		const prepared = lifecycle.prepare({
 			instructions: admission.instructions,
+			...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
 			executionContract: admission.executionContract,
 			requiredCapabilities: admission.executionPlan.requiredCapabilities,
 			...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
@@ -708,13 +785,10 @@ export class WorkerDelegationController {
 		const foreground = this.deps.getModel();
 		const contendsWithLocalForeground =
 			foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(shipment.model);
-		if (contendsWithLocalForeground || !this.hasWorkerCapacity(settings, shipment.profile)) {
+		if (contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
-			if (this.scheduler.queuedCount >= 8 && !request.verificationOfTaskId) {
-				return { started: false, skipReason: "worker_delegation_queue_full" };
-			}
 			let record: LaneRecord;
 			try {
 				record = this.prepareWorkerAttempt(request, admission).record;
@@ -774,7 +848,7 @@ export class WorkerDelegationController {
 		if (!request.verificationOfTaskId) this.recovery.recover();
 		const { instructions, settings, verifierShipment } = admission;
 		const { model, modelBinding, profile: orchestrationProfile, soul } = admission.shipment;
-		if (!this.hasWorkerCapacity(settings, orchestrationProfile)) {
+		if (!this.hasWorkerCapacity(settings)) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		const laneCapability = this.laneCapabilityProfile(model);
@@ -875,6 +949,9 @@ export class WorkerDelegationController {
 				});
 				lifecycle.ensureAgent({
 					agentId,
+					...(prepared.attempt.dispatch.parentAgentId
+						? { parentAgentId: prepared.attempt.dispatch.parentAgentId }
+						: {}),
 					role: immutableProfile.role,
 					resumeContext: conversation.getResumeContext(),
 				});
@@ -944,6 +1021,33 @@ export class WorkerDelegationController {
 		onStarted?.(startedRecord);
 		const maxUsd = grant.budget.maxCostUsd;
 		const executionPolicy = orchestrationProfile.executionPolicy;
+		const recursiveDelegateTool = wrapToolDefinition(
+			createDelegateToolDefinition({
+				startWorkerDelegation: (childRequest) => this.start({ ...childRequest, parentAgentId: agentId }),
+				runWorkerDelegation: (childRequest) => this.runOnce({ ...childRequest, parentAgentId: agentId }),
+				orchestrationProfiles: this.getProfileCatalog(),
+				workerAgentControl: this.agentControl,
+				callerAgentId: agentId,
+			}),
+		);
+		const agentBinding = lifecycle.getAgent(agentId);
+		if (!agentBinding) {
+			this.cancelAndPublish(lifecycle, prepared.record.laneId, "orchestration_agent_missing");
+			return { started: false, skipReason: "orchestration_agent_missing" };
+		}
+		const rootAttempt = lifecycle.getLatestAgentAttempt(agentBinding.rootAgentId);
+		const rootBudget = rootAttempt?.dispatch.executionContract?.worker.authority.budget ?? grant.budget;
+		const sharedBudget = this.treeBudgets.createPort({
+			rootAgentId: agentBinding.rootAgentId,
+			attemptId: durableHandle.attemptId,
+			budget: rootBudget,
+			seeds: collectWorkerTreeBudgetSeeds(lifecycle.getTaskRuntimeSnapshot(), agentBinding.rootAgentId),
+			initialUsage,
+		});
+		const platformShellToolName = getPlatformShellToolName();
+		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === platformShellToolName);
+		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
+		if (shellSessionKey) this.shellSessionKeys.add(shellSessionKey);
 		const toolSurface = createLaneToolSurface({
 			cwd: this.deps.getCwd(),
 			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,
@@ -951,9 +1055,12 @@ export class WorkerDelegationController {
 			writePaths: executionPlan.writePaths,
 			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),
 			processMaxWallClockMs: grant.budget.maxWallClockMs ?? 0,
+			...(shellSessionKey ? { shellSessionKey } : {}),
 			grant,
 			toolManifests: executionPlan.toolManifests,
+			additionalTools: [recursiveDelegateTool],
 			initialUsage,
+			sharedBudget,
 		});
 		const writeGranted =
 			executionPlan.writeEnabled &&
@@ -1243,6 +1350,7 @@ export class WorkerDelegationController {
 			}
 			this.agentControl.signalStateChanged();
 			deregisterInFlight();
+			if (!this.deps.isDisposed()) this.scheduler.drain(true);
 		}
 	}
 

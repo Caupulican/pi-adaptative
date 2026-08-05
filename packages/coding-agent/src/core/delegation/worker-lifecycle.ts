@@ -96,11 +96,20 @@ export class WorkerLifecycle {
 		return { record, attempt };
 	}
 
-	ensureAgent(input: { agentId: string; role: WorkerRole; resumeContext: AgentResumeContext }): AgentBindingContract {
+	ensureAgent(input: {
+		agentId: string;
+		parentAgentId?: string;
+		role: WorkerRole;
+		resumeContext: AgentResumeContext;
+	}): AgentBindingContract {
 		const agentId = input.agentId.trim();
 		const existing = this.ledger.runtime.getSnapshot().agents[agentId];
 		if (!existing) return this.ledger.runtime.registerAgent(input);
-		if (existing.role !== input.role || !sameAgentResumeIdentity(existing.resumeContext, input.resumeContext)) {
+		if (
+			existing.role !== input.role ||
+			existing.parentAgentId !== input.parentAgentId ||
+			!sameAgentResumeIdentity(existing.resumeContext, input.resumeContext)
+		) {
 			throw new Error(`Agent '${agentId}' was re-registered with conflicting identity.`);
 		}
 		return existing;

@@ -70,9 +70,7 @@ function duplicateStrings(values: readonly string[]): string[] {
 export function parseOrchestrationDispatchRequest(value: unknown): OrchestrationDispatchRequest {
 	if (!isPlainRecord(value)) throw new OrchestrationProfileError("Dispatch request must be an object.");
 	if (!hasOnlyKeys(value, ["taskId", "profileId", "instructions", "resourcePointerIds"])) {
-		throw new OrchestrationProfileError(
-			"Dispatch request contains an unsupported field. Model and thinking overrides are forbidden; select a profileId.",
-		);
+		throw new OrchestrationProfileError("Dispatch request contains an unsupported durable metadata field.");
 	}
 	if (
 		typeof value.taskId !== "string" ||
@@ -229,9 +227,10 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	}
 	const processCapable =
 		profile.capabilityCeiling.includes("process.exec") || profile.capabilityCeiling.includes("tests.execute");
-	if (processCapable && (!profile.executionPolicy || profile.executionPolicy.allowedExecutables.length === 0)) {
+	const directProcessLauncher = profile.toolNames.includes("run_process");
+	if (directProcessLauncher && (!profile.executionPolicy || profile.executionPolicy.allowedExecutables.length === 0)) {
 		throw new OrchestrationProfileError(
-			`Profile '${profile.profileId}' must declare executionPolicy.allowedExecutables for process capabilities.`,
+			`Profile '${profile.profileId}' must declare executionPolicy.allowedExecutables for run_process.`,
 		);
 	}
 	if (!processCapable && profile.executionPolicy) {
@@ -258,14 +257,6 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 		) {
 			throw new OrchestrationProfileError(`Profile '${profile.profileId}' executionPolicy is invalid.`);
 		}
-	}
-	const unrestrictedProcessTools = profile.toolNames.filter((toolName) =>
-		["bash", "python", "powershell", "run_toolkit_script"].includes(toolName),
-	);
-	if (unrestrictedProcessTools.length > 0) {
-		throw new OrchestrationProfileError(
-			`Profile '${profile.profileId}' cannot expose unrestricted process tools (${unrestrictedProcessTools.join(", ")}); use run_process with executionPolicy.`,
-		);
 	}
 	const unknownTools = profile.toolNames.filter(
 		(toolName) => !(ORCHESTRATION_PROFILE_TOOL_NAMES as readonly string[]).includes(toolName),
@@ -471,11 +462,6 @@ export class OrchestrationProfileRegistry {
 				if (!target) {
 					throw new OrchestrationProfileError(
 						`Profile '${profile.profileId}' dispatches missing profile '${dispatchedProfileId}'.`,
-					);
-				}
-				if (target.role === "orchestrator") {
-					throw new OrchestrationProfileError(
-						`Profile '${profile.profileId}' cannot recursively dispatch orchestrator '${dispatchedProfileId}'.`,
 					);
 				}
 			}

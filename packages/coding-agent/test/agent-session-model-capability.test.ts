@@ -177,7 +177,8 @@ describe("model capability auto-detection", () => {
 		try {
 			const fullSet = harness.session.getActiveToolNames();
 			expect(fullSet).toContain("goal");
-			const delegateSnippet = "Delegate a bounded task to an isolated, least-privilege worker lane.";
+			const delegateSnippet =
+				"Create and coordinate an autonomous agent with inherited or explicitly selected authority.";
 			expect(harness.session.systemPrompt).toContain(delegateSnippet);
 
 			await harness.session.setModel(harness.getModel("small-model")!);

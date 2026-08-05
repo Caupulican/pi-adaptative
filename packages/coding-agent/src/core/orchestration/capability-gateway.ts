@@ -33,6 +33,8 @@ export interface CapabilityGatewayOptions {
 	initialUsage?: GatewayInitialUsage;
 	now?: () => number;
 	onAudit?: (record: GatewayAuditRecord) => void;
+	/** Session-tree cumulative budget owner. Per-attempt grants remain independently enforced. */
+	sharedBudget?: SharedCapabilityBudget;
 }
 
 export interface GatewayUsageDelta {
@@ -54,6 +56,12 @@ export interface GatewayUsageSnapshot {
 	totalTokens: number;
 	costUsd: number;
 	wallClockMs: number;
+}
+
+export interface SharedCapabilityBudget {
+	assertBudgetAvailable(subject: string): void;
+	recordAttemptUsage(usage: GatewayUsageSnapshot): void;
+	remainingTokens(): number | undefined;
 }
 
 /** Persistable cumulative usage from a prior active segment; excludes restart downtime. */
@@ -137,6 +145,7 @@ export class CapabilityGateway {
 	private readonly cwd: string;
 	private readonly now: () => number;
 	private readonly onAudit?: (record: GatewayAuditRecord) => void;
+	private readonly sharedBudget?: SharedCapabilityBudget;
 	private readonly startedAt: number;
 	private readonly initialWallClockMs: number;
 	private toolCalls: number;
@@ -163,6 +172,7 @@ export class CapabilityGateway {
 		this.cwd = options.cwd;
 		this.now = options.now ?? Date.now;
 		this.onAudit = options.onAudit;
+		this.sharedBudget = options.sharedBudget;
 		this.startedAt = this.currentTime();
 		this.initialWallClockMs = initialUsage.activeWallClockMs;
 		this.toolCalls = initialUsage.toolCalls;
@@ -172,6 +182,7 @@ export class CapabilityGateway {
 		this.cacheWriteTokens = initialUsage.cacheWriteTokens;
 		this.totalTokens = initialUsage.totalTokens;
 		this.costUsd = initialUsage.costUsd;
+		this.sharedBudget?.recordAttemptUsage(this.getUsage());
 	}
 
 	async execute<T>(
@@ -194,6 +205,7 @@ export class CapabilityGateway {
 			throw new Error("CapabilityGateway: tool-call count would exceed safe cumulative usage bounds.");
 		}
 		this.toolCalls = toolCalls;
+		this.sharedBudget?.recordAttemptUsage(this.getUsage());
 		this.audit(toolName, "allow", "allowed");
 	}
 
@@ -221,11 +233,22 @@ export class CapabilityGateway {
 		this.cacheWriteTokens = cacheWriteTokens;
 		this.totalTokens = totalTokens;
 		this.costUsd = costUsd;
+		this.sharedBudget?.recordAttemptUsage(this.getUsage());
 	}
 
 	/** Enforce resumed cumulative budgets before a provider request that has no tool-call boundary. */
 	assertBudgetAvailable(subject = "provider"): void {
 		this.enforceBudget(subject, this.wallClockMsAt(this.currentTime()));
+		this.sharedBudget?.assertBudgetAvailable(subject);
+	}
+
+	remainingTokenBudget(): number | undefined {
+		const local = this.grant.budget.maxTokens;
+		const localRemaining = local === undefined ? undefined : Math.max(0, local - this.totalTokens);
+		const sharedRemaining = this.sharedBudget?.remainingTokens();
+		if (localRemaining === undefined) return sharedRemaining;
+		if (sharedRemaining === undefined) return localRemaining;
+		return Math.min(localRemaining, sharedRemaining);
 	}
 
 	getUsage(): GatewayUsageSnapshot {
@@ -261,6 +284,7 @@ export class CapabilityGateway {
 			this.deny(toolName, "capability_not_granted", `Tool '${toolName}' requires an ungranted capability.`);
 		}
 		this.enforceBudget(toolName, wallClockMs);
+		this.sharedBudget?.assertBudgetAvailable(toolName);
 
 		if (manifest.capabilities.some((capability) => PATH_CAPABILITIES.has(capability))) {
 			const allowedPaths = manifest.capabilities.some((capability) => WRITE_CAPABILITIES.has(capability))

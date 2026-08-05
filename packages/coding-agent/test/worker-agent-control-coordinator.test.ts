@@ -22,9 +22,9 @@ afterEach(() => {
 });
 
 function registeredAgent(overrides: Partial<AgentBindingContract> = {}): AgentBindingContract {
+	const agentId = overrides.agentId ?? "agent-1";
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-		agentId: "agent-1",
 		role: "explorer",
 		status: "registered",
 		resumeContext: {
@@ -37,6 +37,9 @@ function registeredAgent(overrides: Partial<AgentBindingContract> = {}): AgentBi
 		createdAt: "2026-07-27T00:00:00.000Z",
 		updatedAt: "2026-07-27T00:00:00.000Z",
 		...overrides,
+		agentId,
+		rootAgentId: overrides.rootAgentId ?? agentId,
+		depth: overrides.depth ?? 0,
 	};
 }
 

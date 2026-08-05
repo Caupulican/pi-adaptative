@@ -1,11 +1,10 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import { parseBoundedStringArray } from "./bounded-string-array.ts";
 import {
 	isHarnessCapability,
 	isResourcePointerKind,
-	MAX_ORCHESTRATION_COLLECTION_LENGTH,
-	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
@@ -61,19 +60,12 @@ function stringArray(
 	label: string,
 	options: { maxEntries?: number; maxLength?: number } = {},
 ): string[] {
-	const maxEntries = options.maxEntries ?? MAX_ORCHESTRATION_COLLECTION_LENGTH;
-	const maxLength = options.maxLength ?? MAX_ORCHESTRATION_IDENTIFIER_LENGTH;
-	if (
-		!Array.isArray(value) ||
-		value.length > maxEntries ||
-		!value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= maxLength)
-	) {
-		throw new WorkerExecutionContractError(`${label} must be an array of non-empty strings.`);
-	}
-	if (new Set(value).size !== value.length) {
-		throw new WorkerExecutionContractError(`${label} contains duplicates.`);
-	}
-	return [...value];
+	return parseBoundedStringArray(value, {
+		...options,
+		invalidMessage: `${label} must be an array of non-empty strings.`,
+		duplicateMessage: `${label} contains duplicates.`,
+		createError: (message) => new WorkerExecutionContractError(message),
+	});
 }
 
 function parseResourcePointers(value: unknown, label: string): ResourcePointer[] {
@@ -139,11 +131,15 @@ function parseAuthority(
 	if (!capabilities.every(isHarnessCapability)) {
 		throw new WorkerExecutionContractError(`${label} authority contains an unknown capability.`);
 	}
-	if (capabilities.some((capability) => !profile.capabilityCeiling.includes(capability))) {
+	if (
+		capabilities.some(
+			(capability) => capability !== "workflow.delegate" && !profile.capabilityCeiling.includes(capability),
+		)
+	) {
 		throw new WorkerExecutionContractError(`${label} authority exceeds its profile capability ceiling.`);
 	}
 	const toolNames = stringArray(value.toolNames, `${label} authority toolNames`);
-	if (toolNames.some((toolName) => !profile.toolNames.includes(toolName))) {
+	if (toolNames.some((toolName) => toolName !== "delegate" && !profile.toolNames.includes(toolName))) {
 		throw new WorkerExecutionContractError(`${label} authority contains a tool outside its profile.`);
 	}
 	const pathArrayOptions = {
@@ -206,9 +202,6 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 		throw new WorkerExecutionContractError(
 			error instanceof OrchestrationProfileError ? error.message : `${label} profile is invalid.`,
 		);
-	}
-	if (profile.role === "orchestrator") {
-		throw new WorkerExecutionContractError(`${label} cannot materialize an orchestrator profile.`);
 	}
 	const modelBinding = parseModelBinding(value.modelBinding, label);
 	if (!profile.modelPolicy.candidates.some((candidate) => isDeepStrictEqual(candidate, modelBinding))) {

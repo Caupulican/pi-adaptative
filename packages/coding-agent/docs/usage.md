@@ -43,7 +43,7 @@ Pasted images are stored under `~/.pi/agent/state/attachments` by default and at
 
 When an owner choice materially changes the result, the built-in `ask_question` interaction presents up to four questions together. It supports single choice, multi-select, an unrestricted multi-line custom **Other** answer, clipboard text or image paste, explicit **Skip**, configurable keyboard navigation, cancellation, and a final review before a multi-question answer is submitted. The request is checkpointed before display; `/resume` restores the original tool call, and large answers remain exact in a retrievable artifact while only a bounded projection enters prompt context. TUI and RPC hosts use the same fail-closed typed request. Image paste is refused with a visible explanation when the routed model cannot accept images instead of silently replacing it with a placeholder. Non-interactive sessions fail closed instead of inventing an answer, and worker sessions do not construct the question tool.
 
-Native task steps and worker lanes share the same compact work panel. Steps and agents are grouped separately; durable worker task labels and owner-authored profile ids remain visible after `/resume`. Completed worker output remains untrusted until the parent verifies it through the existing result and review contracts.
+Native task steps and worker agents share the same compact work panel. Steps and agents are grouped separately; durable task labels and admitted preset or adaptive grant IDs remain visible after `/resume`. Completed worker output remains untrusted until the parent verifies it through the existing result and review contracts.
 
 ### Secret Store
 
@@ -313,6 +313,6 @@ pi --exclude-tools ask_question
 
 ## Design Principles
 
-Pi keeps the core focused and pushes project-specific workflows into extensions, skills, prompt templates, and packages. Core includes the cross-project lifecycle primitives it depends on itself: native goals, task steps, bounded worker delegation, and a platform-selected shell. Broader integrations such as MCP and external-provider teams remain extension/package territory.
+Pi keeps the core focused and pushes project-specific workflows into extensions, skills, prompt templates, and packages. Core includes the cross-project lifecycle primitives it depends on itself: native goals, task steps, durable recursive agent orchestration, and a platform-selected shell. Broader integrations such as MCP and external-provider teams remain extension/package territory.
 
 For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).

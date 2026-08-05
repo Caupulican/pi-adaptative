@@ -262,17 +262,19 @@ export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 120_000;
-export const MAX_WORKER_DELEGATION_MAX_USD = 5;
-export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 3_600_000;
+export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
+export const DEFAULT_WORKER_DELEGATION_WRITE_PATHS = ["."] as const;
+export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
+export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
 
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
-	orchestrationProfile?: string; // owner-selected default; an active architect may select only profiles in its dispatchProfileIds allowlist
-	maxUsd?: number; // default: 0.50 per delegated worker; 0 disables this settings-level ceiling
-	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget
-	writeEnabled?: boolean; // default: false — grants write_files so workers may emit file actions
-	writePaths?: string[]; // envelope path scope for write workers (REQUIRED for writes; empty = writes refused)
-	maxConcurrent?: number; // default: 1, clamped [1,3] — concurrent delegated workers
+	orchestrationProfile?: string; // optional execution preset; agents may replace its defaults within inherited authority
+	maxUsd?: number; // default: 0.50 shared by one recursive agent tree; 0 disables this settings-level ceiling
+	maxWallClockMs?: number; // default: 120000 cumulative active time across one tree; 0 disables the budget
+	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
+	writePaths?: string[]; // default: ["."]; explicit empty array revokes direct write/edit tools
+	maxConcurrent?: number; // default: 1; global scheduler concurrency, with no framework fan-out ceiling
 }
 
 export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "orchestrationProfile">> &
@@ -524,7 +526,7 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
-	workerDelegation?: WorkerDelegationSettings; // Bounded profile-bound worker delegation; enabled by default on capable models
+	workerDelegation?: WorkerDelegationSettings; // Autonomous recursive agent-tree scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
@@ -3414,11 +3416,14 @@ export class SettingsManager {
 				0,
 				MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 			),
-			writeEnabled: configured.writeEnabled === true,
+			writeEnabled:
+				typeof configured.writeEnabled === "boolean"
+					? configured.writeEnabled
+					: DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
 			writePaths: Array.isArray(configured.writePaths)
 				? configured.writePaths.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-				: [],
-			maxConcurrent: sanitizeIntegerSetting(configured.maxConcurrent, 1, 1, 3),
+				: [...DEFAULT_WORKER_DELEGATION_WRITE_PATHS],
+			maxConcurrent: sanitizeIntegerSetting(configured.maxConcurrent, 1, 1, Number.MAX_SAFE_INTEGER),
 		};
 		if (typeof configured.orchestrationProfile === "string" && configured.orchestrationProfile.trim().length > 0) {
 			resolved.orchestrationProfile = configured.orchestrationProfile.trim();

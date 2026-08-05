@@ -1,4 +1,5 @@
 import path from "node:path";
+import { getPlatformShellToolName } from "../../utils/shell.ts";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import type {
 	ExecutionGrant,
@@ -18,6 +19,8 @@ import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+const INHERITED_CONTROL_TOOL_NAMES = ["delegate"] as const;
+const PLATFORM_SHELL_TOOL_NAME = getPlatformShellToolName();
 
 export interface WorkerExecutionPlan {
 	toolManifests: readonly ToolCapabilityManifest[];
@@ -79,7 +82,7 @@ export function narrowWorkerExecutionPlan(
 		deniedPaths: [...new Set([...admitted.deniedPaths, ...current.deniedPaths].map((entry) => path.resolve(entry)))],
 		readMemory: grantedTools.has("memory"),
 		writeEnabled,
-		processEnabled: grantedTools.has("run_process"),
+		processEnabled: grantedTools.has("run_process") || grantedTools.has("bash") || grantedTools.has("powershell"),
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
 	};
 }
@@ -91,6 +94,8 @@ export function buildWorkerExecutionPlan(args: {
 	deniedPaths: readonly string[];
 	foregroundMaxCostUsd?: number;
 	memoryEnabled: boolean;
+	requestedReadPaths?: readonly string[];
+	requestedWritePaths?: readonly string[];
 }): WorkerExecutionPlan {
 	const grantsRead =
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
@@ -105,14 +110,22 @@ export function buildWorkerExecutionPlan(args: {
 		args.profile.toolNames.includes("memory") &&
 		args.profile.capabilityCeiling.includes("memory.query");
 	const processEligible =
-		args.profile.executionPolicy !== undefined &&
-		(args.profile.capabilityCeiling.includes("process.exec") ||
-			args.profile.capabilityCeiling.includes("tests.execute"));
+		args.profile.capabilityCeiling.includes("process.exec") ||
+		args.profile.capabilityCeiling.includes("tests.execute");
+	const enabledProcessToolNames = processEligible
+		? [
+				...(args.profile.executionPolicy && args.profile.toolNames.includes("run_process")
+					? (["run_process"] as const)
+					: []),
+				...(args.profile.toolNames.includes(PLATFORM_SHELL_TOOL_NAME) ? [PLATFORM_SHELL_TOOL_NAME] : []),
+			]
+		: [];
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
 		...(memoryEligible ? (["memory"] as const) : []),
-		...(processEligible ? (["run_process"] as const) : []),
+		...enabledProcessToolNames,
+		...INHERITED_CONTROL_TOOL_NAMES,
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
@@ -121,7 +134,7 @@ export function buildWorkerExecutionPlan(args: {
 	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	const readMemory = grantedTools.has("memory");
-	const processEnabled = grantedTools.has("run_process");
+	const processEnabled = grantedTools.has("run_process") || grantedTools.has("bash") || grantedTools.has("powershell");
 	const budget = intersectRiskBudgets(
 		args.profile.budget,
 		...(args.settings.maxUsd > 0 ? [{ maxCostUsd: args.settings.maxUsd }] : []),
@@ -131,10 +144,19 @@ export function buildWorkerExecutionPlan(args: {
 	return {
 		toolManifests,
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
-		readPaths: readEnabled ? [path.resolve(args.cwd)] : [],
-		writePaths: writeEnabled
-			? args.settings.writePaths.map((entry) =>
+		readPaths: readEnabled
+			? (args.requestedReadPaths ?? [args.cwd]).map((entry) =>
 					path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
+				)
+			: [],
+		writePaths: writeEnabled
+			? intersectPathScopes(
+					args.settings.writePaths.map((entry) =>
+						path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
+					),
+					(args.requestedWritePaths ?? args.settings.writePaths).map((entry) =>
+						path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
+					),
 				)
 			: [],
 		deniedPaths: args.deniedPaths.map((entry) => path.resolve(entry)),
@@ -159,7 +181,7 @@ export function compileWorkerExecutionGrant(args: {
 		role: args.profile.role,
 		requiredCapabilities: args.plan.requiredCapabilities,
 		requestedCapabilities: args.plan.requiredCapabilities,
-		authorityCapabilities: args.profile.capabilityCeiling,
+		authorityCapabilities: [...new Set([...args.profile.capabilityCeiling, "workflow.delegate" as const])],
 		requestedTools: args.plan.toolManifests.map((manifest) => manifest.toolName),
 		toolManifests: args.plan.toolManifests,
 		resources: args.resources,

@@ -148,125 +148,61 @@ Fitness applicability is intentionally split by autonomy level:
 
 ### Worker Delegation
 
-Delegation requires an owner-authored orchestration profile. Global profiles live at `~/.pi/agent/profiles/orchestration/<id>.json`; project profiles live at `.pi/profiles/orchestration/<id>.json` and override a global profile with the same ID. Select the foreground architect with `--orchestration-profile <id>` or `activeOrchestrationProfile`. Select a default worker with `workerDelegation.orchestrationProfile`.
+Pi's native delegation runtime is a durable recursive agent tree. A profile is not required. A profile-free root agent starts from the foreground model and the maximum classified core worker surface the host can materialize: `read`, `grep`, `find`, `ls`, `write`, `edit`, `memory`, the platform shell, and `delegate`. Live service switches can revoke memory, writes, or delegation. Every descendant inherits its parent's immutable execution grant and the tree's remaining budget by default.
 
-The profile fixes the role, provider/model, exact thinking level, tools, resource profiles, semantic capabilities, budgets, concurrency, lease duration, and independent-verification requirement. Fixed profiles contain one model. Ordered fallback profiles contain an owner-ordered candidate list; runtime health may advance through that list but cannot invent another model or reasoning level. An architect uses role `orchestrator`, grants only `workflow.delegate`, and lists the exact worker profile IDs it may select in `dispatchProfileIds`. A dispatch outside that list is rejected before creating a model call.
-
-```json
-{
-  "schemaVersion": 1,
-  "profileId": "architect",
-  "description": "Routing-only architect",
-  "role": "orchestrator",
-  "modelPolicy": {
-    "mode": "fixed",
-    "candidates": [
-      { "provider": "openai-codex", "modelId": "gpt-5.5", "thinkingLevel": "high" }
-    ]
-  },
-  "capabilityCeiling": ["workflow.delegate"],
-  "toolNames": ["delegate", "delegate_status"],
-  "resourceProfileNames": ["architect-minimal"],
-  "dispatchProfileIds": ["worker-fast", "verifier"],
-  "budget": { "maxTokens": 16000, "maxWallClockMs": 600000, "maxCostUsd": 2, "maxToolCalls": 20 },
-  "maxConcurrent": 1,
-  "leaseTtlMs": 660000,
-  "requireIndependentVerification": false,
-  "createdAt": "2026-07-23T00:00:00.000Z",
-  "updatedAt": "2026-07-23T00:00:00.000Z"
-}
-```
+An agent may set `authority` on `delegate` to choose its child's role label, authenticated model, supported reasoning level, semantic capabilities, tools, read/write paths, and budget. Omitted fields inherit from the parent or selected preset. The host validates the request, resolves the concrete model and tools, intersects execution authority with the immutable parent grant and live global switches, then persists the exact result before the child starts. A descendant can specialize or narrow authority but cannot add an execution capability, tool, path, or budget that the parent did not hold. Roles are descriptive routing and audit labels; the built-in compiler does not impose hidden role ceilings, though an embedding may supply an explicit host ceiling.
 
 ```json
 {
-  "schemaVersion": 1,
-  "profileId": "worker-fast",
-  "description": "Pinned implementation worker",
-  "role": "implementer",
-  "modelPolicy": {
-    "mode": "fixed",
-    "candidates": [
-      { "provider": "openai", "modelId": "gpt-5-mini", "thinkingLevel": "minimal" }
-    ]
-  },
-  "capabilityCeiling": ["filesystem.read", "filesystem.write", "worktree.read", "worktree.mutate"],
-  "toolNames": ["read", "grep", "find", "ls", "write", "edit"],
-  "resourceProfileNames": ["worker-minimal"],
-  "dispatchProfileIds": [],
-  "budget": { "maxTokens": 8000, "maxWallClockMs": 180000, "maxCostUsd": 0.25, "maxAttempts": 2, "maxToolCalls": 12 },
-  "maxConcurrent": 3,
-  "leaseTtlMs": 240000,
-  "requireIndependentVerification": true,
-  "verificationProfileId": "verifier",
-  "createdAt": "2026-07-23T00:00:00.000Z",
-  "updatedAt": "2026-07-23T00:00:00.000Z"
+  "action": "start",
+  "instructions": "Implement and verify the scheduler change.",
+  "authority": {
+    "role": "implementer",
+    "model": { "provider": "openai-codex", "modelId": "gpt-5.5" },
+    "thinkingLevel": "high",
+    "capabilities": [
+      "filesystem.read",
+      "filesystem.write",
+      "worktree.read",
+      "worktree.mutate",
+      "process.exec",
+      "memory.query",
+      "workflow.delegate"
+    ],
+    "toolNames": ["read", "grep", "find", "ls", "write", "edit", "memory", "bash", "delegate"],
+    "readPaths": ["."],
+    "writePaths": ["packages/coding-agent"],
+    "budget": { "maxTokens": 32000, "maxCostUsd": 2, "maxToolCalls": 80 }
+  }
 }
 ```
 
-A profile with `requireIndependentVerification: true` must name an owner-authored
-`verificationProfileId`. That target must have role `verifier`, cannot require another verifier, and
-must also appear in the active architect's `dispatchProfileIds`. After a successful implementation,
-the runtime automatically creates a separate durable verifier task. The implementation remains
-blocked and sends no terminal parent handoff until the verifier returns a typed accepted or rejected
-decision; only an accepted decision backed by trusted criterion-linked review evidence completes it.
+There is no framework depth or fan-out cap. `workerDelegation.maxConcurrent` is the one global running-agent limit; excess work enters the durable queue. The kernel rejects only an exact recursive cycle when a child repeats the same normalized instructions and effective profile already present in its ancestor chain. Root budgets are cumulative across every descendant and attempt: token, cost, tool-call, active-wall-clock, and attempt usage are reconstructed from durable checkpoints and checked before more work is admitted.
 
-```json
-{
-  "schemaVersion": 1,
-  "profileId": "verifier",
-  "description": "Pinned independent test verifier",
-  "role": "verifier",
-  "modelPolicy": {
-    "mode": "fixed",
-    "candidates": [
-      { "provider": "openai", "modelId": "gpt-5-mini", "thinkingLevel": "low" }
-    ]
-  },
-  "capabilityCeiling": ["filesystem.read", "process.exec", "tests.execute"],
-  "toolNames": ["read", "grep", "find", "ls", "run_process"],
-  "resourceProfileNames": ["verifier-minimal"],
-  "dispatchProfileIds": [],
-  "executionPolicy": {
-    "allowedExecutables": ["node", "npm", "git"],
-    "allowedEnvironmentVariables": ["CI"],
-    "maxOutputBytes": 65536
-  },
-  "budget": { "maxTokens": 8000, "maxWallClockMs": 180000, "maxCostUsd": 0.25, "maxToolCalls": 12 },
-  "maxConcurrent": 2,
-  "leaseTtlMs": 240000,
-  "requireIndependentVerification": false,
-  "createdAt": "2026-07-23T00:00:00.000Z",
-  "updatedAt": "2026-07-23T00:00:00.000Z"
-}
-```
+Every agent can coordinate the complete session tree through `delegate` actions:
 
-Operator and verifier profiles that grant `process.exec` or `tests.execute` must also declare `executionPolicy`. `run_process` accepts only those exact executables, passes arguments directly without a shell, exposes only baseline plus owner-listed environment variables, terminates on timeout/output overflow, and always waits for a terminal process event.
+- `list` returns durable logical-agent identities, lineage, depth, and state.
+- `transcript` returns exact peer messages with a cursor and a page size of 1-64; pagination is a context bound, not an authority restriction.
+- `send` and `follow_up` carry durable thread, reply, and expected-reply metadata.
+- `wait` is event-driven; `interrupt` is resumable; `resume` keeps the admitted model, transcript, resources, and grant; `cancel` terminates only the selected current task.
 
-```json
-"executionPolicy": {
-  "allowedExecutables": ["node", "npm", "git"],
-  "allowedEnvironmentVariables": ["CI"],
-  "maxOutputBytes": 65536
-}
-```
+`delegate` returns a lane id immediately. Completion persists a bounded terminal handoff before waking the parent; late output stays in the worker transcript instead of racing into the active foreground transcript. `delegate_status` remains available for bounded lane-result retrieval.
 
-Each isolated worker gets a fresh classified surface. `delegate`, unrestricted shell, foreground memory/lifecycle tools, and opaque extension tools are not inherited. Read-only memory exists only when the selected profile grants `memory.query`, exposes `memory`, and global memory retrieval is enabled; a delegate call cannot add it. Workers are otherwise read-only unless the global write switch, non-empty path scope, profile capabilities, and profile tool list all grant `write` or `edit`.
+Global profiles live at `~/.pi/agent/profiles/orchestration/<id>.json`; project profiles live at `.pi/profiles/orchestration/<id>.json`. They are optional presets for model, reasoning, tools, resources, budget, verification, and prompt defaults. Select one with `profileId` on a call or configure `workerDelegation.orchestrationProfile`. `dispatchProfileIds` is preset-routing metadata, not an admission allowlist. Profile `maxConcurrent` is retained in the authored schema but does not override the global scheduler. `profile_writer` can create an optional immutable session-scoped narrowing when a reusable preset is useful; direct authority selection does not require it.
 
-Profiles are provider-independent: every candidate resolves through the model registry, exact model authentication, capability metadata, and the selected model's native or calibrated text-tool protocol. Worker concurrency is counted per profile under the global worker ceiling; every capacity-bound worker is durably queued and drained under both limits, while local workers also queue when they contend with a local foreground. Worker model, thinking, resource, prompt, memory, and tool authority exist only in the selected orchestration profile; delegate calls and worker settings have no parallel override fields.
+A preset with `requireIndependentVerification: true` still names an owner-authored `verificationProfileId`. The runtime creates a separate durable verifier task and accepts the implementation only after a typed verifier decision. A profile using `run_process` must declare `executionPolicy`; that tool launches only listed executables as direct argv. The platform shell is different: it is a real persistent per-agent shell and is not OS/container isolation. Shell commands can exercise the host process, filesystem, network, and credentials available to Pi; direct `write`/`edit` path scopes do not sandbox shell side effects.
 
-**Confirmed behavior:** `delegate` returns a lane id immediately instead of waiting for the worker. `delegate_status` shows queued, running, and terminal workers and retrieves bounded terminal output by lane id. Completion records a durable terminal notification before waking the parent; undelivered in-process notifications replay after session resume. The interactive footer shows running/queued counts or the latest terminal lane. Late worker output is stored separately and is never injected into an active foreground transcript.
-
-Worker writes use **review-after-apply** semantics: a grant-authorized direct `write`/`edit` call or structured-action fallback may mutate the scoped workspace before the parent reviews the result. Both routes pass through the same compiled execution grant, path policy, and cumulative tool budget. The parent review is therefore a post-mutation acceptance step and receives changed files, blockers, the usage report id, and `parent_review_required` for an in-scope changed result. Denied or out-of-scope actions are refused before filesystem mutation; partial application is reported as `blocked`, never clean success.
+Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant and path policy reject out-of-scope direct mutations before they run, while accepted changes are reported to the parent with changed files, blockers, usage identity, and review state.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `workerDelegation.enabled` | boolean | `true` | Enable bounded delegation on capability-eligible models; explicit `false` is a hard off-switch |
-| `workerDelegation.orchestrationProfile` | string | - | Owner-selected default worker profile; an active architect may use only IDs in its `dispatchProfileIds` |
-| `workerDelegation.maxUsd` | number | `0.5` | Global safety ceiling intersected with profile/foreground limits; `0` disables only this settings-level ceiling |
-| `workerDelegation.maxWallClockMs` | number | `120000` | Global safety ceiling intersected with the profile limit; `0` disables only this settings-level ceiling |
-| `workerDelegation.maxConcurrent` | number | `1` | Global concurrency ceiling combined with profile `maxConcurrent` |
-| `workerDelegation.writeEnabled` | boolean | `false` | Make `write`/`edit` eligible only when `writePaths` is non-empty and the lane profile grants them |
-| `workerDelegation.writePaths` | string[] | `[]` | Relative or absolute path roots enforced for direct child tools and structured-action fallback writes |
+| `workerDelegation.enabled` | boolean | `true` | Enable autonomous recursive agent trees; explicit `false` is a hard off-switch |
+| `workerDelegation.orchestrationProfile` | string | - | Optional default execution preset; agents may replace its defaults within inherited authority |
+| `workerDelegation.maxUsd` | number | `0.5` | Cumulative USD ceiling for one root tree; `0` disables this settings-level ceiling |
+| `workerDelegation.maxWallClockMs` | number | `120000` | Cumulative active wall-clock ceiling for one root tree; `0` disables this settings-level ceiling |
+| `workerDelegation.maxConcurrent` | number | `1` | Global scheduler concurrency; any positive safe integer is accepted, with no depth or fan-out cap |
+| `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
+| `workerDelegation.writePaths` | string[] | `["."]` | Global envelope for direct child writes; an explicit empty array revokes direct `write`/`edit` |
 
 ### Tool Repair
 
