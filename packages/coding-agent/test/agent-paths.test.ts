@@ -61,7 +61,7 @@ describe("agent-paths SSOT accessors", () => {
 		expect(stateFile(AGENT_DIR, "model-adaptation.json")).toBe(join(AGENT_DIR, "state", "model-adaptation.json"));
 	});
 
-	it("keeps encrypted and materialized secret state under one bounded state container", () => {
+	it("retains canonical retired secret paths so legacy data stays model-protected", () => {
 		expect(secretsDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "secrets"));
 		expect(secretVaultFile(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "secrets", "vault.json"));
 		expect(managedSecretEnvDir(AGENT_DIR)).toBe(join(AGENT_DIR, "state", "secrets", "materialized"));

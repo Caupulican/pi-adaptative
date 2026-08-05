@@ -22,6 +22,10 @@ export interface BashExecutionControllerDeps {
 	isStreaming(): boolean;
 	/** Per-agent persistent shell session key — user `!` commands share the agent's shell state. */
 	getShellSessionKey?(): string;
+	/** Owner-authorized credential environment resolved for the current project. */
+	getEnvironment?(cwd: string): NodeJS.ProcessEnv;
+	/** Exact-value redaction applied before owner shell results enter model/session history. */
+	redactSensitiveText?(text: string): string;
 }
 
 export interface BashExecutionOptions {
@@ -59,6 +63,9 @@ export class BashExecutionController {
 		const shellPath = this.deps.getSettingsManager().getShellPath();
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
+		const cwd = this.deps.getSessionManager().getCwd();
+		const environment: NodeJS.ProcessEnv = { ...process.env, ...this.deps.getEnvironment?.(cwd) };
+		delete environment.BW_SESSION;
 		const operations = createLocalPlatformShellOperations(
 			{
 				shellPath,
@@ -71,11 +78,12 @@ export class BashExecutionController {
 		);
 
 		try {
-			const result = await executeBashWithOperations(command, this.deps.getSessionManager().getCwd(), operations, {
+			const result = await executeBashWithOperations(command, cwd, operations, {
 				onChunk,
 				signal: abortController.signal,
 				enableGitFilter,
 				timeout: resolveCommandTimeoutSeconds(options?.timeout),
+				environment,
 			});
 
 			this.recordBashResult(command, result, options);
@@ -90,14 +98,17 @@ export class BashExecutionController {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+		const safeCommand = this.deps.redactSensitiveText?.(command) ?? command;
+		const safeOutput = this.deps.redactSensitiveText?.(result.output) ?? result.output;
+		const outputWasRedacted = safeOutput !== result.output;
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
-			command,
-			output: result.output,
+			command: safeCommand,
+			output: safeOutput,
 			exitCode: result.exitCode,
 			cancelled: result.cancelled,
 			truncated: result.truncated,
-			fullOutputPath: result.fullOutputPath,
+			...(outputWasRedacted ? {} : { fullOutputPath: result.fullOutputPath }),
 			timestamp: Date.now(),
 			excludeFromContext: options?.excludeFromContext,
 		};

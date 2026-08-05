@@ -92,6 +92,7 @@ import * as localModelCommands from "./local-model-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
+import { SecretMenuController } from "./secret-menu-controller.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import * as sessionIoCommands from "./session-io-commands.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
@@ -509,9 +510,15 @@ export class InteractiveMode {
 		// Load changelog (only show new entries, skip for resumed sessions)
 		this.changelogMarkdown = this.getChangelogForDisplay();
 
-		// Ensure the shared discovery/projection binaries are available and on PATH.
-		// fd feeds autocomplete; rg and jq keep source/JSON filtering outside V8.
-		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg"), ensureTool("jq"), ensureTool("jscpd")]);
+		// Ensure shared discovery/projection binaries and the owner credential provider are available.
+		// fd feeds autocomplete; rg and jq keep source/JSON filtering outside V8; bw stays dormant until /secrets.
+		const [fdPath] = await Promise.all([
+			ensureTool("fd"),
+			ensureTool("rg"),
+			ensureTool("jq"),
+			ensureTool("jscpd"),
+			ensureTool("bw"),
+		]);
 		this.fdPath = fdPath;
 
 		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
@@ -1429,6 +1436,11 @@ export class InteractiveMode {
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/secrets") {
+				this.editor.setText("");
+				await this.handleSecretsCommand();
 				return;
 			}
 			if (text === "/auto-learn" || text.startsWith("/auto-learn ")) {
@@ -2931,6 +2943,18 @@ export class InteractiveMode {
 
 	private showSettingsSelector(): void {
 		settingsSelectorFlow.showSettingsSelector(this.settingsSelectorHost());
+	}
+
+	private handleSecretsCommand(): Promise<void> {
+		if (!this.hasHumanAudience) {
+			this.showWarning("/secrets requires an owner-controlled interactive terminal.");
+			return Promise.resolve();
+		}
+		const controller = new SecretMenuController({
+			manager: this.session.credentialManager,
+			cwd: this.sessionManager.getCwd(),
+		});
+		return controller.open(this.extensionUiHost.createExtensionUIContext());
 	}
 
 	private handleResourcesHubAction(action: string): Promise<void> {

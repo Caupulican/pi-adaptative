@@ -104,6 +104,8 @@ export interface PythonToolOptions {
 	operations?: PythonOperations;
 	/** Additional process environment resolved from the final execution cwd. */
 	environment?: (cwd: string) => NodeJS.ProcessEnv;
+	/** Owner-only variables that must never reach model-controlled Python. */
+	omitEnvironmentVariables?: readonly string[];
 	/** Override only for tests or embedded runtimes; production uses the process work directory. */
 	outputDirectory?: string;
 }
@@ -228,27 +230,29 @@ export function createPythonToolDefinition(
 			};
 			let execution: PythonExecutionResult;
 			try {
-				execution = await withExclusiveMutationBarrier(() =>
-					operations.exec({
+				execution = await withExclusiveMutationBarrier(() => {
+					const environment: NodeJS.ProcessEnv = {
+						...process.env,
+						...options.environment?.(cwd),
+						PI_PYTHON_TOOL: "1",
+						PYTHONDONTWRITEBYTECODE: "1",
+						PYTHONIOENCODING: "utf-8",
+						PYTHONUNBUFFERED: "1",
+						PYTHONUTF8: "1",
+					};
+					for (const name of options.omitEnvironmentVariables ?? []) delete environment[name];
+					return operations.exec({
 						python: runtime.pythonPath,
 						args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
 						cwd,
 						stdin: hasCode ? input.code : undefined,
 						timeoutMs: timeoutSeconds * 1000,
 						signal,
-						env: {
-							...process.env,
-							...options.environment?.(cwd),
-							PI_PYTHON_TOOL: "1",
-							PYTHONDONTWRITEBYTECODE: "1",
-							PYTHONIOENCODING: "utf-8",
-							PYTHONUNBUFFERED: "1",
-							PYTHONUTF8: "1",
-						},
+						env: environment,
 						onStdout: (chunk) => stdout.append(chunk),
 						onStderr: (chunk) => stderr.append(chunk),
-					}),
-				);
+					});
+				});
 				const snapshots = finishStreams();
 				const sections: string[] = [];
 				if (snapshots.stdout.content) sections.push(snapshots.stdout.content.trimEnd());

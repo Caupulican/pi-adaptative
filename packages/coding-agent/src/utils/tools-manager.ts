@@ -27,12 +27,14 @@ import { cacheDir as agentCacheDir, cacheFile } from "../core/agent-paths.ts";
 import { ensureManagedJscpd, JSCPD_VERSION } from "./bundled-jscpd.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "./child-process.ts";
 import { getProcessWorkRun } from "./work-directory.ts";
+import { extractZipFile } from "./zip-extractor.ts";
 
 const TOOLS_DIR = getBinDir();
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
 const FFF_NODE_VERSION = "0.9.6";
+export const BITWARDEN_CLI_VERSION = "2026.7.0";
 export const FD_VERSION = "10.4.2";
 const FD_DARWIN_X64_VERSION = "10.3.0";
 export const RG_VERSION = "15.2.0";
@@ -65,7 +67,30 @@ interface ToolConfig {
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
-const TOOLS: Record<"fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
+const TOOLS: Record<"bw" | "fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
+	bw: {
+		name: "Bitwarden CLI",
+		repo: "bitwarden/clients",
+		binaryName: "bw",
+		systemBinaryNames: ["bw"],
+		tagPrefix: "cli-v",
+		pinnedVersion: BITWARDEN_CLI_VERSION,
+		getAssetName: (version, plat, architecture) => {
+			if (plat === "darwin" && architecture === "arm64") return `bw-macos-arm64-${version}.zip`;
+			if (plat === "darwin" && architecture === "x64") return `bw-macos-${version}.zip`;
+			if (plat === "linux" && architecture === "arm64") return `bw-linux-arm64-${version}.zip`;
+			if (plat === "linux" && architecture === "x64") return `bw-linux-${version}.zip`;
+			if (plat === "win32" && architecture === "x64") return `bw-windows-${version}.zip`;
+			return null;
+		},
+		sha256ByAsset: {
+			"bw-linux-2026.7.0.zip": "7a35145e205952f7434d2370da359543145ae0c45ba1af0fe9bdd99d40a00180",
+			"bw-linux-arm64-2026.7.0.zip": "e33ed05ca0fada9bd51b8bce76a230369bf0eefd5796a0a8e60699c977327fb5",
+			"bw-macos-2026.7.0.zip": "b37836d539798f5adeb8a907619ee8a55b6322549bb68669aa4b3a03d5bc0452",
+			"bw-macos-arm64-2026.7.0.zip": "61d5de8a279a9faf3637216f4fb02b506a1e4bb2817d1c64be0bd474466dd85a",
+			"bw-windows-2026.7.0.zip": "b0c22438607b789c6452dbd37ffd6be0e8a61e7a5c4e9ac57804d7ae5ed01b5b",
+		},
+	},
 	fd: {
 		name: "fd",
 		repo: "sharkdp/fd",
@@ -522,53 +547,12 @@ function extractTarGzArchive(archivePath: string, extractDir: string, assetName:
 	}
 }
 
-function getWindowsTarCommand(): string {
-	const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-	if (systemRoot) {
-		const systemTar = join(systemRoot, "System32", "tar.exe");
-		if (existsSync(systemTar)) {
-			return systemTar;
-		}
+async function extractZipArchive(archivePath: string, extractDir: string, assetName: string): Promise<void> {
+	try {
+		await extractZipFile(archivePath, extractDir);
+	} catch (error) {
+		throw new Error(`Failed to extract ${assetName}: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	return "tar.exe";
-}
-
-function extractZipArchive(archivePath: string, extractDir: string, assetName: string): void {
-	const failures: string[] = [];
-
-	if (platform() === "win32") {
-		// Windows ships bsdtar as tar.exe, which supports zip files. Prefer the
-		// System32 binary over Git Bash's GNU tar, which does not handle zip archives.
-		const tarFailure = runExtractionCommand(getWindowsTarCommand(), ["xf", archivePath, "-C", extractDir]);
-		if (!tarFailure) return;
-		failures.push(tarFailure);
-
-		const script =
-			"& { param($archive, $destination) $ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force }";
-		const powershellFailure = runExtractionCommand("powershell.exe", [
-			"-NoLogo",
-			"-NoProfile",
-			"-NonInteractive",
-			"-ExecutionPolicy",
-			"Bypass",
-			"-Command",
-			script,
-			archivePath,
-			extractDir,
-		]);
-		if (!powershellFailure) return;
-		failures.push(powershellFailure);
-	} else {
-		const unzipFailure = runExtractionCommand("unzip", ["-q", archivePath, "-d", extractDir]);
-		if (!unzipFailure) return;
-		failures.push(unzipFailure);
-
-		const tarFailure = runExtractionCommand("tar", ["xf", archivePath, "-C", extractDir]);
-		if (!tarFailure) return;
-		failures.push(tarFailure);
-	}
-
-	throw new Error(`Failed to extract ${assetName}: ${failures.join("; ")}`);
 }
 
 /** Move a verified upstream standalone executable into Pi's managed bin directory. */
@@ -656,7 +640,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 		if (assetName.endsWith(".tar.gz")) {
 			extractTarGzArchive(archivePath, extractDir, assetName);
 		} else if (assetName.endsWith(".zip")) {
-			extractZipArchive(archivePath, extractDir, assetName);
+			await extractZipArchive(archivePath, extractDir, assetName);
 		} else {
 			throw new Error(`Unsupported archive format: ${assetName}`);
 		}
@@ -692,7 +676,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 }
 
 // Termux package names for tools
-const TERMUX_PACKAGES: Record<ManagedToolName, string> = {
+const TERMUX_PACKAGES: Partial<Record<ManagedToolName, string>> = {
 	fd: "fd",
 	jscpd: "jscpd",
 	jq: "jq",
@@ -993,6 +977,7 @@ export async function ensureFffNodePackage(
 
 async function installTermuxManagedTool(tool: ManagedToolName, silent: boolean): Promise<string | undefined> {
 	const packageName = TERMUX_PACKAGES[tool];
+	if (!packageName) throw new Error(`${TOOLS[tool].name} has no supported Termux package`);
 	if (!silent) console.log(chalk.dim(`${TOOLS[tool].name} not found. Installing with Termux pkg...`));
 	const child = spawnProcess("pkg", ["install", "-y", packageName], {
 		env: process.env,
@@ -1047,7 +1032,9 @@ export async function ensureToolWithDiagnostics(
 	if (platform() === "android") {
 		if (tool !== "uv") {
 			const packageName = TERMUX_PACKAGES[tool];
-			const message = `${config.name} not found. Install with: pkg install ${packageName}`;
+			const message = packageName
+				? `${config.name} not found. Install with: pkg install ${packageName}`
+				: `${config.name} is not available as a supported managed tool on Android.`;
 			if (!silent) console.log(chalk.yellow(message));
 			return { status: "unavailable", failureCode: "unsupported_platform", message };
 		}

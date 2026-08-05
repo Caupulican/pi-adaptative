@@ -165,6 +165,7 @@ import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
+import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
@@ -944,6 +945,8 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			isStreaming: () => this.isStreaming,
 			getShellSessionKey: () => this._shellSessionKey,
+			getEnvironment: (cwd) => this._runtimeBuilder.credentialManager.getEnvironmentForCwd(cwd) ?? {},
+			redactSensitiveText: (text) => this._runtimeBuilder.credentialManager.redactSensitiveText(text),
 		});
 		this._profileFilter = new ProfileFilterController({
 			getSettingsManager: () => this.settingsManager,
@@ -3987,5 +3990,10 @@ export class AgentSession {
 	 */
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
+	}
+
+	/** Owner control-plane access for the native /secrets TUI. Never exposed as an agent tool. */
+	get credentialManager(): CredentialManager {
+		return this._runtimeBuilder.credentialManager;
 	}
 }

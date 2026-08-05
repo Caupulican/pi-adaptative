@@ -17,6 +17,7 @@ export interface BuiltinSlashCommand {
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
+	{ name: "secrets", description: "Store and activate project credentials with Bitwarden" },
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
 	{
 		name: "models",

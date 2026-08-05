@@ -6,19 +6,19 @@ import { WORKER_FORBIDDEN_TOOLS } from "../src/core/session-role.ts";
 import { getToolCapabilityPolicy } from "../src/core/tool-capability-policy.ts";
 
 describe("secret_store capability boundary", () => {
-	it("is default-active only for the user plane and requires credentials.modify", () => {
+	it("is default-active only for the user plane and requires credentials.use", () => {
 		expect(getDefaultActiveToolNames()).toContain("secret_store");
 		expect(WORKER_FORBIDDEN_TOOLS.has("secret_store")).toBe(true);
 		expect(getToolCapabilityPolicy("secret_store")).toEqual({
-			capabilityCandidates: ["credentials.modify"],
-			enforcement: "control-plane",
+			capabilityCandidates: ["credentials.use"],
+			enforcement: "service-proxy",
 		});
 	});
 
-	it("uses its native owner confirmation instead of an outer duplicate approval", () => {
+	it("treats an owner-authorized project activation as a non-mutating credential-use operation", () => {
 		expect(assessOperationRisk({ operation: "Tool secret_store", toolName: "secret_store" })).toMatchObject({
-			risk: "scoped-write",
-			reasonCode: "native_owner_secret_flow",
+			risk: "read-only",
+			reasonCode: "authorized_credential_use",
 			requiresApproval: false,
 		});
 		expect(
@@ -28,7 +28,7 @@ describe("secret_store capability boundary", () => {
 				envelope: {
 					id: "secret-envelope",
 					allowedTools: ["secret_store"],
-					capabilities: ["credentials.modify"],
+					capabilities: ["credentials.use"],
 				},
 			}),
 		).toMatchObject({ outcome: "allow", reasonCode: "allowed_by_envelope" });

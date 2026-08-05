@@ -1,185 +1,142 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionContext, ExtensionUIDialogOptions } from "../src/core/extensions/types.ts";
-import { SecretVault } from "../src/core/secrets/secret-vault.ts";
+import { describe, expect, it, vi } from "vitest";
+import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import {
+	CredentialManager,
+	CredentialManagerError,
+	type CredentialProfileRecord,
+	type CredentialProfileStorage,
+} from "../src/core/secrets/credential-manager.ts";
 import { createSecretStoreToolDefinition } from "../src/core/tools/secret-store.ts";
 
-interface TestUI {
-	context: ExtensionContext;
-	inputOptions: Array<ExtensionUIDialogOptions | undefined>;
-	editorCalls: ReturnType<typeof vi.fn>;
-	notify: ReturnType<typeof vi.fn>;
+const projectKey = `git:${"a".repeat(64)}`;
+
+class MemoryStorage implements CredentialProfileStorage {
+	readonly records = new Map<string, CredentialProfileRecord>();
+
+	async connect(): Promise<void> {}
+
+	async listProfiles() {
+		return [...this.records.values()].map((record) => ({
+			profile: record.profile,
+			...(record.description ? { description: record.description } : {}),
+			variableNames: record.variables.map((variable) => variable.name),
+			projectKeys: [...record.projectKeys],
+		}));
+	}
+
+	async readProfile(profile: string): Promise<CredentialProfileRecord> {
+		const record = this.records.get(profile);
+		if (!record) throw new CredentialManagerError("profile_not_found", "Credential profile was not found.");
+		return structuredClone(record);
+	}
+
+	async writeProfile(record: CredentialProfileRecord): Promise<void> {
+		this.records.set(record.profile, structuredClone(record));
+	}
+
+	async deleteProfile(profile: string): Promise<void> {
+		this.records.delete(profile);
+	}
+
+	lock(): void {}
 }
 
-function createContext(options: {
-	mode?: "tui" | "print" | "rpc";
-	hasUI?: boolean;
-	inputs?: string[];
-	editors?: string[];
-	confirms?: boolean[];
-	cwd: string;
-}): TestUI {
-	const inputs = [...(options.inputs ?? [])];
-	const confirms = [...(options.confirms ?? [])];
-	const editors = [...(options.editors ?? [])];
-	const inputOptions: Array<ExtensionUIDialogOptions | undefined> = [];
-	const notify = vi.fn();
-	const editorCalls = vi.fn();
+function createContext(mode: "tui" | "print" | "rpc", cwd: string) {
+	const input = vi.fn();
+	const custom = vi.fn();
 	const context = {
-		cwd: options.cwd,
-		hasUI: options.hasUI ?? true,
-		mode: options.mode ?? "tui",
-		ui: {
-			input: async (_title: string, _placeholder?: string, dialogOptions?: ExtensionUIDialogOptions) => {
-				inputOptions.push(dialogOptions);
-				return inputs.shift();
-			},
-			confirm: async () => confirms.shift() ?? false,
-			custom: async () => {
-				editorCalls();
-				return editors.shift();
-			},
-			notify,
-		},
+		cwd,
+		hasUI: mode === "tui",
+		mode,
+		ui: { input, custom, notify: vi.fn(), confirm: vi.fn() },
 	} as unknown as ExtensionContext;
-	return { context, inputOptions, editorCalls, notify };
+	return { context, input, custom };
+}
+
+function createHarness(options: { initialSessionKey?: string } = { initialSessionKey: "valid-session" }) {
+	const storage = new MemoryStorage();
+	const manager = new CredentialManager({
+		storage,
+		resolveProject: async () => ({ key: projectKey, root: "/work/project", label: "project", portable: true }),
+		initialSessionKey: options.initialSessionKey,
+	});
+	return { storage, manager, tool: createSecretStoreToolDefinition({ manager }) };
 }
 
 describe("secret_store tool", () => {
-	const tempDirs: string[] = [];
+	it.each(["print", "rpc"] as const)("activates a bound profile autonomously in %s mode", async (mode) => {
+		const secret = "model-hidden-secret-value";
+		const { storage, manager, tool } = createHarness();
+		storage.records.set("deploy", {
+			profile: "deploy",
+			variables: [{ name: "DEPLOY_TOKEN", value: secret }],
+			projectKeys: [projectKey],
+		});
+		const ui = createContext(mode, "/work/project");
 
-	afterEach(() => {
-		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+		const activated = await tool.execute("activate", { action: "activate" }, undefined, undefined, ui.context);
+
+		expect(activated.details).toEqual({
+			action: "activate",
+			status: "activated",
+			profile: "deploy",
+			variableNames: ["DEPLOY_TOKEN"],
+			project: "project",
+		});
+		expect(manager.getEnvironmentForCwd("/work/project")).toEqual({ DEPLOY_TOKEN: secret });
+		expect(JSON.stringify(activated)).not.toContain(secret);
+		expect(ui.input).not.toHaveBeenCalled();
+		expect(ui.custom).not.toHaveBeenCalled();
 	});
 
-	function createHarness() {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-tool-"));
-		tempDirs.push(root);
-		const vault = new SecretVault({ agentDir: join(root, "agent"), scryptN: 1_024 });
-		return { root, vault, tool: createSecretStoreToolDefinition({ vault }) };
-	}
-
-	it("captures a plaintext dotenv through the private editor while returning metadata only", async () => {
-		const { root, vault, tool } = createHarness();
-		const passphrase = "model-blind-passphrase";
-		const secret = "credential-value-marker";
-		const ui = createContext({ cwd: root, inputs: [passphrase, passphrase], editors: [`API_TOKEN=${secret}\n`] });
-
-		const stored = await tool.execute(
-			"call-set",
-			{ action: "set", profile: "project", envFile: ".env" },
-			undefined,
-			undefined,
-			ui.context,
-		);
-		const serializedResult = JSON.stringify(stored);
-		expect(serializedResult).not.toContain(passphrase);
-		expect(serializedResult).not.toContain(secret);
-		expect(stored.details).toMatchObject({
-			status: "stored",
-			profile: "project",
-			variableNames: ["API_TOKEN"],
+	it("lists only metadata and current-project binding state", async () => {
+		const secret = "metadata-must-not-contain-this";
+		const { storage, tool } = createHarness();
+		storage.records.set("deploy", {
+			profile: "deploy",
+			description: "deployment account",
+			variables: [{ name: "DEPLOY_TOKEN", value: secret }],
+			projectKeys: [projectKey],
 		});
-		expect(ui.inputOptions).toHaveLength(2);
-		expect(ui.inputOptions.every((options) => options?.sensitive === true)).toBe(true);
-		expect(ui.editorCalls).toHaveBeenCalledOnce();
-		expect(readFileSync(vault.vaultPath, "utf8")).not.toContain(secret);
-		expect(readFileSync(join(root, ".env"), "utf8")).toContain(`API_TOKEN=${secret}`);
+		const ui = createContext("rpc", "/work/project");
 
-		const listed = await tool.execute("call-list", { action: "list" }, undefined, undefined, ui.context);
-		expect(listed.details.profiles?.[0]).toMatchObject({ profile: "project", variableNames: ["API_TOKEN"] });
+		const listed = await tool.execute("list", { action: "list" }, undefined, undefined, ui.context);
+
+		expect(listed.details.profiles).toEqual([
+			{
+				profile: "deploy",
+				description: "deployment account",
+				variableNames: ["DEPLOY_TOKEN"],
+				boundToCurrentProject: true,
+			},
+		]);
 		expect(JSON.stringify(listed)).not.toContain(secret);
 	});
 
-	it("materializes a remembered binding and withholds path and value from the result", async () => {
-		const { root, vault, tool } = createHarness();
-		await vault.initialize("model-blind-passphrase");
-		await vault.replaceProfileDocument("project", undefined, "API_TOKEN=hidden-value\n", {
-			workspace: root,
-			envFile: ".env",
-		});
-		const ui = createContext({ cwd: root });
+	it("returns an owner setup requirement instead of prompting when no session key is available", async () => {
+		const { tool } = createHarness({});
+		const ui = createContext("tui", "/work/project");
 
-		const materialized = await tool.execute(
-			"call-materialize",
-			{ action: "materialize", profile: "project", scope: "managed" },
-			undefined,
-			undefined,
-			ui.context,
-		);
-		const serialized = JSON.stringify(materialized);
-		expect(materialized.details.status).toBe("materialized");
-		expect(serialized).not.toContain("hidden-value");
-		expect(serialized).not.toContain(root);
-		expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining(vault.getManagedEnvPath("project")), "info");
-		expect(vault.getEnvironmentForCwd(root)).toMatchObject({ API_TOKEN: "hidden-value" });
+		const result = await tool.execute("activate", { action: "activate" }, undefined, undefined, ui.context);
+
+		expect(result.details).toMatchObject({
+			action: "activate",
+			status: "unavailable",
+			code: "owner_setup_required",
+		});
+		expect(ui.input).not.toHaveBeenCalled();
+		expect(ui.custom).not.toHaveBeenCalled();
 	});
 
-	it("persists the model-selected relative dotenv location without asking the owner for a path", async () => {
-		const { root, vault, tool } = createHarness();
-		const passphrase = "model-blind-passphrase";
-		const ui = createContext({
-			cwd: root,
-			inputs: [passphrase, passphrase],
-			editors: ["API_TOKEN=workspace-secret\n"],
-		});
+	it("exposes no model-facing credential mutation actions", () => {
+		const { tool } = createHarness();
+		const schema = JSON.stringify(tool.parameters);
 
-		const stored = await tool.execute(
-			"call-set-location",
-			{ action: "set", profile: "project", envFile: ".env.local" },
-			undefined,
-			undefined,
-			ui.context,
-		);
-		expect(stored.details).toMatchObject({ status: "stored", envFile: ".env.local", materialized: true });
-		expect(JSON.stringify(stored)).not.toContain(root);
-		expect(JSON.stringify(stored)).not.toContain("workspace-secret");
-		expect(readFileSync(join(root, ".env.local"), "utf8")).toContain("API_TOKEN=workspace-secret");
-		expect((await vault.listProfiles())[0]?.bindings).toEqual([
-			expect.objectContaining({ workspace: root, envFile: ".env.local" }),
-		]);
-		expect(ui.inputOptions).toHaveLength(2);
-	});
-
-	it("keeps passphrase and dotenv corrections inside the owner UI", async () => {
-		const { root, tool } = createHarness();
-		const passphrase = "corrected-model-blind-passphrase";
-		const secret = "corrected-private-value";
-		const ui = createContext({
-			cwd: root,
-			inputs: ["first-mismatched-passphrase", "second-mismatched-passphrase", passphrase, passphrase],
-			editors: ["not an assignment\n", `TOKEN=${secret}\n`],
-		});
-
-		const stored = await tool.execute(
-			"call-corrected-set",
-			{ action: "set", profile: "corrected" },
-			undefined,
-			undefined,
-			ui.context,
-		);
-		expect(stored.details).toMatchObject({ status: "stored", variableNames: ["TOKEN"] });
-		expect(JSON.stringify(stored)).not.toContain(secret);
-		expect(ui.inputOptions).toHaveLength(4);
-		expect(ui.editorCalls).toHaveBeenCalledTimes(2);
-		expect(ui.notify).toHaveBeenCalledWith("The two master passphrases do not match.", "error");
-		expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("expected NAME=value"), "error");
-	});
-
-	it("refuses non-TUI and unattended invocations before requesting input", async () => {
-		const { root, tool } = createHarness();
-		const rpc = createContext({ cwd: root, mode: "rpc", inputs: ["must-not-be-read"] });
-
-		const refused = await tool.execute(
-			"call-rpc",
-			{ action: "set", profile: "project" },
-			undefined,
-			undefined,
-			rpc.context,
-		);
-		expect(refused.details).toMatchObject({ status: "unavailable", code: "user_tui_required" });
-		expect(rpc.inputOptions).toEqual([]);
+		expect(schema).toContain("activate");
+		expect(schema).toContain("list");
+		expect(schema).toContain("status");
+		for (const forbidden of ["set", "remove", "lock", "materialize", "envFile", "variableNames"]) {
+			expect(schema).not.toContain(forbidden);
+		}
 	});
 });

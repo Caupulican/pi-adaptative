@@ -6,7 +6,6 @@ export const HARNESS_CAPABILITIES = [
 	"network.http",
 	"service.mcp",
 	"credentials.use",
-	"credentials.modify",
 	"tests.execute",
 	"worktree.read",
 	"worktree.mutate",

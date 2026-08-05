@@ -8,7 +8,6 @@ import {
 	credentialToolBlockReason,
 	wrapToolWithCredentialExposureGuard,
 } from "../src/core/secrets/credential-exposure-guard.ts";
-import { SecretVault } from "../src/core/secrets/secret-vault.ts";
 
 const testSchema = Type.Object({ path: Type.Optional(Type.String()), command: Type.Optional(Type.String()) });
 
@@ -123,14 +122,15 @@ describe("credential exposure guard", () => {
 	it("redacts exact unlocked values from partial, final, and thrown tool output", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-secret-guard-"));
 		tempDirs.push(root);
-		const vault = new SecretVault({ agentDir: join(root, "agent"), scryptN: 1_024 });
 		const secret = "opaque-exact-output-marker";
-		await vault.initialize("credential guard passphrase");
-		await vault.replaceProfileDocument("project", undefined, `TOKEN=${secret}\n`, {
-			workspace: root,
-			envFile: ".env",
-		});
-		await vault.materializeEnv("project", join(root, ".env"));
+		const boundary = {
+			redactSensitiveText: (text: string) => text.split(secret).join("[REDACTED_SECRET]"),
+			protectedFiles: [join(root, "agent", "state", "secrets", "vault.json")],
+			protectedDirectories: [join(root, "agent", "state", "secrets", "materialized")],
+		};
+		expect(credentialToolBlockReason("read", { path: boundary.protectedFiles[0] }, root, boundary)).toContain(
+			"model-blind",
+		);
 		const onUpdate = vi.fn();
 		const tool: AgentTool<typeof testSchema> = {
 			name: "example",
@@ -148,7 +148,7 @@ describe("credential exposure guard", () => {
 				};
 			},
 		};
-		const guarded = wrapToolWithCredentialExposureGuard(tool, root, vault);
+		const guarded = wrapToolWithCredentialExposureGuard(tool, root, boundary);
 		const result = await guarded.execute("call", {}, undefined, onUpdate);
 		expect(JSON.stringify(result)).not.toContain(secret);
 		expect(JSON.stringify(onUpdate.mock.calls)).not.toContain(secret);
@@ -161,7 +161,7 @@ describe("credential exposure guard", () => {
 				},
 			},
 			root,
-			vault,
+			boundary,
 		);
 		await expect(failing.execute("call", {})).rejects.not.toThrow(secret);
 	});

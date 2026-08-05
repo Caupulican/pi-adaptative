@@ -192,9 +192,9 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 	}
 	if (input.toolName === "secret_store") {
 		return {
-			risk: "scoped-write",
-			reasonCode: "native_owner_secret_flow",
-			reasons: ["Native secret-store mutations require model-blind owner input and in-tool confirmation"],
+			risk: "read-only",
+			reasonCode: "authorized_credential_use",
+			reasons: ["Credential activation is limited to an owner-authorized current-project binding"],
 			requiresApproval: false,
 		};
 	}

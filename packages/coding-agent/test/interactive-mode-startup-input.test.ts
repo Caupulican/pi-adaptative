@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type UserInputSubmission = {
@@ -13,6 +14,7 @@ type SubmitContext = {
 		setText: (text: string) => void;
 	};
 	shutdown: () => Promise<void>;
+	handleSecretsCommand: () => Promise<void>;
 	session: {
 		isCompacting: boolean;
 		isStreaming: boolean;
@@ -61,6 +63,7 @@ function createSubmitContext(): SubmitContext {
 			setText: vi.fn(),
 		},
 		shutdown: vi.fn(async () => {}),
+		handleSecretsCommand: vi.fn(async () => {}),
 		session: {
 			isCompacting: false,
 			isStreaming: false,
@@ -130,6 +133,18 @@ describe("InteractiveMode startup input", () => {
 			expect(context.session.prompt).not.toHaveBeenCalled();
 			expect(context.editor.setText).toHaveBeenCalledWith("");
 		}
+	});
+
+	it("opens the private credential menu without sending /secrets to the model", async () => {
+		const context = createSubmitContext();
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+		await context.defaultEditor.onSubmit?.("/secrets");
+
+		expect(context.handleSecretsCommand).toHaveBeenCalledTimes(1);
+		expect(context.session.prompt).not.toHaveBeenCalled();
+		expect(context.editor.setText).toHaveBeenCalledWith("");
+		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "secrets")).toBe(true);
 	});
 
 	it("lets /quit and /exit bypass steering and compaction queues", async () => {

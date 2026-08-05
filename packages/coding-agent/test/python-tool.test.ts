@@ -129,6 +129,26 @@ describe("native python tool", () => {
 		expect(timeouts).toEqual([30_000, 300_000]);
 	});
 
+	it("removes owner-only authentication variables from the spawned environment", async () => {
+		const cwd = await createTempDirectory();
+		let captured: PythonExecutionRequest | undefined;
+		const tool = createPythonToolDefinition(cwd, {
+			resolveRuntime: readyRuntime,
+			environment: () => ({ BW_SESSION: "owner-session-key", API_TOKEN: "activated-profile-value" }),
+			omitEnvironmentVariables: ["BW_SESSION"],
+			operations: operation(async (request) => {
+				captured = request;
+				return { exitCode: 0, reason: "exited", signal: null };
+			}),
+			outputDirectory: cwd,
+		});
+
+		await tool.execute("private-env", { code: "pass" }, undefined, undefined, undefined as never);
+
+		expect(captured?.env.API_TOKEN).toBe("activated-profile-value");
+		expect(captured?.env).not.toHaveProperty("BW_SESSION");
+	});
+
 	it("reports timeout, abort, and non-zero exits as real tool errors", async () => {
 		const cwd = await createTempDirectory();
 		for (const [reason, exitCode, expected] of [

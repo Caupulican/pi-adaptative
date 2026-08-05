@@ -31,6 +31,8 @@ export interface BashExecutorOptions {
 	enableGitFilter?: boolean;
 	/** Wall-clock timeout in seconds. Direct interactive/RPC callers provide the same bounded default as the agent tool. */
 	timeout?: number;
+	/** Explicit process environment for both the filtered Git and shell execution paths. */
+	environment?: NodeJS.ProcessEnv;
 }
 
 export interface BashResult {
@@ -72,7 +74,7 @@ export async function executeBashWithOperations(
 				classification.subcommand,
 				classification.globalOptions || [],
 				classification.subcommandArgs || [],
-				{ signal: options.signal, timeout: options.timeout },
+				{ signal: options.signal, timeout: options.timeout, environment: options.environment },
 			);
 			if (res.exitCode !== -100) {
 				const rawBytes = res.rawBytes ?? Buffer.from(res.rawOut, "utf-8");
@@ -167,6 +169,7 @@ export async function executeBashWithOperations(
 			onData,
 			signal: options?.signal,
 			timeout: options?.timeout,
+			env: options?.environment,
 		});
 
 		const fullOutput = outputChunks.join("");

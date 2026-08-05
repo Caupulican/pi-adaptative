@@ -47,11 +47,11 @@ Native task steps and worker agents share the same compact work panel. Steps and
 
 ### Secret Store
 
-In an interactive user session, ask the agent to store or adopt a project's dotenv file, for example: `Store this project's credentials in the project-dev secret profile.` The native `secret_store` tool opens a private multiline editor where the owner pastes ordinary plaintext dotenv content. Existing unmanaged dotenv content is prefilled locally for review. The editor disables history, undo, kill-ring, autocomplete, paste collapsing, and external-editor temp files, and clears its buffer on close. Only profile, variable-name, and workspace-binding metadata reaches the model; the plaintext document never enters tool arguments, results, transcripts, or telemetry. Pi collects the vault passphrase through separate masked input and encrypts the bounded profile and bindings under `~/.pi/agent/state/secrets/vault.json`. Only the derived key and explicitly activated profile environment remain cached in the current Pi process; asking the agent to lock the vault or exiting Pi clears them and resets credential-bearing shell state. Worker, print, and RPC sessions cannot use the capture path.
+Run `/secrets` in an owner-controlled TUI. Pi provisions its pinned [Bitwarden Password Manager CLI](https://bitwarden.com/help/cli/) (`bw`) automatically when no system installation is available, then asks for one masked `BW_SESSION` session key. Generate that key with `bw unlock --raw` after signing in to Bitwarden. Pi keeps the key in memory for the current session; it is never placed in model context or passed to model-controlled processes.
 
-The encrypted binding remembers the workspace and relative dotenv filename. Later, the agent can list that metadata and call `secret_store` materialization for the current workspace without asking for a destination again. Once unlocked and materialized, Pi injects the profile into Bash and Python child environments so the agent runs the consuming application normally without reading or sourcing the file. Direct read, edit, search, and shell-inspection attempts against credential files are refused across foreground and worker tool surfaces, and known values are redacted from streamed results and errors.
+The private menu accepts username/password pairs, a pasted token or private key, a dropped absolute key-file path, or multiple variables in dotenv syntax. Pi stores the profile as an encrypted Bitwarden item and writes no local vault or project dotenv. A normalized Git-origin identity binds the profile to the project, so another clone on a synced machine detects the same binding. Repositories without a portable origin use a machine-local opaque project identity. An existing profile can be explicitly bound to additional projects on the same machine.
 
-Every materialized dotenv file is plaintext and mode `0600` on POSIX. Workspace copies must remain ignored by version control. The protection is a model-facing tool boundary, not an OS sandbox: another process running as the same OS user can read the file, and code deliberately granted network or process authority can use the injected credential. Keep execution policy and approval gates appropriate to that authority.
+The model-facing `secret_store` tool can only inspect non-secret profile metadata and activate a profile already authorized for the current project. Activation works without a live TUI in interactive, print, and RPC modes when that Pi process has a valid `BW_SESSION`. Values are injected in memory into Bash, Python, and allowlisted `run_process` variables; exact values are redacted from tool results and owner-shell transcripts. Locking or exiting clears the active environment and session key. This is a model-facing boundary, not an OS sandbox: code intentionally given process or network authority can use an activated credential through its consuming application.
 
 ## Slash Commands
 
@@ -63,6 +63,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
+| `/secrets` | Connect Bitwarden; add, bind, activate, or remove project credential profiles |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -309,6 +310,7 @@ pi --exclude-tools ask_question
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
+| `BW_SESSION` | Optional Bitwarden CLI session key for autonomous activation in a new Pi process |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
 ## Design Principles

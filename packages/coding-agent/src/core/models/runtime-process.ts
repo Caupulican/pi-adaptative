@@ -5,6 +5,7 @@ import type { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { sleep } from "../../utils/sleep.ts";
+import { extractZipFile } from "../../utils/zip-extractor.ts";
 import { createRollingOutputBuffer } from "../exec.ts";
 
 export interface RuntimeCommandResult {
@@ -258,27 +259,10 @@ export async function extractZipArchive(options: ExtractZipArchiveOptions): Prom
 	const zipPath = join(options.destDir, "..", `${options.tempPrefix}-${process.pid}-${Date.now()}.zip`);
 	try {
 		await pipeline(options.input, createWriteStream(zipPath));
-		const extractCommand = options.platform() === "win32" && options.hasCommand("tar") ? "tar" : "unzip";
-		const args =
-			extractCommand === "tar" ? ["-xf", zipPath, "-C", options.destDir] : ["-q", zipPath, "-d", options.destDir];
-		const proc = spawnProcess(extractCommand, args, {
-			detached: process.platform !== "win32",
-			stdio: "ignore",
-		});
-		const terminal = await waitForChildProcessWithTermination(proc, {
-			timeoutMs: options.timeoutMs,
-			killGraceMs: options.killGraceMs,
-		});
-		if (terminal.reason === "timeout" || terminal.code !== 0) {
-			return {
-				ok: false,
-				error:
-					terminal.reason === "timeout"
-						? `extract-fail: ${extractCommand} timed out after ${options.timeoutMs}ms`
-						: `extract-fail: ${extractCommand} exited with code ${terminal.code ?? "unknown"}`,
-			};
-		}
+		await extractZipFile(zipPath, options.destDir);
 		return { ok: true };
+	} catch (error) {
+		return { ok: false, error: `extract-fail: ${error instanceof Error ? error.message : String(error)}` };
 	} finally {
 		removePartialDownload(zipPath);
 	}

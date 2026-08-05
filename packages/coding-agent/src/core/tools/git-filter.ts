@@ -67,6 +67,7 @@ interface GitQueryResult {
 interface GitFilterOptions {
 	signal?: AbortSignal;
 	timeout?: number;
+	environment?: NodeJS.ProcessEnv;
 }
 
 export function unicodeTruncate(str: string, maxLength: number): string {
@@ -114,7 +115,7 @@ export async function runGitQuery(
 	const child = spawn("git", [...globalOptions, ...args], {
 		cwd,
 		detached: process.platform !== "win32",
-		env: { ...process.env, LC_ALL: "C" },
+		env: { ...(options?.environment ?? process.env), LC_ALL: "C" },
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
 	});

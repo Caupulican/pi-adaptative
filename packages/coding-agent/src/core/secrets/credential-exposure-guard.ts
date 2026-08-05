@@ -5,7 +5,6 @@ import type { TSchema } from "typebox";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
 import { tokenizeShellCommand } from "../tools/shell-command-parser.ts";
-import type { SecretVault } from "./secret-vault.ts";
 
 const DIRECT_PATH_TOOLS = new Set(["read", "edit", "write", "ls"]);
 const SHELL_INSPECTION_COMMANDS = new Set([
@@ -34,6 +33,12 @@ const MAX_REDACTED_DETAIL_NODES = 10_000;
 const JQ_OPTIONS_WITH_ONE_OPERAND = new Set(["-L", "--indent"]);
 const JQ_OPTIONS_WITH_TWO_OPERANDS = new Set(["--arg", "--argjson", "--rawfile", "--slurpfile"]);
 
+export interface CredentialExposureBoundary {
+	redactSensitiveText(text: string): string;
+	protectedFiles?: readonly string[];
+	protectedDirectories?: readonly string[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -43,7 +48,11 @@ function isInside(root: string, target: string): boolean {
 	return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
 }
 
-export function isProtectedCredentialPath(rawPath: string, cwd: string, vault?: SecretVault): boolean {
+export function isProtectedCredentialPath(
+	rawPath: string,
+	cwd: string,
+	boundary?: CredentialExposureBoundary,
+): boolean {
 	const resolved = resolve(cwd, rawPath);
 	const candidates = [resolved];
 	try {
@@ -52,22 +61,24 @@ export function isProtectedCredentialPath(rawPath: string, cwd: string, vault?: 
 	} catch {
 		// Nonexistent write targets still receive the lexical filename check.
 	}
-	const vaultPaths = vault ? [resolve(vault.vaultPath)] : [];
-	const materializedRoots = vault ? [resolve(vault.materializedDir)] : [];
-	if (vault) {
+	const protectedFiles = (boundary?.protectedFiles ?? []).map((path) => resolve(path));
+	const protectedDirectories = (boundary?.protectedDirectories ?? []).map((path) => resolve(path));
+	for (const path of [...protectedFiles]) {
 		try {
-			vaultPaths.push(realpathSync.native(vault.vaultPath));
+			protectedFiles.push(realpathSync.native(path));
 		} catch {
-			// A not-yet-created vault still retains its lexical protected path.
+			// A not-yet-created protected file still retains its lexical path.
 		}
+	}
+	for (const path of [...protectedDirectories]) {
 		try {
-			materializedRoots.push(realpathSync.native(vault.materializedDir));
+			protectedDirectories.push(realpathSync.native(path));
 		} catch {
-			// A not-yet-created materialization directory still retains its lexical protected root.
+			// A not-yet-created protected directory still retains its lexical root.
 		}
 	}
 	return candidates.some((candidate) => {
-		if (vault && (vaultPaths.includes(candidate) || materializedRoots.some((root) => isInside(root, candidate)))) {
+		if (protectedFiles.includes(candidate) || protectedDirectories.some((root) => isInside(root, candidate))) {
 			return true;
 		}
 		const fileName = basename(candidate);
@@ -78,7 +89,7 @@ export function isProtectedCredentialPath(rawPath: string, cwd: string, vault?: 
 function shellCredentialRisk(
 	command: string,
 	cwd: string,
-	vault?: SecretVault,
+	boundary?: CredentialExposureBoundary,
 ): "broad_search" | "credential_path" | "process_environment" | undefined {
 	const shellTokens = tokenizeShellCommand(command);
 	if (!shellTokens) return /\b(?:grep|rg)\b/iu.test(command) ? "broad_search" : undefined;
@@ -99,7 +110,7 @@ function shellCredentialRisk(
 				toolName === "rg" || toolName === "ripgrep" ? "rg" : toolName === "grep" ? "grep" : undefined;
 			if (searchTool) {
 				const scope = parseShellSearchInvocationScope(searchTool, args, readsPipe);
-				if (scope.targets.some((target) => target !== "-" && isProtectedCredentialPath(target, cwd, vault))) {
+				if (scope.targets.some((target) => target !== "-" && isProtectedCredentialPath(target, cwd, boundary))) {
 					return "credential_path";
 				}
 				const hasSafeGlob =
@@ -112,7 +123,7 @@ function shellCredentialRisk(
 			}
 			for (const token of args) {
 				if (!token || token.startsWith("-") || token === ".") continue;
-				if (isProtectedCredentialPath(token, cwd, vault)) return "credential_path";
+				if (isProtectedCredentialPath(token, cwd, boundary)) return "credential_path";
 			}
 		}
 		return undefined;
@@ -179,12 +190,12 @@ function isExistingRegularFile(rawPath: string, cwd: string): boolean {
 	}
 }
 
-function pythonInspectsCredentialPath(code: string, cwd: string, vault?: SecretVault): boolean {
+function pythonInspectsCredentialPath(code: string, cwd: string, boundary?: CredentialExposureBoundary): boolean {
 	if (!PYTHON_INSPECTION_RE.test(code)) return false;
 	QUOTED_TEXT_RE.lastIndex = 0;
 	for (const match of code.matchAll(QUOTED_TEXT_RE)) {
 		const candidate = match[2]?.replace(/\\([\\"'])/g, "$1");
-		if (candidate && isProtectedCredentialPath(candidate, cwd, vault)) return true;
+		if (candidate && isProtectedCredentialPath(candidate, cwd, boundary)) return true;
 	}
 	return false;
 }
@@ -199,20 +210,20 @@ export function credentialToolBlockReason(
 	toolName: string,
 	args: unknown,
 	cwd: string,
-	vault?: SecretVault,
+	boundary?: CredentialExposureBoundary,
 ): string | undefined {
 	if (toolName === "secret_store" || !isRecord(args)) return undefined;
 	if (DIRECT_PATH_TOOLS.has(toolName)) {
 		const path = directPathFromArgs(args);
-		if (path && isProtectedCredentialPath(path, cwd, vault)) {
-			return "Credential file access is model-blind. Use secret_store to edit or materialize the bound profile, then run the consuming application without inspecting the dotenv file.";
+		if (path && isProtectedCredentialPath(path, cwd, boundary)) {
+			return "Credential file access is model-blind. Use secret_store to activate an owner-authorized profile, then run the consuming application without inspecting credential data.";
 		}
 	}
 	if (toolName === "grep") {
 		const path = typeof args.path === "string" ? args.path : undefined;
 		const glob = typeof args.glob === "string" ? args.glob : undefined;
 		if (
-			(path && isProtectedCredentialPath(path, cwd, vault)) ||
+			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
 			(glob && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob))
 		) {
 			return "Credential dotenv files are excluded from model-facing search. Use secret_store metadata instead.";
@@ -225,7 +236,7 @@ export function credentialToolBlockReason(
 		const path = typeof args.path === "string" ? args.path : undefined;
 		const pattern = typeof args.pattern === "string" ? args.pattern : undefined;
 		if (
-			(path && isProtectedCredentialPath(path, cwd, vault)) ||
+			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
 			(pattern && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(pattern))
 		) {
 			return "Credential dotenv files are excluded from model-facing discovery. Use secret_store list instead.";
@@ -233,7 +244,7 @@ export function credentialToolBlockReason(
 	}
 	if (toolName === "bash" || toolName === "powershell" || toolName === "run_process") {
 		const command = typeof args.command === "string" ? args.command : "";
-		const shellRisk = shellCredentialRisk(command, cwd, vault);
+		const shellRisk = shellCredentialRisk(command, cwd, boundary);
 		if (shellRisk === "broad_search") {
 			return "Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.";
 		}
@@ -249,8 +260,8 @@ export function credentialToolBlockReason(
 		const scriptPath = typeof args.scriptPath === "string" ? args.scriptPath : undefined;
 		if (
 			PYTHON_SECRET_READ_RE.test(code) ||
-			pythonInspectsCredentialPath(code, cwd, vault) ||
-			(scriptPath !== undefined && isProtectedCredentialPath(scriptPath, cwd, vault))
+			pythonInspectsCredentialPath(code, cwd, boundary) ||
+			(scriptPath !== undefined && isProtectedCredentialPath(scriptPath, cwd, boundary))
 		) {
 			return "Direct Python inspection of credential dotenv files is blocked. Use secret_store, then run the credential-consuming program normally.";
 		}
@@ -258,8 +269,8 @@ export function credentialToolBlockReason(
 	return undefined;
 }
 
-function redactResult<T>(result: AgentToolResult<T>, vault?: SecretVault): AgentToolResult<T> {
-	const redact = (text: string) => (vault ? vault.redactSensitiveText(text) : redactKnownSecrets(text));
+function redactResult<T>(result: AgentToolResult<T>, boundary?: CredentialExposureBoundary): AgentToolResult<T> {
+	const redact = (text: string) => (boundary ? boundary.redactSensitiveText(text) : redactKnownSecrets(text));
 	const budget = { nodes: 0 };
 	return {
 		...result,
@@ -299,23 +310,25 @@ function redactStructuredDetails(
 export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema, TDetails>(
 	tool: AgentTool<TParameters, TDetails>,
 	cwd: string,
-	vault?: SecretVault,
+	boundary?: CredentialExposureBoundary,
 ): AgentTool<TParameters, TDetails> {
 	return {
 		...tool,
 		async execute(toolCallId, params, signal, onUpdate) {
-			const refusal = credentialToolBlockReason(tool.name, params, cwd, vault);
+			const refusal = credentialToolBlockReason(tool.name, params, cwd, boundary);
 			if (refusal) throw new Error(refusal);
 			const safeUpdate = onUpdate
 				? (partial: AgentToolResult<TDetails>) => {
-						onUpdate(redactResult(partial, vault));
+						onUpdate(redactResult(partial, boundary));
 					}
 				: undefined;
 			try {
-				return redactResult(await tool.execute(toolCallId, params, signal, safeUpdate), vault);
+				return redactResult(await tool.execute(toolCallId, params, signal, safeUpdate), boundary);
 			} catch (error) {
 				if (error instanceof Error) {
-					throw new Error(vault ? vault.redactSensitiveText(error.message) : redactKnownSecrets(error.message));
+					throw new Error(
+						boundary ? boundary.redactSensitiveText(error.message) : redactKnownSecrets(error.message),
+					);
 				}
 				throw new Error("Credential-safe tool execution failed without retaining raw error output.");
 			}

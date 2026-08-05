@@ -1,8 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { BashExecutionController } from "../src/core/bash-execution-controller.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
 import { POWERSHELL_UTF8_PREFIX } from "../src/utils/shell.ts";
+
+const originalBitwardenSession = process.env.BW_SESSION;
+
+afterEach(() => {
+	if (originalBitwardenSession === undefined) delete process.env.BW_SESSION;
+	else process.env.BW_SESSION = originalBitwardenSession;
+});
 
 // Same probe pattern as the engine tests: PI_TEST_PYTHON -> python3 -> python, else no interpreter.
 function resolvePython(): string | null {
@@ -25,6 +32,57 @@ function makeController(): BashExecutionController {
 }
 
 describe("BashExecutionController", () => {
+	it("shares active project credentials with owner shell commands but withholds BW_SESSION", async () => {
+		process.env.BW_SESSION = "owner-control-plane-key";
+		const controller = new BashExecutionController({
+			getAgent: () => ({ state: { messages: [] } }) as never,
+			getSessionManager: () => ({ getCwd: () => process.cwd(), appendMessage: () => undefined }) as never,
+			getSettingsManager: () => ({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+			isStreaming: () => false,
+			getEnvironment: () => ({ API_TOKEN: "active-project-token", BW_SESSION: "must-not-win" }),
+		});
+		let environment: NodeJS.ProcessEnv | undefined;
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, options) => {
+				environment = options.env;
+				return { exitCode: 0 };
+			},
+		};
+
+		await controller.executeBash("consumer", undefined, { operations, platform: "linux" });
+
+		expect(environment).toMatchObject({ API_TOKEN: "active-project-token" });
+		expect(environment).not.toHaveProperty("BW_SESSION");
+	});
+
+	it("keeps raw owner output in the TUI result but redacts it from the model transcript", async () => {
+		const messages: Array<{ command: string; output: string; fullOutputPath?: string }> = [];
+		const persisted: Array<{ command: string; output: string; fullOutputPath?: string }> = [];
+		const controller = new BashExecutionController({
+			getAgent: () => ({ state: { messages } }) as never,
+			getSessionManager: () =>
+				({ getCwd: () => process.cwd(), appendMessage: (message: never) => persisted.push(message) }) as never,
+			getSettingsManager: () => ({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+			isStreaming: () => false,
+			redactSensitiveText: (text) => text.replaceAll("active-project-token", "[REDACTED_SECRET]"),
+		});
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, options) => {
+				options.onData(Buffer.from("active-project-token"));
+				return { exitCode: 0 };
+			},
+		};
+
+		const result = await controller.executeBash("consumer active-project-token", undefined, {
+			operations,
+			platform: "linux",
+		});
+
+		expect(result.output).toBe("active-project-token");
+		expect(messages).toMatchObject([{ command: "consumer [REDACTED_SECRET]", output: "[REDACTED_SECRET]" }]);
+		expect(persisted).toEqual(messages);
+	});
+
 	it("applies a bounded default and the same Windows shell contract as the agent tool (engine disabled)", async () => {
 		const controller = makeController();
 		let executedCommand = "";

@@ -47,6 +47,8 @@ export interface RunProcessToolOptions {
 	policy: OrchestrationExecutionPolicy;
 	maxWallClockMs: number;
 	spawn?: typeof spawnProcess;
+	/** Additional environment resolved for the execution cwd; the policy allowlist still applies. */
+	environment?: (cwd: string) => NodeJS.ProcessEnv;
 }
 
 const SAFE_ENVIRONMENT_VARIABLES = [
@@ -59,12 +61,14 @@ const SAFE_ENVIRONMENT_VARIABLES = [
 	"TMP",
 	"TEMP",
 ] as const;
+const OWNER_CONTROL_PLANE_ENVIRONMENT_VARIABLES = new Set(["BW_SESSION"]);
 
-function scopedEnvironment(allowedNames: readonly string[]): NodeJS.ProcessEnv {
+function scopedEnvironment(allowedNames: readonly string[], additional: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const names = new Set<string>([...SAFE_ENVIRONMENT_VARIABLES, ...allowedNames]);
 	const environment: NodeJS.ProcessEnv = {};
 	for (const name of names) {
-		const value = process.env[name];
+		if (OWNER_CONTROL_PLANE_ENVIRONMENT_VARIABLES.has(name)) continue;
+		const value = additional[name] ?? process.env[name];
 		if (value !== undefined) environment[name] = value;
 	}
 	return environment;
@@ -172,6 +176,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 		promptSnippet: "Run an owner-allowed executable through a constrained direct-argv launcher (not OS isolation).",
 		promptGuidelines: [
 			"Use only an executable listed by the profile. Arguments are passed literally; shell operators and interpolation are unavailable.",
+			"Owner-authorized project credentials are injected only when their variable names are also allowed by the execution profile.",
 			"Treat a non-zero exit code, timeout, abort, or output-limit termination as failure.",
 		],
 		parameters: runProcessSchema,
@@ -185,7 +190,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 			let outputLimitReached = false;
 			const child = (options.spawn ?? spawnProcess)(input.executable, [...args], {
 				cwd,
-				env: scopedEnvironment(options.policy.allowedEnvironmentVariables),
+				env: scopedEnvironment(options.policy.allowedEnvironmentVariables, options.environment?.(cwd) ?? {}),
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
 			});

@@ -303,16 +303,30 @@ export {
 	SessionReplacementRuntimeError,
 } from "./core/sdk.ts";
 export {
-	type SecretEnvDestinationState,
-	type SecretMaterializationResult,
-	type SecretProfileSummary,
-	type SecretRemovalResult,
-	type SecretVariableValue,
-	SecretVault,
-	SecretVaultError,
-	type SecretVaultErrorCode,
-	type SecretVaultOptions,
-} from "./core/secrets/secret-vault.ts";
+	BitwardenCredentialStorage,
+	BitwardenCredentialStorageError,
+	type BitwardenCredentialStorageErrorCode,
+	type BitwardenCredentialStorageOptions,
+} from "./core/secrets/bitwarden-credential-storage.ts";
+export {
+	type CredentialActivationResult,
+	type CredentialConnectionStatus,
+	CredentialManager,
+	CredentialManagerError,
+	type CredentialManagerErrorCode,
+	type CredentialManagerOptions,
+	type CredentialMutationResult,
+	type CredentialProfileRecord,
+	type CredentialProfileStorage,
+	type CredentialProfileSummary,
+	type CredentialProjectIdentity,
+	type CredentialProjectResolver,
+	CredentialStorageError,
+	type CredentialStorageErrorCode,
+	type CredentialVariable,
+	type StoredCredentialProfileSummary,
+} from "./core/secrets/credential-manager.ts";
+export { createPortableGitProjectKey, resolveCredentialProject } from "./core/secrets/credential-project.ts";
 export {
 	type CompactionSettings,
 	type DirectoryResourceProfileInfo,

@@ -101,7 +101,7 @@ function parseUnquotedValue(raw: string): string {
 }
 
 /**
- * Parse the practical dotenv surface Pi materializes: comments, blank lines, optional `export`,
+ * Parse the practical dotenv surface Pi accepts for provider-backed credential profiles: comments, blank lines, optional `export`,
  * unquoted values, and single/double/backtick quoted values (including multiline quoted values).
  * Error messages contain only a line number and grammar reason, never the rejected value.
  */

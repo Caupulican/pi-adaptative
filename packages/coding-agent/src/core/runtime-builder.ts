@@ -38,6 +38,7 @@ import { isAbsolute, join } from "node:path";
 import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { managedSecretEnvDir, secretVaultFile } from "./agent-paths.ts";
 import type {
 	IsolatedCompletionOptions,
 	IsolatedCompletionResult,
@@ -87,8 +88,13 @@ import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blocker
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
-import { wrapToolWithCredentialExposureGuard } from "./secrets/credential-exposure-guard.ts";
-import { SecretVault } from "./secrets/secret-vault.ts";
+import { BitwardenCredentialStorage } from "./secrets/bitwarden-credential-storage.ts";
+import {
+	type CredentialExposureBoundary,
+	wrapToolWithCredentialExposureGuard,
+} from "./secrets/credential-exposure-guard.ts";
+import { CredentialManager } from "./secrets/credential-manager.ts";
+import { resolveCredentialProject } from "./secrets/credential-project.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getSessionRole, isWorkerSession, WORKER_FORBIDDEN_TOOLS } from "./session-role.ts";
 import {
@@ -390,20 +396,28 @@ export class RuntimeBuilder {
 	private readonly _explicitLiveExtensionPaths = new Set<string>();
 	private _reloadPromise: Promise<void> | undefined;
 	private _reloadRequested = false;
-	private readonly _secretVault: SecretVault;
+	private readonly _credentialManager: CredentialManager;
+	private readonly _credentialExposureBoundary: CredentialExposureBoundary;
 	private readonly _fileMutationIntents: FileMutationIntentController;
 
 	private readonly deps: RuntimeBuilderDeps;
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
-		this._secretVault = new SecretVault({
-			agentDir: deps.getAgentDir(),
+		this._credentialManager = new CredentialManager({
+			storage: new BitwardenCredentialStorage(),
+			resolveProject: resolveCredentialProject,
 			onEnvironmentChanged: () => {
 				const sessionKey = deps.getShellSessionKey();
 				disposeShellExecutionSession(sessionKey);
 			},
 		});
+		this._credentialExposureBoundary = {
+			redactSensitiveText: (text) => this._credentialManager.redactSensitiveText(text),
+			// Data from the retired local vault remains protected even though it is no longer executable.
+			protectedFiles: [secretVaultFile(deps.getAgentDir())],
+			protectedDirectories: [managedSecretEnvDir(deps.getAgentDir())],
+		};
 		this._fileMutationIntents = new FileMutationIntentController();
 	}
 
@@ -464,9 +478,17 @@ export class RuntimeBuilder {
 				),
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => [
-				wrapToolWithCredentialExposureGuard(createReadTool(toolCwd), toolCwd, this._secretVault),
-				wrapToolWithCredentialExposureGuard(createGrepTool(toolCwd, { artifactStore }), toolCwd, this._secretVault),
-				wrapToolWithCredentialExposureGuard(createFindTool(toolCwd, { artifactStore }), toolCwd, this._secretVault),
+				wrapToolWithCredentialExposureGuard(createReadTool(toolCwd), toolCwd, this._credentialExposureBoundary),
+				wrapToolWithCredentialExposureGuard(
+					createGrepTool(toolCwd, { artifactStore }),
+					toolCwd,
+					this._credentialExposureBoundary,
+				),
+				wrapToolWithCredentialExposureGuard(
+					createFindTool(toolCwd, { artifactStore }),
+					toolCwd,
+					this._credentialExposureBoundary,
+				),
 			],
 			streamFn: this.deps.getAgent().streamFn,
 			fileExists: (path) => existsSync(resolveCwdPath(cwd, path)),
@@ -515,8 +537,13 @@ export class RuntimeBuilder {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
+	get credentialManager(): CredentialManager {
+		return this._credentialManager;
+	}
+
 	/** Release session-owned mutation payload leases retained by the write/edit tool pair. */
 	dispose(): Promise<void> {
+		this._credentialManager.lock();
 		return this._fileMutationIntents.dispose();
 	}
 
@@ -596,12 +623,20 @@ export class RuntimeBuilder {
 
 		const toolRegistry = new Map(
 			wrappedBuiltInTools.map((tool) => {
-				const guarded = wrapToolWithCredentialExposureGuard(tool, this.deps.getCwd(), this._secretVault);
+				const guarded = wrapToolWithCredentialExposureGuard(
+					tool,
+					this.deps.getCwd(),
+					this._credentialExposureBoundary,
+				);
 				return [guarded.name, guarded] as const;
 			}),
 		);
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
-			const guarded = wrapToolWithCredentialExposureGuard(tool, this.deps.getCwd(), this._secretVault);
+			const guarded = wrapToolWithCredentialExposureGuard(
+				tool,
+				this.deps.getCwd(),
+				this._credentialExposureBoundary,
+			);
 			toolRegistry.set(guarded.name, guarded);
 		}
 		this._toolRegistry = toolRegistry;
@@ -798,12 +833,16 @@ export class RuntimeBuilder {
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
 				platform: process.platform,
-				spawnHook: (context) => ({
-					...context,
-					env: { ...context.env, ...this._secretVault.getEnvironmentForCwd(context.cwd) },
-				}),
+				spawnHook: (context) => {
+					const env = { ...context.env, ...this._credentialManager.getEnvironmentForCwd(context.cwd) };
+					delete env.BW_SESSION;
+					return { ...context, env };
+				},
 			},
-			python: { environment: (cwd) => this._secretVault.getEnvironmentForCwd(cwd) },
+			python: {
+				environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
+				omitEnvironmentVariables: ["BW_SESSION"],
+			},
 			write: { intentController: this._fileMutationIntents },
 			edit: { intentController: this._fileMutationIntents },
 			grep: { artifactStore: toolArtifactStore },
@@ -843,6 +882,7 @@ export class RuntimeBuilder {
 						createRunProcessToolDefinition(this.deps.getCwd(), {
 							policy: orchestrationProfile.executionPolicy,
 							maxWallClockMs: orchestrationProfile.budget.maxWallClockMs ?? 0,
+							environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
 						}),
 					);
 				}
@@ -947,7 +987,7 @@ export class RuntimeBuilder {
 				this._baseToolDefinitions.set(askQuestionToolDefinition.name, askQuestionToolDefinition);
 			}
 			if (toolAccess.allows("secret_store")) {
-				const secretStoreToolDefinition = createSecretStoreToolDefinition({ vault: this._secretVault });
+				const secretStoreToolDefinition = createSecretStoreToolDefinition({ manager: this._credentialManager });
 				this._baseToolDefinitions.set(secretStoreToolDefinition.name, secretStoreToolDefinition);
 			}
 			if (toolAccess.allows("delegate")) {

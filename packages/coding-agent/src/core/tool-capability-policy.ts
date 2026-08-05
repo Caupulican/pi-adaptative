@@ -34,7 +34,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["extensionify", policy(["source.write"], "path-scope")],
 	["goal", policy(["memory.mutate"], "memory-broker")],
 	["memory", policy(["memory.mutate", "memory.query"], "memory-broker")],
-	["secret_store", policy(["credentials.modify"], "control-plane")],
+	["secret_store", policy(["credentials.use"], "service-proxy")],
 	...["delegate", "delegate_status", "profile_writer"].map((toolName) => [toolName, DELEGATE_POLICY] as const),
 	["model_fitness", policy(["research.execute"], "control-plane")],
 ]);
@@ -101,7 +101,7 @@ export function describeToolCapabilityAuthority(toolName: string): string {
 			return "settings";
 		case "publish.execute":
 			return "publish";
-		case "credentials.modify":
+		case "credentials.use":
 			return "authentication";
 		default:
 			return "capability";

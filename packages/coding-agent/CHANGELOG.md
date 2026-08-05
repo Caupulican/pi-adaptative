@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the local `SecretVault`/dotenv-materialization API and model-driven credential mutation actions with a provider-neutral credential manager backed by Bitwarden; the model-facing `secret_store` now exposes only status, metadata listing, and project-authorized activation.
+
+### Added
+
+- Added automatic pinned `bw` provisioning, the private `/secrets` owner workflow, portable Git-project bindings, cross-machine Bitwarden sync, and in-memory credential injection for Bash, Python, and allowlisted direct processes without exposing `BW_SESSION` to model-controlled execution.
+
 ## [0.85.9] - 2026-08-05
 
 ### Added

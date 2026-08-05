@@ -4,6 +4,7 @@ import { createRunProcessTool, createRunProcessToolDefinition } from "../src/cor
 
 const originalScoped = process.env.PI_RUN_PROCESS_TEST_VISIBLE;
 const originalSecret = process.env.PI_RUN_PROCESS_TEST_SECRET;
+const originalBitwardenSession = process.env.BW_SESSION;
 
 function policy(overrides: Partial<OrchestrationExecutionPolicy> = {}): OrchestrationExecutionPolicy {
 	return {
@@ -19,6 +20,8 @@ afterEach(() => {
 	else process.env.PI_RUN_PROCESS_TEST_VISIBLE = originalScoped;
 	if (originalSecret === undefined) delete process.env.PI_RUN_PROCESS_TEST_SECRET;
 	else process.env.PI_RUN_PROCESS_TEST_SECRET = originalSecret;
+	if (originalBitwardenSession === undefined) delete process.env.BW_SESSION;
+	else process.env.BW_SESSION = originalBitwardenSession;
 });
 
 describe("run_process", () => {
@@ -48,6 +51,23 @@ describe("run_process", () => {
 
 		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("visible:");
 		expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("secret");
+	});
+
+	it("injects only allowlisted active credentials and always withholds the Bitwarden session key", async () => {
+		process.env.BW_SESSION = "owner-control-plane-key";
+		const tool = createRunProcessTool(process.cwd(), {
+			policy: policy({ allowedEnvironmentVariables: ["API_TOKEN", "BW_SESSION"] }),
+			maxWallClockMs: 5_000,
+			environment: () => ({ API_TOKEN: "active-project-token", BW_SESSION: "must-not-win" }),
+		});
+		const result = await tool.execute("call-credentials", {
+			executable: process.execPath,
+			args: ["-e", "console.log((process.env.API_TOKEN ?? '') + ':' + (process.env.BW_SESSION ?? ''))"],
+		});
+
+		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("active-project-token:");
+		expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("owner-control-plane-key");
+		expect(result.content[0]?.type === "text" ? result.content[0].text : "").not.toContain("must-not-win");
 	});
 
 	it("rejects an executable outside the immutable profile allowlist before spawn", async () => {

@@ -116,17 +116,17 @@ export function attachmentsDir(agentDir: string): string {
 	return stateFile(agentDir, "attachments");
 }
 
-/** `<agentDir>/state/secrets` -- encrypted credential vault and owner-approved materializations. */
+/** Retired local-secret state root. Current credential storage is provider-backed and never writes here. */
 export function secretsDir(agentDir: string): string {
 	return stateFile(agentDir, "secrets");
 }
 
-/** `<agentDir>/state/secrets/vault.json` -- encrypted, versioned generic credential vault. */
+/** Retired local vault path retained only so model-facing file access stays denied. */
 export function secretVaultFile(agentDir: string): string {
 	return join(secretsDir(agentDir), "vault.json");
 }
 
-/** `<agentDir>/state/secrets/materialized` -- private generated dotenv files, grouped by profile. */
+/** Retired plaintext materialization root retained only so model-facing file access stays denied. */
 export function managedSecretEnvDir(agentDir: string): string {
 	return join(secretsDir(agentDir), "materialized");
 }
