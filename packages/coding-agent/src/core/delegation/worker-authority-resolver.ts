@@ -15,17 +15,7 @@ import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
-const DEFAULT_TOOL_NAMES = [
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"write",
-	"edit",
-	"memory",
-	STABLE_SHELL_TOOL_NAME,
-	"delegate",
-] as const;
+const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls", "write", "edit", "memory", STABLE_SHELL_TOOL_NAME] as const;
 const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set([...CLASSIFIED_LANE_TOOL_NAMES, "delegate"]);
 const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"filesystem.read",
@@ -36,7 +26,6 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"network.http",
 	"service.mcp",
 	"memory.query",
-	"workflow.delegate",
 ];
 
 export interface WorkerAuthorityResolutionInput {

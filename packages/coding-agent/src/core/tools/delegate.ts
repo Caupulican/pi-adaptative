@@ -611,6 +611,16 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						},
 					};
 				}
+				if (deps.callerAgentId) {
+					return invalid(
+						"Subagent worker delegation is disabled (1-level nesting maximum). Only the root orchestrator may spawn worker agents.",
+						{
+							started: false,
+							action,
+							skipReason: "subagent_delegation_disabled",
+						},
+					);
+				}
 				const instructions = input.instructions?.trim();
 				if (!instructions)
 					return invalid("delegate start requires instructions", {

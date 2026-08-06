@@ -436,4 +436,31 @@ describe("delegate_status wait", () => {
 		expect(details.unreviewedLaneIds?.length).toBeLessThanOrEqual(64);
 		expect(details.lanes?.length).toBeLessThanOrEqual(20);
 	});
+
+	it("blocks action start when callerAgentId is set to enforce 1-level nesting maximum", async () => {
+		const startWorkerDelegation = vi.fn();
+		const tool = createDelegateToolDefinition({
+			callerAgentId: "worker-1",
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "start", instructions: "Nested delegation" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(result.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "subagent_delegation_disabled",
+		});
+		const textItem = result.content.find(
+			(item): item is Extract<typeof item, { type: "text" }> => item.type === "text",
+		);
+		expect(textItem?.text).toContain("1-level nesting maximum");
+	});
 });

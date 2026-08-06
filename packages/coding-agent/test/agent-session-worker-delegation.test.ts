@@ -7,6 +7,7 @@ import { getPrivateLaneDeniedPaths } from "../src/core/autonomy/lane-private-pat
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
+import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import {
 	buildWorkerExecutionPlan,
@@ -1916,5 +1917,23 @@ describe("AgentSession worker delegation", () => {
 		} finally {
 			harness.cleanup();
 		}
+	});
+
+	it("omits delegate tool and workflow.delegate capability from default leaf worker surface", () => {
+		const modelRegistry = {
+			find: () => ({ id: "m1", provider: "faux" }),
+			hasConfiguredAuth: () => true,
+		} as any;
+		const resolution = resolveWorkerAuthority({
+			authority: undefined,
+			base: undefined,
+			foregroundModel: { id: "m1", provider: "faux" } as any,
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) return;
+		expect(resolution.shipment.profile.toolNames).not.toContain("delegate");
+		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
 	});
 });

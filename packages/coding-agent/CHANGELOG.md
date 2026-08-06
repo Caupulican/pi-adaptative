@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Enforced a maximum 1-level delegation nesting model (orchestrator + leaf workers): removed `delegate` and `workflow.delegate` from default worker authority, and rejected nested subagent `delegate` `action: "start"` calls with `subagent_delegation_disabled`.
+
 ## [0.86.2] - 2026-08-06
 
 ### Fixed
