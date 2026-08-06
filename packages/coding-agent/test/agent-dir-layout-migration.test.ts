@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { configBackupsDir, directoryProfilesDir, stateFile } from "../src/core/agent-paths.ts";
+import { configBackupsDir, directoryProfilesDir, managedMemoryStateFile, stateFile } from "../src/core/agent-paths.ts";
 import { migrateAgentDirLayout, pruneEmptySessionNamespaces, runMigrations } from "../src/migrations.ts";
 
 describe("migrateAgentDirLayout", () => {
@@ -147,6 +147,21 @@ describe("migrateAgentDirLayout", () => {
 		expect(
 			fs.readFileSync(stateFile(agentDir, "legacy-layout", "sidecars", "auth.json.Zone.Identifier"), "utf-8"),
 		).toBe("zone\n");
+	});
+
+	it("relocates managed-memory sidecars without changing their bytes", () => {
+		const agentDir = createAgentDir();
+		const memoryState = `${JSON.stringify({ version: 1, committedDigest: "memory-digest" })}\n`;
+		const userState = `${JSON.stringify({ version: 1, committedDigest: "user-digest" })}\n`;
+		fs.writeFileSync(path.join(agentDir, "MEMORY.md.pi-managed.json"), memoryState, "utf-8");
+		fs.writeFileSync(path.join(agentDir, "USER.md.pi-managed.json"), userState, "utf-8");
+
+		migrateAgentDirLayout(agentDir);
+
+		expect(fs.existsSync(path.join(agentDir, "MEMORY.md.pi-managed.json"))).toBe(false);
+		expect(fs.existsSync(path.join(agentDir, "USER.md.pi-managed.json"))).toBe(false);
+		expect(fs.readFileSync(managedMemoryStateFile(agentDir, "MEMORY.md"), "utf-8")).toBe(memoryState);
+		expect(fs.readFileSync(managedMemoryStateFile(agentDir, "USER.md"), "utf-8")).toBe(userState);
 	});
 
 	it("is a no-op on a tree that is already fully migrated", () => {

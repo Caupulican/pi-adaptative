@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Aligned memory state sidecar paths with the `managedMemoryStateFile` SSOT, preventing root-level `.pi-managed.json` file generation beside `MEMORY.md` / `USER.md`.
+- Enhanced `migrateAgentDirLayout` to automatically discover and migrate unexpected root files and folders under `~/.pi/agent/` to their canonical `state/` directories.
+- Relaxed `wrapToolWithCredentialExposureGuard` to execute tool calls without upfront blocking errors on search or Python scope heuristics, relying on redacting loaded secrets from tool results instead.
+
 ## [0.86.1] - 2026-08-05
 
 ### Fixed

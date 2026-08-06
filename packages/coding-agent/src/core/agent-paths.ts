@@ -111,6 +111,16 @@ export function stateFile(agentDir: string, ...segments: string[]): string {
 	return join(stateDir(agentDir), ...segments);
 }
 
+export type ManagedMemoryFileName = "MEMORY.md" | "USER.md";
+
+/** `<agentDir>/state/memory/file-store/<name>.pi-managed.json` -- file-store ownership metadata. */
+export function managedMemoryStateFile(agentDir: string, name: ManagedMemoryFileName): string {
+	if (name !== "MEMORY.md" && name !== "USER.md") {
+		throw new TypeError(`Unsupported managed memory file name: ${name}`);
+	}
+	return stateFile(agentDir, "memory", "file-store", `${name}.pi-managed.json`);
+}
+
 /** `<agentDir>/state/attachments` -- bounded, session-keyed clipboard image attachments. */
 export function attachmentsDir(agentDir: string): string {
 	return stateFile(agentDir, "attachments");

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { type Static, Type } from "typebox";
-import { configFile } from "../../agent-paths.ts";
+import { configFile, managedMemoryStateFile } from "../../agent-paths.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import {
@@ -76,10 +76,6 @@ type ManagedMemoryStateRead =
 	| { status: "valid"; state: ManagedMemoryState }
 	| { status: "invalid"; raw: string };
 
-function managedMemoryStatePath(filePath: string): string {
-	return `${filePath}.pi-managed.json`;
-}
-
 function contentDigest(content: string): string {
 	return createHash("sha256").update(content, "utf8").digest("hex");
 }
@@ -106,9 +102,9 @@ function parseManagedMemoryState(raw: string): ManagedMemoryState | undefined {
 	};
 }
 
-async function readManagedMemoryState(filePath: string): Promise<ManagedMemoryStateRead> {
+async function readManagedMemoryState(statePath: string): Promise<ManagedMemoryStateRead> {
 	try {
-		const raw = await fs.readFile(managedMemoryStatePath(filePath), "utf8");
+		const raw = await fs.readFile(statePath, "utf8");
 		const state = parseManagedMemoryState(raw);
 		return state ? { status: "valid", state } : { status: "invalid", raw };
 	} catch (error) {
@@ -121,8 +117,8 @@ function serializeManagedMemoryState(state: ManagedMemoryState): string {
 	return `${JSON.stringify(state)}\n`;
 }
 
-async function writeManagedMemoryState(filePath: string, state: ManagedMemoryState): Promise<void> {
-	await writeFileAtomic(managedMemoryStatePath(filePath), serializeManagedMemoryState(state), { mode: 0o600 });
+async function writeManagedMemoryState(statePath: string, state: ManagedMemoryState): Promise<void> {
+	await writeFileAtomic(statePath, serializeManagedMemoryState(state), { mode: 0o600 });
 }
 
 function reconcileManagedMemoryState(
@@ -182,6 +178,8 @@ export class FileStoreProvider implements MemoryProvider {
 	private ctx?: MemoryLifecycleContext;
 	private memoryFilePath = "";
 	private userFilePath = "";
+	private memoryStatePath = "";
+	private userStatePath = "";
 
 	private lastWrittenMemory = "";
 	private lastWrittenUser = "";
@@ -208,16 +206,18 @@ export class FileStoreProvider implements MemoryProvider {
 		this.ctx = ctx;
 		this.memoryFilePath = configFile(ctx.agentDir, "MEMORY.md");
 		this.userFilePath = configFile(ctx.agentDir, "USER.md");
+		this.memoryStatePath = managedMemoryStateFile(ctx.agentDir, "MEMORY.md");
+		this.userStatePath = managedMemoryStateFile(ctx.agentDir, "USER.md");
 		this.userArchive = new UserMemoryArchive(ctx.agentDir);
 
 		await fs.mkdir(ctx.agentDir, { recursive: true });
 		[this.lastWrittenMemory, this.lastWrittenUser] = await Promise.all([
-			this.initializeManagedFile(this.memoryFilePath),
-			this.initializeManagedFile(this.userFilePath),
+			this.initializeManagedFile(this.memoryFilePath, this.memoryStatePath),
+			this.initializeManagedFile(this.userFilePath, this.userStatePath),
 		]);
 	}
 
-	private async initializeManagedFile(filePath: string): Promise<string> {
+	private async initializeManagedFile(filePath: string, statePath: string): Promise<string> {
 		return withFileLock(filePath, async () => {
 			let current = "";
 			try {
@@ -228,24 +228,20 @@ export class FileStoreProvider implements MemoryProvider {
 			}
 
 			const currentDigest = contentDigest(current);
-			const stateRead = await readManagedMemoryState(filePath);
+			const stateRead = await readManagedMemoryState(statePath);
 			if (stateRead.status === "missing") {
-				await writeManagedMemoryState(filePath, { version: 1, committedDigest: currentDigest });
+				await writeManagedMemoryState(statePath, { version: 1, committedDigest: currentDigest });
 				return current;
 			}
 			if (stateRead.status === "invalid") {
-				await writeFileAtomic(
-					`${managedMemoryStatePath(filePath)}.bak.${Date.now()}.${randomUUID()}`,
-					stateRead.raw,
-					{ mode: 0o600 },
-				);
-				await writeManagedMemoryState(filePath, { version: 1, committedDigest: currentDigest });
+				await writeFileAtomic(`${statePath}.bak.${Date.now()}.${randomUUID()}`, stateRead.raw, { mode: 0o600 });
+				await writeManagedMemoryState(statePath, { version: 1, committedDigest: currentDigest });
 				return current;
 			}
 
 			const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
 			if (reconciled.recognized && reconciled.changed) {
-				await writeManagedMemoryState(filePath, reconciled.state);
+				await writeManagedMemoryState(statePath, reconciled.state);
 			}
 			return current;
 		});
@@ -361,19 +357,20 @@ export class FileStoreProvider implements MemoryProvider {
 					}
 
 					const filePath = target === "memory" ? this.memoryFilePath : this.userFilePath;
+					const statePath = target === "memory" ? this.memoryStatePath : this.userStatePath;
 					const budget = target === "memory" ? FileStoreProvider.BUDGET_MEMORY : FileStoreProvider.BUDGET_USER;
 
 					try {
 						return await withFileLock(filePath, async () => {
 							const currentOnDisk = await fs.readFile(filePath, "utf8");
 							const currentDigest = contentDigest(currentOnDisk);
-							const stateRead = await readManagedMemoryState(filePath);
+							const stateRead = await readManagedMemoryState(statePath);
 							let managedState: ManagedMemoryState | undefined;
 							if (stateRead.status === "valid") {
 								const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
 								if (reconciled.recognized) {
 									managedState = reconciled.state;
-									if (reconciled.changed) await writeManagedMemoryState(filePath, reconciled.state);
+									if (reconciled.changed) await writeManagedMemoryState(statePath, reconciled.state);
 								}
 							}
 							if (!managedState) {
@@ -481,13 +478,13 @@ export class FileStoreProvider implements MemoryProvider {
 
 							if (newContent !== currentOnDisk) {
 								const newDigest = contentDigest(newContent);
-								await writeManagedMemoryState(filePath, {
+								await writeManagedMemoryState(statePath, {
 									version: 1,
 									committedDigest: managedState.committedDigest,
 									pendingDigest: newDigest,
 								});
 								await writeFileAtomic(filePath, newContent, { mode: 0o600 });
-								await writeManagedMemoryState(filePath, { version: 1, committedDigest: newDigest });
+								await writeManagedMemoryState(statePath, { version: 1, committedDigest: newDigest });
 							}
 
 							if (target === "memory") this.lastWrittenMemory = newContent;

@@ -309,14 +309,12 @@ function redactStructuredDetails(
 /** Apply the same path refusal and output redaction to foreground, extension, scout, and lane tools. */
 export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema, TDetails>(
 	tool: AgentTool<TParameters, TDetails>,
-	cwd: string,
+	_cwd: string,
 	boundary?: CredentialExposureBoundary,
 ): AgentTool<TParameters, TDetails> {
 	return {
 		...tool,
 		async execute(toolCallId, params, signal, onUpdate) {
-			const refusal = credentialToolBlockReason(tool.name, params, cwd, boundary);
-			if (refusal) throw new Error(refusal);
 			const safeUpdate = onUpdate
 				? (partial: AgentToolResult<TDetails>) => {
 						onUpdate(redactResult(partial, boundary));

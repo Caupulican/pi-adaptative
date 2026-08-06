@@ -57,7 +57,7 @@ describe("FileStoreProvider multi-session ownership", () => {
 		const agentDir = join(root, "agent");
 		const context: MemoryLifecycleContext = { agentDir, cwd: root, isChildSession: false };
 		const memoryPath = join(agentDir, "MEMORY.md");
-		const statePath = `${memoryPath}.pi-managed.json`;
+		const statePath = join(agentDir, "state", "memory", "file-store", "MEMORY.md.pi-managed.json");
 		const first = new FileStoreProvider();
 		await first.initialize("session-a", context);
 
@@ -79,5 +79,6 @@ describe("FileStoreProvider multi-session ownership", () => {
 		expect(readFileSync(memoryPath, "utf8")).toContain("A peer committed this fact");
 		expect(readFileSync(memoryPath, "utf8")).toContain("Recovery accepted the managed commit.");
 		expect(readFileSync(statePath, "utf8")).not.toContain("pendingDigest");
+		expect(() => readFileSync(`${memoryPath}.pi-managed.json`, "utf8")).toThrow();
 	});
 });

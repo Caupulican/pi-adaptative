@@ -18,7 +18,15 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
-import { configBackupsDir, directoryProfilesDir, sessionsDir, stateFile } from "./core/agent-paths.ts";
+import {
+	configBackupsDir,
+	directoryProfilesDir,
+	extensionStateDir,
+	isCanonicalAgentRootEntry,
+	managedMemoryStateFile,
+	sessionsDir,
+	stateFile,
+} from "./core/agent-paths.ts";
 import { migrateLegacyContextStores, pruneContextStores } from "./core/context/context-store-retention.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
 import { isLegacyEnvVarNameConfigValue } from "./core/resolve-config-value.ts";
@@ -552,6 +560,37 @@ export function migrateAgentDirLayout(agentDir: string): void {
 			"auth.json:Zone.Identifier",
 			stateFile(agentDir, "legacy-layout", "sidecars", "auth.json.Zone.Identifier"),
 		);
+	} catch {}
+	for (const fileName of ["MEMORY.md", "USER.md"] as const) {
+		try {
+			migrateLegacyAgentFile(agentDir, `${fileName}.pi-managed.json`, managedMemoryStateFile(agentDir, fileName));
+		} catch {}
+	}
+	try {
+		if (existsSync(agentDir)) {
+			const entries = readdirSync(agentDir);
+			for (const entry of entries) {
+				if (isCanonicalAgentRootEntry(entry)) continue;
+				if (entry === "MEMORY.md.pi-managed.json" || entry === "USER.md.pi-managed.json") {
+					const fileName = entry.startsWith("MEMORY") ? "MEMORY.md" : "USER.md";
+					migrateLegacyAgentFile(agentDir, entry, managedMemoryStateFile(agentDir, fileName));
+				} else {
+					const fullPath = join(agentDir, entry);
+					try {
+						const stats = lstatSync(fullPath);
+						if (stats.isDirectory() && !stats.isSymbolicLink()) {
+							const KNOWN_EXTENSIONS = new Set(["automator", "gh-scavenger", "trello"]);
+							const targetDir = KNOWN_EXTENSIONS.has(entry)
+								? extensionStateDir(agentDir, entry)
+								: stateFile(agentDir, "legacy-layout", entry);
+							migrateLegacyAgentDirectory(agentDir, entry, targetDir);
+						} else if (stats.isFile() && !stats.isSymbolicLink()) {
+							migrateLegacyAgentFile(agentDir, entry, stateFile(agentDir, "legacy-layout", "root-files", entry));
+						}
+					} catch {}
+				}
+			}
+		}
 	} catch {}
 	pruneEmptySessionNamespaces(agentDir);
 }
