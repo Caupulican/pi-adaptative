@@ -1,5 +1,5 @@
-import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
-import type { AssistantMessage, Message } from "@caupulican/pi-ai/types";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import type { Message } from "@caupulican/pi-ai/types";
 import { describe, expect, it } from "vitest";
 import { STABLE_SHELL_TOOL_NAME } from "../src/core/default-tool-surface.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -27,7 +27,7 @@ function treeControl(session: object): AgentTreeControl {
 }
 
 describe("recursive worker orchestration", () => {
-	it("lets a parent yield the default single scheduler slot and consume its child's terminal handoff", async () => {
+	it("rejects subagent start calls with subagent_delegation_disabled under 1-level nesting maximum", async () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "recursive-wait",
 			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
@@ -40,36 +40,24 @@ describe("recursive worker orchestration", () => {
 				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Produce child evidence." })], {
 					stopReason: "toolUse",
 				}),
-				fauxAssistantMessage(
-					[fauxToolCall("delegate", { action: "wait", agentId: "worker-2", timeoutMs: 10_000 })],
-					{ stopReason: "toolUse" },
-				),
-				fauxAssistantMessage('{"summary":"CHILD_TERMINAL_EVIDENCE","status":"completed"}'),
-				fauxAssistantMessage(
-					[fauxToolCall("delegate", { action: "transcript", agentId: "worker-2", maxMessages: 16 })],
-					{ stopReason: "toolUse" },
-				),
-				fauxAssistantMessage('{"summary":"parent integrated child evidence","status":"completed"}'),
+				fauxAssistantMessage('{"summary":"handled disabled subagent delegation","status":"completed"}'),
 			]);
 
 			const parent = await harness.session.runWorkerDelegationOnce({
-				instructions: "Delegate, wait event-first, and inspect the child transcript.",
+				instructions: "Attempt nested delegation.",
 			});
 
 			expect(parent.record?.status).toBe("succeeded");
-			expect(harness.settingsManager.getWorkerDelegationSettings().maxConcurrent).toBe(1);
-			expect(harness.getPendingResponseCount()).toBe(0);
 			const parentTranscript = treeControl(harness.session).readWorkerAgentTranscript("worker-1", {
 				maxMessages: 64,
 			});
-			expect(JSON.stringify(parentTranscript.messages)).toContain("CHILD_TERMINAL_EVIDENCE");
-			expect(JSON.stringify(parentTranscript.messages)).toContain("Worker terminal handoff");
+			expect(JSON.stringify(parentTranscript.messages)).toContain("subagent_delegation_disabled");
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("lets a worker recursively delegate inherited authority without a depth or fan-out profile grant", async () => {
+	it("prevents subagents from spawning nested worker agents", async () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "recursive-handoff",
 			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
@@ -80,106 +68,23 @@ describe("recursive worker orchestration", () => {
 			workerOrchestrationProfile: profile,
 			settings: { workerDelegation: { enabled: true, maxConcurrent: 3 } },
 		});
-		let releaseChild!: () => void;
-		const childResponse = new Promise<AssistantMessage>((resolve) => {
-			releaseChild = () => resolve(fauxAssistantMessage('{"summary":"child complete","status":"completed"}'));
-		});
-		const terminalLaneIds = new Set<string>();
-		let signalTreeTerminal!: () => void;
-		let signalFinalWakeReply!: () => void;
-		const treeTerminal = new Promise<void>((resolve) => {
-			signalTreeTerminal = resolve;
-		});
-		const finalWakeReply = new Promise<void>((resolve) => {
-			signalFinalWakeReply = resolve;
-		});
-		const unsubscribe = harness.session.subscribe((event) => {
-			if (event.type === "delegate_workers") {
-				for (const record of event.terminalSinceFlush) terminalLaneIds.add(record.laneId);
-				if (terminalLaneIds.size === 3) signalTreeTerminal();
-			}
-			if (
-				event.type === "message_end" &&
-				event.message.role === "assistant" &&
-				JSON.stringify(event.message.content).includes("foreground observed continuation terminal")
-			) {
-				signalFinalWakeReply();
-			}
-		});
 		try {
-			let rootCalls = 0;
-			let foregroundHandoffs = 0;
-			const routeResponse: FauxResponseFactory = (context) => {
-				const messages = JSON.stringify(context.messages);
-				const isWorker =
-					context.systemPrompt?.includes("autonomous agent in a durable orchestration tree") ?? false;
-				if (!isWorker) {
-					foregroundHandoffs += 1;
-					return fauxAssistantMessage(
-						foregroundHandoffs === 1
-							? '{"summary":"foreground observed root terminal","status":"completed"}'
-							: '{"summary":"foreground observed continuation terminal","status":"completed"}',
-					);
-				}
-				if (messages.includes("Worker terminal handoff")) {
-					return fauxAssistantMessage('{"summary":"parent integrated terminal handoff","status":"completed"}');
-				}
-				if (messages.includes("Delegate one child and report when it starts.")) {
-					rootCalls += 1;
-					return rootCalls === 1
-						? fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Inspect the child invariant." })], {
-								stopReason: "toolUse",
-							})
-						: fauxAssistantMessage('{"summary":"parent complete","status":"completed"}');
-				}
-				return childResponse;
-			};
 			harness.setResponses([
-				routeResponse,
-				routeResponse,
-				routeResponse,
-				routeResponse,
-				routeResponse,
-				routeResponse,
+				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Attempt child spawn" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage('{"summary":"subagent complete","status":"completed"}'),
 			]);
 
 			const parent = await harness.session.runWorkerDelegationOnce({
-				instructions: "Delegate one child and report when it starts.",
+				instructions: "Delegate worker.",
 			});
 			expect(parent.record?.status).toBe("succeeded");
-			releaseChild();
-			await Promise.all([treeTerminal, finalWakeReply]);
-			expect(terminalLaneIds.size).toBe(3);
-			expect(harness.session.getLaneRecords().filter((record) => record.type === "worker")).toEqual([
-				expect.objectContaining({ status: "succeeded" }),
-				expect.objectContaining({ status: "succeeded" }),
-				expect.objectContaining({ status: "succeeded" }),
-			]);
-			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(3);
-
-			const snapshot = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
-			}).getTaskRuntimeSnapshot();
-			const agents = Object.values(snapshot.agents).sort((left, right) => left.depth - right.depth);
-			expect(agents).toHaveLength(2);
-			expect(agents[0]).toMatchObject({ rootAgentId: agents[0]?.agentId, depth: 0 });
-			expect(agents[1]).toMatchObject({
-				parentAgentId: agents[0]?.agentId,
-				rootAgentId: agents[0]?.agentId,
-				depth: 1,
-			});
-			for (const attempt of Object.values(snapshot.attempts)) {
-				expect(attempt.grant?.allowedTools).toContain("delegate");
-				expect(attempt.grant?.capabilities).toContain("workflow.delegate");
-			}
-			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(harness.session.getLaneRecords().filter((record) => record.type === "worker")).toHaveLength(1);
 		} finally {
-			unsubscribe();
-			releaseChild();
 			await harness.cleanup();
 		}
-	}, 15_000);
+	});
 
 	it("lists the complete session tree and pages exact peer transcript messages", async () => {
 		const harness = await createHarness();
@@ -458,17 +363,7 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual([
-				"read",
-				"grep",
-				"find",
-				"ls",
-				"memory",
-				"write",
-				"edit",
-				STABLE_SHELL_TOOL_NAME,
-				"delegate",
-			]);
+			expect(tools).toEqual(["read", "grep", "find", "ls", "memory", "write", "edit", STABLE_SHELL_TOOL_NAME]);
 		} finally {
 			await harness.cleanup();
 		}
