@@ -58,6 +58,7 @@ import * as autonomyCommands from "./autonomy-commands.ts";
 import * as clipboardInput from "./clipboard-input.ts";
 import * as compactionQueue from "./compaction-queue.ts";
 import { ActivityLaneComponent, type ActivityLaneKind } from "./components/activity-lane.ts";
+import { AgentsOverlay } from "./components/agents-overlay.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -557,6 +558,7 @@ export class InteractiveMode {
 				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
 				hint("app.model.select", "to select model"),
 				hint("app.tools.expand", "to load history / expand tools"),
+				hint("app.agents.open", "to show live agents"),
 				hint("app.thinking.toggle", "to expand thinking"),
 				hint("app.editor.external", "for external editor"),
 				rawKeyHint("/", "for commands"),
@@ -1340,6 +1342,7 @@ export class InteractiveMode {
 			showModelSelector: (input) => this.showModelSelector(input),
 			loadTuiHistoryOnDemand: () => this.loadTuiHistoryOnDemand(),
 			showTranscriptPager: () => this.showTranscriptPager(),
+			toggleAgentsOverlay: () => this.toggleAgentsOverlay(),
 			toggleThinkingBlockVisibility: () => this.toggleThinkingBlockVisibility(),
 			openExternalEditor: () => this.openExternalEditor(),
 			handleFollowUp: () => this.handleFollowUp(),
@@ -1815,6 +1818,29 @@ export class InteractiveMode {
 				this.tuiHistoryLoadInProgress = false;
 			}
 		})();
+	}
+
+	private agentsOverlayHandle: ReturnType<TUI["showOverlay"]> | undefined;
+
+	private toggleAgentsOverlay(): void {
+		if (!this.hasHumanAudience) return;
+		if (this.agentsOverlayHandle) {
+			this.agentsOverlayHandle.hide();
+			this.agentsOverlayHandle = undefined;
+			return;
+		}
+		const overlay = new AgentsOverlay({
+			keybindings: this.keybindings,
+			snapshot: () => ({
+				laneRecords: this.session.getLaneRecords(),
+				items: this.activityLane?.getItems() ?? [],
+			}),
+			onClose: () => {
+				this.agentsOverlayHandle?.hide();
+				this.agentsOverlayHandle = undefined;
+			},
+		});
+		this.agentsOverlayHandle = this.ui.showOverlay(overlay, { width: "80%", maxHeight: "70%" });
 	}
 
 	private showTranscriptPager(): void {

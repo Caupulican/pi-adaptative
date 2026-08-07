@@ -23,6 +23,8 @@ export interface AppKeybindings {
 	"app.model.select": true;
 	"app.tools.expand": true;
 	"app.tools.background": true;
+	"app.agents.open": true;
+	"app.agents.close": true;
 	"app.thinking.toggle": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
@@ -110,6 +112,8 @@ export const KEYBINDINGS = {
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
 	"app.tools.background": { defaultKeys: "ctrl+b", description: "Move active tool calls to background" },
+	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle the live agents panel" },
+	"app.agents.close": { defaultKeys: "escape", description: "Close the live agents panel" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",

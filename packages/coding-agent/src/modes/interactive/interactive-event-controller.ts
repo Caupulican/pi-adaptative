@@ -175,7 +175,8 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				host.activityLane?.start({
 					id: `background-tool:${task.taskId}`,
 					kind: "tool",
-					label: `${task.toolName} · ${task.taskId}`,
+					label: task.description.trim() || `${task.toolName} · ${task.taskId}`,
+					tag: task.toolName,
 				});
 			}
 			host.ui.requestRender();
@@ -246,6 +247,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				id: `tool:${event.toolCallId}`,
 				kind: host.toolActivityKind(event.toolName),
 				label: host.toolActivityLabel(event.toolName),
+				tag: event.toolName.replace(/[_-]+/g, " ").toLowerCase(),
 			});
 			let component = host.toolPanels.getActive(event.toolCallId);
 			if (!component) {

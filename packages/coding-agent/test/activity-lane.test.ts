@@ -45,7 +45,10 @@ describe("activity lane", () => {
 
 		expect(lines).toHaveLength(1);
 		expect(text).toContain("Implementing status lane");
-		expect(text).toContain("+1");
+		// Workers aggregate into counts instead of consuming plan-slot width.
+		expect(text).toContain("1 agent");
+		// The task owns the plan slot; the goal yields to it.
+		expect(text).not.toContain("Stabilize the harness");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(62);
 	});
 
@@ -114,5 +117,109 @@ describe("activity lane", () => {
 		vi.advanceTimersByTime(2_000);
 		expect(lane.getItems()).toEqual([]);
 		lane.dispose();
+	});
+});
+
+describe("activity lane slots", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	const runtimeTurn = (label: string) => ({
+		id: "runtime:turn",
+		kind: "runtime" as const,
+		label,
+		status: "active" as const,
+	});
+	const tool = (id: string, tag: string) => ({
+		id: `background-tool:${id}`,
+		kind: "tool" as const,
+		label: `${tag} work ${id}`,
+		status: "active" as const,
+		tag,
+	});
+	const render = (items: Parameters<typeof renderActivityLaneLine>[1], width: number) =>
+		stripAnsi(renderActivityLaneLine(theme, items, width).join("\n"));
+
+	it("anchors the turn slot as 'working' and gives the plan slot to the task step", () => {
+		const taskState = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "Audit reconcile flow", activeForm: "Auditing reconcile flow", status: "in_progress" },
+			"T1",
+		);
+		const items = [
+			runtimeTurn("Confirming duplicate charge risk"),
+			...projectActivityLane({ taskState, laneRecords: [] }).active,
+		];
+		const text = render(items, 100);
+
+		expect(text).toMatch(/^\s*● working\s+Step 1\/1 · Auditing reconcile flow/);
+		// The streamed working message never competes with the plan slot.
+		expect(text).not.toContain("Confirming duplicate charge risk");
+	});
+
+	it("falls back to the working message in the plan slot when no task exists", () => {
+		const text = render([runtimeTurn("Confirming duplicate charge risk")], 80);
+		expect(text).toMatch(/^\s*● working\s+Confirming duplicate charge risk\s*$/);
+	});
+
+	it("aggregates concurrent tools by tag with a bounded group count", () => {
+		const items = [
+			runtimeTurn("Working..."),
+			tool("1", "bash"),
+			tool("2", "bash"),
+			tool("3", "python"),
+			tool("4", "ruby"),
+			tool("5", "node"),
+		];
+		const text = render(items, 100);
+		expect(text).toContain("2 bash");
+		expect(text).toContain("1 python");
+		expect(text).toContain("+1");
+		expect(text).not.toContain("tool-task");
+	});
+
+	it("shows only the newest terminal event and keeps load-bearing runtime labels in the turn slot", () => {
+		const items = [
+			{ id: "e1", kind: "tool" as const, label: "Old finish", status: "success" as const },
+			{ id: "e2", kind: "tool" as const, label: "New finish", status: "failure" as const },
+			{ id: "runtime:retry", kind: "runtime" as const, label: "Retry 2/5 in 3s", status: "waiting" as const },
+		];
+		const text = render(items, 90);
+		expect(text).toContain("Retry 2/5 in 3s");
+		expect(text).toContain("New finish");
+		expect(text).not.toContain("Old finish");
+	});
+
+	it("drops right slots before squeezing the plan slot, and never exceeds the width", () => {
+		const taskState = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "A fairly long step description that needs room", status: "in_progress" },
+			"T1",
+		);
+		const items = [
+			runtimeTurn("Working..."),
+			tool("1", "bash"),
+			tool("2", "python"),
+			{ id: "e", kind: "tool" as const, label: "Bash finished", status: "success" as const },
+			...projectActivityLane({ taskState, laneRecords: [] }).active,
+		];
+		for (const width of [24, 32, 40, 56, 72, 120]) {
+			const lines = renderActivityLaneLine(theme, items, width);
+			expect(lines.length).toBeLessThanOrEqual(1);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+		const narrow = render(items, 40);
+		expect(narrow).toContain("Step 1/1");
+		expect(narrow).not.toContain("Bash finished");
+	});
+
+	it("keeps the queued-messages label visible in the right block", () => {
+		const items = [
+			runtimeTurn("Working..."),
+			{ id: "queue:messages", kind: "queue" as const, label: "Queued 2 · 1 steering", status: "waiting" as const },
+		];
+		const text = render(items, 80);
+		expect(text).toContain("Queued 2 · 1 steering");
 	});
 });

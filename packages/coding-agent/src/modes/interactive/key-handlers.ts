@@ -34,6 +34,7 @@ export interface KeyHandlersHost {
 	showModelSelector(initialSearchInput?: string): Promise<void>;
 	loadTuiHistoryOnDemand(): void;
 	showTranscriptPager(): void;
+	toggleAgentsOverlay(): void;
 	toggleThinkingBlockVisibility(): Promise<void>;
 	openExternalEditor(): Promise<void>;
 	handleFollowUp(): Promise<void>;
@@ -88,6 +89,7 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	host.defaultEditor.onAction("app.tools.expand", () => host.loadTuiHistoryOnDemand());
 	host.defaultEditor.onBackgroundTool = () => host.session.backgroundRunningToolCalls() > 0;
 	host.defaultEditor.onAction("app.transcript.open", () => host.showTranscriptPager());
+	host.defaultEditor.onAction("app.agents.open", () => host.toggleAgentsOverlay());
 	host.defaultEditor.onAction("app.thinking.toggle", () => void host.toggleThinkingBlockVisibility());
 	host.defaultEditor.onAction("app.editor.external", () => host.openExternalEditor());
 	host.defaultEditor.onAction("app.message.followUp", () => host.handleFollowUp());
