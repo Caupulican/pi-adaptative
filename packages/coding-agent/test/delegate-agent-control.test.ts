@@ -464,3 +464,117 @@ describe("delegate_status wait", () => {
 		expect(textItem?.text).toContain("1-level nesting maximum");
 	});
 });
+
+describe("delegate persistent worker reuse", () => {
+	it("dispatches a new task onto an idle worker's persistent context instead of minting a fresh agent", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "fresh-lane", type: "worker" as const, status: "queued" as const },
+		}));
+		const followUpWorkerAgent = vi.fn(() => ({
+			started: true,
+			steering: false,
+			messageId: "m1",
+			record: { laneId: "task-2", type: "worker" as const, status: "queued" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({
+				waitForWorkerAgent: async () => ({ status: "idle" }),
+				followUpWorkerAgent,
+			}),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "start", agentId: "worker-1", instructions: "Now audit SysMain too" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(followUpWorkerAgent).toHaveBeenCalledWith("worker-1", "Now audit SysMain too");
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(result.details).toMatchObject({
+			started: true,
+			action: "start",
+			agentId: "worker-1",
+			laneId: "task-2",
+			queued: true,
+		});
+	});
+
+	it("rejects reuse of a busy or unknown worker with an explicit reason", async () => {
+		const followUpWorkerAgent = vi.fn();
+		const makeTool = (status: "active" | "suspended" | "unknown") =>
+			createDelegateToolDefinition({
+				runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+				workerAgentControl: workerAgentControl({
+					waitForWorkerAgent: async () => ({ status }),
+					followUpWorkerAgent: followUpWorkerAgent as never,
+				}),
+			});
+
+		const busy = await makeTool("active").execute(
+			"call",
+			{ action: "start", agentId: "worker-1", instructions: "task" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(busy.details).toMatchObject({ started: false, skipReason: "worker_active" });
+
+		const unknown = await makeTool("unknown").execute(
+			"call",
+			{ action: "start", agentId: "ghost", instructions: "task" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(unknown.details).toMatchObject({ started: false, skipReason: "unknown_agent" });
+		expect(followUpWorkerAgent).not.toHaveBeenCalled();
+	});
+
+	it("rejects reuse that tries to replace the worker's admitted authority", async () => {
+		const tool = createDelegateToolDefinition({
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgent: async () => ({ status: "idle" }) }),
+		});
+		const result = await tool.execute(
+			"call",
+			{
+				action: "start",
+				agentId: "worker-1",
+				instructions: "task",
+				authority: { budget: { maxTokens: 9_000 } },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.details).toMatchObject({ started: false, skipReason: "reuse_keeps_admitted_authority" });
+	});
+
+	it("reports live activity per agent in list so idle workers are discoverable", async () => {
+		const tool = createDelegateToolDefinition({
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({
+				listWorkerAgents: () =>
+					[
+						{ agentId: "worker-1", createdAt: "T0", depth: 1 },
+						{ agentId: "worker-2", createdAt: "T1", depth: 1 },
+					] as never,
+				waitForWorkerAgent: async (agentId) => ({ status: agentId === "worker-1" ? "idle" : "active" }),
+			}),
+		});
+		const result = await tool.execute("call", { action: "list" }, undefined, undefined, context);
+		const textItem = result.content.find(
+			(item): item is Extract<typeof item, { type: "text" }> => item.type === "text",
+		);
+		const payload = JSON.parse(textItem?.text ?? "{}");
+		expect(payload.agents).toEqual([
+			expect.objectContaining({ agentId: "worker-1", activity: "idle" }),
+			expect.objectContaining({ agentId: "worker-2", activity: "active" }),
+		]);
+	});
+});

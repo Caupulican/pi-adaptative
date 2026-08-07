@@ -8,7 +8,8 @@ describe("delegate tool description varies by wiring mode", () => {
 		});
 
 		expect(definition.description).toContain("inherits the caller's execution authority");
-		expect(definition.description).toContain("no depth or fan-out cap");
+		expect(definition.description).toContain("Workers are persistent specialists");
+		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
 		expect(definition.description).toContain("transcript pages exact durable peer messages");
 		expect(definition.description).toContain("wait is event-driven");
 		expect(definition.description).not.toContain("delegate_status");
@@ -32,7 +33,8 @@ describe("delegate tool description varies by wiring mode", () => {
 
 		// Core capability wording is preserved alongside the async addendum.
 		expect(definition.description).toContain("inherits the caller's execution authority");
-		expect(definition.description).toContain("no depth or fan-out cap");
+		expect(definition.description).toContain("Workers are persistent specialists");
+		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
 		expect(definition.description).toContain("returns immediately");
 		expect(definition.description).toContain("delegate_status");
 		expect(definition.description).toContain("does not wait for the worker to finish");

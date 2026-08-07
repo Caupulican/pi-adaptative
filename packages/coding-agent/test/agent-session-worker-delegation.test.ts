@@ -741,6 +741,46 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("persists a worker's conversation across tasks: a reused agent keeps its prior task context", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage('{"summary":"first task done","status":"completed"}')]);
+			const initial = await harness.session.runWorkerDelegationOnce({
+				instructions: "Memorize the codeword ZEPHYR-9 for later tasks",
+			});
+			if (!initial.started || !initial.record) throw new Error("Expected the initial worker task to complete.");
+
+			harness.setResponses([fauxAssistantMessage('{"summary":"second task done","status":"completed"}')]);
+			const controls = (
+				harness.session as unknown as {
+					_backgroundLanes: {
+						followUpWorkerAgent(
+							agentId: string,
+							message: string,
+						): { started: boolean; record?: { laneId: string } };
+						readWorkerAgentTranscript(
+							agentId: string,
+							options?: { maxMessages?: number },
+						): { totalMessages: number; messages: unknown[] };
+					};
+				}
+			)._backgroundLanes;
+			const agentId = initial.record.laneId;
+			const followUp = controls.followUpWorkerAgent(agentId, "Recall the codeword from the previous task");
+			expect(followUp.started).toBe(true);
+			// The follow-up is a NEW task (fresh lane) dispatched onto the SAME durable conversation.
+			expect(followUp.record?.laneId).not.toBe(initial.record.laneId);
+
+			await vi.waitFor(() => {
+				const transcript = JSON.stringify(controls.readWorkerAgentTranscript(agentId, { maxMessages: 64 }));
+				expect(transcript).toContain("ZEPHYR-9");
+				expect(transcript).toContain("Recall the codeword from the previous task");
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("interrupts a leased logical-agent turn before provider execution begins", async () => {
 		const harness = await createHarness();
 		try {
@@ -1935,5 +1975,29 @@ describe("AgentSession worker delegation", () => {
 		if (!resolution.ok) return;
 		expect(resolution.shipment.profile.toolNames).not.toContain("delegate");
 		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
+	});
+
+	it("rejects non-viable token grants at admission instead of starving the worker mid-flight", () => {
+		const modelRegistry = {
+			find: () => ({ id: "m1", provider: "faux" }),
+			hasConfiguredAuth: () => true,
+		} as any;
+		const resolve = (maxTokens?: number) =>
+			resolveWorkerAuthority({
+				authority: maxTokens === undefined ? undefined : { budget: { maxTokens } },
+				base: undefined,
+				foregroundModel: { id: "m1", provider: "faux" } as any,
+				modelRegistry,
+				isModelExhausted: () => false,
+			});
+
+		const rejected = resolve(3_000);
+		expect(rejected.ok).toBe(false);
+		if (rejected.ok) return;
+		expect(rejected.reason).toBe("token_budget_below_floor:requested=3000,min=5000");
+
+		expect(resolve(5_000).ok).toBe(true);
+		// Unbounded grants remain valid: the floor only guards explicit non-viable limits.
+		expect(resolve(undefined).ok).toBe(true);
 	});
 });

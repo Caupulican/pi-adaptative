@@ -37,7 +37,13 @@ function createDelegateSchema() {
 			budget: Type.Optional(
 				Type.Object(
 					{
-						maxTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+						maxTokens: Type.Optional(
+							Type.Integer({
+								minimum: 0,
+								description:
+									"Budget-counted work tokens (cache reads charge at 10%). Grants below 5000 are rejected as non-viable: a worker's first response alone costs ~3500.",
+							}),
+						),
 						maxWallClockMs: Type.Optional(Type.Integer({ minimum: 0 })),
 						maxCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
 						maxAttempts: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -78,7 +84,8 @@ function createDelegateSchema() {
 			agentId: Type.Optional(
 				Type.String({
 					maxLength: 512,
-					description: "Stable logical worker id returned by start; never substitute a transient task lane.",
+					description:
+						"Stable logical worker id returned by start; never substitute a transient task lane. With start: dispatch this task onto that existing worker's persistent context instead of creating a fresh agent.",
 				}),
 			),
 			message: Type.Optional(
@@ -172,7 +179,7 @@ export interface DelegateToolDependencies {
 }
 
 const DELEGATE_DESCRIPTION_CORE =
-	"Create agents recursively and coordinate the complete session orchestration tree. A child inherits the caller's execution authority by default and may select a loaded profile as a preset; inherited authority can narrow but never escalate beyond the root grant. There is no depth or fan-out cap: the host scheduler manages concurrency, cumulative budgets, leases, cancellation, and exact-cycle detection. list discovers peers; transcript pages exact durable peer messages; send/follow_up carry thread and reply metadata; wait is event-driven. interrupt is resumable; resume retains the admitted transcript/model/resources under a fresh fence; cancel is terminal only for the current task.";
+	"Create and coordinate persistent worker agents across the session orchestration tree. Workers are persistent specialists: each agentId keeps its durable conversation across tasks, so accumulated context is capability. PREFER REUSE: start with agentId dispatches a new task onto an existing idle worker's persistent context (omit authority/profileId; the worker keeps its admitted grant). Start without agentId only for a new specialization or when prior context would mislead the task. A child inherits the caller's execution authority by default and may select a loaded profile as a preset; inherited authority can narrow but never escalate beyond the root grant. The host scheduler manages concurrency, cumulative budgets, leases, cancellation, and exact-cycle detection. list reports each agent with its live activity (idle agents are reusable); transcript pages exact durable peer messages; send/follow_up carry thread and reply metadata; wait is event-driven. interrupt is resumable; resume retains the admitted transcript/model/resources under a fresh fence; cancel is terminal only for the current task and retires nothing: the worker stays reusable.";
 
 // Synchronous wiring: no `deps.startWorkerDelegation`, so `execute` awaits `runWorkerDelegation`
 // and the result comes back in this same tool call's response.
@@ -402,7 +409,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "cursor_out_of_range",
 						});
 					const pageSize = input.maxMessages ?? 64;
-					const page = agents.slice(cursor, cursor + pageSize);
+					const control = deps.workerAgentControl;
+					// Activity tells the orchestrator which persistent workers are reusable right now.
+					const page = await Promise.all(
+						agents.slice(cursor, cursor + pageSize).map(async (agent) => ({
+							...agent,
+							activity: (
+								await (deps.callerAgentId
+									? control.waitForWorkerAgent(agent.agentId, 1, { callerAgentId: deps.callerAgentId })
+									: control.waitForWorkerAgent(agent.agentId, 1))
+							).status,
+						})),
+					);
 					const nextCursor = cursor + page.length;
 					return {
 						content: [
@@ -620,6 +638,75 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "subagent_delegation_disabled",
 						},
 					);
+				}
+				// Persistent reuse: start with agentId dispatches this task onto the existing worker's
+				// durable conversation instead of silently minting a context-free fresh agent.
+				const reuseAgentId = input.agentId?.trim();
+				if (reuseAgentId) {
+					if (!deps.workerAgentControl)
+						return invalid("delegate start with agentId is unavailable", {
+							started: false,
+							action,
+							agentId: reuseAgentId,
+							skipReason: "worker_agent_control_unavailable",
+						});
+					const reuseInstructions = input.instructions?.trim();
+					if (!reuseInstructions)
+						return invalid("delegate start requires instructions", {
+							started: false,
+							action,
+							agentId: reuseAgentId,
+							skipReason: "missing_instructions",
+						});
+					if (input.authority !== undefined || input.profileId !== undefined) {
+						return invalid(
+							"delegate start with agentId reuses the worker's admitted authority; omit authority and profileId, or start a fresh agent without agentId",
+							{
+								started: false,
+								action,
+								agentId: reuseAgentId,
+								skipReason: "reuse_keeps_admitted_authority",
+							},
+						);
+					}
+					const activity = await deps.workerAgentControl.waitForWorkerAgent(reuseAgentId, 1);
+					if (activity.status === "unknown")
+						return invalid(
+							`worker ${reuseAgentId} is unknown; use list to discover reusable agents or start without agentId`,
+							{ started: false, action, agentId: reuseAgentId, skipReason: "unknown_agent" },
+						);
+					if (activity.status !== "idle")
+						return invalid(
+							`worker ${reuseAgentId} is ${activity.status}; wait for it, send a steering message, or resume it before dispatching a new task`,
+							{ started: false, action, agentId: reuseAgentId, skipReason: `worker_${activity.status}` },
+						);
+					const followed = deps.workerAgentControl.followUpWorkerAgent(reuseAgentId, reuseInstructions);
+					if (!followed.started) {
+						return invalid(
+							`delegate start could not reuse worker ${reuseAgentId}: ${followed.skipReason ?? "not_started"}`,
+							{
+								started: false,
+								action,
+								agentId: reuseAgentId,
+								skipReason: followed.skipReason ?? "reuse_failed",
+							},
+						);
+					}
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `worker ${reuseAgentId} accepted the task on its persistent context (lane ${followed.record?.laneId ?? "queued"})`,
+							},
+						],
+						details: {
+							started: true,
+							action,
+							agentId: reuseAgentId,
+							laneId: followed.record?.laneId,
+							queued: true,
+						},
+					};
 				}
 				const instructions = input.instructions?.trim();
 				if (!instructions)

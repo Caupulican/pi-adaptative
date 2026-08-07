@@ -19,7 +19,8 @@ describe("delegate tool capability description", () => {
 		expect(definition.description).toContain("inherits the caller's execution authority");
 		expect(definition.description).toContain("loaded profile as a preset");
 		expect(definition.description).toContain("host scheduler manages concurrency");
-		expect(definition.description).toContain("no depth or fan-out cap");
+		expect(definition.description).toContain("Workers are persistent specialists");
+		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
