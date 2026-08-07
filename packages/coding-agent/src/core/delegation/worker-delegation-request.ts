@@ -146,6 +146,8 @@ export interface WorkerDelegationRequest {
 	instructions: string;
 	profileId?: string;
 	authority?: WorkerDelegationAuthorityRequest;
+	/** Tool-facing immutable birth-context selection for a newly admitted logical worker. */
+	forkTurns?: string;
 	/** Runtime-owned creator identity for recursive delegation; never accepted from a model argument. */
 	parentAgentId?: string;
 	/** Runtime-owned correlation for an automatically dispatched verifier; never model-settable. */

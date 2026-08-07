@@ -31,6 +31,8 @@ import { uuidv7 } from "../uuid.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
+/** Maximum borrowed entries one non-copying SessionManager visit may inspect. */
+export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
 
 export interface SessionHeader {
 	type: "session";
@@ -204,6 +206,9 @@ export type ReadonlySessionManager = Pick<
 	| "getLatestCustomEntryOnBranch"
 	| "getHeader"
 	| "getEntries"
+	| "getEntryCount"
+	| "visitEntries"
+	| "readEntryJsonPrefix"
 	| "getTree"
 	| "getSessionName"
 >;
@@ -585,6 +590,11 @@ function indexSessionEntryFileLocations(
 	locations: Map<string, SessionEntryFileLocation>,
 	retainedIds: ReadonlySet<string>,
 ): number {
+	const pendingIds = new Set<string>();
+	for (const id of retainedIds) {
+		if (!locations.has(id)) pendingIds.add(id);
+	}
+	if (pendingIds.size === 0) return startOffset;
 	const fd = openSync(filePath, "r");
 	const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 	let position = startOffset;
@@ -593,18 +603,19 @@ function indexSessionEntryFileLocations(
 	let prefixLength = 0;
 	let prefixParts: Buffer[] = [];
 
-	const finishLine = (): void => {
+	const finishLine = (): boolean => {
 		if (prefixLength > 0) {
 			const prefix =
 				prefixParts.length === 1
 					? prefixParts[0].toString("utf8")
 					: Buffer.concat(prefixParts, prefixLength).toString("utf8");
 			const id = /"id"\s*:\s*"([A-Za-z0-9_-]+)"/.exec(prefix)?.[1];
-			if (id && retainedIds.has(id)) locations.set(id, { offset: lineOffset, length: lineLength });
+			if (id && pendingIds.delete(id)) locations.set(id, { offset: lineOffset, length: lineLength });
 		}
 		lineLength = 0;
 		prefixLength = 0;
 		prefixParts = [];
+		return pendingIds.size === 0;
 	};
 
 	try {
@@ -626,8 +637,9 @@ function indexSessionEntryFileLocations(
 					prefixLength += retainedLength;
 				}
 				if (newlineIndex === -1 || newlineIndex >= bytesRead) break;
-				finishLine();
-				lineOffset = chunkOffset + newlineIndex + 1;
+				const nextLineOffset = chunkOffset + newlineIndex + 1;
+				if (finishLine()) return nextLineOffset;
+				lineOffset = nextLineOffset;
 				segmentStart = newlineIndex + 1;
 			}
 		}
@@ -1167,28 +1179,49 @@ export class SessionManager {
 	}
 
 	private _ensureEntryFileLocations(retainedIds: ReadonlySet<string>): void {
-		if (!this.sessionFile || !existsSync(this.sessionFile)) return;
+		if (retainedIds.size === 0 || !this.sessionFile || !existsSync(this.sessionFile)) return;
 		const fileBytes = statSync(this.sessionFile).size;
 		if (fileBytes < this.indexedSessionFileBytes) this._resetEntryFileIndex();
-		if (fileBytes === this.indexedSessionFileBytes) return;
-		const idsToIndex = new Set(this.coldPayloadEntryIds);
-		for (const id of retainedIds) idsToIndex.add(id);
+		const allLocated = (): boolean => {
+			for (const id of retainedIds) {
+				if (!this.entryFileLocations.has(id)) return false;
+			}
+			return true;
+		};
+		if (allLocated()) return;
+		const scanStart = this.indexedSessionFileBytes;
+		if (fileBytes > scanStart) {
+			this.indexedSessionFileBytes = indexSessionEntryFileLocations(
+				this.sessionFile,
+				scanStart,
+				this.entryFileLocations,
+				retainedIds,
+			);
+			if (allLocated()) return;
+		}
+		// The missing target may precede the incremental cursor. Rebuild only for the bounded
+		// requested set; forward sequential pages continue from the exact prior line boundary.
+		if (scanStart === 0) return;
+		this._resetEntryFileIndex();
 		this.indexedSessionFileBytes = indexSessionEntryFileLocations(
 			this.sessionFile,
-			this.indexedSessionFileBytes,
+			0,
 			this.entryFileLocations,
-			idsToIndex,
+			retainedIds,
 		);
+	}
+
+	private _getEntryFileLocation(entryId: string): SessionEntryFileLocation | undefined {
+		let location = this.entryFileLocations.get(entryId);
+		if (location) return location;
+		this._ensureEntryFileLocations(new Set([entryId]));
+		location = this.entryFileLocations.get(entryId);
+		return location;
 	}
 
 	private _readCompactedMessageProperty(entryId: string, property: "content" | "output"): unknown {
 		if (!this.sessionFile) throw new Error(`Compacted session payload ${entryId} is unavailable`);
-		let location = this.entryFileLocations.get(entryId);
-		if (!location) {
-			this._resetEntryFileIndex();
-			this._ensureEntryFileLocations(new Set([entryId]));
-			location = this.entryFileLocations.get(entryId);
-		}
+		const location = this._getEntryFileLocation(entryId);
 		if (!location) throw new Error(`Compacted session payload ${entryId} is unavailable`);
 		const fd = openSync(this.sessionFile, "r");
 		const buffer = Buffer.allocUnsafe(location.length);
@@ -1603,6 +1636,69 @@ export class SessionManager {
 	/** Return current session entry count without allocating a defensive entries array. */
 	getEntryCount(): number {
 		return this.entries.length;
+	}
+
+	/**
+	 * Visit one bounded entry range without allocating an entries slice or cloning payloads.
+	 * Entries are borrowed read-only for the callback duration. `persistedBytes` is a conservative
+	 * serialized-size signal for disk-backed cold payloads; infinity means the payload cannot be
+	 * restored through the bounded index and consumers must skip it.
+	 */
+	visitEntries(
+		startIndex: number,
+		maxEntries: number,
+		visitor: (entry: Readonly<SessionEntry>, index: number, persistedBytes?: number) => void,
+	): number {
+		if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex > this.entries.length) {
+			throw new TypeError("Session entry visit start index is invalid.");
+		}
+		if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > MAX_SESSION_ENTRY_VISIT_COUNT) {
+			throw new TypeError(`Session entry visit count must be from 1 through ${MAX_SESSION_ENTRY_VISIT_COUNT}.`);
+		}
+		const endIndex = Math.min(this.entries.length, startIndex + maxEntries);
+		const visitedColdPayloadEntryIds = new Set<string>();
+		for (let index = startIndex; index < endIndex; index += 1) {
+			const entryId = this.entries[index]!.id;
+			if (this.coldPayloadEntryIds.has(entryId)) visitedColdPayloadEntryIds.add(entryId);
+		}
+		if (visitedColdPayloadEntryIds.size > 0) this._ensureEntryFileLocations(visitedColdPayloadEntryIds);
+		for (let index = startIndex; index < endIndex; index += 1) {
+			const entry = this.entries[index]!;
+			const coldPayload = this.coldPayloadEntryIds.has(entry.id);
+			const persistedBytes = coldPayload
+				? (this.entryFileLocations.get(entry.id)?.length ?? Number.POSITIVE_INFINITY)
+				: undefined;
+			visitor(entry, index, persistedBytes);
+		}
+		return endIndex;
+	}
+
+	/**
+	 * Read only a bounded UTF-8 prefix of one persisted entry's canonical JSONL record.
+	 * This lets owners classify cold payloads without invoking a disk-backed message getter or
+	 * allocating the complete retained line. Returns undefined for in-memory or unknown entries.
+	 */
+	readEntryJsonPrefix(entryId: string, maxBytes: number): string | undefined {
+		if (!this.sessionFile || !this.byId.has(entryId)) return undefined;
+		if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > ENTRY_ID_PREFIX_BYTES) {
+			throw new TypeError(`Session entry JSON prefix bytes must be from 1 through ${ENTRY_ID_PREFIX_BYTES}.`);
+		}
+		const location = this._getEntryFileLocation(entryId);
+		if (!location) return undefined;
+		const bytesToRead = Math.min(maxBytes, location.length);
+		const buffer = Buffer.allocUnsafe(bytesToRead);
+		const fd = openSync(this.sessionFile, "r");
+		let bytesRead = 0;
+		try {
+			while (bytesRead < bytesToRead) {
+				const count = readSync(fd, buffer, bytesRead, bytesToRead - bytesRead, location.offset + bytesRead);
+				if (count === 0) break;
+				bytesRead += count;
+			}
+		} finally {
+			closeSync(fd);
+		}
+		return buffer.subarray(0, bytesRead).toString("utf8");
 	}
 
 	/**

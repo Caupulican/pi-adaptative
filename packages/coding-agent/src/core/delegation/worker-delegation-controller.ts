@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { getProcessWorkRun } from "../agent-paths.ts";
@@ -11,7 +13,7 @@ import type {
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
-import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -20,12 +22,13 @@ import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../mo
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
-import type {
-	AttemptUsageSnapshot,
-	ExecutionGrant,
-	OrchestrationProfile,
-	ResourcePointer,
-	WorkerExecutionContract,
+import {
+	type AttemptUsageSnapshot,
+	type ExecutionGrant,
+	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+	type OrchestrationProfile,
+	type ResourcePointer,
+	type WorkerExecutionContract,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
@@ -36,6 +39,7 @@ import {
 	TaskProfileWriter,
 } from "../orchestration/task-profile-writer.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
 import {
 	createWorkerExecutionContract,
 	verifierWorkerExecutionContract,
@@ -46,11 +50,14 @@ import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../setti
 import { createDelegateToolDefinition } from "../tools/delegate.ts";
 import { disposePersistentShellSession } from "../tools/shell-session.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import type { WorkerAgentControlPort } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
 import { resolveWorkerAuthority } from "./worker-authority-resolver.ts";
+import { WorkerContextForkStore, WorkerContextForkStoreError } from "./worker-context-fork-store.ts";
+import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
 	type WorkerConversation,
 	type WorkerConversationRetentionPolicy,
@@ -65,6 +72,11 @@ import {
 	type WorkerExecutionPlan,
 	workerExecutionAuthorityFromPlan,
 } from "./worker-execution-policy.ts";
+import {
+	DEFAULT_WORKER_FLEET_LIMITS,
+	evaluateNewWorkerAdmission,
+	pendingVerifierSubjectTaskIds,
+} from "./worker-fleet-limits.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
@@ -72,8 +84,12 @@ import { type ResolvedWorkerProfile, WorkerProfileResolver } from "./worker-prof
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
-import { evaluateWorkerRetry } from "./worker-retry-policy.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
+import {
+	type WorkerTerminalHandoff,
+	WorkerTerminalHandoffCoordinator,
+	type WorkerTerminalHandoffDelivery,
+} from "./worker-terminal-handoff-coordinator.ts";
 import { collectWorkerTreeBudgetSeeds, WorkerTreeBudgetCoordinator } from "./worker-tree-budget-coordinator.ts";
 import { WorkerWriteReservationCoordinator } from "./worker-write-reservation-coordinator.ts";
 
@@ -169,6 +185,22 @@ interface PreparedWorkerAgent {
 	resourceSystemPrompt: string;
 }
 
+type QueuedWorkerAttemptOutcome = { started: false; skipReason: string } | { started: true; record: LaneRecord };
+
+interface WorkerContextForkSource {
+	model: { provider: string; model: string };
+	messages: readonly AgentMessage[];
+}
+
+function workerContextModelIdentity(modelRef: string | undefined): { provider: string; model: string } {
+	if (!modelRef) throw new Error("Worker parent resume model is missing.");
+	const separator = modelRef.indexOf("/");
+	if (separator <= 0 || separator === modelRef.length - 1) {
+		throw new Error("Worker parent resume model is invalid.");
+	}
+	return { provider: modelRef.slice(0, separator), model: modelRef.slice(separator + 1) };
+}
+
 export class WorkerDelegationController {
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
@@ -180,17 +212,14 @@ export class WorkerDelegationController {
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
-	/** In-process attempt-ladder state; durable budgets remain the restart-safe ceiling. */
-	private readonly laneRetryCounts = new Map<string, number>();
-	private readonly laneRetryTimers = new Map<string, NodeJS.Timeout>();
-	private readonly terminalHandoffRetryCounts = new Map<string, number>();
-	private readonly terminalHandoffRetryTimers = new Map<string, NodeJS.Timeout>();
 	private readonly shellSessionKeys = new Set<string>();
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
 	private readonly publishedTerminalAttemptIds = new Set<string>();
-	private readonly yieldedCapacityAttemptIds = new Set<string>();
+	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
 	private readonly conversations = new WorkerConversationStore();
+	private readonly contextForks: WorkerContextForkStore;
+	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
 	private readonly inFlightLedgers = new Map<
@@ -211,23 +240,17 @@ export class WorkerDelegationController {
 		this.deps = deps;
 		this.notifications = notifications;
 		this.lifecycle = lifecycle;
+		this.contextForks = new WorkerContextForkStore({
+			agentDir: this.deps.getAgentDir(),
+			parentSessionId: this.deps.getSessionId(),
+		});
 		this.scheduler = new WorkerDispatchScheduler({
 			agentDir: this.deps.getAgentDir?.() ?? "",
 			isDisposed: () => this.deps.isDisposed(),
 			admit: (request, record) => this.workerDispatchAdmission(request, record),
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
 			run: (request, record) => this.runOnce(request, undefined, record),
-			cancel: (laneId, reasonCode) => {
-				try {
-					this.writeReservations.release(laneId);
-					const terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
-					if (terminal) this.publishTerminalRecord(terminal);
-				} catch (error) {
-					this.safeWarn(
-						`Failed to cancel durable worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-			},
+			cancel: (laneId, reasonCode) => this.cancelScheduledWorker(laneId, reasonCode),
 			warn: (message) => this.safeWarn(message),
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
@@ -235,9 +258,16 @@ export class WorkerDelegationController {
 			scheduler: this.scheduler,
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
 			publishTerminalRecord: (record) => this.publishTerminalRecord(record),
+			publishTerminalRecords: (records) => this.publishRecoveredTerminalRecords(records),
 			dispatchVerification: (recovery) => this.dispatchRecoveredVerification(recovery),
 			recoverTaskBearingMailboxTurns: () => this.agentControl.reconcileTaskBearingMailboxTurns(),
 			recoverSessionRootReplies: () => this.agentControl.reconcileSessionRootReplies(),
+			retryReady: () => {
+				if (this.deps.isDisposed()) return;
+				this.scheduler.drain();
+				this.terminalHandoffs.signal();
+				this.notifications.statusChanged();
+			},
 			warn: (message) => this.safeWarn(message),
 		});
 		this.agentControl = new WorkerAgentControlCoordinator({
@@ -249,17 +279,35 @@ export class WorkerDelegationController {
 			recoveredRequest: (attempt) => this.recovery.recoveredRequest(attempt),
 			run: (request, record) => this.runOnce(request, undefined, record),
 			scheduler: this.scheduler,
-			statusChanged: () => this.notifications.statusChanged(),
+			statusChanged: () => {
+				this.terminalHandoffs.signal();
+				this.notifications.statusChanged();
+			},
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			cancelLane: (laneId, reasonCode) => {
 				this.scheduler.dropQueued(laneId);
 				this.writeReservations.release(laneId);
 				const terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
 				if (terminal) this.publishTerminalRecord(terminal);
+				if (terminal && !this.deps.isDisposed()) this.scheduler.drain();
 				return terminal;
+			},
+			taskStartHeadroomSkipReason: (agent) => {
+				const contract = this.lifecycle.getLatestAgentAttempt(agent.agentId)?.dispatch.executionContract;
+				return contract
+					? this.workerProjectionHeadroomSkipReason(contract)
+					: "orchestration_execution_contract_missing";
 			},
 			yieldCapacity: (callerAgentId, targetAgentId) => this.yieldWorkerCapacity(callerAgentId, targetAgentId),
 			warn: (message) => this.safeWarn(message),
+		});
+		this.terminalHandoffs = new WorkerTerminalHandoffCoordinator({
+			deliver: (handoff) => this.deliverTerminalHandoff(handoff),
+			onDeliveryError: (handoff, error) => {
+				this.safeWarn(
+					`Worker terminal handoff for ${handoff.record.laneId} failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			},
 		});
 		this.agentControl.reconcileSessionRootReplies();
 		this.writeReservations = new WorkerWriteReservationCoordinator({
@@ -279,6 +327,36 @@ export class WorkerDelegationController {
 			this.deps.emit({ type: "warning", message });
 		} catch {
 			// Disposal and recovery diagnostics must never throw.
+		}
+	}
+
+	private cancelScheduledWorker(laneId: string, reasonCode: string): void {
+		try {
+			this.writeReservations.release(laneId);
+		} catch (error) {
+			this.safeWarn(
+				`Failed to release worker ${laneId} before cancellation: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			throw error;
+		}
+		let terminal: LaneRecord | undefined;
+		try {
+			terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
+		} catch (error) {
+			this.safeWarn(
+				`Failed to cancel durable worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			throw error;
+		}
+		if (!terminal) return;
+		try {
+			this.publishTerminalRecord(terminal);
+		} catch (error) {
+			// The durable cancellation is authoritative. Publication remains recoverable from its
+			// pending notification and must not make the scheduler requeue a terminal attempt.
+			this.safeWarn(
+				`Failed to publish canceled worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 	}
 
@@ -320,14 +398,31 @@ export class WorkerDelegationController {
 	}
 
 	abort(): void {
-		this.workerAbort.abort();
+		this.runTeardownStep("abort worker execution", () => this.workerAbort.abort());
 		// Bound attempts have an authoritative transcript and agent identity. A normal owner-session
 		// shutdown is an execution interruption, not an explicit worker cancellation: fence it into
 		// suspended state before the abort continuation can observe the signal.
-		const suspendedAttemptIds = new Set(
-			this.lifecycle.suspendBoundInProcessAttemptsForRestart(this.agentControl.getProcessOwnerId()),
-		);
-		for (const record of this.lifecycle.getRecords()) {
+		const suspendedAttemptIds = new Set<string>();
+		try {
+			for (const attemptId of this.lifecycle.suspendBoundInProcessAttemptsForRestart(
+				this.agentControl.getProcessOwnerId(),
+			)) {
+				suspendedAttemptIds.add(attemptId);
+			}
+		} catch (error) {
+			this.safeWarn(
+				`Failed to persist worker restart suspension during teardown: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		let records: LaneRecord[] = [];
+		try {
+			records = this.lifecycle.getRecords();
+		} catch (error) {
+			this.safeWarn(
+				`Failed to inspect durable worker records during teardown: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		for (const record of records) {
 			if (record.status !== "queued" && record.status !== "running") continue;
 			const ledger = this.inFlightLedgers.get(record.laneId);
 			if (ledger && suspendedAttemptIds.has(ledger.handle.attemptId)) {
@@ -385,17 +480,26 @@ export class WorkerDelegationController {
 				);
 			}
 		}
+		this.inFlightLedgers.clear();
 
-		this.scheduler.cancelQueued();
-		for (const timer of this.laneRetryTimers.values()) clearTimeout(timer);
-		this.laneRetryTimers.clear();
-		this.laneRetryCounts.clear();
-		for (const timer of this.terminalHandoffRetryTimers.values()) clearTimeout(timer);
-		this.terminalHandoffRetryTimers.clear();
-		this.terminalHandoffRetryCounts.clear();
-		this.writeReservations.dispose();
-		for (const shellSessionKey of this.shellSessionKeys) disposePersistentShellSession(shellSessionKey);
+		this.runTeardownStep("cancel queued worker dispatches", () => this.scheduler.cancelQueued());
+		this.runTeardownStep("dispose worker recovery", () => this.recovery.dispose());
+		this.runTeardownStep("dispose worker terminal handoffs", () => this.terminalHandoffs.dispose());
+		this.runTeardownStep("dispose worker write reservations", () => this.writeReservations.dispose());
+		for (const shellSessionKey of this.shellSessionKeys) {
+			this.runTeardownStep(`dispose worker shell ${shellSessionKey}`, () =>
+				disposePersistentShellSession(shellSessionKey),
+			);
+		}
 		this.shellSessionKeys.clear();
+	}
+
+	private runTeardownStep(label: string, step: () => void): void {
+		try {
+			step();
+		} catch (error) {
+			this.safeWarn(`Failed to ${label}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private getWorkerLifecycle(): WorkerLifecycle {
@@ -446,6 +550,7 @@ export class WorkerDelegationController {
 	/** Reconcile the session goal into an already-loaded worker runtime without defeating lazy UAC. */
 	synchronizeGoalState(goal: GoalState): void {
 		this.publishGoalTerminalRecords(this.lifecycle.synchronizeGoalState(goal));
+		if (goal.status === "active" && !this.deps.isDisposed()) this.scheduler.drain();
 	}
 
 	private publishGoalTerminalRecords(records: readonly LaneRecord[]): void {
@@ -454,6 +559,7 @@ export class WorkerDelegationController {
 			this.laneAbortControllers.get(record.laneId)?.abort("goal_terminal");
 			this.publishTerminalRecord(record);
 		}
+		if (records.length > 0 && !this.deps.isDisposed()) this.scheduler.drain();
 	}
 
 	private dispatchRecoveredVerification(
@@ -526,6 +632,37 @@ export class WorkerDelegationController {
 			: { ok: false, skipReason: `independent_verifier_unavailable:${admitted.reason}` };
 	}
 
+	/**
+	 * A descendant may select a different routing profile, but that preset cannot introduce context
+	 * its ancestor never admitted. Pointer ids alone are insufficient authority: retain only pointers
+	 * whose complete immutable metadata matches the ancestral contract, and require exact soul text.
+	 */
+	private narrowWorkerShipmentContext(
+		shipment: ResolvedWorkerProfile,
+		boundary: WorkerExecutionContract["worker"],
+	): { ok: true; shipment: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
+		const boundaryPointers = new Map(boundary.resourcePointers.map((pointer) => [pointer.id, pointer]));
+		const resourcePointers: ResourcePointer[] = [];
+		for (const pointer of shipment.resourcePointers) {
+			const inherited = boundaryPointers.get(pointer.id);
+			if (!inherited || !isDeepStrictEqual(inherited, pointer)) {
+				return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
+			}
+			resourcePointers.push(structuredClone(inherited));
+		}
+		if (shipment.soul !== undefined && shipment.soul !== boundary.soul) {
+			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
+		}
+		return {
+			ok: true,
+			shipment: {
+				...shipment,
+				resourcePointers,
+				...(shipment.soul ? { soul: shipment.soul } : {}),
+			},
+		};
+	}
+
 	private hasExactRecursiveCycle(parentAgentId: string, instructions: string, profileId: string): boolean {
 		const normalizedInstructions = instructions.trim();
 		const visited = new Set<string>();
@@ -543,6 +680,26 @@ export class WorkerDelegationController {
 			current = current.parentAgentId ? this.lifecycle.getAgent(current.parentAgentId) : undefined;
 		}
 		return false;
+	}
+
+	/** Reject a new logical identity before creating its task, transcript, agent, or queue entry. */
+	private newWorkerFleetSkipReason(request: WorkerDelegationRequest, requiredAgentSlots = 1): string | undefined {
+		const decision = evaluateNewWorkerAdmission(
+			this.lifecycle.getTaskRuntimeSnapshot().agents,
+			request.parentAgentId,
+			DEFAULT_WORKER_FLEET_LIMITS,
+			requiredAgentSlots,
+		);
+		return decision.ok ? undefined : decision.reasonCode;
+	}
+
+	private requiredAgentSlotsForAdmission(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+	): number {
+		const pendingVerifierSubjects = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
+		if (request.verificationOfTaskId) pendingVerifierSubjects.delete(request.verificationOfTaskId);
+		return 1 + pendingVerifierSubjects.size + (admission.verifierShipment ? 1 : 0);
 	}
 
 	/** Single admission contract shared by enqueue, scheduler revalidation, and execution. */
@@ -603,7 +760,12 @@ export class WorkerDelegationController {
 					isModelExhausted: (model) => this.deps.isModelExhausted(model),
 				});
 		if (!adaptive.ok) return { ok: false, skipReason: adaptive.reason };
-		const shipment = adaptive.shipment;
+		let shipment = adaptive.shipment;
+		if (parentContract) {
+			const narrowed = this.narrowWorkerShipmentContext(shipment, parentContract.worker);
+			if (!narrowed.ok) return narrowed;
+			shipment = narrowed.shipment;
+		}
 		if (parentAgent && this.hasExactRecursiveCycle(parentAgent.agentId, instructions, shipment.profile.profileId)) {
 			return { ok: false, skipReason: "recursive_delegation_cycle" };
 		}
@@ -624,6 +786,12 @@ export class WorkerDelegationController {
 			const verifier = this.resolveRequiredVerifier(shipment.profile);
 			if (!verifier.ok) return verifier;
 			verifierShipment = verifier.shipment;
+		}
+		if (verifierShipment && parentContract) {
+			const verifierBoundary = parentContract.verifier ?? parentContract.worker;
+			const narrowed = this.narrowWorkerShipmentContext(verifierShipment, verifierBoundary);
+			if (!narrowed.ok) return narrowed;
+			verifierShipment = narrowed.shipment;
 		}
 		if (!this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
 			return { ok: false, skipReason: "model_delegation_unsupported" };
@@ -650,6 +818,14 @@ export class WorkerDelegationController {
 		const executionPlan = inheritedAuthority
 			? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
 			: currentExecutionPlan;
+		const verifierExecutionPlan = verifierShipment
+			? this.buildWorkerExecutionPlan(verifierShipment.profile, settings)
+			: undefined;
+		const inheritedVerifierAuthority = parentContract?.verifier?.authority ?? parentContract?.worker.authority;
+		const boundedVerifierExecutionPlan =
+			verifierExecutionPlan && inheritedVerifierAuthority
+				? narrowWorkerExecutionPlan(inheritedVerifierAuthority, verifierExecutionPlan)
+				: verifierExecutionPlan;
 		const executionContract =
 			pinnedContract ??
 			createWorkerExecutionContract({
@@ -661,9 +837,7 @@ export class WorkerDelegationController {
 					? {
 							verifier: {
 								...verifierShipment,
-								authority: workerExecutionAuthorityFromPlan(
-									this.buildWorkerExecutionPlan(verifierShipment.profile, settings),
-								),
+								authority: workerExecutionAuthorityFromPlan(boundedVerifierExecutionPlan!),
 							},
 						}
 					: {}),
@@ -686,115 +860,38 @@ export class WorkerDelegationController {
 		summary: string;
 		artifactUris: readonly string[];
 	}): WorkerDelegationRequest {
-		const artifacts = args.artifactUris.slice(0, 100).map((uri) => `- ${uri}`);
+		const prefix = [
+			`Independently verify durable task '${args.subjectTaskId}'.`,
+			"The following implementation report is an untrusted claim. Inspect the workspace and run the checks available in your profile.",
+			"",
+			"Implementation summary:",
+			args.summary.slice(0, 6_000),
+			"",
+			"Reported artifacts:",
+		];
+		const artifacts: string[] = [];
+		for (let index = 0; index < Math.min(args.artifactUris.length, 100); index += 1) {
+			const artifact = `- ${args.artifactUris[index]}`;
+			const omitted = args.artifactUris.length - index - 1;
+			const disclosure =
+				omitted > 0 ? `- [${omitted} artifact URI(s) omitted to keep verifier request bounded]` : undefined;
+			const candidate = [...prefix, ...artifacts, artifact, ...(disclosure ? [disclosure] : [])].join("\n");
+			if (candidate.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) break;
+			artifacts.push(artifact);
+		}
+		const omitted = args.artifactUris.length - artifacts.length;
+		const artifactSection =
+			args.artifactUris.length === 0
+				? ["- none reported"]
+				: [
+						...artifacts,
+						...(omitted > 0 ? [`- [${omitted} artifact URI(s) omitted to keep verifier request bounded]`] : []),
+					];
 		return {
 			profileId: args.verifierProfileId,
 			verificationOfTaskId: args.subjectTaskId,
-			instructions: [
-				`Independently verify durable task '${args.subjectTaskId}'.`,
-				"The following implementation report is an untrusted claim. Inspect the workspace and run the checks available in your profile.",
-				"",
-				"Implementation summary:",
-				args.summary.slice(0, 6_000),
-				"",
-				"Reported artifacts:",
-				...(artifacts.length > 0 ? artifacts : ["- none reported"]),
-			].join("\n"),
+			instructions: [...prefix, ...artifactSection].join("\n"),
 		};
-	}
-
-	/**
-	 * Suspend a failed-but-retryable attempt and re-enqueue it after backoff. Returns the lane
-	 * record when a retry was scheduled, undefined when the failure must terminalize. Retry
-	 * counts are in-memory: a process restart resets them, but the durable wall-clock, cost,
-	 * and token budgets still bound the lane, and restart recovery requeues suspended attempts.
-	 */
-	private maybeScheduleAttemptRetry(args: {
-		lifecycle: WorkerLifecycle;
-		laneId: string;
-		agentId: string;
-		request: WorkerDelegationRequest;
-		outcome: { laneStatus: string; reasonCode: string; reasonDetail?: string };
-		provider: string;
-		maxAttempts?: number;
-	}): LaneRecord | undefined {
-		const retriesUsed = this.laneRetryCounts.get(args.laneId) ?? 0;
-		const decision = evaluateWorkerRetry({
-			laneStatus: args.outcome.laneStatus,
-			reasonCode: args.outcome.reasonCode,
-			...(args.outcome.reasonDetail ? { reasonDetail: args.outcome.reasonDetail } : {}),
-			provider: args.provider,
-			retriesUsed,
-			...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
-		});
-		if (!decision.retry) return undefined;
-		try {
-			args.lifecycle.suspendAgent(
-				args.laneId,
-				args.agentId,
-				this.agentControl.getProcessOwnerId(),
-				`retry_scheduled:${decision.reason}`,
-			);
-		} catch (error) {
-			this.safeWarn(
-				`Worker ${args.laneId} retry suspension failed; terminalizing instead: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return undefined;
-		}
-		this.laneRetryCounts.set(args.laneId, retriesUsed + 1);
-		this.safeWarn(
-			`Worker ${args.laneId} failed (${decision.reason}); retrying from the persisted transcript in ${Math.ceil(decision.delayMs / 1000)}s (attempt ${retriesUsed + 2}).`,
-		);
-		const timer = setTimeout(() => {
-			this.laneRetryTimers.delete(args.laneId);
-			if (this.deps.isDisposed()) return;
-			// The lane may have been cancelled or manually resumed while waiting.
-			if (args.lifecycle.getActiveAttempt(args.laneId)?.status !== "suspended") return;
-			const record = args.lifecycle.getRecord(args.laneId);
-			if (!record) return;
-			this.scheduler.enqueue(record, args.request, true);
-			this.scheduler.drain();
-			this.notifications.statusChanged();
-		}, decision.delayMs);
-		this.laneRetryTimers.set(args.laneId, timer);
-		this.notifications.statusChanged();
-		return args.lifecycle.getRecord(args.laneId);
-	}
-
-	private clearLaneRetryState(laneId: string): void {
-		this.laneRetryCounts.delete(laneId);
-		const timer = this.laneRetryTimers.get(laneId);
-		if (timer) {
-			clearTimeout(timer);
-			this.laneRetryTimers.delete(laneId);
-		}
-	}
-
-	private scheduleTerminalHandoffRetry(attemptId: string, record: LaneRecord): void {
-		if (
-			this.deps.isDisposed() ||
-			this.publishedTerminalAttemptIds.has(attemptId) ||
-			this.terminalHandoffRetryTimers.has(attemptId)
-		) {
-			return;
-		}
-		const retries = this.terminalHandoffRetryCounts.get(attemptId) ?? 0;
-		const delayMs = Math.min(100 * 2 ** Math.min(retries, 5), 5_000);
-		this.terminalHandoffRetryCounts.set(attemptId, retries + 1);
-		const timer = setTimeout(() => {
-			this.terminalHandoffRetryTimers.delete(attemptId);
-			if (this.deps.isDisposed() || this.publishedTerminalAttemptIds.has(attemptId)) return;
-			this.publishTerminalRecord(record);
-		}, delayMs);
-		timer.unref();
-		this.terminalHandoffRetryTimers.set(attemptId, timer);
-	}
-
-	private clearTerminalHandoffRetry(attemptId: string): void {
-		const timer = this.terminalHandoffRetryTimers.get(attemptId);
-		if (timer) clearTimeout(timer);
-		this.terminalHandoffRetryTimers.delete(attemptId);
-		this.terminalHandoffRetryCounts.delete(attemptId);
 	}
 
 	private publishTerminalObserversBestEffort(record: LaneRecord): void {
@@ -827,77 +924,95 @@ export class WorkerDelegationController {
 		}
 	}
 
+	private deliverTerminalHandoff(handoff: Readonly<WorkerTerminalHandoff>): WorkerTerminalHandoffDelivery {
+		const delivery = this.agentControl.deliverWorkerTerminalHandoff(handoff);
+		if (!delivery.accepted) {
+			this.safeWarn(
+				`Worker terminal handoff for ${handoff.record.laneId} was not accepted${delivery.skipReason ? `: ${delivery.skipReason}` : "."}`,
+			);
+			return "retained";
+		}
+		const notification = this.lifecycle.getTerminalNotification(handoff.record.laneId);
+		if (notification?.status === "pending") {
+			this.lifecycle.markNotificationsDelivered([notification.notificationId]);
+		}
+		this.publishedTerminalAttemptIds.add(handoff.terminalAttemptId);
+		this.publishTerminalObserversBestEffort(handoff.record);
+		try {
+			this.notifications.statusChanged();
+		} catch (error) {
+			this.safeWarn(
+				`Worker terminal status observer failed for ${handoff.record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		try {
+			this.agentControl.signalStateChanged();
+		} catch (error) {
+			this.safeWarn(
+				`Worker terminal state observer failed for ${handoff.record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		return "delivered";
+	}
+
+	private publishRecoveredTerminalRecords(records: readonly LaneRecord[]): void {
+		const handoffs: WorkerTerminalHandoff[] = [];
+		const directRecords: LaneRecord[] = [];
+		for (const record of records) {
+			this.recovery.clearScheduledRetry(record.laneId);
+			const attempt = this.lifecycle.getActiveAttempt(record.laneId);
+			if (attempt && this.publishedTerminalAttemptIds.has(attempt.attemptId)) continue;
+			const childAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
+			const parentAgentId = this.lifecycle.getAgent(childAgentId)?.parentAgentId ?? attempt?.dispatch.parentAgentId;
+			if (attempt && parentAgentId) {
+				handoffs.push({
+					terminalAttemptId: attempt.attemptId,
+					parentAgentId,
+					childAgentId,
+					record,
+				});
+			} else {
+				directRecords.push(record);
+			}
+		}
+		if (handoffs.length > 0) {
+			try {
+				this.terminalHandoffs.rehydrate(handoffs);
+			} catch (error) {
+				this.safeWarn(
+					`Worker terminal handoff recovery batch was retained durably but not adopted: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		for (const record of directRecords) this.publishTerminalRecord(record);
+	}
+
 	private publishTerminalRecord(record: LaneRecord): void {
-		this.clearLaneRetryState(record.laneId);
-		const attempt = this.lifecycle?.getActiveAttempt(record.laneId);
+		if (!isLaneTerminalStatus(record.status)) return;
+		this.recovery.clearScheduledRetry(record.laneId);
+		const attempt = this.lifecycle.getActiveAttempt(record.laneId);
 		const attemptId = attempt?.attemptId;
 		if (attemptId && this.publishedTerminalAttemptIds.has(attemptId)) return;
 		const childAgentId = attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
 		const parentAgentId = this.lifecycle.getAgent(childAgentId)?.parentAgentId ?? attempt?.dispatch.parentAgentId;
-		let handedOffToParent = false;
 		if (attemptId && parentAgentId) {
 			try {
-				const handoff = this.agentControl.deliverWorkerTerminalHandoff({
+				this.terminalHandoffs.retain({
 					parentAgentId,
 					childAgentId,
 					terminalAttemptId: attemptId,
 					record,
 				});
-				handedOffToParent = handoff.accepted;
-				if (!handoff.accepted) {
-					this.safeWarn(
-						`Worker terminal handoff for ${record.laneId} was not accepted${handoff.skipReason ? `: ${handoff.skipReason}` : "."}`,
-					);
-				}
+				this.terminalHandoffs.signal();
 			} catch (error) {
 				this.safeWarn(
-					`Worker terminal handoff for ${record.laneId} failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
-		if (attemptId && parentAgentId && !handedOffToParent) {
-			this.scheduleTerminalHandoffRetry(attemptId, record);
-			try {
-				this.agentControl.signalStateChanged();
-			} catch (error) {
-				this.safeWarn(
-					`Worker terminal retry signal failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+					`Worker terminal handoff retention for ${record.laneId} failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 			return;
 		}
-		if (handedOffToParent) {
-			const notification = this.lifecycle.getTerminalNotification(record.laneId);
-			if (notification?.status === "pending") {
-				try {
-					this.lifecycle.markNotificationsDelivered([notification.notificationId]);
-				} catch (error) {
-					this.safeWarn(
-						`Worker terminal notification commit failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-					);
-					if (attemptId) this.scheduleTerminalHandoffRetry(attemptId, record);
-					try {
-						this.agentControl.signalStateChanged();
-					} catch (signalError) {
-						this.safeWarn(
-							`Worker terminal retry signal failed for ${record.laneId}: ${signalError instanceof Error ? signalError.message : String(signalError)}`,
-						);
-					}
-					return;
-				}
-			}
-			try {
-				this.notifications.statusChanged();
-			} catch (error) {
-				this.safeWarn(
-					`Worker terminal status observer failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		} else {
-			this.recordTerminal(record);
-		}
+		this.recordTerminal(record);
 		if (attemptId) {
-			this.clearTerminalHandoffRetry(attemptId);
 			this.publishedTerminalAttemptIds.add(attemptId);
 		}
 		this.publishTerminalObserversBestEffort(record);
@@ -913,13 +1028,14 @@ export class WorkerDelegationController {
 	private cancelAndPublish(lifecycle: WorkerLifecycle, laneId: string, reasonCode: string): LaneRecord | undefined {
 		const record = lifecycle.cancel(laneId, reasonCode);
 		if (record) this.publishTerminalRecord(record);
+		if (record && !this.deps.isDisposed()) this.scheduler.drain();
 		return record;
 	}
 
 	private hasWorkerCapacity(settings: ResolvedWorkerDelegationSettings): boolean {
 		const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
 		let yielded = 0;
-		for (const attemptId of [...this.yieldedCapacityAttemptIds]) {
+		for (const attemptId of this.yieldedCapacityAttemptIds.keys()) {
 			const status = snapshot.attempts[attemptId]?.status;
 			if (status === "leased" || status === "running") yielded += 1;
 			else this.yieldedCapacityAttemptIds.delete(attemptId);
@@ -933,27 +1049,169 @@ export class WorkerDelegationController {
 		if (!caller || !target || caller.rootAgentId !== target.rootAgentId) return () => undefined;
 		const attempt = this.lifecycle.getLatestAgentAttempt(caller.agentId);
 		if (!attempt || (attempt.status !== "leased" && attempt.status !== "running")) return () => undefined;
-		this.yieldedCapacityAttemptIds.add(attempt.attemptId);
+		this.yieldedCapacityAttemptIds.set(
+			attempt.attemptId,
+			(this.yieldedCapacityAttemptIds.get(attempt.attemptId) ?? 0) + 1,
+		);
 		this.scheduler.drain();
 		let released = false;
 		return () => {
 			if (released) return;
 			released = true;
+			const leases = this.yieldedCapacityAttemptIds.get(attempt.attemptId);
+			if (leases === undefined) return;
+			if (leases > 1) {
+				this.yieldedCapacityAttemptIds.set(attempt.attemptId, leases - 1);
+				return;
+			}
 			this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
 			if (!this.deps.isDisposed()) this.scheduler.drain();
 		};
 	}
 
 	private workerDispatchAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission {
-		const contract = this.getWorkerLifecycle().getActiveAttempt(record.laneId)?.dispatch.executionContract;
+		if (this.recovery.deferRetryIfNeeded(record, request)) return { action: "wait" };
+		const lifecycle = this.getWorkerLifecycle();
+		const attempt = lifecycle.getActiveAttempt(record.laneId);
+		if (!attempt) return { action: "cancel", reasonCode: "orchestration_attempt_missing" };
+		if (attempt.status === "queued" || attempt.status === "suspended") {
+			const readiness = lifecycle.getAttemptDispatchReadiness(attempt.attemptId);
+			if (readiness.state === "waiting") {
+				return {
+					action: "wait",
+					reason: readiness.reasonCode === "objective_paused" ? "objective" : "dependencies",
+				};
+			}
+			if (readiness.state === "blocked") return { action: "cancel", reasonCode: readiness.reasonCode };
+		}
+		const contract = attempt.dispatch.executionContract;
 		const admission = this.resolveWorkerAdmission(request, contract);
 		if (!admission.ok) return { action: "cancel", reasonCode: admission.skipReason };
 		if (!this.hasWorkerCapacity(admission.settings)) return { action: "wait", reason: "capacity" };
-		const attempt = this.getWorkerLifecycle().getActiveAttempt(record.laneId);
-		if (!attempt) return { action: "cancel", reasonCode: "orchestration_attempt_missing" };
 		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
 		if (reservation.kind === "denied") return { action: "cancel", reasonCode: reservation.reasonCode };
 		return reservation.kind === "granted" ? { action: "start" } : { action: "wait", reason: "write_reservation" };
+	}
+
+	private workerProjectionHeadroomSkipReason(
+		contract: WorkerExecutionContract,
+		verificationOfTaskId?: string,
+	): string | undefined {
+		const pendingVerifierSubjects = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
+		if (verificationOfTaskId) pendingVerifierSubjects.delete(verificationOfTaskId);
+		const slots = 1 + pendingVerifierSubjects.size + (contract.verifier ? 1 : 0);
+		try {
+			this.lifecycle.ledger.runtime.assertProjectionHeadroom({ tasks: slots, attempts: slots });
+			return undefined;
+		} catch {
+			return "orchestration_projection_capacity_exhausted";
+		}
+	}
+
+	private workerQueueReservationSkipReason(
+		request: WorkerDelegationRequest,
+		requestQueueSlots: 0 | 1,
+		unpersistedVerifierSlots: 0 | 1,
+	): string | undefined {
+		const pendingVerifierSubjects = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
+		if (request.verificationOfTaskId) pendingVerifierSubjects.delete(request.verificationOfTaskId);
+		const remainingQueueSlots = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
+		return requestQueueSlots + pendingVerifierSubjects.size + unpersistedVerifierSlots > remainingQueueSlots
+			? "worker_dispatch_queue_full"
+			: undefined;
+	}
+
+	private workerContextParentModel(request: WorkerDelegationRequest): { provider: string; model: string } {
+		if (request.parentAgentId) {
+			const parent = this.lifecycle.getAgent(request.parentAgentId);
+			if (!parent) throw new Error("Worker parent logical agent is missing.");
+			return workerContextModelIdentity(parent.resumeContext.modelRef);
+		}
+		const parent = this.deps.getModel();
+		if (!parent) throw new Error("Foreground parent model is missing.");
+		return { provider: parent.provider, model: parent.id };
+	}
+
+	private workerContextForkSource(request: WorkerDelegationRequest): WorkerContextForkSource {
+		const model = this.workerContextParentModel(request);
+		if (!request.parentAgentId) {
+			return { model, messages: this.deps.getSessionManager().buildSessionContext().messages };
+		}
+		const parent = this.lifecycle.getAgent(request.parentAgentId);
+		if (!parent) throw new Error("Worker parent logical agent is missing.");
+		const conversation = this.conversations.open({
+			agentDir: this.deps.getAgentDir(),
+			resumeContext: parent.resumeContext,
+			expectedLogicalAgentId: parent.agentId,
+		});
+		return { model, messages: conversation.getProviderContext().messages };
+	}
+
+	private workerContextForkMode(
+		request: WorkerDelegationRequest,
+		contract: WorkerExecutionContract,
+	): ReturnType<typeof resolveWorkerContextInheritanceMode> {
+		if (request.verificationOfTaskId) return { kind: "none" };
+		return resolveWorkerContextInheritanceMode({
+			parent: this.workerContextParentModel(request),
+			worker: {
+				provider: contract.worker.modelBinding.provider,
+				model: contract.worker.modelBinding.modelId,
+			},
+			...(request.forkTurns !== undefined ? { mode: request.forkTurns } : {}),
+		});
+	}
+
+	private workerContextForkAdmissionSkipReason(
+		request: WorkerDelegationRequest,
+		contract: WorkerExecutionContract,
+	): string | undefined {
+		try {
+			this.workerContextForkMode(request, contract);
+			return undefined;
+		} catch {
+			return "worker_context_inheritance_denied";
+		}
+	}
+
+	/** One admission owner for every newly generated logical worker identity. */
+	private admitNewWorkerRequest(
+		request: WorkerDelegationRequest,
+		pinnedContract?: WorkerExecutionContract,
+	): WorkerAdmission {
+		const fleetSkipReason = this.newWorkerFleetSkipReason(request);
+		if (fleetSkipReason) return { ok: false, skipReason: fleetSkipReason };
+		const admission = this.resolveWorkerAdmission(request, pinnedContract);
+		if (!admission.ok) return admission;
+		const contextForkSkipReason = this.workerContextForkAdmissionSkipReason(request, admission.executionContract);
+		if (contextForkSkipReason) return { ok: false, skipReason: contextForkSkipReason };
+		if (!request.verificationOfTaskId) this.recovery.recover();
+		const headroomSkipReason = this.newWorkerFleetSkipReason(
+			request,
+			this.requiredAgentSlotsForAdmission(request, admission),
+		);
+		if (headroomSkipReason) return { ok: false, skipReason: headroomSkipReason };
+		const projectionHeadroomSkipReason = this.workerProjectionHeadroomSkipReason(
+			admission.executionContract,
+			request.verificationOfTaskId,
+		);
+		if (projectionHeadroomSkipReason) return { ok: false, skipReason: projectionHeadroomSkipReason };
+		const queueReservationSkipReason = this.workerQueueReservationSkipReason(
+			request,
+			0,
+			admission.verifierShipment ? 1 : 0,
+		);
+		return queueReservationSkipReason ? { ok: false, skipReason: queueReservationSkipReason } : admission;
+	}
+
+	private durableWorkerContextForkReferences(): WorkerContextForkReference[] {
+		const references: WorkerContextForkReference[] = [];
+		for (const attempt of Object.values(this.lifecycle.getTaskRuntimeSnapshot().attempts)) {
+			if (attempt.dispatch.birthContextForkReference) {
+				references.push(attempt.dispatch.birthContextForkReference);
+			}
+		}
+		return references;
 	}
 
 	private buildWorkerExecutionPlan(
@@ -990,21 +1248,134 @@ export class WorkerDelegationController {
 			};
 		}
 		const goal = this.deps.getGoalStateSnapshot();
-		const prepared = lifecycle.prepare({
-			instructions: admission.instructions,
-			...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
-			executionContract: admission.executionContract,
-			requiredCapabilities: admission.executionPlan.requiredCapabilities,
-			...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
-			taskContext: {
-				requirementIds: request.taskContext?.requirementIds ?? [],
-				dependsOnTaskIds: request.taskContext?.dependsOnTaskIds ?? [],
-				acceptanceCriterionIds: request.taskContext?.acceptanceCriterionIds ?? [],
-				resourcePointerIds: admission.resourcePointerIds,
-			},
-			...(goal ? { goal } : {}),
-		});
-		return { executionPlan: admission.executionPlan, lifecycle, ...prepared };
+		const mode = this.workerContextForkMode(request, admission.executionContract);
+		const messages =
+			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
+		for (let allocation = 0; allocation < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession; allocation++) {
+			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
+			let proposedReference: WorkerContextForkReference | undefined;
+			try {
+				const captured = this.contextForks.captureAndPrepare({
+					logicalAgentId: laneId,
+					messages,
+					readDurableReferences: () => this.durableWorkerContextForkReferences(),
+					isLogicalIdentityClaimed: () => {
+						const snapshot = lifecycle.getTaskRuntimeSnapshot();
+						return (
+							snapshot.tasks[laneId]?.attemptIds.some(
+								(attemptId) => snapshot.attempts[attemptId] !== undefined,
+							) ?? false
+						);
+					},
+					prepare: (birthContextForkReference) => {
+						proposedReference = birthContextForkReference;
+						return lifecycle.prepare(
+							{
+								instructions: admission.instructions,
+								...(request.parentAgentId ? { parentAgentId: request.parentAgentId } : {}),
+								birthContextForkReference,
+								executionContract: admission.executionContract,
+								requiredCapabilities: admission.executionPlan.requiredCapabilities,
+								...(request.verificationOfTaskId ? { verificationOfTaskId: request.verificationOfTaskId } : {}),
+								taskContext: {
+									requirementIds: request.taskContext?.requirementIds ?? [],
+									dependsOnTaskIds: request.taskContext?.dependsOnTaskIds ?? [],
+									acceptanceCriterionIds: request.taskContext?.acceptanceCriterionIds ?? [],
+									resourcePointerIds: admission.resourcePointerIds,
+								},
+								...(goal ? { goal } : {}),
+							},
+							laneId,
+						);
+					},
+				});
+				return { executionPlan: admission.executionPlan, lifecycle, ...captured.value };
+			} catch (error) {
+				if (error instanceof WorkerContextForkStoreError && error.code === "identity_claimed") continue;
+				const snapshot = lifecycle.getTaskRuntimeSnapshot();
+				const candidateTask = snapshot.tasks[laneId];
+				const candidateAttempts = candidateTask?.attemptIds.map((attemptId) => snapshot.attempts[attemptId]) ?? [];
+				const candidateOwnsDurableAttempt = candidateAttempts.some((attempt) => attempt !== undefined);
+				const sameRequestReplay = candidateAttempts.some(
+					(attempt) =>
+						attempt !== undefined &&
+						attempt.dispatch.instructions === admission.instructions &&
+						attempt.dispatch.parentAgentId === request.parentAgentId &&
+						isDeepStrictEqual(attempt.dispatch.executionContract, admission.executionContract) &&
+						(proposedReference === undefined ||
+							isDeepStrictEqual(attempt.dispatch.birthContextForkReference, proposedReference)),
+				);
+				const corruptSnapshot =
+					error instanceof WorkerContextForkStoreError &&
+					(error.code === "snapshot_corrupt" || error.code === "snapshot_missing");
+				const generatedIdWasConcurrentlyClaimed =
+					candidateOwnsDurableAttempt && !sameRequestReplay && !corruptSnapshot;
+				if (!generatedIdWasConcurrentlyClaimed) throw error;
+			}
+		}
+		throw new Error("Worker logical-agent allocation retries were exhausted.");
+	}
+
+	private enqueuePreparedWorkerAttempt(
+		record: LaneRecord,
+		request: WorkerDelegationRequest,
+		profileId: string,
+		priority: boolean,
+	): string | undefined {
+		try {
+			this.scheduler.enqueue(record, { ...request, profileId }, false, priority);
+			return undefined;
+		} catch (error) {
+			const reasonCode =
+				error instanceof Error && error.message === "worker_dispatch_queue_full"
+					? "worker_dispatch_queue_full"
+					: "worker_dispatch_enqueue_error";
+			this.cancelAndPublish(this.lifecycle, record.laneId, reasonCode);
+			this.safeWarn(`Worker dispatch enqueue failed: ${error instanceof Error ? error.message : String(error)}`);
+			return reasonCode;
+		}
+	}
+
+	private queuePreparedWorkerAttempt(
+		prepared: PreparedWorkerAttempt,
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		options: {
+			ensureAgent?: boolean;
+			drain?: boolean;
+			onStarted?: (record: LaneRecord) => void;
+		} = {},
+	): QueuedWorkerAttemptOutcome {
+		if (
+			this.workerQueueReservationSkipReason(request, 1, 0) ||
+			!this.scheduler.hasQueueCapacity(request.verificationOfTaskId !== undefined)
+		) {
+			this.cancelAndPublish(prepared.lifecycle, prepared.record.laneId, "worker_dispatch_queue_full");
+			return { started: false, skipReason: "worker_dispatch_queue_full" };
+		}
+		if (options.ensureAgent !== false) {
+			try {
+				this.ensurePreparedAgent(prepared, admission);
+			} catch (error) {
+				this.cancelAndPublish(prepared.lifecycle, prepared.record.laneId, "worker_conversation_unavailable");
+				this.safeWarn(
+					`Worker conversation setup failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return { started: false, skipReason: "worker_conversation_unavailable" };
+			}
+		}
+		const priority = request.verificationOfTaskId !== undefined;
+		const enqueueSkipReason = this.enqueuePreparedWorkerAttempt(
+			prepared.record,
+			request,
+			admission.shipment.profile.profileId,
+			priority,
+		);
+		if (enqueueSkipReason) return { started: false, skipReason: enqueueSkipReason };
+		this.notifications.statusChanged();
+		options.onStarted?.(prepared.record);
+		if (options.drain) this.scheduler.drain();
+		return { started: true, record: prepared.record };
 	}
 
 	private ensurePreparedAgent(
@@ -1015,6 +1386,7 @@ export class WorkerDelegationController {
 		const immutableWorker = prepared.attempt.dispatch.executionContract?.worker;
 		if (!immutableWorker) throw new Error("Prepared worker execution contract is missing.");
 		const agentId = prepared.attempt.agentId ?? prepared.attempt.dispatch.logicalLaneId ?? prepared.record.laneId;
+		const birthContextForkReference = prepared.attempt.dispatch.birthContextForkReference;
 		const existing = prepared.lifecycle.getAgent(agentId);
 		if (existing) {
 			const conversation = this.conversations.open({
@@ -1022,6 +1394,9 @@ export class WorkerDelegationController {
 				resumeContext: existing.resumeContext,
 				expectedLogicalAgentId: existing.agentId,
 			});
+			if (!isDeepStrictEqual(conversation.getBirthContextForkReference(), birthContextForkReference)) {
+				throw new Error("Worker conversation birth context conflicts with its durable attempt.");
+			}
 			const materialized = materializeWorkerResourceBundle(existing.resumeContext.contextPointers);
 			if (!materialized.ok) throw new Error(`worker_resource_materialization_${materialized.code}`);
 			return {
@@ -1043,6 +1418,7 @@ export class WorkerDelegationController {
 			modelRef: `${immutableWorker.modelBinding.provider}/${immutableWorker.modelBinding.modelId}`,
 			resourceProfileNames: immutableWorker.profile.resourceProfileNames,
 			contextPointers: materialized.pointers,
+			...(birthContextForkReference ? { birthContextForkReference } : {}),
 		});
 		prepared.lifecycle.ensureAgent({
 			agentId,
@@ -1067,39 +1443,37 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
-		const admission = this.resolveWorkerAdmission(request, pinnedContract);
+		const admission = this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		if (!request.verificationOfTaskId) this.recovery.recover();
 		const { settings, shipment } = admission;
 
 		const foreground = this.deps.getModel();
 		const contendsWithLocalForeground =
 			foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(shipment.model);
-		if (contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
+		const dependencyGated = (request.taskContext?.dependsOnTaskIds.length ?? 0) > 0;
+		if (dependencyGated || contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
-			let record: LaneRecord | undefined;
+			const priority = request.verificationOfTaskId !== undefined;
+			if (
+				this.workerQueueReservationSkipReason(request, 1, admission.verifierShipment ? 1 : 0) ||
+				!this.scheduler.hasQueueCapacity(priority)
+			) {
+				return { started: false, skipReason: "worker_dispatch_queue_full" };
+			}
+			let prepared: PreparedWorkerAttempt;
 			try {
-				const prepared = this.prepareWorkerAttempt(request, admission);
-				record = prepared.record;
-				this.ensurePreparedAgent(prepared, admission);
+				prepared = this.prepareWorkerAttempt(request, admission);
 			} catch (error) {
-				if (record) this.cancelAndPublish(this.lifecycle, record.laneId, "worker_conversation_unavailable");
 				this.safeWarn(
 					`Worker dispatch was not persisted: ${error instanceof Error ? error.message : String(error)}`,
 				);
 				return { started: false, skipReason: "orchestration_ledger_error" };
 			}
-			if (!record) return { started: false, skipReason: "orchestration_attempt_missing" };
-			this.scheduler.enqueue(
-				record,
-				{ ...request, profileId: shipment.profile.profileId },
-				false,
-				request.verificationOfTaskId !== undefined,
-			);
-			this.notifications.statusChanged();
-			return { started: true, record };
+			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
+				drain: dependencyGated,
+			});
 		}
 		let startedRecord: LaneRecord | undefined;
 		const promise = this.runOnceWithAdmission(
@@ -1109,6 +1483,7 @@ export class WorkerDelegationController {
 			},
 			undefined,
 			admission,
+			true,
 		);
 		if (!startedRecord) {
 			// Preparation is synchronous up to the first isolated completion await. A promise that
@@ -1133,13 +1508,18 @@ export class WorkerDelegationController {
 		onStarted?: (record: LaneRecord) => void,
 		existingRecord?: LaneRecord,
 		preparedAdmission?: Extract<WorkerAdmission, { ok: true }>,
+		newWorkerAdmissionChecked = false,
 	): Promise<WorkerDelegationRunOutcome> {
 		const pinnedContract = existingRecord
 			? this.getWorkerLifecycle().getActiveAttempt(existingRecord.laneId)?.dispatch.executionContract
 			: undefined;
-		const admission = preparedAdmission ?? this.resolveWorkerAdmission(request, pinnedContract);
+		const admission = existingRecord
+			? this.resolveWorkerAdmission(request, pinnedContract)
+			: preparedAdmission && newWorkerAdmissionChecked
+				? preparedAdmission
+				: this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
-		if (!request.verificationOfTaskId) this.recovery.recover();
+		if (existingRecord && !request.verificationOfTaskId) this.recovery.recover();
 		const { instructions, settings, verifierShipment } = admission;
 		const { model, modelBinding, profile: orchestrationProfile, soul } = admission.shipment;
 		if (!this.hasWorkerCapacity(settings)) {
@@ -1150,6 +1530,16 @@ export class WorkerDelegationController {
 		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
 		const { executionPlan, lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
+		if (prepared.attempt.status === "queued") {
+			const readiness = lifecycle.getAttemptDispatchReadiness(prepared.attempt.attemptId);
+			if (readiness.state === "blocked") {
+				this.cancelAndPublish(lifecycle, prepared.record.laneId, readiness.reasonCode);
+				return { started: false, skipReason: readiness.reasonCode };
+			}
+			if (readiness.state === "waiting") {
+				return this.queuePreparedWorkerAttempt(prepared, request, admission, { onStarted });
+			}
+		}
 		let preparedAgent: PreparedWorkerAgent;
 		try {
 			preparedAgent = this.ensurePreparedAgent(prepared, admission);
@@ -1218,10 +1608,10 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: reservation.reasonCode };
 		}
 		if (reservation.kind === "blocked") {
-			this.scheduler.enqueue(prepared.record, { ...request, profileId: admission.shipment.profile.profileId });
-			this.notifications.statusChanged();
-			onStarted?.(prepared.record);
-			return { started: true, record: prepared.record };
+			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
+				ensureAgent: false,
+				onStarted,
+			});
 		}
 		let durableHandle: StartedDelegationAttempt;
 		try {
@@ -1428,16 +1818,19 @@ export class WorkerDelegationController {
 			// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
 			// terminalizing, resuming from the persisted transcript under a fresh fence.
 			if (rawOutcome.laneStatus === "failed" && !this.deps.isDisposed() && !workerSignal.aborted) {
-				const retryRecord = this.maybeScheduleAttemptRetry({
-					lifecycle,
+				const retry = this.recovery.scheduleAttemptRetry({
 					laneId: startedRecord.laneId,
 					agentId,
+					ownerId: this.agentControl.getProcessOwnerId(),
 					request: { ...request, profileId: admission.shipment.profile.profileId },
 					outcome: rawOutcome,
 					provider: modelBinding.provider,
 					...(grant.budget.maxAttempts !== undefined ? { maxAttempts: grant.budget.maxAttempts } : {}),
 				});
-				if (retryRecord) return { started: true, record: retryRecord };
+				if (retry.scheduled) {
+					this.notifications.statusChanged();
+					return { started: true, record: retry.record };
+				}
 			}
 			const verificationRequired =
 				orchestrationProfile.requireIndependentVerification &&
@@ -1630,5 +2023,6 @@ export class WorkerDelegationController {
 	drain(): void {
 		this.recovery.recover();
 		this.scheduler.drain();
+		this.terminalHandoffs.signal();
 	}
 }

@@ -150,12 +150,15 @@ Fitness applicability is intentionally split by autonomy level:
 
 Pi's native delegation runtime is a durable recursive agent tree. A profile is not required. A profile-free root agent starts from the foreground model and the maximum classified core worker surface the host can materialize: `read`, `grep`, `find`, `ls`, `write`, `edit`, `memory`, the platform shell, and `delegate`. Live service switches can revoke memory, writes, or delegation. Every descendant inherits its parent's immutable execution grant and the tree's remaining budget by default.
 
-An agent may set `authority` on `delegate` to choose its child's role label, authenticated model, supported reasoning level, semantic capabilities, tools, read/write paths, and budget. Omitted fields inherit from the parent or selected preset. The host validates the request, resolves the concrete model and tools, intersects execution authority with the immutable parent grant and live global switches, then persists the exact result before the child starts. A descendant can specialize or narrow authority but cannot add an execution capability, tool, path, or budget that the parent did not hold. Roles are descriptive routing and audit labels; the built-in compiler does not impose hidden role ceilings, though an embedding may supply an explicit host ceiling.
+An agent may set `authority` on `delegate` to choose its child's role label, authenticated model, supported reasoning level, semantic capabilities, tools, read/write paths, and budget. Omitted fields inherit from the parent or selected preset. The host validates the request, resolves the concrete model and tools, intersects execution authority with the immutable parent grant and live global switches, then persists the exact result before the child starts. A descendant can specialize or narrow authority but cannot add an execution capability, tool, path, or budget that the parent did not hold. Profile selection also cannot add context: every child resource pointer must fully match an ancestral pointer (ID alone is insufficient), soul text must match exactly, and a verifier stays within its previously admitted ancestral verifier or worker boundary. Roles are descriptive routing and audit labels; the built-in compiler does not impose hidden role ceilings, though an embedding may supply an explicit host ceiling.
+
+For a new logical agent, `forkTurns` chooses immutable sanitized birth context: `"none"`, `"all"`, or a positive user-turn count encoded as a string, such as `"3"`. When omitted, an exact same-provider/model child defaults to `"all"`; a child that changes provider or model defaults to `"none"`, and explicitly requesting inherited turns across that boundary is rejected. The bounded snapshot keeps whole text-only user/complete-assistant turns and a valid compaction checkpoint when needed. It excludes system/developer/custom context, reasoning/commentary, tool protocol and results, mailbox controls, attachments, and incomplete assistant output. A reused `agentId` continues its existing transcript and cannot replace its birth context.
 
 ```json
 {
   "action": "start",
   "instructions": "Implement and verify the scheduler change.",
+  "forkTurns": "3",
   "authority": {
     "role": "implementer",
     "model": { "provider": "openai-codex", "modelId": "gpt-5.5" },
@@ -177,16 +180,21 @@ An agent may set `authority` on `delegate` to choose its child's role label, aut
 }
 ```
 
-There is no framework depth or fan-out cap. `workerDelegation.maxConcurrent` is the one global running-agent limit; excess work enters the durable queue. The kernel rejects only an exact recursive cycle when a child repeats the same normalized instructions and effective profile already present in its ancestor chain. Root budgets are cumulative across every descendant and attempt: token, cost, tool-call, active-wall-clock, and attempt usage are reconstructed from durable checkpoints and checked before more work is admitted.
+Fleet creation is bounded before Pi creates a durable task, conversation, agent, or queue entry: depth is at most 8, one parent may own at most 64 direct children, one session may retain at most 256 logical agents, and the scheduler may retain at most 256 queued dispatches. Admission dynamically preserves queue and durable-projection headroom for every implementation whose mandatory verifier has not yet materialized, plus a newly admitted contract's verifier. A verifier dispatch that encounters saturation remains represented by its durable subject and replays on a queue-capacity event. The shared durable projection independently caps agents, tasks, and attempts at 256 each. `workerDelegation.maxConcurrent` remains the global running-agent limit; excess admitted work enters the bounded durable queue. The kernel also rejects an exact recursive cycle when a child repeats the same normalized instructions and effective profile already present in its ancestor chain. Root budgets are cumulative across every descendant and attempt: token, cost, tool-call, active-wall-clock, and attempt usage are reconstructed from durable checkpoints and checked before more work is admitted.
 
-Every agent can coordinate the complete session tree through `delegate` actions:
+`delegate` exposes the shared durable task/tree state through distinct authority boundaries:
 
-- `list` returns durable logical-agent identities, lineage, depth, and state.
-- `transcript` returns exact peer messages with a cursor and a page size of 1-64; pagination is a context bound, not an authority restriction.
-- `send` and `follow_up` carry durable thread, reply, and expected-reply metadata.
-- `wait` is event-driven; `interrupt` is resumable; `resume` keeps the admitted model, transcript, resources, and grant; `cancel` terminates only the selected current task.
+- `tasks` returns a bounded view of durable DAG tasks, dependencies, status, latest attempt/agent dispatch, verifier state, terminal reason, and persisted retry eligibility. `start.dependsOn` accepts only existing same-objective task IDs; forward, cross-objective, self, and cyclic edges fail before dispatch.
+- `list` returns safe metadata for session agents, including lineage, depth, state, and reusable activity; it does not grant transcript or control authority.
+- `transcript` pages bounded messages only for the session root or the caller's own agent/control subtree, with an opaque raw-entry cursor and page size of 1-64. A page may be empty and still provide `nextCursor` after visiting non-message entries; an individually oversized message is omitted and counted rather than partially returned. Sibling and unrelated peer transcripts are not readable by workers.
+- `send` and `broadcast` queue bounded, non-waking, threaded peer evidence; broadcast canonicalizes a bounded target set and reports acceptance per target. Peer content is untrusted data, never authority.
+- `follow_up`, `interrupt`, `resume`, and `cancel` may wake or mutate only within the caller's control subtree. `resume` keeps the admitted model, transcript, resources, and grant; a paused objective retains its suspended attempt without starting or cancelling it until objective resume drains the scheduler. `cancel` terminates only the selected current task.
+- `reply` answers one exact reply-expected request. The session root consumes replies through the acknowledged `inbox`, event-driven `inbox_wait`, and `inbox_ack` flow instead of unsolicited transcript injection.
+- `wait` and `wait_many` are event-driven; `wait_many` accepts a bounded canonical target set and completes in `any` or `all` mode. `retire` replay-safely closes only an idle leaf after its mailbox and reply obligations clear, preserving its binding and transcript.
 
-`delegate` returns a lane id immediately. Completion persists a bounded terminal handoff before waking the parent; late output stays in the worker transcript instead of racing into the active foreground transcript. `delegate_status` remains available for bounded lane-result retrieval.
+Transient attempt retries are evidence-gated. A classified provider or transport failure suspends the exact attempt with its retry count and ISO `notBefore` deadline, then resumes from the persisted transcript under a fresh fence when that deadline is eligible. Restart recovery uses the durable deadline rather than resetting an in-memory backoff; `maxAttempts: 1` disables the ladder, and missing/unknown failure classification never retries.
+
+`delegate` returns a stable agent/lane identity immediately. Completion persists a bounded terminal handoff before waking the parent; late output stays in the worker transcript instead of racing into the active foreground transcript. A full parent mailbox retains the attempt-keyed handoff until an explicit terminal, mailbox-capacity, state-change, or recovery event drains it—there is no retry polling loop. Exact replays are inert, conflicts fail closed, and delivery errors remain retained. `delegate_status` remains available for bounded lane-result retrieval.
 
 Global profiles live at `~/.pi/agent/profiles/orchestration/<id>.json`; project profiles live at `.pi/profiles/orchestration/<id>.json`. They are optional presets for model, reasoning, tools, resources, budget, verification, and prompt defaults. Select one with `profileId` on a call or configure `workerDelegation.orchestrationProfile`. `dispatchProfileIds` is preset-routing metadata, not an admission allowlist. Profile `maxConcurrent` is retained in the authored schema but does not override the global scheduler. `profile_writer` can create an optional immutable session-scoped narrowing when a reusable preset is useful; direct authority selection does not require it.
 
@@ -200,7 +208,7 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.orchestrationProfile` | string | - | Optional default execution preset; agents may replace its defaults within inherited authority |
 | `workerDelegation.maxUsd` | number | `0.5` | Cumulative USD ceiling for one root tree; `0` disables this settings-level ceiling |
 | `workerDelegation.maxWallClockMs` | number | `120000` | Cumulative active wall-clock ceiling for one root tree; `0` disables this settings-level ceiling |
-| `workerDelegation.maxConcurrent` | number | `1` | Global scheduler concurrency; any positive safe integer is accepted, with no depth or fan-out cap |
+| `workerDelegation.maxConcurrent` | number | `20` | Global running-agent concurrency inside the fixed fleet and queue bounds |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.writePaths` | string[] | `["."]` | Global envelope for direct child writes; an explicit empty array revokes direct `write`/`edit` |
 

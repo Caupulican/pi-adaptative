@@ -6,6 +6,12 @@ describe("subagent level-0 prompt composition", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(300);
 	});
 
+	it("describes bounded delegation and transcript authority without granting peer transcript access", () => {
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host-enforced fleet bounds");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("own control subtree transcripts");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("inspect exact peer transcripts");
+	});
+
 	it("always starts with the immutable core", () => {
 		const composed = composeSubagentSystemPrompt({ rolePrompt: "You do research." });
 		expect(composed.startsWith(SUBAGENT_CORE_SYSTEM_PROMPT)).toBe(true);

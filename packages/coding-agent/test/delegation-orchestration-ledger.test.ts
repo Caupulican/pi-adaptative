@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
+import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { projectGoalObjective } from "../src/core/orchestration/work-state-projection.ts";
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
@@ -103,6 +104,45 @@ afterEach(() => {
 });
 
 describe("DelegationOrchestrationLedger", () => {
+	it("atomically prepares a task and first attempt without leaving an orphan on append failure", () => {
+		const agentDir = root();
+		const sessionId = "atomic-prepare";
+		const store = new OrchestrationEventStore({ agentDir, sessionId });
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId, store });
+		ledger.runtime.createObjective({
+			objectiveId: `session:${sessionId}`,
+			title: "Atomic prepare",
+			description: "A task and its first attempt are one durable transition",
+		});
+		const append = store.append.bind(store);
+		const appendSpy = vi.spyOn(store, "append").mockImplementation((input, options) => {
+			if (input.type === "task.attempt_prepared") throw new Error("injected atomic append failure");
+			return append(input, options);
+		});
+
+		expect(() =>
+			ledger.prepare({
+				laneId: "worker-atomic",
+				instructions: "Prepare without an orphan",
+				executionContract: executionContract(profile()),
+				requiredCapabilities: ["filesystem.read"],
+			}),
+		).toThrow("injected atomic append failure");
+		expect(ledger.runtime.getSnapshot()).toMatchObject({ tasks: {}, attempts: {} });
+		appendSpy.mockRestore();
+
+		const queued = ledger.prepare({
+			laneId: "worker-atomic",
+			instructions: "Prepare without an orphan",
+			executionContract: executionContract(profile()),
+			requiredCapabilities: ["filesystem.read"],
+		});
+		expect(store.readAll().filter((event) => event.type === "task.attempt_prepared")).toHaveLength(1);
+		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId, store }).runtime.getSnapshot();
+		expect(reopened.tasks["worker-atomic"]?.attemptIds).toEqual([queued.attemptId]);
+		expect(reopened.attempts[queued.attemptId]?.taskId).toBe("worker-atomic");
+	});
+
 	it("persists dispatch before execution and requeues interrupted isolated work with a fresh fenced attempt", () => {
 		const agentDir = root();
 		const first = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-1" });
@@ -166,6 +206,33 @@ describe("DelegationOrchestrationLedger", () => {
 		const reopened = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-2" });
 		const recovered = reopened.recoverQueuedDispatches();
 		expect(recovered.map((attempt) => attempt.attemptId)).toEqual([queued.attemptId]);
+	});
+
+	it("adopts only an exact replay of an active durable dispatch", () => {
+		const agentDir = root();
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-exact-replay" });
+		const originalContract = executionContract(profile());
+		const input = {
+			laneId: "worker-exact",
+			instructions: "Inspect exact replay ownership",
+			executionContract: originalContract,
+			requiredCapabilities: ["filesystem.read" as const],
+		};
+		const queued = ledger.prepare(input);
+
+		expect(ledger.prepare(input)).toEqual(queued);
+		const conflictingProfile = profile();
+		conflictingProfile.modelPolicy = {
+			mode: "fixed",
+			candidates: [{ provider: "test", modelId: "different", thinkingLevel: "off" }],
+		};
+		expect(() =>
+			ledger.prepare({
+				...input,
+				executionContract: executionContract(conflictingProfile),
+			}),
+		).toThrow(/conflicting durable dispatch identity/i);
+		expect(ledger.runtime.getSnapshot().tasks[input.laneId]?.attemptIds).toEqual([queued.attemptId]);
 	});
 
 	it("fails an interrupted task instead of requeueing past its profile attempt budget", () => {
@@ -251,6 +318,33 @@ describe("DelegationOrchestrationLedger", () => {
 			projectGoalObjective(expandedGoal).acceptanceCriteria,
 		);
 		expect(reopened.runtime.getSnapshot().tasks["worker-1"]?.task.acceptanceCriterionIds).toEqual([]);
+	});
+
+	it("rejects an oversized objective evidence batch before writing any synchronization prefix", () => {
+		const agentDir = root();
+		const sessionId = "session-goal-byte-preflight";
+		const store = new OrchestrationEventStore({ agentDir, sessionId });
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId, store });
+		const base = goal([{ id: "req-1", description: "Retain bounded evidence", required: true }]);
+		const evidenceIds = Array.from({ length: 512 }, (_, index) => `evidence-${index}`);
+		const oversized: GoalState = {
+			...base,
+			requirements: base.requirements.map((requirement) => ({
+				...requirement,
+				status: "satisfied",
+				evidenceIds,
+			})),
+			evidence: evidenceIds.map((id) => ({
+				id,
+				kind: "user",
+				summary: "x".repeat(2_500),
+				createdAt: "2026-07-23T00:01:00.000Z",
+			})),
+		};
+
+		expect(() => ledger.synchronizeGoalState(oversized)).toThrow(/retained record exceeds/i);
+		expect(store.readAll()).toEqual([]);
+		expect(ledger.runtime.getSnapshot()).toMatchObject({ objectives: {}, lastOrdinal: 0 });
 	});
 
 	it("persists runtime-owned task context on the task and durable dispatch", () => {

@@ -22,6 +22,8 @@ function workerAgentControl(overrides: Record<string, unknown> = {}): WorkerAgen
 			cursor: 0,
 			totalMessages: 0,
 			messages: [],
+			omittedMessages: 0,
+			serializedBytes: 2,
 		}),
 		sendWorkerAgentMessage: () => ({ messageId: "worker-send", queued: true }),
 		followUpWorkerAgent: () => ({ started: false, steering: false, messageId: "worker-follow-up" }),

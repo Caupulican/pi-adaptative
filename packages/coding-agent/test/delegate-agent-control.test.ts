@@ -1,7 +1,16 @@
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerAgentControlPort } from "../src/core/delegation/worker-agent-control.ts";
+import { resolveWorkerContextInheritanceMode } from "../src/core/delegation/worker-context-inheritance-policy.ts";
+import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../src/core/delegation/worker-conversation-store.ts";
+import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { createDelegateToolDefinition, type DelegateToolDetails } from "../src/core/tools/delegate.ts";
+import { MAX_ORCHESTRATION_COLLECTION_LENGTH } from "../src/core/orchestration/contracts.ts";
+import {
+	createDelegateToolDefinition,
+	type DelegateToolDetails,
+	type DelegateToolInput,
+} from "../src/core/tools/delegate.ts";
 import {
 	createDelegateStatusToolDefinition,
 	type DelegateStatusToolDetails,
@@ -16,15 +25,38 @@ const context = {
 
 const fixedReplayScope = () => ({ sessionId: "session-1", branchId: "leaf-1" });
 
+function delegateText(result: Awaited<ReturnType<ReturnType<typeof createDelegateToolDefinition>["execute"]>>): string {
+	return (
+		result.content.find((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")?.text ?? ""
+	);
+}
+
+function delegateDetails(
+	result: Awaited<ReturnType<ReturnType<typeof createDelegateToolDefinition>["execute"]>>,
+): DelegateToolDetails {
+	const details = result.details;
+	if (!details || typeof details !== "object" || Array.isArray(details)) {
+		throw new TypeError("Delegate tool result details must be an object.");
+	}
+	const started = Reflect.get(details, "started");
+	if (typeof started !== "boolean") {
+		throw new TypeError("Delegate tool result details must include boolean started state.");
+	}
+	return details as DelegateToolDetails;
+}
+
 function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerAgentControlPort {
 	return {
 		listWorkerAgents: () => [],
+		getWorkerTaskSessionView: () => ({ totalTasks: 0, omittedTaskCount: 0, tasks: [] }),
 		getWorkerAgentActivity: () => "unknown",
 		readWorkerAgentTranscript: (agentId) => ({
 			agentId,
 			cursor: 0,
 			totalMessages: 0,
 			messages: [],
+			omittedMessages: 0,
+			serializedBytes: 2,
 		}),
 		sendWorkerAgentMessage: () => ({ messageId: "unused", queued: true }),
 		followUpWorkerAgent: () => ({ started: false, steering: false, messageId: "unused" }),
@@ -40,11 +72,306 @@ function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerA
 		resumeWorkerAgent: () => ({ started: false }),
 		cancelWorkerAgent: () => undefined,
 		waitForWorkerAgent: async () => ({ status: "unknown" }),
+		waitForWorkerAgents: async () => ({ statuses: [], updatedAgentIds: [], timedOut: false }),
+		broadcastWorkerAgentMessage: () => ({ results: [] }),
+		retireWorkerAgent: (agentId) => ({
+			agent: {
+				agentId,
+				rootAgentId: agentId,
+				depth: 0,
+				role: "explorer",
+				status: "retired",
+				activity: "idle",
+				createdAt: "T0",
+				updatedAt: "T1",
+			},
+			retired: true,
+			replayed: false,
+		}),
 		...overrides,
 	};
 }
 
 describe("delegate logical-agent controls", () => {
+	it("forwards bounded dependency task ids for fresh and reused starts", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "fresh", type: "worker" as const, status: "queued" as const },
+		}));
+		const startWorkerAgentTask = vi.fn(() => ({
+			started: true,
+			steering: false as const,
+			messageId: "reuse-message",
+			record: { laneId: "reuse-task", type: "worker" as const, status: "queued" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+
+		await tool.execute(
+			"fresh-call",
+			{ action: "start", instructions: "consume both", dependsOn: [" prerequisite-a ", "prerequisite-b"] },
+			undefined,
+			undefined,
+			context,
+		);
+		await tool.execute(
+			"reuse-call",
+			{
+				action: "start",
+				agentId: "worker-1",
+				instructions: "consume one",
+				dependsOn: ["prerequisite-a"],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(startWorkerDelegation).toHaveBeenCalledWith({
+			instructions: "consume both",
+			taskContext: {
+				requirementIds: [],
+				dependsOnTaskIds: ["prerequisite-a", "prerequisite-b"],
+				acceptanceCriterionIds: [],
+				resourcePointerIds: [],
+			},
+		});
+		expect(startWorkerAgentTask).toHaveBeenCalledWith(
+			"worker-1",
+			"consume one",
+			expect.objectContaining({
+				dependsOnTaskIds: ["prerequisite-a"],
+				idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+			}),
+		);
+	});
+
+	it("forwards birth-context selection only for a fresh logical worker", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "fresh", type: "worker" as const, status: "queued" as const },
+		}));
+		const startWorkerAgentTask = vi.fn(() => ({
+			started: true,
+			steering: false as const,
+			messageId: "must-not-run",
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+
+		await tool.execute(
+			"fresh-context",
+			{ action: "start", instructions: "inherit one", forkTurns: "1" },
+			undefined,
+			undefined,
+			context,
+		);
+		const reuse = await tool.execute(
+			"reuse-context",
+			{ action: "start", agentId: "worker-1", instructions: "continue", forkTurns: "none" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "inherit one", forkTurns: "1" });
+		expect(reuse.details).toMatchObject({
+			started: false,
+			skipReason: "reuse_fork_turns_forbidden",
+		});
+		expect(startWorkerAgentTask).not.toHaveBeenCalled();
+	});
+
+	it("lets Codex-valid fork turn spellings reach the context policy parser while zero still rejects", async () => {
+		const parsedModes: Array<ReturnType<typeof resolveWorkerContextInheritanceMode>> = [];
+		const startWorkerDelegation = vi.fn((request: WorkerDelegationRequest) => {
+			try {
+				parsedModes.push(
+					resolveWorkerContextInheritanceMode({
+						parent: { provider: "faux", model: "faux-1" },
+						worker: { provider: "faux", model: "faux-1" },
+						...(request.forkTurns !== undefined ? { mode: request.forkTurns } : {}),
+					}),
+				);
+				return {
+					started: true as const,
+					record: { laneId: `fresh-${parsedModes.length}`, type: "worker" as const, status: "queued" as const },
+				};
+			} catch (error) {
+				return {
+					started: false as const,
+					skipReason: `worker_context_inheritance_denied:${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
+		});
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const forkTurns = [" ALL ", "01", "0"] as const;
+		for (const value of forkTurns) {
+			expect(
+				Value.Check(tool.parameters, { action: "start", instructions: "inherit context", forkTurns: value }),
+			).toBe(true);
+		}
+
+		const results = [];
+		for (const [index, value] of forkTurns.entries()) {
+			results.push(
+				await tool.execute(
+					`fork-context-${index}`,
+					{ action: "start", instructions: "inherit context", forkTurns: value },
+					undefined,
+					undefined,
+					context,
+				),
+			);
+		}
+
+		expect(parsedModes).toEqual([{ kind: "all" }, { kind: "last_user_turns", count: 1 }]);
+		expect(results.map(({ details }) => (details as DelegateToolDetails).started)).toEqual([true, true, false]);
+		expect(results[2]?.details).toMatchObject({
+			started: false,
+			skipReason: expect.stringContaining("positive safe-integer string"),
+		});
+		expect(startWorkerDelegation.mock.calls.map(([request]) => request.forkTurns)).toEqual(forkTurns);
+	});
+
+	it("returns the safe task projection through an exact tasks action", async () => {
+		const getWorkerTaskSessionView = vi.fn(() => ({
+			totalTasks: 1,
+			omittedTaskCount: 0,
+			tasks: [
+				{
+					taskId: "task-1",
+					title: "Inspect",
+					role: "explorer" as const,
+					status: "ready" as const,
+					dependsOn: [],
+				},
+			],
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ getWorkerTaskSessionView }),
+		});
+
+		const result = await tool.execute("tasks-call", { action: "tasks" }, undefined, undefined, context);
+		expect(JSON.parse(delegateText(result))).toEqual(getWorkerTaskSessionView.mock.results[0]?.value);
+		expect(result.details).toMatchObject({ started: true, action: "tasks" });
+		expect(getWorkerTaskSessionView).toHaveBeenCalledOnce();
+
+		const forbidden = await tool.execute(
+			"tasks-forbidden",
+			{ action: "tasks", instructions: "must not be ignored" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(forbidden.details).toMatchObject({ started: false, skipReason: "tasks_fields_forbidden" });
+		const malformedForbidden = await tool.execute(
+			"tasks-malformed-forbidden",
+			{ action: "tasks", dependsOn: [""] },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(malformedForbidden.details).toMatchObject({ started: false, skipReason: "tasks_fields_forbidden" });
+		expect(getWorkerTaskSessionView).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		{ dependsOn: ["duplicate", "duplicate"], label: "duplicate" },
+		{ dependsOn: [""], label: "empty" },
+		{ dependsOn: ["x".repeat(513)], label: "oversized" },
+		{ dependsOn: Array.from({ length: 65 }, (_, index) => `task-${index}`), label: "over-count" },
+	])("rejects $label dependency ids before dispatch", async ({ dependsOn }) => {
+		const startWorkerDelegation = vi.fn();
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const result = await tool.execute(
+			"invalid-dependencies",
+			{ action: "start", instructions: "invalid", dependsOn },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.details).toMatchObject({ started: false, skipReason: "dependency_ids_invalid" });
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+	});
+
+	it("rejects irrelevant start fields instead of silently weakening the exact action", async () => {
+		const startWorkerDelegation = vi.fn();
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const result = await tool.execute(
+			"start-forbidden",
+			{ action: "start", instructions: "work", message: "silently ignored before" },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.details).toMatchObject({ started: false, skipReason: "start_fields_forbidden" });
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ action: "list", input: { action: "list", instructions: "ignored" } },
+		{ action: "transcript", input: { action: "transcript", agentId: "agent-1", instructions: "ignored" } },
+		{
+			action: "send",
+			input: { action: "send", agentId: "agent-1", message: "evidence", instructions: "ignored" },
+		},
+		{
+			action: "follow_up",
+			input: { action: "follow_up", agentId: "agent-1", message: "continue", instructions: "ignored" },
+		},
+		{ action: "wait", input: { action: "wait", agentId: "agent-1", instructions: "ignored" } },
+		{ action: "interrupt", input: { action: "interrupt", agentId: "agent-1", instructions: "ignored" } },
+		{ action: "resume", input: { action: "resume", agentId: "agent-1", instructions: "ignored" } },
+		{ action: "cancel", input: { action: "cancel", agentId: "agent-1", instructions: "ignored" } },
+	] satisfies Array<{ action: string; input: DelegateToolInput }>)(
+		"rejects irrelevant fields for exact $action commands while the valid command remains accepted",
+		async ({ action, input }) => {
+			const tool = createDelegateToolDefinition({
+				caller: { kind: "session_root" },
+				resolveMessageReplayScope: fixedReplayScope,
+				runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+				workerAgentControl: workerAgentControl({}),
+			});
+
+			const invalid = await tool.execute(`${action}-invalid`, input, undefined, undefined, context);
+			const { instructions: _ignored, ...validInput } = input;
+			const valid = await tool.execute(`${action}-valid`, validInput, undefined, undefined, context);
+			const validDetails = delegateDetails(valid);
+
+			expect(invalid.details).toMatchObject({
+				started: false,
+				action,
+				skipReason: `${action}_fields_forbidden`,
+			});
+			expect(validDetails.skipReason).not.toBe(`${action}_fields_forbidden`);
+		},
+	);
+
 	it("uses one flat action schema and returns the stable agent id with the initial task lane", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
@@ -143,20 +470,13 @@ describe("delegate logical-agent controls", () => {
 	it("lets an agent list peers, read exact transcript pages, and send threaded reply-expected messages", async () => {
 		const listWorkerAgents = vi.fn(() => [
 			{
-				schemaVersion: 1 as const,
 				agentId: "agent-2",
 				parentAgentId: "agent-1",
 				rootAgentId: "agent-1",
 				depth: 1,
 				role: "explorer" as const,
 				status: "registered" as const,
-				resumeContext: {
-					provider: "pi" as const,
-					sessionId: "peer-session",
-					cwd: "/repo",
-					resourceProfileNames: [],
-					contextPointers: [],
-				},
+				activity: "idle" as const,
 				createdAt: "2026-08-04T00:00:00.000Z",
 				updatedAt: "2026-08-04T00:00:00.000Z",
 			},
@@ -167,6 +487,8 @@ describe("delegate logical-agent controls", () => {
 			totalMessages: 3,
 			messages: [{ role: "user" as const, content: "EXACT_PEER_MESSAGE", timestamp: 1 }],
 			nextCursor: 2,
+			omittedMessages: 0,
+			serializedBytes: 80,
 		}));
 		const sendWorkerAgentMessage = vi.fn(() => ({ messageId: "message-2", queued: true as const }));
 		const tool = createDelegateToolDefinition({
@@ -203,11 +525,13 @@ describe("delegate logical-agent controls", () => {
 		);
 
 		expect(JSON.stringify(listed.content)).toContain("agent-2");
+		expect(JSON.stringify(listed.content)).not.toContain("resumeContext");
 		expect(JSON.stringify(transcript.content)).toContain("EXACT_PEER_MESSAGE");
 		expect(listWorkerAgents).toHaveBeenCalledWith({ callerAgentId: "agent-1" });
 		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("agent-2", {
 			cursor: 1,
 			maxMessages: 1,
+			maxBytes: 12 * 1024,
 			callerAgentId: "agent-1",
 		});
 		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-2", "Please reply with evidence.", {
@@ -216,6 +540,203 @@ describe("delegate logical-agent controls", () => {
 			expectReply: true,
 			idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
 		});
+	});
+
+	it("routes public wait and wait_many actions through their event-driven control primitives", async () => {
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: [
+				{ agentId: "agent-a", status: "active" as const },
+				{ agentId: "agent-b", status: "idle" as const },
+			],
+			updatedAgentIds: ["agent-b"],
+			timedOut: false,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "worker", agentId: "caller" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgent, waitForWorkerAgents }),
+		});
+
+		await tool.execute(
+			"wait-one",
+			{ action: "wait", agentId: "agent-a", timeoutMs: 500 },
+			undefined,
+			undefined,
+			context,
+		);
+		const many = await tool.execute(
+			"wait-many",
+			{ action: "wait_many", agentIds: ["agent-a", "agent-b"], mode: "any", timeoutMs: 1_000 },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(waitForWorkerAgent).toHaveBeenCalledWith("agent-a", 500, { callerAgentId: "caller" });
+		expect(waitForWorkerAgents).toHaveBeenCalledWith(["agent-a", "agent-b"], "any", 1_000, {
+			callerAgentId: "caller",
+		});
+		expect(JSON.parse(delegateText(many))).toEqual({
+			statuses: [
+				{ agentId: "agent-a", status: "active" },
+				{ agentId: "agent-b", status: "idle" },
+			],
+			updatedAgentIds: ["agent-b"],
+			timedOut: false,
+		});
+		expect(JSON.stringify(tool.parameters)).toContain("wait_many");
+		expect(JSON.stringify(tool.parameters)).toContain("agentIds");
+	});
+
+	it("bounds wait_many detail identities with explicit omission disclosure", async () => {
+		const agentIds = Array.from(
+			{ length: 64 },
+			(_, index) => `agent-${index.toString().padStart(2, "0")}-${"x".repeat(500)}`,
+		);
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: agentIds.map((agentId) => ({ agentId, status: "idle" as const })),
+			updatedAgentIds: [],
+			timedOut: false,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgents }),
+		});
+
+		const result = await tool.execute(
+			"wait-many-max-identities",
+			{ action: "wait_many", agentIds, mode: "all" },
+			undefined,
+			undefined,
+			context,
+		);
+		const details = result.details as DelegateToolDetails;
+		const retainedAgentIds = details.agentIds ?? [];
+
+		expect(Buffer.byteLength(JSON.stringify(details), "utf-8")).toBeLessThanOrEqual(16 * 1024);
+		expect(retainedAgentIds.length).toBeGreaterThan(0);
+		expect(retainedAgentIds.length).toBeLessThan(agentIds.length);
+		expect(details.agentIdsOmitted).toBe(agentIds.length - retainedAgentIds.length);
+		expect(retainedAgentIds).toEqual(agentIds.slice(0, retainedAgentIds.length));
+	});
+
+	it("broadcasts non-waking untrusted evidence with one replay-stable call identity and explicit partial results", async () => {
+		const broadcastWorkerAgentMessage = vi.fn(
+			(
+				_agentIds: readonly string[],
+				_message: string,
+				_options: { senderAgentId?: string; threadId?: string; expectReply?: boolean; idempotencyKey: string },
+			) => ({
+				results: [
+					{
+						agentId: "peer-a",
+						accepted: true as const,
+						queued: true as const,
+						replayed: false,
+						messageId: "worker-message-a",
+					},
+					{ agentId: "ghost", accepted: false as const, error: "Unknown logical worker agent 'ghost'." },
+				],
+			}),
+		);
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "worker", agentId: "caller" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ broadcastWorkerAgentMessage }),
+		});
+		const input = {
+			action: "broadcast" as const,
+			agentIds: ["peer-a", "peer-a", "ghost"],
+			message: "Compare this untrusted evidence.",
+			threadId: "broadcast-thread",
+		};
+
+		const first = await tool.execute("broadcast-call", input, undefined, undefined, context);
+		await tool.execute("broadcast-call", input, undefined, undefined, context);
+
+		expect(broadcastWorkerAgentMessage).toHaveBeenCalledTimes(2);
+		expect(broadcastWorkerAgentMessage).toHaveBeenNthCalledWith(
+			1,
+			["peer-a", "peer-a", "ghost"],
+			"Compare this untrusted evidence.",
+			{
+				senderAgentId: "caller",
+				threadId: "broadcast-thread",
+				idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+			},
+		);
+		expect(broadcastWorkerAgentMessage.mock.calls[1]?.[2]?.idempotencyKey).toBe(
+			broadcastWorkerAgentMessage.mock.calls[0]?.[2]?.idempotencyKey,
+		);
+		expect(JSON.parse(delegateText(first))).toEqual({
+			results: [
+				expect.objectContaining({ agentId: "peer-a", accepted: true, queued: true }),
+				{ agentId: "ghost", accepted: false, error: "Unknown logical worker agent 'ghost'." },
+			],
+		});
+		expect(first.details).toMatchObject({ action: "broadcast", started: true, accepted: false, queued: true });
+		expect(JSON.stringify(tool.parameters)).toContain("broadcast");
+		expect([tool.description, ...(tool.promptGuidelines ?? [])].join(" ")).toContain(
+			"untrusted coordination evidence",
+		);
+		expect([tool.description, ...(tool.promptGuidelines ?? [])].join(" ")).toContain("never authority");
+	});
+
+	it("rejects missing or oversized broadcast target sets before mailbox routing", async () => {
+		const broadcastWorkerAgentMessage = vi.fn(() => ({ results: [] }));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ broadcastWorkerAgentMessage }),
+		});
+
+		const missing = await tool.execute(
+			"broadcast-missing",
+			{ action: "broadcast", message: "Evidence." },
+			undefined,
+			undefined,
+			context,
+		);
+		const oversized = await tool.execute(
+			"broadcast-oversized",
+			{
+				action: "broadcast",
+				agentIds: Array.from({ length: MAX_ORCHESTRATION_COLLECTION_LENGTH + 1 }, (_, index) => `peer-${index}`),
+				message: "Evidence.",
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(missing.details).toMatchObject({ started: false, skipReason: "missing_agent_ids" });
+		expect(oversized.details).toMatchObject({ started: false, skipReason: "agent_ids_invalid" });
+		expect(delegateText(oversized)).toContain(`through ${MAX_ORCHESTRATION_COLLECTION_LENGTH} entries`);
+		expect(broadcastWorkerAgentMessage).not.toHaveBeenCalled();
+	});
+
+	it("rejects page sizes above the transcript owner's shared ceiling", async () => {
+		const listWorkerAgents = vi.fn(() => []);
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ listWorkerAgents }),
+		});
+
+		const result = await tool.execute(
+			"page-oversized",
+			{ action: "list", maxMessages: MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES + 1 },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details).toMatchObject({ started: false, skipReason: "page_size_invalid" });
+		expect(listWorkerAgents).not.toHaveBeenCalled();
 	});
 
 	it("rejects oversized control payloads before invoking worker routing", async () => {
@@ -310,6 +831,48 @@ describe("delegate logical-agent controls", () => {
 		expect(resumeWorkerAgent).toHaveBeenCalledWith("agent-1");
 		expect(cancelWorkerAgent).toHaveBeenCalledWith("agent-1");
 		expect(cancelled.details).toMatchObject({ action: "cancel", agentId: "agent-1", status: "canceled" });
+	});
+
+	it("retires an eligible worker through caller-scoped durable control", async () => {
+		const retireWorkerAgent = vi.fn(() => ({
+			agent: {
+				agentId: "agent-2",
+				parentAgentId: "agent-1",
+				rootAgentId: "agent-1",
+				depth: 1,
+				role: "explorer" as const,
+				status: "retired" as const,
+				activity: "idle" as const,
+				createdAt: "T0",
+				updatedAt: "T1",
+			},
+			retired: true as const,
+			replayed: false,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "worker", agentId: "agent-1" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ retireWorkerAgent }),
+		});
+
+		const retired = await tool.execute(
+			"retire-call",
+			{ action: "retire", agentId: "agent-2" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(retireWorkerAgent).toHaveBeenCalledWith("agent-2", { callerAgentId: "agent-1" });
+		expect(delegateText(retired)).toContain("binding and transcript retained");
+		expect(retired.details).toMatchObject({
+			started: true,
+			action: "retire",
+			agentId: "agent-2",
+			accepted: true,
+			replayed: false,
+		});
+		expect(JSON.stringify(tool.parameters)).toContain("retire");
 	});
 
 	it("turns a thrown control callback into a bounded typed tool result", async () => {
@@ -474,8 +1037,11 @@ describe("delegate_status wait", () => {
 		expect(details.lanes?.length).toBeLessThanOrEqual(20);
 	});
 
-	it("blocks action start when callerAgentId is set to enforce 1-level nesting maximum", async () => {
-		const startWorkerDelegation = vi.fn();
+	it("forwards bounded recursive action start for an admitted worker", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "nested-lane", type: "worker" as const, status: "queued" as const },
+		}));
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "worker", agentId: "worker-1" },
 			startWorkerDelegation,
@@ -489,16 +1055,9 @@ describe("delegate_status wait", () => {
 			undefined,
 			context,
 		);
-		expect(startWorkerDelegation).not.toHaveBeenCalled();
-		expect(result.details).toMatchObject({
-			started: false,
-			action: "start",
-			skipReason: "subagent_delegation_disabled",
-		});
-		const textItem = result.content.find(
-			(item): item is Extract<typeof item, { type: "text" }> => item.type === "text",
-		);
-		expect(textItem?.text).toContain("1-level nesting maximum");
+		expect(startWorkerDelegation).toHaveBeenCalledOnce();
+		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Nested delegation" });
+		expect(result.details).toMatchObject({ started: true, agentId: "nested-lane", status: "queued" });
 	});
 });
 
@@ -771,12 +1330,28 @@ describe("delegate persistent worker reuse", () => {
 			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({
-				listWorkerAgents: () =>
-					[
-						{ agentId: "worker-1", createdAt: "T0", depth: 1 },
-						{ agentId: "worker-2", createdAt: "T1", depth: 1 },
-					] as never,
-				getWorkerAgentActivity: (agentId) => (agentId === "worker-1" ? "idle" : "active"),
+				listWorkerAgents: () => [
+					{
+						agentId: "worker-1",
+						rootAgentId: "worker-1",
+						depth: 0,
+						role: "implementer",
+						status: "registered",
+						activity: "idle",
+						createdAt: "T0",
+						updatedAt: "T0",
+					},
+					{
+						agentId: "worker-2",
+						rootAgentId: "worker-2",
+						depth: 0,
+						role: "explorer",
+						status: "active",
+						activity: "active",
+						createdAt: "T1",
+						updatedAt: "T1",
+					},
+				],
 				waitForWorkerAgent,
 			}),
 		});
@@ -790,5 +1365,79 @@ describe("delegate persistent worker reuse", () => {
 			expect.objectContaining({ agentId: "worker-2", activity: "active" }),
 		]);
 		expect(waitForWorkerAgent).not.toHaveBeenCalled();
+	});
+
+	it("bounds every collection-shaped worker control response by UTF-8 bytes with explicit omissions", async () => {
+		const agentIds = Array.from(
+			{ length: 64 },
+			(_, index) => `agent-${index.toString().padStart(2, "0")}-${"界".repeat(160)}`,
+		);
+		const agents = agentIds.map((agentId, index) => ({
+			agentId,
+			rootAgentId: agentId,
+			depth: 0,
+			role: "explorer" as const,
+			status: "registered" as const,
+			activity: "idle" as const,
+			createdAt: `T${index}`,
+			updatedAt: `T${index}`,
+		}));
+		const tasks = Array.from({ length: 64 }, (_, index) => ({
+			taskId: `task-${index}`,
+			title: "界".repeat(1_000),
+			role: "explorer" as const,
+			status: "ready" as const,
+			dependsOn: [] as const,
+		}));
+		const workerControl = workerAgentControl({
+			listWorkerAgents: () => agents,
+			getWorkerTaskSessionView: () => ({ totalTasks: 100, omittedTaskCount: 36, tasks }),
+			waitForWorkerAgents: async () => ({
+				statuses: agentIds.map((agentId) => ({ agentId, status: "idle" as const })),
+				updatedAgentIds: agentIds,
+				timedOut: false,
+			}),
+			broadcastWorkerAgentMessage: () => ({
+				results: agentIds.map((agentId) => ({ agentId, accepted: false as const, error: "界".repeat(160) })),
+			}),
+		});
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerControl,
+		});
+
+		const results = [
+			await tool.execute("tasks-bound", { action: "tasks" }, undefined, undefined, context),
+			await tool.execute(
+				"list-bound",
+				{ action: "list", maxMessages: MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES },
+				undefined,
+				undefined,
+				context,
+			),
+			await tool.execute(
+				"wait-bound",
+				{ action: "wait_many", agentIds, mode: "all" },
+				undefined,
+				undefined,
+				context,
+			),
+			await tool.execute(
+				"broadcast-bound",
+				{ action: "broadcast", agentIds, message: "bounded evidence" },
+				undefined,
+				undefined,
+				context,
+			),
+		];
+
+		for (const result of results) {
+			const text = delegateText(result);
+			expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(16 * 1024);
+			const payload = JSON.parse(text) as { omittedCount?: number; omittedTaskCount?: number };
+			expect(payload.omittedCount ?? payload.omittedTaskCount).toBeGreaterThan(0);
+		}
 	});
 });

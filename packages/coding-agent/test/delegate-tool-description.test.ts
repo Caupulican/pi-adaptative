@@ -1,8 +1,73 @@
 import { describe, expect, it } from "vitest";
+import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../src/core/delegation/worker-conversation-store.ts";
+import {
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	MAX_WORKER_AUTHORITY_PATHS,
+} from "../src/core/orchestration/contracts.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
+import { createDelegateToolDefinition, DELEGATE_ACTIONS } from "../src/core/tools/delegate.ts";
 
 describe("delegate tool capability description", () => {
+	it("derives the tool action schema from the canonical action registry", () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
+		});
+		const parameters = definition.parameters as unknown as {
+			properties?: { action?: { enum?: readonly string[] } };
+		};
+
+		expect(parameters.properties?.action?.enum).toEqual(DELEGATE_ACTIONS);
+		expect(new Set(DELEGATE_ACTIONS).size).toBe(DELEGATE_ACTIONS.length);
+	});
+
+	it("derives durable dispatch and authority bounds from the orchestration contracts", () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
+		});
+		const parameters = definition.parameters as unknown as {
+			properties: Record<
+				string,
+				{
+					maxLength?: number;
+					maxItems?: number;
+					maximum?: number;
+					items?: { maxLength?: number };
+					properties?: Record<string, unknown>;
+				}
+			>;
+		};
+		const authority = parameters.properties.authority as unknown as {
+			properties: Record<
+				string,
+				{ maxItems?: number; items?: { maxLength?: number }; properties?: Record<string, { maxLength?: number }> }
+			>;
+		};
+
+		expect(parameters.properties.instructions.maxLength).toBe(MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH);
+		for (const field of ["profileId", "agentId", "threadId", "replyToMessageId", "requestMessageId", "messageId"]) {
+			expect(parameters.properties[field]?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
+		}
+		expect(parameters.properties.agentIds.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
+		expect(parameters.properties.agentIds.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
+		expect(parameters.properties.maxMessages.maximum).toBe(MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES);
+		expect(authority.properties.model.properties?.provider?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH);
+		expect(authority.properties.model.properties?.modelId?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_ID_LENGTH);
+		expect(authority.properties.capabilities.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
+		expect(authority.properties.toolNames.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
+		expect(authority.properties.toolNames.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
+		for (const field of ["readPaths", "writePaths"]) {
+			expect(authority.properties[field]?.maxItems).toBe(MAX_WORKER_AUTHORITY_PATHS);
+			expect(authority.properties[field]?.items?.maxLength).toBe(MAX_WORKER_AUTHORITY_PATH_LENGTH);
+		}
+	});
+
 	it("stays accurate when worker write settings change without a runtime rebuild", () => {
 		const settings = SettingsManager.inMemory({
 			workerDelegation: { writeEnabled: false, writePaths: [] },
@@ -17,11 +82,14 @@ describe("delegate tool capability description", () => {
 
 		expect(settings.getWorkerDelegationSettings()).toMatchObject({ writeEnabled: true, writePaths: ["src"] });
 		expect(definition.description).toBe(descriptionBefore);
-		expect(definition.description).toContain("inherits the caller's execution authority");
+		expect(definition.description).toContain("inherits the caller's execution authority by default");
 		expect(definition.description).toContain("loaded profile as a preset");
-		expect(definition.description).toContain("host scheduler manages concurrency");
+		expect(definition.description).toContain("host scheduler manages bounded depth");
 		expect(definition.description).toContain("Workers are persistent specialists");
 		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
+		expect(definition.description).toContain(
+			"when inherited parent context would mislead the task, also set forkTurns to none",
+		);
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
@@ -32,9 +100,9 @@ describe("delegate tool capability description", () => {
 				authority?: object;
 			};
 		};
-		expect(parameters.properties?.instructions?.description).toContain("inherits the caller's full admitted grant");
-		expect(parameters.properties?.instructions?.description).toContain("cannot recursively delegate");
-		expect(parameters.properties?.instructions?.description).not.toContain("may recursively delegate");
+		expect(parameters.properties?.instructions?.description).toContain("inherits the caller's admitted grant");
+		expect(parameters.properties?.instructions?.description).toContain("may recursively delegate");
+		expect(parameters.properties?.instructions?.description).toContain("bounds depth");
 		expect(parameters.properties?.message?.description).toContain("reply");
 		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
 		expect(parameters.properties?.profileId?.description).toContain("preset, not an authority allowlist");
@@ -43,7 +111,7 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 
-	it("does not forward a delegate-call memory override to the worker orchestrator", async () => {
+	it("rejects a delegate-call memory override instead of forwarding it to the worker orchestrator", async () => {
 		let received: { instructions: string; profileId?: string } | undefined;
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
@@ -57,7 +125,7 @@ describe("delegate tool capability description", () => {
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
 
-		await definition.execute(
+		const result = await definition.execute(
 			"call-1",
 			{ instructions: "Recall the relevant convention", memoryRead: true },
 			new AbortController().signal,
@@ -65,6 +133,11 @@ describe("delegate tool capability description", () => {
 			{} as never,
 		);
 
-		expect(received).toEqual({ instructions: "Recall the relevant convention" });
+		expect(received).toBeUndefined();
+		expect(result.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "start_fields_forbidden",
+		});
 	});
 });

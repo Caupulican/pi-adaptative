@@ -21,6 +21,7 @@
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
  *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
  *                                                                                            control-plane bundle
+ *     worker-context-forks/<identity-digest>-<content-digest>.json                         -- immutable birth snapshots
  *   worktrees/<repo-slug>/<laneKey>   durable lane checkouts (core/worktree-sync)           -- worktreesDir
  * ```
  *
@@ -231,6 +232,30 @@ export function orchestrationEventStoreDir(agentDir: string, parentSessionId: st
  */
 export function workerConversationSessionsDir(agentDir: string, parentSessionId: string): string {
 	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-conversations");
+}
+
+/** `<orchestrationSessionDir>/worker-context-forks` -- immutable sanitized worker birth snapshots. */
+export function workerContextForksDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-context-forks");
+}
+
+/**
+ * `<workerContextForksDir>/<identity-digest>-<content-digest>.json` -- one immutable,
+ * content-addressed sanitized worker birth snapshot.
+ */
+export function workerContextForkFile(
+	agentDir: string,
+	parentSessionId: string,
+	identityDigest: string,
+	contentDigest: string,
+): string {
+	if (!/^[a-f0-9]{64}$/i.test(identityDigest) || !/^[a-f0-9]{64}$/i.test(contentDigest)) {
+		throw new TypeError("Worker context fork identities must be hexadecimal SHA-256 digests.");
+	}
+	return join(
+		workerContextForksDir(agentDir, parentSessionId),
+		`${identityDigest.toLowerCase()}-${contentDigest.toLowerCase()}.json`,
+	);
 }
 
 /**

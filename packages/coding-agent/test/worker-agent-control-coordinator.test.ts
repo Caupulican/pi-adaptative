@@ -4,10 +4,19 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerAgentMailbox, workerAgentMessageId } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
-import { type WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
-import type { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
-import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
-import { type AgentBindingContract, ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
+import {
+	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
+	type WorkerConversation,
+	WorkerConversationStore,
+} from "../src/core/delegation/worker-conversation-store.ts";
+import { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
+import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import {
+	type AgentBindingContract,
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	ORCHESTRATION_SCHEMA_VERSION,
+} from "../src/core/orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../src/core/orchestration/task-runtime.ts";
 
 const roots: string[] = [];
@@ -63,6 +72,114 @@ function activeAttempt(status: AttemptRuntimeState["status"]): AttemptRuntimeSta
 }
 
 describe("WorkerAgentControlCoordinator", () => {
+	it("forwards bounded opaque transcript pagination without assuming a message-count cursor", () => {
+		const agent = registeredAgent({ agentId: "paged-worker" });
+		const lifecycle = {
+			getAgent: (agentId: string) => (agentId === agent.agentId ? agent : undefined),
+		} as unknown as WorkerLifecycle;
+		const getRawTranscriptPage = vi.fn(() => ({
+			cursor: 100,
+			messages: [],
+			nextCursor: 112,
+			omittedMessages: 1,
+			serializedBytes: 2,
+		}));
+		const open = vi.spyOn(WorkerConversationStore.prototype, "open").mockReturnValue({
+			getRawTranscriptPage,
+		} as unknown as WorkerConversation);
+		try {
+			const coordinator = new WorkerAgentControlCoordinator({
+				agentDir: root(),
+				parentSessionId: "parent-opaque-transcript",
+				processOwnerId: "pi-worker:1:owner",
+				isControlAvailable: () => true,
+				getLifecycle: () => lifecycle,
+				recoveredRequest: () => ({ instructions: "unused" }),
+				run: async () => ({ started: false, skipReason: "unused" }),
+				scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+				statusChanged: vi.fn(),
+				abortLane: vi.fn(),
+				cancelLane: vi.fn(),
+			});
+
+			expect(
+				coordinator.readWorkerAgentTranscript("paged-worker", {
+					cursor: 100,
+					maxMessages: 8,
+					maxBytes: 12 * 1024,
+				}),
+			).toEqual({
+				agentId: "paged-worker",
+				cursor: 100,
+				messages: [],
+				nextCursor: 112,
+				omittedMessages: 1,
+				serializedBytes: 2,
+			});
+			expect(getRawTranscriptPage).toHaveBeenCalledWith({ cursor: 100, maxMessages: 8, maxBytes: 12 * 1024 });
+			expect(() =>
+				coordinator.readWorkerAgentTranscript("paged-worker", {
+					maxMessages: MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES + 1,
+				}),
+			).toThrow(`through ${MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES} messages`);
+		} finally {
+			open.mockRestore();
+		}
+	});
+
+	it("projects activity from durable task order when attempt clocks tie and UUID order reverses", async () => {
+		const agent = registeredAgent({ activeAttemptId: "attempt-a", status: "active" });
+		const completed = {
+			...activeAttempt("completed"),
+			attemptId: "attempt-z",
+			taskId: "task-old",
+			agentId: agent.agentId,
+			createdAt: "2026-07-27T00:00:00.000Z",
+		};
+		const queued = {
+			...activeAttempt("queued"),
+			attemptId: "attempt-a",
+			taskId: "task-new",
+			agentId: agent.agentId,
+			createdAt: "2026-07-27T00:00:00.000Z",
+		};
+		const snapshot = {
+			agents: { [agent.agentId]: agent },
+			tasks: {
+				"task-old": { attemptIds: [completed.attemptId] },
+				"task-new": { attemptIds: [queued.attemptId] },
+			},
+			attempts: { [completed.attemptId]: completed, [queued.attemptId]: queued },
+		} as unknown as TaskRuntimeProjection;
+		const getLatestAgentAttempt = vi.fn();
+		const lifecycle = {
+			getTaskRuntimeSnapshot: () => snapshot,
+			getLatestAgentAttempt,
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-tied-attempt-order",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		expect(coordinator.listWorkerAgents()).toEqual([
+			expect.objectContaining({ agentId: agent.agentId, activity: "active" }),
+		]);
+		await expect(coordinator.waitForWorkerAgents([agent.agentId], "all", 1)).resolves.toMatchObject({
+			statuses: [{ agentId: agent.agentId, status: "active" }],
+			timedOut: true,
+		});
+		expect(getLatestAgentAttempt).not.toHaveBeenCalled();
+	});
+
 	it("owns follow-up scheduling, event-driven state waits, and cancellation callbacks without controller wrappers", async () => {
 		let agent = registeredAgent();
 		let attempt: AttemptRuntimeState | undefined;
@@ -150,12 +267,123 @@ describe("WorkerAgentControlCoordinator", () => {
 		await expect(waiting).resolves.toEqual({ status: "suspended" });
 
 		attempt = activeAttempt("suspended");
+		enqueue.mockClear();
+		drain.mockClear();
+		track.mockClear();
 		expect(coordinator.resumeWorkerAgent("agent-1")).toMatchObject({ started: true, record });
-		expect(track).toHaveBeenCalledWith("worker-1", expect.any(Promise));
+		expect(enqueue).toHaveBeenCalledWith(record, { instructions: "recovered" }, true, false);
+		expect(drain).toHaveBeenCalledOnce();
+		expect(track).not.toHaveBeenCalled();
 
 		expect(coordinator.cancelWorkerAgent("agent-1", "owner_cancelled")).toMatchObject({ status: "canceled" });
 		expect(abortLane).toHaveBeenLastCalledWith("worker-1", "owner_cancelled");
 		expect(cancelLane).toHaveBeenCalledWith("worker-1", "owner_cancelled");
+	});
+
+	it("keeps a suspended resume queued when worker capacity is full", async () => {
+		const agentDir = root();
+		const attempt = {
+			...activeAttempt("suspended"),
+			attemptId: "attempt-capacity-resume",
+			taskId: "worker-capacity-resume",
+		};
+		const agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "suspended" });
+		const record = { laneId: attempt.taskId, type: "worker" as const, status: "running" as const };
+		const request = { instructions: "resume after capacity is available" };
+		const lifecycle = {
+			getAgent: (agentId: string) => (agentId === agent.agentId ? agent : undefined),
+			getLatestAgentAttempt: () => attempt,
+			getTaskRuntimeSnapshot: () => ({
+				agents: { [agent.agentId]: agent },
+				attempts: { [attempt.attemptId]: attempt },
+			}),
+			getRecord: (laneId: string) => (laneId === record.laneId ? record : undefined),
+		} as unknown as WorkerLifecycle;
+		let capacityFull = true;
+		const admit = vi.fn(() =>
+			capacityFull ? ({ action: "wait", reason: "capacity" } as const) : ({ action: "start" } as const),
+		);
+		const scheduledRun = vi.fn(async () => ({ started: true as const }));
+		const cancelLane = vi.fn();
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir,
+			isDisposed: () => false,
+			admit,
+			getRecord: lifecycle.getRecord.bind(lifecycle),
+			run: scheduledRun,
+			cancel: cancelLane,
+			warn: vi.fn(),
+		});
+		const bypassRun = vi.fn(async () => ({
+			started: false as const,
+			skipReason: "worker_delegation_already_running",
+		}));
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId: "parent-capacity-resume",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => request,
+			run: bypassRun,
+			scheduler,
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane,
+		});
+
+		expect(coordinator.resumeWorkerAgent(agent.agentId)).toMatchObject({ started: true, record });
+		await Promise.resolve();
+		expect(bypassRun).not.toHaveBeenCalled();
+		expect(admit).toHaveBeenCalledWith(request, record);
+		expect(scheduledRun).not.toHaveBeenCalled();
+		expect(cancelLane).not.toHaveBeenCalled();
+		expect(scheduler.queuedCount).toBe(1);
+
+		capacityFull = false;
+		scheduler.drain();
+		expect(scheduledRun).toHaveBeenCalledWith(request, record);
+		expect(cancelLane).not.toHaveBeenCalled();
+		expect(scheduler.queuedCount).toBe(0);
+	});
+
+	it("resumes a suspended verifier through the reserved scheduler queue", () => {
+		const attempt = {
+			...activeAttempt("suspended"),
+			attemptId: "attempt-verifier-resume",
+			taskId: "worker-verifier-resume",
+		};
+		const agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "suspended" });
+		const record = { laneId: attempt.taskId, type: "worker" as const, status: "running" as const };
+		const request = { instructions: "resume verifier", verificationOfTaskId: "worker-subject" };
+		const lifecycle = {
+			getAgent: (agentId: string) => (agentId === agent.agentId ? agent : undefined),
+			getLatestAgentAttempt: () => attempt,
+			getTaskRuntimeSnapshot: () => ({
+				agents: { [agent.agentId]: agent },
+				attempts: { [attempt.attemptId]: attempt },
+			}),
+			getRecord: (laneId: string) => (laneId === record.laneId ? record : undefined),
+		} as unknown as WorkerLifecycle;
+		const enqueue = vi.fn();
+		const drain = vi.fn();
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-verifier-resume",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => request,
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue, drain, track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		expect(coordinator.resumeWorkerAgent(agent.agentId)).toMatchObject({ started: true, record });
+		expect(enqueue).toHaveBeenCalledWith(record, request, true, true);
+		expect(drain).toHaveBeenCalledOnce();
 	});
 
 	it("keeps an expected reply open until durable target admission and reuses the exact accepted reply", () => {
@@ -872,37 +1100,58 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(responderMailbox.awaitingReplies()).toEqual([]);
 	});
 
-	it("limits peer visibility to one tree and destructive control to the caller's subtree", () => {
-		const rootAgent = registeredAgent({ agentId: "root", rootAgentId: "root" });
-		const child = registeredAgent({
+	it("exposes safe session peers while restricting transcripts and destructive control to the caller subtree", () => {
+		const agentDir = root();
+		const parentSessionId = "parent-session-peer-visibility";
+		const binding = (agentId: string, overrides: Partial<AgentBindingContract> = {}) => {
+			const conversation = new WorkerConversationStore().ensure({
+				agentDir,
+				parentSessionId,
+				logicalAgentId: agentId,
+				cwd: agentDir,
+				resourceProfileNames: [],
+				contextPointers: [],
+			});
+			return registeredAgent({
+				...overrides,
+				agentId,
+				resumeContext: conversation.getResumeContext(),
+			});
+		};
+		const rootAgent = binding("root", { rootAgentId: "root" });
+		const child = binding("child", {
 			agentId: "child",
 			parentAgentId: "root",
 			rootAgentId: "root",
 			depth: 1,
 		});
-		const sibling = registeredAgent({
+		const sibling = binding("sibling", {
 			agentId: "sibling",
 			parentAgentId: "root",
 			rootAgentId: "root",
 			depth: 1,
 		});
-		const foreign = registeredAgent({ agentId: "foreign", rootAgentId: "foreign" });
+		const foreign = binding("foreign", { rootAgentId: "foreign" });
 		const agents = { root: rootAgent, child, sibling, foreign };
 		const attempts = {
 			"attempt-root": { ...activeAttempt("running"), attemptId: "attempt-root", taskId: "root" },
 			"attempt-child": { ...activeAttempt("running"), attemptId: "attempt-child", taskId: "child" },
 			"attempt-sibling": { ...activeAttempt("running"), attemptId: "attempt-sibling", taskId: "sibling" },
 		};
+		const getTaskRuntimeSnapshot = vi.fn(() => ({ agents, attempts }));
+		const getLatestAgentAttempt = vi.fn(
+			(agentId: string) =>
+				attempts[`attempt-${agentId}` as keyof typeof attempts] as AttemptRuntimeState | undefined,
+		);
 		const lifecycle = {
 			getAgent: (agentId: string) => agents[agentId as keyof typeof agents],
-			getTaskRuntimeSnapshot: () => ({ agents, attempts }),
-			getLatestAgentAttempt: (agentId: string) =>
-				attempts[`attempt-${agentId}` as keyof typeof attempts] as AttemptRuntimeState | undefined,
+			getTaskRuntimeSnapshot,
+			getLatestAgentAttempt,
 		} as unknown as WorkerLifecycle;
 		const cancelLane = vi.fn(() => ({ laneId: "child", type: "worker" as const, status: "canceled" as const }));
 		const coordinator = new WorkerAgentControlCoordinator({
-			agentDir: root(),
-			parentSessionId: "parent-1",
+			agentDir,
+			parentSessionId,
 			processOwnerId: "pi-worker:1:owner",
 			isControlAvailable: () => true,
 			getLifecycle: () => lifecycle,
@@ -914,11 +1163,34 @@ describe("WorkerAgentControlCoordinator", () => {
 			cancelLane,
 		});
 
-		expect(coordinator.listWorkerAgents({ callerAgentId: "child" }).map((agent) => agent.agentId)).toEqual([
-			"root",
-			"child",
-			"sibling",
+		const views = coordinator.listWorkerAgents({ callerAgentId: "child" });
+		expect(views.map((agent) => agent.agentId).sort()).toEqual(["child", "foreign", "root", "sibling"]);
+		expect(getTaskRuntimeSnapshot).toHaveBeenCalledOnce();
+		expect(getLatestAgentAttempt).not.toHaveBeenCalled();
+		const serializedViews = JSON.stringify(views);
+		expect(serializedViews).not.toContain("resumeContext");
+		expect(serializedViews).not.toContain("sessionFile");
+		expect(serializedViews).not.toContain("contextPointers");
+		expect(Object.keys(views.find((agent) => agent.agentId === "foreign") ?? {}).sort()).toEqual([
+			"activity",
+			"agentId",
+			"createdAt",
+			"depth",
+			"role",
+			"rootAgentId",
+			"status",
+			"updatedAt",
 		]);
+		expect(coordinator.readWorkerAgentTranscript("child", { callerAgentId: "child" })).toMatchObject({
+			agentId: "child",
+		});
+		expect(() => coordinator.readWorkerAgentTranscript("sibling", { callerAgentId: "child" })).toThrow(
+			"outside its control subtree",
+		);
+		expect(() => coordinator.readWorkerAgentTranscript("foreign", { callerAgentId: "child" })).toThrow(
+			"outside its control subtree",
+		);
+		expect(coordinator.readWorkerAgentTranscript("foreign")).toMatchObject({ agentId: "foreign" });
 		expect(() => coordinator.cancelWorkerAgent("root", "agent_cancelled", { callerAgentId: "child" })).toThrow(
 			"outside its control subtree",
 		);
@@ -931,29 +1203,430 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(cancelLane).toHaveBeenCalledOnce();
 	});
 
-	it("waits on a queued stable agent id while yielding and restoring the caller's scheduler slot", async () => {
-		const parent = registeredAgent({
-			agentId: "parent",
-			rootAgentId: "parent",
+	it("routes reply-expected messages between independent top-level session peers", () => {
+		const agentDir = root();
+		const requesterAttempt = {
+			...activeAttempt("running"),
+			attemptId: "attempt-peer-requester",
+			taskId: "requester-task",
+		};
+		const requester = registeredAgent({
+			agentId: "requester",
+			rootAgentId: "requester",
 			status: "active",
-			activeAttemptId: "attempt-parent",
+			activeAttemptId: requesterAttempt.attemptId,
 		});
-		const child = registeredAgent({
-			agentId: "child",
-			parentAgentId: "parent",
-			rootAgentId: "parent",
+		const responder = registeredAgent({ agentId: "responder", rootAgentId: "responder" });
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ requester, responder })[agentId as "requester" | "responder"],
+			getLatestAgentAttempt: (agentId: string) => (agentId === requester.agentId ? requesterAttempt : undefined),
+			getTaskRuntimeSnapshot: () => ({
+				agents: { requester, responder },
+				attempts: { [requesterAttempt.attemptId]: requesterAttempt },
+			}),
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId: "parent-session-peer-messaging",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		const sent = coordinator.sendWorkerAgentMessage("responder", "Return peer evidence.", {
+			senderAgentId: "requester",
+			threadId: "peer-thread",
+			expectReply: true,
+		});
+		const responderMailbox = new WorkerAgentMailbox({
+			agentDir,
+			parentSessionId: "parent-session-peer-messaging",
+			agentId: "responder",
+		});
+		expect(responderMailbox.pending()).toEqual([
+			expect.objectContaining({ messageId: sent.messageId, senderAgentId: "requester", expectReply: true }),
+		]);
+		responderMailbox.acknowledgeDelivered(sent.messageId);
+		const reply = coordinator.replyToWorkerAgentMessage("responder", "Exact peer evidence.", sent.messageId);
+		expect(reply).toMatchObject({ destination: "worker", steering: true });
+		expect(
+			new WorkerAgentMailbox({
+				agentDir,
+				parentSessionId: "parent-session-peer-messaging",
+				agentId: "requester",
+			}).pending(),
+		).toEqual([
+			expect.objectContaining({
+				messageId: reply.messageId,
+				senderAgentId: "responder",
+				replyToMessageId: sent.messageId,
+			}),
+		]);
+	});
+
+	it("keeps peer sends visible but rejects cross-root worker wake controls", () => {
+		const agentDir = root();
+		const caller = registeredAgent({ agentId: "caller", rootAgentId: "caller" });
+		const peer = registeredAgent({ agentId: "peer", rootAgentId: "peer" });
+		const prepareAgentTurn = vi.fn();
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ caller, peer })[agentId as "caller" | "peer"],
+			getLatestAgentAttempt: () => undefined,
+			getTaskRuntimeSnapshot: () => ({ agents: { caller, peer }, attempts: {} }),
+			prepareAgentTurn,
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId: "parent-session-peer-authority",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		expect(
+			coordinator.sendWorkerAgentMessage("peer", "Share evidence without waking.", { senderAgentId: "caller" }),
+		).toMatchObject({ queued: true });
+		expect(() =>
+			coordinator.followUpWorkerAgent("peer", "Wake with caller authority.", { senderAgentId: "caller" }),
+		).toThrow("outside its control subtree");
+		expect(() =>
+			coordinator.startWorkerAgentTask("peer", "Start with caller authority.", { callerAgentId: "caller" }),
+		).toThrow("outside its control subtree");
+		expect(prepareAgentTurn).not.toHaveBeenCalled();
+	});
+
+	it("broadcasts once per canonical session peer, reports target failures, and never wakes a cross-root peer", () => {
+		const agentDir = root();
+		const parentSessionId = "parent-session-broadcast";
+		const caller = registeredAgent({ agentId: "caller", rootAgentId: "caller" });
+		let peer = registeredAgent({ agentId: "peer", rootAgentId: "peer" });
+		const retired = registeredAgent({ agentId: "retired", rootAgentId: "retired", status: "retired" });
+		const prepareAgentTurn = vi.fn();
+		const scheduler = { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() };
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ caller, peer, retired })[agentId as "caller" | "peer" | "retired"],
+			getLatestAgentAttempt: () => undefined,
+			getTaskRuntimeSnapshot: () => ({ agents: { caller, peer, retired }, attempts: {} }),
+			prepareAgentTurn,
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId,
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler,
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		const first = coordinator.broadcastWorkerAgentMessage(
+			[" peer ", "peer", "unknown", "retired"],
+			"Share untrusted coordination evidence.",
+			{
+				senderAgentId: "caller",
+				threadId: "broadcast-thread",
+				idempotencyKey: "broadcast-call-1",
+			},
+		);
+		expect(first.results).toEqual([
+			{
+				agentId: "peer",
+				accepted: true,
+				queued: true,
+				replayed: false,
+				messageId: expect.stringMatching(/^worker-message-[a-f0-9]{64}$/),
+			},
+			{ agentId: "unknown", accepted: false, error: "Unknown logical worker agent 'unknown'." },
+			{ agentId: "retired", accepted: false, error: "Logical worker agent 'retired' is retired." },
+		]);
+		const firstMessageId = first.results[0]?.accepted ? first.results[0].messageId : undefined;
+		const mailbox = new WorkerAgentMailbox({ agentDir, parentSessionId, agentId: "peer" });
+		expect(mailbox.pending()).toEqual([
+			expect.objectContaining({
+				messageId: firstMessageId,
+				kind: "follow_up",
+				senderAgentId: "caller",
+				threadId: "broadcast-thread",
+			}),
+		]);
+		expect(mailbox.pending()[0]?.task).toBeUndefined();
+
+		peer = { ...peer, status: "retired" };
+		expect(
+			coordinator.broadcastWorkerAgentMessage(["peer"], "Share untrusted coordination evidence.", {
+				senderAgentId: "caller",
+				threadId: "broadcast-thread",
+				idempotencyKey: "broadcast-call-1",
+			}).results,
+		).toEqual([
+			{
+				agentId: "peer",
+				accepted: true,
+				queued: true,
+				replayed: true,
+				messageId: firstMessageId,
+			},
+		]);
+		expect(
+			coordinator.broadcastWorkerAgentMessage(["peer"], "A fresh retired message.", {
+				senderAgentId: "caller",
+				idempotencyKey: "broadcast-call-2",
+			}).results,
+		).toEqual([{ agentId: "peer", accepted: false, error: "Logical worker agent 'peer' is retired." }]);
+		expect(mailbox.pending()).toHaveLength(1);
+		expect(prepareAgentTurn).not.toHaveBeenCalled();
+		expect(scheduler.enqueue).not.toHaveBeenCalled();
+	});
+
+	it("continues a broadcast after one target mailbox rejects admission under backpressure", () => {
+		const agentDir = root();
+		const parentSessionId = "parent-session-broadcast-backpressure";
+		const full = registeredAgent({ agentId: "full", rootAgentId: "full" });
+		const available = registeredAgent({ agentId: "available", rootAgentId: "available" });
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ full, available })[agentId as "full" | "available"],
+			getLatestAgentAttempt: () => undefined,
+			getTaskRuntimeSnapshot: () => ({ agents: { full, available }, attempts: {} }),
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId,
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+		const fullMailbox = new WorkerAgentMailbox({ agentDir, parentSessionId, agentId: "full" });
+		for (let index = 0; index < 64; index++) {
+			fullMailbox.enqueue({ kind: "follow_up", content: `pending ${index}` });
+		}
+
+		const broadcast = coordinator.broadcastWorkerAgentMessage(["full", "available"], "Bounded evidence.", {
+			idempotencyKey: "broadcast-backpressure-call",
+		});
+
+		expect(broadcast.results[0]).toEqual({
+			agentId: "full",
+			accepted: false,
+			error: expect.stringContaining("message limit"),
+		});
+		expect(broadcast.results[1]).toMatchObject({ agentId: "available", accepted: true, queued: true });
+		expect(new WorkerAgentMailbox({ agentDir, parentSessionId, agentId: "available" }).pending()).toHaveLength(1);
+	});
+
+	it("rejects active, suspended, cross-root, pending-message, and unresolved-reply retirement", () => {
+		const agentDir = root();
+		const parentSessionId = "parent-agent-retirement-guards";
+		const caller = registeredAgent({ agentId: "caller", rootAgentId: "caller" });
+		const active = registeredAgent({
+			agentId: "active",
+			parentAgentId: "caller",
+			rootAgentId: "caller",
+			depth: 1,
+			status: "active",
+			activeAttemptId: "attempt-active",
+		});
+		const suspended = registeredAgent({
+			agentId: "suspended",
+			parentAgentId: "caller",
+			rootAgentId: "caller",
+			depth: 1,
+			status: "suspended",
+			activeAttemptId: "attempt-suspended",
+		});
+		const pending = registeredAgent({
+			agentId: "pending",
+			parentAgentId: "caller",
+			rootAgentId: "caller",
 			depth: 1,
 		});
-		let childAttempt = {
+		const awaiting = registeredAgent({
+			agentId: "awaiting",
+			parentAgentId: "caller",
+			rootAgentId: "caller",
+			depth: 1,
+		});
+		const foreign = registeredAgent({ agentId: "foreign", rootAgentId: "foreign" });
+		const activeAttemptState = { ...activeAttempt("running"), attemptId: "attempt-active" };
+		const suspendedAttemptState = { ...activeAttempt("suspended"), attemptId: "attempt-suspended" };
+		const agents = { caller, active, suspended, pending, awaiting, foreign };
+		const retireAgent = vi.fn();
+		const lifecycle = {
+			getAgent: (agentId: string) => agents[agentId as keyof typeof agents],
+			getLatestAgentAttempt: (agentId: string) => {
+				if (agentId === "active") return activeAttemptState;
+				if (agentId === "suspended") return suspendedAttemptState;
+				return undefined;
+			},
+			getTaskRuntimeSnapshot: () => ({
+				agents,
+				attempts: {
+					[activeAttemptState.attemptId]: activeAttemptState,
+					[suspendedAttemptState.attemptId]: suspendedAttemptState,
+				},
+			}),
+			retireAgent,
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId,
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+		new WorkerAgentMailbox({ agentDir, parentSessionId, agentId: "pending" }).enqueue({
+			kind: "follow_up",
+			content: "Pending evidence must survive.",
+			senderAgentId: "caller",
+		});
+		const awaitingMailbox = new WorkerAgentMailbox({ agentDir, parentSessionId, agentId: "awaiting" });
+		const request = awaitingMailbox.enqueue({
+			kind: "follow_up",
+			content: "Reply before retirement.",
+			senderAgentId: "caller",
+			expectReply: true,
+		});
+		awaitingMailbox.acknowledgeDelivered(request.messageId);
+
+		expect(() => coordinator.retireWorkerAgent("active", { callerAgentId: "caller" })).toThrow("active");
+		expect(() => coordinator.retireWorkerAgent("suspended", { callerAgentId: "caller" })).toThrow("suspended");
+		expect(() => coordinator.retireWorkerAgent("foreign", { callerAgentId: "caller" })).toThrow(
+			"outside its control subtree",
+		);
+		expect(() => coordinator.retireWorkerAgent("pending", { callerAgentId: "caller" })).toThrow(
+			"pending control message",
+		);
+		expect(() => coordinator.retireWorkerAgent("awaiting", { callerAgentId: "caller" })).toThrow(
+			"unresolved reply obligation",
+		);
+		expect(retireAgent).not.toHaveBeenCalled();
+	});
+
+	it("retires idle leaves idempotently across restart while retaining their durable bindings", () => {
+		const agentDir = root();
+		const parentSessionId = "parent-agent-retirement-restart";
+		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: parentSessionId });
+		const ensure = (agentId: string, parentAgentId?: string) =>
+			lifecycle.ensureAgent({
+				agentId,
+				...(parentAgentId ? { parentAgentId } : {}),
+				role: "explorer",
+				resumeContext: {
+					provider: "pi",
+					sessionId: `session-${agentId}`,
+					cwd: agentDir,
+					resourceProfileNames: [],
+					contextPointers: [],
+				},
+			});
+		ensure("root-agent");
+		ensure("child", "root-agent");
+		const grandchildBefore = ensure("grandchild", "child");
+		ensure("foreign");
+		const statusChanged = vi.fn();
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId,
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged,
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		expect(() => coordinator.retireWorkerAgent("child", { callerAgentId: "root-agent" })).toThrow(
+			"non-retired descendant 'grandchild'",
+		);
+		expect(() => coordinator.retireWorkerAgent("foreign", { callerAgentId: "child" })).toThrow(
+			"outside its control subtree",
+		);
+		expect(coordinator.retireWorkerAgent("grandchild", { callerAgentId: "root-agent" })).toEqual({
+			agent: expect.objectContaining({ agentId: "grandchild", status: "retired" }),
+			retired: true,
+			replayed: false,
+		});
+		expect(coordinator.retireWorkerAgent("grandchild", { callerAgentId: "root-agent" })).toEqual({
+			agent: expect.objectContaining({ agentId: "grandchild", status: "retired" }),
+			retired: true,
+			replayed: true,
+		});
+		expect(coordinator.retireWorkerAgent("foreign")).toMatchObject({ retired: true, replayed: false });
+		expect(statusChanged).toHaveBeenCalledTimes(2);
+
+		const restartedLifecycle = new WorkerLifecycle({ agentDir, sessionId: parentSessionId });
+		const restartedStatusChanged = vi.fn();
+		const restarted = new WorkerAgentControlCoordinator({
+			agentDir,
+			parentSessionId,
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => restartedLifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: restartedStatusChanged,
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		expect(restarted.retireWorkerAgent("grandchild", { callerAgentId: "root-agent" })).toMatchObject({
+			retired: true,
+			replayed: true,
+		});
+		expect(restartedLifecycle.getAgent("grandchild")?.resumeContext).toEqual(grandchildBefore.resumeContext);
+		expect(restarted.listWorkerAgents().find(({ agentId }) => agentId === "grandchild")?.status).toBe("retired");
+		expect(restartedStatusChanged).not.toHaveBeenCalled();
+	});
+
+	it("waits across top-level peers while yielding and restoring exactly one caller scheduler slot", async () => {
+		const caller = registeredAgent({
+			agentId: "caller",
+			rootAgentId: "caller",
+			status: "active",
+			activeAttemptId: "attempt-caller",
+		});
+		const peer = registeredAgent({ agentId: "peer", rootAgentId: "peer" });
+		let peerAttempt = {
 			...activeAttempt("queued"),
-			attemptId: "attempt-child",
-			taskId: "child",
-			dispatch: { ...activeAttempt("queued").dispatch, logicalLaneId: "child" },
+			attemptId: "attempt-peer",
+			taskId: "peer",
+			dispatch: { ...activeAttempt("queued").dispatch, logicalLaneId: "peer" },
 		};
 		const lifecycle = {
-			getAgent: (agentId: string) => ({ parent, child })[agentId as "parent" | "child"],
-			getLatestAgentAttempt: (agentId: string) => (agentId === "child" ? childAttempt : activeAttempt("running")),
-			getTaskRuntimeSnapshot: () => ({ agents: { parent, child }, attempts: { "attempt-child": childAttempt } }),
+			getAgent: (agentId: string) => ({ caller, peer })[agentId as "caller" | "peer"],
+			getLatestAgentAttempt: (agentId: string) => (agentId === "peer" ? peerAttempt : activeAttempt("running")),
+			getTaskRuntimeSnapshot: () => ({ agents: { caller, peer }, attempts: { "attempt-peer": peerAttempt } }),
 		} as unknown as WorkerLifecycle;
 		const releaseYield = vi.fn();
 		const yieldCapacity = vi.fn(() => releaseYield);
@@ -972,13 +1645,300 @@ describe("WorkerAgentControlCoordinator", () => {
 			yieldCapacity,
 		});
 
-		const waiting = coordinator.waitForWorkerAgent("child", 10_000, { callerAgentId: "parent" });
-		expect(yieldCapacity).toHaveBeenCalledWith("parent", "child");
-		childAttempt = { ...childAttempt, status: "completed" };
+		const waiting = coordinator.waitForWorkerAgent("peer", 10_000, { callerAgentId: "caller" });
+		expect(yieldCapacity).toHaveBeenCalledOnce();
+		expect(yieldCapacity).toHaveBeenCalledWith("caller", "caller");
+		peerAttempt = { ...peerAttempt, status: "completed" };
 		coordinator.signalStateChanged();
 
 		await expect(waiting).resolves.toEqual({ status: "idle" });
 		expect(releaseYield).toHaveBeenCalledOnce();
+	});
+
+	it("waits for any deduplicated session peer with one shared state subscription and one capacity yield", async () => {
+		const caller = registeredAgent({
+			agentId: "caller",
+			rootAgentId: "caller",
+			status: "active",
+			activeAttemptId: "attempt-caller",
+		});
+		const peerA = registeredAgent({
+			agentId: "peer-a",
+			rootAgentId: "peer-a",
+			status: "active",
+			activeAttemptId: "attempt-peer-a",
+		});
+		const peerB = registeredAgent({
+			agentId: "peer-b",
+			rootAgentId: "peer-b",
+			status: "active",
+			activeAttemptId: "attempt-peer-b",
+		});
+		const peerAAttempt = {
+			...activeAttempt("running"),
+			attemptId: "attempt-peer-a",
+			taskId: "peer-a-task",
+			dispatch: { ...activeAttempt("running").dispatch, logicalLaneId: "peer-a" },
+		};
+		let peerBAttempt = {
+			...activeAttempt("queued"),
+			attemptId: "attempt-peer-b",
+			taskId: "peer-b-task",
+			dispatch: { ...activeAttempt("queued").dispatch, logicalLaneId: "peer-b" },
+		};
+		const getLatestAgentAttempt = vi.fn((agentId: string) => {
+			if (agentId === "peer-a") return peerAAttempt;
+			if (agentId === "peer-b") return peerBAttempt;
+			return activeAttempt("running");
+		});
+		const getTaskRuntimeSnapshot = vi.fn(() => ({
+			agents: { caller, "peer-a": peerA, "peer-b": peerB },
+			attempts: {
+				"attempt-peer-a": peerAAttempt,
+				"attempt-peer-b": peerBAttempt,
+			},
+		}));
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ caller, "peer-a": peerA, "peer-b": peerB })[agentId],
+			getLatestAgentAttempt,
+			getTaskRuntimeSnapshot,
+		} as unknown as WorkerLifecycle;
+		const releaseYield = vi.fn();
+		const yieldCapacity = vi.fn(() => releaseYield);
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-multi-wait-any",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+			yieldCapacity,
+		});
+		const subscribe = vi.spyOn(WorkerAgentMailbox.prototype, "subscribe");
+
+		try {
+			const waiting = coordinator.waitForWorkerAgents([" peer-a ", "peer-a", "peer-b"], "any", 10_000, {
+				callerAgentId: "caller",
+			});
+			expect(subscribe).not.toHaveBeenCalled();
+			expect(yieldCapacity).toHaveBeenCalledOnce();
+			expect(yieldCapacity).toHaveBeenCalledWith("caller", "caller");
+			peerBAttempt = { ...peerBAttempt, status: "completed" };
+			const snapshotsBeforeStateEvent = getTaskRuntimeSnapshot.mock.calls.length;
+			coordinator.signalStateChanged();
+
+			await expect(waiting).resolves.toEqual({
+				statuses: [
+					{ agentId: "peer-a", status: "active" },
+					{ agentId: "peer-b", status: "idle" },
+				],
+				updatedAgentIds: ["peer-b"],
+				timedOut: false,
+			});
+			expect(releaseYield).toHaveBeenCalledOnce();
+			// One snapshot reconciles mailboxes and one projects every target status; neither scales by target count.
+			expect(getTaskRuntimeSnapshot.mock.calls.length - snapshotsBeforeStateEvent).toBe(2);
+			expect(getLatestAgentAttempt).not.toHaveBeenCalled();
+		} finally {
+			subscribe.mockRestore();
+		}
+	});
+
+	it("cleans the shared wait subscription and timeout when caller-capacity yield throws", async () => {
+		const caller = registeredAgent({ agentId: "caller", rootAgentId: "caller" });
+		const peer = registeredAgent({ agentId: "peer", rootAgentId: "peer" });
+		const peerAttempt = {
+			...activeAttempt("running"),
+			attemptId: "attempt-peer",
+			taskId: "peer-task",
+			agentId: "peer",
+		};
+		const lifecycle = {
+			getAgent: (agentId: string) => ({ caller, peer })[agentId as "caller" | "peer"],
+			getLatestAgentAttempt: (agentId: string) => (agentId === "peer" ? peerAttempt : undefined),
+			getTaskRuntimeSnapshot: () => ({
+				agents: { caller, peer },
+				attempts: { [peerAttempt.attemptId]: peerAttempt },
+			}),
+		} as unknown as WorkerLifecycle;
+		let observedListenerCount = 0;
+		let stateListeners: Set<() => void>;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-multi-wait-yield-failure",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+			yieldCapacity: () => {
+				observedListenerCount = stateListeners.size;
+				throw new Error("synthetic yield failure");
+			},
+		});
+		stateListeners = (coordinator as unknown as { stateListeners: Set<() => void> }).stateListeners;
+
+		await expect(
+			coordinator.waitForWorkerAgents(["peer"], "all", 10_000, { callerAgentId: "caller" }),
+		).rejects.toThrow("synthetic yield failure");
+		expect(observedListenerCount).toBe(1);
+		expect(stateListeners.size).toBe(0);
+	});
+
+	it("waits for all peers and returns partial updates when the bounded wait times out", async () => {
+		vi.useFakeTimers();
+		try {
+			const caller = registeredAgent({ agentId: "caller", rootAgentId: "caller" });
+			const peerA = registeredAgent({ agentId: "peer-a", rootAgentId: "peer-a" });
+			const peerB = registeredAgent({ agentId: "peer-b", rootAgentId: "peer-b" });
+			let peerAAttempt = {
+				...activeAttempt("running"),
+				attemptId: "attempt-peer-a",
+				taskId: "peer-a-task",
+				agentId: "peer-a",
+			};
+			const peerBAttempt = {
+				...activeAttempt("running"),
+				attemptId: "attempt-peer-b",
+				taskId: "peer-b-task",
+				agentId: "peer-b",
+			};
+			const lifecycle = {
+				getAgent: (agentId: string) => ({ caller, "peer-a": peerA, "peer-b": peerB })[agentId],
+				getLatestAgentAttempt: (agentId: string) => {
+					if (agentId === "peer-a") return peerAAttempt;
+					if (agentId === "peer-b") return peerBAttempt;
+					return undefined;
+				},
+				getTaskRuntimeSnapshot: () => ({
+					agents: { caller, "peer-a": peerA, "peer-b": peerB },
+					attempts: {
+						"attempt-peer-a": peerAAttempt,
+						"attempt-peer-b": peerBAttempt,
+					},
+				}),
+			} as unknown as WorkerLifecycle;
+			const releaseYield = vi.fn();
+			const yieldCapacity = vi.fn(() => releaseYield);
+			const coordinator = new WorkerAgentControlCoordinator({
+				agentDir: root(),
+				parentSessionId: "parent-multi-wait-all",
+				processOwnerId: "pi-worker:1:owner",
+				isControlAvailable: () => true,
+				getLifecycle: () => lifecycle,
+				recoveredRequest: () => ({ instructions: "unused" }),
+				run: async () => ({ started: false, skipReason: "unused" }),
+				scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+				statusChanged: vi.fn(),
+				abortLane: vi.fn(),
+				cancelLane: vi.fn(),
+				yieldCapacity,
+			});
+
+			let resolved = false;
+			const waiting = coordinator.waitForWorkerAgents(["peer-a", "peer-b"], "all", 1_000, {
+				callerAgentId: "caller",
+			});
+			void waiting.then(() => {
+				resolved = true;
+			});
+			peerAAttempt = { ...peerAAttempt, status: "completed" };
+			coordinator.signalStateChanged();
+			await Promise.resolve();
+			expect(resolved).toBe(false);
+			await vi.advanceTimersByTimeAsync(1_000);
+
+			await expect(waiting).resolves.toEqual({
+				statuses: [
+					{ agentId: "peer-a", status: "idle" },
+					{ agentId: "peer-b", status: "active" },
+				],
+				updatedAgentIds: ["peer-a"],
+				timedOut: true,
+			});
+			expect(yieldCapacity).toHaveBeenCalledOnce();
+			expect(releaseYield).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("validates one bounded canonical multi-agent wait set", () => {
+		const lifecycle = {
+			getAgent: () => undefined,
+			getTaskRuntimeSnapshot: () => ({ agents: {}, attempts: {} }),
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-multi-wait-validation",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		expect(() => coordinator.waitForWorkerAgents([], "any")).toThrow(
+			`from 1 through ${MAX_ORCHESTRATION_COLLECTION_LENGTH}`,
+		);
+		expect(() =>
+			coordinator.waitForWorkerAgents(
+				Array.from({ length: MAX_ORCHESTRATION_COLLECTION_LENGTH + 1 }, (_, index) => `agent-${index}`),
+				"all",
+			),
+		).toThrow(`from 1 through ${MAX_ORCHESTRATION_COLLECTION_LENGTH}`);
+		expect(() => coordinator.waitForWorkerAgents([" "], "any")).toThrow("id is required");
+		expect(() =>
+			coordinator.waitForWorkerAgents(["x".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH + 1)], "any"),
+		).toThrow(`exceeds ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH}`);
+		expect(() => coordinator.waitForWorkerAgents(["agent-1"], "race" as never)).toThrow("mode");
+	});
+
+	it("projects a 64-agent immediate wait from one snapshot without per-agent lifecycle reads", async () => {
+		const agents = Object.fromEntries(
+			Array.from({ length: MAX_ORCHESTRATION_COLLECTION_LENGTH }, (_, index) => {
+				const agentId = `peer-${index}`;
+				return [agentId, registeredAgent({ agentId, rootAgentId: agentId })];
+			}),
+		);
+		const getTaskRuntimeSnapshot = vi.fn(() => ({ agents, attempts: {} }));
+		const getAgent = vi.fn();
+		const getLatestAgentAttempt = vi.fn();
+		const lifecycle = { getTaskRuntimeSnapshot, getAgent, getLatestAgentAttempt } as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-64-wait",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		const result = await coordinator.waitForWorkerAgents(Object.keys(agents), "all");
+
+		expect(result.statuses).toHaveLength(64);
+		expect(result.statuses.every(({ status }) => status === "idle")).toBe(true);
+		expect(getTaskRuntimeSnapshot).toHaveBeenCalledOnce();
+		expect(getAgent).not.toHaveBeenCalled();
+		expect(getLatestAgentAttempt).not.toHaveBeenCalled();
 	});
 
 	it("reports activity without yielding capacity and atomically rejects a competing task start", () => {
@@ -986,27 +1946,39 @@ describe("WorkerAgentControlCoordinator", () => {
 		let agent = registeredAgent();
 		const otherAgent = registeredAgent({ agentId: "agent-2" });
 		let attempt: AttemptRuntimeState | undefined;
+		let taskDependencies: readonly string[] = [];
 		const record = { laneId: "worker-1:turn:2", type: "worker" as const, status: "queued" as const };
-		const prepareAgentTurn = vi.fn((args: { agentId: string; instructions: string; controlMessageId?: string }) => {
-			attempt = {
-				...activeAttempt("queued"),
-				taskId: record.laneId,
-				dispatch: {
-					...activeAttempt("queued").dispatch,
-					instructions: args.instructions,
-					logicalLaneId: args.agentId,
-					...(args.controlMessageId ? { controlMessageId: args.controlMessageId } : {}),
-				},
-			};
-			agent = registeredAgent({ activeAttemptId: attempt.attemptId });
-			return { record, attempt };
-		});
+		const prepareAgentTurn = vi.fn(
+			(args: {
+				agentId: string;
+				instructions: string;
+				controlMessageId?: string;
+				dependsOnTaskIds?: readonly string[];
+			}) => {
+				taskDependencies = args.dependsOnTaskIds ?? [];
+				attempt = {
+					...activeAttempt("queued"),
+					taskId: record.laneId,
+					dispatch: {
+						...activeAttempt("queued").dispatch,
+						instructions: args.instructions,
+						logicalLaneId: args.agentId,
+						...(args.controlMessageId ? { controlMessageId: args.controlMessageId } : {}),
+					},
+				};
+				agent = registeredAgent({ activeAttemptId: attempt.attemptId });
+				return { record, attempt };
+			},
+		);
 		const lifecycle = {
 			getAgent: (agentId: string) =>
 				agentId === agent.agentId ? agent : agentId === otherAgent.agentId ? otherAgent : undefined,
 			getLatestAgentAttempt: () => attempt,
 			getTaskRuntimeSnapshot: () => ({
 				agents: { [agent.agentId]: agent, [otherAgent.agentId]: otherAgent },
+				tasks: attempt
+					? { [attempt.taskId]: { task: { dependsOn: taskDependencies }, attemptIds: [attempt.attemptId] } }
+					: {},
 				attempts: attempt ? { [attempt.attemptId]: attempt } : {},
 			}),
 			getRecord: (laneId: string) => (laneId === record.laneId ? record : undefined),
@@ -1032,6 +2004,7 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(yieldCapacity).not.toHaveBeenCalled();
 		const first = coordinator.startWorkerAgentTask("agent-1", "first task", {
 			idempotencyKey: "host-start-call-1",
+			dependsOnTaskIds: ["dependency-a", "dependency-b"],
 		});
 		expect(first).toMatchObject({
 			started: true,
@@ -1039,11 +2012,23 @@ describe("WorkerAgentControlCoordinator", () => {
 			record,
 		});
 		expect(
-			coordinator.startWorkerAgentTask("agent-1", "first task", { idempotencyKey: "host-start-call-1" }),
+			coordinator.startWorkerAgentTask("agent-1", "first task", {
+				idempotencyKey: "host-start-call-1",
+				dependsOnTaskIds: ["dependency-a", "dependency-b"],
+			}),
 		).toEqual(first);
 		expect(() =>
-			coordinator.startWorkerAgentTask("agent-1", "drifted task", { idempotencyKey: "host-start-call-1" }),
+			coordinator.startWorkerAgentTask("agent-1", "drifted task", {
+				idempotencyKey: "host-start-call-1",
+				dependsOnTaskIds: ["dependency-a", "dependency-b"],
+			}),
 		).toThrow("idempotency identity conflicts");
+		expect(() =>
+			coordinator.startWorkerAgentTask("agent-1", "first task", {
+				idempotencyKey: "host-start-call-1",
+				dependsOnTaskIds: ["dependency-b", "dependency-a"],
+			}),
+		).toThrow("durable task dependencies");
 		expect(() =>
 			coordinator.startWorkerAgentTask("agent-2", "first task", { idempotencyKey: "host-start-call-1" }),
 		).toThrow("already accepted by logical worker 'agent-1'");
@@ -1055,6 +2040,12 @@ describe("WorkerAgentControlCoordinator", () => {
 			skipReason: "worker_active",
 		});
 		expect(prepareAgentTurn).toHaveBeenCalledOnce();
+		expect(prepareAgentTurn).toHaveBeenCalledWith({
+			agentId: "agent-1",
+			instructions: "first task",
+			controlMessageId: first.messageId,
+			dependsOnTaskIds: ["dependency-a", "dependency-b"],
+		});
 		// Explicit follow-up remains the intentional steering path for an active task.
 		expect(coordinator.followUpWorkerAgent("agent-1", "steer active task")).toMatchObject({
 			started: false,
@@ -1063,7 +2054,10 @@ describe("WorkerAgentControlCoordinator", () => {
 		if (!attempt) throw new Error("Expected active attempt.");
 		attempt = { ...attempt, status: "completed" };
 		expect(
-			coordinator.startWorkerAgentTask("agent-1", "first task", { idempotencyKey: "host-start-call-1" }),
+			coordinator.startWorkerAgentTask("agent-1", "first task", {
+				idempotencyKey: "host-start-call-1",
+				dependsOnTaskIds: ["dependency-a", "dependency-b"],
+			}),
 		).toEqual(first);
 		expect(prepareAgentTurn).toHaveBeenCalledOnce();
 
@@ -1075,11 +2069,15 @@ describe("WorkerAgentControlCoordinator", () => {
 		}
 		expect(mailbox.getMessage(first.messageId)).toBeUndefined();
 		expect(
-			coordinator.startWorkerAgentTask("agent-1", "first task", { idempotencyKey: "host-start-call-1" }),
+			coordinator.startWorkerAgentTask("agent-1", "first task", {
+				idempotencyKey: "host-start-call-1",
+				dependsOnTaskIds: ["dependency-a", "dependency-b"],
+			}),
 		).toEqual(first);
 		expect(() =>
 			coordinator.startWorkerAgentTask("agent-1", "drifted after eviction", {
 				idempotencyKey: "host-start-call-1",
+				dependsOnTaskIds: ["dependency-a", "dependency-b"],
 			}),
 		).toThrow("idempotency identity conflicts");
 		expect(mailbox.pending()).toEqual([]);
@@ -1093,7 +2091,12 @@ describe("WorkerAgentControlCoordinator", () => {
 			let attempt: AttemptRuntimeState | undefined;
 			let failed = false;
 			const prepareAgentTurn = vi.fn(
-				(args: { agentId: string; instructions: string; controlMessageId?: string }) => {
+				(args: {
+					agentId: string;
+					instructions: string;
+					controlMessageId?: string;
+					dependsOnTaskIds?: readonly string[];
+				}) => {
 					if (failurePoint === "prepare" && !failed) {
 						failed = true;
 						throw new Error("simulated prepare failure");
@@ -1160,11 +2163,16 @@ describe("WorkerAgentControlCoordinator", () => {
 				agentId: agent.agentId,
 			});
 
-			const accepted = coordinator.startWorkerAgentTask(agent.agentId, `survive ${failurePoint}`);
+			const accepted = coordinator.startWorkerAgentTask(agent.agentId, `survive ${failurePoint}`, {
+				dependsOnTaskIds: ["dependency-a"],
+			});
 			expect(accepted.messageId).toMatch(/^worker-message-/);
 			expect(accepted.skipReason).toContain(`simulated ${failurePoint} failure`);
 			expect(mailbox.pendingTaskBearing()).toEqual([
-				expect.objectContaining({ messageId: accepted.messageId, task: { kind: "agent_turn" } }),
+				expect.objectContaining({
+					messageId: accepted.messageId,
+					task: { kind: "agent_turn", dependsOnTaskIds: ["dependency-a"] },
+				}),
 			]);
 			expect(abortLane).not.toHaveBeenCalled();
 			expect(cancelLane).not.toHaveBeenCalled();
@@ -1173,6 +2181,12 @@ describe("WorkerAgentControlCoordinator", () => {
 			coordinator.signalStateChanged();
 			coordinator.signalStateChanged();
 			expect(prepareAgentTurn).toHaveBeenCalledTimes(failurePoint === "prepare" ? 2 : 1);
+			expect(prepareAgentTurn).toHaveBeenLastCalledWith({
+				agentId: agent.agentId,
+				instructions: `survive ${failurePoint}`,
+				controlMessageId: accepted.messageId,
+				dependsOnTaskIds: ["dependency-a"],
+			});
 			expect(attempt?.dispatch.controlMessageId).toBe(accepted.messageId);
 			expect(mailbox.pendingTaskBearing()).toHaveLength(1);
 			expect(enqueue).toHaveBeenCalled();
@@ -1421,7 +2435,9 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(reopened.getRawTranscript()).toContainEqual(
 			expect.objectContaining({
 				role: "user",
-				content: expect.stringContaining("childAgentId=child"),
+				content: expect.stringMatching(
+					/childAgentId=child[\s\S]*bounded raw transcript pages[\s\S]*complete durable entries[\s\S]*omittedMessages/,
+				),
 			}),
 		);
 		expect(coordinator.deliverWorkerTerminalHandoff(handoff)).toMatchObject({
@@ -1940,6 +2956,8 @@ describe("WorkerAgentControlCoordinator", () => {
 			getRecord: () => runningRecord,
 			suspendAgent: vi.fn(),
 		} as unknown as WorkerLifecycle;
+		const enqueue = vi.fn();
+		const drain = vi.fn();
 		const track = vi.fn();
 		const coordinator = new WorkerAgentControlCoordinator({
 			agentDir: root(),
@@ -1949,7 +2967,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			getLifecycle: () => lifecycle,
 			recoveredRequest: () => ({ instructions: "recovered" }),
 			run: async () => ({ started: true }),
-			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track, dropQueued: vi.fn() },
+			scheduler: { enqueue, drain, track, dropQueued: vi.fn() },
 			statusChanged: () => {
 				throw new Error("simulated status observer failure");
 			},
@@ -1978,7 +2996,9 @@ describe("WorkerAgentControlCoordinator", () => {
 
 		attempt = { ...attempt, status: "suspended" };
 		expect(coordinator.resumeWorkerAgent("parent")).toMatchObject({ started: true, record: runningRecord });
-		expect(track).toHaveBeenCalledOnce();
+		expect(enqueue).toHaveBeenCalledWith(runningRecord, { instructions: "recovered" }, true, false);
+		expect(drain).toHaveBeenCalledOnce();
+		expect(track).not.toHaveBeenCalled();
 		expect(coordinator.cancelWorkerAgent("parent")).toEqual(canceledRecord);
 
 		attempt = { ...attempt, status: "running" };

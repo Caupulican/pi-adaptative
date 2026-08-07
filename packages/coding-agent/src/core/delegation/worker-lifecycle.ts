@@ -1,9 +1,11 @@
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
+import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import type {
 	AgentBindingContract,
 	AgentResumeContext,
+	AttemptRetryState,
 	AttemptUsageSnapshot,
 	ExecutionGrant,
 	WorkerExecutionContract,
@@ -16,7 +18,11 @@ import {
 	type PrepareManagedDelegationInput,
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type {
+	AttemptDispatchReadiness,
+	AttemptRuntimeState,
+	TaskRuntimeProjection,
+} from "../orchestration/task-runtime.ts";
 import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
@@ -56,7 +62,12 @@ export class WorkerLifecycle {
 	private nextLaneNumber: number;
 	private readonly isProcessAlive: (pid: number) => boolean;
 
-	constructor(options: { agentDir: string; sessionId: string; isProcessAlive?: (pid: number) => boolean }) {
+	constructor(options: {
+		agentDir: string;
+		sessionId: string;
+		isProcessAlive?: (pid: number) => boolean;
+		now?: () => number;
+	}) {
 		this.ledger = new DelegationOrchestrationLedger(options);
 		this.isProcessAlive = options.isProcessAlive ?? isLocalProcessAlive;
 		const snapshot = this.ledger.runtime.getSnapshot();
@@ -75,19 +86,32 @@ export class WorkerLifecycle {
 		attempt: AttemptRuntimeState;
 	} {
 		let selectedLaneId = laneId;
+		const generatedLaneId = !selectedLaneId;
 		if (!selectedLaneId) {
-			const snapshot = this.ledger.runtime.getSnapshot();
-			while (snapshot.tasks[`worker-${this.nextLaneNumber}`]) this.nextLaneNumber += 1;
-			selectedLaneId = `worker-${this.nextLaneNumber++}`;
+			selectedLaneId = this.getNextAvailableLaneIdCandidate();
 		}
 		const attempt = this.ledger.prepare({ ...input, laneId: selectedLaneId });
+		if (generatedLaneId) this.nextLaneNumber = Number(selectedLaneId.slice("worker-".length)) + 1;
 		const record = this.getRecord(selectedLaneId);
 		if (!record) throw new Error(`Durable worker '${selectedLaneId}' was not projected after enqueue.`);
 		return { record, attempt };
 	}
 
+	/** Return the next generated lane id without reserving it or changing lifecycle state. */
+	getNextAvailableLaneIdCandidate(): string {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		let candidateNumber = this.nextLaneNumber;
+		while (snapshot.tasks[`worker-${candidateNumber}`]) candidateNumber += 1;
+		return `worker-${candidateNumber}`;
+	}
+
 	/** Queue the next distinct task/attempt for an idle logical agent. */
-	prepareAgentTurn(input: { agentId: string; instructions: string; controlMessageId?: string }): {
+	prepareAgentTurn(input: {
+		agentId: string;
+		instructions: string;
+		controlMessageId?: string;
+		dependsOnTaskIds?: readonly string[];
+	}): {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
 	} {
@@ -114,6 +138,11 @@ export class WorkerLifecycle {
 			throw new Error(`Agent '${agentId}' was re-registered with conflicting identity.`);
 		}
 		return existing;
+	}
+
+	/** Retire one idle logical worker while retaining its durable binding and transcript identity. */
+	retireAgent(agentId: string): AgentBindingContract {
+		return this.ledger.runtime.retireAgent(agentId);
 	}
 
 	prepareManaged(
@@ -262,6 +291,7 @@ export class WorkerLifecycle {
 		leaseId: string;
 		fencingToken: number;
 		reasonCode: string;
+		retry?: AttemptRetryState;
 	}): void {
 		const attempt = this.getActiveAttempt(args.laneId);
 		if (!attempt || !attempt.agentId || !attempt.lease) {
@@ -273,18 +303,26 @@ export class WorkerLifecycle {
 			leaseId: args.leaseId,
 			fencingToken: args.fencingToken,
 			reasonCode: args.reasonCode,
+			...(args.retry ? { retry: args.retry } : {}),
 		});
 	}
 
 	resumeAgent(laneId: string, agentId: string, leaseTtlMs: number, ownerId = agentId): StartedDelegationAttempt {
 		const attempt = this.getActiveAttempt(laneId);
 		if (!attempt) throw new Error(`Durable worker '${laneId}' has no resumable attempt.`);
-		this.ledger.runtime.requestAgentResume(agentId);
+		this.ledger.runtime.assertAttemptReadyForResume(attempt.attemptId);
+		this.ledger.runtime.requestAgentResume(agentId, attempt.attemptId);
 		const lease = this.ledger.runtime.resumeAttempt(attempt.attemptId, agentId, leaseTtlMs, ownerId);
 		return this.startedHandle(this.ledger.runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken));
 	}
 
-	suspendAgent(laneId: string, agentId: string, ownerId: string, reasonCode = "agent_interrupted"): void {
+	suspendAgent(
+		laneId: string,
+		agentId: string,
+		ownerId: string,
+		reasonCode = "agent_interrupted",
+		retry?: AttemptRetryState,
+	): void {
 		const attempt = this.getActiveAttempt(laneId);
 		if (!attempt || attempt.agentId !== agentId || !attempt.lease) {
 			throw new Error(`Logical worker '${agentId}' has no live attempt for interruption.`);
@@ -295,7 +333,21 @@ export class WorkerLifecycle {
 			leaseId: attempt.lease.leaseId,
 			fencingToken: attempt.lease.fencingToken,
 			reasonCode,
+			...(retry ? { retry } : {}),
 		});
+	}
+
+	scheduleAgentRetry(args: {
+		laneId: string;
+		agentId: string;
+		ownerId: string;
+		reasonCode: string;
+		retry: AttemptRetryState;
+	}): AttemptRuntimeState {
+		this.suspendAgent(args.laneId, args.agentId, args.ownerId, args.reasonCode, args.retry);
+		const attempt = this.getActiveAttempt(args.laneId);
+		if (!attempt) throw new Error(`Durable worker '${args.laneId}' disappeared after retry suspension.`);
+		return attempt;
 	}
 
 	bindGrant(attemptId: string, grant: ExecutionGrant): void {
@@ -369,7 +421,6 @@ export class WorkerLifecycle {
 			if (implementationAttempt?.result?.nextAction !== "independent_verification_required") return [];
 			const verifier = Object.values(snapshot.tasks)
 				.filter((candidate) => candidate.task.verificationOfTaskId === subject.task.taskId)
-				.sort((left, right) => left.task.createdAt.localeCompare(right.task.createdAt))
 				.at(-1);
 			if (!verifier) {
 				const verifierExecutionContract = implementationAttempt.dispatch.executionContract
@@ -387,15 +438,16 @@ export class WorkerLifecycle {
 				];
 			}
 			const verifierAttempt = selectedWorkerAttempt(snapshot, verifier.task.taskId);
-			if (!verifierAttempt || ACTIVE_WORKER_ATTEMPT_STATUSES.has(verifierAttempt.status)) return [];
+			if (!verifierAttempt || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(verifierAttempt.status)) return [];
 			const review = verifierAttempt.result?.evidence.find(
-				(evidence) => evidence.kind === "review" && evidence.metadata?.subjectTaskId === subject.task.taskId,
+				(evidence) =>
+					evidence.trusted &&
+					evidence.kind === "review" &&
+					evidence.metadata?.subjectTaskId === subject.task.taskId &&
+					(evidence.metadata.verdict === "accepted" || evidence.metadata.verdict === "rejected"),
 			);
 			const verdictValue = review?.metadata?.verdict;
-			const verdict =
-				review?.trusted && (verdictValue === "accepted" || verdictValue === "rejected")
-					? verdictValue
-					: "inconclusive";
+			const verdict = verdictValue === "accepted" || verdictValue === "rejected" ? verdictValue : "inconclusive";
 			const reasonCodesValue = review?.metadata?.reasonCodes;
 			const reasonCodes = Array.isArray(reasonCodesValue)
 				? reasonCodesValue.filter((reasonCode): reasonCode is string => typeof reasonCode === "string")
@@ -427,14 +479,16 @@ export class WorkerLifecycle {
 	}
 
 	getLatestAgentAttempt(agentId: string): AttemptRuntimeState | undefined {
-		return Object.values(this.ledger.runtime.getSnapshot().attempts)
-			.filter((attempt) => attempt.agentId === agentId || attempt.dispatch.logicalLaneId === agentId)
-			.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-			.at(-1);
+		return latestAgentAttemptByDurableOrder(this.ledger.runtime.getSnapshot(), agentId);
 	}
 
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection {
 		return this.ledger.runtime.getSnapshot();
+	}
+
+	/** Read-only dispatch gate for an already persisted queued worker attempt. */
+	getAttemptDispatchReadiness(attemptId: string): AttemptDispatchReadiness {
+		return this.ledger.runtime.getAttemptDispatchReadiness(attemptId);
 	}
 
 	getRecords(): LaneRecord[] {

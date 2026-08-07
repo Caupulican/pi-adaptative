@@ -3,9 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
+import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
+import { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
+import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { WorkerRecoveryCoordinator } from "../src/core/delegation/worker-recovery-coordinator.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../src/core/orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import {
 	createTestExecutionGrant,
@@ -79,6 +84,50 @@ describe("WorkerRecoveryCoordinator", () => {
 		});
 	});
 
+	it("recovers verifier identity from the durable task without caller-supplied metadata", () => {
+		const agentDir = root();
+		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-recovery-verifier" });
+		const implementerProfile = createTestWorkerOrchestrationProfile({
+			profileId: "pinned-implementer",
+			model: { provider: "faux", id: "pinned-implementer-model" },
+		});
+		const implementerContract = createWorkerExecutionContract({
+			worker: {
+				profile: implementerProfile,
+				modelBinding: implementerProfile.modelPolicy.candidates[0]!,
+				authority: createTestWorkerExecutionAuthority(implementerProfile, agentDir),
+			},
+		});
+		const subject = lifecycle.prepare({
+			instructions: "Implement the durable subject.",
+			executionContract: implementerContract,
+			requiredCapabilities: [],
+		});
+		const verifierProfile = createTestWorkerOrchestrationProfile({
+			profileId: "pinned-verifier",
+			model: { provider: "faux", id: "pinned-verifier-model" },
+			role: "verifier",
+		});
+		const verifierContract = createWorkerExecutionContract({
+			worker: {
+				profile: verifierProfile,
+				modelBinding: verifierProfile.modelPolicy.candidates[0]!,
+				authority: createTestWorkerExecutionAuthority(verifierProfile, agentDir),
+			},
+		});
+		const verifier = lifecycle.prepare({
+			instructions: "Verify the durable subject.",
+			executionContract: verifierContract,
+			requiredCapabilities: [],
+			verificationOfTaskId: subject.record.laneId,
+		});
+
+		expect(coordinator(lifecycle).recoveredRequest(verifier.attempt)).toMatchObject({
+			instructions: "Verify the durable subject.",
+			verificationOfTaskId: subject.record.laneId,
+		});
+	});
+
 	it("rebuilds the durable scheduler queue without consulting a current model or profile", () => {
 		const agentDir = root();
 		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-recovery-queue" });
@@ -146,6 +195,59 @@ describe("WorkerRecoveryCoordinator", () => {
 		expect(enqueue).toHaveBeenCalledTimes(1);
 	});
 
+	it("retains a failed queue recovery for retry while continuing terminal and mailbox recovery", () => {
+		const record: LaneRecord = { laneId: "queued-worker", type: "worker", status: "queued" };
+		const terminal: LaneRecord = { laneId: "terminal-worker", type: "worker", status: "succeeded" };
+		const attempt: AttemptRuntimeState = {
+			attemptId: "queued-attempt",
+			taskId: record.laneId,
+			status: "queued",
+			dispatch: {
+				taskId: record.laneId,
+				profileId: "pinned",
+				instructions: "recover me",
+				resourcePointerIds: [],
+			},
+			checkpointIds: [],
+			createdAt: "2026-08-07T00:00:00.000Z",
+			updatedAt: "2026-08-07T00:00:00.000Z",
+		};
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [{ record, attempt }],
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: { [attempt.attemptId]: attempt } }),
+			getTask: () => undefined,
+			getPendingVerificationRecoveries: () => [],
+			getPendingTerminalNotifications: () => [{ notificationId: "terminal", record: terminal }],
+		} as unknown as WorkerLifecycle;
+		const enqueue = vi.fn(() => {
+			throw new Error("reload blocker unavailable");
+		});
+		const publishTerminalRecord = vi.fn();
+		const recoverSessionRootReplies = vi.fn();
+		const recoverTaskBearingMailboxTurns = vi.fn();
+		const warn = vi.fn();
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord,
+			dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+			recoverTaskBearingMailboxTurns,
+			recoverSessionRootReplies,
+			warn,
+		});
+
+		expect(() => recovery.recover()).not.toThrow();
+		expect(publishTerminalRecord).toHaveBeenCalledWith(terminal);
+		expect(recoverSessionRootReplies).toHaveBeenCalledOnce();
+		expect(recoverTaskBearingMailboxTurns).toHaveBeenCalledOnce();
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("reload blocker unavailable"));
+
+		recovery.recover();
+		expect(enqueue).toHaveBeenCalledTimes(2);
+	});
+
 	it("reconciles accepted root replies and task-bearing mailboxes on every recovery boundary", () => {
 		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-mailbox-recovery" });
 		const recoverTaskBearingMailboxTurns = vi.fn();
@@ -165,6 +267,318 @@ describe("WorkerRecoveryCoordinator", () => {
 		recovery.recover();
 		expect(recoverTaskBearingMailboxTurns).toHaveBeenCalledTimes(2);
 		expect(recoverSessionRootReplies).toHaveBeenCalledTimes(2);
+	});
+
+	it("hands all pending terminal notifications to one atomic recovery batch", () => {
+		const records: LaneRecord[] = [
+			{ laneId: "terminal-1", type: "worker", status: "succeeded" },
+			{ laneId: "terminal-2", type: "worker", status: "failed" },
+		];
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
+			getPendingVerificationRecoveries: () => [],
+			getPendingTerminalNotifications: () =>
+				records.map((record, index) => ({ notificationId: `notification-${index}`, record })),
+		} as unknown as WorkerLifecycle;
+		const publishTerminalRecord = vi.fn();
+		const publishTerminalRecords = vi.fn();
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue: vi.fn() },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord,
+			publishTerminalRecords,
+			dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		expect(publishTerminalRecords).toHaveBeenCalledOnce();
+		expect(publishTerminalRecords).toHaveBeenCalledWith(records);
+		expect(publishTerminalRecord).not.toHaveBeenCalled();
+	});
+
+	it("replays every retained mandatory verifier when a saturated queue releases capacity", async () => {
+		const agentDir = root();
+		const records = new Map<string, LaneRecord>();
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir,
+			registerInFlightWork: () => () => undefined,
+			isDisposed: () => false,
+			admit: () => ({ action: "wait", reason: "capacity" }),
+			getRecord: (laneId) => records.get(laneId),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			cancel: vi.fn(),
+			warn: vi.fn(),
+		});
+		for (let index = 0; index < DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - 1; index += 1) {
+			const record = { laneId: `ordinary-${index}`, type: "worker" as const, status: "queued" as const };
+			records.set(record.laneId, record);
+			scheduler.enqueue(record, { instructions: `ordinary ${index}` });
+		}
+		const startedSubjects = new Set<string>();
+		const recoveries = ["subject-1", "subject-2"].map((subjectTaskId) => ({
+			action: "dispatch" as const,
+			subjectTaskId,
+			implementationProfileId: "implementer",
+			summary: `verify ${subjectTaskId}`,
+			artifactUris: [],
+		}));
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
+			getPendingVerificationRecoveries: () =>
+				recoveries.filter((recovery) => !startedSubjects.has(recovery.subjectTaskId)),
+			getPendingTerminalNotifications: () => [],
+		} as unknown as WorkerLifecycle;
+		const dispatchVerification = vi.fn((recovery: (typeof recoveries)[number]) => {
+			const record = {
+				laneId: `verifier-${recovery.subjectTaskId}`,
+				type: "worker" as const,
+				status: "queued" as const,
+			};
+			records.set(record.laneId, record);
+			const request: WorkerDelegationRequest = {
+				instructions: recovery.summary,
+				verificationOfTaskId: recovery.subjectTaskId,
+			};
+			try {
+				scheduler.enqueue(record, request, false, true);
+				startedSubjects.add(recovery.subjectTaskId);
+				return { started: true as const };
+			} catch (error) {
+				return {
+					started: false as const,
+					skipReason: error instanceof Error ? error.message : String(error),
+				};
+			}
+		});
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler,
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord: vi.fn(),
+			dispatchVerification,
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		expect(startedSubjects).toEqual(new Set(["subject-1"]));
+		expect(scheduler.queuedCount).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches);
+
+		expect(scheduler.dropQueued("ordinary-0")).toBe(true);
+		await Promise.resolve();
+		expect(startedSubjects).toEqual(new Set(["subject-1", "subject-2"]));
+		expect(scheduler.queuedCount).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches);
+		expect(dispatchVerification.mock.calls.map(([candidate]) => candidate.subjectTaskId)).toEqual([
+			"subject-1",
+			"subject-2",
+			"subject-2",
+		]);
+		recovery.dispose();
+	});
+
+	it("rederives every restart-suspended agent attempt after partial queue recovery", () => {
+		const attempts = ["lane-1", "lane-2"].map(
+			(laneId, index): AttemptRuntimeState => ({
+				attemptId: `attempt-${index + 1}`,
+				taskId: laneId,
+				agentId: `agent-${index + 1}`,
+				dispatch: {
+					provider: "pi",
+					taskId: laneId,
+					instructions: `recover ${laneId}`,
+					profileId: "recovery-profile",
+					logicalLaneId: `agent-${index + 1}`,
+					resourcePointerIds: [],
+				},
+				status: "suspended",
+				reasonCode: "agent_process_recovered_after_owner_exit",
+				checkpointIds: [],
+				createdAt: "2026-08-07T00:00:00.000Z",
+				updatedAt: "2026-08-07T00:00:00.000Z",
+			}),
+		);
+		const records = new Map(
+			attempts.map((attempt) => [
+				attempt.taskId,
+				{ laneId: attempt.taskId, type: "worker" as const, status: "running" as const },
+			]),
+		);
+		const tasks = Object.fromEntries(
+			attempts.map((attempt) => [
+				attempt.taskId,
+				{
+					task: { verificationOfTaskId: undefined },
+					attemptIds: [attempt.attemptId],
+				},
+			]),
+		);
+		const snapshot = {
+			agents: {},
+			tasks,
+			attempts: Object.fromEntries(attempts.map((attempt) => [attempt.attemptId, attempt])),
+		} as unknown as TaskRuntimeProjection;
+		let firstPass = true;
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => {
+				if (!firstPass) return [];
+				firstPass = false;
+				return attempts.map(({ attemptId }) => attemptId);
+			},
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => snapshot,
+			getRecord: (laneId: string) => records.get(laneId),
+			getTask: (taskId: string) => snapshot.tasks[taskId],
+			getPendingVerificationRecoveries: () => [],
+			getPendingTerminalNotifications: () => [],
+		} as unknown as WorkerLifecycle;
+		const queued = new Set<string>();
+		const running = new Set<string>();
+		let capacityListener: (() => void) | undefined;
+		const enqueue = vi.fn((record: LaneRecord) => {
+			if (queued.has(record.laneId) || running.has(record.laneId)) return;
+			if (queued.size >= 1) throw new Error("worker_dispatch_queue_full");
+			queued.add(record.laneId);
+		});
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: {
+				enqueue,
+				onQueueCapacityAvailable: (listener) => {
+					capacityListener = listener;
+					return () => {
+						capacityListener = undefined;
+					};
+				},
+			},
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord: vi.fn(),
+			dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		expect(queued).toEqual(new Set(["lane-1"]));
+		running.add("lane-1");
+		queued.delete("lane-1");
+		capacityListener?.();
+		expect(queued).toEqual(new Set(["lane-2"]));
+		expect(enqueue.mock.calls.map(([record]) => record.laneId)).toEqual(["lane-1", "lane-2", "lane-1", "lane-2"]);
+		recovery.dispose();
+	});
+
+	it("does not immediately enqueue a retry-suspended attempt before its durable deadline", () => {
+		const notBefore = "2026-08-07T02:00:00.000Z";
+		const attempt = {
+			attemptId: "attempt-retry",
+			taskId: "lane-retry",
+			agentId: "agent-retry",
+			dispatch: {
+				provider: "pi",
+				taskId: "lane-retry",
+				instructions: "retry later",
+				profileId: "recovery-profile",
+				logicalLaneId: "agent-retry",
+				resourcePointerIds: [],
+			},
+			status: "suspended",
+			reasonCode: "retry_scheduled:server_error",
+			retry: { retriesUsed: 1, notBefore },
+			checkpointIds: [],
+			createdAt: "2026-08-07T00:00:00.000Z",
+			updatedAt: "2026-08-07T00:00:00.000Z",
+		} as AttemptRuntimeState;
+		const snapshot = {
+			agents: {},
+			tasks: { [attempt.taskId]: { task: {}, attemptIds: [attempt.attemptId] } },
+			attempts: { [attempt.attemptId]: attempt },
+		} as unknown as TaskRuntimeProjection;
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => snapshot,
+			getRecord: () => ({ laneId: attempt.taskId, type: "worker", status: "running" }),
+			getTask: (taskId: string) => snapshot.tasks[taskId],
+			getActiveAttempt: () => attempt,
+			getPendingVerificationRecoveries: () => [],
+			getPendingTerminalNotifications: () => [],
+		} as unknown as WorkerLifecycle;
+		const enqueue = vi.fn();
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord: vi.fn(),
+			dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
+			now: () => Date.parse("2026-08-07T01:00:00.000Z"),
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		expect(enqueue).not.toHaveBeenCalled();
+		recovery.dispose();
+	});
+
+	it("isolates a throwing verifier dispatch and continues every remaining recovery owner", () => {
+		const terminalRecord = { laneId: "terminal", type: "worker" as const, status: "succeeded" as const };
+		const recoveries = ["subject-throws", "subject-starts"].map((subjectTaskId) => ({
+			action: "dispatch" as const,
+			subjectTaskId,
+			implementationProfileId: "implementer",
+			summary: `verify ${subjectTaskId}`,
+			artifactUris: [],
+		}));
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
+			getPendingVerificationRecoveries: () => recoveries,
+			getPendingTerminalNotifications: () => [{ notificationId: "notification-1", record: terminalRecord }],
+		} as unknown as WorkerLifecycle;
+		const publishTerminalRecord = vi.fn();
+		const recoverTaskBearingMailboxTurns = vi.fn();
+		const recoverSessionRootReplies = vi.fn();
+		const warn = vi.fn();
+		const dispatchVerification = vi.fn((recovery: (typeof recoveries)[number]) => {
+			if (recovery.subjectTaskId === "subject-throws") throw new Error("verifier boundary failed");
+			return { started: true as const };
+		});
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue: vi.fn() },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord,
+			dispatchVerification,
+			recoverTaskBearingMailboxTurns,
+			recoverSessionRootReplies,
+			warn,
+		});
+
+		expect(() => recovery.recover()).not.toThrow();
+		expect(dispatchVerification.mock.calls.map(([candidate]) => candidate.subjectTaskId)).toEqual([
+			"subject-throws",
+			"subject-starts",
+		]);
+		expect(publishTerminalRecord).toHaveBeenCalledWith(terminalRecord);
+		expect(recoverSessionRootReplies).toHaveBeenCalledOnce();
+		expect(recoverTaskBearingMailboxTurns).toHaveBeenCalledOnce();
+		recovery.recover();
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn).toHaveBeenCalledWith(
+			"Recovered verification for subject-throws threw during dispatch: verifier boundary failed",
+		);
 	});
 
 	it("repairs only unmatched interrupted tool calls and reuses a terminal response", () => {

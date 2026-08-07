@@ -1,6 +1,7 @@
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { WorkerContextForkReference } from "./worker-context-fork-reference.ts";
 
 export { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 
@@ -19,6 +20,28 @@ export const MAX_ORCHESTRATION_MODEL_ID_LENGTH = 512;
 export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
 export const MAX_ORCHESTRATION_COLLECTION_LENGTH = 64;
 export const MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH = 16 * 1024;
+/**
+ * Lifetime ceilings for the retained hot projection. Terminal records are intentionally retained,
+ * so these limits match the durable worker-fleet ceiling rather than only counting active work.
+ */
+export const MAX_ORCHESTRATION_AGENT_BINDINGS = 256;
+export const MAX_ORCHESTRATION_OBJECTIVES = 256;
+export const MAX_ORCHESTRATION_TASKS = 256;
+export const MAX_ORCHESTRATION_ATTEMPTS = 256;
+export const MAX_ORCHESTRATION_CHECKPOINTS = 4_096;
+export const MAX_ORCHESTRATION_APPROVALS = 256;
+/** Approval prompts and terminal handoffs may each retain one notification per attempt. */
+export const MAX_ORCHESTRATION_NOTIFICATIONS = 512;
+/** Source goal state admits at most 512 evidence entries for one objective. */
+export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE = 512;
+export const MAX_ORCHESTRATION_EVIDENCE = 4_096;
+export const MAX_ORCHESTRATION_CHECKPOINT_SUMMARY_LENGTH = 4 * 1024;
+/** One changed retained map value; aggregate projection accounting remains the authoritative ceiling. */
+export const MAX_ORCHESTRATION_RETAINED_RECORD_BYTES = 1024 * 1024;
+/** Leaves room for bounded idempotency evidence and the snapshot envelope below the on-disk ceiling. */
+export const MAX_ORCHESTRATION_PROJECTION_BYTES = 24 * 1024 * 1024;
+export const MAX_ORCHESTRATION_SNAPSHOT_IDEMPOTENCY_BYTES = 4 * 1024 * 1024;
+export const MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 /** Matches the bounded worker/process result contract retained by the execution plane. */
 export const MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES = 512 * 1024;
 export const MAX_WORKER_AUTHORITY_PATHS = 64;
@@ -116,9 +139,9 @@ export interface AgentBindingContract extends AgentIdentityContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
 	/** Direct creator in the durable orchestration tree. Root agents omit this field. */
 	parentAgentId?: string;
-	/** Stable root identity retained across arbitrary recursive delegation depth. */
+	/** Stable root identity retained across bounded recursive delegation depth. */
 	rootAgentId: string;
-	/** Informational lineage depth. It is observed and persisted, never used as an admission cap. */
+	/** Durable lineage depth. Fleet admission enforces the host-configured depth ceiling. */
 	depth: number;
 	role: WorkerRole;
 	status: AgentBindingStatus;
@@ -298,6 +321,8 @@ export interface OrchestrationDispatchRequest {
 	authorizationId?: string;
 	/** Worktree-sync lane claimed by the external dispatcher. */
 	worktreeLaneKey?: string;
+	/** Immutable sanitized parent context captured for this persistent logical worker at birth. */
+	birthContextForkReference?: WorkerContextForkReference;
 	/** Runtime-owned immutable worker materialization. Never accepted from a model tool call. */
 	executionContract?: WorkerExecutionContract;
 }
@@ -344,6 +369,14 @@ export interface AttemptLease {
 	fencingToken: number;
 	issuedAt: string;
 	expiresAt: string;
+}
+
+/** Restart-durable host retry ladder state for one resumable worker attempt. */
+export interface AttemptRetryState {
+	/** Scheduled retries already consumed; the initial execution is not included. */
+	retriesUsed: number;
+	/** Earliest instant at which the suspended attempt may receive a fresh lease. */
+	notBefore: string;
 }
 
 /** Complete cumulative active usage for one execution attempt. Restart downtime is never included. */
@@ -462,10 +495,12 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"objective.completed",
 	"objective.cancelled",
 	"task.created",
+	"task.attempt_prepared",
 	"task.ready",
 	"task.failed",
 	"task.verification_finished",
 	"agent.registered",
+	"agent.retired",
 	"agent.suspended",
 	"agent.resume_requested",
 	"agent.resumed",

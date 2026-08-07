@@ -20,6 +20,11 @@ import {
 	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 } from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import {
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	MAX_WORKER_AUTHORITY_PATHS,
+} from "./orchestration/contracts.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
 import {
 	mergeResourceProfileMap,
@@ -31,6 +36,7 @@ import { validateSkillName } from "./skills.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
+import { isPlainRecord } from "./util/value-guards.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -262,10 +268,12 @@ export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 120_000;
+export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 20;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_WRITE_PATHS = ["."] as const;
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
+export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
 
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
@@ -274,7 +282,7 @@ export interface WorkerDelegationSettings {
 	maxWallClockMs?: number; // default: 120000 cumulative active time across one tree; 0 disables the budget
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	writePaths?: string[]; // default: ["."]; explicit empty array revokes direct write/edit tools
-	maxConcurrent?: number; // default: 1; global scheduler concurrency, with no framework fan-out ceiling
+	maxConcurrent?: number; // default: 20; running-worker concurrency; fixed fleet safety ceilings separately bound depth, children, identities, and queued dispatches
 }
 
 export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "orchestrationProfile">> &
@@ -734,6 +742,158 @@ function sanitizeNumberSetting(value: unknown, fallback: number, min: number, ma
 	return value;
 }
 
+type WorkerDelegationDiagnosticReporter = (message: string) => void;
+
+function reportInvalidWorkerDelegationField(
+	reportDiagnostic: WorkerDelegationDiagnosticReporter | undefined,
+	field: keyof WorkerDelegationSettings,
+	expectation: string,
+): void {
+	reportDiagnostic?.(`workerDelegation.${field} must be ${expectation}; the configured value was ignored`);
+}
+
+function normalizeWorkerDelegationWritePaths(
+	value: unknown,
+	reportDiagnostic?: WorkerDelegationDiagnosticReporter,
+): string[] | undefined {
+	if (!Array.isArray(value)) {
+		reportInvalidWorkerDelegationField(reportDiagnostic, "writePaths", "an array of path strings");
+		return undefined;
+	}
+	const normalized: string[] = [];
+	const seen = new Set<string>();
+	let canonicalized = false;
+	for (let index = 0; index < value.length; index++) {
+		const entry = value[index];
+		if (typeof entry !== "string") {
+			canonicalized = true;
+			continue;
+		}
+		const trimmed = entry.trim();
+		if (!trimmed || trimmed.length > MAX_WORKER_AUTHORITY_PATH_LENGTH || seen.has(trimmed)) {
+			canonicalized = true;
+			continue;
+		}
+		if (trimmed !== entry) canonicalized = true;
+		seen.add(trimmed);
+		normalized.push(trimmed);
+		if (normalized.length === MAX_WORKER_AUTHORITY_PATHS && index < value.length - 1) {
+			canonicalized = true;
+			break;
+		}
+	}
+	if (canonicalized) {
+		reportDiagnostic?.(
+			`workerDelegation.writePaths was normalized to at most ${MAX_WORKER_AUTHORITY_PATHS} unique, nonempty paths of at most ${MAX_WORKER_AUTHORITY_PATH_LENGTH} characters`,
+		);
+	}
+	return normalized;
+}
+
+/** Normalize one precedence layer before merging so malformed overrides cannot widen lower-scope authority. */
+function normalizeWorkerDelegationLayer(
+	value: unknown,
+	reportDiagnostic?: WorkerDelegationDiagnosticReporter,
+): WorkerDelegationSettings | undefined {
+	if (!isPlainRecord(value)) {
+		if (value !== undefined)
+			reportDiagnostic?.("workerDelegation must be an object; the configured value was ignored");
+		return undefined;
+	}
+	const normalized: WorkerDelegationSettings = {};
+	if (Object.hasOwn(value, "enabled")) {
+		if (typeof value.enabled === "boolean") normalized.enabled = value.enabled;
+		else reportInvalidWorkerDelegationField(reportDiagnostic, "enabled", "a boolean");
+	}
+	if (Object.hasOwn(value, "orchestrationProfile")) {
+		if (typeof value.orchestrationProfile === "string") {
+			const profileId = value.orchestrationProfile.trim();
+			if (profileId && profileId.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
+				normalized.orchestrationProfile = profileId;
+			} else {
+				reportInvalidWorkerDelegationField(
+					reportDiagnostic,
+					"orchestrationProfile",
+					`a nonempty string of at most ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`,
+				);
+			}
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"orchestrationProfile",
+				`a nonempty string of at most ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "maxUsd")) {
+		if (
+			typeof value.maxUsd === "number" &&
+			Number.isFinite(value.maxUsd) &&
+			value.maxUsd >= 0 &&
+			value.maxUsd <= MAX_WORKER_DELEGATION_MAX_USD
+		) {
+			normalized.maxUsd = value.maxUsd;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"maxUsd",
+				`a finite number between 0 and ${MAX_WORKER_DELEGATION_MAX_USD}`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "maxWallClockMs")) {
+		if (
+			typeof value.maxWallClockMs === "number" &&
+			Number.isSafeInteger(value.maxWallClockMs) &&
+			value.maxWallClockMs >= 0 &&
+			value.maxWallClockMs <= MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS
+		) {
+			normalized.maxWallClockMs = value.maxWallClockMs;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"maxWallClockMs",
+				`a safe integer between 0 and ${MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS}`,
+			);
+		}
+	}
+	if (Object.hasOwn(value, "writeEnabled")) {
+		if (typeof value.writeEnabled === "boolean") normalized.writeEnabled = value.writeEnabled;
+		else reportInvalidWorkerDelegationField(reportDiagnostic, "writeEnabled", "a boolean");
+	}
+	if (Object.hasOwn(value, "writePaths")) {
+		const writePaths = normalizeWorkerDelegationWritePaths(value.writePaths, reportDiagnostic);
+		if (writePaths !== undefined) normalized.writePaths = writePaths;
+	}
+	if (Object.hasOwn(value, "maxConcurrent")) {
+		if (
+			typeof value.maxConcurrent === "number" &&
+			Number.isSafeInteger(value.maxConcurrent) &&
+			value.maxConcurrent > 0 &&
+			value.maxConcurrent <= MAX_WORKER_DELEGATION_MAX_CONCURRENT
+		) {
+			normalized.maxConcurrent = value.maxConcurrent;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"maxConcurrent",
+				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_MAX_CONCURRENT}`,
+			);
+		}
+	}
+	return normalized;
+}
+
+function mergeWorkerDelegationLayers(...layers: unknown[]): WorkerDelegationSettings | undefined {
+	let merged: WorkerDelegationSettings | undefined;
+	for (const layer of layers) {
+		const normalized = normalizeWorkerDelegationLayer(layer);
+		if (!normalized) continue;
+		merged = { ...(merged ?? {}), ...normalized };
+	}
+	return merged;
+}
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface ProfileDefinitionInput {
@@ -1056,6 +1216,9 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.directoryProfileInfo = directoryProfileInfo;
 		this.errors = [...initialErrors];
+		this.reportWorkerDelegationDiagnostics("global", this.globalSettings);
+		this.reportWorkerDelegationDiagnostics("project", this.projectSettings);
+		this.reportWorkerDelegationDiagnostics("directoryProfile", this.directoryProfileSettings);
 		this.settings = this.mergeEffectiveSettings();
 		this.refreshProfileRegistry();
 	}
@@ -1080,6 +1243,14 @@ export class SettingsManager {
 		}
 		this.profileDiagnosticKeys.add(key);
 		this.errors.push({ scope, error: new Error(message) });
+	}
+
+	private reportWorkerDelegationDiagnostics(scope: SettingsErrorScope, settings: Settings): void {
+		const diagnostics: string[] = [];
+		normalizeWorkerDelegationLayer(settings.workerDelegation, (message) => diagnostics.push(message));
+		if (diagnostics.length > 0) {
+			this.recordError(scope, new Error(`Worker delegation settings: ${diagnostics.join("; ")}`));
+		}
 	}
 
 	private getActiveProfileNamesForDiagnostics(): string[] {
@@ -1146,6 +1317,13 @@ export class SettingsManager {
 	private mergeEffectiveSettings(): Settings {
 		let merged = deepMergeSettings(this.globalSettings, this.projectSettings);
 		merged = deepMergeSettings(merged, this.directoryProfileSettings);
+		const workerDelegation = mergeWorkerDelegationLayers(
+			this.globalSettings.workerDelegation,
+			this.projectSettings.workerDelegation,
+			this.directoryProfileSettings.workerDelegation,
+		);
+		if (workerDelegation) merged.workerDelegation = workerDelegation;
+		else delete merged.workerDelegation;
 		if (this.runtimeResourceProfiles !== undefined) {
 			merged = deepMergeSettings(merged, {
 				activeResourceProfile: this.runtimeResourceProfiles,
@@ -1506,6 +1684,8 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoad.error;
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
+		} else {
+			this.reportWorkerDelegationDiagnostics("project", this.projectSettings);
 		}
 		this.recomputeSettings();
 	}
@@ -1516,6 +1696,7 @@ export class SettingsManager {
 		if (!globalLoad.error) {
 			this.globalSettings = globalLoad.settings;
 			this.globalSettingsLoadError = null;
+			this.reportWorkerDelegationDiagnostics("global", this.globalSettings);
 		} else {
 			this.globalSettingsLoadError = globalLoad.error;
 			this.recordError("global", globalLoad.error);
@@ -1530,6 +1711,7 @@ export class SettingsManager {
 		if (!projectLoad.error) {
 			this.projectSettings = projectLoad.settings;
 			this.projectSettingsLoadError = null;
+			this.reportWorkerDelegationDiagnostics("project", this.projectSettings);
 		} else {
 			this.projectSettingsLoadError = projectLoad.error;
 			this.recordError("project", projectLoad.error);
@@ -1539,6 +1721,7 @@ export class SettingsManager {
 		this.directoryProfileInfo = directoryProfileLoad.info;
 		if (!directoryProfileLoad.error) {
 			this.directoryProfileSettings = directoryProfileLoad.settings;
+			this.reportWorkerDelegationDiagnostics("directoryProfile", this.directoryProfileSettings);
 		} else {
 			this.recordError("directoryProfile", directoryProfileLoad.error);
 		}
@@ -1593,7 +1776,13 @@ export class SettingsManager {
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		const normalizedOverrides = { ...overrides };
+		if (Object.hasOwn(overrides, "workerDelegation")) {
+			const workerDelegation = normalizeWorkerDelegationLayer(overrides.workerDelegation);
+			if (workerDelegation) normalizedOverrides.workerDelegation = workerDelegation;
+			else delete normalizedOverrides.workerDelegation;
+		}
+		this.settings = deepMergeSettings(this.settings, normalizedOverrides);
 	}
 
 	/** Select runtime-only resource profiles, e.g. from CLI/subagent launch options. */
@@ -3400,7 +3589,7 @@ export class SettingsManager {
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {
-		const configured = this.settings.workerDelegation ?? {};
+		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
 
 		const resolved: ResolvedWorkerDelegationSettings = {
 			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_WORKER_DELEGATION_ENABLED,
@@ -3420,10 +3609,13 @@ export class SettingsManager {
 				typeof configured.writeEnabled === "boolean"
 					? configured.writeEnabled
 					: DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
-			writePaths: Array.isArray(configured.writePaths)
-				? configured.writePaths.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-				: [...DEFAULT_WORKER_DELEGATION_WRITE_PATHS],
-			maxConcurrent: sanitizeIntegerSetting(configured.maxConcurrent, 1, 1, Number.MAX_SAFE_INTEGER),
+			writePaths: configured.writePaths ? [...configured.writePaths] : [...DEFAULT_WORKER_DELEGATION_WRITE_PATHS],
+			maxConcurrent: sanitizeIntegerSetting(
+				configured.maxConcurrent,
+				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
+				1,
+				MAX_WORKER_DELEGATION_MAX_CONCURRENT,
+			),
 		};
 		if (typeof configured.orchestrationProfile === "string" && configured.orchestrationProfile.trim().length > 0) {
 			resolved.orchestrationProfile = configured.orchestrationProfile.trim();
@@ -3437,15 +3629,16 @@ export class SettingsManager {
 	}
 
 	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope: SettingsScope = "global"): void {
+		const normalizedSettings = normalizeWorkerDelegationLayer(settings) ?? {};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
-			projectSettings.workerDelegation = { ...settings };
+			projectSettings.workerDelegation = normalizedSettings;
 			this.markProjectModified("workerDelegation");
 			this.saveProjectSettings(projectSettings);
 			return;
 		}
 
-		this.globalSettings.workerDelegation = { ...settings };
+		this.globalSettings.workerDelegation = normalizedSettings;
 		this.markModified("workerDelegation");
 		this.save();
 	}

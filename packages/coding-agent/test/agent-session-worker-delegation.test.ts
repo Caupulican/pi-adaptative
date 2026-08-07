@@ -775,6 +775,7 @@ describe("AgentSession worker delegation", () => {
 				parentAgentId: parent.record.laneId,
 			});
 			if (!child.record) throw new Error("Expected a durable child agent.");
+			const childLaneId = child.record.laneId;
 
 			const lifecycle = new WorkerLifecycle({
 				agentDir: harness.tempDir,
@@ -785,7 +786,7 @@ describe("AgentSession worker delegation", () => {
 				(attempt) =>
 					attempt.dispatch.logicalLaneId === parent.record?.laneId &&
 					attempt.dispatch.controlMessageId !== undefined &&
-					attempt.dispatch.instructions.includes(`childAgentId=${child.record?.laneId}`),
+					attempt.dispatch.instructions.includes(`childAgentId=${childLaneId}`),
 			);
 			expect(handoffAttempt).toBeDefined();
 			const controlMessageId = handoffAttempt?.dispatch.controlMessageId;
@@ -795,19 +796,21 @@ describe("AgentSession worker delegation", () => {
 				parentSessionId: harness.session.sessionId,
 				agentId: parent.record.laneId,
 			});
-			expect(parentMailbox.getMessage(controlMessageId)).toMatchObject({
-				deliveredAt: expect.any(String),
-				senderAgentId: child.record.laneId,
-				task: {
-					kind: "terminal_handoff",
-					sourceAttemptId: expect.any(String),
-				},
-			});
+			await vi.waitFor(() =>
+				expect(parentMailbox.getMessage(controlMessageId)).toMatchObject({
+					deliveredAt: expect.any(String),
+					senderAgentId: childLaneId,
+					task: {
+						kind: "terminal_handoff",
+						sourceAttemptId: expect.any(String),
+					},
+				}),
+			);
 			expect(parentMailbox.pendingTaskBearing()).toEqual([]);
 			const rootTerminalProjections = harness
 				.eventsOfType("delegate_workers")
 				.flatMap((event) => event.terminalSinceFlush)
-				.filter((record) => record.laneId === child.record?.laneId);
+				.filter((record) => record.laneId === childLaneId);
 			expect(rootTerminalProjections).toEqual([]);
 		} finally {
 			prepareAgentTurn?.mockRestore();
@@ -984,7 +987,7 @@ describe("AgentSession worker delegation", () => {
 				agent.agentId,
 				workerController.getAgentControlProcessOwnerId(),
 			);
-			workerController.lifecycle.ledger.runtime.requestAgentResume(agent.agentId);
+			workerController.lifecycle.ledger.runtime.requestAgentResume(agent.agentId, started.attemptId);
 			workerController.lifecycle.ledger.runtime.resumeAttempt(
 				started.attemptId,
 				agent.agentId,

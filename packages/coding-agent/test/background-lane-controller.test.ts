@@ -208,6 +208,35 @@ describe("worker runtime construction", () => {
 			messageId: "worker-message-1",
 		}));
 		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: [{ agentId: "child", status: "idle" as const }],
+			updatedAgentIds: [],
+			timedOut: false,
+		}));
+		const broadcastWorkerAgentMessage = vi.fn(() => ({
+			results: [
+				{
+					agentId: "child",
+					accepted: true as const,
+					queued: true as const,
+					replayed: false,
+					messageId: "message-1",
+				},
+			],
+		}));
+		const retireWorkerAgent = vi.fn(() => ({
+			agent: {
+				agentId: "child",
+				rootAgentId: "parent",
+				depth: 1,
+				role: "explorer" as const,
+				status: "retired" as const,
+				createdAt: "T0",
+				updatedAt: "T1",
+			},
+			retired: true as const,
+			replayed: false,
+		}));
 		const agentControl = {
 			listWorkerAgents,
 			getWorkerAgentActivity,
@@ -217,6 +246,9 @@ describe("worker runtime construction", () => {
 			resumeWorkerAgent,
 			cancelWorkerAgent,
 			waitForWorkerAgent,
+			waitForWorkerAgents,
+			broadcastWorkerAgentMessage,
+			retireWorkerAgent,
 		};
 		const controller = new BackgroundLaneController({ isDelegateToolActive: () => true } as never);
 		(
@@ -234,6 +266,12 @@ describe("worker runtime construction", () => {
 		controller.resumeWorkerAgent("child", scope);
 		controller.cancelWorkerAgent("child", "agent_cancelled", scope);
 		await controller.waitForWorkerAgent("child", 1_000, scope);
+		await controller.waitForWorkerAgents(["child", "peer"], "all", 2_000, scope);
+		controller.broadcastWorkerAgentMessage(["child", "peer"], "Share evidence.", {
+			senderAgentId: "parent",
+			idempotencyKey: "broadcast-1",
+		});
+		controller.retireWorkerAgent("child", scope);
 
 		expect(listWorkerAgents).toHaveBeenCalledWith(scope);
 		expect(getWorkerAgentActivity).toHaveBeenCalledWith("child", scope);
@@ -243,6 +281,12 @@ describe("worker runtime construction", () => {
 		expect(resumeWorkerAgent).toHaveBeenCalledWith("child", scope);
 		expect(cancelWorkerAgent).toHaveBeenCalledWith("child", "agent_cancelled", scope);
 		expect(waitForWorkerAgent).toHaveBeenCalledWith("child", 1_000, scope);
+		expect(waitForWorkerAgents).toHaveBeenCalledWith(["child", "peer"], "all", 2_000, scope);
+		expect(broadcastWorkerAgentMessage).toHaveBeenCalledWith(["child", "peer"], "Share evidence.", {
+			senderAgentId: "parent",
+			idempotencyKey: "broadcast-1",
+		});
+		expect(retireWorkerAgent).toHaveBeenCalledWith("child", scope);
 	});
 });
 
@@ -348,6 +392,7 @@ describe("quiesce registry", () => {
 					getEntries: () => [],
 					getLeafId: () => null,
 					getEntry: () => undefined,
+					buildSessionContext: () => ({ messages: [] }),
 					appendCustomEntry: () => "entry-1",
 				}) as unknown as SessionManager,
 			getSettingsManager: () => settingsManager,

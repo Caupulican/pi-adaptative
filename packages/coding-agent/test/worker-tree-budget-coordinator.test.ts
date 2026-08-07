@@ -131,6 +131,30 @@ describe("WorkerTreeBudgetCoordinator", () => {
 		admittedSecond.release();
 	});
 
+	it("rejects a descendant reservation after durable root usage exhausts the tree token budget", async () => {
+		const coordinator = new WorkerTreeBudgetCoordinator();
+		const exhaustedRootUsage = usage({ inputTokens: 60, outputTokens: 40, totalTokens: 100 });
+		coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "attempt-root",
+			budget: { maxTokens: 100 },
+			seeds: [{ attemptId: "attempt-root", usage: exhaustedRootUsage }],
+			initialUsage: exhaustedRootUsage,
+		});
+		const child = coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "attempt-child",
+			budget: { maxTokens: 100 },
+			seeds: [{ attemptId: "attempt-root", usage: exhaustedRootUsage }],
+			initialUsage: usage(),
+		});
+
+		expect(child.remainingTokens()).toBe(0);
+		await expect(child.reserveProviderBudget(1, "child provider request")).rejects.toMatchObject({
+			field: "maxTokens",
+		} satisfies Partial<WorkerTreeBudgetExceededError>);
+	});
+
 	it("serializes concurrent provider requests when cost is a cumulative unknown", async () => {
 		const coordinator = new WorkerTreeBudgetCoordinator();
 		const first = coordinator.createPort({

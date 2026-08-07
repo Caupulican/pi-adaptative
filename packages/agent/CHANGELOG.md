@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed bounded session-history readers indexing every cold payload before visiting a small range; borrowed entry pages now resolve only their own cold records, and compacted payload restoration and prefix reads share one canonical file-location lookup.
+
 ## [0.86.3] - 2026-08-06
 
 ## [0.86.2] - 2026-08-06

@@ -1,7 +1,7 @@
 import { classifyFailure, computeRetryDelayMs, type RetryPolicy } from "@caupulican/pi-agent-core/reliability";
 
 /**
- * In-process attempt ladder policy for delegated workers.
+ * Restart-durable, host-owned attempt ladder policy for delegated workers.
  *
  * The budget model has always carried `maxAttempts`, but nothing drove a second attempt: a
  * failed worker terminalized immediately and "retry" meant the orchestrator model burning a
@@ -30,7 +30,7 @@ export function evaluateWorkerRetry(args: {
 	reasonCode: string;
 	reasonDetail?: string;
 	provider: string;
-	/** Ladder retries already consumed for this lane in this process. */
+	/** Restart-durable ladder retries already consumed for this attempt. */
 	retriesUsed: number;
 	/** Grant budget ceiling for total attempts; defaults to {@link DEFAULT_WORKER_TASK_ATTEMPTS}. */
 	maxAttempts?: number;

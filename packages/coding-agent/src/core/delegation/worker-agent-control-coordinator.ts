@@ -2,8 +2,13 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type { AgentBindingContract } from "../orchestration/contracts.ts";
-import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
+import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
+import {
+	type AgentBindingContract,
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+} from "../orchestration/contracts.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
 	SessionRootMailbox,
 	type SessionRootReply,
@@ -14,23 +19,36 @@ import {
 	sessionRootReplyMessageId,
 } from "./session-root-mailbox.ts";
 import {
+	normalizeWorkerAgentDependencyTaskIds,
 	type SessionRootWorkerAgentMessageOptions,
 	type WorkerAgentActivity,
+	type WorkerAgentBroadcastOptions,
+	type WorkerAgentBroadcastResult,
 	type WorkerAgentControlPort,
 	type WorkerAgentControlScope,
 	WorkerAgentMailbox,
 	type WorkerAgentMessage,
 	type WorkerAgentMessageOptions,
 	type WorkerAgentReplyResult,
+	type WorkerAgentRetireResult,
 	type WorkerAgentTaskMetadata,
 	type WorkerAgentTaskStartOptions,
 	type WorkerAgentTranscriptOptions,
+	type WorkerAgentView,
+	type WorkerAgentWaitMode,
+	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
-import { type WorkerConversation, WorkerConversationStore } from "./worker-conversation-store.ts";
+import {
+	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
+	type WorkerConversation,
+	WorkerConversationStore,
+} from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
+import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
 
 export interface WorkerAgentControlCoordinatorOptions {
 	agentDir: string;
@@ -44,11 +62,14 @@ export interface WorkerAgentControlCoordinatorOptions {
 	statusChanged(): void;
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
-	yieldCapacity?(callerAgentId: string, targetAgentId: string): () => void;
+	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
+	yieldCapacity?(callerAgentId: string, capacityOwnerAgentId: string): () => void;
 	warn?(message: string): void;
 }
 
 type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
+
+const MAX_BROADCAST_ERROR_CHARS = 512;
 
 type TaskBearingReconciliation = {
 	started: boolean;
@@ -96,13 +117,27 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return this.options.processOwnerId;
 	}
 
-	listWorkerAgents(scope: WorkerAgentControlScope = {}): AgentBindingContract[] {
+	listWorkerAgents(scope: WorkerAgentControlScope = {}): WorkerAgentView[] {
 		this.requireControl();
-		const agents = Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents);
-		const caller = scope.callerAgentId ? this.requireKnownAgent(scope.callerAgentId) : undefined;
+		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+		if (scope.callerAgentId) {
+			const callerAgentId = scope.callerAgentId.trim();
+			if (!callerAgentId || !snapshot.agents[callerAgentId]) {
+				throw new Error(`Unknown logical worker agent '${callerAgentId}'.`);
+			}
+		}
+		const latestAttempts = this.latestAttemptsByAgent(snapshot);
+		const agents = Object.values(snapshot.agents);
 		return agents
-			.filter((agent) => !caller || agent.rootAgentId === caller.rootAgentId)
-			.sort((left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt));
+			.sort((left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt))
+			.map((agent) =>
+				this.workerAgentView(agent, this.projectAgentActivity(agent, latestAttempts.get(agent.agentId))),
+			);
+	}
+
+	getWorkerTaskSessionView(): ReturnType<WorkerAgentControlPort["getWorkerTaskSessionView"]> {
+		this.requireControl();
+		return projectWorkerTaskSessionView(this.options.getLifecycle().getTaskRuntimeSnapshot());
 	}
 
 	/** Snapshot-only activity projection. Unlike waitForWorkerAgent, this never yields scheduler capacity. */
@@ -112,7 +147,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (!canonicalAgentId) throw new Error("Logical worker agent id is required.");
 		const agent = this.options.getLifecycle().getAgent(canonicalAgentId);
 		if (!agent) return "unknown";
-		this.requireVisibleAgent(canonicalAgentId, scope);
+		this.requireSessionPeer(canonicalAgentId, scope);
 		return this.activityForAgent(agent);
 	}
 
@@ -121,29 +156,29 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentTranscriptOptions = {},
 	): ReturnType<WorkerAgentControlPort["readWorkerAgentTranscript"]> {
 		this.requireControl();
-		const agent = this.requireVisibleAgent(agentId, options);
+		const agent = this.requireControllableAgent(agentId, options);
 		const cursor = options.cursor ?? 0;
 		const maxMessages = options.maxMessages ?? 16;
 		if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TypeError("Worker transcript cursor is invalid.");
-		if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > 64) {
-			throw new TypeError("Worker transcript page size must be from 1 through 64 messages.");
+		if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES) {
+			throw new TypeError(
+				`Worker transcript page size must be from 1 through ${MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES} messages.`,
+			);
 		}
-		const transcript = this.conversations
+		const page = this.conversations
 			.open({
 				agentDir: this.options.agentDir,
 				resumeContext: agent.resumeContext,
 				expectedLogicalAgentId: agent.agentId,
 			})
-			.getRawTranscript();
-		if (cursor > transcript.length) throw new TypeError("Worker transcript cursor exceeds the transcript length.");
-		const messages = transcript.slice(cursor, cursor + maxMessages);
-		const nextCursor = cursor + messages.length;
+			.getRawTranscriptPage({
+				cursor,
+				maxMessages,
+				...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+			});
 		return {
 			agentId: agent.agentId,
-			cursor,
-			totalMessages: transcript.length,
-			messages,
-			...(nextCursor < transcript.length ? { nextCursor } : {}),
+			...page,
 		};
 	}
 
@@ -154,11 +189,61 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	): { messageId: string; queued: true } {
 		this.requireControl();
 		this.rejectGenericReplyOptions(options);
-		const agent = this.requireVisibleAgent(agentId, { callerAgentId: options.senderAgentId });
+		const agent = this.requireSessionPeer(agentId, { callerAgentId: options.senderAgentId });
 		this.assertAgentAcceptsNewMessages(agent, options.idempotencyKey);
 		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options);
 		this.notifyStateChangedBestEffort();
 		return { messageId: queued.messageId, queued: true };
+	}
+
+	broadcastWorkerAgentMessage(
+		agentIds: readonly string[],
+		message: string,
+		options: WorkerAgentBroadcastOptions,
+	): WorkerAgentBroadcastResult {
+		this.requireControl();
+		const canonicalAgentIds = this.canonicalAgentIdSet(agentIds, "Worker broadcast");
+		const recipients = canonicalAgentIds.map((agentId) => ({
+			agentId,
+			idempotencyKey: workerAgentBroadcastTargetIdempotencyKey(options.idempotencyKey, agentId),
+		}));
+		const senderAgentId = options.senderAgentId ? this.requireKnownAgent(options.senderAgentId).agentId : undefined;
+		let created = false;
+		const results = recipients.map(({ agentId, idempotencyKey }) => {
+			try {
+				const target = this.requireSessionPeer(agentId, { callerAgentId: senderAgentId });
+				this.assertAgentAcceptsNewMessages(target, idempotencyKey);
+				const messageOptions = senderAgentId
+					? {
+							senderAgentId,
+							...(options.threadId !== undefined ? { threadId: options.threadId } : {}),
+							...(options.expectReply === true ? { expectReply: true } : {}),
+							idempotencyKey,
+						}
+					: this.sessionRootMessageOptions({
+							...(options.threadId !== undefined ? { threadId: options.threadId } : {}),
+							...(options.expectReply === true ? { expectReply: true } : {}),
+							idempotencyKey,
+						});
+				const queued = this.enqueuePeerMessage(target, "follow_up", message, messageOptions);
+				created ||= queued.status === "retained" && queued.created;
+				return {
+					agentId,
+					accepted: true as const,
+					queued: true as const,
+					replayed: queued.status === "completed_replay" || !queued.created,
+					messageId: queued.messageId,
+				};
+			} catch (error) {
+				return {
+					agentId,
+					accepted: false as const,
+					error: (error instanceof Error ? error.message : String(error)).slice(0, MAX_BROADCAST_ERROR_CHARS),
+				};
+			}
+		});
+		if (created) this.notifyStateChangedBestEffort();
+		return { results };
 	}
 
 	followUpWorkerAgent(
@@ -167,7 +252,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentMessageOptions = {},
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string } {
 		this.requireControl();
-		const agent = this.requireVisibleAgent(agentId, { callerAgentId: options.senderAgentId });
+		const agent = this.requireControllableAgent(agentId, { callerAgentId: options.senderAgentId });
 		return this.followUpAcceptedAgent(agent, message, options);
 	}
 
@@ -215,9 +300,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				return { destination: "session_root", messageId: completedReply.replyMessageId };
 			}
 			const completedTarget = this.requireKnownAgent(completedReply.requestSenderId);
-			if (source.rootAgentId !== completedTarget.rootAgentId) {
-				throw new Error("Worker reply target is outside its agent tree.");
-			}
 			this.reconcileCompletedWorkerReplyAcknowledgement(
 				sourceMailbox,
 				replyToMessageId,
@@ -241,9 +323,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			return this.routeWorkerReplyToSessionRoot(source, sourceMailbox, request, message);
 		}
 		const target = this.requireKnownAgent(request.senderAgentId);
-		if (source.rootAgentId !== target.rootAgentId) {
-			throw new Error("Worker reply target is outside its agent tree.");
-		}
 		if (target.status === "retired" && activeAcknowledgementId === undefined) {
 			throw new Error(`Logical worker agent '${target.agentId}' is retired.`);
 		}
@@ -321,9 +400,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (!canonicalAgentId) throw new Error("Logical worker agent id is required.");
 		const candidate = this.options.getLifecycle().getAgent(canonicalAgentId);
 		if (!candidate) return { started: false, steering: false, messageId: "", skipReason: "unknown_agent" };
-		const agent = this.requireVisibleAgent(canonicalAgentId, options);
+		const agent = this.requireControllableAgent(canonicalAgentId, options);
+		const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(options.dependsOnTaskIds);
 		if (options.idempotencyKey !== undefined) {
-			const replay = this.replayWorkerAgentTask(agent, message, options.idempotencyKey);
+			const replay = this.replayWorkerAgentTask(agent, message, options.idempotencyKey, dependsOnTaskIds);
 			if (replay) return replay;
 		}
 		const activity = this.activityForAgent(agent);
@@ -337,6 +417,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			agent,
 			message,
 			options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey },
+			dependsOnTaskIds,
 		);
 	}
 
@@ -344,6 +425,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agent: AgentBindingContract,
 		message: string,
 		idempotencyKey: string,
+		dependsOnTaskIds: readonly string[],
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } | undefined {
 		this.assertIdempotencyTarget(agent.agentId, idempotencyKey);
 		const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
@@ -353,6 +435,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			if (correlatedAttempt.dispatch.instructions !== message.trim()) {
 				throw new Error("Worker control idempotency identity conflicts with its durable dispatch.");
 			}
+			this.assertAttemptDependencyIdentity(correlatedAttempt, dependsOnTaskIds);
 			const record = this.options.getLifecycle().getRecord(correlatedAttempt.taskId);
 			if (!record) {
 				return {
@@ -378,7 +461,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			kind: "follow_up",
 			content: message,
 			idempotencyKey,
-			task: { kind: "agent_turn" },
+			task: {
+				kind: "agent_turn",
+				...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+			},
 		});
 		if (acceptance.status === "completed_replay") {
 			return {
@@ -427,8 +513,19 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agent: AgentBindingContract,
 		message: string,
 		options: WorkerAgentMessageOptions,
+		dependsOnTaskIds: readonly string[] = [],
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string } {
-		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options, { kind: "agent_turn" });
+		if (!this.isAcceptedControlReplay(agent.agentId, options.idempotencyKey)) {
+			const headroomSkipReason = this.options.taskStartHeadroomSkipReason?.(agent);
+			if (headroomSkipReason)
+				return { started: false, steering: false, messageId: "", skipReason: headroomSkipReason };
+			const skipReason = this.reusableTaskAdmissionSkipReason(agent.agentId);
+			if (skipReason) return { started: false, steering: false, messageId: "", skipReason };
+		}
+		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options, {
+			kind: "agent_turn",
+			...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+		});
 		if (queued.status === "completed_replay") {
 			return {
 				started: false,
@@ -446,6 +543,25 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...(reconciliation.record ? { record: reconciliation.record } : {}),
 			...(reconciliation.skipReason ? { skipReason: reconciliation.skipReason } : {}),
 		};
+	}
+
+	private assertAttemptDependencyIdentity(attempt: AttemptRuntimeState, dependsOnTaskIds: readonly string[]): void {
+		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot() as Partial<
+			ReturnType<WorkerLifecycle["getTaskRuntimeSnapshot"]>
+		>;
+		const durableDependencies = snapshot.tasks?.[attempt.taskId]?.task.dependsOn;
+		if (!durableDependencies) {
+			if (dependsOnTaskIds.length > 0) {
+				throw new Error("Worker control idempotency dependency projection is missing.");
+			}
+			return;
+		}
+		if (
+			durableDependencies.length !== dependsOnTaskIds.length ||
+			durableDependencies.some((dependencyId, index) => dependencyId !== dependsOnTaskIds[index])
+		) {
+			throw new Error("Worker control idempotency identity conflicts with its durable task dependencies.");
+		}
 	}
 
 	private sessionRootMessageOptions(options: SessionRootWorkerAgentMessageOptions): WorkerAgentMessageOptions {
@@ -747,18 +863,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			resumeContext: target.resumeContext,
 			expectedLogicalAgentId: target.agentId,
 		});
-		const prefix = `[Worker control ${messageId}`;
-		const existing = conversation
-			.getRawTranscript()
-			.filter(
-				(message) =>
-					message.role === "user" && typeof message.content === "string" && message.content.startsWith(prefix),
-			);
-		if (existing.some((message) => message.content !== projected.content)) {
-			throw new Error("Worker control transcript identity conflicts with existing content.");
+		if (typeof projected.content !== "string") {
+			throw new Error("Worker control transcript projection is not textual.");
 		}
-		if (existing.length === 0 && appendIfMissing) conversation.appendMessage(projected);
-		return { messageId, delivered: existing.length > 0 || appendIfMissing };
+		const reconciliation = conversation.reconcileWorkerControlMessage(
+			{ messageId, content: projected.content },
+			projected,
+			appendIfMissing,
+		);
+		return { messageId, delivered: reconciliation.delivered };
 	}
 
 	reconcileSessionRootReplies(): void {
@@ -909,8 +1022,25 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (!attempt || attempt.status !== "suspended") return { started: false, skipReason: "agent_not_suspended" };
 		const record = this.options.getLifecycle().getRecord(attempt.taskId);
 		if (!record) return { started: false, skipReason: "orchestration_projection_missing" };
-		const promise = this.options.run(this.options.recoveredRequest(attempt), record);
-		this.options.scheduler.track(record.laneId, promise);
+		try {
+			const request = this.options.recoveredRequest(attempt);
+			this.options.scheduler.enqueue(record, request, true, request.verificationOfTaskId !== undefined);
+		} catch (error) {
+			return {
+				started: false,
+				record,
+				skipReason: error instanceof Error ? error.message : String(error),
+			};
+		}
+		try {
+			this.options.scheduler.drain();
+		} catch (error) {
+			return {
+				started: true,
+				record,
+				skipReason: `worker_resume_recovery_pending:${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
 		this.signalStateChanged();
 		return { started: true, record };
 	}
@@ -928,59 +1058,145 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return record;
 	}
 
-	/** Event-driven wait: durable projection plus state/mailbox notifications, never output polling. */
+	retireWorkerAgent(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentRetireResult {
+		this.requireControl();
+		let target = this.requireControllableAgent(agentId, scope);
+		if (target.status === "retired") {
+			return { agent: this.workerAgentView(target), retired: true, replayed: true };
+		}
+		const activity = this.activityForAgent(target);
+		if (activity !== "idle") {
+			throw new Error(`Logical worker agent '${target.agentId}' cannot retire while ${activity}.`);
+		}
+		const mailbox = this.getMailbox(target.agentId);
+		if (mailbox.pendingTaskBearing().length > 0) {
+			this.reconcileTaskBearingMailbox(target.agentId);
+			target = this.requireControllableAgent(target.agentId, scope);
+		}
+		this.reconcileWorkerReplyOutboxesBestEffort();
+		const pendingMessages = mailbox.pending();
+		if (pendingMessages.length > 0) {
+			throw new Error(
+				`Logical worker agent '${target.agentId}' has ${pendingMessages.length} pending control message${pendingMessages.length === 1 ? "" : "s"}.`,
+			);
+		}
+		const unresolvedReplyCount = mailbox.awaitingReplies().length + mailbox.listReplyAcknowledgements().length;
+		if (unresolvedReplyCount > 0) {
+			throw new Error(
+				`Logical worker agent '${target.agentId}' has ${unresolvedReplyCount} unresolved reply obligation${unresolvedReplyCount === 1 ? "" : "s"}.`,
+			);
+		}
+		const retired = this.options.getLifecycle().retireAgent(target.agentId);
+		this.notifyStateChangedBestEffort();
+		return { agent: this.workerAgentView(retired), retired: true, replayed: false };
+	}
+
+	/** Event-driven wait: durable projection plus one shared state notification, never output polling. */
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs = 30_000,
 		scope: WorkerAgentControlScope = {},
 	): Promise<{ status: WorkerAgentActivity }> {
+		return this.waitForWorkerAgents([agentId], "all", timeoutMs, scope).then((result) => ({
+			status: result.statuses[0]?.status ?? "unknown",
+		}));
+	}
+
+	/** One event-driven wait set with one shared caller-capacity lease; never per-agent promise polling. */
+	waitForWorkerAgents(
+		agentIds: readonly string[],
+		mode: WorkerAgentWaitMode,
+		timeoutMs = 30_000,
+		scope: WorkerAgentControlScope = {},
+	): ReturnType<WorkerAgentControlPort["waitForWorkerAgents"]> {
 		this.requireControl();
-		const canonicalAgentId = agentId.trim();
-		if (!canonicalAgentId) throw new Error("Logical worker agent id is required.");
-		const target = this.options.getLifecycle().getAgent(canonicalAgentId);
-		if (target) this.requireVisibleAgent(canonicalAgentId, scope);
+		if (mode !== "any" && mode !== "all") throw new TypeError("Worker wait mode must be 'any' or 'all'.");
+		const canonicalAgentIds = this.canonicalAgentIdSet(agentIds, "Worker wait");
+		const baselineSnapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+		if (scope.callerAgentId) {
+			const callerAgentId = scope.callerAgentId.trim();
+			if (!callerAgentId || !baselineSnapshot.agents[callerAgentId]) {
+				throw new Error(`Unknown logical worker agent '${callerAgentId}'.`);
+			}
+		}
 		const boundedTimeoutMs = Number.isFinite(timeoutMs)
 			? Math.max(1, Math.min(Math.floor(timeoutMs), 300_000))
 			: 30_000;
-		const currentStatus = (): WorkerAgentActivity => {
-			const agent = this.options.getLifecycle().getAgent(canonicalAgentId);
-			if (!agent) return "unknown";
-			return this.activityForAgent(agent);
+		const statusesFromSnapshot = (snapshot: TaskRuntimeProjection) => {
+			const latestAttempts = this.latestAttemptsByAgent(snapshot);
+			return canonicalAgentIds.map((agentId) => {
+				const agent = snapshot.agents[agentId];
+				return {
+					agentId,
+					status: agent
+						? this.projectAgentActivity(agent, latestAttempts.get(agent.agentId))
+						: ("unknown" as const),
+				};
+			});
 		};
-		const immediate = currentStatus();
-		if (immediate !== "active") return Promise.resolve({ status: immediate });
+		const currentStatuses = () => statusesFromSnapshot(this.options.getLifecycle().getTaskRuntimeSnapshot());
+		const baselineStatuses = statusesFromSnapshot(baselineSnapshot);
+		const baselineByAgentId = new Map(baselineStatuses.map(({ agentId, status }) => [agentId, status]));
+		const updatedAgentIds = new Set<string>();
+		const recordUpdates = (statuses: typeof baselineStatuses) => {
+			for (const { agentId, status } of statuses) {
+				if (baselineByAgentId.get(agentId) !== status) updatedAgentIds.add(agentId);
+			}
+		};
+		const waitSatisfied = (statuses: typeof baselineStatuses) => {
+			return mode === "any"
+				? statuses.some(({ status }) => status !== "active")
+				: statuses.every(({ status }) => status !== "active");
+		};
+		const result = (statuses: typeof baselineStatuses, timedOut: boolean) => ({
+			statuses,
+			updatedAgentIds: canonicalAgentIds.filter((agentId) => updatedAgentIds.has(agentId)),
+			timedOut,
+		});
+		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false));
 		return new Promise((resolve) => {
 			let settled = false;
-			let releaseYield = (): void => undefined;
-			let unsubscribeMailbox = (): void => undefined;
+			let releaseYield: (() => void) | undefined;
 			let unsubscribeState = (): void => undefined;
 			let timeout: ReturnType<typeof setTimeout> | undefined;
-			const settle = () => {
-				if (settled) return;
-				const next = currentStatus();
-				if (next === "active") return;
-				settled = true;
-				unsubscribeMailbox();
+			const cleanup = () => {
 				unsubscribeState();
 				if (timeout) clearTimeout(timeout);
-				releaseYield();
-				resolve({ status: next });
+				const release = releaseYield;
+				releaseYield = undefined;
+				release?.();
 			};
-			unsubscribeMailbox = this.getMailbox(canonicalAgentId).subscribe(settle);
+			const settle = () => {
+				if (settled) return;
+				const statuses = currentStatuses();
+				recordUpdates(statuses);
+				if (!waitSatisfied(statuses)) return;
+				settled = true;
+				cleanup();
+				resolve(result(statuses, false));
+			};
 			unsubscribeState = this.subscribeStateChanges(settle);
 			timeout = setTimeout(() => {
 				if (settled) return;
 				settled = true;
-				unsubscribeMailbox();
-				unsubscribeState();
-				releaseYield();
-				resolve({ status: currentStatus() });
+				const statuses = currentStatuses();
+				recordUpdates(statuses);
+				cleanup();
+				resolve(result(statuses, true));
 			}, boundedTimeoutMs);
 			if (typeof timeout === "object" && "unref" in timeout) timeout.unref();
 			if (scope.callerAgentId && this.options.yieldCapacity) {
-				const yielded = this.options.yieldCapacity(scope.callerAgentId, canonicalAgentId);
-				if (settled) yielded();
-				else releaseYield = yielded;
+				// Capacity belongs to the waiting caller. Passing that identity through both slots keeps
+				// legacy controller adapters from treating an independent peer as the capacity owner.
+				try {
+					const yielded = this.options.yieldCapacity(scope.callerAgentId, scope.callerAgentId);
+					if (settled) yielded();
+					else releaseYield = yielded;
+				} catch (error) {
+					settled = true;
+					cleanup();
+					throw error;
+				}
 			}
 			settle();
 		});
@@ -995,7 +1211,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const mailbox = this.getMailbox(agentId);
 		const pending = mailbox.pending();
 		if (pending.length === 0) return [];
-		const delivered = conversation.findDeliveredWorkerControlMessageIds(pending.map((message) => message.messageId));
+		const delivered = conversation.findDeliveredWorkerControlMessageIds(
+			pending.map((message) => {
+				const projected = this.mailboxMessage(message);
+				if (typeof projected.content !== "string") {
+					throw new Error("Worker control transcript projection is not textual.");
+				}
+				return { messageId: message.messageId, content: projected.content };
+			}),
+		);
 		for (const messageId of delivered) this.acknowledgeDeliveredMailboxMessage(agentId, messageId);
 		return mailbox
 			.pending()
@@ -1071,9 +1295,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					continue;
 				}
 				const target = this.requireKnownAgent(request.senderAgentId);
-				if (source.rootAgentId !== target.rootAgentId) {
-					throw new Error("Worker reply target is outside its agent tree.");
-				}
 				this.routeWorkerReplyToAgent(target, source.agentId, request, acknowledgement.replyContent);
 				this.workerReplyReconciliationFailures.delete(failureKey);
 			} catch (error) {
@@ -1139,7 +1360,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			`laneId=${args.record.laneId}`,
 			`status=${args.record.status}`,
 			...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
-			`Read the exact child evidence with delegate action="transcript" agentId="${args.childAgentId}".`,
+			`Read bounded raw transcript pages with delegate action="transcript" agentId="${args.childAgentId}". Messages present in each page are complete durable entries; omittedMessages discloses whole-message omissions, and an empty page may still continue via nextCursor.`,
 		].join("\n");
 		const idempotencyKey = `terminal-handoff:${args.terminalAttemptId}`;
 		const transcriptInput: MandatoryTranscriptControlInput = {
@@ -1243,12 +1464,26 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					if (settled) return settled;
 					continue;
 				}
+				const reuseSkipReason = this.reusableTaskAdmissionSkipReason(agent.agentId);
+				if (reuseSkipReason) {
+					this.reconcileControlTranscript(agent, message, true);
+					this.acknowledgeDeliveredMailboxMessage(agent.agentId, message.messageId);
+					const settlement = {
+						started: false,
+						skipReason: `${reuseSkipReason}:transcript_fallback_delivered`,
+					};
+					if (expectedMessageId === message.messageId) return settlement;
+					continue;
+				}
 				try {
 					this.enableAttemptAccountingForNextTask(agent);
 					const prepared = this.options.getLifecycle().prepareAgentTurn({
 						agentId: agent.agentId,
 						instructions: message.content,
 						controlMessageId: message.messageId,
+						...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
+							? { dependsOnTaskIds: message.task.dependsOnTaskIds }
+							: {}),
 					});
 					return this.scheduleTaskBearingAttempt(prepared.record, prepared.attempt);
 				} catch (error) {
@@ -1401,6 +1636,28 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 	}
 
+	private canonicalAgentIdSet(agentIds: readonly string[], label: string): string[] {
+		if (!Array.isArray(agentIds) || agentIds.length < 1 || agentIds.length > MAX_ORCHESTRATION_COLLECTION_LENGTH) {
+			throw new TypeError(
+				`${label} agent ids must contain from 1 through ${MAX_ORCHESTRATION_COLLECTION_LENGTH} entries.`,
+			);
+		}
+		const canonicalAgentIds: string[] = [];
+		const seenAgentIds = new Set<string>();
+		for (const agentId of agentIds) {
+			if (typeof agentId !== "string") throw new TypeError("Logical worker agent id is required.");
+			const canonicalAgentId = agentId.trim();
+			if (!canonicalAgentId) throw new TypeError("Logical worker agent id is required.");
+			if (canonicalAgentId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
+				throw new TypeError(`Logical worker agent id exceeds ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters.`);
+			}
+			if (seenAgentIds.has(canonicalAgentId)) continue;
+			seenAgentIds.add(canonicalAgentId);
+			canonicalAgentIds.push(canonicalAgentId);
+		}
+		return canonicalAgentIds;
+	}
+
 	private requireKnownAgent(agentId: string): AgentBindingContract {
 		const normalized = agentId.trim();
 		if (!normalized) throw new Error("Logical worker agent id is required.");
@@ -1409,18 +1666,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return agent;
 	}
 
-	private requireVisibleAgent(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
+	private requireSessionPeer(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
 		const target = this.requireKnownAgent(agentId);
-		if (!scope.callerAgentId) return target;
-		const caller = this.requireKnownAgent(scope.callerAgentId);
-		if (caller.rootAgentId !== target.rootAgentId) {
-			throw new Error(`Logical worker agent '${target.agentId}' is outside the caller's agent tree.`);
-		}
+		if (scope.callerAgentId) this.requireKnownAgent(scope.callerAgentId);
 		return target;
 	}
 
 	private requireControllableAgent(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
-		const target = this.requireVisibleAgent(agentId, scope);
+		const target = this.requireSessionPeer(agentId, scope);
 		if (!scope.callerAgentId) return target;
 		const caller = this.requireKnownAgent(scope.callerAgentId);
 		let cursor: AgentBindingContract | undefined = target;
@@ -1440,8 +1693,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return agent.activeAttemptId ? lifecycle.getTaskRuntimeSnapshot().attempts[agent.activeAttemptId] : undefined;
 	}
 
+	private latestAttemptsByAgent(snapshot: TaskRuntimeProjection): Map<string, AttemptRuntimeState> {
+		return latestAgentAttemptsByDurableOrder(snapshot);
+	}
+
 	private activityForAgent(agent: AgentBindingContract): WorkerAgentActivity {
-		const attempt = this.latestAgentAttempt(agent);
+		return this.projectAgentActivity(agent, this.latestAgentAttempt(agent));
+	}
+
+	private projectAgentActivity(
+		agent: AgentBindingContract,
+		attempt: AttemptRuntimeState | undefined,
+	): WorkerAgentActivity {
 		if (attempt?.status === "suspended" || agent.status === "suspended") return "suspended";
 		if (attempt?.status === "queued" || attempt?.status === "leased" || attempt?.status === "running") {
 			return "active";
@@ -1473,6 +1736,21 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			this.mailboxes.set(agentId, mailbox);
 		}
 		return mailbox;
+	}
+
+	private isAcceptedControlReplay(agentId: string, idempotencyKey: string | undefined): boolean {
+		if (idempotencyKey === undefined) return false;
+		const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
+		const mailbox = this.getMailbox(agentId);
+		return mailbox.getMessage(messageId) !== undefined || mailbox.hasControlReplayReceipt(messageId);
+	}
+
+	private reusableTaskAdmissionSkipReason(agentId: string): string | undefined {
+		const admission = evaluateReusableWorkerTaskAdmission(
+			this.options.getLifecycle().getTaskRuntimeSnapshot(),
+			agentId,
+		);
+		return admission.ok ? undefined : admission.reasonCode;
 	}
 
 	private subscribeStateChanges(listener: () => void): () => void {
@@ -1508,9 +1786,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (reply.replyToMessageId === undefined) return undefined;
 		if (!reply.senderAgentId) throw new Error("Worker reply routing metadata is incomplete.");
 		const source = this.requireKnownAgent(reply.senderAgentId);
-		if (source.rootAgentId !== target.rootAgentId) {
-			throw new Error("Worker reply target is outside its agent tree.");
-		}
 		const sourceMailbox = this.getMailbox(source.agentId);
 		const request = sourceMailbox.getMessage(reply.replyToMessageId);
 		if (!request || request.expectReply !== true || request.deliveredAt === undefined) {
@@ -1552,6 +1827,23 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...options,
 			...(task ? { task } : {}),
 		});
+	}
+
+	private workerAgentView(
+		agent: AgentBindingContract,
+		activity: WorkerAgentActivity = this.activityForAgent(agent),
+	): WorkerAgentView {
+		return {
+			agentId: agent.agentId,
+			...(agent.parentAgentId ? { parentAgentId: agent.parentAgentId } : {}),
+			rootAgentId: agent.rootAgentId,
+			depth: agent.depth,
+			role: agent.role,
+			status: agent.status,
+			activity,
+			createdAt: agent.createdAt,
+			updatedAt: agent.updatedAt,
+		};
 	}
 
 	private assertIdempotencyTarget(targetAgentId: string, idempotencyKey: string): void {

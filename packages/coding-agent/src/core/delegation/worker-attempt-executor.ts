@@ -301,6 +301,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		async run(): Promise<WorkerAttemptExecutionResult> {
 			if (ran) throw new Error("A worker attempt executor may run only once.");
 			ran = true;
+			options.conversation.beginAttemptUsage(options.durableHandle.attemptId);
 			if (!options.hasPersistedUsageCheckpoint) {
 				checkpointUsage("Persisted deterministic cumulative usage baseline for the durable worker transcript.");
 			}
@@ -361,15 +362,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					if (availableTokens !== undefined && availableTokens <= 0) {
 						throw new Error("Worker token budget exhausted before provider completion.");
 					}
+					options.conversation.ensureAttemptUserPrompt(options.durableHandle.attemptId, userPrompt);
 					let history = options.conversation.getProviderMessages();
-					if (history.length === 0) {
-						options.conversation.appendMessage({
-							role: "user",
-							content: [{ type: "text", text: userPrompt }],
-							timestamp: Date.now(),
-						});
-						history = options.conversation.getProviderMessages();
-					}
 					let completion: IsolatedCompletionResult;
 					const attemptProviderCompletion = (): Promise<IsolatedCompletionResult> => {
 						// Later attempts resume from the durably persisted transcript, not a stale snapshot.

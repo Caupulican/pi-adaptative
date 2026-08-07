@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
 import type {
-	AgentBindingContract,
 	AttemptUsageSnapshot,
 	HarnessCapability,
 	OrchestrationDispatchRequest,
@@ -14,13 +15,23 @@ import type {
 } from "./contracts.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
-import { type AttemptRuntimeState, DurableTaskRuntime, DurableTaskRuntimeError } from "./task-runtime.ts";
+import {
+	type AttemptRuntimeState,
+	DurableTaskRuntime,
+	DurableTaskRuntimeError,
+	validateTaskDependencyIds,
+} from "./task-runtime.ts";
 import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
+import {
+	normalizeWorkerContextForkReference,
+	type WorkerContextForkReference,
+} from "./worker-context-fork-reference.ts";
 
 export interface DelegationLedgerOptions {
 	agentDir: string;
 	sessionId: string;
 	now?: () => number;
+	store?: OrchestrationEventStore;
 }
 
 export interface PrepareDelegationInput {
@@ -32,6 +43,7 @@ export interface PrepareDelegationInput {
 	goal?: GoalState;
 	verificationOfTaskId?: string;
 	taskContext?: WorkerDelegationTaskContext;
+	birthContextForkReference?: WorkerContextForkReference;
 }
 
 export interface PrepareManagedDelegationInput {
@@ -61,6 +73,7 @@ export interface PrepareAgentTurnInput {
 	agentId: string;
 	instructions: string;
 	controlMessageId?: string;
+	dependsOnTaskIds?: readonly string[];
 }
 
 function activeAttempt(attempt: AttemptRuntimeState): boolean {
@@ -89,7 +102,8 @@ export class DelegationOrchestrationLedger {
 	constructor(options: DelegationLedgerOptions) {
 		this.sessionId = options.sessionId;
 		this.runtime = new DurableTaskRuntime({
-			store: new OrchestrationEventStore({ agentDir: options.agentDir, sessionId: options.sessionId }),
+			store:
+				options.store ?? new OrchestrationEventStore({ agentDir: options.agentDir, sessionId: options.sessionId }),
 			now: options.now,
 		});
 	}
@@ -108,7 +122,10 @@ export class DelegationOrchestrationLedger {
 			...(input.goal ? { goal: input.goal } : {}),
 			...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
-			dispatchMetadata: { logicalLaneId: input.laneId },
+			dispatchMetadata: {
+				logicalLaneId: input.laneId,
+				...(input.birthContextForkReference ? { birthContextForkReference: input.birthContextForkReference } : {}),
+			},
 		});
 	}
 
@@ -163,10 +180,27 @@ export class DelegationOrchestrationLedger {
 		const sequence = agentAttempts.length + 1;
 		const taskId = controlMessageId ? mailboxTurnTaskId(agentId, controlMessageId) : `${agentId}:turn:${sequence}`;
 		const existingTask = snapshot.tasks[taskId]?.task;
+		const prior = latestAgentAttemptByDurableOrder(snapshot, agent.agentId);
+		const contract = prior?.dispatch.executionContract;
+		if (!prior || !contract) {
+			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no immutable execution contract.`);
+		}
+		const priorTask = snapshot.tasks[prior.taskId]?.task;
+		if (!priorTask) throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
+		const dependencyTaskIds = validateTaskDependencyIds(
+			snapshot.tasks,
+			existingTask?.objectiveId ?? priorTask.objectiveId,
+			input.dependsOnTaskIds,
+		);
 		if (existingTask && controlMessageId) {
-			if (existingTask.description !== instructions || existingTask.role !== agent.role) {
+			if (
+				existingTask.description !== instructions ||
+				existingTask.role !== agent.role ||
+				existingTask.dependsOn.length !== dependencyTaskIds.length ||
+				existingTask.dependsOn.some((dependencyId, index) => dependencyId !== dependencyTaskIds[index])
+			) {
 				throw new DurableTaskRuntimeError(
-					`Worker control message '${controlMessageId}' has conflicting instructions.`,
+					`Worker control message '${controlMessageId}' has conflicting task identity.`,
 				);
 			}
 			const existingAttempts = (snapshot.tasks[taskId]?.attemptIds ?? []).map(
@@ -190,13 +224,6 @@ export class DelegationOrchestrationLedger {
 		if (agent.status !== "registered") {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' is not idle.`);
 		}
-		const prior = this.latestAgentAttempt(snapshot, agent);
-		const contract = prior?.dispatch.executionContract;
-		if (!prior || !contract) {
-			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no immutable execution contract.`);
-		}
-		const priorTask = snapshot.tasks[prior.taskId]?.task;
-		if (!priorTask) throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
 		if (existingTask && !controlMessageId) {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' already has turn ${sequence}.`);
 		}
@@ -207,9 +234,10 @@ export class DelegationOrchestrationLedger {
 			role: agent.role,
 			requiredCapabilities: contract.worker.authority.capabilities,
 			riskBudget: contract.worker.profile.budget,
+			...(priorTask.objectiveId.startsWith("goal:") ? { goalId: priorTask.objectiveId.slice("goal:".length) } : {}),
 			taskContext: {
 				requirementIds: prior.dispatch.requirementIds ?? [],
-				dependsOnTaskIds: priorTask.dependsOn,
+				dependsOnTaskIds: dependencyTaskIds,
 				acceptanceCriterionIds: priorTask.acceptanceCriterionIds,
 				resourcePointerIds: prior.dispatch.resourcePointerIds,
 			},
@@ -218,18 +246,11 @@ export class DelegationOrchestrationLedger {
 				logicalLaneId: agentId,
 				dispatchSequence: sequence,
 				...(controlMessageId ? { controlMessageId } : {}),
+				...(prior.dispatch.birthContextForkReference
+					? { birthContextForkReference: prior.dispatch.birthContextForkReference }
+					: {}),
 			},
 		});
-	}
-
-	private latestAgentAttempt(
-		snapshot: ReturnType<DurableTaskRuntime["getSnapshot"]>,
-		agent: AgentBindingContract,
-	): AttemptRuntimeState | undefined {
-		return Object.values(snapshot.attempts)
-			.filter((attempt) => attempt.agentId === agent.agentId || attempt.dispatch.logicalLaneId === agent.agentId)
-			.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-			.at(-1);
 	}
 
 	private prepareNormalized(input: {
@@ -254,8 +275,18 @@ export class DelegationOrchestrationLedger {
 			| "provider"
 			| "authorizationId"
 			| "worktreeLaneKey"
+			| "birthContextForkReference"
 		>;
 	}): AttemptRuntimeState {
+		let birthContextForkReference: WorkerContextForkReference | undefined;
+		try {
+			birthContextForkReference =
+				input.dispatchMetadata?.birthContextForkReference === undefined
+					? undefined
+					: normalizeWorkerContextForkReference(input.dispatchMetadata.birthContextForkReference);
+		} catch (error) {
+			throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+		}
 		let snapshot = this.runtime.getSnapshot();
 		const existingVerificationSubject = input.verificationOfTaskId
 			? snapshot.tasks[input.verificationOfTaskId]
@@ -268,6 +299,40 @@ export class DelegationOrchestrationLedger {
 			existingVerificationSubject?.task.objectiveId ??
 			projectedGoal?.objectiveId ??
 			(input.goalId ? goalObjectiveId(input.goalId) : `session:${this.sessionId}`);
+		const dependencyTaskIds = validateTaskDependencyIds(
+			snapshot.tasks,
+			objectiveId,
+			input.taskContext?.dependsOnTaskIds,
+		);
+		const existingTask = snapshot.tasks[input.laneId]?.task;
+		if (
+			existingTask &&
+			(existingTask.objectiveId !== objectiveId ||
+				existingTask.description !== input.instructions ||
+				existingTask.role !== input.role ||
+				existingTask.dependsOn.length !== dependencyTaskIds.length ||
+				existingTask.dependsOn.some((dependencyId, index) => dependencyId !== dependencyTaskIds[index]))
+		) {
+			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
+		}
+		const taskStateBeforeWrites = snapshot.tasks[input.laneId];
+		const activeAttemptBeforeWrites = taskStateBeforeWrites?.attemptIds
+			.map((attemptId) => snapshot.attempts[attemptId])
+			.find((attempt): attempt is AttemptRuntimeState => attempt !== undefined && activeAttempt(attempt));
+		for (const attemptId of taskStateBeforeWrites?.attemptIds ?? []) {
+			const durableReference = snapshot.attempts[attemptId]?.dispatch.birthContextForkReference;
+			if (!isDeepStrictEqual(durableReference, birthContextForkReference)) {
+				throw new DurableTaskRuntimeError(`Task '${input.laneId}' has a conflicting birth context fork reference.`);
+			}
+		}
+		const projectedEvidence =
+			input.goal && objectiveId === projectedGoal?.objectiveId ? projectGoalAcceptanceEvidence(input.goal) : [];
+		if (projectedGoal) this.runtime.assertObjectiveSynchronizationHeadroom(projectedGoal, projectedEvidence);
+		this.runtime.assertProjectionHeadroom({
+			objectives: snapshot.objectives[objectiveId] ? 0 : 1,
+			tasks: taskStateBeforeWrites ? 0 : 1,
+			attempts: activeAttemptBeforeWrites ? 0 : 1,
+		});
 		if (input.goal && objectiveId === projectedGoal?.objectiveId) {
 			this.synchronizeGoalState(input.goal);
 			snapshot = this.runtime.getSnapshot();
@@ -280,39 +345,25 @@ export class DelegationOrchestrationLedger {
 			snapshot = this.runtime.getSnapshot();
 		}
 
-		if (!snapshot.tasks[input.laneId]) {
-			const verificationSubject = input.verificationOfTaskId
-				? snapshot.tasks[input.verificationOfTaskId]
-				: undefined;
-			this.runtime.createTask({
-				taskId: input.laneId,
-				objectiveId,
-				title: deriveWorkerTaskLabel(input.instructions, `Delegated ${input.role} work`),
-				description: input.instructions,
-				role: input.role,
-				dependsOn: input.taskContext?.dependsOnTaskIds ?? [],
-				requiredCapabilities: input.requiredCapabilities,
-				acceptanceCriterionIds: input.taskContext?.acceptanceCriterionIds ?? [],
-				riskBudget: input.riskBudget,
-				...(input.verificationOfTaskId
-					? {
-							verificationOfTaskId: input.verificationOfTaskId,
-							acceptanceCriterionIds: verificationSubject?.task.acceptanceCriterionIds ?? [],
-						}
-					: {}),
-			});
-			snapshot = this.runtime.getSnapshot();
-		}
-
-		const task = snapshot.tasks[input.laneId];
-		if (!task) throw new DurableTaskRuntimeError(`Failed to create task '${input.laneId}'.`);
-		const existing = [...task.attemptIds]
-			.reverse()
-			.map((attemptId) => snapshot.attempts[attemptId])
-			.find((attempt): attempt is AttemptRuntimeState => attempt !== undefined && activeAttempt(attempt));
-		if (existing) return existing;
-
-		return this.runtime.queueAttempt(input.laneId, {
+		const verificationSubject = input.verificationOfTaskId ? snapshot.tasks[input.verificationOfTaskId] : undefined;
+		const taskInput = {
+			taskId: input.laneId,
+			objectiveId,
+			title: deriveWorkerTaskLabel(input.instructions, `Delegated ${input.role} work`),
+			description: input.instructions,
+			role: input.role,
+			dependsOn: dependencyTaskIds,
+			requiredCapabilities: input.requiredCapabilities,
+			acceptanceCriterionIds: input.taskContext?.acceptanceCriterionIds ?? [],
+			riskBudget: input.riskBudget,
+			...(input.verificationOfTaskId
+				? {
+						verificationOfTaskId: input.verificationOfTaskId,
+						acceptanceCriterionIds: verificationSubject?.task.acceptanceCriterionIds ?? [],
+					}
+				: {}),
+		} as const;
+		const dispatch = {
 			taskId: input.laneId,
 			profileId: input.profileId,
 			instructions: input.instructions,
@@ -321,14 +372,44 @@ export class DelegationOrchestrationLedger {
 			requirementIds: input.taskContext?.requirementIds ?? [],
 			...(input.executionContract ? { executionContract: input.executionContract } : {}),
 			...input.dispatchMetadata,
-		});
+			...(birthContextForkReference ? { birthContextForkReference } : {}),
+		} as const;
+		if (
+			existingTask &&
+			(existingTask.title !== taskInput.title ||
+				existingTask.verificationOfTaskId !== taskInput.verificationOfTaskId ||
+				!isDeepStrictEqual(existingTask.requiredCapabilities, [...new Set(taskInput.requiredCapabilities)]) ||
+				!isDeepStrictEqual(existingTask.acceptanceCriterionIds, [...new Set(taskInput.acceptanceCriterionIds)]) ||
+				!isDeepStrictEqual(existingTask.riskBudget, taskInput.riskBudget))
+		) {
+			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable task identity.`);
+		}
+		if (activeAttemptBeforeWrites && !isDeepStrictEqual(activeAttemptBeforeWrites.dispatch, dispatch)) {
+			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
+		}
+		if (!snapshot.tasks[input.laneId]) {
+			return this.runtime.prepareTaskAttempt(
+				{
+					...taskInput,
+				},
+				dispatch,
+			).attempt;
+		}
+
+		const task = snapshot.tasks[input.laneId];
+		if (!task) throw new DurableTaskRuntimeError(`Failed to create task '${input.laneId}'.`);
+		if (activeAttemptBeforeWrites) return activeAttemptBeforeWrites;
+
+		return this.runtime.queueAttempt(input.laneId, dispatch);
 	}
 
 	synchronizeGoalState(goal: GoalState): void {
 		const objective = projectGoalObjective(goal);
+		const evidence = projectGoalAcceptanceEvidence(goal);
+		this.runtime.assertObjectiveSynchronizationHeadroom(objective, evidence);
 		this.runtime.ensureObjective(objective);
-		for (const evidence of projectGoalAcceptanceEvidence(goal)) {
-			this.runtime.recordObjectiveEvidence(objective.objectiveId, evidence);
+		for (const item of evidence) {
+			this.runtime.recordObjectiveEvidence(objective.objectiveId, item);
 		}
 		const status = this.runtime.getSnapshot().objectives[goalObjectiveId(goal.goalId)]?.objective.status;
 		switch (goal.status) {

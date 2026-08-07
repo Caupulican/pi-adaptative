@@ -46,7 +46,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 		"Use every provided tool when it improves the result; the host enforces the exact inherited grant at execution time.",
 		...(capabilities.delegate
 			? [
-					"You may create agents recursively without a depth or fan-out cap. Use list/transcript/threaded messages to coordinate the tree; the scheduler owns concurrency, budgets, leases, cycle rejection, and cancellation.",
+					"You may create agents recursively within host-enforced depth, direct-child, session-agent, and queue bounds. Use list/transcript/threaded messages to coordinate the tree; the scheduler owns concurrency, budgets, leases, exact-cycle rejection, and cancellation.",
 				]
 			: []),
 		...(capabilities.write

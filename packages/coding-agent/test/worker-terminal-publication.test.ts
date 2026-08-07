@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { WorkerDelegationController } from "../src/core/delegation/worker-delegation-controller.ts";
+import {
+	type WorkerTerminalHandoff,
+	WorkerTerminalHandoffCoordinator,
+	type WorkerTerminalHandoffDelivery,
+} from "../src/core/delegation/worker-terminal-handoff-coordinator.ts";
 
 type TerminalPublicationController = {
 	publishTerminalRecord(record: LaneRecord): void;
+	deliverTerminalHandoff(handoff: Readonly<WorkerTerminalHandoff>): WorkerTerminalHandoffDelivery;
 	publishedTerminalAttemptIds: Set<string>;
+	terminalHandoffs: WorkerTerminalHandoffCoordinator;
 };
 
 function terminalPublicationHarness(failureEdge?: "snapshot" | "telemetry") {
@@ -37,11 +44,8 @@ function terminalPublicationHarness(failureEdge?: "snapshot" | "telemetry") {
 
 	const controller = Object.create(WorkerDelegationController.prototype) as WorkerDelegationController;
 	Object.assign(controller as object, {
-		laneRetryCounts: new Map(),
-		laneRetryTimers: new Map(),
-		terminalHandoffRetryCounts: new Map(),
-		terminalHandoffRetryTimers: new Map(),
 		publishedTerminalAttemptIds: new Set<string>(),
+		recovery: { clearScheduledRetry: vi.fn() },
 		lifecycle: {
 			getActiveAttempt: () => ({
 				attemptId: "attempt-child-terminal",
@@ -65,9 +69,13 @@ function terminalPublicationHarness(failureEdge?: "snapshot" | "telemetry") {
 		},
 	});
 	const internal = controller as unknown as TerminalPublicationController;
+	internal.terminalHandoffs = new WorkerTerminalHandoffCoordinator({
+		deliver: (handoff) => internal.deliverTerminalHandoff(handoff),
+	});
 
 	return {
 		publish: () => internal.publishTerminalRecord(record),
+		signal: () => internal.terminalHandoffs.signal(),
 		publishedTerminalAttemptIds: internal.publishedTerminalAttemptIds,
 		appendCustomEntry,
 		emitAutonomyTelemetry,
@@ -118,9 +126,8 @@ describe("WorkerDelegationController terminal publication", () => {
 	});
 
 	it.each(["throw", "reject"] as const)(
-		"retries a parent terminal handoff after the first %s without consuming its durable notification",
-		async (failureMode) => {
-			vi.useFakeTimers();
+		"retains a parent terminal handoff after the first %s and retries on an explicit state signal",
+		(failureMode) => {
 			const harness = terminalPublicationHarness();
 			harness.deliverWorkerTerminalHandoff.mockImplementationOnce(() => {
 				if (failureMode === "throw") throw new Error("simulated transient parent handoff failure");
@@ -138,7 +145,7 @@ describe("WorkerDelegationController terminal publication", () => {
 			expect(harness.recordTerminal).not.toHaveBeenCalled();
 			expect(harness.publishedTerminalAttemptIds).toEqual(new Set());
 
-			await vi.runAllTimersAsync();
+			harness.signal();
 			expect(harness.getNotificationStatus()).toBe("delivered");
 			expect(harness.markNotificationsDelivered).toHaveBeenCalledOnce();
 			expect(harness.publishedTerminalAttemptIds).toEqual(new Set(["attempt-child-terminal"]));
@@ -149,8 +156,7 @@ describe("WorkerDelegationController terminal publication", () => {
 		},
 	);
 
-	it("retries an accepted parent handoff when the durable notification commit fails once", async () => {
-		vi.useFakeTimers();
+	it("retains an accepted parent handoff until an explicit state signal can commit its notification", () => {
 		const harness = terminalPublicationHarness();
 		harness.markNotificationsDelivered.mockImplementationOnce(() => {
 			throw new Error("simulated notification commit failure");
@@ -162,7 +168,7 @@ describe("WorkerDelegationController terminal publication", () => {
 		expect(harness.markNotificationsDelivered).toHaveBeenCalledOnce();
 		expect(harness.publishedTerminalAttemptIds).toEqual(new Set());
 
-		await vi.runAllTimersAsync();
+		harness.signal();
 
 		expect(harness.getNotificationStatus()).toBe("delivered");
 		expect(harness.deliverWorkerTerminalHandoff).toHaveBeenCalledTimes(2);

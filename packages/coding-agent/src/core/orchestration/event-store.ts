@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -8,8 +9,13 @@ import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/
 import {
 	type AppendOrchestrationEventInput,
 	isOrchestrationEvent,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES,
+	MAX_ORCHESTRATION_SNAPSHOT_IDEMPOTENCY_BYTES,
+	ORCHESTRATION_EVENT_TYPES,
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationEvent,
+	toJsonObject,
 } from "./contracts.ts";
 
 const EVENT_FILE_PATTERN = /^(\d{16})\.json$/;
@@ -25,8 +31,39 @@ const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
 const MAX_SNAPSHOT_DIRECTORY_ENTRIES = 8;
 const MAX_CURSOR_BYTES = 64 * 1024;
 const MAX_BASELINE_BYTES = 64 * 1024;
-/** Full current task state plus retained idempotency evidence; intentionally above the 16MiB tail cap. */
-const MAX_PROJECTION_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+const ORCHESTRATION_ACTORS = ["human", "kernel", "runtime", "policy", "router", "worker"] as const;
+const APPEND_INPUT_FIELDS = [
+	"type",
+	"aggregateId",
+	"actor",
+	"correlationId",
+	"causationId",
+	"idempotencyKey",
+	"payload",
+] as const;
+const EVENT_FIELDS = [
+	"schemaVersion",
+	"ordinal",
+	"eventId",
+	"type",
+	"aggregateId",
+	"actor",
+	"occurredAt",
+	"correlationId",
+	"causationId",
+	"idempotencyKey",
+	"payload",
+] as const;
+const SNAPSHOT_FIELDS = [
+	"version",
+	"schemaVersion",
+	"throughOrdinal",
+	"createdAt",
+	"projection",
+	"idempotencyEvents",
+	"digest",
+] as const;
+const BASELINE_FIELDS = ["version", "throughOrdinal", "digest", "snapshotFile"] as const;
 
 interface EventCursor {
 	version: 1;
@@ -82,6 +119,12 @@ export interface OrchestrationEventStoreOptions {
 	maxTailEvents?: number;
 	maxTailBytes?: number;
 	maxIdempotencyEvents?: number;
+}
+
+export interface AppendOrchestrationEventOptions {
+	expectedLastOrdinal?: number;
+	/** Exact event admission under the append lock, before any durable file is written. */
+	validateBeforeCommit?: (event: OrchestrationEvent) => void;
 }
 
 export class OrchestrationEventStoreError extends Error {
@@ -142,6 +185,10 @@ function serialize(value: unknown): string {
 	return `${JSON.stringify(value, null, "\t")}\n`;
 }
 
+function serializeCompact(value: unknown): string {
+	return `${JSON.stringify(value)}\n`;
+}
+
 function serializeBounded(
 	value: unknown,
 	maxBytes: number,
@@ -153,6 +200,162 @@ function serializeBounded(
 		throw new OrchestrationEventStoreError(oversizedMessage);
 	}
 	return serialized;
+}
+
+function serializeCompactBounded(value: unknown, maxBytes: number, label: string): string {
+	const serialized = serializeCompact(value);
+	if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
+		throw new OrchestrationEventStoreError(`${label} exceeds its byte limit.`);
+	}
+	return serialized;
+}
+
+function isCanonicalIdentifier(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH &&
+		value.trim() === value
+	);
+}
+
+function canonicalIdentifier(value: unknown, label: string): string {
+	if (!isCanonicalIdentifier(value)) {
+		throw new OrchestrationEventStoreError(
+			`${label} must be a non-empty canonical identifier of at most ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters.`,
+		);
+	}
+	return value;
+}
+
+function isCanonicalIsoTimestamp(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0 || value.trim() !== value) return false;
+	const milliseconds = Date.parse(value);
+	return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function canonicalIsoTimestamp(value: unknown, label: string): string {
+	if (!isCanonicalIsoTimestamp(value)) {
+		throw new OrchestrationEventStoreError(`${label} must be a canonical ISO-8601 timestamp.`);
+	}
+	return value;
+}
+
+function canonicalJsonObject(value: unknown, label: string): JsonObject {
+	try {
+		return toJsonObject(value);
+	} catch (error) {
+		throw new OrchestrationEventStoreError(
+			`${label} must be a finite JSON object: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+function hasExactFields(record: Record<string, unknown>, fields: readonly string[]): boolean {
+	const actualFields = Object.keys(record);
+	return actualFields.length === fields.length && fields.every((field) => Object.hasOwn(record, field));
+}
+
+function normalizeAppendInput(input: AppendOrchestrationEventInput): AppendOrchestrationEventInput {
+	if (!input || typeof input !== "object" || Array.isArray(input)) {
+		throw new OrchestrationEventStoreError("Orchestration append input must be an object.");
+	}
+	const raw = input as unknown as Record<string, unknown>;
+	const unsupportedField = Object.keys(raw).find(
+		(field) => !APPEND_INPUT_FIELDS.some((candidate) => candidate === field),
+	);
+	if (unsupportedField) {
+		throw new OrchestrationEventStoreError(`Orchestration append input field '${unsupportedField}' is unsupported.`);
+	}
+	const type = ORCHESTRATION_EVENT_TYPES.find((candidate) => candidate === raw.type);
+	if (!type) {
+		throw new OrchestrationEventStoreError(`Orchestration event type '${String(raw.type)}' is invalid.`);
+	}
+	const actor = ORCHESTRATION_ACTORS.find((candidate) => candidate === raw.actor);
+	if (!actor) {
+		throw new OrchestrationEventStoreError(`Orchestration event actor '${String(raw.actor)}' is invalid.`);
+	}
+	const correlationId =
+		raw.correlationId === undefined
+			? undefined
+			: canonicalIdentifier(raw.correlationId, "Orchestration correlation id");
+	const causationId =
+		raw.causationId === undefined ? undefined : canonicalIdentifier(raw.causationId, "Orchestration causation id");
+	const idempotencyKey =
+		raw.idempotencyKey === undefined
+			? undefined
+			: canonicalIdentifier(raw.idempotencyKey, "Orchestration idempotency key");
+	return {
+		type,
+		aggregateId: canonicalIdentifier(raw.aggregateId, "Orchestration aggregate id"),
+		actor,
+		...(correlationId ? { correlationId } : {}),
+		...(causationId ? { causationId } : {}),
+		...(idempotencyKey ? { idempotencyKey } : {}),
+		payload: canonicalJsonObject(raw.payload, "Orchestration event payload"),
+	};
+}
+
+function isCanonicalOrchestrationEvent(value: unknown): value is OrchestrationEvent {
+	if (!isOrchestrationEvent(value)) return false;
+	if (Object.keys(value).some((field) => !EVENT_FIELDS.some((candidate) => candidate === field))) return false;
+	if (!isCanonicalIdentifier(value.eventId) || !isCanonicalIdentifier(value.aggregateId)) return false;
+	if (!isCanonicalIsoTimestamp(value.occurredAt)) return false;
+	if (value.correlationId !== undefined && !isCanonicalIdentifier(value.correlationId)) return false;
+	if (value.causationId !== undefined && !isCanonicalIdentifier(value.causationId)) return false;
+	if (value.idempotencyKey !== undefined && !isCanonicalIdentifier(value.idempotencyKey)) return false;
+	try {
+		toJsonObject(value.payload);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function assertCanonicalOrchestrationEvent(value: unknown): asserts value is OrchestrationEvent {
+	if (!isCanonicalOrchestrationEvent(value)) {
+		throw new OrchestrationEventStoreError("Constructed orchestration event is not canonical.");
+	}
+}
+
+function observeListenerResult(value: unknown): void {
+	if ((typeof value !== "object" || value === null) && typeof value !== "function") return;
+	let then: unknown;
+	try {
+		then = (value as { then?: unknown }).then;
+	} catch {
+		return;
+	}
+	if (typeof then === "function") void Promise.resolve(value).catch(() => {});
+}
+
+function boundedIdempotencyEvents(events: readonly OrchestrationEvent[], maxEvents: number): OrchestrationEvent[] {
+	const selectedNewestFirst: OrchestrationEvent[] = [];
+	let serializedBytes = 2;
+	for (const event of [...events].sort((left, right) => right.ordinal - left.ordinal)) {
+		if (selectedNewestFirst.length >= maxEvents) break;
+		const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+		const nextBytes = serializedBytes + (selectedNewestFirst.length > 0 ? 1 : 0) + eventBytes;
+		if (nextBytes > MAX_ORCHESTRATION_SNAPSHOT_IDEMPOTENCY_BYTES) continue;
+		selectedNewestFirst.push(structuredClone(event));
+		serializedBytes = nextBytes;
+	}
+	return selectedNewestFirst.reverse();
+}
+
+function assertExactIdempotentReplay(existing: OrchestrationEvent, input: AppendOrchestrationEventInput): void {
+	const matches =
+		existing.type === input.type &&
+		existing.aggregateId === input.aggregateId &&
+		existing.actor === input.actor &&
+		existing.correlationId === (input.correlationId || undefined) &&
+		existing.causationId === (input.causationId || undefined) &&
+		isDeepStrictEqual(existing.payload, input.payload);
+	if (!matches) {
+		throw new OrchestrationEventStoreError(
+			`Orchestration idempotency key '${input.idempotencyKey}' was reused with conflicting event content.`,
+		);
+	}
 }
 
 function eventFileName(ordinal: number): string {
@@ -226,13 +429,23 @@ export class OrchestrationEventStore {
 		);
 	}
 
-	append(input: AppendOrchestrationEventInput, options: { expectedLastOrdinal?: number } = {}): OrchestrationEvent {
+	append(input: AppendOrchestrationEventInput, options: AppendOrchestrationEventOptions = {}): OrchestrationEvent {
+		const normalizedInput = normalizeAppendInput(input);
+		if (
+			options.expectedLastOrdinal !== undefined &&
+			(!Number.isSafeInteger(options.expectedLastOrdinal) || options.expectedLastOrdinal < 0)
+		) {
+			throw new OrchestrationEventStoreError("Expected orchestration ordinal must be a non-negative safe integer.");
+		}
 		const committed = withFileLockSync(this.cursorPath, (): { event: OrchestrationEvent; appended: boolean } => {
 			const indexes = this.synchronizeIndexesUnlocked();
 			const actual = indexes.lastOrdinal;
-			if (input.idempotencyKey) {
-				const existing = indexes.idempotencyEvents.get(input.idempotencyKey);
-				if (existing) return { event: existing, appended: false };
+			if (normalizedInput.idempotencyKey) {
+				const existing = indexes.idempotencyEvents.get(normalizedInput.idempotencyKey);
+				if (existing) {
+					assertExactIdempotentReplay(existing, normalizedInput);
+					return { event: existing, appended: false };
+				}
 			}
 			if (options.expectedLastOrdinal !== undefined) {
 				if (actual !== options.expectedLastOrdinal) {
@@ -245,21 +458,23 @@ export class OrchestrationEventStore {
 				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 				ordinal,
 				eventId: this.createEventId(),
-				type: input.type,
-				aggregateId: input.aggregateId,
-				actor: input.actor,
+				type: normalizedInput.type,
+				aggregateId: normalizedInput.aggregateId,
+				actor: normalizedInput.actor,
 				occurredAt: this.now(),
-				...(input.correlationId ? { correlationId: input.correlationId } : {}),
-				...(input.causationId ? { causationId: input.causationId } : {}),
-				...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-				payload: structuredClone(input.payload),
+				...(normalizedInput.correlationId ? { correlationId: normalizedInput.correlationId } : {}),
+				...(normalizedInput.causationId ? { causationId: normalizedInput.causationId } : {}),
+				...(normalizedInput.idempotencyKey ? { idempotencyKey: normalizedInput.idempotencyKey } : {}),
+				payload: normalizedInput.payload,
 			};
+			assertCanonicalOrchestrationEvent(next);
 			const serializedEvent = serializeBounded(
 				next,
 				this.maxTailBytes,
 				"Orchestration event",
 				"Orchestration event exceeds its configured tail byte limit.",
 			);
+			options.validateBeforeCommit?.(next);
 			const nextTailBytes = indexes.tailBytes + Buffer.byteLength(serializedEvent);
 			const serializedCursor = serializeBounded(
 				{ version: 1, lastOrdinal: ordinal, tailBytes: nextTailBytes } satisfies EventCursor,
@@ -269,7 +484,7 @@ export class OrchestrationEventStore {
 			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent);
 			indexes.lastOrdinal = ordinal;
 			indexes.tailBytes = nextTailBytes;
-			if (input.idempotencyKey) indexes.idempotencyEvents.set(input.idempotencyKey, next);
+			if (normalizedInput.idempotencyKey) indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
 			// The immutable event is authoritative. The cursor is only a corruption high-water mark,
 			// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
 			// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
@@ -278,7 +493,13 @@ export class OrchestrationEventStore {
 		});
 
 		if (committed.appended) {
-			for (const listener of this.listeners) listener(structuredClone(committed.event));
+			for (const listener of [...this.listeners]) {
+				try {
+					observeListenerResult(listener(structuredClone(committed.event)) as unknown);
+				} catch {
+					// The event is already durable. Observer failures cannot turn a committed transition into a reported failure.
+				}
+			}
 		}
 		return structuredClone(committed.event);
 	}
@@ -361,23 +582,21 @@ export class OrchestrationEventStore {
 					retainedByKey.set(event.idempotencyKey, event);
 				}
 			}
-			const idempotencyEvents = [...retainedByKey.values()]
-				.sort((left, right) => left.ordinal - right.ordinal)
-				.slice(-this.maxIdempotencyEvents)
-				.map((event) => structuredClone(event));
+			const idempotencyEvents = boundedIdempotencyEvents([...retainedByKey.values()], this.maxIdempotencyEvents);
+			const canonicalProjection = canonicalJsonObject(projection(), "Orchestration projection snapshot");
 			const content: ProjectionSnapshotContent = {
 				version: 1,
 				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 				throughOrdinal,
-				createdAt: this.now(),
-				projection: structuredClone(projection()),
+				createdAt: canonicalIsoTimestamp(this.now(), "Orchestration projection snapshot creation time"),
+				projection: canonicalProjection,
 				idempotencyEvents,
 			};
 			const digest = snapshotDigest(content);
 			const snapshotFile = eventFileName(throughOrdinal);
-			const serializedSnapshot = serializeBounded(
+			const serializedSnapshot = serializeCompactBounded(
 				{ ...content, digest } satisfies ProjectionSnapshot,
-				MAX_PROJECTION_SNAPSHOT_BYTES,
+				MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES,
 				"Orchestration projection snapshot",
 			);
 			const serializedBaseline = serializeBounded(
@@ -533,6 +752,7 @@ export class OrchestrationEventStore {
 		}
 		const baseline = parsed as Record<string, unknown>;
 		if (
+			!hasExactFields(baseline, BASELINE_FIELDS) ||
 			baseline.version !== 1 ||
 			!Number.isSafeInteger(baseline.throughOrdinal) ||
 			Number(baseline.throughOrdinal) < 1 ||
@@ -560,7 +780,7 @@ export class OrchestrationEventStore {
 			parsed = JSON.parse(
 				readBoundedTextFileSync(
 					join(this.snapshotsDir, baseline.snapshotFile),
-					MAX_PROJECTION_SNAPSHOT_BYTES,
+					MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES,
 					"Orchestration projection snapshot",
 				),
 			);
@@ -574,6 +794,7 @@ export class OrchestrationEventStore {
 		}
 		const snapshot = parsed as Record<string, unknown>;
 		if (
+			!hasExactFields(snapshot, SNAPSHOT_FIELDS) ||
 			snapshot.version !== 1 ||
 			snapshot.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION ||
 			snapshot.throughOrdinal !== baseline.throughOrdinal ||
@@ -583,7 +804,10 @@ export class OrchestrationEventStore {
 			Array.isArray(snapshot.projection) ||
 			!Array.isArray(snapshot.idempotencyEvents) ||
 			snapshot.idempotencyEvents.length > this.maxIdempotencyEvents ||
-			!snapshot.idempotencyEvents.every(isOrchestrationEvent) ||
+			Buffer.byteLength(JSON.stringify(snapshot.idempotencyEvents), "utf8") >
+				MAX_ORCHESTRATION_SNAPSHOT_IDEMPOTENCY_BYTES ||
+			!isCanonicalIsoTimestamp(snapshot.createdAt) ||
+			!snapshot.idempotencyEvents.every(isCanonicalOrchestrationEvent) ||
 			!snapshot.idempotencyEvents.every(
 				(event) => event.ordinal <= baseline.throughOrdinal && event.idempotencyKey !== undefined,
 			) ||
@@ -594,12 +818,13 @@ export class OrchestrationEventStore {
 		) {
 			throw new OrchestrationEventStoreError("Invalid orchestration projection snapshot.");
 		}
+		const projection = canonicalJsonObject(snapshot.projection, "Orchestration projection snapshot state");
 		const content: ProjectionSnapshotContent = {
 			version: 1,
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 			throughOrdinal: baseline.throughOrdinal,
 			createdAt: snapshot.createdAt,
-			projection: structuredClone(snapshot.projection) as JsonObject,
+			projection,
 			idempotencyEvents: snapshot.idempotencyEvents.map((event) => structuredClone(event)),
 		};
 		if (snapshotDigest(content) !== baseline.digest) {
@@ -685,7 +910,7 @@ export class OrchestrationEventStore {
 				`Failed to parse orchestration event ${name}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		if (!isOrchestrationEvent(parsed)) {
+		if (!isCanonicalOrchestrationEvent(parsed)) {
 			throw new OrchestrationEventStoreError(`Invalid orchestration event record: ${name}`);
 		}
 		return parsed;

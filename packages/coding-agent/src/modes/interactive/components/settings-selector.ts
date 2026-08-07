@@ -12,6 +12,7 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
+import { DEFAULT_WORKER_FLEET_LIMITS } from "../../../core/delegation/worker-fleet-limits.ts";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type {
 	AutoLearnSettings,
@@ -41,9 +42,11 @@ import {
 	DEFAULT_RESEARCH_LANE_MAX_USD,
 	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_ENABLED,
+	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
+	MAX_WORKER_DELEGATION_MAX_USD,
 } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -1120,6 +1123,7 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 		this.state = {
 			...settings,
 			enabled: settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED,
+			maxConcurrent: settings.maxConcurrent ?? DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
 			maxUsd: settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD,
 			maxWallClockMs: settings.maxWallClockMs ?? DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 		};
@@ -1149,18 +1153,19 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
 						"Agent Tree USD Budget",
-						"Enter any nonnegative finite number. Zero disables the settings-level cost ceiling.",
+						`Enter a nonnegative finite number no greater than ${MAX_WORKER_DELEGATION_MAX_USD}. Zero disables the settings-level cost ceiling.`,
 						String(this.state.maxUsd),
 						(value) => {
 							const maxUsd = Number(value.trim());
-							if (Number.isFinite(maxUsd) && maxUsd >= 0) {
+							if (Number.isFinite(maxUsd) && maxUsd >= 0 && maxUsd <= MAX_WORKER_DELEGATION_MAX_USD) {
 								this.state = { ...this.state, maxUsd };
-								onChange({ ...this.state }, this.scope);
+								done(String(maxUsd));
+								return;
 							}
-							done(String(this.state.maxUsd));
+							done();
 						},
 						() => done(),
-						"nonnegative number; invalid input keeps the current value",
+						`number in [0, ${MAX_WORKER_DELEGATION_MAX_USD}]; invalid input keeps the current value`,
 					),
 			},
 			{
@@ -1177,9 +1182,10 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 							const maxWallClockMs = Number(value.trim());
 							if (Number.isSafeInteger(maxWallClockMs) && maxWallClockMs >= 0) {
 								this.state = { ...this.state, maxWallClockMs };
-								onChange({ ...this.state }, this.scope);
+								done(String(maxWallClockMs));
+								return;
 							}
-							done(String(this.state.maxWallClockMs));
+							done();
 						},
 						() => done(),
 						"nonnegative safe integer; invalid input keeps the current value",
@@ -1196,20 +1202,21 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 			{
 				id: "worker-delegation-max-concurrent",
 				label: "Max concurrent workers",
-				description: "Global scheduler concurrency; delegation depth and fan-out have no framework cap",
-				currentValue: String(this.state.maxConcurrent ?? 1),
+				description: `Global scheduler concurrency; fixed fleet caps are depth ${DEFAULT_WORKER_FLEET_LIMITS.maxDepth}, ${DEFAULT_WORKER_FLEET_LIMITS.maxChildrenPerAgent} children/agent, and ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} session agents`,
+				currentValue: String(this.state.maxConcurrent),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
 						"Global Worker Concurrency",
-						"Enter any positive safe integer. This limits simultaneously running agents, not tree depth or fan-out.",
-						String(this.state.maxConcurrent ?? 1),
+						`Enter any positive safe integer. This limits running agents; fixed safety ceilings separately bound depth ${DEFAULT_WORKER_FLEET_LIMITS.maxDepth}, ${DEFAULT_WORKER_FLEET_LIMITS.maxChildrenPerAgent} direct children, ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} session agents, and ${DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches} queued dispatches.`,
+						String(this.state.maxConcurrent),
 						(value) => {
 							const maxConcurrent = Number(value.trim());
 							if (Number.isSafeInteger(maxConcurrent) && maxConcurrent > 0) {
 								this.state = { ...this.state, maxConcurrent };
-								onChange({ ...this.state }, this.scope);
+								done(String(maxConcurrent));
+								return;
 							}
-							done(String(this.state.maxConcurrent ?? 1));
+							done();
 						},
 						() => done(),
 						"positive safe integer; invalid input keeps the current value",

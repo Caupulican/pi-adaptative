@@ -87,6 +87,89 @@ describe("WorkerAgentMailbox", () => {
 		).toThrow("idempotency identity conflicts");
 	});
 
+	it("persists reused-task dependencies and rejects dependency drift on exact replay", () => {
+		const agentDir = root();
+		const options = { agentDir, parentSessionId: "parent-dependencies", agentId: "agent-1" };
+		const first = new WorkerAgentMailbox(options).enqueueWithReceipt({
+			kind: "follow_up",
+			content: "consume prerequisites",
+			idempotencyKey: "start-with-dependencies",
+			task: { kind: "agent_turn", dependsOnTaskIds: ["task-a", "task-b"] },
+		});
+		if (first.status !== "retained") throw new Error("Expected retained dependency-bearing task.");
+
+		expect(new WorkerAgentMailbox(options).pendingTaskBearing()).toEqual([
+			expect.objectContaining({
+				messageId: first.messageId,
+				task: { kind: "agent_turn", dependsOnTaskIds: ["task-a", "task-b"] },
+			}),
+		]);
+		expect(
+			new WorkerAgentMailbox(options).enqueueWithReceipt({
+				kind: "steer",
+				content: "consume prerequisites",
+				idempotencyKey: "start-with-dependencies",
+				task: { kind: "agent_turn", dependsOnTaskIds: ["task-a", "task-b"] },
+			}),
+		).toMatchObject({ status: "retained", created: false, messageId: first.messageId });
+		expect(() =>
+			new WorkerAgentMailbox(options).enqueueWithReceipt({
+				kind: "follow_up",
+				content: "consume prerequisites",
+				idempotencyKey: "start-with-dependencies",
+				task: { kind: "agent_turn", dependsOnTaskIds: ["task-a", "task-c"] },
+			}),
+		).toThrow("idempotency identity conflicts");
+	});
+
+	it.each([
+		["duplicates", ["task-a", "task-a"]],
+		["empty ids", [""]],
+		["oversized ids", ["x".repeat(513)]],
+		["too many ids", Array.from({ length: 65 }, (_, index) => `task-${index}`)],
+	] as const)("rejects %s in dependency-bearing mailbox intent", (_label, dependsOnTaskIds) => {
+		const mailbox = new WorkerAgentMailbox({
+			agentDir: root(),
+			parentSessionId: "parent-invalid-dependencies",
+			agentId: "agent-1",
+		});
+		expect(() =>
+			mailbox.enqueueWithReceipt({
+				kind: "follow_up",
+				content: "invalid dependency intent",
+				idempotencyKey: "invalid-dependencies",
+				task: { kind: "agent_turn", dependsOnTaskIds },
+			}),
+		).toThrow("dependency task ids");
+		expect(mailbox.pending()).toEqual([]);
+	});
+
+	it("rejects explicit null durable dependency metadata while accepting omission as an empty set", () => {
+		const agentDir = root();
+		const mailbox = new WorkerAgentMailbox({
+			agentDir,
+			parentSessionId: "parent-corrupt-dependencies",
+			agentId: "agent-1",
+		});
+		const message = mailbox.enqueue({
+			kind: "follow_up",
+			content: "dependency-free turn",
+			task: { kind: "agent_turn" },
+		});
+		expect(mailbox.pendingTaskBearing()).toEqual([message]);
+
+		const file = mailboxFile(agentDir);
+		const state = JSON.parse(readFileSync(file, "utf-8")) as {
+			messages: Array<{ task?: { dependsOnTaskIds?: unknown } }>;
+		};
+		const task = state.messages[0]?.task;
+		if (!task) throw new Error("Expected durable task metadata.");
+		task.dependsOnTaskIds = null;
+		writeFileSync(file, JSON.stringify(state));
+
+		expect(() => mailbox.pendingTaskBearing()).toThrow("dependency task ids");
+	});
+
 	it("keeps a compact replay receipt after completed message history is evicted", () => {
 		const mailbox = new WorkerAgentMailbox({ agentDir: root(), parentSessionId: "parent-1", agentId: "agent-1" });
 		const accepted = mailbox.enqueueWithReceipt({

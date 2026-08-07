@@ -53,7 +53,7 @@ function resultFor(
 		artifacts: [],
 		evidence: [],
 		errors: [],
-		usage: { wallClockMs: 10, toolCalls: 1 },
+		usage: { costUsd: 0, wallClockMs: 10, toolCalls: 1 },
 		createdAt: new Date().toISOString(),
 		...overrides,
 	};
@@ -673,6 +673,197 @@ describe("WorkerLifecycle", () => {
 			status: "failed",
 			reasonCode: "independent_verification_rejected:focused_checks_failed",
 		});
+	});
+
+	it("does not reconcile suspended verifier attempts across restart, retry, or pause states", () => {
+		const suspensions: readonly {
+			reasonCode: string;
+			retry?: { retriesUsed: number; notBefore: string };
+		}[] = [
+			{ reasonCode: "agent_process_recovered_after_owner_exit" },
+			{
+				reasonCode: "retry_scheduled:server_error",
+				retry: { retriesUsed: 1, notBefore: "2099-08-07T02:00:00.000Z" },
+			},
+			{ reasonCode: "objective_paused" },
+		];
+		for (const [index, suspension] of suspensions.entries()) {
+			const lifecycle = new WorkerLifecycle({
+				agentDir: root(),
+				sessionId: `session-verification-suspended-${index}`,
+			});
+			const implementation = finishAwaitingVerification(lifecycle);
+			const verifierProfile = createTestWorkerOrchestrationProfile({
+				profileId: `verifier-${index}`,
+				model: { provider: "test", id: "model" },
+				role: "verifier",
+			});
+			const verifier = lifecycle.prepare({
+				instructions: "verify",
+				executionContract: executionContract(verifierProfile),
+				requiredCapabilities: [],
+				verificationOfTaskId: implementation.laneId,
+			});
+			const agentId = `verifier-agent-${index}`;
+			lifecycle.ensureAgent({
+				agentId,
+				role: "verifier",
+				resumeContext: {
+					provider: "pi",
+					sessionId: `verifier-session-${index}`,
+					cwd: "/repo",
+					resourceProfileNames: [],
+					contextPointers: [],
+				},
+			});
+			const verifierTask = lifecycle.getTask(verifier.record.laneId);
+			if (!verifierTask) throw new Error("Expected verifier task.");
+			lifecycle.bindGrant(
+				verifier.attempt.attemptId,
+				createTestExecutionGrant({
+					objectiveId: verifierTask.task.objectiveId,
+					taskId: verifier.attempt.taskId,
+					attemptId: verifier.attempt.attemptId,
+					role: "verifier",
+				}),
+			);
+			lifecycle.startAgent(verifier.record.laneId, agentId, verifierProfile.leaseTtlMs);
+			const bound = lifecycle.getActiveAttempt(verifier.record.laneId);
+			if (!bound?.lease) throw new Error("Expected bound verifier lease.");
+			lifecycle.suspendBoundAttempt({
+				laneId: verifier.record.laneId,
+				ownerId: bound.lease.ownerId,
+				leaseId: bound.lease.leaseId,
+				fencingToken: bound.lease.fencingToken,
+				reasonCode: suspension.reasonCode,
+				...(suspension.retry ? { retry: suspension.retry } : {}),
+			});
+
+			expect(lifecycle.getPendingVerificationRecoveries()).toEqual([]);
+		}
+	});
+
+	it("selects trusted valid verifier evidence after untrusted and malformed decoys", () => {
+		for (const verdict of ["accepted", "rejected"] as const) {
+			const lifecycle = new WorkerLifecycle({
+				agentDir: root(),
+				sessionId: `session-verification-decoy-${verdict}`,
+			});
+			const implementation = finishAwaitingVerification(lifecycle);
+			const verifierProfile = createTestWorkerOrchestrationProfile({
+				profileId: `verifier-${verdict}`,
+				model: { provider: "test", id: "model" },
+				role: "verifier",
+			});
+			const verifier = lifecycle.prepare({
+				instructions: "verify",
+				executionContract: executionContract(verifierProfile),
+				requiredCapabilities: [],
+				verificationOfTaskId: implementation.laneId,
+			});
+			const verifierHandle = startWithGrant(lifecycle, verifier.record.laneId, verifierProfile.leaseTtlMs);
+			lifecycle.finish(
+				resultFor(verifierHandle, {
+					evidence: [
+						{
+							evidenceId: `untrusted-decoy-${verdict}`,
+							kind: "review",
+							summary: "untrusted decoy",
+							artifactIds: [],
+							trusted: false,
+							createdAt: new Date().toISOString(),
+							metadata: { subjectTaskId: implementation.laneId, verdict },
+						},
+						{
+							evidenceId: `malformed-decoy-${verdict}`,
+							kind: "review",
+							summary: "malformed decoy",
+							artifactIds: [],
+							trusted: true,
+							createdAt: new Date().toISOString(),
+							metadata: { subjectTaskId: implementation.laneId, verdict: "maybe" },
+						},
+						{
+							evidenceId: `trusted-review-${verdict}`,
+							kind: "review",
+							summary: `trusted ${verdict} review`,
+							artifactIds: [],
+							trusted: true,
+							createdAt: new Date().toISOString(),
+							metadata: {
+								subjectTaskId: implementation.laneId,
+								verdict,
+								reasonCodes: [`trusted_${verdict}`],
+							},
+						},
+					],
+				}),
+			);
+
+			expect(lifecycle.getPendingVerificationRecoveries()).toMatchObject([
+				{
+					action: "reconcile",
+					verdict,
+					reasonCode:
+						verdict === "accepted"
+							? "independent_verification_accepted"
+							: "independent_verification_rejected:trusted_rejected",
+				},
+			]);
+		}
+	});
+
+	it("selects the latest verifier task by durable insertion despite reversed task clocks", () => {
+		const baseNow = Date.now() - 30_000;
+		let now = baseNow;
+		const lifecycle = new WorkerLifecycle({
+			agentDir: root(),
+			sessionId: "session-verification-task-order",
+			now: () => now,
+		});
+		const implementation = finishAwaitingVerification(lifecycle);
+		const verifierProfile = createTestWorkerOrchestrationProfile({
+			profileId: "verifier-order",
+			model: { provider: "test", id: "model" },
+			role: "verifier",
+		});
+		const prepareVerifier = (verdict: "accepted" | "rejected") => {
+			const verifier = lifecycle.prepare({
+				instructions: `verify ${verdict}`,
+				executionContract: executionContract(verifierProfile),
+				requiredCapabilities: [],
+				verificationOfTaskId: implementation.laneId,
+			});
+			return verifier;
+		};
+		now = baseNow + 2_000;
+		const firstVerifier = prepareVerifier("rejected");
+		const firstHandle = startWithGrant(lifecycle, firstVerifier.record.laneId, verifierProfile.leaseTtlMs);
+		lifecycle.finish(
+			resultFor(firstHandle, {
+				evidence: [
+					{
+						evidenceId: "review-rejected",
+						kind: "review",
+						summary: "rejected",
+						artifactIds: [],
+						trusted: true,
+						createdAt: new Date(now).toISOString(),
+						metadata: { subjectTaskId: implementation.laneId, verdict: "rejected" },
+					},
+				],
+			}),
+		);
+		now = baseNow + 1_000;
+		const latestVerifier = prepareVerifier("accepted");
+
+		expect(lifecycle.getTask(firstVerifier.record.laneId)?.task.createdAt).toBe(
+			new Date(baseNow + 2_000).toISOString(),
+		);
+		expect(lifecycle.getTask(latestVerifier.record.laneId)?.task.createdAt).toBe(
+			new Date(baseNow + 1_000).toISOString(),
+		);
+		expect(lifecycle.getPendingVerificationRecoveries()).toEqual([]);
 	});
 
 	it("reconciles a terminal verifier without a result as inconclusive", () => {

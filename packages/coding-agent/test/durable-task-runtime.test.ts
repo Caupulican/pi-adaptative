@@ -7,6 +7,9 @@ import { buildPiResumeLaunchSpec } from "../src/core/orchestration/agent-resume.
 import {
 	type ApprovalRequestContract,
 	ORCHESTRATION_SCHEMA_VERSION,
+	type OrchestrationEvent,
+	type OrchestrationEventType,
+	toJsonObject,
 	type WorkerResultContract,
 } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
@@ -14,7 +17,9 @@ import {
 	DurableTaskRuntime,
 	DurableTaskRuntimeError,
 	reduceOrchestrationEvent,
+	type TaskRuntimeProjection,
 } from "../src/core/orchestration/task-runtime.ts";
+import { projectionFromSnapshot } from "../src/core/orchestration/task-runtime-codecs.ts";
 import { buildResumablePiAgentWakePrompt } from "../src/core/process-matrix/resume-launcher.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
 
@@ -80,6 +85,24 @@ function completedResult(args: {
 	};
 }
 
+function forgedEvent(
+	projection: TaskRuntimeProjection,
+	type: OrchestrationEventType,
+	aggregateId: string,
+	payload: JsonObject,
+): OrchestrationEvent {
+	return {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		ordinal: projection.lastOrdinal + 1,
+		eventId: `forged-${type}-${projection.lastOrdinal + 1}`,
+		type,
+		aggregateId,
+		actor: "runtime",
+		occurredAt: new Date(T0).toISOString(),
+		payload,
+	};
+}
+
 afterEach(() => {
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
@@ -88,6 +111,45 @@ afterEach(() => {
 });
 
 describe("DurableTaskRuntime", () => {
+	it("adopts every intervening ordinal when an append resolves to an exact idempotent replay", () => {
+		const harness = createHarness();
+		const append = harness.store.append.bind(harness.store);
+		const peer = new OrchestrationEventStore({ agentDir: harness.agentDir, sessionId: "session-1" });
+		vi.spyOn(harness.store, "append").mockImplementationOnce((input, options) => {
+			append(input);
+			const firstObjective = input.payload.objective as JsonObject;
+			peer.append({
+				type: "objective.created",
+				aggregateId: "objective-intervening",
+				actor: "kernel",
+				idempotencyKey: "objective-created:objective-intervening",
+				payload: toJsonObject({
+					objective: {
+						...firstObjective,
+						objectiveId: "objective-intervening",
+						title: "Intervening writer",
+					},
+				}),
+			});
+			return append(input, options);
+		});
+
+		harness.runtime.createObjective({
+			objectiveId: "objective-requested",
+			title: "Requested writer",
+			description: "Race an exact replay with an intervening commit",
+		});
+		const snapshot = harness.runtime.getSnapshot();
+		expect(snapshot.lastOrdinal).toBe(2);
+		expect(Object.keys(snapshot.objectives).sort()).toEqual(["objective-intervening", "objective-requested"]);
+		expect(() =>
+			reduceOrchestrationEvent(
+				{ ...snapshot, lastOrdinal: 0, objectives: {} },
+				{ ...harness.store.readAll()[1]!, ordinal: 2 },
+			),
+		).toThrow(/ordinal 2 is not contiguous after 0/i);
+	});
+
 	it("rejects oversized persisted dispatch fields before appending an attempt event", () => {
 		const { runtime } = createHarness();
 		const objective = runtime.createObjective({
@@ -118,6 +180,205 @@ describe("DurableTaskRuntime", () => {
 			}),
 		).toThrow("dispatch.resourcePointerIds must be a bounded identifier array");
 		expect(runtime.getSnapshot().attempts).toEqual({});
+	});
+
+	it("rejects forged lifecycle events at the reducer boundary without mutating their source projection", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "objective-authority",
+			title: "Reducer authority",
+			description: "Reject transitions that bypass command admission",
+			acceptanceCriteria: [{ id: "criterion", description: "Required proof", required: true }],
+		});
+		const task = runtime.createTask({
+			taskId: "task-authority",
+			objectiveId: objective.objectiveId,
+			title: "Owned task",
+			description: "Keep lifecycle ownership centralized",
+			role: "implementer",
+			acceptanceCriterionIds: ["criterion"],
+		});
+		const queued = runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-authority");
+		const queuedProjection = runtime.getSnapshot();
+
+		const queuedCases: Array<{ event: OrchestrationEvent; message: RegExp }> = [
+			{
+				event: forgedEvent(
+					queuedProjection,
+					"objective.completed",
+					objective.objectiveId,
+					toJsonObject({ completionPolicy: "task_evidence" }),
+				),
+				message: /incomplete tasks/i,
+			},
+			{
+				event: forgedEvent(
+					queuedProjection,
+					"task.failed",
+					task.taskId,
+					toJsonObject({ taskId: task.taskId, reasonCode: "forged" }),
+				),
+				message: /still owns active attempt/i,
+			},
+			{
+				event: forgedEvent(
+					queuedProjection,
+					"attempt.started",
+					queued.attemptId,
+					toJsonObject({ attemptId: queued.attemptId, leaseId: "lease-forged", fencingToken: 1 }),
+				),
+				message: /is not leased/i,
+			},
+			{
+				event: forgedEvent(
+					queuedProjection,
+					"objective.evidence_recorded",
+					objective.objectiveId,
+					toJsonObject({
+						evidence: {
+							evidenceId: "evidence-forged",
+							criterionId: "criterion-unknown",
+							kind: "test",
+							summary: "forged",
+							artifactIds: [],
+							trusted: true,
+							createdAt: new Date(T0).toISOString(),
+						},
+					}),
+				),
+				message: /unknown acceptance criterion/i,
+			},
+			{
+				event: forgedEvent(
+					queuedProjection,
+					"objective.updated",
+					objective.objectiveId,
+					toJsonObject({
+						objective: {
+							...queuedProjection.objectives[objective.objectiveId]!.objective,
+							acceptanceCriteria: [],
+						},
+					}),
+				),
+				message: /acceptance criteria referenced by tasks/i,
+			},
+		];
+		for (const candidate of queuedCases) {
+			const before = structuredClone(queuedProjection);
+			expect(() => reduceOrchestrationEvent(queuedProjection, candidate.event)).toThrow(candidate.message);
+			expect(queuedProjection).toEqual(before);
+		}
+
+		const dispatchProjection = structuredClone(queuedProjection);
+		delete (dispatchProjection.attempts as Record<string, unknown>)[queued.attemptId];
+		(dispatchProjection.tasks[task.taskId] as { attemptIds: readonly string[] }).attemptIds = [];
+		const invalidDispatch = {
+			...dispatch(task.taskId),
+			executionContract: null,
+		};
+		expect(() =>
+			reduceOrchestrationEvent(
+				dispatchProjection,
+				forgedEvent(
+					dispatchProjection,
+					"attempt.queued",
+					task.taskId,
+					toJsonObject({
+						attemptId: "attempt-null-contract",
+						taskId: task.taskId,
+						dispatch: invalidDispatch,
+					}),
+				),
+			),
+		).toThrow(/execution contract is invalid/i);
+	});
+
+	it("rejects forged result and verification ownership while preserving inconclusive no-result recovery", () => {
+		const { runtime } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "objective-verifier-authority",
+			title: "Verification authority",
+			description: "Only reconcile independently owned verifier outcomes",
+		});
+		const subject = runtime.createTask({
+			taskId: "task-subject-authority",
+			objectiveId: objective.objectiveId,
+			title: "Subject",
+			description: "Implementation subject",
+			role: "implementer",
+		});
+		const unrelated = runtime.createTask({
+			taskId: "task-unrelated-authority",
+			objectiveId: objective.objectiveId,
+			title: "Unrelated",
+			description: "Different result owner",
+			role: "implementer",
+		});
+		const subjectAttempt = runtime.queueAttempt(subject.taskId, dispatch(subject.taskId), "grant-subject");
+		const subjectLease = runtime.leaseAttempt(subjectAttempt.attemptId, "subject-worker", 60_000);
+		runtime.startAttempt(subjectAttempt.attemptId, subjectLease.leaseId, subjectLease.fencingToken);
+		const running = runtime.getSnapshot();
+		const crossResult = completedResult({
+			objectiveId: objective.objectiveId,
+			taskId: unrelated.taskId,
+			attemptId: subjectAttempt.attemptId,
+			leaseId: subjectLease.leaseId,
+			fencingToken: subjectLease.fencingToken,
+		});
+		expect(() =>
+			reduceOrchestrationEvent(
+				running,
+				forgedEvent(running, "attempt.finished", subjectAttempt.attemptId, toJsonObject({ result: crossResult })),
+			),
+		).toThrow(/taskId does not match attempt/i);
+
+		runtime.finishAttempt(
+			completedResult({
+				objectiveId: objective.objectiveId,
+				taskId: subject.taskId,
+				attemptId: subjectAttempt.attemptId,
+				leaseId: subjectLease.leaseId,
+				fencingToken: subjectLease.fencingToken,
+				status: "partial",
+			}),
+		);
+		const verifier = runtime.createTask({
+			taskId: "task-verifier-authority",
+			objectiveId: objective.objectiveId,
+			title: "Verifier",
+			description: "Independent verifier",
+			role: "verifier",
+			verificationOfTaskId: subject.taskId,
+		});
+		const verifierAttempt = runtime.queueAttempt(verifier.taskId, dispatch(verifier.taskId, "verifier"), "grant-v");
+		const queuedVerifier = runtime.getSnapshot();
+		expect(() =>
+			reduceOrchestrationEvent(
+				queuedVerifier,
+				forgedEvent(
+					queuedVerifier,
+					"task.verification_finished",
+					subject.taskId,
+					toJsonObject({
+						taskId: subject.taskId,
+						verifierTaskId: verifier.taskId,
+						verifierAttemptId: verifierAttempt.attemptId,
+						verdict: "accepted",
+						reasonCode: "forged",
+					}),
+				),
+			),
+		).toThrow(/not terminal/i);
+
+		runtime.cancelAttempt(verifierAttempt.attemptId, "verifier_transport_failed");
+		runtime.finishVerification({
+			taskId: subject.taskId,
+			verifierTaskId: verifier.taskId,
+			verifierAttemptId: verifierAttempt.attemptId,
+			verdict: "inconclusive",
+			reasonCode: "verifier_no_result",
+		});
+		expect(runtime.getSnapshot().tasks[subject.taskId]?.verification?.verdict).toBe("inconclusive");
 	});
 
 	it("rejects invalid objective and task budgets through the shared contract", () => {
@@ -527,7 +788,7 @@ describe("DurableTaskRuntime", () => {
 						artifactIds: [],
 						trusted: true,
 						createdAt: new Date(T0).toISOString(),
-						metadata: { subjectTaskId: implementation.taskId },
+						metadata: { subjectTaskId: implementation.taskId, verdict: "accepted" },
 					},
 				],
 			}),
@@ -799,7 +1060,7 @@ describe("DurableTaskRuntime", () => {
 			resumeContext: { sessionId: "pi-session-123", latestCheckpointId: checkpoint.checkpointId },
 		});
 
-		const resuming = harness.runtime.requestAgentResume(agent.agentId);
+		const resuming = harness.runtime.requestAgentResume(agent.agentId, attempt.attemptId);
 		const launch = buildPiResumeLaunchSpec(resuming, {
 			parentPid: 1234,
 			parentSessionId: "parent-session",
@@ -855,6 +1116,204 @@ describe("DurableTaskRuntime", () => {
 
 		const reopened = new DurableTaskRuntime({ store: harness.store, now: () => harness.clock.ms });
 		expect(reopened.getSnapshot().agents[agent.agentId]?.resumeContext.sessionId).toBe("pi-session-123");
+	});
+
+	it("rejects public and forged resume transitions before a persisted retry backoff elapses", () => {
+		const harness = createHarness();
+		const agent = harness.runtime.registerAgent({
+			agentId: "agent-retry-backoff",
+			role: "explorer",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "pi-retry-backoff",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		});
+		const objective = harness.runtime.createObjective({ title: "Retry", description: "Honor retry backoff" });
+		const task = harness.runtime.createTask({
+			objectiveId: objective.objectiveId,
+			title: "Retry safely",
+			description: "Do not resume early",
+			role: "explorer",
+		});
+		const attempt = harness.runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-retry-backoff");
+		const firstLease = harness.runtime.leaseAttempt(attempt.attemptId, agent.agentId, 60_000, agent.agentId);
+		const notBeforeMs = T0 + 60_000;
+		harness.runtime.suspendBoundAttempt({
+			attemptId: attempt.attemptId,
+			ownerId: firstLease.ownerId,
+			leaseId: firstLease.leaseId,
+			fencingToken: firstLease.fencingToken,
+			reasonCode: "transient_transport",
+			retry: { retriesUsed: 1, notBefore: new Date(notBeforeMs).toISOString() },
+		});
+
+		const suspended = harness.runtime.getSnapshot();
+		expect(() => harness.runtime.requestAgentResume(agent.agentId, attempt.attemptId)).toThrow(/retry backoff/i);
+		expect(harness.runtime.getSnapshot().lastOrdinal).toBe(suspended.lastOrdinal);
+		expect(() =>
+			reduceOrchestrationEvent(suspended, {
+				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+				ordinal: suspended.lastOrdinal + 1,
+				eventId: "event-forged-resume-request",
+				type: "agent.resume_requested",
+				aggregateId: agent.agentId,
+				actor: "runtime",
+				occurredAt: new Date(T0).toISOString(),
+				payload: { agentId: agent.agentId, attemptId: attempt.attemptId },
+			}),
+		).toThrow(/retry backoff/i);
+
+		harness.clock.ms = notBeforeMs;
+		harness.runtime.requestAgentResume(agent.agentId, attempt.attemptId);
+		const resuming = harness.runtime.getSnapshot();
+		const forgedAtMs = T0 + 1_000;
+		expect(() =>
+			reduceOrchestrationEvent(resuming, {
+				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+				ordinal: resuming.lastOrdinal + 1,
+				eventId: "event-forged-attempt-resume",
+				type: "attempt.resumed",
+				aggregateId: attempt.attemptId,
+				actor: "runtime",
+				occurredAt: new Date(forgedAtMs).toISOString(),
+				payload: {
+					agentId: agent.agentId,
+					lease: {
+						leaseId: "lease-forged-early",
+						attemptId: attempt.attemptId,
+						ownerId: agent.agentId,
+						fencingToken: firstLease.fencingToken + 1,
+						issuedAt: new Date(forgedAtMs).toISOString(),
+						expiresAt: new Date(forgedAtMs + 60_000).toISOString(),
+					},
+				},
+			}),
+		).toThrow(/retry backoff/i);
+
+		const resumedLease = harness.runtime.resumeAttempt(attempt.attemptId, agent.agentId, 60_000);
+		expect(resumedLease.fencingToken).toBe(firstLease.fencingToken + 1);
+		expect(harness.runtime.getSnapshot().attempts[attempt.attemptId]?.status).toBe("leased");
+	});
+
+	it("reopens compacted retry state through resumed execution and clears it only at terminal", () => {
+		const agentDir = join(tmpdir(), `pi-durable-runtime-retry-compaction-${process.pid}-${Date.now()}`);
+		mkdirSync(agentDir, { recursive: true });
+		tempDirs.push(agentDir);
+		let now = T0;
+		let nextId = 1;
+		const store = new OrchestrationEventStore({
+			agentDir,
+			sessionId: "retry-compaction-session",
+			now: () => new Date(now).toISOString(),
+			createEventId: () => `retry-event-${nextId++}`,
+			maxTailEvents: 1,
+			maxTailBytes: 1_000_000,
+		});
+		const openRuntime = () =>
+			new DurableTaskRuntime({ store, now: () => now, createId: () => `retry-id-${nextId++}` });
+		let runtime = openRuntime();
+		const agent = runtime.registerAgent({
+			agentId: "agent-retry-compaction",
+			role: "explorer",
+			resumeContext: {
+				provider: "pi",
+				sessionId: "pi-retry-compaction",
+				cwd: "/repo",
+				resourceProfileNames: [],
+				contextPointers: [],
+			},
+		});
+		const objective = runtime.createObjective({
+			objectiveId: "objective-retry-compaction",
+			title: "Retry compaction",
+			description: "Keep the durable retry ladder through active resumed execution",
+		});
+		const task = runtime.createTask({
+			taskId: "task-retry-compaction",
+			objectiveId: objective.objectiveId,
+			title: "Resume safely",
+			description: "Reopen every retry lifecycle state from a compacted projection",
+			role: "explorer",
+		});
+		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-retry-compaction");
+		const firstLease = runtime.leaseAttempt(attempt.attemptId, "owner-retry-compaction", 60_000, agent.agentId);
+		runtime.startAttempt(attempt.attemptId, firstLease.leaseId, firstLease.fencingToken);
+		const notBefore = new Date(now + 1_000).toISOString();
+		runtime.suspendBoundAttempt({
+			attemptId: attempt.attemptId,
+			ownerId: firstLease.ownerId,
+			leaseId: firstLease.leaseId,
+			fencingToken: firstLease.fencingToken,
+			reasonCode: "retry_scheduled:server_error",
+			retry: { retriesUsed: 1, notBefore },
+		});
+
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({
+			status: "suspended",
+			retry: { retriesUsed: 1, notBefore },
+		});
+		runtime = openRuntime();
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({
+			status: "suspended",
+			retry: { retriesUsed: 1, notBefore },
+		});
+
+		now += 1_000;
+		runtime.requestAgentResume(agent.agentId, attempt.attemptId);
+		const resumedLease = runtime.resumeAttempt(attempt.attemptId, agent.agentId, 60_000, firstLease.ownerId);
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({
+			status: "leased",
+			retry: { retriesUsed: 1, notBefore },
+		});
+		runtime = openRuntime();
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({
+			status: "leased",
+			retry: { retriesUsed: 1, notBefore },
+		});
+
+		runtime.startAttempt(attempt.attemptId, resumedLease.leaseId, resumedLease.fencingToken);
+		const runningSnapshot = runtime.getSnapshot();
+		expect(runningSnapshot.attempts[attempt.attemptId]).toMatchObject({
+			status: "running",
+			retry: { retriesUsed: 1, notBefore },
+		});
+		runtime = openRuntime();
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({
+			status: "running",
+			retry: { retriesUsed: 1, notBefore },
+		});
+		const unboundRetry = structuredClone(runningSnapshot);
+		delete (unboundRetry.attempts[attempt.attemptId] as { agentId?: string }).agentId;
+		expect(() => projectionFromSnapshot(toJsonObject(unboundRetry), unboundRetry.lastOrdinal)).toThrow(
+			/outside the resumable agent lifecycle/i,
+		);
+
+		runtime.finishAttempt(
+			completedResult({
+				objectiveId: objective.objectiveId,
+				taskId: task.taskId,
+				attemptId: attempt.attemptId,
+				leaseId: resumedLease.leaseId,
+				fencingToken: resumedLease.fencingToken,
+			}),
+		);
+		const completedSnapshot = runtime.getSnapshot();
+		expect(completedSnapshot.attempts[attempt.attemptId]).toMatchObject({ status: "completed" });
+		expect(completedSnapshot.attempts[attempt.attemptId]?.retry).toBeUndefined();
+		runtime = openRuntime();
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]).toMatchObject({ status: "completed" });
+		expect(runtime.getSnapshot().attempts[attempt.attemptId]?.retry).toBeUndefined();
+		const terminalRetry = structuredClone(completedSnapshot);
+		(terminalRetry.attempts[attempt.attemptId] as { retry?: { retriesUsed: number; notBefore: string } }).retry = {
+			retriesUsed: 1,
+			notBefore,
+		};
+		expect(() => projectionFromSnapshot(toJsonObject(terminalRetry), terminalRetry.lastOrdinal)).toThrow(
+			/outside the resumable agent lifecycle/i,
+		);
 	});
 
 	it("immediately suspends only bound in-process attempts on a known process restart", () => {

@@ -3,7 +3,13 @@ import { existsSync } from "node:fs";
 import type { Message } from "@caupulican/pi-ai";
 import { workerAgentMailboxFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type { AgentBindingContract } from "../orchestration/contracts.ts";
+import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
+import {
+	type AgentBindingStatus,
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	type WorkerRole,
+} from "../orchestration/contracts.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
@@ -13,6 +19,7 @@ import type {
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./session-root-mailbox.ts";
+import type { WorkerTaskSessionView } from "./worker-task-view.ts";
 
 const MAX_MAILBOX_MESSAGES = 64;
 const MAX_MAILBOX_MESSAGE_CHARS = 4_096;
@@ -60,7 +67,9 @@ const assertWorkerAgentMailboxBounds = createReplaySafeMailboxBounder(
 
 export type WorkerAgentMessageKind = "steer" | "follow_up";
 
-export type WorkerAgentTaskMetadata = { kind: "agent_turn" } | { kind: "terminal_handoff"; sourceAttemptId: string };
+export type WorkerAgentTaskMetadata =
+	| { kind: "agent_turn"; dependsOnTaskIds?: readonly string[] }
+	| { kind: "terminal_handoff"; sourceAttemptId: string };
 
 export interface WorkerAgentMessage {
 	messageId: string;
@@ -130,9 +139,10 @@ export interface WorkerAgentMailboxOptions {
 export interface WorkerAgentTranscriptPage {
 	agentId: string;
 	cursor: number;
-	totalMessages: number;
 	messages: Message[];
 	nextCursor?: number;
+	omittedMessages: number;
+	serializedBytes: number;
 }
 
 export interface WorkerAgentMessageOptions {
@@ -141,6 +151,14 @@ export interface WorkerAgentMessageOptions {
 	expectReply?: boolean;
 	/** Host-derived replay identity scoped to the caller, session, tool invocation, and action. */
 	idempotencyKey?: string;
+}
+
+export interface WorkerAgentBroadcastOptions {
+	senderAgentId?: string;
+	threadId?: string;
+	expectReply?: boolean;
+	/** Call-level replay identity; the coordinator derives one stable identity per canonical target. */
+	idempotencyKey: string;
 }
 
 export interface SessionRootWorkerAgentMessageOptions {
@@ -167,25 +185,78 @@ export interface WorkerAgentControlScope {
 export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {
 	/** Host-derived replay identity scoped to the caller, session, tool invocation, and action. */
 	idempotencyKey?: string;
+	/** Existing same-objective durable tasks that must complete before this turn may run. */
+	dependsOnTaskIds?: readonly string[];
 }
 
 export interface WorkerAgentTranscriptOptions extends WorkerAgentControlScope {
 	cursor?: number;
 	maxMessages?: number;
+	/** Host-owned aggregate-envelope headroom; never accepted directly from a model argument. */
+	maxBytes?: number;
 }
 
 export type WorkerAgentActivity = "active" | "suspended" | "idle" | "unknown";
 
+export type WorkerAgentWaitMode = "any" | "all";
+
+export interface WorkerAgentWaitStatus {
+	agentId: string;
+	status: WorkerAgentActivity;
+}
+
+export interface WorkerAgentWaitResult {
+	statuses: WorkerAgentWaitStatus[];
+	updatedAgentIds: string[];
+	timedOut: boolean;
+}
+
+export type WorkerAgentBroadcastTargetResult =
+	| { agentId: string; accepted: true; queued: true; replayed: boolean; messageId: string }
+	| { agentId: string; accepted: false; error: string };
+
+export interface WorkerAgentBroadcastResult {
+	results: WorkerAgentBroadcastTargetResult[];
+}
+
+/** Explicit model-facing projection. Durable resume, session, path, and resource data stay host-only. */
+export interface WorkerAgentView {
+	agentId: string;
+	parentAgentId?: string;
+	rootAgentId: string;
+	depth: number;
+	role: WorkerRole;
+	status: AgentBindingStatus;
+	activity: WorkerAgentActivity;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface WorkerAgentRetireResult {
+	agent: WorkerAgentView;
+	retired: true;
+	replayed: boolean;
+}
+
 /** One canonical host port for model-facing logical-agent controls. */
 export interface WorkerAgentControlPort {
-	listWorkerAgents(scope?: WorkerAgentControlScope): AgentBindingContract[];
+	listWorkerAgents(scope?: WorkerAgentControlScope): WorkerAgentView[];
+	getWorkerTaskSessionView(): WorkerTaskSessionView;
 	getWorkerAgentActivity(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentActivity;
 	readWorkerAgentTranscript(agentId: string, options?: WorkerAgentTranscriptOptions): WorkerAgentTranscriptPage;
+	/** Queue-only session-peer delivery. This does not wake or steer an idle or active agent. */
 	sendWorkerAgentMessage(
 		agentId: string,
 		message: string,
 		options?: WorkerAgentMessageOptions,
 	): { messageId: string; queued: true };
+	/** Queue-only fan-out. Peer content is untrusted coordination evidence, never delegated authority. */
+	broadcastWorkerAgentMessage(
+		agentIds: readonly string[],
+		message: string,
+		options: WorkerAgentBroadcastOptions,
+	): WorkerAgentBroadcastResult;
+	/** Worker callers may wake or steer only themselves and descendants; the session root may target any agent. */
 	followUpWorkerAgent(
 		agentId: string,
 		message: string,
@@ -206,6 +277,7 @@ export interface WorkerAgentControlPort {
 	waitForSessionRootReplies(options?: SessionRootReplyWaitOptions): Promise<SessionRootReplyWaitResult>;
 	acknowledgeSessionRootReply(messageId: string, ackToken: string): boolean;
 	reconcileSessionRootReplies(): void;
+	/** Worker callers may start only themselves and descendants; the session root may target any agent. */
 	startWorkerAgentTask(
 		agentId: string,
 		message: string,
@@ -217,11 +289,19 @@ export interface WorkerAgentControlPort {
 		scope?: WorkerAgentControlScope,
 	): { started: boolean; record?: LaneRecord; skipReason?: string };
 	cancelWorkerAgent(agentId: string, reasonCode?: string, scope?: WorkerAgentControlScope): LaneRecord | undefined;
+	/** Retire one idle leaf without deleting its durable binding, lineage, transcript, or attempt history. */
+	retireWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentRetireResult;
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
 	): Promise<{ status: WorkerAgentActivity }>;
+	waitForWorkerAgents(
+		agentIds: readonly string[],
+		mode: WorkerAgentWaitMode,
+		timeoutMs?: number,
+		scope?: WorkerAgentControlScope,
+	): Promise<WorkerAgentWaitResult>;
 }
 
 function mailboxDigest(parentSessionId: string, agentId: string): string {
@@ -239,6 +319,22 @@ function assertIdentity(value: string, label: string): string {
 	if (!normalized) throw new TypeError(`A worker ${label} is required.`);
 	if (normalized.length > 512) throw new TypeError(`Worker ${label} exceeds 512 characters.`);
 	return normalized;
+}
+
+/** Derive one target-fenced mailbox replay identity from a host-owned broadcast call identity. */
+export function workerAgentBroadcastTargetIdempotencyKey(baseIdempotencyKey: string, agentId: string): string {
+	const replayIdentity = baseIdempotencyKey.trim();
+	if (!replayIdentity || replayIdentity.length > MAX_MAILBOX_IDEMPOTENCY_KEY_CHARS) {
+		throw new TypeError("Worker broadcast idempotency key is invalid.");
+	}
+	const targetAgentId = assertIdentity(agentId, "agent id");
+	return `worker-broadcast-${createHash("sha256")
+		.update("pi-worker-broadcast-target-v1")
+		.update("\0")
+		.update(replayIdentity)
+		.update("\0")
+		.update(targetAgentId)
+		.digest("hex")}`;
 }
 
 /** Session-scoped replay identity. The coordinator fences one accepted id to exactly one target mailbox. */
@@ -375,8 +471,15 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 				throw new Error("Worker agent mailbox contains invalid task-bearing message metadata.");
 			}
 			const taskRecord = message.task as Record<string, unknown>;
-			if (taskRecord.kind === "agent_turn" && Object.keys(taskRecord).every((field) => field === "kind")) {
-				task = { kind: "agent_turn" };
+			if (
+				taskRecord.kind === "agent_turn" &&
+				Object.keys(taskRecord).every((field) => field === "kind" || field === "dependsOnTaskIds")
+			) {
+				const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(taskRecord.dependsOnTaskIds);
+				task = {
+					kind: "agent_turn",
+					...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+				};
 			} else if (
 				taskRecord.kind === "terminal_handoff" &&
 				typeof taskRecord.sourceAttemptId === "string" &&
@@ -666,9 +769,26 @@ function normalizeOptionalIdentity(value: string | undefined, label: string): st
 	return normalized;
 }
 
+export function normalizeWorkerAgentDependencyTaskIds(value: unknown): readonly string[] {
+	return parseBoundedStringArray(value === undefined ? [] : value, {
+		maxEntries: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+		maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+		trim: true,
+		invalidMessage: "Worker dependency task ids must contain bounded, non-empty strings.",
+		duplicateMessage: "Worker dependency task ids must contain unique strings.",
+		createError: (message) => new TypeError(message),
+	});
+}
+
 function normalizeTaskMetadata(task: WorkerAgentTaskMetadata | undefined): WorkerAgentTaskMetadata | undefined {
 	if (task === undefined) return undefined;
-	if (task.kind === "agent_turn") return { kind: "agent_turn" };
+	if (task.kind === "agent_turn") {
+		const dependsOnTaskIds = normalizeWorkerAgentDependencyTaskIds(task.dependsOnTaskIds);
+		return {
+			kind: "agent_turn",
+			...(dependsOnTaskIds.length > 0 ? { dependsOnTaskIds } : {}),
+		};
+	}
 	const sourceAttemptId = normalizeOptionalIdentity(task.sourceAttemptId, "terminal source attempt id");
 	if (!sourceAttemptId) throw new TypeError("Worker terminal source attempt id is invalid.");
 	return { kind: "terminal_handoff", sourceAttemptId };
@@ -679,6 +799,14 @@ function sameTaskMetadata(
 	right: WorkerAgentTaskMetadata | undefined,
 ): boolean {
 	if (left?.kind !== right?.kind) return false;
+	if (left?.kind === "agent_turn" && right?.kind === "agent_turn") {
+		const leftDependencies = left.dependsOnTaskIds ?? [];
+		const rightDependencies = right.dependsOnTaskIds ?? [];
+		return (
+			leftDependencies.length === rightDependencies.length &&
+			leftDependencies.every((dependencyId, index) => dependencyId === rightDependencies[index])
+		);
+	}
 	if (left?.kind === "terminal_handoff" && right?.kind === "terminal_handoff") {
 		return left.sourceAttemptId === right.sourceAttemptId;
 	}
