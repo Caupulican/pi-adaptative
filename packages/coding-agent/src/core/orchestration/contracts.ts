@@ -128,6 +128,12 @@ export interface AgentBindingContract extends AgentIdentityContract {
 }
 
 export interface RiskBudget {
+	/**
+	 * Budget-counted tokens, not raw provider totals: input/output/cache-write tokens charge at
+	 * face value, prompt-cache reads at CACHE_READ_BUDGET_WEIGHT (see capability-gateway.ts).
+	 * Charging cache reads fully would turn this into a request counter, since every request
+	 * re-reads the fixed system prompt.
+	 */
 	maxTokens?: number;
 	maxWallClockMs?: number;
 	maxCostUsd?: number;

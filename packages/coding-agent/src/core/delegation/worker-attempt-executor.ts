@@ -1,5 +1,11 @@
 import path from "node:path";
 import { compact } from "@caupulican/pi-agent-core/compaction/compaction";
+import {
+	classifyFailure,
+	computeRetryDelayMs,
+	type RetryPolicy,
+	sleepAbortable,
+} from "@caupulican/pi-agent-core/reliability";
 import { sanitizeToolFailureContext } from "@caupulican/pi-agent-core/tool-failure-memory";
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
@@ -38,6 +44,50 @@ export interface WorkerAttemptExecutionResult {
 	rawOutcome: WorkerRunOutcome;
 	usage: AttemptUsageSnapshot;
 	changedFiles: readonly string[];
+}
+
+/**
+ * Backoff policy for transient worker provider failures. Without it, a dropped provider socket
+ * kills the attempt instantly at $0 spend and an immediate re-dispatch hits the same dead
+ * connection (field session 019fd4dc: paired $0 `completion_error` lanes ~10s apart). Jitter
+ * de-synchronizes sibling workers that all lost the same connection at once.
+ */
+const WORKER_PROVIDER_RETRY_POLICY: RetryPolicy = {
+	maxAttempts: 3,
+	baseDelayMs: 2_000,
+	maxDelayMs: 30_000,
+	jitterRatio: 0.2,
+};
+
+export async function runProviderCompletionWithBackoff(args: {
+	attempt: () => Promise<IsolatedCompletionResult>;
+	/** Release per-attempt provider reservations before waiting; the final failure is rethrown. */
+	onAttemptFailure: () => void;
+	provider: string;
+	laneId: string;
+	warn: (message: string) => void;
+	signal?: AbortSignal;
+}): Promise<IsolatedCompletionResult> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await args.attempt();
+		} catch (error) {
+			args.onAttemptFailure();
+			if (args.signal?.aborted) throw error;
+			const classified = classifyFailure({
+				message: error instanceof Error ? error.message : String(error),
+				provider: args.provider,
+			});
+			if (!classified.retryable || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) throw error;
+			const delayMs = computeRetryDelayMs(WORKER_PROVIDER_RETRY_POLICY, attempt, {
+				...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
+			});
+			args.warn(
+				`Worker ${args.laneId} provider request failed (${classified.reason}); retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt + 1}/${WORKER_PROVIDER_RETRY_POLICY.maxAttempts}).`,
+			);
+			await sleepAbortable(delayMs, args.signal);
+		}
+	}
 }
 
 /**
@@ -321,8 +371,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						history = options.conversation.getProviderMessages();
 					}
 					let completion: IsolatedCompletionResult;
-					try {
-						completion = await options.runIsolatedCompletion({
+					const attemptProviderCompletion = (): Promise<IsolatedCompletionResult> => {
+						// Later attempts resume from the durably persisted transcript, not a stale snapshot.
+						history = options.conversation.getProviderMessages();
+						return options.runIsolatedCompletion({
 							systemPrompt: composeSubagentSystemPrompt({
 								soul: options.soul,
 								rolePrompt: [systemPrompt, options.workerResourceSystemPrompt].filter(Boolean).join("\n\n"),
@@ -467,6 +519,16 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							signal,
 							cacheRetention: "short",
 							laneKind: "worker",
+						});
+					};
+					try {
+						completion = await runProviderCompletionWithBackoff({
+							attempt: attemptProviderCompletion,
+							onAttemptFailure: releaseProviderReservation,
+							provider: options.model.provider,
+							laneId: options.laneId,
+							warn: options.warn,
+							...(signal ? { signal } : {}),
 						});
 					} finally {
 						releaseProviderReservation();

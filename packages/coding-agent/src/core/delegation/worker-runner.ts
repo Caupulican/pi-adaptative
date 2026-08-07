@@ -140,6 +140,8 @@ export interface WorkerRunOutcome {
 	accepted: boolean;
 	laneStatus: LaneTerminalStatus;
 	reasonCode: string;
+	/** Underlying executor error for bounded failures; drives the in-process retry decision. */
+	reasonDetail?: string;
 	costUsd: number;
 }
 
@@ -326,6 +328,7 @@ function finishOutcome(args: {
 	claim: WorkerClaim;
 	laneStatus: LaneTerminalStatus;
 	reasonCode: string;
+	reasonDetail?: string;
 	costUsd: number;
 	cwd?: string;
 }): WorkerRunOutcome {
@@ -337,6 +340,7 @@ function finishOutcome(args: {
 		accepted: acceptance.outcome === "allow",
 		laneStatus: args.laneStatus,
 		reasonCode: args.reasonCode,
+		...(args.reasonDetail ? { reasonDetail: args.reasonDetail } : {}),
 		costUsd: args.costUsd,
 	};
 }
@@ -388,11 +392,14 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				...baseClaim,
 				changedFiles: liveChangedFiles,
 				status: cancelled ? "cancelled" : "failed",
-				summary: `Worker did not complete: ${bounded.failure.reasonCode}`,
+				summary: `Worker did not complete: ${bounded.failure.reasonCode}${
+					bounded.failure.detail ? ` — ${bounded.failure.detail}` : ""
+				}`,
 				...(blockers ? { blockers } : {}),
 			},
 			laneStatus: bounded.failure.status,
 			reasonCode: bounded.failure.reasonCode,
+			...(bounded.failure.detail ? { reasonDetail: bounded.failure.detail } : {}),
 			costUsd,
 		});
 	}

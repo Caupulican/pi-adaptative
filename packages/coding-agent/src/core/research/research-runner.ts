@@ -63,6 +63,8 @@ export type ResearchRunStatus = "succeeded" | "failed" | "canceled" | "timeout" 
 export interface ResearchRunResult {
 	status: ResearchRunStatus;
 	reasonCode: string;
+	/** Underlying executor error for `completion_error` outcomes; absent for policy outcomes. */
+	reasonDetail?: string;
 	gateOutcome: GateOutcome;
 	bundle?: EvidenceBundle;
 	costUsd: number;
@@ -166,6 +168,7 @@ export async function runResearch(options: ResearchRunnerOptions): Promise<Resea
 		return {
 			status: bounded.failure.status,
 			reasonCode: bounded.failure.reasonCode,
+			...(bounded.failure.detail ? { reasonDetail: bounded.failure.detail } : {}),
 			gateOutcome,
 			costUsd: bounded.completion?.costUsd ?? 0,
 		};

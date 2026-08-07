@@ -233,8 +233,10 @@ describe("CapabilityGateway", () => {
 		}
 	});
 
-	it("counts provider cache tokens in resumed cumulative token budgets", () => {
+	it("discounts prompt-cache reads in resumed cumulative token budgets instead of charging face value", () => {
 		const fixture = createFixture();
+		// Field regression (session 019fd4dc): re-reading a cached system prompt exhausted small
+		// grants in 2-3 responses. 2 + 1 + ceil(7 * 0.1) = 4 budgeted tokens, well under 10.
 		const gateway = new CapabilityGateway({
 			grant: grant(fixture.cwd, { maxTokens: 10 }),
 			cwd: fixture.cwd,
@@ -242,6 +244,45 @@ describe("CapabilityGateway", () => {
 				inputTokens: 2,
 				outputTokens: 1,
 				cacheReadTokens: 7,
+				cacheWriteTokens: 0,
+				totalTokens: 10,
+			}),
+		});
+
+		expect(() => gateway.assertBudgetAvailable()).not.toThrow();
+		expect(gateway.remainingAttemptTokenBudget()).toBe(6);
+	});
+
+	it("still exhausts the token budget once discounted cache reads accumulate", () => {
+		const fixture = createFixture();
+		// 3 + ceil(70 * 0.1) = 10 budgeted tokens >= maxTokens 10.
+		const gateway = new CapabilityGateway({
+			grant: grant(fixture.cwd, { maxTokens: 10 }),
+			cwd: fixture.cwd,
+			initialUsage: initialUsage({
+				inputTokens: 3,
+				outputTokens: 0,
+				cacheReadTokens: 70,
+				cacheWriteTokens: 0,
+				totalTokens: 73,
+			}),
+		});
+
+		expect(() => gateway.assertBudgetAvailable()).toThrow(
+			expect.objectContaining({ reasonCode: "token_budget_exhausted" }),
+		);
+	});
+
+	it("charges provider-authoritative totals above the detail sum at face value", () => {
+		const fixture = createFixture();
+		// Only totalTokens reported: nothing is attributable to cache reads, so no discount.
+		const gateway = new CapabilityGateway({
+			grant: grant(fixture.cwd, { maxTokens: 10 }),
+			cwd: fixture.cwd,
+			initialUsage: initialUsage({
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
 				cacheWriteTokens: 0,
 				totalTokens: 10,
 			}),

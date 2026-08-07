@@ -71,6 +71,7 @@ import { type ResolvedWorkerProfile, WorkerProfileResolver } from "./worker-prof
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
+import { evaluateWorkerRetry } from "./worker-retry-policy.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 import { collectWorkerTreeBudgetSeeds, WorkerTreeBudgetCoordinator } from "./worker-tree-budget-coordinator.ts";
 import { WorkerWriteReservationCoordinator } from "./worker-write-reservation-coordinator.ts";
@@ -178,6 +179,9 @@ export class WorkerDelegationController {
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
+	/** In-process attempt-ladder state; durable budgets remain the restart-safe ceiling. */
+	private readonly laneRetryCounts = new Map<string, number>();
+	private readonly laneRetryTimers = new Map<string, NodeJS.Timeout>();
 	private readonly shellSessionKeys = new Set<string>();
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
@@ -376,6 +380,9 @@ export class WorkerDelegationController {
 		}
 
 		this.scheduler.cancelQueued();
+		for (const timer of this.laneRetryTimers.values()) clearTimeout(timer);
+		this.laneRetryTimers.clear();
+		this.laneRetryCounts.clear();
 		this.writeReservations.dispose();
 		for (const shellSessionKey of this.shellSessionKeys) disposePersistentShellSession(shellSessionKey);
 		this.shellSessionKeys.clear();
@@ -678,7 +685,75 @@ export class WorkerDelegationController {
 		};
 	}
 
+	/**
+	 * Suspend a failed-but-retryable attempt and re-enqueue it after backoff. Returns the lane
+	 * record when a retry was scheduled, undefined when the failure must terminalize. Retry
+	 * counts are in-memory: a process restart resets them, but the durable wall-clock, cost,
+	 * and token budgets still bound the lane, and restart recovery requeues suspended attempts.
+	 */
+	private maybeScheduleAttemptRetry(args: {
+		lifecycle: WorkerLifecycle;
+		laneId: string;
+		agentId: string;
+		request: WorkerDelegationRequest;
+		outcome: { laneStatus: string; reasonCode: string; reasonDetail?: string };
+		provider: string;
+		maxAttempts?: number;
+	}): LaneRecord | undefined {
+		const retriesUsed = this.laneRetryCounts.get(args.laneId) ?? 0;
+		const decision = evaluateWorkerRetry({
+			laneStatus: args.outcome.laneStatus,
+			reasonCode: args.outcome.reasonCode,
+			...(args.outcome.reasonDetail ? { reasonDetail: args.outcome.reasonDetail } : {}),
+			provider: args.provider,
+			retriesUsed,
+			...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
+		});
+		if (!decision.retry) return undefined;
+		try {
+			args.lifecycle.suspendAgent(
+				args.laneId,
+				args.agentId,
+				this.agentControl.getProcessOwnerId(),
+				`retry_scheduled:${decision.reason}`,
+			);
+		} catch (error) {
+			this.safeWarn(
+				`Worker ${args.laneId} retry suspension failed; terminalizing instead: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return undefined;
+		}
+		this.laneRetryCounts.set(args.laneId, retriesUsed + 1);
+		this.safeWarn(
+			`Worker ${args.laneId} failed (${decision.reason}); retrying from the persisted transcript in ${Math.ceil(decision.delayMs / 1000)}s (attempt ${retriesUsed + 2}).`,
+		);
+		const timer = setTimeout(() => {
+			this.laneRetryTimers.delete(args.laneId);
+			if (this.deps.isDisposed()) return;
+			// The lane may have been cancelled or manually resumed while waiting.
+			if (args.lifecycle.getActiveAttempt(args.laneId)?.status !== "suspended") return;
+			const record = args.lifecycle.getRecord(args.laneId);
+			if (!record) return;
+			this.scheduler.enqueue(record, args.request, true);
+			this.scheduler.drain();
+			this.notifications.statusChanged();
+		}, decision.delayMs);
+		this.laneRetryTimers.set(args.laneId, timer);
+		this.notifications.statusChanged();
+		return args.lifecycle.getRecord(args.laneId);
+	}
+
+	private clearLaneRetryState(laneId: string): void {
+		this.laneRetryCounts.delete(laneId);
+		const timer = this.laneRetryTimers.get(laneId);
+		if (timer) {
+			clearTimeout(timer);
+			this.laneRetryTimers.delete(laneId);
+		}
+	}
+
 	private publishTerminalRecord(record: LaneRecord): void {
+		this.clearLaneRetryState(record.laneId);
 		const attempt = this.lifecycle?.getActiveAttempt(record.laneId);
 		const attemptId = attempt?.attemptId;
 		if (attemptId && this.publishedTerminalAttemptIds.has(attemptId)) return;
@@ -1225,6 +1300,20 @@ export class WorkerDelegationController {
 			});
 			const executionResult = await executor.run();
 			const rawOutcome = executionResult.rawOutcome;
+			// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
+			// terminalizing, resuming from the persisted transcript under a fresh fence.
+			if (rawOutcome.laneStatus === "failed" && !this.deps.isDisposed() && !workerSignal.aborted) {
+				const retryRecord = this.maybeScheduleAttemptRetry({
+					lifecycle,
+					laneId: startedRecord.laneId,
+					agentId,
+					request: { ...request, profileId: admission.shipment.profile.profileId },
+					outcome: rawOutcome,
+					provider: modelBinding.provider,
+					...(grant.budget.maxAttempts !== undefined ? { maxAttempts: grant.budget.maxAttempts } : {}),
+				});
+				if (retryRecord) return { started: true, record: retryRecord };
+			}
 			const verificationRequired =
 				orchestrationProfile.requireIndependentVerification &&
 				orchestrationProfile.role !== "verifier" &&

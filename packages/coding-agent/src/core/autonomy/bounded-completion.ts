@@ -15,7 +15,24 @@ export type BoundedCompletionFailureStatus = "canceled" | "timeout" | "failed";
 export interface BoundedCompletionOutcome {
 	/** Present when the executor settled; may coexist with `failure` when an abort raced the result. */
 	completion?: BoundedCompletion;
-	failure?: { status: BoundedCompletionFailureStatus; reasonCode: string };
+	failure?: { status: BoundedCompletionFailureStatus; reasonCode: string; detail?: string };
+}
+
+const MAX_FAILURE_DETAIL_CHARS = 240;
+
+/**
+ * Preserve the executor's actual error alongside the stable reason code. A bare
+ * `completion_error` is undiagnosable from lane records alone (field lesson: workers dying
+ * on provider socket drops and budget denials all flattened to the same code).
+ */
+export function boundedFailureDetail(error: unknown): string | undefined {
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	if (!message) return undefined;
+	const firstLine = message.split("\n", 1)[0]?.trim() ?? "";
+	if (firstLine.length === 0) return undefined;
+	return firstLine.length <= MAX_FAILURE_DETAIL_CHARS
+		? firstLine
+		: `${firstLine.slice(0, MAX_FAILURE_DETAIL_CHARS - 1)}…`;
 }
 
 type ExecutorSettlement = { kind: "completion"; completion: BoundedCompletion } | { kind: "error"; error: unknown };
@@ -100,11 +117,12 @@ export async function runBoundedCompletion(args: {
 		}
 
 		if (winner.kind === "error") {
+			const detail = boundedFailureDetail(winner.error);
 			return {
 				failure:
 					args.signal?.aborted || timeoutController.signal.aborted
 						? abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal })
-						: { status: "failed", reasonCode: "completion_error" },
+						: { status: "failed", reasonCode: "completion_error", ...(detail ? { detail } : {}) },
 			};
 		}
 

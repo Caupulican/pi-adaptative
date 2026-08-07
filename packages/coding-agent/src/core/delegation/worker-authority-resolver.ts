@@ -15,6 +15,16 @@ import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
+/**
+ * Smallest token grant a worker can survive on. A worker's first response pays the full
+ * uncached system prompt (~3.3k budgeted tokens in the field), so grants below this floor
+ * starve mid-flight with every tool call denied `token_budget_exhausted` — reject them at
+ * admission with an explicit reason instead (field session 019fd4dc: 8-9k grants died in
+ * 2-3 responses under face-value cache-read counting; the floor plus discounted counting
+ * makes small grants viable again).
+ */
+export const MIN_VIABLE_WORKER_TOKEN_BUDGET = 5_000;
+
 const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls", "write", "edit", "memory", STABLE_SHELL_TOOL_NAME] as const;
 const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set([...CLASSIFIED_LANE_TOOL_NAMES, "delegate"]);
 const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
@@ -104,6 +114,12 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		}
 	}
 	const budget = structuredClone(input.authority?.budget ?? input.base?.profile.budget ?? {});
+	if (budget.maxTokens !== undefined && budget.maxTokens < MIN_VIABLE_WORKER_TOKEN_BUDGET) {
+		return {
+			ok: false,
+			reason: `token_budget_below_floor:requested=${budget.maxTokens},min=${MIN_VIABLE_WORKER_TOKEN_BUDGET}`,
+		};
+	}
 	const role = input.authority?.role ?? input.base?.profile.role ?? "orchestrator";
 	const now = new Date().toISOString();
 	const descriptor = {

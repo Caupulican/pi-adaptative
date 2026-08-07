@@ -77,6 +77,31 @@ export interface SharedCapabilityBudget {
 /** Persistable cumulative usage from a prior active segment; excludes restart downtime. */
 export type GatewayInitialUsage = AttemptUsageSnapshot;
 
+/**
+ * Weight applied to prompt-cache reads when charging token budgets. Cache reads re-bill the
+ * same context on every request (a worker's fixed system prompt alone is thousands of tokens),
+ * so charging them at face value turns `maxTokens` into a request counter: a 9k grant died in
+ * 2-3 responses while doing ~500 tokens of real work per response (field session 019fd4dc).
+ * The weight mirrors the typical cache-read price ratio; money stays bounded by `maxCostUsd`.
+ */
+export const CACHE_READ_BUDGET_WEIGHT = 0.1;
+
+/**
+ * Tokens charged against `maxTokens` budgets: real work at face value, cache reads discounted.
+ * A provider-authoritative total above the detail sum is unattributed usage and charges fully.
+ */
+export function budgetedTokens(usage: {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalTokens: number;
+}): number {
+	const detailed = usage.inputTokens + usage.outputTokens + usage.cacheWriteTokens;
+	const unattributed = Math.max(0, usage.totalTokens - detailed - usage.cacheReadTokens);
+	return detailed + unattributed + Math.ceil(usage.cacheReadTokens * CACHE_READ_BUDGET_WEIGHT);
+}
+
 export class CapabilityGatewayDeniedError extends Error {
 	readonly reasonCode: GatewayDecisionCode;
 
@@ -276,7 +301,7 @@ export class CapabilityGateway {
 
 	remainingAttemptTokenBudget(): number | undefined {
 		const maximum = this.grant.budget.maxTokens;
-		return maximum === undefined ? undefined : Math.max(0, maximum - this.totalTokens);
+		return maximum === undefined ? undefined : Math.max(0, maximum - budgetedTokens(this.getUsage()));
 	}
 
 	remainingTokenBudget(): number | undefined {
@@ -343,7 +368,7 @@ export class CapabilityGateway {
 		if (budget.maxToolCalls !== undefined && this.toolCalls >= budget.maxToolCalls) {
 			this.deny(toolName, "tool_call_budget_exhausted", "Tool-call budget exhausted.");
 		}
-		if (budget.maxTokens !== undefined && this.totalTokens >= budget.maxTokens) {
+		if (budget.maxTokens !== undefined && budgetedTokens(this.getUsage()) >= budget.maxTokens) {
 			this.deny(toolName, "token_budget_exhausted", "Token budget exhausted.");
 		}
 		if (budget.maxCostUsd !== undefined && this.costUsd >= budget.maxCostUsd) {

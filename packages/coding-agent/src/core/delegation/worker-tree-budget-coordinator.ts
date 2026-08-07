@@ -1,7 +1,8 @@
-import type {
-	GatewayUsageSnapshot,
-	ProviderBudgetReservation,
-	SharedCapabilityBudget,
+import {
+	budgetedTokens,
+	type GatewayUsageSnapshot,
+	type ProviderBudgetReservation,
+	type SharedCapabilityBudget,
 } from "../orchestration/capability-gateway.ts";
 import type { AttemptUsageSnapshot, RiskBudget } from "../orchestration/contracts.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
@@ -147,7 +148,7 @@ export class WorkerTreeBudgetCoordinator {
 				const maximum = tree.budget.maxTokens;
 				return maximum === undefined
 					? undefined
-					: Math.max(0, maximum - this.totalTokens(tree) - this.reservedTokens(tree));
+					: Math.max(0, maximum - this.budgetedTokens(tree) - this.reservedTokens(tree));
 			},
 			reserveProviderBudget: (requestedMaxTokens, subject, signal) =>
 				this.reserveProviderBudget(tree, args.attemptId, requestedMaxTokens, subject, signal),
@@ -162,7 +163,7 @@ export class WorkerTreeBudgetCoordinator {
 		if (reservation && previous) {
 			reservation.maxTokens = Math.max(
 				0,
-				reservation.maxTokens - Math.max(0, merged.totalTokens - previous.totalTokens),
+				reservation.maxTokens - Math.max(0, budgetedTokens(merged) - budgetedTokens(previous)),
 			);
 		}
 	}
@@ -224,7 +225,7 @@ export class WorkerTreeBudgetCoordinator {
 			const availableTokens =
 				state.budget.maxTokens === undefined
 					? waiter.requestedMaxTokens
-					: Math.max(0, state.budget.maxTokens - this.totalTokens(state) - this.reservedTokens(state));
+					: Math.max(0, state.budget.maxTokens - this.budgetedTokens(state) - this.reservedTokens(state));
 			if (availableTokens <= 0) return;
 			const maxTokens = Math.min(waiter.requestedMaxTokens, availableTokens);
 			state.waiters.shift();
@@ -250,8 +251,8 @@ export class WorkerTreeBudgetCoordinator {
 		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
 	}
 
-	private totalTokens(state: TreeBudgetState): number {
-		return [...state.attempts.values()].reduce((total, usage) => total + usage.totalTokens, 0);
+	private budgetedTokens(state: TreeBudgetState): number {
+		return [...state.attempts.values()].reduce((total, usage) => total + budgetedTokens(usage), 0);
 	}
 
 	private reservedTokens(state: TreeBudgetState): number {
@@ -263,7 +264,7 @@ export class WorkerTreeBudgetCoordinator {
 		if (state.budget.maxAttempts !== undefined && usages.length > state.budget.maxAttempts) {
 			throw new WorkerTreeBudgetExceededError("maxAttempts", subject);
 		}
-		if (state.budget.maxTokens !== undefined && this.totalTokens(state) >= state.budget.maxTokens) {
+		if (state.budget.maxTokens !== undefined && this.budgetedTokens(state) >= state.budget.maxTokens) {
 			throw new WorkerTreeBudgetExceededError("maxTokens", subject);
 		}
 		if (

@@ -104,11 +104,34 @@ describe("runBoundedCompletion", () => {
 		expect(outcome.failure).toEqual({ status: "canceled", reasonCode: "external_abort" });
 	});
 
-	it("maps an executor throw without any abort to failed/completion_error", async () => {
+	it("maps an executor throw without any abort to failed/completion_error carrying the error detail", async () => {
 		const outcome = await runBoundedCompletion({
 			maxWallClockMs: 0,
 			execute: async () => {
 				throw new Error("boom");
+			},
+		});
+		expect(outcome.failure).toEqual({ status: "failed", reasonCode: "completion_error", detail: "boom" });
+	});
+
+	it("bounds the failure detail to the first line and a fixed length", async () => {
+		const outcome = await runBoundedCompletion({
+			maxWallClockMs: 0,
+			execute: async () => {
+				throw new Error(`${"x".repeat(500)}\nsecond line`);
+			},
+		});
+		expect(outcome.failure?.reasonCode).toBe("completion_error");
+		expect(outcome.failure?.detail).toHaveLength(240);
+		expect(outcome.failure?.detail?.endsWith("…")).toBe(true);
+		expect(outcome.failure?.detail).not.toContain("second line");
+	});
+
+	it("omits the detail for non-message throw values", async () => {
+		const outcome = await runBoundedCompletion({
+			maxWallClockMs: 0,
+			execute: async () => {
+				throw { code: 42 };
 			},
 		});
 		expect(outcome.failure).toEqual({ status: "failed", reasonCode: "completion_error" });
