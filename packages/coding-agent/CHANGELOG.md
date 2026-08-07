@@ -24,6 +24,7 @@
 - Fixed orchestration authority drift by routing command admission, event replay, and snapshot recovery through exact shared reducers and strict codecs; canonical persistence and replay now reject unsupported fields, conflicting identities, invalid graph relationships, and divergent retained state, while file-locked exact-content reconciliation prevents stale worker-session owners from duplicating durable control delivery.
 - Fixed persistent-worker transcript and completion ownership: one revision-fenced conversation core now verifies exact append bytes and bounded callback-evidenced suffixes across retries and cancellation, rejects stale supported writers, ownership-boundary content changes, unreserved results, and late output, preserves immutable birth metadata, accounts cumulative retry cost, and retains shared provider reservations until returned usage is charged.
 - Fixed worker crash recovery discarding a durably persisted empty terminal response and calling the provider again; recovery now replays the empty completion so the original deterministic output validation runs without duplicate work or cost.
+- Fixed malformed ancestor `.git` markers capturing project credential scope; repository discovery now requires a bounded, valid symbolic or detached Git `HEAD` before reading remote configuration.
 
 ## [0.86.3] - 2026-08-06
 

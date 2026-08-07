@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made deterministic model-catalog builds fail closed when a committed generated catalog is missing instead of silently fetching live provider metadata.
+
 ## [0.86.3] - 2026-08-06
 
 ## [0.86.2] - 2026-08-06

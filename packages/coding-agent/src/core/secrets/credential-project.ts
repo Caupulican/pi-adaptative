@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { CredentialProjectIdentity } from "./credential-manager.ts";
 
 const MAX_GIT_POINTER_BYTES = 4 * 1024;
+const MAX_GIT_HEAD_BYTES = 1024;
 const MAX_GIT_CONFIG_BYTES = 1024 * 1024;
 
 function opaqueKey(kind: "git" | "local", identity: string): string {
@@ -63,6 +64,28 @@ async function isFile(path: string): Promise<boolean> {
 	}
 }
 
+function isValidGitHead(head: string): boolean {
+	const value = head.endsWith("\n") ? head.slice(0, -1).replace(/\r$/, "") : head;
+	if (/^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value)) return true;
+	const reference = value.match(/^ref: (refs\/.+)$/)?.[1];
+	return (
+		reference !== undefined &&
+		!/[\x00-\x20\x7f~^:?*[\]\\]/.test(reference) &&
+		!reference.includes("..") &&
+		!reference.includes("@{") &&
+		!reference.includes("//") &&
+		!reference.endsWith("/") &&
+		!reference.endsWith(".") &&
+		!reference.endsWith(".lock")
+	);
+}
+
+async function isGitDirectory(path: string): Promise<boolean> {
+	if (!(await isDirectory(path))) return false;
+	const head = await readBounded(join(path, "HEAD"), MAX_GIT_HEAD_BYTES);
+	return head !== undefined && isValidGitHead(head);
+}
+
 async function readBounded(path: string, maxBytes: number): Promise<string | undefined> {
 	try {
 		const metadata = await stat(path);
@@ -79,12 +102,13 @@ interface GitRepositoryLocation {
 }
 
 async function resolveGitDirectory(root: string, marker: string): Promise<string | undefined> {
-	if (await isDirectory(marker)) return marker;
+	if (await isGitDirectory(marker)) return marker;
 	if (!(await isFile(marker))) return undefined;
 	const pointer = await readBounded(marker, MAX_GIT_POINTER_BYTES);
 	const gitDirValue = pointer?.match(/^gitdir:\s*(.+?)\s*$/im)?.[1];
 	if (!gitDirValue || /[\0\r\n]/.test(gitDirValue)) return undefined;
-	return resolve(root, gitDirValue);
+	const gitDir = resolve(root, gitDirValue);
+	return (await isGitDirectory(gitDir)) ? gitDir : undefined;
 }
 
 async function findGitRepository(cwd: string): Promise<GitRepositoryLocation | undefined> {

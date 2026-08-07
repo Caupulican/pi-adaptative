@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { existsSync, writeFileSync } from "fs";
+import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import type { ImagesModel } from "../src/types.ts";
+import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -140,14 +141,8 @@ async function main(): Promise<void> {
 
 // Same deterministic-build escape hatch as generate-models.ts: CI verifies the committed
 // catalog rather than refetching live data that can drift and abort the publish.
-if (
-	process.env.PI_SKIP_MODEL_FETCH === "1" &&
-	existsSync(join(packageRoot, "src", "image-models.generated.ts"))
-) {
-	console.log("PI_SKIP_MODEL_FETCH=1 - keeping committed image-models.generated.ts (no live fetch)");
-} else {
-	main().catch((error) => {
-		console.error(error);
-		process.exit(1);
-	});
-}
+await runModelCatalogGeneration({
+	catalogPath: join(packageRoot, "src", "image-models.generated.ts"),
+	skipFetch: process.env.PI_SKIP_MODEL_FETCH,
+	generate: main,
+});
