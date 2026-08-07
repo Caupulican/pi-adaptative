@@ -9,6 +9,7 @@ import {
 	pathScopesOverlap,
 	safeRealpathSync,
 } from "../src/core/autonomy/path-scope.ts";
+import { createDirectoryLink, FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
 
 describe("path-scope", () => {
 	let tempDir: string;
@@ -100,10 +101,10 @@ describe("path-scope", () => {
 			expect(decision.kind).toBe("outside");
 		});
 
-		it("safely resolves existing symlink inside root pointing outside root as outside/denied", () => {
-			// Create a symlink inside allowedRoot that points to outsideRoot
+		it("safely resolves an existing directory link inside root pointing outside root as outside/denied", () => {
+			// Create a directory link inside allowedRoot that points to outsideRoot.
 			const symlinkPath = path.join(allowedRoot, "symlink-out");
-			fs.symlinkSync(outsideRoot, symlinkPath, "dir");
+			createDirectoryLink(outsideRoot, symlinkPath);
 
 			// Writing to the symlink directory should be blocked
 			const targetFile = path.join(symlinkPath, "evil.txt");
@@ -111,14 +112,14 @@ describe("path-scope", () => {
 			expect(decision.kind).toBe("outside");
 		});
 
-		it("safely resolves symlinks pointing inside the allowed root as inside", () => {
+		it("safely resolves directory links pointing inside the allowed root as inside", () => {
 			// Create a nested dir
 			const nestedDir = path.join(allowedRoot, "nested");
 			fs.mkdirSync(nestedDir);
 
-			// Create a symlink in outsideRoot pointing to nestedDir
+			// Create a directory link in outsideRoot pointing to nestedDir.
 			const symlinkPath = path.join(outsideRoot, "symlink-in");
-			fs.symlinkSync(nestedDir, symlinkPath, "dir");
+			createDirectoryLink(nestedDir, symlinkPath);
 
 			const targetFile = path.join(symlinkPath, "good.txt");
 			const decision = checkPathScope({ root: allowedRoot }, targetFile);
@@ -126,28 +127,34 @@ describe("path-scope", () => {
 			expect(decision.kind).toBe("inside");
 		});
 
-		it("resolves a dangling symlink escaping the root as outside, not lexically inside", () => {
-			// evil-link lives inside allowedRoot but points at a file that does not exist (dangling).
-			// existsSync follows symlinks, so it reports false for a dangling link — the leaf must
-			// still be dereferenced instead of joined onto the parent as a literal path segment.
-			const target = path.join(outsideRoot, "secret.txt");
-			const link = path.join(allowedRoot, "evil-link");
-			fs.symlinkSync(target, link);
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+			"resolves a dangling symlink escaping the root as outside, not lexically inside",
+			() => {
+				// evil-link lives inside allowedRoot but points at a file that does not exist (dangling).
+				// existsSync follows symlinks, so it reports false for a dangling link — the leaf must
+				// still be dereferenced instead of joined onto the parent as a literal path segment.
+				const target = path.join(outsideRoot, "secret.txt");
+				const link = path.join(allowedRoot, "evil-link");
+				fs.symlinkSync(target, link);
 
-			const decision = checkPathScope({ root: allowedRoot }, link);
-			expect(decision.kind).toBe("outside");
-		});
+				const decision = checkPathScope({ root: allowedRoot }, link);
+				expect(decision.kind).toBe("outside");
+			},
+		);
 
-		it("maps a symlink loop to outside/unresolvable instead of resolving it lexically", () => {
-			const linkA = path.join(allowedRoot, "loop-a");
-			const linkB = path.join(allowedRoot, "loop-b");
-			fs.symlinkSync(linkB, linkA);
-			fs.symlinkSync(linkA, linkB);
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+			"maps a symlink loop to outside/unresolvable instead of resolving it lexically",
+			() => {
+				const linkA = path.join(allowedRoot, "loop-a");
+				const linkB = path.join(allowedRoot, "loop-b");
+				fs.symlinkSync(linkB, linkA);
+				fs.symlinkSync(linkA, linkB);
 
-			const decision = checkPathScope({ root: allowedRoot }, linkA);
-			expect(decision.kind).toBe("outside");
-			expect(decision.reasonCode).toBe("unresolvable_target");
-		});
+				const decision = checkPathScope({ root: allowedRoot }, linkA);
+				expect(decision.kind).toBe("outside");
+				expect(decision.reasonCode).toBe("unresolvable_target");
+			},
+		);
 
 		it("respects allowedPaths within root", () => {
 			const subdir1 = path.join(allowedRoot, "sub1");
@@ -209,25 +216,31 @@ describe("path-scope", () => {
 			);
 		});
 
-		it("resolves a dangling leaf symlink to its target's resolved path, not its own lexical path", () => {
-			const target = path.join(outsideRoot, "secret.txt"); // never created — dangling
-			const link = path.join(allowedRoot, "evil-link");
-			fs.symlinkSync(target, link);
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+			"resolves a dangling leaf symlink to its target's resolved path, not its own lexical path",
+			() => {
+				const target = path.join(outsideRoot, "secret.txt"); // never created — dangling
+				const link = path.join(allowedRoot, "evil-link");
+				fs.symlinkSync(target, link);
 
-			expect(safeRealpathSync(link)).toBe(path.join(fs.realpathSync(outsideRoot), "secret.txt"));
-		});
+				expect(safeRealpathSync(link)).toBe(path.join(fs.realpathSync(outsideRoot), "secret.txt"));
+			},
+		);
 
-		it("resolves a chain of dangling symlinks to the final target's resolved path", () => {
-			const finalTarget = path.join(outsideRoot, "secret2.txt"); // never created — dangling
-			const link2 = path.join(allowedRoot, "link2");
-			const link1 = path.join(allowedRoot, "link1");
-			fs.symlinkSync(finalTarget, link2);
-			fs.symlinkSync(link2, link1);
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+			"resolves a chain of dangling symlinks to the final target's resolved path",
+			() => {
+				const finalTarget = path.join(outsideRoot, "secret2.txt"); // never created — dangling
+				const link2 = path.join(allowedRoot, "link2");
+				const link1 = path.join(allowedRoot, "link1");
+				fs.symlinkSync(finalTarget, link2);
+				fs.symlinkSync(link2, link1);
 
-			expect(safeRealpathSync(link1)).toBe(path.join(fs.realpathSync(outsideRoot), "secret2.txt"));
-		});
+				expect(safeRealpathSync(link1)).toBe(path.join(fs.realpathSync(outsideRoot), "secret2.txt"));
+			},
+		);
 
-		it("throws instead of looping forever on a symlink cycle", () => {
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)("throws instead of looping forever on a symlink cycle", () => {
 			const linkA = path.join(allowedRoot, "loop-a");
 			const linkB = path.join(allowedRoot, "loop-b");
 			fs.symlinkSync(linkB, linkA);

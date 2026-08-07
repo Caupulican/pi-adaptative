@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 function normalizeForMatch(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -257,7 +258,7 @@ export default function() {}`,
 			expect(result.extensions.some((r) => r.path === extPath && !r.enabled)).toBe(true);
 		});
 
-		it("should resolve symlinked user and project resources once", async () => {
+		it("should resolve linked user and project resource directories once", async () => {
 			const previousHome = process.env.HOME;
 			process.env.HOME = tempDir;
 
@@ -288,14 +289,14 @@ Content`,
 
 				mkdirSync(join(agentDir), { recursive: true });
 				mkdirSync(join(tempDir, ".pi"), { recursive: true });
-				symlinkSync(sharedExtensionsDir, join(agentDir, "extensions"), "dir");
-				symlinkSync(sharedSkillsDir, join(agentDir, "skills"), "dir");
-				symlinkSync(sharedPromptsDir, join(agentDir, "prompts"), "dir");
-				symlinkSync(sharedThemesDir, join(agentDir, "themes"), "dir");
-				symlinkSync(sharedExtensionsDir, join(tempDir, ".pi", "extensions"), "dir");
-				symlinkSync(sharedSkillsDir, join(tempDir, ".pi", "skills"), "dir");
-				symlinkSync(sharedPromptsDir, join(tempDir, ".pi", "prompts"), "dir");
-				symlinkSync(sharedThemesDir, join(tempDir, ".pi", "themes"), "dir");
+				createDirectoryLink(sharedExtensionsDir, join(agentDir, "extensions"));
+				createDirectoryLink(sharedSkillsDir, join(agentDir, "skills"));
+				createDirectoryLink(sharedPromptsDir, join(agentDir, "prompts"));
+				createDirectoryLink(sharedThemesDir, join(agentDir, "themes"));
+				createDirectoryLink(sharedExtensionsDir, join(tempDir, ".pi", "extensions"));
+				createDirectoryLink(sharedSkillsDir, join(tempDir, ".pi", "skills"));
+				createDirectoryLink(sharedPromptsDir, join(tempDir, ".pi", "prompts"));
+				createDirectoryLink(sharedThemesDir, join(tempDir, ".pi", "themes"));
 
 				const result = await packageManager.resolve();
 
@@ -572,7 +573,7 @@ Content`,
 			}
 		});
 
-		it("should dedupe user skill entries when ~/.pi/agent/skills is a symlink to ~/.agents/skills", async () => {
+		it("should dedupe user skill entries when ~/.pi/agent/skills links to ~/.agents/skills", async () => {
 			const previousHome = process.env.HOME;
 			process.env.HOME = tempDir;
 
@@ -580,9 +581,7 @@ Content`,
 				const agentSkillsDir = join(agentDir, "skills");
 				const agentsSkillsDir = join(tempDir, ".agents", "skills");
 				mkdirSync(agentsSkillsDir, { recursive: true });
-				// Use junction on Windows to avoid EPERM when symlink privileges are unavailable.
-				const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
-				symlinkSync(agentsSkillsDir, agentSkillsDir, directoryLinkType);
+				createDirectoryLink(agentsSkillsDir, agentSkillsDir);
 
 				const skillPath = join(agentsSkillsDir, "foo", "SKILL.md");
 				mkdirSync(join(agentsSkillsDir, "foo"), { recursive: true });

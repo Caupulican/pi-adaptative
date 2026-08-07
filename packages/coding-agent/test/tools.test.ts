@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +26,7 @@ import {
 	createWriteTool,
 } from "../src/index.ts";
 import { getShellConfig } from "../src/utils/shell.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 vi.mock("../src/utils/shell.ts", { spy: true });
 
@@ -844,13 +845,13 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result).trim()).toBe("abc");
 		});
 
-		it("shell find does not recurse into symlinked directories", async () => {
+		it("shell find does not recurse into linked directories", async () => {
 			const searchDir = join(testDir, "shell-find-symlinks");
 			const outsideDir = join(testDir, "shell-find-outside");
 			mkdirSync(searchDir);
 			mkdirSync(outsideDir);
 			writeFileSync(join(outsideDir, "escaped.txt"), "escape");
-			symlinkSync(outsideDir, join(searchDir, "out-link"));
+			createDirectoryLink(outsideDir, join(searchDir, "out-link"));
 			const bash = bashToolFor(testDir);
 
 			const result = await bash.execute("test-find-symlink", { command: `find ${searchDir}` });

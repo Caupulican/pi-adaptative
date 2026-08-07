@@ -12,6 +12,7 @@ import {
 	normalizePath,
 	resolvePath,
 } from "../src/utils/paths.ts";
+import { createDirectoryLink, FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
 
 let tempDir: string;
 
@@ -35,7 +36,7 @@ describe("canonicalizePath", () => {
 		expect(canonicalizePath(file)).toBe(realpathSync.native(file));
 	});
 
-	it("resolves symlinks to their targets", () => {
+	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)("resolves file symlinks to their targets", () => {
 		const dir = createTempDir();
 		const target = join(dir, "target.txt");
 		const link = join(dir, "link.txt");
@@ -44,12 +45,12 @@ describe("canonicalizePath", () => {
 		expect(canonicalizePath(link)).toBe(realpathSync.native(target));
 	});
 
-	it("resolves directory symlinks", () => {
+	it("resolves directory links", () => {
 		const dir = createTempDir();
 		const targetDir = join(dir, "target-dir");
 		const linkDir = join(dir, "link-dir");
 		mkdirSync(targetDir);
-		symlinkSync(targetDir, linkDir, "dir");
+		createDirectoryLink(targetDir, linkDir);
 		expect(canonicalizePath(linkDir)).toBe(realpathSync.native(targetDir));
 	});
 
@@ -82,7 +83,7 @@ describe("canonicalizePath", () => {
 		expect(canonicalizePath(nonexistent)).toBe(nonexistent);
 	});
 
-	it("falls back to the raw path for a dangling symlink", () => {
+	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)("falls back to the raw path for a dangling symlink", () => {
 		const dir = createTempDir();
 		const target = join(dir, "target.txt");
 		const link = join(dir, "link.txt");

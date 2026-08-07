@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionInfo } from "@caupulican/pi-agent-core/node";
@@ -7,6 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -49,7 +50,7 @@ function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionI
 	};
 }
 
-function createSymlinkedSessionPaths(): {
+function createLinkedSessionPaths(): {
 	baseDir: string;
 	parentAliasA: string;
 	parentAliasB: string;
@@ -67,8 +68,8 @@ function createSymlinkedSessionPaths(): {
 	mkdirSync(sharedDir, { recursive: true });
 	const aliasASessions = join(aliasADir, "sessions");
 	const aliasBSessions = join(aliasBDir, "sessions");
-	symlinkSync(sharedDir, aliasASessions);
-	symlinkSync(sharedDir, aliasBSessions);
+	createDirectoryLink(sharedDir, aliasASessions);
+	createDirectoryLink(sharedDir, aliasBSessions);
 
 	const parentRealPath = join(sharedDir, "parent.jsonl");
 	const childRealPath = join(sharedDir, "child.jsonl");
@@ -247,7 +248,7 @@ describe("session selector path/delete interactions", () => {
 	});
 
 	it("threads sessions when parent and child paths use different symlink aliases", async () => {
-		const paths = createSymlinkedSessionPaths();
+		const paths = createLinkedSessionPaths();
 		tempDirs.push(paths.baseDir);
 
 		const sessions = [
@@ -283,7 +284,7 @@ describe("session selector path/delete interactions", () => {
 	});
 
 	it("treats the current session as active across symlink aliases", async () => {
-		const paths = createSymlinkedSessionPaths();
+		const paths = createLinkedSessionPaths();
 		tempDirs.push(paths.baseDir);
 
 		const sessions = [makeSession({ id: "parent", path: paths.parentAliasB, name: "Parent" })];

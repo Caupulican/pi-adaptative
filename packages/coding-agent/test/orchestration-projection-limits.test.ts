@@ -1270,5 +1270,5 @@ describe("durable orchestration projection ceilings", () => {
 			}),
 		).toThrow(/task.*limit/i);
 		expect(ledger.runtime.getSnapshot()).toEqual(before);
-	});
+	}, 90_000);
 });

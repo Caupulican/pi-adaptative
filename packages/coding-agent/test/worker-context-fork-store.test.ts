@@ -100,7 +100,7 @@ describe("WorkerContextForkStore", () => {
 		expect(reference.messageBytes).toBe(Buffer.byteLength(JSON.stringify(messages), "utf-8"));
 		expect(reopened.messages).toEqual(expectedMessages);
 		expect(reopened.messages).not.toBe(messages);
-		expect(statSync(filePath).mode & 0o777).toBe(0o600);
+		if (process.platform !== "win32") expect(statSync(filePath).mode & 0o777).toBe(0o600);
 		expect(readdirSync(join(filePath, ".."))).not.toEqual(expect.arrayContaining([expect.stringMatching(/\.tmp$/)]));
 
 		messages[0]!.content = "mutated caller copy";

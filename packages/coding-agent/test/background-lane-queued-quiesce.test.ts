@@ -51,6 +51,7 @@ function buildQueuingDeps(
 	});
 	const sessionManager = {
 		getEntries: () => [],
+		buildSessionContext: () => ({ messages: [] }),
 		appendCustomEntry: () => "entry-1",
 	} as unknown as SessionManager;
 	return {

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 function settingsWithExtensionsGranted(...allowedExtensions: string[]): SettingsManager {
 	return SettingsManager.inMemory({
@@ -194,7 +195,7 @@ Project skill`,
 			expect(theme?.sourcePath).toBe(projectThemePath);
 		});
 
-		it("should load symlinked user and project extensions once", async () => {
+		it("should load linked user and project extension directories once", async () => {
 			const sharedExtDir = join(tempDir, "shared-extensions");
 			mkdirSync(sharedExtDir, { recursive: true });
 			writeFileSync(
@@ -209,8 +210,8 @@ Project skill`,
 
 			mkdirSync(agentDir, { recursive: true });
 			mkdirSync(join(cwd, ".pi"), { recursive: true });
-			symlinkSync(sharedExtDir, join(agentDir, "extensions"), "dir");
-			symlinkSync(sharedExtDir, join(cwd, ".pi", "extensions"), "dir");
+			createDirectoryLink(sharedExtDir, join(agentDir, "extensions"));
+			createDirectoryLink(sharedExtDir, join(cwd, ".pi", "extensions"));
 
 			const settingsManager = settingsWithExtensionsGranted("shared.ts");
 			const loader = new DefaultResourceLoader({

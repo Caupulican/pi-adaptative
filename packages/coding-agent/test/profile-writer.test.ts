@@ -1,6 +1,7 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { MIN_VIABLE_WORKER_TOKEN_BUDGET } from "../src/core/delegation/worker-authority-resolver.ts";
 import type { OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import {
 	MAX_SESSION_TASK_PROFILES,
@@ -63,7 +64,7 @@ describe("profile_writer", () => {
 					model: { provider: "faux", modelId: "fast-worker", thinkingLevel: "low" },
 					toolNames: ["read", "grep"],
 					resourceProfileNames: [],
-					budget: { maxTokens: 1_024, maxToolCalls: 2 },
+					budget: { maxTokens: MIN_VIABLE_WORKER_TOKEN_BUDGET, maxToolCalls: 2 },
 				},
 				undefined,
 				undefined,

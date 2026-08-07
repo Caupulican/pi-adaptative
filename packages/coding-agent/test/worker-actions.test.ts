@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,6 +17,7 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type ToolCapabilityManifest,
 } from "../src/core/orchestration/contracts.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 describe("parseWorkerActions", () => {
 	it("rejects an entire action batch when any action is malformed", () => {
@@ -272,9 +273,9 @@ describe("applyWorkerActions (execution-time grant enforcement)", () => {
 		expect(readFileSync(target, "utf-8").startsWith("needle")).toBe(true);
 	});
 
-	it("a write through a real directory symlink lands exactly where the (real-fs) scope check resolved it", () => {
+	it("a write through a real directory link lands exactly where the (real-fs) scope check resolved it", () => {
 		mkdirSync(join(cwd, "src", "real"), { recursive: true });
-		symlinkSync(join(cwd, "src", "real"), join(cwd, "src", "alias"));
+		createDirectoryLink(join(cwd, "src", "real"), join(cwd, "src", "alias"));
 
 		const report = applyWorkerActions({
 			actions: [{ op: "write", path: "src/alias/f.txt", content: "hi" }],

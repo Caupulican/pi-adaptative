@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { workerContextForkFile } from "../src/core/agent-paths.ts";
@@ -13,6 +12,8 @@ import {
 import type { WorkerContextForkReference } from "../src/core/orchestration/worker-context-fork-reference.ts";
 
 const tempDirectories: string[] = [];
+const workerContextForkStoreModuleUrl = new URL("../src/core/delegation/worker-context-fork-store.ts", import.meta.url)
+	.href;
 
 afterEach(() => {
 	for (const directory of tempDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -181,13 +182,10 @@ describe("WorkerContextForkStore capture transaction", () => {
 		const durableReferencesFile = join(agentDir, "durable-references.json");
 		writeFileSync(durableReferencesFile, "[]", "utf-8");
 		const workerFile = join(agentDir, "capture-worker.mjs");
-		const storeModule = fileURLToPath(
-			new URL("../src/core/delegation/worker-context-fork-store.ts", import.meta.url),
-		);
 		writeFileSync(
 			workerFile,
 			`import { writeFileSync } from "node:fs";
-import { WorkerContextForkStore } from ${JSON.stringify(storeModule)};
+import { WorkerContextForkStore } from ${JSON.stringify(workerContextForkStoreModuleUrl)};
 const options = ${JSON.stringify({ agentDir, parentSessionId, durableReferencesFile })};
 const store = new WorkerContextForkStore(options);
 store.captureAndPrepare({
@@ -253,13 +251,10 @@ store.captureAndPrepare({
 		const { agentDir, parentSessionId, store } = fixture("identical-concurrent-parent");
 		const claimedFile = join(agentDir, "worker-claimed");
 		const workerFile = join(agentDir, "identical-capture-worker.mjs");
-		const storeModule = fileURLToPath(
-			new URL("../src/core/delegation/worker-context-fork-store.ts", import.meta.url),
-		);
 		writeFileSync(
 			workerFile,
 			`import { existsSync, writeFileSync } from "node:fs";
-import { WorkerContextForkStore } from ${JSON.stringify(storeModule)};
+import { WorkerContextForkStore } from ${JSON.stringify(workerContextForkStoreModuleUrl)};
 const options = ${JSON.stringify({ agentDir, parentSessionId, claimedFile })};
 const store = new WorkerContextForkStore(options);
 store.captureAndPrepare({

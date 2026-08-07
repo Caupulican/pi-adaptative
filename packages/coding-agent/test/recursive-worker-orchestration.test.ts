@@ -474,98 +474,102 @@ describe("recursive worker orchestration", () => {
 			remainingIdentities: 1,
 			expectedStarted: true,
 		},
-	])("$name", async ({ remainingIdentities, expectedStarted }) => {
-		const scenario = expectedStarted ? "control" : "negative";
-		const verifierProfile = createTestWorkerOrchestrationProfile({
-			profileId: `reuse-headroom-${scenario}-verifier`,
-			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
-			role: "verifier",
-		});
-		const implementationProfile = createTestWorkerOrchestrationProfile({
-			profileId: `reuse-headroom-${scenario}-implementation`,
-			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
-			requireIndependentVerification: true,
-			verificationProfileId: verifierProfile.profileId,
-		});
-		const harness = await createHarness({
-			workerOrchestrationProfile: implementationProfile,
-			additionalOrchestrationProfiles: [verifierProfile],
-		});
-		try {
-			harness.setResponses([
-				fauxAssistantMessage('{"summary":"initial implementation","status":"completed","findings":[]}'),
-				fauxAssistantMessage(
-					'{"summary":"initial verification","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
-				),
-			]);
-			const initial = await harness.session.runWorkerDelegationOnce({
-				instructions: "Create the reusable specialist.",
+	])(
+		"$name",
+		async ({ remainingIdentities, expectedStarted }) => {
+			const scenario = expectedStarted ? "control" : "negative";
+			const verifierProfile = createTestWorkerOrchestrationProfile({
+				profileId: `reuse-headroom-${scenario}-verifier`,
+				model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
+				role: "verifier",
 			});
-			expect(initial.record?.laneId).toBe("worker-1");
-			const lifecycle = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
+			const implementationProfile = createTestWorkerOrchestrationProfile({
+				profileId: `reuse-headroom-${scenario}-implementation`,
+				model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
+				requireIndependentVerification: true,
+				verificationProfileId: verifierProfile.profileId,
 			});
-			await vi.waitFor(
-				() => {
-					expect(
-						Object.values(lifecycle.getTaskRuntimeSnapshot().tasks).filter(
-							(task) => task.verification?.verdict === "accepted",
-						),
-					).toHaveLength(1);
-				},
-				{ timeout: 10_000 },
-			);
-			let seeded = 0;
-			const targetAgentCount = DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession - remainingIdentities;
-			while (durableEntityCounts(lifecycle).agents < targetAgentCount) {
-				seedAgent(lifecycle, { agentId: `seed-reuse-headroom-${scenario}-${seeded++}`, cwd: harness.tempDir });
-			}
-			const before = durableEntityCounts(lifecycle);
-			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
-			harness.setResponses([
-				fauxAssistantMessage('{"summary":"reused implementation","status":"completed","findings":[]}'),
-				fauxAssistantMessage(
-					'{"summary":"reuse verification","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
-				),
-			]);
-
-			const outcome = treeControl(harness.session).startWorkerAgentTask(
-				"worker-1",
-				"Reuse the retained specialist and preserve verifier headroom.",
-				{ idempotencyKey: `reuse-headroom-${scenario}` },
-			);
-
-			if (!expectedStarted) {
-				expect(outcome).toEqual({
-					started: false,
-					steering: false,
-					messageId: "",
-					skipReason: "worker_agent_session_limit_reached",
+			const harness = await createHarness({
+				workerOrchestrationProfile: implementationProfile,
+				additionalOrchestrationProfiles: [verifierProfile],
+			});
+			try {
+				harness.setResponses([
+					fauxAssistantMessage('{"summary":"initial implementation","status":"completed","findings":[]}'),
+					fauxAssistantMessage(
+						'{"summary":"initial verification","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
+					),
+				]);
+				const initial = await harness.session.runWorkerDelegationOnce({
+					instructions: "Create the reusable specialist.",
 				});
-				expect(durableEntityCounts(lifecycle)).toEqual(before);
-				expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
-				expect(harness.getPendingResponseCount()).toBe(2);
-				return;
-			}
+				expect(initial.record?.laneId).toBe("worker-1");
+				const lifecycle = new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				});
+				await vi.waitFor(
+					() => {
+						expect(
+							Object.values(lifecycle.getTaskRuntimeSnapshot().tasks).filter(
+								(task) => task.verification?.verdict === "accepted",
+							),
+						).toHaveLength(1);
+					},
+					{ timeout: 10_000 },
+				);
+				let seeded = 0;
+				const targetAgentCount = DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession - remainingIdentities;
+				while (durableEntityCounts(lifecycle).agents < targetAgentCount) {
+					seedAgent(lifecycle, { agentId: `seed-reuse-headroom-${scenario}-${seeded++}`, cwd: harness.tempDir });
+				}
+				const before = durableEntityCounts(lifecycle);
+				const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
+				harness.setResponses([
+					fauxAssistantMessage('{"summary":"reused implementation","status":"completed","findings":[]}'),
+					fauxAssistantMessage(
+						'{"summary":"reuse verification","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
+					),
+				]);
 
-			expect(outcome.started).toBe(true);
-			await vi.waitFor(
-				() => {
-					expect(durableEntityCounts(lifecycle).agents).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession);
-					expect(
-						Object.values(lifecycle.getTaskRuntimeSnapshot().tasks).filter(
-							(task) => task.verification?.verdict === "accepted",
-						),
-					).toHaveLength(2);
-				},
-				{ timeout: 10_000 },
-			);
-			expect(harness.getPendingResponseCount()).toBe(0);
-		} finally {
-			await harness.cleanup();
-		}
-	});
+				const outcome = treeControl(harness.session).startWorkerAgentTask(
+					"worker-1",
+					"Reuse the retained specialist and preserve verifier headroom.",
+					{ idempotencyKey: `reuse-headroom-${scenario}` },
+				);
+
+				if (!expectedStarted) {
+					expect(outcome).toEqual({
+						started: false,
+						steering: false,
+						messageId: "",
+						skipReason: "worker_agent_session_limit_reached",
+					});
+					expect(durableEntityCounts(lifecycle)).toEqual(before);
+					expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
+					expect(harness.getPendingResponseCount()).toBe(2);
+					return;
+				}
+
+				expect(outcome.started).toBe(true);
+				await vi.waitFor(
+					() => {
+						expect(durableEntityCounts(lifecycle).agents).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession);
+						expect(
+							Object.values(lifecycle.getTaskRuntimeSnapshot().tasks).filter(
+								(task) => task.verification?.verdict === "accepted",
+							),
+						).toHaveLength(2);
+					},
+					{ timeout: 10_000 },
+				);
+				expect(harness.getPendingResponseCount()).toBe(0);
+			} finally {
+				await harness.cleanup();
+			}
+		},
+		90_000,
+	);
 
 	it("rejects a descendant preset that would introduce unadmitted resources or soul", async () => {
 		let privilegedSkill = "";

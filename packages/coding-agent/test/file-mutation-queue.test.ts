@@ -6,6 +6,7 @@ import { createEditTool } from "../src/core/tools/edit.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
+import { FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -75,7 +76,7 @@ describe("withFileMutationQueue", () => {
 		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("a:end"));
 	});
 
-	it("uses the same queue for symlink aliases", async () => {
+	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)("uses the same queue for symlink aliases", async () => {
 		const dir = await createTempDir();
 		const targetPath = join(dir, "target.txt");
 		const symlinkPath = join(dir, "alias.txt");

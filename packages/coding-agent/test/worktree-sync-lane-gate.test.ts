@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
 	type WorktreeSyncEngineDeps,
 } from "../src/core/worktree-sync/git-engine.ts";
 import { classifyLaneBashCommand, WorktreeLaneGate } from "../src/core/worktree-sync/lane-gate.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 const cleanups: string[] = [];
 
@@ -204,14 +205,14 @@ describe("WorktreeLaneGate path envelope (D5, real git)", () => {
 		expect(outsideResult.allowed).toBe(false);
 		if (!outsideResult.allowed) expect(outsideResult.code).toBe("path_outside_lane");
 
-		// A symlink INSIDE the lane pointing to a directory OUTSIDE it: a not-yet-existing file
-		// reached through that symlink must still resolve (symlink-safely, via its nearest existing
+		// A directory link INSIDE the lane pointing to a directory OUTSIDE it: a not-yet-existing file
+		// reached through that link must still resolve (link-safely, via its nearest existing
 		// ancestor) to outside the lane and be refused -- not silently allowed just because the
 		// final path component doesn't exist yet.
 		const outsideDir = join(dirname(createdA.lane.worktreePath), "outside-dir");
 		mkdirSync(outsideDir, { recursive: true });
 		const escapeLink = join(createdA.lane.worktreePath, "escape-link");
-		symlinkSync(outsideDir, escapeLink);
+		createDirectoryLink(outsideDir, escapeLink);
 		const notYetExisting = join(escapeLink, "new-file.txt");
 		const escapeResult = await gate.checkMutation("edit", undefined, notYetExisting);
 		expect(escapeResult.allowed).toBe(false);

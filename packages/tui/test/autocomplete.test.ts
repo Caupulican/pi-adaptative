@@ -36,6 +36,28 @@ const setupFolder = (baseDir: string, structure: FolderStructure = {}): void => 
 	});
 };
 
+const createDirectoryLink = (targetPath: string, linkPath: string): void => {
+	symlinkSync(targetPath, linkPath, process.platform === "win32" ? "junction" : "dir");
+};
+
+const fileSymlinkSkipReason = (() => {
+	if (process.platform !== "win32") return false;
+
+	const probeDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-file-symlink-probe-"));
+	try {
+		writeFileSync(join(probeDir, "target.txt"), "target");
+		symlinkSync("target.txt", join(probeDir, "link.txt"), "file");
+		return false;
+	} catch (error) {
+		if (error instanceof Error && Reflect.get(error, "code") === "EPERM") {
+			return "Windows file symlink privilege is unavailable";
+		}
+		throw error;
+	} finally {
+		rmSync(probeDir, { recursive: true, force: true });
+	}
+})();
+
 const fdPath = resolveFdPath();
 const isFdInstalled = Boolean(fdPath);
 
@@ -379,7 +401,7 @@ describe("CombinedAutocompleteProvider", () => {
 					"some_file.txt": "symlinked",
 				},
 			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
+			createDirectoryLink(outsideDir, join(baseDir, "symlinked_dir"));
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@some";
@@ -396,7 +418,7 @@ describe("CombinedAutocompleteProvider", () => {
 					"nested/file.txt": "symlinked",
 				},
 			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
+			createDirectoryLink(outsideDir, join(baseDir, "symlinked_dir"));
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@symlinked";
@@ -406,7 +428,7 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.ok(values.includes("@symlinked_dir/"));
 		});
 
-		test("returns symlinked files without requiring type l", async () => {
+		test("returns symlinked files without requiring type l", { skip: fileSymlinkSkipReason }, async () => {
 			setupFolder(baseDir, {
 				files: {
 					"original.txt": "content",

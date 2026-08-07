@@ -8,6 +8,7 @@ import {
 	resolveModelThinkingLevel,
 } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { MIN_VIABLE_WORKER_TOKEN_BUDGET } from "../src/core/delegation/worker-authority-resolver.ts";
 import { resolveModelToolProtocol } from "../src/core/model-tool-protocol.ts";
 import type { OrchestrationThinkingLevel } from "../src/core/orchestration/contracts.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
@@ -132,7 +133,11 @@ describe("provider-neutral model contract matrix", () => {
 
 			const profile = createTestWorkerOrchestrationProfile({
 				profileId: `${entry.model.id}-worker`,
-				model,
+				model: {
+					provider: model.provider,
+					id: model.id,
+					maxTokens: Math.max(model.maxTokens, MIN_VIABLE_WORKER_TOKEN_BUDGET),
+				},
 				thinkingLevel: entry.profileThinking,
 			});
 			const harness = await createHarness({

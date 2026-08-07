@@ -8,6 +8,7 @@ import {
 	isPathWithinEnvelope,
 	wrapToolWithEnvelopeScope,
 } from "../src/core/autonomy/envelope-enforcement.ts";
+import { createDirectoryLink, FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
 
 const envelope = (overrides: Partial<CapabilityEnvelope>): CapabilityEnvelope => ({
 	id: "env-1",
@@ -47,44 +48,50 @@ describe("envelope path scope", () => {
 			rmSync(base, { recursive: true, force: true });
 		});
 
-		it("denies a target whose parent segment is a symlink escaping the allowed root", () => {
-			symlinkSync(join(base, "outside"), join(base, "allowed", "link"));
+		it("denies a target whose parent segment is a directory link escaping the allowed root", () => {
+			createDirectoryLink(join(base, "outside"), join(base, "allowed", "link"));
 			const scoped = envelope({ allowedPaths: ["allowed"] });
 			expect(isPathWithinEnvelope(scoped, "allowed/link/escape.txt", base)).toBe(false);
 			expect(isPathWithinEnvelope(scoped, "allowed/real.txt", base)).toBe(true);
 		});
 
-		it("denies writing through a symlinked file that targets outside the allowed root", () => {
-			writeFileSync(join(base, "outside", "target.txt"), "sensitive", "utf-8");
-			symlinkSync(join(base, "outside", "target.txt"), join(base, "allowed", "evil.txt"));
-			const scoped = envelope({ allowedPaths: ["allowed"] });
-			expect(isPathWithinEnvelope(scoped, "allowed/evil.txt", base)).toBe(false);
-		});
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+			"denies writing through a symlinked file that targets outside the allowed root",
+			() => {
+				writeFileSync(join(base, "outside", "target.txt"), "sensitive", "utf-8");
+				symlinkSync(join(base, "outside", "target.txt"), join(base, "allowed", "evil.txt"));
+				const scoped = envelope({ allowedPaths: ["allowed"] });
+				expect(isPathWithinEnvelope(scoped, "allowed/evil.txt", base)).toBe(false);
+			},
+		);
 
-		it("deny wins through a symlink into a denied subtree", () => {
+		it("deny wins through a directory link into a denied subtree", () => {
 			mkdirSync(join(base, "allowed", "secret"));
-			symlinkSync(join(base, "allowed", "secret"), join(base, "allowed", "shortcut"));
+			createDirectoryLink(join(base, "allowed", "secret"), join(base, "allowed", "shortcut"));
 			const scoped = envelope({ allowedPaths: ["allowed"], deniedPaths: ["allowed/secret"] });
 			expect(isPathWithinEnvelope(scoped, "allowed/shortcut/key.pem", base)).toBe(false);
 		});
 
-		it("still allows targets under an allowed root that is itself a symlink", () => {
-			symlinkSync(join(base, "allowed"), join(base, "alias"));
+		it("still allows targets under an allowed root that is itself a directory link", () => {
+			createDirectoryLink(join(base, "allowed"), join(base, "alias"));
 			const scoped = envelope({ allowedPaths: ["alias"] });
 			expect(isPathWithinEnvelope(scoped, "alias/file.txt", base)).toBe(true);
 			expect(isPathWithinEnvelope(scoped, join(base, "allowed", "file.txt"), base)).toBe(true);
 		});
 
-		it("denies a DANGLING symlink inside the allowed root whose target lives outside it (escape repro)", () => {
-			// evil.txt is a symlink INSIDE the allowed root pointing at a file that does not exist
-			// yet OUTSIDE the allowed root. existsSync follows symlinks, so for a dangling link it
-			// reports false — a resolver that treats "false" as "literal non-existent path" would
-			// approve this as a plain in-scope file, even though the write itself (writeFileSync)
-			// follows the link and creates the file outside the sandbox.
-			symlinkSync(join(base, "outside", "secret.txt"), join(base, "allowed", "evil.txt"));
-			const scoped = envelope({ allowedPaths: ["allowed"] });
-			expect(isPathWithinEnvelope(scoped, "allowed/evil.txt", base)).toBe(false);
-		});
+		it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
+			"denies a DANGLING symlink inside the allowed root whose target lives outside it (escape repro)",
+			() => {
+				// evil.txt is a symlink INSIDE the allowed root pointing at a file that does not exist
+				// yet OUTSIDE the allowed root. existsSync follows symlinks, so for a dangling link it
+				// reports false — a resolver that treats "false" as "literal non-existent path" would
+				// approve this as a plain in-scope file, even though the write itself (writeFileSync)
+				// follows the link and creates the file outside the sandbox.
+				symlinkSync(join(base, "outside", "secret.txt"), join(base, "allowed", "evil.txt"));
+				const scoped = envelope({ allowedPaths: ["allowed"] });
+				expect(isPathWithinEnvelope(scoped, "allowed/evil.txt", base)).toBe(false);
+			},
+		);
 	});
 
 	it("extracts every conventional path argument shape", () => {

@@ -692,7 +692,7 @@ describe("WorkerRecoveryCoordinator", () => {
 		const legacyMetadata = JSON.parse(readFileSync(metadataFile, "utf-8")) as Record<string, unknown>;
 		delete legacyMetadata.usageAccountingVersion;
 		writeFileSync(metadataFile, `${JSON.stringify(legacyMetadata)}\n`);
-		const legacyConversation = store.open({ agentDir, resumeContext });
+		const legacyConversation = new WorkerConversationStore().open({ agentDir, resumeContext });
 		const rawTranscript = vi.spyOn(legacyConversation, "getRawTranscript");
 
 		const usage = coordinator(new WorkerLifecycle({ agentDir, sessionId: "session-recovery-usage" })).initialUsage(

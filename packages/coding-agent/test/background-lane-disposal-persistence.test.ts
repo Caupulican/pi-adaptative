@@ -35,6 +35,7 @@ function makeTrackedSessionManager(): {
 	let appendCount = 0;
 	const sessionManager = {
 		getEntries: () => entries,
+		buildSessionContext: () => ({ messages: [] }),
 		appendCustomEntry: (customType: string, data: unknown) => {
 			appendCount++;
 			const id = `entry-${appendCount}`;

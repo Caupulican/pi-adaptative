@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import {
 	type WorkerWriteReservationLease,
 	WorkerWriteReservationStore,
 } from "../src/core/delegation/worker-write-reservation.ts";
+import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 
 describe("WorkerWriteReservationStore", () => {
 	const tempDirs: string[] = [];
@@ -118,7 +119,7 @@ describe("WorkerWriteReservationStore", () => {
 		const paths = fixture();
 		const store = new WorkerWriteReservationStore({ agentDir: paths.agentDir });
 		const sourceAlias = join(paths.workspace, "source-alias");
-		symlinkSync(paths.source, sourceAlias, "dir");
+		createDirectoryLink(paths.source, sourceAlias);
 		const oldLease = grantedLease(store.acquire(request(paths, { writeScopes: [sourceAlias] })));
 		expect(store.release(oldLease)).toMatchObject({ kind: "released" });
 		const newLease = grantedLease(

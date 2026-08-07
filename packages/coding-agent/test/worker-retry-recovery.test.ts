@@ -592,5 +592,5 @@ describe("durable worker retry recovery", () => {
 		expect(queued.size).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - 1);
 		expect(queued.has(retainedLaneId)).toBe(true);
 		coordinator.dispose();
-	});
+	}, 90_000);
 });
