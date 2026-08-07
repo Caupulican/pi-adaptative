@@ -1,11 +1,21 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	truncateSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createDeterministicCompaction } from "@caupulican/pi-agent-core/node";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AssistantMessage, Message } from "@caupulican/pi-ai";
+import type { AssistantMessage, Message, UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { workerConversationSessionsDir } from "../src/core/agent-paths.ts";
+import { WorkerContextForkStore } from "../src/core/delegation/worker-context-fork-store.ts";
 import {
 	MAX_WORKER_TRANSCRIPT_PAGE_BYTES,
 	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
@@ -13,7 +23,7 @@ import {
 	WorkerConversationStore,
 } from "../src/core/delegation/worker-conversation-store.ts";
 
-function userMessage(text: string): Message {
+function userMessage(text: string): UserMessage {
 	return { role: "user", content: text, timestamp: 1 };
 }
 
@@ -35,6 +45,12 @@ function assistantMessage(text: string): AssistantMessage {
 		stopReason: "stop",
 		timestamp: 2,
 	};
+}
+
+function commitNewMessages(conversation: WorkerConversation, completeTranscript: readonly Message[]): number {
+	const persistedMessages = conversation.getRawTranscript().length;
+	const cursor = conversation.captureTranscriptCommitCursor();
+	return conversation.commitTranscript(cursor, completeTranscript.slice(persistedMessages));
 }
 
 describe("WorkerConversationStore", () => {
@@ -64,6 +80,13 @@ describe("WorkerConversationStore", () => {
 				},
 			],
 		};
+	}
+
+	function captureBirthContext(options: ReturnType<typeof createOptions>, parentSessionId = options.parentSessionId) {
+		return new WorkerContextForkStore({ agentDir: options.agentDir, parentSessionId }).capture({
+			logicalAgentId: options.logicalAgentId,
+			messages: [userMessage("immutable parent context")],
+		});
 	}
 
 	it("creates a durable canonical SessionManager transcript and resume context without writing the project cwd", () => {
@@ -110,13 +133,224 @@ describe("WorkerConversationStore", () => {
 		const created = store.create(options);
 		const transcript = [userMessage("inspect the repository"), assistantMessage("inspection complete")];
 
-		expect(created.commitTranscript(transcript)).toBe(2);
-		expect(created.commitTranscript(transcript)).toBe(0);
+		expect(commitNewMessages(created, transcript)).toBe(2);
+		expect(commitNewMessages(created, transcript)).toBe(0);
 
 		const reopened = store.open({ agentDir: options.agentDir, resumeContext: created.getResumeContext() });
 		expect(reopened.getProviderContext().messages).toEqual(transcript);
-		expect(reopened.commitTranscript([...transcript, userMessage("continue")])).toBe(1);
+		expect(commitNewMessages(reopened, [...transcript, userMessage("continue")])).toBe(1);
 		expect(reopened.getProviderContext().messages).toEqual([...transcript, userMessage("continue")]);
+	});
+
+	it("reuses one warm canonical session across repeated opens and transcript commits", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const created = store.create(options);
+		const resumeContext = created.getResumeContext();
+		const openSession = vi.spyOn(SessionManager, "open");
+		const visitEntries = vi.spyOn(SessionManager.prototype, "visitEntries");
+
+		try {
+			for (let index = 0; index < 32; index++) {
+				const conversation = store.open({
+					agentDir: options.agentDir,
+					resumeContext: { ...resumeContext, latestCheckpointId: `checkpoint-${index}` },
+				});
+				const cursor = conversation.captureTranscriptCommitCursor();
+				const next = userMessage(`turn ${index}`);
+				conversation.appendMessage(next);
+				expect(conversation.commitTranscript(cursor, [next])).toBe(0);
+				expect(conversation.getResumeContext().latestCheckpointId).toBe(`checkpoint-${index}`);
+			}
+
+			expect(openSession).not.toHaveBeenCalled();
+			expect(visitEntries.mock.calls.reduce((total, [, count]) => total + count, 0)).toBeLessThanOrEqual(64);
+		} finally {
+			openSession.mockRestore();
+			visitEntries.mockRestore();
+		}
+	});
+
+	it("revalidates a cached birth prefix only when its durable metadata revision changes", () => {
+		const options = createOptions();
+		const reference = captureBirthContext(options);
+		const store = new WorkerConversationStore();
+		const openBirthContext = vi.spyOn(WorkerContextForkStore.prototype, "open");
+		try {
+			const conversation = store.ensure({ ...options, birthContextForkReference: reference });
+			const resumeContext = conversation.getResumeContext();
+			const initialValidations = openBirthContext.mock.calls.length;
+
+			for (let index = 0; index < 8; index++) {
+				store.open({ agentDir: options.agentDir, resumeContext });
+			}
+			expect(openBirthContext).toHaveBeenCalledTimes(initialValidations);
+
+			const metadataFile = `${resumeContext.sessionFile}.worker.json`;
+			const exactMetadata = readFileSync(metadataFile);
+			const before = statSync(metadataFile);
+			writeFileSync(metadataFile, exactMetadata);
+			utimesSync(metadataFile, before.atime, new Date(before.mtimeMs + 5_000));
+			store.open({ agentDir: options.agentDir, resumeContext });
+
+			expect(openBirthContext).toHaveBeenCalledTimes(initialValidations + 1);
+		} finally {
+			openBirthContext.mockRestore();
+		}
+	});
+
+	it("rejects an idle cached metadata swap to another valid parent birth snapshot", () => {
+		const options = createOptions();
+		const reference = captureBirthContext(options);
+		const store = new WorkerConversationStore();
+		const conversation = store.ensure({ ...options, birthContextForkReference: reference });
+		const resumeContext = conversation.getResumeContext();
+		const metadataFile = `${resumeContext.sessionFile}.worker.json`;
+		const alternateParentSessionId = "alternate-parent-session";
+		const alternateReference = captureBirthContext(options, alternateParentSessionId);
+		const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Record<string, unknown>;
+		writeFileSync(
+			metadataFile,
+			`${JSON.stringify({
+				...metadata,
+				parentSessionId: alternateParentSessionId,
+				birthContextForkReference: alternateReference,
+			})}\n`,
+		);
+
+		expect(() => store.open({ agentDir: options.agentDir, resumeContext })).toThrow(
+			/parent session identity conflicts/i,
+		);
+	});
+
+	it("rejects removal of an idle cached birth-context identity", () => {
+		const options = createOptions();
+		const reference = captureBirthContext(options);
+		const store = new WorkerConversationStore();
+		const conversation = store.ensure({ ...options, birthContextForkReference: reference });
+		const resumeContext = conversation.getResumeContext();
+		const metadataFile = `${resumeContext.sessionFile}.worker.json`;
+		const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Record<string, unknown>;
+		delete metadata.parentSessionId;
+		delete metadata.birthContextForkReference;
+		writeFileSync(metadataFile, `${JSON.stringify(metadata)}\n`);
+
+		expect(() => store.open({ agentDir: options.agentDir, resumeContext })).toThrow(
+			/parent session identity conflicts/i,
+		);
+	});
+
+	it("rejects an idle cached usage-accounting version downgrade", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const conversation = store.create(options);
+		const resumeContext = conversation.getResumeContext();
+		const metadataFile = `${resumeContext.sessionFile}.worker.json`;
+		const metadata = JSON.parse(readFileSync(metadataFile, "utf8")) as Record<string, unknown>;
+		delete metadata.usageAccountingVersion;
+		writeFileSync(metadataFile, `${JSON.stringify(metadata)}\n`);
+
+		expect(() => store.open({ agentDir: options.agentDir, resumeContext })).toThrow(
+			/usage accounting version cannot be downgraded/i,
+		);
+	});
+
+	it("projects a first birth-context binding through every live shared-core view", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const created = store.create(options);
+		const peer = store.open({ agentDir: options.agentDir, resumeContext: created.getResumeContext() });
+		const reference = captureBirthContext(options);
+
+		const bound = store.ensure({ ...options, birthContextForkReference: reference });
+
+		for (const conversation of [created, peer, bound]) {
+			expect(conversation.getBirthContextForkReference()).toEqual(reference);
+			expect(conversation.getProviderMessages()).toEqual([userMessage("immutable parent context")]);
+		}
+		created.appendMessage(userMessage("continued through the original view"));
+		expect(bound.getProviderMessages()).toEqual([
+			userMessage("immutable parent context"),
+			userMessage("continued through the original view"),
+		]);
+	});
+
+	it("atomically binds provider history to the raw cursor that fences its next suffix", () => {
+		const conversation = new WorkerConversationStore().create(createOptions());
+		conversation.appendMessage(userMessage("captured history"));
+		const transcriptCommit = conversation.beginTranscriptCommit();
+		conversation.appendMessage(userMessage("racing control"));
+
+		expect(transcriptCommit.history).toEqual([userMessage("captured history")]);
+		try {
+			expect(() =>
+				conversation.commitTranscript(transcriptCommit.cursor, [assistantMessage("provider suffix")], {
+					appendMissing: false,
+				}),
+			).toThrow(/suffix diverges/i);
+		} finally {
+			conversation.abortTranscriptCommit(transcriptCommit.cursor);
+		}
+	});
+
+	it("rejects a same-size durable prefix rewrite before appending a transcript suffix", () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		const transcript = [userMessage("first")];
+		commitNewMessages(conversation, transcript);
+		const cursor = conversation.captureTranscriptCommitCursor();
+		const sessionFile = conversation.getResumeContext().sessionFile!;
+		const before = statSync(sessionFile);
+		const rewritten = readFileSync(sessionFile, "utf8").replace('"content":"first"', '"content":"other"');
+		expect(Buffer.byteLength(rewritten)).toBe(before.size);
+		writeFileSync(sessionFile, rewritten);
+		utimesSync(sessionFile, before.atime, before.mtime);
+
+		expect(() => conversation.commitTranscript(cursor, [userMessage("suffix")])).toThrow(
+			/ownership|changed|diverge/i,
+		);
+		expect(readFileSync(sessionFile, "utf8")).not.toContain('"content":"suffix"');
+	});
+
+	it("rejects when the raw bytes written by an owned append disagree with its in-memory entry", () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		const sessionFile = conversation.getResumeContext().sessionFile!;
+		const originalAppendMessage = SessionManager.prototype.appendMessage;
+		const appendMessage = vi.spyOn(SessionManager.prototype, "appendMessage").mockImplementation(function (
+			this: SessionManager,
+			message,
+		) {
+			const entryId = originalAppendMessage.call(this, message);
+			const rewritten = readFileSync(sessionFile, "utf8").replace(
+				'"content":"owned append"',
+				'"content":"rogue append"',
+			);
+			writeFileSync(sessionFile, rewritten);
+			return entryId;
+		});
+
+		try {
+			expect(() => conversation.appendMessage(userMessage("owned append"))).toThrow(
+				"Worker conversation changed during its owned append.",
+			);
+		} finally {
+			appendMessage.mockRestore();
+		}
+		expect(readFileSync(sessionFile, "utf8")).toContain('"content":"rogue append"');
+		expect(readFileSync(sessionFile, "utf8")).not.toContain('"content":"owned append"');
+	});
+
+	it("rejects a truncated final entry without repairing or appending to the damaged file", () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		conversation.appendMessage(userMessage("durable message"));
+		const sessionFile = conversation.getResumeContext().sessionFile!;
+		truncateSync(sessionFile, statSync(sessionFile).size - 1);
+		const damaged = readFileSync(sessionFile);
+
+		expect(() => conversation.appendMessage(userMessage("must not append"))).toThrow(/partial entry/i);
+		expect(readFileSync(sessionFile)).toEqual(damaged);
 	});
 
 	it("compares completed transcripts using the exact JSON storage shape without accepting content drift", () => {
@@ -124,24 +358,23 @@ describe("WorkerConversationStore", () => {
 		const store = new WorkerConversationStore();
 		const conversation = store.create(options);
 		conversation.ensureAttemptUserPrompt("attempt-json-shape", "inspect the durable transcript");
-		const history = conversation.getProviderMessages();
 		const completion = {
 			...assistantMessage("durable completion"),
 			errorMessage: undefined,
 			responseId: undefined,
 		};
+		const cursor = conversation.captureTranscriptCommitCursor();
 		conversation.appendMessage(completion);
 
-		expect(conversation.commitTranscript([...history, completion])).toBe(0);
+		expect(conversation.commitTranscript(cursor, [completion])).toBe(0);
 		const reopened = store.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() });
-		expect(reopened.commitTranscript([...history, completion])).toBe(0);
+		expect(conversation.commitTranscript(cursor, [completion])).toBe(0);
 		expect(Object.hasOwn(reopened.getRawTranscript().at(-1)!, "errorMessage")).toBe(false);
 		expect(() =>
-			reopened.commitTranscript([
-				...history,
+			conversation.commitTranscript(cursor, [
 				{ ...completion, content: [{ type: "text", text: "different completion" }] },
 			]),
-		).toThrow("diverges from persisted context");
+		).toThrow(/conflicts with its committed suffix/i);
 		expect(reopened.getRawTranscript().at(-1)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "text", text: "durable completion" }],
@@ -153,7 +386,6 @@ describe("WorkerConversationStore", () => {
 		const store = new WorkerConversationStore();
 		const conversation = store.create(options);
 		conversation.ensureAttemptUserPrompt("attempt-large-details", "run the bounded tool");
-		const history = conversation.getProviderMessages();
 		const toolResult: Message = {
 			role: "toolResult",
 			toolCallId: "tool-large-details",
@@ -163,11 +395,12 @@ describe("WorkerConversationStore", () => {
 			isError: false,
 			timestamp: 3,
 		};
+		const cursor = conversation.captureTranscriptCommitCursor();
 		conversation.appendMessage(toolResult);
 
-		expect(conversation.commitTranscript([...history, toolResult])).toBe(0);
+		expect(conversation.commitTranscript(cursor, [toolResult])).toBe(0);
 		const reopened = store.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() });
-		expect(reopened.commitTranscript([...history, toolResult])).toBe(0);
+		expect(conversation.commitTranscript(cursor, [toolResult])).toBe(0);
 		expect(reopened.getRawTranscript().at(-1)).toMatchObject({
 			role: "toolResult",
 			content: [{ type: "text", text: "model-visible result remains exact" }],
@@ -177,11 +410,10 @@ describe("WorkerConversationStore", () => {
 			},
 		});
 		expect(() =>
-			reopened.commitTranscript([
-				...history,
+			conversation.commitTranscript(cursor, [
 				{ ...toolResult, content: [{ type: "text", text: "changed model-visible result" }] },
 			]),
-		).toThrow("diverges from persisted context");
+		).toThrow(/conflicts with its committed suffix/i);
 	});
 
 	it("bounds and projects durable failure diagnostics consistently across commit and reopen", () => {
@@ -207,10 +439,11 @@ describe("WorkerConversationStore", () => {
 		};
 		const transcript: Message[] = [userMessage("run provider request"), failure];
 
-		expect(created.commitTranscript(transcript)).toBe(2);
-		expect(created.commitTranscript(transcript)).toBe(0);
+		const cursor = created.captureTranscriptCommitCursor();
+		expect(created.commitTranscript(cursor, transcript)).toBe(2);
+		expect(created.commitTranscript(cursor, transcript)).toBe(0);
 		const reopened = store.open({ agentDir: options.agentDir, resumeContext: created.getResumeContext() });
-		expect(reopened.commitTranscript(transcript)).toBe(0);
+		expect(commitNewMessages(reopened, transcript)).toBe(0);
 
 		const persisted = reopened
 			.getRawTranscript()
@@ -278,6 +511,33 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getChangedFiles("attempt-1")).toEqual(["src/first.ts", "src/second.ts"]);
 		expect(reopened.getChangedFiles("attempt-2")).toEqual(["src/later.ts"]);
 		expect(reopened.getProviderContext().messages).toEqual([userMessage("modify the focused files")]);
+	});
+
+	it("scans changed-file progress only inside its versioned attempt boundary", () => {
+		const manager = SessionManager.inMemory("/repo");
+		for (let index = 0; index < 2_048; index++) {
+			manager.appendMessage(userMessage(`prior persistent-worker turn ${index}`));
+		}
+		const conversation = new WorkerConversation(manager, {
+			provider: "pi",
+			sessionId: manager.getSessionId(),
+			cwd: "/repo",
+			resourceProfileNames: [],
+			contextPointers: [],
+		});
+		conversation.beginAttemptUsage("attempt-current");
+		conversation.recordChangedFile("attempt-current", "src/current.ts");
+		conversation.beginAttemptUsage("attempt-next");
+		conversation.recordChangedFile("attempt-next", "src/next.ts");
+		const visits = vi.spyOn(manager, "visitEntries");
+
+		expect(conversation.getChangedFiles("attempt-current")).toEqual(["src/current.ts"]);
+		expect(visits.mock.calls.every(([startIndex]) => startIndex >= 2_049)).toBe(true);
+		expect(visits.mock.calls.reduce((total, [, count]) => total + count, 0)).toBeLessThanOrEqual(2);
+
+		visits.mockClear();
+		expect(conversation.getChangedFiles("attempt-missing")).toEqual([]);
+		expect(visits).not.toHaveBeenCalled();
 	});
 
 	it("recovers usage only from the current durable attempt boundary", () => {
@@ -369,7 +629,10 @@ describe("WorkerConversationStore", () => {
 		const conversation = store.create(options);
 		conversation.beginAttemptUsage("attempt-original-owner");
 
-		const externalOwner = store.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() });
+		const externalOwner = new WorkerConversationStore().open({
+			agentDir: options.agentDir,
+			resumeContext: conversation.getResumeContext(),
+		});
 		externalOwner.beginAttemptUsage("attempt-external-owner");
 		externalOwner.appendMessage({
 			...assistantMessage("external owner result"),
@@ -427,8 +690,11 @@ describe("WorkerConversationStore", () => {
 		const legacyMetadata = JSON.parse(readFileSync(metadataFile, "utf-8")) as Record<string, unknown>;
 		delete legacyMetadata.usageAccountingVersion;
 		writeFileSync(metadataFile, `${JSON.stringify(legacyMetadata)}\n`);
-		const legacy = store.open({ agentDir: options.agentDir, resumeContext });
+		const legacyStore = new WorkerConversationStore();
+		const legacy = legacyStore.open({ agentDir: options.agentDir, resumeContext });
+		const legacyPeer = legacyStore.open({ agentDir: options.agentDir, resumeContext });
 		expect(legacy.usesAttemptUsageBoundaries()).toBe(false);
+		expect(legacyPeer.usesAttemptUsageBoundaries()).toBe(false);
 		expect(legacy.getRawTranscriptUsage("attempt-never-versioned")).toMatchObject({
 			inputTokens: 9,
 			outputTokens: 3,
@@ -437,7 +703,8 @@ describe("WorkerConversationStore", () => {
 		});
 
 		legacy.enableAttemptUsageBoundaries();
-		const upgraded = store.open({ agentDir: options.agentDir, resumeContext });
+		expect(legacyPeer.usesAttemptUsageBoundaries()).toBe(true);
+		const upgraded = legacyStore.open({ agentDir: options.agentDir, resumeContext });
 		expect(upgraded.usesAttemptUsageBoundaries()).toBe(true);
 		expect(upgraded.getRawTranscriptUsage("attempt-prepared-after-upgrade")).toMatchObject({ totalTokens: 0 });
 	});
@@ -445,10 +712,11 @@ describe("WorkerConversationStore", () => {
 	it("refuses divergent complete transcripts rather than duplicating or branching context", () => {
 		const options = createOptions();
 		const conversation = new WorkerConversationStore().create(options);
-		conversation.commitTranscript([userMessage("first")]);
+		const cursor = conversation.captureTranscriptCommitCursor();
+		conversation.commitTranscript(cursor, [userMessage("first")]);
 
-		expect(() => conversation.commitTranscript([userMessage("changed"), assistantMessage("reply")])).toThrow(
-			"diverges from persisted context",
+		expect(() => conversation.commitTranscript(cursor, [userMessage("changed"), assistantMessage("reply")])).toThrow(
+			/conflicts with its committed suffix/i,
 		);
 		expect(conversation.getProviderContext().messages).toEqual([userMessage("first")]);
 	});
@@ -575,8 +843,9 @@ describe("WorkerConversationStore", () => {
 		}
 		await conversation.compactProviderContext({ maxContextTokens: 1_000, keepRecentTokens: 300 });
 		const suffix = assistantMessage("continued after compaction");
+		const cursor = conversation.captureTranscriptCommitCursor();
 
-		expect(conversation.commitTranscript([...raw, suffix])).toBe(1);
+		expect(conversation.commitTranscript(cursor, [suffix])).toBe(1);
 		expect(conversation.getRawTranscript()).toEqual([...raw, suffix]);
 		expect(conversation.getProviderContext().messages.at(-1)).toEqual(suffix);
 	});
@@ -611,8 +880,8 @@ describe("WorkerConversationStore", () => {
 		const store = new WorkerConversationStore();
 		const created = store.create(options);
 		const resumeContext = created.getResumeContext();
-		const firstStaleOwner = store.open({ agentDir: options.agentDir, resumeContext });
-		const secondStaleOwner = store.open({ agentDir: options.agentDir, resumeContext });
+		const firstStaleOwner = new WorkerConversationStore().open({ agentDir: options.agentDir, resumeContext });
+		const secondStaleOwner = new WorkerConversationStore().open({ agentDir: options.agentDir, resumeContext });
 		const expectation = {
 			messageId: "worker-message-race",
 			content: "[Worker control worker-message-race]\nDeliver exactly once.",
@@ -639,6 +908,23 @@ describe("WorkerConversationStore", () => {
 		expect(() =>
 			reopened.reconcileWorkerControlMessage(conflicting, userMessage(conflicting.content), false),
 		).toThrow(/identity conflicts with existing content/i);
+	});
+
+	it("rejects an ordinary stale owner before it appends across independent stores", () => {
+		const options = createOptions();
+		const firstStore = new WorkerConversationStore();
+		const firstOwner = firstStore.create(options);
+		const resumeContext = firstOwner.getResumeContext();
+		const staleOwner = new WorkerConversationStore().open({ agentDir: options.agentDir, resumeContext });
+		const staleCursor = staleOwner.captureTranscriptCommitCursor();
+		firstOwner.appendMessage(userMessage("new canonical owner message"));
+
+		expect(() => staleOwner.commitTranscript(staleCursor, [userMessage("stale owner message")])).toThrow(
+			/advanced under a different owner/i,
+		);
+		expect(
+			new WorkerConversationStore().open({ agentDir: options.agentDir, resumeContext }).getRawTranscript(),
+		).toEqual([userMessage("new canonical owner message")]);
 	});
 
 	it("fails closed when a worker-control id is already duplicated in the durable transcript", () => {
@@ -721,13 +1007,14 @@ describe("WorkerConversationStore", () => {
 		const options = createOptions();
 		const store = new WorkerConversationStore();
 		const conversation = store.create(options);
-		conversation.appendMessage(userMessage("x".repeat(MAX_WORKER_TRANSCRIPT_PAGE_BYTES + 1)));
+		conversation.appendMessage(userMessage("x".repeat(68 * 1024)));
 		conversation.appendMessage(userMessage("small durable suffix"));
+		const openSession = vi.spyOn(SessionManager, "open");
 		const reopened = store.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() });
 		const fullEntries = vi.spyOn(SessionManager.prototype, "getEntries");
 
 		try {
-			const first = reopened.getRawTranscriptPage({ cursor: 0, maxMessages: 1 });
+			const first = reopened.getRawTranscriptPage({ cursor: 0, maxMessages: 1, maxBytes: 64 * 1024 });
 			expect(first).toMatchObject({
 				cursor: 0,
 				messages: [],
@@ -743,8 +1030,10 @@ describe("WorkerConversationStore", () => {
 			});
 			expect(second.nextCursor).toBeUndefined();
 			expect(second.serializedBytes).toBeLessThanOrEqual(MAX_WORKER_TRANSCRIPT_PAGE_BYTES);
+			expect(openSession).not.toHaveBeenCalled();
 			expect(fullEntries).not.toHaveBeenCalled();
 		} finally {
+			openSession.mockRestore();
 			fullEntries.mockRestore();
 		}
 	});
@@ -822,6 +1111,27 @@ describe("WorkerConversationStore", () => {
 				.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() })
 				.getRawTranscriptUsage(),
 		).toMatchObject({ inputTokens: 7, outputTokens: 2, totalTokens: 9, costUsd: 0.01 });
+	});
+
+	it("rejects a compaction checkpoint when the transcript advances during summary generation", async () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		for (let index = 0; index < 18; index++) {
+			conversation.appendMessage(userMessage(`turn-${index}: ${"context ".repeat(80)}`));
+		}
+
+		await expect(
+			conversation.compactProviderContext({
+				maxContextTokens: 1_000,
+				keepRecentTokens: 300,
+				generateVerifiedCompaction: async (preparation) => {
+					conversation.appendMessage(userMessage("racing durable append"));
+					return createDeterministicCompaction(preparation);
+				},
+			}),
+		).rejects.toThrow(/changed while its compaction checkpoint/i);
+		expect(conversation.hasProviderCompaction()).toBe(false);
+		expect(conversation.getRawTranscript().at(-1)).toEqual(userMessage("racing durable append"));
 	});
 
 	it("does not append a deterministic fallback after worker ownership is aborted", async () => {

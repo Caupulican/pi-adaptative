@@ -35,6 +35,15 @@ import {
 	MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS,
 } from "./worker-claim.ts";
 import { type WorkerContextForkSnapshot, WorkerContextForkStore } from "./worker-context-fork-store.ts";
+import {
+	advanceWorkerSessionHeadAfterOwnedAppend,
+	readWorkerConversationFileRevision,
+	sameWorkerConversationFileRevision,
+	scanWorkerSessionFile,
+	type WorkerConversationFileRevision,
+	WorkerConversationOwnershipError,
+	type WorkerSessionFileHead,
+} from "./worker-conversation-revision.ts";
 
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
@@ -136,6 +145,52 @@ interface WorkerConversationMetadata {
 	usageAccountingVersion?: 1;
 }
 
+interface WorkerConversationMetadataState {
+	logicalAgentId: string;
+	parentSessionId?: string;
+	birthContextForkReference?: WorkerContextForkReference;
+	usageAccountingVersion?: 1;
+}
+
+interface WorkerConversationMetadataBinding extends WorkerConversationMetadataState {
+	file: string;
+	agentDir: string;
+}
+
+interface WorkerConversationCore {
+	sessionManager: SessionManager;
+	head?: WorkerSessionFileHead;
+	metadataRevision?: WorkerConversationFileRevision;
+	metadataState?: WorkerConversationMetadataState;
+	invalid: boolean;
+	generation: number;
+	activeTranscriptCursors: number;
+}
+
+export interface WorkerTranscriptCommitCursor {
+	readonly kind: "worker-transcript-suffix-v1";
+}
+
+interface WorkerTranscriptCommitCursorState {
+	core: WorkerConversationCore;
+	entryIndex: number;
+	generation: number;
+	status: "active" | "committed" | "aborted";
+	committedSuffix?: Message[];
+}
+
+const workerTranscriptCommitCursorStates = new WeakMap<
+	WorkerTranscriptCommitCursor,
+	WorkerTranscriptCommitCursorState
+>();
+
+interface CachedWorkerConversationCore {
+	core: WorkerConversationCore;
+	resumeContext: AgentResumeContext;
+	metadataFile: string;
+	agentDir: string;
+}
+
 type WorkerSessionEntry = ReturnType<SessionManager["getEntries"]>[number];
 type WorkerSessionMessage = Extract<WorkerSessionEntry, { type: "message" }>["message"];
 
@@ -157,6 +212,50 @@ function visitWorkerSessionEntries(
 	let cursor = startIndex;
 	while (cursor < endIndex) {
 		cursor = sessionManager.visitEntries(cursor, Math.min(MAX_SESSION_ENTRY_VISIT_COUNT, endIndex - cursor), visitor);
+	}
+}
+
+function assertLinearWorkerSession(sessionManager: SessionManager): void {
+	const ids = new Set<string>();
+	let previousId: string | null = null;
+	visitWorkerSessionEntries(sessionManager, 0, sessionManager.getEntryCount(), (entry) => {
+		if (
+			typeof entry.id !== "string" ||
+			!entry.id ||
+			entry.id.length > 128 ||
+			ids.has(entry.id) ||
+			entry.parentId !== previousId
+		) {
+			throw new WorkerConversationOwnershipError("Worker conversation entries are not one linear chain.");
+		}
+		ids.add(entry.id);
+		previousId = entry.id;
+	});
+}
+
+function assertWorkerConversationOpenRevision(
+	file: string,
+	expectedRevision: WorkerConversationFileRevision,
+	errorMessage: string,
+): void {
+	if (!sameWorkerConversationFileRevision(expectedRevision, readWorkerConversationFileRevision(file))) {
+		throw new WorkerConversationOwnershipError(errorMessage);
+	}
+}
+
+function assertWorkerSessionHeadContent(
+	expected: WorkerSessionFileHead,
+	actual: WorkerSessionFileHead,
+	errorMessage: string,
+): void {
+	if (
+		expected.revision.dev !== actual.revision.dev ||
+		expected.revision.ino !== actual.revision.ino ||
+		expected.headerDigest !== actual.headerDigest ||
+		expected.entryDigest !== actual.entryDigest ||
+		expected.entryCount !== actual.entryCount
+	) {
+		throw new WorkerConversationOwnershipError(errorMessage);
 	}
 }
 
@@ -361,16 +460,21 @@ function expectedResumeContext(options: CreateWorkerConversationOptions): AgentR
 	};
 }
 
-function metadataFromFile(metadataFile: string): WorkerConversationMetadata {
+interface WorkerConversationMetadataRead {
+	metadata: WorkerConversationMetadata;
+	content: string;
+}
+
+function readWorkerConversationMetadata(metadataFile: string): WorkerConversationMetadataRead {
+	let content: string;
 	let metadata: unknown;
 	try {
-		metadata = JSON.parse(
-			readBoundedTextFileSync(
-				metadataFile,
-				MAX_WORKER_CONVERSATION_METADATA_BYTES,
-				"Worker conversation metadata durable size bound",
-			),
+		content = readBoundedTextFileSync(
+			metadataFile,
+			MAX_WORKER_CONVERSATION_METADATA_BYTES,
+			"Worker conversation metadata durable size bound",
 		);
+		metadata = JSON.parse(content);
 	} catch {
 		throw new Error(
 			existsSync(metadataFile)
@@ -407,24 +511,69 @@ function metadataFromFile(metadataFile: string): WorkerConversationMetadata {
 		throw new Error("Worker conversation metadata is invalid.");
 	}
 	return {
-		logicalAgentId,
-		...(typeof parentSessionId === "string" ? { parentSessionId } : {}),
-		resumeContext: cloneResumeContext(resumeContext as AgentResumeContext),
-		...(normalizedBirthContextForkReference
-			? { birthContextForkReference: normalizedBirthContextForkReference }
-			: {}),
-		...(usageAccountingVersion === 1 ? { usageAccountingVersion } : {}),
+		content,
+		metadata: {
+			logicalAgentId,
+			...(typeof parentSessionId === "string" ? { parentSessionId } : {}),
+			resumeContext: cloneResumeContext(resumeContext as AgentResumeContext),
+			...(normalizedBirthContextForkReference
+				? { birthContextForkReference: normalizedBirthContextForkReference }
+				: {}),
+			...(usageAccountingVersion === 1 ? { usageAccountingVersion } : {}),
+		},
 	};
 }
 
-function assertExactConversationMetadata(
-	metadataFile: string,
+function cloneWorkerConversationMetadataState(
+	metadata: WorkerConversationMetadataState,
+): WorkerConversationMetadataState {
+	return {
+		logicalAgentId: metadata.logicalAgentId,
+		...(metadata.parentSessionId ? { parentSessionId: metadata.parentSessionId } : {}),
+		...(metadata.birthContextForkReference
+			? { birthContextForkReference: structuredClone(metadata.birthContextForkReference) }
+			: {}),
+		...(metadata.usageAccountingVersion ? { usageAccountingVersion: metadata.usageAccountingVersion } : {}),
+	};
+}
+
+function bindWorkerConversationMetadata(
+	file: string,
+	agentDir: string,
+	state: WorkerConversationMetadataState,
+): WorkerConversationMetadataBinding {
+	return { file, agentDir, ...cloneWorkerConversationMetadataState(state) };
+}
+
+function assertCachedWorkerConversationMetadata(
+	previous: WorkerConversationMetadataState,
+	next: WorkerConversationMetadataState,
+): void {
+	if (next.logicalAgentId !== previous.logicalAgentId) {
+		throw new Error("Worker conversation logical agent identity conflicts with the persisted transcript.");
+	}
+	if (next.parentSessionId !== previous.parentSessionId) {
+		throw new Error("Worker conversation parent session identity conflicts with the persisted transcript.");
+	}
+	if (!isDeepStrictEqual(next.birthContextForkReference, previous.birthContextForkReference)) {
+		throw new Error("Worker conversation birth context reference conflicts with the persisted transcript.");
+	}
+	assertWorkerConversationUsageAccountingVersion(previous.usageAccountingVersion, next.usageAccountingVersion);
+}
+
+function assertWorkerConversationUsageAccountingVersion(previous: 1 | undefined, next: 1 | undefined): void {
+	if (previous === 1 && next !== 1) {
+		throw new Error("Worker conversation usage accounting version cannot be downgraded.");
+	}
+}
+
+function assertExactConversationMetadataValue(
+	metadata: WorkerConversationMetadata,
 	expected: AgentResumeContext,
 	logicalAgentId?: string,
 	parentSessionId?: string,
 	birthContextForkReference?: WorkerContextForkReference,
 ): WorkerConversationMetadata {
-	const metadata = metadataFromFile(metadataFile);
 	if (logicalAgentId && metadata.logicalAgentId !== logicalAgentId) {
 		throw new Error("Worker conversation logical agent identity conflicts with the persisted transcript.");
 	}
@@ -438,6 +587,83 @@ function assertExactConversationMetadata(
 		throw new Error("Worker conversation birth context reference conflicts with the persisted transcript.");
 	}
 	return metadata;
+}
+
+function assertExactConversationMetadata(
+	metadataFile: string,
+	expected: AgentResumeContext,
+	logicalAgentId?: string,
+	parentSessionId?: string,
+	birthContextForkReference?: WorkerContextForkReference,
+): WorkerConversationMetadata {
+	return assertExactConversationMetadataValue(
+		readWorkerConversationMetadata(metadataFile).metadata,
+		expected,
+		logicalAgentId,
+		parentSessionId,
+		birthContextForkReference,
+	);
+}
+
+function assertStableExactConversationMetadata(
+	metadataFile: string,
+	expected: AgentResumeContext,
+	logicalAgentId?: string,
+	parentSessionId?: string,
+	birthContextForkReference?: WorkerContextForkReference,
+): {
+	metadata: WorkerConversationMetadata;
+	revision: WorkerConversationFileRevision;
+	content: string;
+} {
+	const before = existsSync(metadataFile) ? readWorkerConversationFileRevision(metadataFile) : undefined;
+	const first = readWorkerConversationMetadata(metadataFile);
+	const between = readWorkerConversationFileRevision(metadataFile);
+	const second = readWorkerConversationMetadata(metadataFile);
+	const revision = readWorkerConversationFileRevision(metadataFile);
+	if (
+		!before ||
+		!sameWorkerConversationFileRevision(before, between) ||
+		!sameWorkerConversationFileRevision(between, revision) ||
+		first.content !== second.content
+	) {
+		throw new WorkerConversationOwnershipError("Worker conversation metadata changed while it was verified.");
+	}
+	const metadata = assertExactConversationMetadataValue(
+		first.metadata,
+		expected,
+		logicalAgentId,
+		parentSessionId,
+		birthContextForkReference,
+	);
+	return { metadata, revision, content: first.content };
+}
+
+function assertWorkerConversationMetadataContent(
+	metadataFile: string,
+	expectedRevision: WorkerConversationFileRevision,
+	expectedContent: string,
+	errorMessage: string,
+): void {
+	try {
+		const before = readWorkerConversationFileRevision(metadataFile);
+		const content = readBoundedTextFileSync(
+			metadataFile,
+			MAX_WORKER_CONVERSATION_METADATA_BYTES,
+			"Worker conversation metadata durable size bound",
+		);
+		const after = readWorkerConversationFileRevision(metadataFile);
+		if (
+			!sameWorkerConversationFileRevision(expectedRevision, before) ||
+			!sameWorkerConversationFileRevision(before, after) ||
+			content !== expectedContent
+		) {
+			throw new WorkerConversationOwnershipError(errorMessage);
+		}
+	} catch (error) {
+		if (error instanceof WorkerConversationOwnershipError) throw error;
+		throw new WorkerConversationOwnershipError(errorMessage);
+	}
 }
 
 function writeWorkerConversationMetadata(metadataFile: string, metadata: WorkerConversationMetadata): void {
@@ -461,7 +687,7 @@ function verifyWorkerBirthContextPrefix(
 	sessionManager: SessionManager,
 	snapshot: WorkerContextForkSnapshot,
 	recoverMissingSuffix: boolean,
-): void {
+): boolean {
 	const entryCount = sessionManager.getEntryCount();
 	const sharedLength = Math.min(entryCount, snapshot.messages.length);
 	let divergenceIndex: number | undefined;
@@ -481,13 +707,14 @@ function verifyWorkerBirthContextPrefix(
 	if (divergenceIndex !== undefined) {
 		throw new Error(`Worker conversation birth context diverges at message ${divergenceIndex}.`);
 	}
-	if (entryCount >= snapshot.messages.length) return;
+	if (entryCount >= snapshot.messages.length) return false;
 	if (!recoverMissingSuffix) {
 		throw new Error("Worker conversation birth context prefix is incomplete; reopen through ensure for recovery.");
 	}
 	for (const message of snapshot.messages.slice(entryCount)) {
 		sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)));
 	}
+	return true;
 }
 
 function assertAttemptUsageId(attemptId: string): string {
@@ -644,49 +871,51 @@ function assertWorkerConversationFile(agentDir: string, sessionFile: string, ses
 /**
  * Durable SessionManager-backed transcript for exactly one logical worker lane.
  *
- * Single-writer invariant: orchestration must ensure that no two live processes append to the same
- * conversation. This store deliberately does not merge branches or lock competing writers; a
- * complete child transcript is committed only after it proves the current provider-visible context
- * is its exact prefix.
+ * The canonical session-file lock plus a raw-byte revision head fences competing processes. One
+ * store shares the parsed core across lightweight resume-context views; unexpected durable changes
+ * fail closed for active owners and only strict append-only recovery may replace the core.
  */
 export class WorkerConversation {
-	private sessionManager: SessionManager;
+	private readonly core: WorkerConversationCore;
 	private readonly resumeContext: AgentResumeContext;
 	private readonly agentDir?: string;
 	private readonly metadataFile?: string;
-	private readonly logicalAgentId?: string;
-	private readonly parentSessionId?: string;
-	private readonly birthContextForkReference?: WorkerContextForkReference;
-	private usageAccountingVersion: 1 | undefined;
 
 	constructor(
 		sessionManager: SessionManager,
 		resumeContext: AgentResumeContext,
-		metadata?: {
-			file: string;
-			agentDir: string;
-			logicalAgentId: string;
-			parentSessionId?: string;
-			birthContextForkReference?: WorkerContextForkReference;
-			usageAccountingVersion?: 1;
-		},
+		metadata?: WorkerConversationMetadataBinding,
+		sharedCore?: WorkerConversationCore,
 	) {
-		this.sessionManager = sessionManager;
+		this.core = sharedCore ?? {
+			sessionManager,
+			...(metadata ? { metadataState: cloneWorkerConversationMetadataState(metadata) } : {}),
+			invalid: false,
+			generation: 0,
+			activeTranscriptCursors: 0,
+		};
 		this.resumeContext = cloneResumeContext(resumeContext);
 		this.agentDir = metadata?.agentDir;
 		this.metadataFile = metadata?.file;
-		this.logicalAgentId = metadata?.logicalAgentId;
-		this.parentSessionId = metadata?.parentSessionId;
-		this.birthContextForkReference = metadata?.birthContextForkReference
-			? structuredClone(metadata.birthContextForkReference)
-			: undefined;
-		// Direct in-memory construction has no legacy metadata to preserve.
-		this.usageAccountingVersion = metadata ? metadata.usageAccountingVersion : 1;
+	}
+
+	private get sessionManager(): SessionManager {
+		return this.core.sessionManager;
+	}
+
+	private set sessionManager(sessionManager: SessionManager) {
+		this.core.sessionManager = sessionManager;
+	}
+
+	/** Persisted conversations share one adopted metadata state; direct in-memory instances are current. */
+	private get usageAccountingVersion(): 1 | undefined {
+		return this.metadataFile ? this.core.metadataState?.usageAccountingVersion : 1;
 	}
 
 	/** Immutable parent-context identity installed before this logical worker's first attempt. */
 	getBirthContextForkReference(): WorkerContextForkReference | undefined {
-		return this.birthContextForkReference ? structuredClone(this.birthContextForkReference) : undefined;
+		const reference = this.core.metadataState?.birthContextForkReference;
+		return reference ? structuredClone(reference) : undefined;
 	}
 
 	/** Resolve current provider-visible messages lazily through SessionManager. */
@@ -855,18 +1084,30 @@ export class WorkerConversation {
 			throw new TypeError("Worker changed-file progress path is invalid or exceeds its durable bound.");
 		}
 		const path = candidate.values[0]!;
+		if (this.usageAccountingVersion === 1) this.beginAttemptUsage(attemptId);
 		const existing = this.getChangedFiles(attemptId);
 		if (existing.includes(path)) return;
 		if (existing.length >= MAX_WORKER_CLAIM_CHANGED_FILES) {
 			throw new Error("Worker changed-file progress exceeds its durable entry bound.");
 		}
-		this.sessionManager.appendCustomEntry(WORKER_CHANGED_FILE_CUSTOM_TYPE, { attemptId, path });
+		this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendCustomEntry(WORKER_CHANGED_FILE_CUSTOM_TYPE, { attemptId, path }),
+		);
 	}
 
 	/** Rehydrate the bounded mutation set across owner-session disposal and worker resume. */
 	getChangedFiles(attemptId: string): string[] {
+		let firstEntry = 0;
+		let lastEntry = this.sessionManager.getEntryCount();
+		if (this.usageAccountingVersion === 1) {
+			const boundaryIndex = attemptUsageBoundaryIndex(this.sessionManager, assertAttemptUsageId(attemptId));
+			if (boundaryIndex < 0) return [];
+			firstEntry = boundaryIndex + 1;
+			const nextBoundaryIndex = attemptUsageBoundaryIndex(this.sessionManager, undefined, firstEntry);
+			if (nextBoundaryIndex >= 0) lastEntry = nextBoundaryIndex;
+		}
 		const paths: string[] = [];
-		visitWorkerSessionEntries(this.sessionManager, 0, this.sessionManager.getEntryCount(), (entry) => {
+		visitWorkerSessionEntries(this.sessionManager, firstEntry, lastEntry, (entry) => {
 			if (entry.type !== "custom" || entry.customType !== WORKER_CHANGED_FILE_CUSTOM_TYPE) return;
 			const data = entry.data;
 			if (!data || typeof data !== "object" || Array.isArray(data)) return;
@@ -895,9 +1136,11 @@ export class WorkerConversation {
 		const normalizedAttemptId = assertAttemptUsageId(attemptId);
 		this.enableAttemptUsageBoundaries();
 		if (attemptUsageBoundaryIndex(this.sessionManager, normalizedAttemptId) >= 0) return;
-		this.sessionManager.appendCustomEntry(WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE, {
-			attemptId: normalizedAttemptId,
-		});
+		this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendCustomEntry(WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE, {
+				attemptId: normalizedAttemptId,
+			}),
+		);
 	}
 
 	/**
@@ -922,7 +1165,9 @@ export class WorkerConversation {
 		});
 		if (matches > 1) throw new Error("Worker attempt prompt appears more than once in its durable boundary.");
 		if (matches === 1) return;
-		this.sessionManager.appendMessage({ role: "user", content: prompt, timestamp: Date.now() });
+		this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendMessage({ role: "user", content: prompt, timestamp: Date.now() }),
+		);
 	}
 
 	/** Whether missing attempt markers have versioned, fail-closed accounting semantics. */
@@ -937,24 +1182,27 @@ export class WorkerConversation {
 	enableAttemptUsageBoundaries(): void {
 		if (this.usageAccountingVersion === 1) return;
 		const metadataFile = this.metadataFile;
-		if (!metadataFile) {
-			this.usageAccountingVersion = 1;
-			return;
-		}
+		if (!metadataFile) return;
 		const sessionFile = this.resumeContext.sessionFile;
 		if (!sessionFile) throw new Error("Worker conversation cannot version usage without a session file.");
 		withFileLockSync(sessionFile, () => {
-			const metadata = assertExactConversationMetadata(
+			this.synchronizeCoreLocked(false);
+			const currentMetadataState = this.core.metadataState;
+			let metadata = assertExactConversationMetadata(
 				metadataFile,
 				this.resumeContext,
-				this.logicalAgentId,
-				this.parentSessionId,
-				this.birthContextForkReference,
+				currentMetadataState?.logicalAgentId,
+				currentMetadataState?.parentSessionId,
+				currentMetadataState?.birthContextForkReference,
 			);
 			if (metadata.usageAccountingVersion !== 1) {
-				writeWorkerConversationMetadata(metadataFile, { ...metadata, usageAccountingVersion: 1 });
+				metadata = { ...metadata, usageAccountingVersion: 1 };
+				writeWorkerConversationMetadata(metadataFile, metadata);
 			}
-			this.usageAccountingVersion = 1;
+			const metadataState = cloneWorkerConversationMetadataState(metadata);
+			const metadataRevision = readWorkerConversationFileRevision(metadataFile);
+			this.core.metadataState = metadataState;
+			this.core.metadataRevision = metadataRevision;
 		});
 	}
 
@@ -1018,8 +1266,9 @@ export class WorkerConversation {
 	 */
 	findDeliveredWorkerControlMessageIds(expectations: readonly WorkerControlTranscriptExpectation[]): Set<string> {
 		if (expectations.length === 0) return new Set();
-		return this.withCanonicalSessionLock((sessionManager) =>
-			scanWorkerControlTranscript(sessionManager, expectations),
+		return this.withCanonicalSessionLock(
+			(sessionManager) => scanWorkerControlTranscript(sessionManager, expectations),
+			true,
 		);
 	}
 
@@ -1039,9 +1288,11 @@ export class WorkerConversation {
 		return this.withCanonicalSessionLock((sessionManager) => {
 			const delivered = scanWorkerControlTranscript(sessionManager, [expectation]).has(expectation.messageId);
 			if (delivered || !appendIfMissing) return { delivered, appended: false };
-			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)));
+			this.appendSessionEntryLocked(sessionManager, (owner) =>
+				owner.appendMessage(structuredClone(workerMessageForPersistence(message))),
+			);
 			return { delivered: true, appended: true };
-		});
+		}, true);
 	}
 
 	/**
@@ -1055,6 +1306,7 @@ export class WorkerConversation {
 	): Promise<WorkerConversationRetentionOutcome> {
 		assertRetentionPolicy(policy);
 		signal?.throwIfAborted();
+		const preparationEntryCount = this.withCanonicalSessionLock((sessionManager) => sessionManager.getEntryCount());
 		const before = this.getProviderContext();
 		const beforeUsage = estimateContextTokens(before.messages);
 		if (beforeUsage.tokens <= policy.maxContextTokens) {
@@ -1098,24 +1350,189 @@ export class WorkerConversation {
 		}
 
 		signal?.throwIfAborted();
-		this.sessionManager.appendCompaction(
-			result.summary,
-			result.firstKeptEntryId,
-			result.tokensBefore,
-			result.details,
-			false,
-			result.usage,
-		);
+		this.appendSessionEntry((sessionManager) => {
+			if (sessionManager.getEntryCount() !== preparationEntryCount) {
+				throw new WorkerConversationOwnershipError(
+					"Worker conversation changed while its compaction checkpoint was generated.",
+				);
+			}
+			return sessionManager.appendCompaction(
+				result.summary,
+				result.firstKeptEntryId,
+				result.tokensBefore,
+				result.details,
+				false,
+				result.usage,
+			);
+		});
 		const context = this.getProviderContext();
 		return { status, context, contextUsage: estimateContextTokens(context.messages) };
 	}
 
 	/** Append one already-authorized worker message to the canonical transcript. */
 	appendMessage(message: Message): string {
-		return this.sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)));
+		return this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message))),
+		);
 	}
 
-	private withCanonicalSessionLock<Result>(operation: (sessionManager: SessionManager) => Result): Result {
+	private appendSessionEntry(operation: (sessionManager: SessionManager) => string): string {
+		return this.withCanonicalSessionLock((sessionManager) =>
+			this.appendSessionEntryLocked(sessionManager, operation),
+		);
+	}
+
+	private appendSessionEntryLocked(
+		sessionManager: SessionManager,
+		operation: (sessionManager: SessionManager) => string,
+	): string {
+		const beforeCount = sessionManager.getEntryCount();
+		let entryId: string;
+		try {
+			entryId = operation(sessionManager);
+		} catch (error) {
+			this.core.invalid = true;
+			throw error;
+		}
+		if (sessionManager.getEntryCount() !== beforeCount + 1) {
+			this.core.invalid = true;
+			throw new WorkerConversationOwnershipError("Worker conversation append did not advance exactly one entry.");
+		}
+		const head = this.core.head;
+		if (!head) return entryId;
+		const entry = sessionManager.getEntry(entryId);
+		if (!entry) {
+			this.core.invalid = true;
+			throw new WorkerConversationOwnershipError("Worker conversation appended entry is unavailable.");
+		}
+		const serialized = JSON.stringify(entry);
+		try {
+			this.core.head = advanceWorkerSessionHeadAfterOwnedAppend(this.resumeContext.sessionFile!, head, serialized);
+		} catch (error) {
+			this.core.invalid = true;
+			throw error;
+		}
+		if (entry.type === "message") {
+			try {
+				sessionManager.releasePersistedMessagePayload(entryId);
+			} catch (error) {
+				this.core.invalid = true;
+				throw error;
+			}
+		}
+		this.core.invalid = false;
+		return entryId;
+	}
+
+	private reopenVerifiedSessionManagerLocked(
+		expectedEntryCount: number,
+		failure: "recovery state" | "appended suffix",
+	): SessionManager {
+		const sessionFile = this.resumeContext.sessionFile!;
+		const sessionDir = this.resumeContext.sessionDir ?? dirname(sessionFile);
+		const sessionManager = SessionManager.open(sessionFile, this.agentDir!, sessionDir);
+		if (
+			sessionManager.getSessionId() !== this.resumeContext.sessionId ||
+			sessionManager.getCwd() !== resolve(this.resumeContext.cwd) ||
+			sessionManager.getEntryCount() !== expectedEntryCount
+		) {
+			throw new WorkerConversationOwnershipError(`Worker conversation ${failure} is invalid.`);
+		}
+		assertLinearWorkerSession(sessionManager);
+		return sessionManager;
+	}
+
+	private synchronizeCoreLocked(allowExternalAppend: boolean): void {
+		const sessionFile = this.resumeContext.sessionFile;
+		if (!sessionFile) return;
+		if (this.metadataFile && this.core.metadataRevision) {
+			const metadataRevision = readWorkerConversationFileRevision(this.metadataFile);
+			if (!sameWorkerConversationFileRevision(this.core.metadataRevision, metadataRevision)) {
+				throw new WorkerConversationOwnershipError("Worker conversation metadata changed under a different owner.");
+			}
+		}
+		const currentRevision = readWorkerConversationFileRevision(sessionFile);
+		const head = this.core.head;
+		if (!this.core.invalid && head && sameWorkerConversationFileRevision(head.revision, currentRevision)) return;
+		const scanned = scanWorkerSessionFile(
+			sessionFile,
+			this.resumeContext.sessionId,
+			this.resumeContext.cwd,
+			head?.entryCount,
+		);
+		if (!head) {
+			if (scanned.entryCount !== this.sessionManager.getEntryCount()) {
+				throw new WorkerConversationOwnershipError("Worker conversation session entries are invalid.");
+			}
+			this.core.head = scanned;
+			this.core.invalid = false;
+			return;
+		}
+		if (scanned.revision.dev !== head.revision.dev || scanned.revision.ino !== head.revision.ino) {
+			throw new WorkerConversationOwnershipError("Worker conversation file identity changed.");
+		}
+		if (
+			scanned.headerDigest !== head.headerDigest ||
+			scanned.entryCount < head.entryCount ||
+			scanned.prefixDigest !== head.entryDigest
+		) {
+			throw new WorkerConversationOwnershipError("Worker conversation durable prefix changed.");
+		}
+		if (scanned.entryCount === head.entryCount) {
+			if (scanned.entryDigest !== head.entryDigest) {
+				throw new WorkerConversationOwnershipError("Worker conversation durable content changed.");
+			}
+			if (this.core.invalid || this.sessionManager.getEntryCount() !== scanned.entryCount) {
+				this.sessionManager = this.reopenVerifiedSessionManagerLocked(scanned.entryCount, "recovery state");
+				this.core.generation += 1;
+			}
+			this.core.head = scanned;
+			this.core.invalid = false;
+			return;
+		}
+		if (!allowExternalAppend) {
+			throw new WorkerConversationOwnershipError("Worker conversation advanced under a different owner.");
+		}
+		if (this.core.activeTranscriptCursors > 0) {
+			throw new WorkerConversationOwnershipError(
+				"Worker conversation advanced while a transcript commit was active.",
+			);
+		}
+		this.sessionManager = this.reopenVerifiedSessionManagerLocked(scanned.entryCount, "appended suffix");
+		this.core.head = scanned;
+		this.core.invalid = false;
+		this.core.generation += 1;
+	}
+
+	/** Store-only refresh while the canonical session-file lock is already held. */
+	refreshCachedCoreLocked(): void {
+		this.synchronizeCoreLocked(true);
+	}
+
+	private captureTranscriptCommitCursorLocked(sessionManager: SessionManager): WorkerTranscriptCommitCursor {
+		const cursor: WorkerTranscriptCommitCursor = Object.freeze({ kind: "worker-transcript-suffix-v1" });
+		workerTranscriptCommitCursorStates.set(cursor, {
+			core: this.core,
+			entryIndex: sessionManager.getEntryCount(),
+			generation: this.core.generation,
+			status: "active",
+		});
+		this.core.activeTranscriptCursors += 1;
+		return cursor;
+	}
+
+	/** Atomically capture the provider projection and the raw-entry cursor that immediately follows it. */
+	beginTranscriptCommit(): { history: Message[]; cursor: WorkerTranscriptCommitCursor } {
+		return this.withCanonicalSessionLock((sessionManager) => ({
+			history: convertToLlm(sessionManager.buildSessionContext().messages),
+			cursor: this.captureTranscriptCommitCursorLocked(sessionManager),
+		}));
+	}
+
+	private withCanonicalSessionLock<Result>(
+		operation: (sessionManager: SessionManager) => Result,
+		allowExternalAppend = false,
+	): Result {
 		const sessionFile = this.resumeContext.sessionFile;
 		if (!sessionFile) return operation(this.sessionManager);
 		const agentDir = this.agentDir;
@@ -1123,58 +1540,101 @@ export class WorkerConversation {
 			throw new Error("Worker conversation cannot lock a persisted transcript without its agent directory.");
 		}
 		return withFileLockSync(sessionFile, () => {
-			const sessionDir = this.resumeContext.sessionDir ?? dirname(sessionFile);
-			const sessionManager = SessionManager.open(sessionFile, agentDir, sessionDir);
+			this.synchronizeCoreLocked(allowExternalAppend);
+			const sessionManager = this.sessionManager;
 			if (
 				sessionManager.getSessionId() !== this.resumeContext.sessionId ||
 				sessionManager.getCwd() !== resolve(this.resumeContext.cwd)
 			) {
 				throw new Error("Worker conversation changed identity while acquiring its transcript lock.");
 			}
-			this.sessionManager = sessionManager;
 			return operation(sessionManager);
 		});
 	}
 
-	/**
-	 * Commit one complete child-owned transcript without replaying its persisted prefix.
-	 *
-	 * Any mismatch is a divergence: appending would duplicate or reorder provider context, so the
-	 * caller must resolve it rather than silently branching this logical worker conversation.
-	 */
-	commitTranscript(transcript: readonly Message[]): number {
+	/** Commit only the bounded child-loop suffix captured by an opaque raw-entry cursor. */
+	captureTranscriptCommitCursor(): WorkerTranscriptCommitCursor {
+		return this.withCanonicalSessionLock((sessionManager) =>
+			this.captureTranscriptCommitCursorLocked(sessionManager),
+		);
+	}
+
+	abortTranscriptCommit(cursor: WorkerTranscriptCommitCursor): void {
+		const state = workerTranscriptCommitCursorStates.get(cursor);
+		if (!state || state.core !== this.core) {
+			throw new WorkerConversationOwnershipError("Worker transcript cursor belongs to a different conversation.");
+		}
+		if (state.status === "active") {
+			state.status = "aborted";
+			this.core.activeTranscriptCursors -= 1;
+		}
+	}
+
+	commitTranscript(
+		cursor: WorkerTranscriptCommitCursor,
+		suffix: readonly Message[],
+		options?: { appendMissing?: boolean },
+	): number {
+		const state = workerTranscriptCommitCursorStates.get(cursor);
+		if (!state || state.core !== this.core) {
+			throw new WorkerConversationOwnershipError("Worker transcript cursor belongs to a different conversation.");
+		}
+		const normalizedSuffix = suffix.map((message) => workerMessageForPersistence(message));
+		if (state.status === "aborted") {
+			throw new WorkerConversationOwnershipError("Worker transcript cursor is no longer active.");
+		}
+		if (state.status === "committed") {
+			if (!isDeepStrictEqual(state.committedSuffix, normalizedSuffix)) {
+				throw new WorkerConversationOwnershipError(
+					"Worker transcript cursor replay conflicts with its committed suffix.",
+				);
+			}
+			return 0;
+		}
 		return this.withCanonicalSessionLock((sessionManager) => {
-			// Compare against the append-only source transcript, not the provider projection: once a
-			// compaction checkpoint exists, buildSessionContext() begins with its synthetic summary and is
-			// intentionally no longer an exact prefix of the child loop's raw message sequence.
+			if (state.generation !== this.core.generation) {
+				throw new WorkerConversationOwnershipError(
+					"Worker transcript cursor was invalidated by owner replacement.",
+				);
+			}
 			let persistedMessages = 0;
 			let divergenceIndex: number | undefined;
-			visitWorkerSessionEntries(sessionManager, 0, sessionManager.getEntryCount(), (entry) => {
+			visitWorkerSessionEntries(sessionManager, state.entryIndex, sessionManager.getEntryCount(), (entry) => {
 				if (divergenceIndex !== undefined) return;
 				const persisted = rawWorkerTranscriptMessage(entry);
 				if (!persisted) return;
-				const candidate = transcript[persistedMessages];
+				const candidate = normalizedSuffix[persistedMessages];
 				if (!candidate) {
 					divergenceIndex = persistedMessages;
 					return;
 				}
-				if (!isDeepStrictEqual(workerMessageForPersistence(persisted), workerMessageForPersistence(candidate))) {
+				if (!isDeepStrictEqual(workerMessageForPersistence(persisted), candidate)) {
 					divergenceIndex = persistedMessages;
 				}
 				persistedMessages += 1;
 			});
 			if (divergenceIndex !== undefined) {
-				if (divergenceIndex >= transcript.length) {
-					throw new Error("Worker conversation transcript is shorter than its persisted raw context.");
+				if (divergenceIndex >= normalizedSuffix.length) {
+					throw new Error("Worker conversation suffix is shorter than its persisted raw context.");
 				}
 				throw new Error(
-					`Worker conversation transcript diverges from persisted context at message ${divergenceIndex}.`,
+					`Worker conversation suffix diverges from persisted context at message ${divergenceIndex}.`,
 				);
 			}
-			for (let index = persistedMessages; index < transcript.length; index += 1) {
-				sessionManager.appendMessage(structuredClone(workerMessageForPersistence(transcript[index]!)));
+			if (options?.appendMissing === false && persistedMessages < normalizedSuffix.length) {
+				throw new WorkerConversationOwnershipError(
+					"Worker conversation is missing callback-persisted transcript suffix entries.",
+				);
 			}
-			return transcript.length - persistedMessages;
+			for (let index = persistedMessages; index < normalizedSuffix.length; index += 1) {
+				this.appendSessionEntryLocked(sessionManager, (owner) =>
+					owner.appendMessage(structuredClone(normalizedSuffix[index]!)),
+				);
+			}
+			state.status = "committed";
+			state.committedSuffix = structuredClone(normalizedSuffix);
+			this.core.activeTranscriptCursors -= 1;
+			return normalizedSuffix.length - persistedMessages;
 		});
 	}
 
@@ -1210,6 +1670,19 @@ function assertApplicableCompactionResult(result: CompactionResult, preparation:
 
 /** Creates and reopens canonical SessionManager transcripts for logical Pi worker lanes. */
 export class WorkerConversationStore {
+	private readonly cachedCores = new Map<string, CachedWorkerConversationCore>();
+
+	clearCache(): void {
+		for (const cached of this.cachedCores.values()) {
+			if (cached.core.activeTranscriptCursors > 0) {
+				throw new WorkerConversationOwnershipError(
+					"Worker conversation cache cannot be cleared during an active transcript commit.",
+				);
+			}
+		}
+		this.cachedCores.clear();
+	}
+
 	create(options: CreateWorkerConversationOptions): WorkerConversation {
 		const resumeContext = expectedResumeContext(options);
 		const sessionFile = resumeContext.sessionFile!;
@@ -1319,7 +1792,13 @@ export class WorkerConversationStore {
 	}
 
 	open(options: OpenWorkerConversationOptions): WorkerConversation {
-		return this.openExisting(options, { recoverBirthContextPrefix: false });
+		const context = options.resumeContext;
+		if (context.provider !== "pi" || !context.sessionFile) {
+			return this.openExisting(options, { recoverBirthContextPrefix: false });
+		}
+		assertValidSessionId(context.sessionId);
+		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		return withFileLockSync(sessionFile, () => this.openExisting(options, { recoverBirthContextPrefix: false }));
 	}
 
 	private openExisting(
@@ -1346,15 +1825,206 @@ export class WorkerConversationStore {
 			);
 		}
 
+		const metadataFile = workerConversationMetadataFile(sessionFile);
+		const cached = this.cachedCores.get(sessionFile);
+		if (cached) {
+			if (!sameAgentResumeIdentity(cached.resumeContext, context)) {
+				throw new Error("Worker conversation resume context conflicts with the persisted transcript.");
+			}
+			let {
+				metadata,
+				revision: metadataRevision,
+				content: metadataContent,
+			} = assertStableExactConversationMetadata(
+				metadataFile,
+				context,
+				options.expectedLogicalAgentId,
+				birthContext.parentSessionId,
+			);
+			const previousMetadataState = cached.core.metadataState;
+			if (!previousMetadataState) {
+				throw new WorkerConversationOwnershipError("Worker conversation cached metadata state is missing.");
+			}
+			let metadataState = cloneWorkerConversationMetadataState(metadata);
+			assertCachedWorkerConversationMetadata(previousMetadataState, metadataState);
+			const requestedReference = birthContext.birthContextForkReference;
+			let boundFirstReference = false;
+			if (requestedReference && !previousMetadataState.birthContextForkReference) {
+				if (cached.core.activeTranscriptCursors > 0) {
+					throw new WorkerConversationOwnershipError(
+						"Worker conversation birth context changed while a transcript commit was active.",
+					);
+				}
+				const parentSessionId = birthContext.parentSessionId;
+				if (!parentSessionId) throw new Error("Worker conversation birth context parent session is missing.");
+				const snapshot = openWorkerBirthContext(
+					options.agentDir,
+					parentSessionId,
+					metadataState.logicalAgentId,
+					requestedReference,
+				);
+				if (cached.core.sessionManager.getEntryCount() > 0) {
+					throw new Error("Worker conversation cannot bind birth context after transcript use.");
+				}
+				metadata = {
+					...metadata,
+					parentSessionId,
+					birthContextForkReference: requestedReference,
+				};
+				try {
+					// Bind identity before the first prefix entry. A crash leaves an exact suffix for cold recovery.
+					writeWorkerConversationMetadata(metadataFile, metadata);
+					const boundMetadata = assertStableExactConversationMetadata(
+						metadataFile,
+						context,
+						metadataState.logicalAgentId,
+						parentSessionId,
+						requestedReference,
+					);
+					assertWorkerConversationUsageAccountingVersion(
+						previousMetadataState.usageAccountingVersion,
+						boundMetadata.metadata.usageAccountingVersion,
+					);
+					metadata = boundMetadata.metadata;
+					metadataRevision = boundMetadata.revision;
+					metadataContent = boundMetadata.content;
+					verifyWorkerBirthContextPrefix(cached.core.sessionManager, snapshot, true);
+					const boundHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
+					if (cached.core.sessionManager.getEntryCount() !== boundHead.entryCount) {
+						throw new WorkerConversationOwnershipError(
+							"Worker conversation bound birth context entries are invalid.",
+						);
+					}
+					assertLinearWorkerSession(cached.core.sessionManager);
+					metadataState = cloneWorkerConversationMetadataState(metadata);
+					assertWorkerConversationMetadataContent(
+						metadataFile,
+						metadataRevision,
+						metadataContent,
+						"Worker conversation metadata changed while its birth context was bound.",
+					);
+					cached.core.head = boundHead;
+					cached.core.metadataState = metadataState;
+					cached.core.metadataRevision = metadataRevision;
+					cached.core.invalid = false;
+					cached.core.generation += 1;
+					boundFirstReference = true;
+				} catch (error) {
+					cached.core.invalid = true;
+					this.cachedCores.delete(sessionFile);
+					throw error;
+				}
+			}
+			if (requestedReference && !isDeepStrictEqual(metadataState.birthContextForkReference, requestedReference)) {
+				throw new Error("Worker conversation birth context reference conflicts with the persisted transcript.");
+			}
+			const revisionChanged =
+				!cached.core.metadataRevision ||
+				!sameWorkerConversationFileRevision(cached.core.metadataRevision, metadataRevision);
+			const currentSessionRevision = readWorkerConversationFileRevision(sessionFile);
+			const sessionRevisionChanged =
+				!cached.core.head || !sameWorkerConversationFileRevision(cached.core.head.revision, currentSessionRevision);
+			if (!revisionChanged && !boundFirstReference && !isDeepStrictEqual(previousMetadataState, metadataState)) {
+				throw new WorkerConversationOwnershipError(
+					"Worker conversation metadata content changed without a new durable revision.",
+				);
+			}
+			const previousMetadataRevision = cached.core.metadataRevision;
+			if (revisionChanged) {
+				if (cached.core.activeTranscriptCursors > 0) {
+					throw new WorkerConversationOwnershipError(
+						"Worker conversation metadata changed while a transcript commit was active.",
+					);
+				}
+			}
+			if (sessionRevisionChanged && cached.core.activeTranscriptCursors > 0) {
+				throw new WorkerConversationOwnershipError(
+					"Worker conversation advanced while a transcript commit was active.",
+				);
+			}
+			const reference = metadataState.birthContextForkReference;
+			if ((revisionChanged || sessionRevisionChanged) && reference) {
+				const parentSessionId = metadataState.parentSessionId;
+				if (!parentSessionId) throw new Error("Worker conversation birth context parent session is missing.");
+				const snapshot = openWorkerBirthContext(
+					options.agentDir,
+					parentSessionId,
+					metadataState.logicalAgentId,
+					reference,
+				);
+				const verificationManager = sessionRevisionChanged
+					? SessionManager.open(sessionFile, cached.agentDir, sessionDir)
+					: cached.core.sessionManager;
+				const recoveredBirthSuffix = verifyWorkerBirthContextPrefix(
+					verificationManager,
+					snapshot,
+					sessionRevisionChanged && birthContext.recoverBirthContextPrefix,
+				);
+				if (recoveredBirthSuffix) {
+					const recoveredHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
+					if (verificationManager.getEntryCount() !== recoveredHead.entryCount) {
+						throw new WorkerConversationOwnershipError(
+							"Worker conversation recovered birth context entries are invalid.",
+						);
+					}
+					assertLinearWorkerSession(verificationManager);
+					cached.core.sessionManager = verificationManager;
+					cached.core.head = recoveredHead;
+					cached.core.invalid = false;
+					cached.core.generation += 1;
+				}
+			}
+			assertWorkerConversationMetadataContent(
+				metadataFile,
+				metadataRevision,
+				metadataContent,
+				"Worker conversation metadata changed while its cached state was opened.",
+			);
+			if (revisionChanged) {
+				cached.core.metadataState = metadataState;
+				cached.core.metadataRevision = metadataRevision;
+			}
+			const conversation = new WorkerConversation(
+				cached.core.sessionManager,
+				{ ...context, sessionDir, sessionFile, cwd: cached.core.sessionManager.getCwd() },
+				bindWorkerConversationMetadata(cached.metadataFile, cached.agentDir, metadataState),
+				cached.core,
+			);
+			try {
+				conversation.refreshCachedCoreLocked();
+			} catch (error) {
+				if (revisionChanged) {
+					cached.core.metadataState = previousMetadataState;
+					cached.core.metadataRevision = previousMetadataRevision;
+				}
+				throw error;
+			}
+			return conversation;
+		}
+
+		const scannedHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
 		const sessionManager = SessionManager.open(sessionFile, options.agentDir, sessionDir);
+		const openedHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
+		assertWorkerSessionHeadContent(
+			scannedHead,
+			openedHead,
+			"Worker conversation changed while its canonical session was opened.",
+		);
 		if (sessionManager.getSessionId() !== context.sessionId) {
 			throw new Error("Worker conversation session file does not contain the requested durable session id.");
 		}
 		if (sessionManager.getCwd() !== resolve(context.cwd)) {
 			throw new Error("Worker conversation resume context working directory disagrees with the persisted session.");
 		}
-		const metadataFile = workerConversationMetadataFile(sessionFile);
-		let metadata = assertExactConversationMetadata(
+		if (sessionManager.getEntryCount() !== openedHead.entryCount) {
+			throw new WorkerConversationOwnershipError("Worker conversation session entries are invalid.");
+		}
+		assertLinearWorkerSession(sessionManager);
+		let {
+			metadata,
+			revision: metadataRevision,
+			content: metadataContent,
+		} = assertStableExactConversationMetadata(
 			metadataFile,
 			context,
 			options.expectedLogicalAgentId,
@@ -1385,6 +2055,7 @@ export class WorkerConversationStore {
 				}
 				const parentSessionId = birthContext.parentSessionId;
 				if (!parentSessionId) throw new Error("Worker conversation birth context parent session is missing.");
+				const previousUsageAccountingVersion = metadata.usageAccountingVersion;
 				metadata = {
 					...metadata,
 					parentSessionId,
@@ -1392,6 +2063,20 @@ export class WorkerConversationStore {
 				};
 				// Bind identity before the first prefix entry. A crash can only leave an exact suffix to recover.
 				writeWorkerConversationMetadata(metadataFile, metadata);
+				const boundMetadata = assertStableExactConversationMetadata(
+					metadataFile,
+					context,
+					metadata.logicalAgentId,
+					parentSessionId,
+					expectedReference,
+				);
+				assertWorkerConversationUsageAccountingVersion(
+					previousUsageAccountingVersion,
+					boundMetadata.metadata.usageAccountingVersion,
+				);
+				metadata = boundMetadata.metadata;
+				metadataRevision = boundMetadata.revision;
+				metadataContent = boundMetadata.content;
 			}
 		}
 		const reference = metadata.birthContextForkReference;
@@ -1405,7 +2090,37 @@ export class WorkerConversationStore {
 			verifyWorkerBirthContextPrefix(sessionManager, snapshot, birthContext.recoverBirthContextPrefix);
 		}
 
-		return new WorkerConversation(
+		let currentHead: WorkerSessionFileHead;
+		if (sessionManager.getEntryCount() === openedHead.entryCount) {
+			assertWorkerConversationOpenRevision(
+				sessionFile,
+				openedHead.revision,
+				"Worker conversation changed while its canonical session was opened.",
+			);
+			currentHead = openedHead;
+		} else {
+			currentHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
+		}
+		if (sessionManager.getEntryCount() !== currentHead.entryCount) {
+			throw new WorkerConversationOwnershipError("Worker conversation session entries are invalid.");
+		}
+		const metadataState = cloneWorkerConversationMetadataState(metadata);
+		assertWorkerConversationMetadataContent(
+			metadataFile,
+			metadataRevision,
+			metadataContent,
+			"Worker conversation metadata changed while its canonical state was opened.",
+		);
+		const core: WorkerConversationCore = {
+			sessionManager,
+			head: currentHead,
+			metadataRevision,
+			metadataState,
+			invalid: false,
+			generation: 0,
+			activeTranscriptCursors: 0,
+		};
+		const conversation = new WorkerConversation(
 			sessionManager,
 			{
 				...context,
@@ -1413,17 +2128,16 @@ export class WorkerConversationStore {
 				sessionFile,
 				cwd: sessionManager.getCwd(),
 			},
-			{
-				file: metadataFile,
-				agentDir: options.agentDir,
-				logicalAgentId: metadata.logicalAgentId,
-				...(metadata.parentSessionId ? { parentSessionId: metadata.parentSessionId } : {}),
-				...(metadata.birthContextForkReference
-					? { birthContextForkReference: metadata.birthContextForkReference }
-					: {}),
-				...(metadata.usageAccountingVersion ? { usageAccountingVersion: metadata.usageAccountingVersion } : {}),
-			},
+			bindWorkerConversationMetadata(metadataFile, options.agentDir, metadataState),
+			core,
 		);
+		this.cachedCores.set(sessionFile, {
+			core,
+			resumeContext: cloneResumeContext(context),
+			metadataFile,
+			agentDir: options.agentDir,
+		});
+		return conversation;
 	}
 }
 

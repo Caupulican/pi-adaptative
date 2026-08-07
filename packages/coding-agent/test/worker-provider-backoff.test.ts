@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import { runProviderCompletionWithBackoff } from "../src/core/delegation/worker-attempt-executor.ts";
+import { WorkerConversationOwnershipError } from "../src/core/delegation/worker-conversation-revision.ts";
+import { WorkerTreeBudgetExceededError } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
+import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 
 const COMPLETION = { text: "ok" } as IsolatedCompletionResult;
 
@@ -48,6 +51,29 @@ describe("worker provider backoff", () => {
 		expect(calls()).toBe(1);
 		expect(released).toEqual([1]);
 		expect(warnings).toHaveLength(0);
+	});
+
+	it("never retries an ownership failure even when its message resembles a transient transport error", async () => {
+		const failure = new WorkerConversationOwnershipError("WebSocket error");
+		const { run, warnings, released, calls } = harness([failure]);
+		await expect(run).rejects.toBe(failure);
+		expect(calls()).toBe(1);
+		expect(released).toEqual([1]);
+		expect(warnings).toHaveLength(0);
+	});
+
+	it("never retries provider authority failures", async () => {
+		const failures = [
+			new CapabilityGatewayDeniedError("token_budget_exhausted", "WebSocket error"),
+			new WorkerTreeBudgetExceededError("maxTokens", "provider completion"),
+		];
+		for (const failure of failures) {
+			const { run, warnings, released, calls } = harness([failure]);
+			await expect(run).rejects.toBe(failure);
+			expect(calls()).toBe(1);
+			expect(released).toEqual([1]);
+			expect(warnings).toHaveLength(0);
+		}
 	});
 
 	it("gives up after the attempt ceiling and rethrows the final failure", async () => {

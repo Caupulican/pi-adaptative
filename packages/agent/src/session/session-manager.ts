@@ -176,6 +176,48 @@ export interface SessionContext {
 	model: { provider: string; modelId: string } | null;
 }
 
+function invalidSessionParentCycle(entryId: string): Error {
+	return new Error(`Invalid session entry graph: parent cycle detected at entry "${entryId}".`);
+}
+
+/** Visit leaf-to-root ancestry through one bounded, cycle-rejecting implementation path. */
+function visitSessionAncestry(
+	start: SessionEntry | undefined,
+	byId: ReadonlyMap<string, SessionEntry>,
+	visitor: (entry: SessionEntry) => false | undefined,
+): void {
+	let current = start;
+	// One external start plus every indexed node is the longest possible acyclic walk.
+	let remainingEntries = byId.size + 1;
+	while (current) {
+		if (remainingEntries-- === 0) throw invalidSessionParentCycle(current.id);
+		if (visitor(current) === false) return;
+		current = current.parentId ? byId.get(current.parentId) : undefined;
+	}
+}
+
+interface SessionContextCache {
+	leafId: string | null;
+	context: SessionContext;
+}
+
+const synthesizedSessionContextMessages = new WeakSet<AgentMessage>();
+
+function retainSynthesizedSessionContextMessage<T extends AgentMessage>(message: T): T {
+	synthesizedSessionContextMessages.add(message);
+	return message;
+}
+
+function cloneSessionContext(context: SessionContext): SessionContext {
+	return {
+		messages: context.messages.map((message) =>
+			synthesizedSessionContextMessages.has(message) ? { ...message } : message,
+		),
+		thinkingLevel: context.thinkingLevel,
+		model: context.model ? { ...context.model } : null,
+	};
+}
+
 export interface SessionInfo {
 	path: string;
 	id: string;
@@ -373,11 +415,9 @@ export function buildSessionContext(
 
 	// Walk from leaf to root, then reverse once. Repeated front insertion makes long branches quadratic.
 	const path: SessionEntry[] = [];
-	let current: SessionEntry | undefined = leaf;
-	while (current) {
-		path.push(current);
-		current = current.parentId ? byId.get(current.parentId) : undefined;
-	}
+	visitSessionAncestry(leaf, byId, (entry) => {
+		path.push(entry);
+	});
 	path.reverse();
 
 	// Extract settings and find compaction
@@ -409,16 +449,26 @@ export function buildSessionContext(
 			messages.push(entry.message);
 		} else if (entry.type === "custom_message") {
 			messages.push(
-				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				retainSynthesizedSessionContextMessage(
+					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			messages.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			messages.push(
+				retainSynthesizedSessionContextMessage(
+					createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
+				),
+			);
 		}
 	};
 
 	if (compaction) {
 		// Emit summary first
-		messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
+		messages.push(
+			retainSynthesizedSessionContextMessage(
+				createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp),
+			),
+		);
 
 		// Find compaction index in path
 		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
@@ -985,6 +1035,8 @@ export class SessionManager {
 	private readonly entryFileLocations = new Map<string, SessionEntryFileLocation>();
 	private readonly coldPayloadEntryIds = new Set<string>();
 	private indexedSessionFileBytes = 0;
+	private sessionContextCache: SessionContextCache | undefined;
+	private persistenceStateUncertain = false;
 
 	private constructor(
 		cwd: string,
@@ -1008,6 +1060,38 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
+		const recoveringUncertainWrite = this.persistenceStateUncertain;
+		this.persistenceStateUncertain = true;
+		try {
+			if (recoveringUncertainWrite) {
+				const resolvedSessionFile = resolvePath(sessionFile);
+				if (existsSync(resolvedSessionFile)) {
+					const fileBytes = statSync(resolvedSessionFile).size;
+					if (fileBytes > 0) {
+						const fd = openSync(resolvedSessionFile, "r");
+						const finalByte = Buffer.allocUnsafe(1);
+						try {
+							if (readSync(fd, finalByte, 0, 1, fileBytes - 1) !== 1 || finalByte[0] !== 0x0a) {
+								throw new Error(
+									"Session file ends with an incomplete JSONL record after a failed write; repair it or start a new session.",
+								);
+							}
+						} finally {
+							closeSync(fd);
+						}
+					}
+				}
+			}
+			this._setSessionFile(sessionFile);
+			this.persistenceStateUncertain = false;
+		} catch (error) {
+			this.persistenceStateUncertain = true;
+			throw error;
+		}
+	}
+
+	private _setSessionFile(sessionFile: string): void {
+		this._invalidateSessionContextCache();
 		this._resetEntryFileIndex(true);
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
@@ -1048,9 +1132,11 @@ export class SessionManager {
 			this.sessionId = header?.id ?? createSessionId();
 			this._ensureEntryFileLocations(this.coldPayloadEntryIds);
 
-			if (migrateToCurrentVersion(this.fileEntries)) {
-				this._rewriteFile();
-			}
+			const migrated = migrateToCurrentVersion(this.fileEntries);
+			// Validate and index the complete parent graph before a migration rewrite can
+			// mutate the source file. Malformed cycles must fail synchronously on cold open.
+			this._buildIndex();
+			if (migrated) this._rewriteFile();
 
 			// Bound in-memory retention: oversized tool result details from disk would
 			// otherwise be pinned in fileEntries for the whole process lifetime.
@@ -1058,7 +1144,6 @@ export class SessionManager {
 				if (entry.type === "message") compactToolResultDetailsForRetention(entry.message);
 			}
 
-			this._buildIndex();
 			this.flushed = true;
 			this._releaseExistingCompactedMessagePayloads();
 		} else {
@@ -1089,6 +1174,8 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.persistenceStateUncertain = false;
+		this._invalidateSessionContextCache();
 		this._resetEntryFileIndex(true);
 
 		if (this.persist) {
@@ -1105,28 +1192,60 @@ export class SessionManager {
 	}
 
 	private _buildIndex(): void {
-		this.entries = [];
-		this.byId.clear();
-		this.labelsById.clear();
-		this.labelTimestampsById.clear();
-		this.leafId = null;
+		this._invalidateSessionContextCache();
+		const entries: SessionEntry[] = [];
+		const byId = new Map<string, SessionEntry>();
+		const labelsById = new Map<string, string>();
+		const labelTimestampsById = new Map<string, string>();
+		let leafId: string | null = null;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
-			this.entries.push(entry);
-			this.byId.set(entry.id, entry);
-			this.leafId = entry.id;
+			if (typeof entry.id !== "string" || entry.id.length === 0) {
+				throw new Error("Invalid session entry graph: every entry requires a non-empty string id.");
+			}
+			if (byId.has(entry.id)) {
+				throw new Error(`Invalid session entry graph: duplicate entry id "${entry.id}".`);
+			}
+			if (entry.parentId !== null && typeof entry.parentId !== "string") {
+				throw new Error(`Invalid session entry graph: entry "${entry.id}" has a malformed parent id.`);
+			}
+			entries.push(entry);
+			byId.set(entry.id, entry);
+			leafId = entry.id;
 			if (entry.type === "label") {
 				if (entry.label) {
-					this.labelsById.set(entry.targetId, entry.label);
-					this.labelTimestampsById.set(entry.targetId, entry.timestamp);
+					labelsById.set(entry.targetId, entry.label);
+					labelTimestampsById.set(entry.targetId, entry.timestamp);
 				} else {
-					this.labelsById.delete(entry.targetId);
-					this.labelTimestampsById.delete(entry.targetId);
+					labelsById.delete(entry.targetId);
+					labelTimestampsById.delete(entry.targetId);
 				}
 			}
 		}
+
+		const settledEntryIds = new Set<string>();
+		for (const entry of entries) {
+			if (settledEntryIds.has(entry.id)) continue;
+			const activeEntryIds = new Set<string>();
+			const traversedEntryIds: string[] = [];
+			visitSessionAncestry(entry, byId, (current) => {
+				if (settledEntryIds.has(current.id)) return false;
+				if (activeEntryIds.has(current.id)) {
+					throw invalidSessionParentCycle(current.id);
+				}
+				activeEntryIds.add(current.id);
+				traversedEntryIds.push(current.id);
+			});
+			for (const entryId of traversedEntryIds) settledEntryIds.add(entryId);
+		}
+
+		this.entries = entries;
+		this.byId = byId;
+		this.labelsById = labelsById;
+		this.labelTimestampsById = labelTimestampsById;
+		this.leafId = leafId;
 		for (const id of this.coldPayloadEntryIds) {
-			if (!this.byId.has(id)) this.coldPayloadEntryIds.delete(id);
+			if (!byId.has(id)) this.coldPayloadEntryIds.delete(id);
 		}
 	}
 
@@ -1270,51 +1389,55 @@ export class SessionManager {
 		});
 	}
 
+	private _releasableMessageProperties(entry: SessionMessageEntry): Array<"content" | "output"> {
+		const message = entry.message as unknown as Record<string, unknown>;
+		const properties: Array<"content" | "output"> = [];
+		for (const property of ["content", "output"] as const) {
+			const descriptor = Object.getOwnPropertyDescriptor(message, property);
+			if (
+				descriptor &&
+				!descriptor.get &&
+				"value" in descriptor &&
+				retainedStringChars(descriptor.value, COMPACTED_PAYLOAD_RELEASE_MIN_CHARS) >=
+					COMPACTED_PAYLOAD_RELEASE_MIN_CHARS
+			) {
+				properties.push(property);
+			}
+		}
+		return properties;
+	}
+
 	private _releaseExistingCompactedMessagePayloads(): void {
-		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
-		while (current) {
+		const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
+		visitSessionAncestry(leaf, this.byId, (current) => {
 			if (current.type === "compaction") {
 				this._releaseCompactedMessagePayloads(current.firstKeptEntryId, current.parentId);
-				return;
+				return false;
 			}
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
+		});
 	}
 
 	private _releaseCompactedMessagePayloads(firstKeptEntryId: string, compactionParentId: string | null): void {
 		if (!this.persist || !this.flushed || !this.sessionFile) return;
 		const keptEntryIds = new Set<string>();
-		let currentId = compactionParentId;
 		let foundFirstKept = false;
-		while (currentId) {
-			keptEntryIds.add(currentId);
-			if (currentId === firstKeptEntryId) {
+		const compactionParent = compactionParentId ? this.byId.get(compactionParentId) : undefined;
+		visitSessionAncestry(compactionParent, this.byId, (current) => {
+			keptEntryIds.add(current.id);
+			if (current.id === firstKeptEntryId) {
 				foundFirstKept = true;
-				break;
+				return false;
 			}
-			currentId = this.byId.get(currentId)?.parentId ?? null;
-		}
+		});
 		if (!foundFirstKept) return;
 		const retainedIds = new Set<string>();
 		const releases: Array<{ entry: SessionMessageEntry; properties: Array<"content" | "output"> }> = [];
 		for (const entry of this.entries) {
 			if (entry.type !== "message") continue;
-			const message = entry.message as unknown as Record<string, unknown>;
-			const properties: Array<"content" | "output"> = [];
-			for (const property of ["content", "output"] as const) {
-				const descriptor = Object.getOwnPropertyDescriptor(message, property);
-				if (
-					descriptor &&
-					!descriptor.get &&
-					"value" in descriptor &&
-					retainedStringChars(descriptor.value, COMPACTED_PAYLOAD_RELEASE_MIN_CHARS) >=
-						COMPACTED_PAYLOAD_RELEASE_MIN_CHARS
-				) {
-					retainedIds.add(entry.id);
-					if (!keptEntryIds.has(entry.id)) properties.push(property);
-				}
-			}
-			if (properties.length > 0) releases.push({ entry, properties });
+			const properties = this._releasableMessageProperties(entry);
+			if (properties.length === 0) continue;
+			retainedIds.add(entry.id);
+			if (!keptEntryIds.has(entry.id)) releases.push({ entry, properties });
 		}
 		this._ensureEntryFileLocations(retainedIds);
 		for (const release of releases) {
@@ -1325,42 +1448,103 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
-
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
-			if (this.flushed) {
-				this._ensureSessionFileParent(this.sessionFile);
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
-			}
-			return;
+		if (this.persistenceStateUncertain) {
+			throw new Error(
+				"Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending.",
+			);
 		}
 
-		if (!this.flushed) {
-			this._ensureSessionFileParent(this.sessionFile);
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
+		try {
+			const hasAssistant =
+				(entry.type === "message" && entry.message.role === "assistant") ||
+				this.fileEntries.some(
+					(candidate) => candidate.type === "message" && candidate.message.role === "assistant",
+				);
+			if (!hasAssistant) {
+				if (this.flushed) {
+					this._ensureSessionFileParent(this.sessionFile);
+					appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 				}
-			} finally {
-				closeSync(fd);
+				return;
 			}
-			this.flushed = true;
-		} else {
-			this._ensureSessionFileParent(this.sessionFile);
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+
+			if (!this.flushed) {
+				this._ensureSessionFileParent(this.sessionFile);
+				const fd = openSync(this.sessionFile, "wx");
+				try {
+					for (const candidate of this.fileEntries) {
+						writeFileSync(fd, `${JSON.stringify(candidate)}\n`);
+					}
+					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				} finally {
+					closeSync(fd);
+				}
+				this.flushed = true;
+			} else {
+				this._ensureSessionFileParent(this.sessionFile);
+				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			}
+		} catch (error) {
+			// append/write/close failures may leave a partial JSONL suffix. Do not publish the
+			// entry in memory, and fence every later append until an explicit reload owns the
+			// surviving canonical prefix.
+			this.persistenceStateUncertain = true;
+			throw error;
 		}
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		this._persist(entry);
 		this.fileEntries.push(entry);
 		this.entries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
-		this._persist(entry);
+		this._advanceSessionContextCache(entry);
+	}
+
+	private _invalidateSessionContextCache(): void {
+		this.sessionContextCache = undefined;
+	}
+
+	/** Advance a materialized linear projection without walking its immutable ancestry again. */
+	private _advanceSessionContextCache(entry: SessionEntry): void {
+		const cached = this.sessionContextCache;
+		if (!cached || cached.leafId !== entry.parentId || entry.type === "compaction") {
+			this._invalidateSessionContextCache();
+			return;
+		}
+
+		switch (entry.type) {
+			case "message":
+				cached.context.messages.push(entry.message);
+				if (entry.message.role === "assistant") {
+					cached.context.model = { provider: entry.message.provider, modelId: entry.message.model };
+				}
+				break;
+			case "custom_message":
+				cached.context.messages.push(
+					retainSynthesizedSessionContextMessage(
+						createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+					),
+				);
+				break;
+			case "branch_summary":
+				if (entry.summary) {
+					cached.context.messages.push(
+						retainSynthesizedSessionContextMessage(
+							createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
+						),
+					);
+				}
+				break;
+			case "thinking_level_change":
+				cached.context.thinkingLevel = entry.thinkingLevel;
+				break;
+			case "model_change":
+				cached.context.model = { provider: entry.provider, modelId: entry.modelId };
+				break;
+		}
+		cached.leafId = entry.id;
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1576,11 +1760,10 @@ export class SessionManager {
 	getBranch(fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
-		while (current) {
-			path.push(current);
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
+		const start = startId ? this.byId.get(startId) : undefined;
+		visitSessionAncestry(start, this.byId, (entry) => {
+			path.push(entry);
+		});
 		path.reverse();
 		return path;
 	}
@@ -1594,12 +1777,14 @@ export class SessionManager {
 	 */
 	getLatestCustomEntryOnBranch(customType: string, fromId?: string): CustomEntry | undefined {
 		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
-		while (current) {
-			if (current.type === "custom" && current.customType === customType) return current;
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
-		return undefined;
+		const start = startId ? this.byId.get(startId) : undefined;
+		let match: CustomEntry | undefined;
+		visitSessionAncestry(start, this.byId, (entry) => {
+			if (entry.type !== "custom" || entry.customType !== customType) return;
+			match = entry;
+			return false;
+		});
+		return match;
 	}
 
 	/**
@@ -1607,7 +1792,15 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+		let cached = this.sessionContextCache;
+		if (!cached || cached.leafId !== this.leafId) {
+			cached = {
+				leafId: this.leafId,
+				context: buildSessionContext(this.entries, this.leafId, this.byId),
+			};
+			this.sessionContextCache = cached;
+		}
+		return cloneSessionContext(cached.context);
 	}
 
 	/**
@@ -1636,6 +1829,31 @@ export class SessionManager {
 	/** Return current session entry count without allocating a defensive entries array. */
 	getEntryCount(): number {
 		return this.entries.length;
+	}
+
+	/**
+	 * Release large own payload properties from one already-persisted message without reopening the
+	 * session. Calling this immediately after append advances the bounded file-location cursor only
+	 * across the new suffix; cold getters restore the exact property from that canonical JSONL line.
+	 */
+	releasePersistedMessagePayload(entryId: string): void {
+		const entry = this.byId.get(entryId);
+		if (!entry || entry.type !== "message") {
+			throw new TypeError(`Session entry ${entryId} is not a persisted message.`);
+		}
+		if (!this.persist || !this.flushed || !this.sessionFile) {
+			throw new Error(`Session message ${entryId} is not durably persisted.`);
+		}
+		if (this.persistenceStateUncertain) {
+			throw new Error(
+				"Session persistence state is uncertain after a failed write; reopen the session file before releasing payloads.",
+			);
+		}
+		const properties = this._releasableMessageProperties(entry);
+		if (properties.length === 0) return;
+		const location = this._getEntryFileLocation(entryId);
+		if (!location) throw new Error(`Persisted session message ${entryId} has no canonical file location.`);
+		for (const property of properties) this._releaseMessageProperty(entry, property);
 	}
 
 	/**
@@ -1709,14 +1927,14 @@ export class SessionManager {
 		const maxEntries = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 100;
 		if (maxEntries === 0) return [];
 		const history: string[] = [];
-		let entry = this.leafId ? this.byId.get(this.leafId) : undefined;
-		while (entry && history.length < maxEntries) {
+		const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
+		visitSessionAncestry(leaf, this.byId, (entry) => {
 			if (entry.type === "message" && entry.message.role === "user") {
 				const text = this.getUserInputText(entry.message);
 				if (text) history.push(text);
 			}
-			entry = entry.parentId ? this.byId.get(entry.parentId) : undefined;
-		}
+			if (history.length >= maxEntries) return false;
+		});
 		return history.reverse();
 	}
 
@@ -1794,6 +2012,7 @@ export class SessionManager {
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		this._invalidateSessionContextCache();
 		this.leafId = branchFromId;
 	}
 
@@ -1803,6 +2022,7 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
+		this._invalidateSessionContextCache();
 		this.leafId = null;
 	}
 
@@ -1821,6 +2041,7 @@ export class SessionManager {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		this._invalidateSessionContextCache();
 		this.leafId = branchFromId;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
@@ -1909,7 +2130,9 @@ export class SessionManager {
 		if (this.persist && hasAssistant) {
 			// Keep the source manager active while cold compacted getters serialize into the copy.
 			branched._rewriteFile();
-			branched.flushed = true;
+			// Reload through the branch owner so every disk-backed getter closes over the new
+			// canonical file instead of retaining the source manager's payload arena.
+			branched.setSessionFile(newSessionFile);
 		} else {
 			branched.flushed = false;
 		}
@@ -1924,6 +2147,7 @@ export class SessionManager {
 	 */
 	createBranchedSession(leafId: string): string | undefined {
 		const branched = this.createBranchedSessionManager(leafId);
+		this._invalidateSessionContextCache();
 		this.sessionId = branched.sessionId;
 		this.sessionFile = branched.sessionFile;
 		this.flushed = branched.flushed;
@@ -1933,6 +2157,7 @@ export class SessionManager {
 		this.labelsById = branched.labelsById;
 		this.labelTimestampsById = branched.labelTimestampsById;
 		this.leafId = branched.leafId;
+		this.persistenceStateUncertain = branched.persistenceStateUncertain;
 		this.coldPayloadEntryIds.clear();
 		for (const id of branched.coldPayloadEntryIds) this.coldPayloadEntryIds.add(id);
 		this._resetEntryFileIndex();

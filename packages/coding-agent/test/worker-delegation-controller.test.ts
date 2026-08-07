@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { WorkerDelegationController } from "../src/core/delegation/worker-delegation-controller.ts";
 import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../src/core/orchestration/contracts.ts";
@@ -17,6 +20,33 @@ function controllerWithRunningCaller(): WorkerDelegationController {
 }
 
 describe("WorkerDelegationController integration invariants", () => {
+	it("shares its conversation store with logical-agent control", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-controller-store-ownership-"));
+		try {
+			const controller = new WorkerDelegationController(
+				{
+					getAgentDir: () => agentDir,
+					getSessionId: () => "session-store-ownership",
+					isDelegateToolActive: () => true,
+					isDisposed: () => false,
+					emit: vi.fn(),
+				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[0],
+				{ statusChanged: vi.fn() } as unknown as ConstructorParameters<typeof WorkerDelegationController>[1],
+				{
+					getTaskRuntimeSnapshot: () => ({ agents: {} }),
+				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[2],
+			);
+
+			const conversations = Reflect.get(controller, "conversations");
+			const agentControl = Reflect.get(controller, "agentControl") as object;
+
+			expect(conversations).toBeDefined();
+			expect(Reflect.get(agentControl, "conversations")).toBe(conversations);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
 	it("retains a caller capacity yield until every independent wait lease releases it", () => {
 		const controller = controllerWithRunningCaller();
 		const yieldCapacity = Reflect.get(controller, "yieldWorkerCapacity") as (
@@ -141,12 +171,21 @@ describe("WorkerDelegationController integration invariants", () => {
 				},
 			},
 			writeReservations: { dispose: () => stages.push("reservations") },
+			conversations: { clearCache: () => stages.push("conversations") },
 			shellSessionKeys: new Set<string>(),
 			deps: { emit },
 		}) as unknown as WorkerDelegationController;
 
 		expect(() => controller.abort()).not.toThrow();
-		expect(stages).toEqual(["abort", "suspend", "scheduler", "recovery", "handoffs", "reservations"]);
+		expect(stages).toEqual([
+			"abort",
+			"suspend",
+			"scheduler",
+			"recovery",
+			"handoffs",
+			"reservations",
+			"conversations",
+		]);
 		expect(emit).toHaveBeenCalledWith(
 			expect.objectContaining({ type: "warning", message: expect.stringContaining("durable suspension failed") }),
 		);

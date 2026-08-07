@@ -113,7 +113,7 @@ export interface WorkerRunnerOptions {
 	 * enforce the cost-visibility invariant (a completed claim without a usage report is blocked).
 	 */
 	usageReportId: string;
-	complete: (args: { systemPrompt: string; userPrompt: string; signal?: AbortSignal }) => Promise<WorkerCompletion>;
+	complete: (args: { systemPrompt: string; userPrompt: string; signal: AbortSignal }) => Promise<WorkerCompletion>;
 	/** Live successful child-tool mutations, including writes completed before timeout/cancellation. */
 	getChangedFiles?: () => readonly string[];
 	signal?: AbortSignal;

@@ -3,6 +3,7 @@
 ### Fixed
 
 - Fixed bounded session-history readers indexing every cold payload before visiting a small range; borrowed entry pages now resolve only their own cold records, and compacted payload restoration and prefix reads share one canonical file-location lookup.
+- Fixed long-running session projection and persistence ownership: linear appends now advance a cached context without revisiting settled ancestry, persisted oversized payloads can be released into exact disk-backed getters, branch copies rebind those getters, malformed entry graphs fail closed, and failed JSONL writes cannot publish phantom state or permit later appends before explicit recovery.
 
 ## [0.86.3] - 2026-08-06
 

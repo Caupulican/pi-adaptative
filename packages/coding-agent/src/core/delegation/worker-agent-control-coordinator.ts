@@ -54,6 +54,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 	agentDir: string;
 	parentSessionId: string;
 	processOwnerId: string;
+	/** Controller-owned composition dependency; standalone coordinators receive a private default. */
+	conversationStore?: WorkerConversationStore;
 	isControlAvailable(): boolean;
 	getLifecycle(): WorkerLifecycle;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
@@ -96,7 +98,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly options: WorkerAgentControlCoordinatorOptions;
 	private readonly mailboxes = new Map<string, WorkerAgentMailbox>();
 	private readonly stateListeners = new Set<() => void>();
-	private readonly conversations = new WorkerConversationStore();
+	private readonly conversations: WorkerConversationStore;
 	private readonly reconcilingTaskBearingAgentIds = new Set<string>();
 	private readonly taskBearingContinuationAgentIds = new Set<string>();
 	private readonly sessionRootMailbox: SessionRootMailbox;
@@ -106,6 +108,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	constructor(options: WorkerAgentControlCoordinatorOptions) {
 		this.options = options;
+		this.conversations = options.conversationStore ?? new WorkerConversationStore();
 		this.sessionRootAddress = sessionRootAddress(options.parentSessionId);
 		this.sessionRootMailbox = new SessionRootMailbox({
 			agentDir: options.agentDir,

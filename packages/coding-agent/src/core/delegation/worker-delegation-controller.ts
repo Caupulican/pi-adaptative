@@ -274,6 +274,7 @@ export class WorkerDelegationController {
 			agentDir: this.deps.getAgentDir(),
 			parentSessionId: this.deps.getSessionId(),
 			processOwnerId: createLocalWorkerProcessOwnerId(process.pid, randomUUID()),
+			conversationStore: this.conversations,
 			isControlAvailable: () => this.deps.isDelegateToolActive(),
 			getLifecycle: () => this.getWorkerLifecycle(),
 			recoveredRequest: (attempt) => this.recovery.recoveredRequest(attempt),
@@ -492,6 +493,7 @@ export class WorkerDelegationController {
 			);
 		}
 		this.shellSessionKeys.clear();
+		this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
 	}
 
 	private runTeardownStep(label: string, step: () => void): void {
