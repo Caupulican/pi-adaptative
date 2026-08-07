@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Added
+
+- Made persistent workers the default delegation workflow: `delegate start` with an `agentId` now dispatches the new task onto that existing worker's durable conversation (idle agents only; the worker keeps its admitted authority — passing `authority`/`profileId` is rejected with `reuse_keeps_admitted_authority`; busy/unknown agents fail with explicit reasons), `list` reports each agent's live `activity` so idle specialists are discoverable, and the tool contract teaches the orchestrator to prefer reuse over minting fresh context-free workers. Starting without `agentId` still creates a fresh specialist from scratch.
+- Added an in-process worker attempt ladder: a delegated worker that fails on an evidence-classified transient error (network, 5xx, rate limit) is suspended durably and re-enqueued after jittered backoff, resuming from its persisted transcript under a fresh fence — instead of terminalizing and forcing the orchestrator to re-delegate blind. Bounded by the grant's `maxAttempts` (default 2 total attempts; `maxAttempts: 1` never ladders), evidence-gated (failures without a classified transient cause never retry), and restart-safe (suspended attempts flow through the existing restart recovery).
+- Added a live agents panel (`ctrl+q` toggles, `escape` closes; configurable via `app.agents.open`/`app.agents.close`) as the detail view behind the statusline's aggregated concurrency counts: each worker lane with status, runtime, profile, elapsed time, and cost, plus running background tools — rendered in the same orchestration-panel row language as the delegate tool output.
+
+### Changed
+
+- Redesigned the activity statusline above the editor into a fixed-slot layout (turn state · plan position · concurrency counts · last event): slots keep stable positions instead of shifting as chips arrive, concurrent background tools aggregate into per-runtime counts (`2 bash · 1 python`) instead of enumerating task ids, background tool chips show the task description instead of internal `tool-task-N` ids, color now carries status only, and only the plan slot truncates when width runs out.
+
+### Fixed
+
+- Fixed delegated workers dying with bare `completion_error`: token budgets now charge prompt-cache reads at 10% instead of face value (a fixed ~3k-token cached system prompt no longer turns `maxTokens` into a request counter), non-viable grants (`maxTokens` under 5000) are rejected at `delegate start` with `token_budget_below_floor` instead of starving mid-flight, worker failure summaries and research lane results carry the underlying executor error, and transient provider failures (socket drops, 5xx, rate limits) retry with jittered backoff inside the worker attempt instead of failing instantly at $0.
+- Fixed corrupted TUI rendering (stale duplicated status lines, wrapped line fragments) on terminals that render East Asian ambiguous characters (`·`, `…`, `●`) as two columns, such as Windows consoles with a CJK codepage/font: the renderer now probes the terminal's actual character width at startup and recalculates layout accordingly.
+
 ## [0.86.3] - 2026-08-06
 
 ### Fixed
