@@ -657,6 +657,46 @@ describe("WorkerRecoveryCoordinator", () => {
 		});
 	});
 
+	it("recovers an empty terminal assistant without replaying the provider", () => {
+		const agentDir = root();
+		const conversation = new WorkerConversationStore().ensure({
+			agentDir,
+			parentSessionId: "session-empty-terminal-recovery",
+			logicalAgentId: "agent-empty-terminal-recovery",
+			cwd: agentDir,
+			resourceProfileNames: [],
+			contextPointers: [],
+		});
+		conversation.beginAttemptUsage("attempt-empty-terminal");
+		const usage = {
+			input: 7,
+			output: 0,
+			cacheRead: 3,
+			cacheWrite: 0,
+			totalTokens: 10,
+			cost: { input: 0.07, output: 0, cacheRead: 0.01, cacheWrite: 0, total: 0.08 },
+		};
+		conversation.appendMessage({
+			...fauxAssistantMessage("", { stopReason: "stop" }),
+			model: "persisted-empty-model",
+			responseModel: "resolved-empty-model",
+			usage,
+		});
+		const recovery = coordinator(new WorkerLifecycle({ agentDir, sessionId: "session-empty-terminal-recovery" }));
+		const replayProvider = vi.fn();
+
+		const recovered = recovery.recoveredTerminalCompletion(conversation, "attempt-empty-terminal");
+		if (!recovered) replayProvider();
+
+		expect(replayProvider).not.toHaveBeenCalled();
+		expect(recovered).toEqual({ text: "", usage, stopReason: "stop" });
+		expect(conversation.getLastAttemptMessage("attempt-empty-terminal")).toMatchObject({
+			model: "persisted-empty-model",
+			responseModel: "resolved-empty-model",
+			usage,
+		});
+	});
+
 	it("recovers cumulative usage without cloning compacted raw transcript payloads", () => {
 		const agentDir = root();
 		const store = new WorkerConversationStore();

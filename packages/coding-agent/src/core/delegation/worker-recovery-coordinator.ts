@@ -424,7 +424,7 @@ export class WorkerRecoveryCoordinator {
 			)
 			.map((content) => content.text)
 			.join("");
-		return text ? { text, usage: last.usage, stopReason: last.stopReason } : undefined;
+		return { text, usage: last.usage, stopReason: last.stopReason };
 	}
 
 	/** Legacy raw transcripts predate durable usage checkpoints; reconstruct their bounded cumulative baseline. */
