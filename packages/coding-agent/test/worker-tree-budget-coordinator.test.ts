@@ -131,6 +131,55 @@ describe("WorkerTreeBudgetCoordinator", () => {
 		admittedSecond.release();
 	});
 
+	it("reconciles cumulative components while shrinking reservations by weighted token spend", async () => {
+		const coordinator = new WorkerTreeBudgetCoordinator();
+		const first = coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "attempt-first",
+			budget: { maxTokens: 100 },
+			seeds: [],
+			initialUsage: usage(),
+		});
+		const second = coordinator.createPort({
+			rootAgentId: "root",
+			attemptId: "attempt-second",
+			budget: { maxTokens: 100 },
+			seeds: [],
+			initialUsage: usage(),
+		});
+		const firstReservation = await first.reserveProviderBudget(80, "first provider request");
+
+		first.recordAttemptUsage({
+			toolCalls: 0,
+			inputTokens: 10,
+			outputTokens: 0,
+			cacheReadTokens: 20,
+			cacheWriteTokens: 0,
+			totalTokens: 30,
+			costUsd: 0,
+			wallClockMs: 0,
+		});
+		first.recordAttemptUsage({
+			toolCalls: 0,
+			inputTokens: 0,
+			outputTokens: 5,
+			cacheReadTokens: 10,
+			cacheWriteTokens: 0,
+			totalTokens: 15,
+			costUsd: 0,
+			wallClockMs: 0,
+		});
+
+		const secondReservation = await second.reserveProviderBudget(100, "second provider request");
+		expect(secondReservation.maxTokens).toBe(20);
+		firstReservation.release();
+		secondReservation.release();
+		expect(second.remainingTokens()).toBe(83);
+		const weightedReservation = await second.reserveProviderBudget(100, "weighted provider request");
+		expect(weightedReservation.maxTokens).toBe(83);
+		weightedReservation.release();
+	});
+
 	it("rejects a descendant reservation after durable root usage exhausts the tree token budget", async () => {
 		const coordinator = new WorkerTreeBudgetCoordinator();
 		const exhaustedRootUsage = usage({ inputTokens: 60, outputTokens: 40, totalTokens: 100 });

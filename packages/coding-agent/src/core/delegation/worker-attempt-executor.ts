@@ -18,11 +18,7 @@ import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import type { ModelCapabilityProfile } from "../model-capability.ts";
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
-import {
-	CapabilityGatewayDeniedError,
-	type GatewayUsageDelta,
-	type ProviderBudgetReservation,
-} from "../orchestration/capability-gateway.ts";
+import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
@@ -32,6 +28,7 @@ import { WorkerConversationOwnershipError } from "./worker-conversation-revision
 import type { WorkerConversation, WorkerConversationRetentionPolicy } from "./worker-conversation-store.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
 import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
 import { WorkerTreeBudgetExceededError } from "./worker-tree-budget-coordinator.ts";
 
@@ -145,55 +142,8 @@ export interface WorkerAttemptExecutorOptions {
 	warn(message: string): void;
 }
 
-function recordAssistantUsage(surface: LaneToolSurface, message: Extract<Message, { role: "assistant" }>): void {
-	surface.gateway?.recordUsage({
-		inputTokens: message.usage.input,
-		outputTokens: message.usage.output,
-		cacheReadTokens: message.usage.cacheRead,
-		cacheWriteTokens: message.usage.cacheWrite,
-		totalTokens: message.usage.totalTokens,
-		costUsd: message.usage.cost.total,
-	});
-}
-
-function positiveProviderUsageDelta(reported: Usage, accounted: Usage): Required<GatewayUsageDelta> {
-	return {
-		inputTokens: Math.max(0, reported.input - accounted.input),
-		outputTokens: Math.max(0, reported.output - accounted.output),
-		cacheReadTokens: Math.max(0, reported.cacheRead - accounted.cacheRead),
-		cacheWriteTokens: Math.max(0, reported.cacheWrite - accounted.cacheWrite),
-		totalTokens: Math.max(0, reported.totalTokens - accounted.totalTokens),
-		costUsd: Math.max(0, reported.cost.total - accounted.cost.total),
-	};
-}
-
-function recordSupplementalProviderUsage(surface: LaneToolSurface, reported: Usage, accounted: Usage): boolean {
-	const gateway = surface.gateway;
-	if (!gateway) return false;
-	const delta = positiveProviderUsageDelta(reported, accounted);
-	if (
-		delta.inputTokens === 0 &&
-		delta.outputTokens === 0 &&
-		delta.cacheReadTokens === 0 &&
-		delta.cacheWriteTokens === 0 &&
-		delta.totalTokens === 0 &&
-		delta.costUsd === 0
-	) {
-		return false;
-	}
-	gateway.recordUsage(delta);
-	return true;
-}
-
 function isToolRequest(message: Message): boolean {
 	return message.role === "assistant" && message.content.some((content) => content.type === "toolCall");
-}
-
-class WorkerCompletionProtocolError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "WorkerCompletionProtocolError";
-	}
 }
 
 function workerCompletionCallbackFailure(error: unknown): Error {
@@ -208,119 +158,6 @@ function workerCompletionCallbackFailure(error: unknown): Error {
 	return new WorkerCompletionProtocolError(
 		"Worker completion callback failed before its authority and durable transcript were verified.",
 	);
-}
-
-class WorkerProviderReservationFence {
-	private readonly acquire: () => Promise<ProviderBudgetReservation>;
-	private readonly signal: AbortSignal;
-	private readonly onFailure: (error: unknown) => void;
-	private held: ProviderBudgetReservation | undefined;
-	private heldConsumed = false;
-	private inFlight = false;
-	private generation = 0;
-	private closed = false;
-	private successfulPreflights = 0;
-	private consumedPreflights = 0;
-
-	constructor(options: {
-		acquire(): Promise<ProviderBudgetReservation>;
-		signal: AbortSignal;
-		onFailure(error: unknown): void;
-	}) {
-		this.acquire = options.acquire;
-		this.signal = options.signal;
-		this.onFailure = options.onFailure;
-	}
-
-	async requestPreflight(): Promise<{ maxTokens: number }> {
-		if (this.closed || this.inFlight || (this.held && !this.heldConsumed)) {
-			const error = new WorkerCompletionProtocolError(
-				"Worker completion attempted an overlapping or out-of-order provider preflight.",
-			);
-			this.generation += 1;
-			this.onFailure(error);
-			this.releaseHeldReservation();
-			throw error;
-		}
-		// The previous provider turn is fully usage-accounted. Release its remaining capacity only
-		// when the adapter proves a next turn is starting; a terminal turn stays fenced until the
-		// returned result has been reconciled.
-		this.releaseHeldReservation();
-		this.inFlight = true;
-		const generation = ++this.generation;
-		let acquired: ProviderBudgetReservation | undefined;
-		try {
-			acquired = await this.acquire();
-			this.signal.throwIfAborted();
-			if (this.closed || generation !== this.generation) {
-				throw new WorkerCompletionProtocolError(
-					"Worker completion provider preflight resolved after its ownership fence closed.",
-				);
-			}
-			this.held = acquired;
-			this.heldConsumed = false;
-			acquired = undefined;
-			this.successfulPreflights += 1;
-			return { maxTokens: this.held.maxTokens };
-		} catch (error) {
-			this.onFailure(error);
-			acquired?.release();
-			this.releaseHeldReservation();
-			throw error;
-		} finally {
-			this.inFlight = false;
-		}
-	}
-
-	assertAssistantReservation(): void {
-		if (this.held && !this.heldConsumed) return;
-		throw new WorkerCompletionProtocolError(
-			"Worker completion attempted to persist an assistant without a held provider reservation.",
-		);
-	}
-
-	consumeAssistantReservation(): void {
-		this.assertAssistantReservation();
-		this.consumedPreflights += 1;
-		this.heldConsumed = true;
-	}
-
-	consumeToolAssistantReservation(): void {
-		this.consumeAssistantReservation();
-		this.releaseHeldReservation();
-	}
-
-	assertAllSuccessfulPreflightsConsumed(): void {
-		if (
-			!this.inFlight &&
-			(!this.held || this.heldConsumed) &&
-			this.consumedPreflights === this.successfulPreflights
-		) {
-			return;
-		}
-		throw new WorkerCompletionProtocolError(
-			"Worker completion returned with a provider preflight authority epoch that no assistant consumed.",
-		);
-	}
-
-	releaseHeldReservation(): void {
-		const held = this.held;
-		this.held = undefined;
-		this.heldConsumed = false;
-		held?.release();
-	}
-
-	hasSuccessfulPreflight(): boolean {
-		return this.successfulPreflights > 0;
-	}
-
-	close(): void {
-		if (!this.closed) {
-			this.closed = true;
-			this.generation += 1;
-		}
-		this.releaseHeldReservation();
-	}
 }
 
 function callbackEvidencedCompletion(
@@ -484,8 +321,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							}
 							let preflightFailed = false;
 							let preflightFailure: unknown;
-							const reservationFence = new WorkerProviderReservationFence({
-								acquire: () =>
+							const providerTurn = new WorkerProviderTurnProtocol({
+								acquireReservation: () =>
 									reserveProviderBudget(maxTokens, "worker_compaction_provider_completion", requestSignal),
 								signal: requestSignal,
 								onFailure: (error) => {
@@ -493,6 +330,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									preflightFailed = true;
 									preflightFailure = error;
 								},
+								...(options.toolSurface.gateway
+									? { recordUsage: (delta) => options.toolSurface.gateway?.recordUsage(delta) }
+									: {}),
 							});
 							try {
 								let completion: IsolatedCompletionResult;
@@ -503,13 +343,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										model: options.model,
 										thinkingLevel: options.thinkingLevel,
 										maxTokens,
-										requestPreflight: () => reservationFence.requestPreflight(),
+										requestPreflight: () => providerTurn.requestPreflight(),
 										signal: requestSignal,
 										cacheRetention: "none",
 										laneKind: "worker-compaction",
 									});
 								} catch (error) {
-									reservationFence.close();
+									providerTurn.close();
 									requestSignal.throwIfAborted();
 									if (preflightFailed) throw workerCompletionCallbackFailure(preflightFailure);
 									throw error;
@@ -529,11 +369,15 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										: {}),
 								};
 								addUsage(compactionUsage, completion.usage);
-								recordAssistantUsage(options.toolSurface, response);
+								if (providerTurn.hasOutstandingAssistantReservation()) {
+									providerTurn.accountAssistantUsage(completion.usage);
+								} else {
+									providerTurn.accountUnverifiedResultUsageDelta(completion.usage);
+								}
 								checkpointUsage("Persisted worker compaction provider usage before verification.");
-								if (reservationFence.hasSuccessfulPreflight()) {
+								if (providerTurn.hasSuccessfulPreflight()) {
 									try {
-										reservationFence.consumeAssistantReservation();
+										providerTurn.consumeTerminalAssistantAndHold();
 									} catch (error) {
 										if (!preflightFailed) {
 											preflightFailed = true;
@@ -541,17 +385,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										}
 									}
 								}
-								reservationFence.close();
+								providerTurn.close();
 								requestSignal.throwIfAborted();
 								if (preflightFailed) throw workerCompletionCallbackFailure(preflightFailure);
-								if (!reservationFence.hasSuccessfulPreflight()) {
-									throw new WorkerCompletionProtocolError(
-										"Worker compaction returned provider output without a successful authority preflight.",
-									);
-								}
+								providerTurn.assertProviderOutputPreflight("compaction");
 								return response;
 							} finally {
-								reservationFence.close();
+								providerTurn.close();
 							}
 						},
 					},
@@ -609,10 +449,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					const retentionPolicy = createRetentionPolicy(signal);
 					const persistedToolAssistantIds = new Set<string>();
 					const pendingToolAssistants = new Map<string, AssistantMessage>();
-					let activeReservationFence: WorkerProviderReservationFence | undefined;
-					const closeActiveReservationFence = (): void => {
-						const active = activeReservationFence;
-						activeReservationFence = undefined;
+					let activeProviderTurn: WorkerProviderTurnProtocol | undefined;
+					const closeActiveProviderTurn = (): void => {
+						const active = activeProviderTurn;
+						activeProviderTurn = undefined;
 						active?.close();
 					};
 					options.toolSurface.gateway?.assertBudgetAvailable("worker_provider_completion");
@@ -630,7 +470,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						const historyLength = history.length;
 						const transcriptCursor = transcriptCommit.cursor;
 						const durableCallbackMessages: Message[] = [];
-						const accountedCompletionUsage = createEmptyUsage();
 						let callbackFailed = false;
 						let callbackFailure: unknown;
 						const retainCallbackFailure = (error: unknown): void => {
@@ -638,8 +477,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							callbackFailed = true;
 							callbackFailure = error;
 						};
-						const reservationFence = new WorkerProviderReservationFence({
-							acquire: () =>
+						const providerTurn = new WorkerProviderTurnProtocol({
+							acquireReservation: () =>
 								reserveProviderBudget(
 									options.laneCapability.laneMaxOutputTokens,
 									"worker_provider_completion",
@@ -647,12 +486,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								),
 							signal,
 							onFailure: retainCallbackFailure,
+							...(options.toolSurface.gateway
+								? { recordUsage: (delta) => options.toolSurface.gateway?.recordUsage(delta) }
+								: {}),
 						});
-						activeReservationFence = reservationFence;
-						const accountAssistantUsage = (message: AssistantMessage): void => {
-							recordAssistantUsage(options.toolSurface, message);
-							addUsage(accountedCompletionUsage, message.usage);
-						};
+						activeProviderTurn = providerTurn;
 						const persistToolRequest = (message: AssistantMessage): void => {
 							signal.throwIfAborted();
 							const toolCallIds = message.content.flatMap((content) =>
@@ -660,20 +498,19 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							);
 							if (toolCallIds.length === 0 || toolCallIds.every((id) => persistedToolAssistantIds.has(id)))
 								return;
-							reservationFence.assertAssistantReservation();
-							accountAssistantUsage(message);
+							providerTurn.accountAssistantUsage(message.usage);
 							options.conversation.appendMessage(message);
 							for (const id of toolCallIds) {
 								persistedToolAssistantIds.add(id);
 								pendingToolAssistants.delete(id);
 							}
 							checkpointUsage("Persisted worker assistant tool request and its cumulative provider usage.");
-							reservationFence.consumeToolAssistantReservation();
+							providerTurn.consumeToolAssistantAndRelease();
 							durableCallbackMessages.push(message);
 						};
 						let committed = false;
 						const abortTranscriptCursor = (): void => {
-							reservationFence.close();
+							providerTurn.close();
 							options.conversation.abortTranscriptCommit(transcriptCursor);
 						};
 						signal.addEventListener("abort", abortTranscriptCursor, { once: true });
@@ -697,7 +534,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										availableTokens ?? Number.POSITIVE_INFINITY,
 									),
 									tools: options.toolSurface.tools,
-									requestPreflight: () => reservationFence.requestPreflight(),
+									requestPreflight: () => providerTurn.requestPreflight(),
 									beforeToolCall: async (context, toolSignal) => {
 										try {
 											signal.throwIfAborted();
@@ -771,8 +608,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												if (pending) persistToolRequest(pending);
 											}
 											if (message.role === "assistant") {
-												reservationFence.assertAssistantReservation();
-												accountAssistantUsage(message);
+												providerTurn.accountAssistantUsage(message.usage);
 											}
 											options.conversation.appendMessage(message);
 											options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
@@ -780,7 +616,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												checkpointUsage(
 													"Persisted worker assistant response and its cumulative provider usage.",
 												);
-												reservationFence.consumeAssistantReservation();
+												providerTurn.consumeTerminalAssistantAndHold();
 											}
 											if (message.role === "toolResult")
 												checkpointUsage(`Persisted worker tool result '${message.toolCallId}'.`);
@@ -873,29 +709,25 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									laneKind: "worker",
 								});
 							} catch (error) {
-								reservationFence.close();
+								providerTurn.close();
 								if (signal.aborted) throw error;
 								if (callbackFailed) throw workerCompletionCallbackFailure(callbackFailure);
 								throw error;
 							}
 							try {
-								reservationFence.assertAllSuccessfulPreflightsConsumed();
+								providerTurn.assertEverySuccessfulPreflightConsumed();
 							} catch (error) {
 								retainCallbackFailure(error);
 							}
 							signal.throwIfAborted();
-							if (recordSupplementalProviderUsage(options.toolSurface, result.usage, accountedCompletionUsage)) {
+							if (providerTurn.accountUnverifiedResultUsageDelta(result.usage)) {
 								checkpointUsage(
 									"Persisted supplemental provider result usage before rejecting unverified completion evidence.",
 								);
 							}
-							reservationFence.close();
+							providerTurn.close();
 							if (callbackFailed) throw workerCompletionCallbackFailure(callbackFailure);
-							if (!reservationFence.hasSuccessfulPreflight()) {
-								throw new WorkerCompletionProtocolError(
-									"Worker completion returned provider output without a successful authority preflight.",
-								);
-							}
+							providerTurn.assertProviderOutputPreflight();
 							const evidenced = callbackEvidencedCompletion(result, historyLength, durableCallbackMessages);
 							signal.throwIfAborted();
 							const appended = options.conversation.commitTranscript(transcriptCursor, evidenced.suffix, {
@@ -910,22 +742,22 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							return evidenced.completion;
 						} finally {
 							signal.removeEventListener("abort", abortTranscriptCursor);
-							reservationFence.close();
-							if (activeReservationFence === reservationFence) activeReservationFence = undefined;
+							providerTurn.close();
+							if (activeProviderTurn === providerTurn) activeProviderTurn = undefined;
 							if (!committed) options.conversation.abortTranscriptCommit(transcriptCursor);
 						}
 					};
 					try {
 						completion = await runProviderCompletionWithBackoff({
 							attempt: attemptProviderCompletion,
-							onAttemptFailure: closeActiveReservationFence,
+							onAttemptFailure: closeActiveProviderTurn,
 							provider: options.model.provider,
 							laneId: options.laneId,
 							warn: options.warn,
 							...(signal ? { signal } : {}),
 						});
 					} finally {
-						closeActiveReservationFence();
+						closeActiveProviderTurn();
 					}
 					const cumulativeUsage = checkpointUsage(
 						"Verified the callback-persisted worker conversation terminal suffix.",

@@ -1,4 +1,9 @@
 import {
+	attemptUsageFromGatewayUsage,
+	EMPTY_ATTEMPT_USAGE,
+	reconcileAttemptUsage,
+} from "../orchestration/attempt-usage.ts";
+import {
 	budgetedTokens,
 	type GatewayUsageSnapshot,
 	type ProviderBudgetReservation,
@@ -19,7 +24,7 @@ export class WorkerTreeBudgetExceededError extends Error {
 
 interface TreeBudgetState {
 	budget: RiskBudget;
-	attempts: Map<string, GatewayUsageSnapshot>;
+	attempts: Map<string, AttemptUsageSnapshot>;
 	reservations: Map<string, { maxTokens: number }>;
 	waiters: ProviderBudgetWaiter[];
 }
@@ -55,17 +60,6 @@ export interface WorkerTreeBudgetProjection {
 	checkpoints: Readonly<Record<string, { usage?: AttemptUsageSnapshot }>>;
 }
 
-const EMPTY_ATTEMPT_USAGE: AttemptUsageSnapshot = {
-	toolCalls: 0,
-	inputTokens: 0,
-	outputTokens: 0,
-	cacheReadTokens: 0,
-	cacheWriteTokens: 0,
-	totalTokens: 0,
-	costUsd: 0,
-	activeWallClockMs: 0,
-};
-
 /** Rebuild every durable tree attempt, including attempts with no usage checkpoint yet. */
 export function collectWorkerTreeBudgetSeeds(
 	snapshot: WorkerTreeBudgetProjection,
@@ -82,33 +76,6 @@ export function collectWorkerTreeBudgetSeeds(
 		seeds.push({ attemptId: attempt.attemptId, usage: usage ?? EMPTY_ATTEMPT_USAGE });
 	}
 	return seeds;
-}
-
-function gatewayUsage(usage: AttemptUsageSnapshot): GatewayUsageSnapshot {
-	return {
-		toolCalls: usage.toolCalls,
-		inputTokens: usage.inputTokens,
-		outputTokens: usage.outputTokens,
-		cacheReadTokens: usage.cacheReadTokens,
-		cacheWriteTokens: usage.cacheWriteTokens,
-		totalTokens: usage.totalTokens,
-		costUsd: usage.costUsd,
-		wallClockMs: usage.activeWallClockMs,
-	};
-}
-
-function mergeUsage(current: GatewayUsageSnapshot | undefined, incoming: GatewayUsageSnapshot): GatewayUsageSnapshot {
-	if (!current) return structuredClone(incoming);
-	return {
-		toolCalls: Math.max(current.toolCalls, incoming.toolCalls),
-		inputTokens: Math.max(current.inputTokens, incoming.inputTokens),
-		outputTokens: Math.max(current.outputTokens, incoming.outputTokens),
-		cacheReadTokens: Math.max(current.cacheReadTokens, incoming.cacheReadTokens),
-		cacheWriteTokens: Math.max(current.cacheWriteTokens, incoming.cacheWriteTokens),
-		totalTokens: Math.max(current.totalTokens, incoming.totalTokens),
-		costUsd: Math.max(current.costUsd, incoming.costUsd),
-		wallClockMs: Math.max(current.wallClockMs, incoming.wallClockMs),
-	};
 }
 
 function abortReason(signal: AbortSignal): unknown {
@@ -134,11 +101,14 @@ export class WorkerTreeBudgetCoordinator {
 			state.budget = intersectRiskBudgets(state.budget, args.budget);
 		}
 		for (const seed of args.seeds) {
-			state.attempts.set(seed.attemptId, mergeUsage(state.attempts.get(seed.attemptId), gatewayUsage(seed.usage)));
+			state.attempts.set(
+				seed.attemptId,
+				reconcileAttemptUsage(state.attempts.get(seed.attemptId) ?? EMPTY_ATTEMPT_USAGE, seed.usage),
+			);
 		}
 		state.attempts.set(
 			args.attemptId,
-			mergeUsage(state.attempts.get(args.attemptId), gatewayUsage(args.initialUsage)),
+			reconcileAttemptUsage(state.attempts.get(args.attemptId) ?? EMPTY_ATTEMPT_USAGE, args.initialUsage),
 		);
 		const tree = state;
 		return {
@@ -157,7 +127,7 @@ export class WorkerTreeBudgetCoordinator {
 
 	private recordAttemptUsage(state: TreeBudgetState, attemptId: string, usage: GatewayUsageSnapshot): void {
 		const previous = state.attempts.get(attemptId);
-		const merged = mergeUsage(previous, usage);
+		const merged = reconcileAttemptUsage(previous ?? EMPTY_ATTEMPT_USAGE, attemptUsageFromGatewayUsage(usage));
 		state.attempts.set(attemptId, merged);
 		const reservation = state.reservations.get(attemptId);
 		if (reservation && previous) {
@@ -281,7 +251,7 @@ export class WorkerTreeBudgetCoordinator {
 		}
 		if (
 			state.budget.maxWallClockMs !== undefined &&
-			usages.reduce((total, usage) => total + usage.wallClockMs, 0) >= state.budget.maxWallClockMs
+			usages.reduce((total, usage) => total + usage.activeWallClockMs, 0) >= state.budget.maxWallClockMs
 		) {
 			throw new WorkerTreeBudgetExceededError("maxWallClockMs", subject);
 		}

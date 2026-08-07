@@ -36,6 +36,26 @@ const boundaries = [
 			"formatDiagnostics(",
 		],
 	},
+	{
+		path: "packages/coding-agent/src/core/delegation/worker-attempt-executor.ts",
+		// Durable callback, transcript, and checkpoint ordering remains here; reservation epochs and
+		// provider-usage reconciliation must stay in the extracted protocol below this bounded ceiling.
+		maxLines: 820,
+		required: ['from "./worker-provider-turn-protocol.ts"'],
+		forbidden: [
+			"class WorkerCompletionProtocolError",
+			"class WorkerProviderTurnProtocol",
+			"class WorkerProviderReservationFence",
+			"function positiveProviderUsageDelta(",
+			"function recordSupplementalProviderUsage(",
+		],
+	},
+	{
+		path: "packages/coding-agent/src/core/delegation/worker-tree-budget-coordinator.ts",
+		maxLines: 300,
+		required: ['from "../orchestration/attempt-usage.ts"'],
+		forbidden: ["const EMPTY_ATTEMPT_USAGE", "function gatewayUsage(", "function mergeUsage("],
+	},
 ];
 
 const failures = [];
