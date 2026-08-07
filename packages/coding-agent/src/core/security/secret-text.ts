@@ -14,6 +14,9 @@ const SECRET_LIKE_PATTERNS: readonly RegExp[] = [
 	/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|account[_-]?key|private[_-]?key|sharedaccesssignature|authorization|credential|secret|password)\b\s*[:=]\s*\S+/i,
 ];
 
+export const MAX_RETAINED_DIAGNOSTIC_CHARS = 240;
+const MAX_DIAGNOSTIC_SCAN_CHARS = 4_096;
+
 export function hasSecretLikeText(text: string): boolean {
 	return SECRET_LIKE_PATTERNS.some((pattern) => pattern.test(text));
 }
@@ -24,4 +27,16 @@ export function redactKnownSecrets(text: string): string {
 		redacted = redacted.replace(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`), "[REDACTED]");
 	}
 	return redacted;
+}
+
+/** Retain one redacted diagnostic line with bounded regex work and durable output size. */
+export function boundedRedactedDiagnosticText(text: string): string | undefined {
+	const scanned = text.slice(0, MAX_DIAGNOSTIC_SCAN_CHARS);
+	const lineEnd = scanned.search(/[\r\n]/);
+	const scanTruncated = lineEnd === -1 && text.length > scanned.length;
+	const firstLine = (lineEnd === -1 ? scanned : scanned.slice(0, lineEnd)).trim();
+	if (!firstLine) return undefined;
+	const redacted = redactKnownSecrets(firstLine);
+	if (!scanTruncated && redacted.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return redacted;
+	return `${redacted.slice(0, MAX_RETAINED_DIAGNOSTIC_CHARS - 1)}…`;
 }

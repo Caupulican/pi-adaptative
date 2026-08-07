@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import { hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
@@ -11,6 +12,7 @@ import type {
 	WorkerExecutionContract,
 	WorkerRole,
 } from "./contracts.ts";
+import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
 import { type AttemptRuntimeState, DurableTaskRuntime, DurableTaskRuntimeError } from "./task-runtime.ts";
 import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
@@ -58,10 +60,21 @@ export interface StartedDelegationAttempt {
 export interface PrepareAgentTurnInput {
 	agentId: string;
 	instructions: string;
+	controlMessageId?: string;
 }
 
 function activeAttempt(attempt: AttemptRuntimeState): boolean {
 	return attempt.status === "queued" || attempt.status === "leased" || attempt.status === "running";
+}
+
+function mailboxTurnTaskId(agentId: string, controlMessageId: string): string {
+	return `mailbox-turn-${createHash("sha256")
+		.update("pi-worker-agent-mailbox-turn-v1")
+		.update("\0")
+		.update(agentId)
+		.update("\0")
+		.update(controlMessageId)
+		.digest("hex")}`;
 }
 
 /**
@@ -126,17 +139,54 @@ export class DelegationOrchestrationLedger {
 
 	/**
 	 * Queue one new turn for an existing logical agent. The agent identity and its immutable
-	 * execution contract are inherited from the last bound turn; the durable task and attempt ids
-	 * are intentionally new so retries, leases, and terminal evidence never collide across turns.
+	 * execution contract are inherited from the last bound turn. Each distinct control message owns
+	 * one deterministic task/attempt identity; exact retries adopt it instead of minting new work.
 	 */
 	prepareAgentTurn(input: PrepareAgentTurnInput): AttemptRuntimeState {
 		const agentId = input.agentId.trim();
 		const instructions = input.instructions.trim();
+		const controlMessageId = input.controlMessageId?.trim();
 		if (!agentId) throw new DurableTaskRuntimeError("Logical worker agent id is required.");
 		if (!instructions) throw new DurableTaskRuntimeError("Worker follow-up instructions are required.");
+		if (
+			input.controlMessageId !== undefined &&
+			(!controlMessageId || controlMessageId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)
+		) {
+			throw new DurableTaskRuntimeError("Worker control message id is invalid.");
+		}
 		const snapshot = this.runtime.getSnapshot();
 		const agent = snapshot.agents[agentId];
 		if (!agent) throw new DurableTaskRuntimeError(`Unknown logical worker agent '${agentId}'.`);
+		const agentAttempts = Object.values(snapshot.attempts).filter(
+			(attempt) => attempt.agentId === agentId || attempt.dispatch.logicalLaneId === agentId,
+		);
+		const sequence = agentAttempts.length + 1;
+		const taskId = controlMessageId ? mailboxTurnTaskId(agentId, controlMessageId) : `${agentId}:turn:${sequence}`;
+		const existingTask = snapshot.tasks[taskId]?.task;
+		if (existingTask && controlMessageId) {
+			if (existingTask.description !== instructions || existingTask.role !== agent.role) {
+				throw new DurableTaskRuntimeError(
+					`Worker control message '${controlMessageId}' has conflicting instructions.`,
+				);
+			}
+			const existingAttempts = (snapshot.tasks[taskId]?.attemptIds ?? []).map(
+				(attemptId) => snapshot.attempts[attemptId],
+			);
+			for (const attempt of existingAttempts) {
+				if (
+					!attempt ||
+					attempt.dispatch.logicalLaneId !== agentId ||
+					attempt.dispatch.controlMessageId !== controlMessageId ||
+					attempt.dispatch.instructions !== instructions
+				) {
+					throw new DurableTaskRuntimeError(
+						`Worker control message '${controlMessageId}' has conflicting dispatch evidence.`,
+					);
+				}
+			}
+			const existingAttempt = existingAttempts.at(-1);
+			if (existingAttempt) return existingAttempt;
+		}
 		if (agent.status !== "registered") {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' is not idle.`);
 		}
@@ -147,9 +197,7 @@ export class DelegationOrchestrationLedger {
 		}
 		const priorTask = snapshot.tasks[prior.taskId]?.task;
 		if (!priorTask) throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
-		const sequence = Object.values(snapshot.attempts).filter((attempt) => attempt.agentId === agentId).length + 1;
-		const taskId = `${agentId}:turn:${sequence}`;
-		if (snapshot.tasks[taskId]) {
+		if (existingTask && !controlMessageId) {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' already has turn ${sequence}.`);
 		}
 		return this.prepareNormalized({
@@ -169,6 +217,7 @@ export class DelegationOrchestrationLedger {
 			dispatchMetadata: {
 				logicalLaneId: agentId,
 				dispatchSequence: sequence,
+				...(controlMessageId ? { controlMessageId } : {}),
 			},
 		});
 	}
@@ -178,7 +227,7 @@ export class DelegationOrchestrationLedger {
 		agent: AgentBindingContract,
 	): AttemptRuntimeState | undefined {
 		return Object.values(snapshot.attempts)
-			.filter((attempt) => attempt.agentId === agent.agentId)
+			.filter((attempt) => attempt.agentId === agent.agentId || attempt.dispatch.logicalLaneId === agent.agentId)
 			.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 			.at(-1);
 	}
@@ -198,7 +247,13 @@ export class DelegationOrchestrationLedger {
 		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
 			OrchestrationDispatchRequest,
-			"executionKind" | "logicalLaneId" | "dispatchSequence" | "provider" | "authorizationId" | "worktreeLaneKey"
+			| "executionKind"
+			| "logicalLaneId"
+			| "dispatchSequence"
+			| "controlMessageId"
+			| "provider"
+			| "authorizationId"
+			| "worktreeLaneKey"
 		>;
 	}): AttemptRuntimeState {
 		let snapshot = this.runtime.getSnapshot();

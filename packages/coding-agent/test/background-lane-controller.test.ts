@@ -193,6 +193,7 @@ describe("worker runtime construction", () => {
 
 	it("forwards recursive caller scope through the session-level worker-control boundary", async () => {
 		const listWorkerAgents = vi.fn(() => []);
+		const getWorkerAgentActivity = vi.fn(() => "idle" as const);
 		const readWorkerAgentTranscript = vi.fn(() => ({
 			agentId: "child",
 			cursor: 0,
@@ -201,10 +202,17 @@ describe("worker runtime construction", () => {
 		const interruptWorkerAgent = vi.fn(() => ({ interrupted: false }));
 		const resumeWorkerAgent = vi.fn(() => ({ started: false }));
 		const cancelWorkerAgent = vi.fn(() => undefined);
+		const startWorkerAgentTask = vi.fn(() => ({
+			started: true as const,
+			steering: false as const,
+			messageId: "worker-message-1",
+		}));
 		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
 		const agentControl = {
 			listWorkerAgents,
+			getWorkerAgentActivity,
 			readWorkerAgentTranscript,
+			startWorkerAgentTask,
 			interruptWorkerAgent,
 			resumeWorkerAgent,
 			cancelWorkerAgent,
@@ -219,14 +227,18 @@ describe("worker runtime construction", () => {
 		const scope = { callerAgentId: "parent" };
 
 		controller.listWorkerAgents(scope);
+		controller.getWorkerAgentActivity("child", scope);
 		controller.readWorkerAgentTranscript("child", { cursor: 2, maxMessages: 3, ...scope });
+		controller.startWorkerAgentTask("child", "new task", scope);
 		controller.interruptWorkerAgent("child", scope);
 		controller.resumeWorkerAgent("child", scope);
 		controller.cancelWorkerAgent("child", "agent_cancelled", scope);
 		await controller.waitForWorkerAgent("child", 1_000, scope);
 
 		expect(listWorkerAgents).toHaveBeenCalledWith(scope);
+		expect(getWorkerAgentActivity).toHaveBeenCalledWith("child", scope);
 		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("child", { cursor: 2, maxMessages: 3, ...scope });
+		expect(startWorkerAgentTask).toHaveBeenCalledWith("child", "new task", scope);
 		expect(interruptWorkerAgent).toHaveBeenCalledWith("child", scope);
 		expect(resumeWorkerAgent).toHaveBeenCalledWith("child", scope);
 		expect(cancelWorkerAgent).toHaveBeenCalledWith("child", "agent_cancelled", scope);

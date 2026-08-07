@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { getCellDimensions, resetCapabilitiesCache, setCellDimensions } from "../src/terminal-image.ts";
 import { type Component, TUI } from "../src/tui.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -77,5 +77,119 @@ describe("TUI cell size responses", () => {
 			assert.deepStrictEqual(recorder.inputs, ["q"]);
 			tui.stop();
 		});
+	});
+
+	it("removes a batched cell size response while preserving unrelated input", () => {
+		withImageTerminal(() => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+			const terminal = new VirtualTerminal(80, 24);
+			const tui = new TUI(terminal);
+			const recorder = new InputRecorder();
+
+			tui.setFocus(recorder);
+			tui.start();
+
+			terminal.sendInput("a\x1b[6;20;10tb");
+			assert.deepStrictEqual(recorder.inputs, ["ab"]);
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
+			tui.stop();
+		});
+	});
+
+	it("consumes cell size responses before public input listeners", () => {
+		withImageTerminal(() => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+			const terminal = new VirtualTerminal(80, 24);
+			const tui = new TUI(terminal);
+			const observed: string[] = [];
+			tui.addInputListener((data) => {
+				observed.push(data);
+				return { consume: true };
+			});
+			tui.start();
+
+			terminal.sendInput("\x1b[6;20;10t");
+			assert.deepStrictEqual(observed, []);
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
+			tui.stop();
+		});
+	});
+
+	it("preserves cell-size-shaped bytes inside bracketed paste while consuming a genuine response", () => {
+		withImageTerminal(() => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+			const terminal = new VirtualTerminal(80, 24);
+			const tui = new TUI(terminal);
+			const recorder = new InputRecorder();
+			tui.setFocus(recorder);
+			tui.start();
+			try {
+				const paste = "\x1b[200~x\x1b[6;30;15ty\x1b[201~";
+				terminal.sendInput(`a${paste}b\x1b[6;20;10tc`);
+
+				assert.deepStrictEqual(recorder.inputs, [`a${paste}bc`]);
+				assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("stops intercepting cell size responses after the startup timeout", () => {
+		mock.timers.enable({ apis: ["setTimeout"] });
+		try {
+			withImageTerminal(() => {
+				setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+				const terminal = new VirtualTerminal(80, 24);
+				const tui = new TUI(terminal);
+				const recorder = new InputRecorder();
+				tui.setFocus(recorder);
+				tui.start();
+				try {
+					mock.timers.tick(2000);
+					terminal.sendInput("\x1b[6;20;10t");
+
+					assert.deepStrictEqual(recorder.inputs, ["\x1b[6;20;10t"]);
+					assert.deepStrictEqual(getCellDimensions(), { widthPx: 9, heightPx: 18 });
+				} finally {
+					tui.stop();
+				}
+			});
+		} finally {
+			mock.timers.reset();
+		}
+	});
+
+	it("cancels the previous cell size timeout before restarting the query", () => {
+		mock.timers.enable({ apis: ["setTimeout"] });
+		try {
+			withImageTerminal(() => {
+				setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+				const terminal = new VirtualTerminal(80, 24);
+				const tui = new TUI(terminal);
+				const recorder = new InputRecorder();
+				tui.setFocus(recorder);
+				tui.start();
+				try {
+					mock.timers.tick(1000);
+					tui.stop();
+					tui.start();
+					mock.timers.tick(1000);
+
+					terminal.sendInput("\x1b[6;20;10t");
+					assert.deepStrictEqual(recorder.inputs, []);
+					assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
+				} finally {
+					tui.stop();
+				}
+			});
+		} finally {
+			mock.timers.reset();
+		}
 	});
 });

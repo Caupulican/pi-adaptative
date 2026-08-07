@@ -74,6 +74,8 @@ export interface LaneToolSurfaceOptions {
 	processMaxWallClockMs?: number;
 	/** Stable per-agent shell identity. Omitted when the compiled plan does not grant a host shell. */
 	shellSessionKey?: string;
+	/** Host-owned managed directory for complete shell output; never inferred from process-global config. */
+	shellOutputDirectory?: string;
 	/** Compiled policy path. When present, it is the only authorization source for this surface. */
 	grant?: ExecutionGrant;
 	toolManifests?: readonly ToolCapabilityManifest[];
@@ -111,6 +113,7 @@ function createLaneTools(
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 	shellSessionKey?: string,
+	shellOutputDirectory?: string,
 ): AgentTool[] {
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
@@ -126,7 +129,12 @@ function createLaneTools(
 		);
 	}
 	if (shellSessionKey) {
-		factories.set(STABLE_SHELL_TOOL_NAME, () => createBashTool(cwd, { sessionKey: shellSessionKey }));
+		factories.set(STABLE_SHELL_TOOL_NAME, () =>
+			createBashTool(cwd, {
+				sessionKey: shellSessionKey,
+				...(shellOutputDirectory ? { outputDirectory: shellOutputDirectory } : {}),
+			}),
+		);
 	}
 	if (readMemory) {
 		factories.set(MEMORY_LANE_TOOL_NAME, () => ({
@@ -251,6 +259,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.executionPolicy,
 			options.processMaxWallClockMs,
 			options.shellSessionKey,
+			options.shellOutputDirectory,
 		),
 		dispose: () => fileMutationIntents.dispose(),
 		allowedTools,

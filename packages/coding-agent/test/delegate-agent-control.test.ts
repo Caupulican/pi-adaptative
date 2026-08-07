@@ -7,11 +7,19 @@ import {
 	type DelegateStatusToolDetails,
 } from "../src/core/tools/delegate-status.ts";
 
-const context = {} as ExtensionContext;
+const context = {
+	sessionManager: {
+		getSessionId: () => "session-1",
+		getLeafId: () => "leaf-1",
+	},
+} as unknown as ExtensionContext;
+
+const fixedReplayScope = () => ({ sessionId: "session-1", branchId: "leaf-1" });
 
 function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerAgentControlPort {
 	return {
 		listWorkerAgents: () => [],
+		getWorkerAgentActivity: () => "unknown",
 		readWorkerAgentTranscript: (agentId) => ({
 			agentId,
 			cursor: 0,
@@ -20,6 +28,14 @@ function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerA
 		}),
 		sendWorkerAgentMessage: () => ({ messageId: "unused", queued: true }),
 		followUpWorkerAgent: () => ({ started: false, steering: false, messageId: "unused" }),
+		sendSessionRootWorkerAgentMessage: () => ({ messageId: "unused", queued: true }),
+		followUpSessionRootWorkerAgent: () => ({ started: false, steering: false, messageId: "unused" }),
+		replyToWorkerAgentMessage: () => ({ destination: "session_root", messageId: "unused" }),
+		listSessionRootReplies: () => [],
+		waitForSessionRootReplies: async () => ({ replies: [], timedOut: true }),
+		acknowledgeSessionRootReply: () => false,
+		reconcileSessionRootReplies: () => undefined,
+		startWorkerAgentTask: () => ({ started: false, steering: false, messageId: "", skipReason: "unknown_agent" }),
 		interruptWorkerAgent: () => ({ interrupted: false }),
 		resumeWorkerAgent: () => ({ started: false }),
 		cancelWorkerAgent: () => undefined,
@@ -35,6 +51,7 @@ describe("delegate logical-agent controls", () => {
 			record: { laneId: "lane-1", type: "worker" as const, status: "queued" as const },
 		}));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
@@ -51,6 +68,7 @@ describe("delegate logical-agent controls", () => {
 			record: { laneId: "lane-free", type: "worker" as const, status: "queued" as const },
 		}));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
@@ -80,6 +98,7 @@ describe("delegate logical-agent controls", () => {
 
 	it("bounds the owner profile catalog injected into the model prompt while retaining its total", () => {
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			orchestrationProfiles: Array.from({ length: 40 }, (_, index) => ({
 				profileId: `profile-${index}-${"p".repeat(512)}`,
@@ -97,6 +116,8 @@ describe("delegate logical-agent controls", () => {
 	it("validates action-specific fields before routing worker controls", async () => {
 		const sendWorkerAgentMessage = vi.fn(() => ({ messageId: "message-1", queued: true as const }));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "worker", agentId: "agent-sender" },
+			resolveMessageReplayScope: fixedReplayScope,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({ sendWorkerAgentMessage }),
 		});
@@ -112,7 +133,10 @@ describe("delegate logical-agent controls", () => {
 			undefined,
 			context,
 		);
-		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-1", "Check the focused test");
+		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-1", "Check the focused test", {
+			senderAgentId: "agent-sender",
+			idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+		});
 		expect(sent.details).toMatchObject({ action: "send", agentId: "agent-1", queued: true });
 	});
 
@@ -146,8 +170,9 @@ describe("delegate logical-agent controls", () => {
 		}));
 		const sendWorkerAgentMessage = vi.fn(() => ({ messageId: "message-2", queued: true as const }));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "worker", agentId: "agent-1" },
+			resolveMessageReplayScope: fixedReplayScope,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
-			callerAgentId: "agent-1",
 			workerAgentControl: workerAgentControl({
 				listWorkerAgents,
 				readWorkerAgentTranscript,
@@ -170,7 +195,6 @@ describe("delegate logical-agent controls", () => {
 				agentId: "agent-2",
 				message: "Please reply with evidence.",
 				threadId: "thread-1",
-				replyToMessageId: "message-1",
 				expectReply: true,
 			},
 			undefined,
@@ -189,8 +213,8 @@ describe("delegate logical-agent controls", () => {
 		expect(sendWorkerAgentMessage).toHaveBeenCalledWith("agent-2", "Please reply with evidence.", {
 			senderAgentId: "agent-1",
 			threadId: "thread-1",
-			replyToMessageId: "message-1",
 			expectReply: true,
+			idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
 		});
 	});
 
@@ -201,6 +225,8 @@ describe("delegate logical-agent controls", () => {
 		}));
 		const sendWorkerAgentMessage = vi.fn(() => ({ messageId: "message-1", queued: true as const }));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({ sendWorkerAgentMessage }),
@@ -236,7 +262,11 @@ describe("delegate logical-agent controls", () => {
 	});
 
 	it("routes follow-up, interruption, resume, and terminal cancellation through the existing callbacks", async () => {
-		const followUpWorkerAgent = vi.fn(() => ({ started: true, steering: true, messageId: "message-2" }));
+		const followUpSessionRootWorkerAgent = vi.fn(() => ({
+			started: true,
+			steering: true,
+			messageId: "message-2",
+		}));
 		const interruptWorkerAgent = vi.fn(() => ({ interrupted: true }));
 		const resumeWorkerAgent = vi.fn(() => ({ started: true }));
 		const cancelWorkerAgent = vi.fn(() => ({
@@ -245,9 +275,11 @@ describe("delegate logical-agent controls", () => {
 			status: "canceled" as const,
 		}));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({
-				followUpWorkerAgent,
+				followUpSessionRootWorkerAgent,
 				interruptWorkerAgent,
 				resumeWorkerAgent,
 				cancelWorkerAgent,
@@ -271,7 +303,9 @@ describe("delegate logical-agent controls", () => {
 			context,
 		);
 
-		expect(followUpWorkerAgent).toHaveBeenCalledWith("agent-1", "Continue");
+		expect(followUpSessionRootWorkerAgent).toHaveBeenCalledWith("agent-1", "Continue", {
+			idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
+		});
 		expect(interruptWorkerAgent).toHaveBeenCalledWith("agent-1");
 		expect(resumeWorkerAgent).toHaveBeenCalledWith("agent-1");
 		expect(cancelWorkerAgent).toHaveBeenCalledWith("agent-1");
@@ -280,6 +314,8 @@ describe("delegate logical-agent controls", () => {
 
 	it("turns a thrown control callback into a bounded typed tool result", async () => {
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
 			startWorkerDelegation: () => {
 				throw new Error(`synthetic failure ${"x".repeat(32_000)}`);
 			},
@@ -302,6 +338,7 @@ describe("delegate logical-agent controls", () => {
 
 	it("bounds synchronous worker claims before returning them to model context", async () => {
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({
 				started: true,
 				record: { laneId: "lane-1", type: "worker", status: "succeeded" },
@@ -440,7 +477,7 @@ describe("delegate_status wait", () => {
 	it("blocks action start when callerAgentId is set to enforce 1-level nesting maximum", async () => {
 		const startWorkerDelegation = vi.fn();
 		const tool = createDelegateToolDefinition({
-			callerAgentId: "worker-1",
+			caller: { kind: "worker", agentId: "worker-1" },
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
@@ -466,23 +503,89 @@ describe("delegate_status wait", () => {
 });
 
 describe("delegate persistent worker reuse", () => {
+	it("uses one leaf-scoped host key for exact start replay and a distinct key on a new leaf", async () => {
+		let leafId = "leaf-a";
+		const replayContext = {
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getLeafId: () => leafId,
+			},
+		} as unknown as ExtensionContext;
+		const admitted = new Map<
+			string,
+			{
+				started: true;
+				steering: false;
+				messageId: string;
+				record: { laneId: string; type: "worker"; status: "queued" };
+			}
+		>();
+		const startWorkerAgentTask = vi.fn(
+			(_agentId: string, _message: string, options?: { idempotencyKey?: string }) => {
+				const idempotencyKey = options?.idempotencyKey;
+				if (!idempotencyKey) {
+					return {
+						started: false as const,
+						steering: false as const,
+						messageId: "",
+						skipReason: "missing_idempotency_key",
+					};
+				}
+				const replay = admitted.get(idempotencyKey);
+				if (replay) return replay;
+				const sequence = admitted.size + 1;
+				const accepted = {
+					started: true as const,
+					steering: false as const,
+					messageId: `message-${sequence}`,
+					record: { laneId: `task-${sequence}`, type: "worker" as const, status: "queued" as const },
+				};
+				admitted.set(idempotencyKey, accepted);
+				return accepted;
+			},
+		);
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: () => ({ sessionId: "session-1", branchId: leafId }),
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+		const input = { action: "start" as const, agentId: "worker-1", instructions: "Audit replay" };
+
+		const first = await tool.execute("reused-tool-call", input, undefined, undefined, replayContext);
+		const replay = await tool.execute("reused-tool-call", input, undefined, undefined, replayContext);
+		leafId = "leaf-b";
+		const nextLeaf = await tool.execute("reused-tool-call", input, undefined, undefined, replayContext);
+
+		expect(first.details).toMatchObject({ started: true, laneId: "task-1" });
+		expect(replay.details).toMatchObject({ started: true, laneId: "task-1" });
+		expect(nextLeaf.details).toMatchObject({ started: true, laneId: "task-2" });
+		const firstKey = startWorkerAgentTask.mock.calls[0]?.[2]?.idempotencyKey;
+		const replayKey = startWorkerAgentTask.mock.calls[1]?.[2]?.idempotencyKey;
+		const nextLeafKey = startWorkerAgentTask.mock.calls[2]?.[2]?.idempotencyKey;
+		expect(firstKey).toMatch(/^delegate-message-[a-f0-9]{64}$/);
+		expect(replayKey).toBe(firstKey);
+		expect(nextLeafKey).not.toBe(firstKey);
+	});
+
 	it("dispatches a new task onto an idle worker's persistent context instead of minting a fresh agent", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "fresh-lane", type: "worker" as const, status: "queued" as const },
 		}));
-		const followUpWorkerAgent = vi.fn(() => ({
+		const startWorkerAgentTask = vi.fn(() => ({
 			started: true,
-			steering: false,
+			steering: false as const,
 			messageId: "m1",
 			record: { laneId: "task-2", type: "worker" as const, status: "queued" as const },
 		}));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({
-				waitForWorkerAgent: async () => ({ status: "idle" }),
-				followUpWorkerAgent,
+				startWorkerAgentTask,
 			}),
 		});
 
@@ -493,7 +596,11 @@ describe("delegate persistent worker reuse", () => {
 			undefined,
 			context,
 		);
-		expect(followUpWorkerAgent).toHaveBeenCalledWith("worker-1", "Now audit SysMain too");
+		expect(startWorkerAgentTask).toHaveBeenCalledWith(
+			"worker-1",
+			"Now audit SysMain too",
+			expect.objectContaining({ idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/) }),
+		);
 		expect(startWorkerDelegation).not.toHaveBeenCalled();
 		expect(result.details).toMatchObject({
 			started: true,
@@ -504,14 +611,73 @@ describe("delegate persistent worker reuse", () => {
 		});
 	});
 
+	it("reports terminal replay and wake-pending reuse as durable acceptance", async () => {
+		const cases = [
+			{
+				name: "terminal replay",
+				outcome: {
+					started: false,
+					steering: false as const,
+					messageId: "message-terminal",
+					record: { laneId: "task-terminal", type: "worker" as const, status: "succeeded" as const },
+					skipReason: "worker_task_terminal_completed",
+				},
+				queued: false,
+			},
+			{
+				name: "wake pending",
+				outcome: {
+					started: false,
+					steering: false as const,
+					messageId: "message-pending",
+					skipReason: "worker_task_waiting_for_older_message",
+				},
+				queued: true,
+			},
+		] as const;
+
+		for (const entry of cases) {
+			const tool = createDelegateToolDefinition({
+				caller: { kind: "session_root" },
+				resolveMessageReplayScope: fixedReplayScope,
+				runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+				workerAgentControl: workerAgentControl({ startWorkerAgentTask: () => entry.outcome }),
+			});
+			const result = await tool.execute(
+				`call-${entry.name}`,
+				{ action: "start", agentId: "worker-1", instructions: "replayed task" },
+				undefined,
+				undefined,
+				context,
+			);
+
+			expect(result.details).toMatchObject({
+				started: true,
+				accepted: true,
+				messageId: entry.outcome.messageId,
+				skipReason: entry.outcome.skipReason,
+				queued: entry.queued,
+			});
+			expect(result.content).toEqual([
+				expect.objectContaining({ type: "text", text: expect.stringContaining(entry.outcome.skipReason) }),
+			]);
+		}
+	});
+
 	it("rejects reuse of a busy or unknown worker with an explicit reason", async () => {
-		const followUpWorkerAgent = vi.fn();
+		const startWorkerAgentTask = vi.fn();
 		const makeTool = (status: "active" | "suspended" | "unknown") =>
 			createDelegateToolDefinition({
+				caller: { kind: "session_root" },
+				resolveMessageReplayScope: fixedReplayScope,
 				runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 				workerAgentControl: workerAgentControl({
-					waitForWorkerAgent: async () => ({ status }),
-					followUpWorkerAgent: followUpWorkerAgent as never,
+					startWorkerAgentTask: () => ({
+						started: false,
+						steering: false,
+						messageId: "",
+						skipReason: status === "unknown" ? "unknown_agent" : `worker_${status}`,
+					}),
 				}),
 			});
 
@@ -532,13 +698,57 @@ describe("delegate persistent worker reuse", () => {
 			context,
 		);
 		expect(unknown.details).toMatchObject({ started: false, skipReason: "unknown_agent" });
-		expect(followUpWorkerAgent).not.toHaveBeenCalled();
+		expect(startWorkerAgentTask).not.toHaveBeenCalled();
+	});
+
+	it("atomically admits only one of two concurrent starts for the same idle agent", async () => {
+		let active = false;
+		const startWorkerAgentTask = vi.fn(() => {
+			if (active) {
+				return { started: false, steering: false as const, messageId: "", skipReason: "worker_active" };
+			}
+			active = true;
+			return {
+				started: true,
+				steering: false as const,
+				messageId: "message-first",
+				record: { laneId: "task-first", type: "worker" as const, status: "queued" as const },
+			};
+		});
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+
+		const [first, second] = await Promise.all([
+			tool.execute(
+				"call",
+				{ action: "start", agentId: "worker-1", instructions: "first task" },
+				undefined,
+				undefined,
+				context,
+			),
+			tool.execute(
+				"call",
+				{ action: "start", agentId: "worker-1", instructions: "second task" },
+				undefined,
+				undefined,
+				context,
+			),
+		]);
+
+		expect(first.details).toMatchObject({ started: true, laneId: "task-first" });
+		expect(second.details).toMatchObject({ started: false, skipReason: "worker_active" });
+		expect(startWorkerAgentTask).toHaveBeenCalledTimes(2);
 	});
 
 	it("rejects reuse that tries to replace the worker's admitted authority", async () => {
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
-			workerAgentControl: workerAgentControl({ waitForWorkerAgent: async () => ({ status: "idle" }) }),
+			workerAgentControl: workerAgentControl({}),
 		});
 		const result = await tool.execute(
 			"call",
@@ -556,7 +766,9 @@ describe("delegate persistent worker reuse", () => {
 	});
 
 	it("reports live activity per agent in list so idle workers are discoverable", async () => {
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "active" as const }));
 		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({
 				listWorkerAgents: () =>
@@ -564,7 +776,8 @@ describe("delegate persistent worker reuse", () => {
 						{ agentId: "worker-1", createdAt: "T0", depth: 1 },
 						{ agentId: "worker-2", createdAt: "T1", depth: 1 },
 					] as never,
-				waitForWorkerAgent: async (agentId) => ({ status: agentId === "worker-1" ? "idle" : "active" }),
+				getWorkerAgentActivity: (agentId) => (agentId === "worker-1" ? "idle" : "active"),
+				waitForWorkerAgent,
 			}),
 		});
 		const result = await tool.execute("call", { action: "list" }, undefined, undefined, context);
@@ -576,5 +789,6 @@ describe("delegate persistent worker reuse", () => {
 			expect.objectContaining({ agentId: "worker-1", activity: "idle" }),
 			expect.objectContaining({ agentId: "worker-2", activity: "active" }),
 		]);
+		expect(waitForWorkerAgent).not.toHaveBeenCalled();
 	});
 });

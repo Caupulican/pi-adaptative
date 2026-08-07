@@ -182,6 +182,10 @@ describe("WorkerLifecycle", () => {
 
 		expect(lifecycle.suspendBoundInProcessAttemptsForRestart(agent.agentId)).toEqual([first.attemptId]);
 		expect(lifecycle.suspendBoundInProcessAttemptsForRestart(agent.agentId)).toEqual([]);
+		// Suspension is a resumable ownership state, not a terminal failure and not a runnable lease.
+		expect(lifecycle.getRecord(prepared.record.laneId)).toMatchObject({ status: "running" });
+		expect(lifecycle.getPendingTerminalNotifications()).toEqual([]);
+		expect(() => lifecycle.start(prepared.record.laneId, profile.leaseTtlMs)).toThrow();
 		const resumed = lifecycle.resumeAgent(prepared.record.laneId, agent.agentId, profile.leaseTtlMs);
 		expect(resumed).toMatchObject({ attemptId: first.attemptId, fencingToken: first.fencingToken + 1 });
 		expect(lifecycle.getActiveAttempt(prepared.record.laneId)).toMatchObject({
@@ -304,7 +308,8 @@ describe("WorkerLifecycle", () => {
 	});
 
 	it("creates a distinct durable task and attempt for a logical agent follow-up", () => {
-		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-agent-followup" });
+		const agentDir = root();
+		const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "session-agent-followup" });
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "explorer",
 			model: { provider: "test", id: "model" },
@@ -353,6 +358,50 @@ describe("WorkerLifecycle", () => {
 				instructions: "Now inspect the focused tests.",
 			},
 		});
+
+		lifecycle.cancel(followUp.record.laneId, "test_turn_complete");
+		const taskBearing = lifecycle.prepareAgentTurn({
+			agentId: agent.agentId,
+			instructions: "Consume the accepted terminal handoff.",
+			controlMessageId: "worker-message-terminal-1",
+		});
+		const replayed = new WorkerLifecycle({
+			agentDir,
+			sessionId: "session-agent-followup",
+		}).prepareAgentTurn({
+			agentId: agent.agentId,
+			instructions: "Consume the accepted terminal handoff.",
+			controlMessageId: "worker-message-terminal-1",
+		});
+
+		expect(taskBearing.record.laneId).toMatch(/^mailbox-turn-[a-f0-9]{64}$/);
+		expect(taskBearing.attempt.dispatch).toMatchObject({
+			logicalLaneId: agent.agentId,
+			controlMessageId: "worker-message-terminal-1",
+		});
+		expect(replayed).toMatchObject({
+			record: { laneId: taskBearing.record.laneId },
+			attempt: { attemptId: taskBearing.attempt.attemptId },
+		});
+		lifecycle.cancel(taskBearing.record.laneId, "simulated_wake_failure");
+		const attemptsBeforeTerminalReplay = Object.keys(lifecycle.getTaskRuntimeSnapshot().attempts);
+		const terminalReplay = lifecycle.prepareAgentTurn({
+			agentId: agent.agentId,
+			instructions: "Consume the accepted terminal handoff.",
+			controlMessageId: "worker-message-terminal-1",
+		});
+		expect(terminalReplay.attempt).toMatchObject({
+			attemptId: taskBearing.attempt.attemptId,
+			status: "cancelled",
+		});
+		expect(Object.keys(lifecycle.getTaskRuntimeSnapshot().attempts)).toEqual(attemptsBeforeTerminalReplay);
+		expect(() =>
+			lifecycle.prepareAgentTurn({
+				agentId: agent.agentId,
+				instructions: "Conflicting replay instructions.",
+				controlMessageId: "worker-message-terminal-1",
+			}),
+		).toThrow("conflicting");
 	});
 
 	it("uses the same durable lifecycle and terminal outbox for managed-process workers", () => {

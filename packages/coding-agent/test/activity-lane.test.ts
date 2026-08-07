@@ -179,6 +179,24 @@ describe("activity lane slots", () => {
 		expect(text).not.toContain("tool-task");
 	});
 
+	it("normalizes equivalent foreground and background tool tags through one aggregation path", () => {
+		const items = [
+			{ ...tool("foreground", " Read__File "), id: "tool:foreground" },
+			tool("background", "read--file"),
+			tool("spaced", "READ  FILE"),
+		];
+		const text = render(items, 100);
+
+		expect(text).toContain("3 read file");
+		expect(text).not.toContain("read_file");
+	});
+
+	it("falls back to the activity kind when tag normalization is empty", () => {
+		const text = render([tool("empty", " _--_ ")], 100);
+
+		expect(text).toContain("1 tool");
+	});
+
 	it("shows only the newest terminal event and keeps load-bearing runtime labels in the turn slot", () => {
 		const items = [
 			{ id: "e1", kind: "tool" as const, label: "Old finish", status: "success" as const },
@@ -221,5 +239,29 @@ describe("activity lane slots", () => {
 		];
 		const text = render(items, 80);
 		expect(text).toContain("Queued 2 · 1 steering");
+	});
+
+	it("keeps queued-message state visible beside an active plan at narrow widths", () => {
+		const taskState = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "A fairly long authoritative task description", status: "in_progress" },
+			"T1",
+		);
+		const items = [
+			runtimeTurn("Working..."),
+			{
+				id: "queue:messages",
+				kind: "queue" as const,
+				label: "Queued 2 · 1 steering · Alt+Up edit",
+				status: "waiting" as const,
+			},
+			...projectActivityLane({ taskState, laneRecords: [] }).active,
+		];
+		const lines = renderActivityLaneLine(theme, items, 69);
+		const text = stripAnsi(lines.join("\n"));
+
+		expect(text).toContain("Step 1/1");
+		expect(text).toContain("Queued 2");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(69);
 	});
 });

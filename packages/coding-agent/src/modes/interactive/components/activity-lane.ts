@@ -32,6 +32,16 @@ const DEFAULT_TERMINAL_HOLD_MS = 2_000;
 const MAX_ACTIVITY_LABEL_LENGTH = 240;
 const MAX_SEEN_TERMINALS = 512;
 
+export const BACKGROUND_TOOL_ACTIVITY_ID_PREFIX = "background-tool:";
+
+export function backgroundToolActivityId(taskId: string): string {
+	return `${BACKGROUND_TOOL_ACTIVITY_ID_PREFIX}${taskId}`;
+}
+
+export function isBackgroundToolActivityItem(item: Pick<ActivityLaneItem, "id" | "kind">): boolean {
+	return item.kind === "tool" && item.id.startsWith(BACKGROUND_TOOL_ACTIVITY_ID_PREFIX);
+}
+
 const STATUS_COLORS: Record<ActivityLaneStatus, ThemeColor> = {
 	active: "muted",
 	waiting: "warning",
@@ -173,8 +183,8 @@ export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): Ac
 /**
  * Slot layout. One row, fixed slot order and anchors, left to right by stability:
  *
- *   ● working  Step 2/5 · Confirming duplicate-charge risk      2 bash · 1 python  ● Read finished
- *   turn       plan (only elastic slot)                         concurrency        last event
+ *   ● working  Step 2/5 · Confirming duplicate-charge risk      2 bash  Queued 1  ● Read finished
+ *   turn       plan (only elastic slot)                         concurrency/queue  last event
  *
  * Only the plan slot truncates. When width runs out, whole slots drop right-to-left
  * (event, then concurrency) so surviving slots never shift position mid-turn.
@@ -203,6 +213,14 @@ interface LaneSlots {
 	groups: AggregateGroup[];
 	queue: ActivityLaneItem | undefined;
 	event: ActivityLaneItem | undefined;
+}
+
+function normalizeActivityTag(tag: string | undefined, fallback: "tool" | "worker"): string {
+	const normalized = (tag ?? fallback)
+		.replace(/[_\s-]+/g, " ")
+		.trim()
+		.toLowerCase();
+	return normalized || fallback;
 }
 
 function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
@@ -234,7 +252,7 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 				break;
 			case "tool":
 			case "worker": {
-				const tag = item.tag ?? item.kind;
+				const tag = normalizeActivityTag(item.tag, item.kind);
 				const group = groups.get(tag) ?? { tag, count: 0, waiting: false };
 				group.count += 1;
 				if (item.status === "waiting") group.waiting = true;
@@ -249,17 +267,14 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 	return { turn, plan: plan ?? goal, groups: [...groups.values()], queue, event };
 }
 
-function renderAggregate(theme: Theme, slots: LaneSlots): string {
+function renderConcurrency(theme: Theme, groups: readonly AggregateGroup[]): string {
 	const parts: string[] = [];
-	const shown = slots.groups.slice(0, AGGREGATE_GROUP_MAX);
+	const shown = groups.slice(0, AGGREGATE_GROUP_MAX);
 	for (const group of shown) {
 		parts.push(theme.fg(group.waiting ? "warning" : "muted", `${group.count} ${group.tag}`));
 	}
-	const overflow = slots.groups.length - shown.length;
+	const overflow = groups.length - shown.length;
 	if (overflow > 0) parts.push(theme.fg("dim", `+${overflow}`));
-	if (slots.queue) {
-		parts.push(theme.fg("warning", truncateToWidth(slots.queue.label, QUEUE_TEXT_MAX, "…")));
-	}
 	return parts.join(theme.fg("dim", " · "));
 }
 
@@ -287,8 +302,10 @@ export function renderActivityLaneLine(theme: Theme, items: readonly ActivityLan
 	const planText = planItem?.label ?? planFromTurn ?? "";
 	const planColor: ThemeColor = planItem ? (planItem.status === "waiting" ? "warning" : "text") : "muted";
 
-	// Right-aligned slots at natural size; drop whole slots before squeezing the plan.
-	let aggregatePart = renderAggregate(theme, slots);
+	// Right-aligned slots at natural size. Events and concurrency drop before the plan
+	// shrinks below its preferred width; the user-owned queue state remains visible.
+	let concurrencyPart = renderConcurrency(theme, slots.groups);
+	const queuePart = slots.queue ? theme.fg("warning", truncateToWidth(slots.queue.label, QUEUE_TEXT_MAX, "…")) : "";
 	let eventPart = slots.event
 		? `${theme.fg(STATUS_COLORS[slots.event.status], "●")} ${theme.fg(
 				"muted",
@@ -298,27 +315,25 @@ export function renderActivityLaneLine(theme: Theme, items: readonly ActivityLan
 
 	const leftBase = visibleWidth(indent) + (turnPart ? visibleWidth(turnPart) : 0);
 	const planGap = turnPart && planText ? SLOT_GAP_WIDTH : 0;
+	const rightPart = (): string => [concurrencyPart, queuePart, eventPart].filter(Boolean).join(gap);
 	const planBudget = (): number => {
-		let right = visibleWidth(aggregatePart) + visibleWidth(eventPart);
-		if (aggregatePart && eventPart) right += SLOT_GAP_WIDTH;
+		let right = visibleWidth(rightPart());
 		if (right > 0) right += SLOT_GAP_WIDTH; // breathing room before the right block
 		return safeWidth - leftBase - planGap - right;
 	};
 
 	if (planText && planBudget() < PLAN_TEXT_MIN && eventPart) eventPart = "";
-	if (planText && planBudget() < PLAN_TEXT_MIN && aggregatePart) aggregatePart = "";
+	if (planText && planBudget() < PLAN_TEXT_MIN && concurrencyPart) concurrencyPart = "";
 
 	const planAvailable = Math.max(0, planBudget());
 	const planPart = planText ? theme.fg(planColor, truncateToWidth(planText, planAvailable, "…")) : "";
 
-	let rightPart = aggregatePart;
-	if (aggregatePart && eventPart) rightPart += gap + eventPart;
-	else if (eventPart) rightPart = eventPart;
+	const renderedRightPart = rightPart();
 
 	let line = indent + turnPart + (turnPart && planPart ? gap : "") + planPart;
-	if (rightPart) {
-		const pad = Math.max(SLOT_GAP_WIDTH, safeWidth - visibleWidth(line) - visibleWidth(rightPart));
-		line += " ".repeat(pad) + rightPart;
+	if (renderedRightPart) {
+		const pad = Math.max(SLOT_GAP_WIDTH, safeWidth - visibleWidth(line) - visibleWidth(renderedRightPart));
+		line += " ".repeat(pad) + renderedRightPart;
 	}
 	return [truncateToWidth(line, safeWidth, "")];
 }

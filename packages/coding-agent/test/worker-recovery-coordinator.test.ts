@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
@@ -35,6 +35,8 @@ function coordinator(lifecycle: WorkerLifecycle): WorkerRecoveryCoordinator {
 		recoverWriteReservations: vi.fn(),
 		publishTerminalRecord: vi.fn(),
 		dispatchVerification: () => ({ started: false, skipReason: "verifier_unavailable" }),
+		recoverTaskBearingMailboxTurns: vi.fn(),
+		recoverSessionRootReplies: vi.fn(),
 		warn: vi.fn(),
 	});
 }
@@ -119,6 +121,8 @@ describe("WorkerRecoveryCoordinator", () => {
 			recoverWriteReservations: vi.fn(),
 			publishTerminalRecord: vi.fn(),
 			dispatchVerification: () => ({ started: false, skipReason: "verifier_unavailable" }),
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
 			warn: vi.fn(),
 		});
 
@@ -140,6 +144,27 @@ describe("WorkerRecoveryCoordinator", () => {
 		);
 		recovery.recover();
 		expect(enqueue).toHaveBeenCalledTimes(1);
+	});
+
+	it("reconciles accepted root replies and task-bearing mailboxes on every recovery boundary", () => {
+		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-mailbox-recovery" });
+		const recoverTaskBearingMailboxTurns = vi.fn();
+		const recoverSessionRootReplies = vi.fn();
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue: vi.fn() },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord: vi.fn(),
+			dispatchVerification: () => ({ started: false, skipReason: "verifier_unavailable" }),
+			recoverTaskBearingMailboxTurns,
+			recoverSessionRootReplies,
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		recovery.recover();
+		expect(recoverTaskBearingMailboxTurns).toHaveBeenCalledTimes(2);
+		expect(recoverSessionRootReplies).toHaveBeenCalledTimes(2);
 	});
 
 	it("repairs only unmatched interrupted tool calls and reuses a terminal response", () => {
@@ -181,17 +206,47 @@ describe("WorkerRecoveryCoordinator", () => {
 				.map((message) => message.toolCallId),
 		).toEqual([calls[0]!.id, calls[1]!.id]);
 
+		conversation.beginAttemptUsage("attempt-terminal");
 		const terminal = fauxAssistantMessage("Persisted terminal response", { stopReason: "stop" });
 		conversation.appendMessage(terminal);
-		expect(recovery.recoveredTerminalCompletion(conversation)).toMatchObject({
+		expect(recovery.recoveredTerminalCompletion(conversation, "attempt-terminal")).toMatchObject({
 			text: "Persisted terminal response",
+			stopReason: "stop",
+		});
+	});
+
+	it("requires terminal assistant evidence after the recovered attempt boundary", () => {
+		const agentDir = root();
+		const conversation = new WorkerConversationStore().ensure({
+			agentDir,
+			parentSessionId: "session-terminal-attempt-scope",
+			logicalAgentId: "agent-terminal-attempt-scope",
+			cwd: agentDir,
+			resourceProfileNames: [],
+			contextPointers: [],
+		});
+		conversation.appendMessage(fauxAssistantMessage("prior task completed", { stopReason: "stop" }));
+		conversation.beginAttemptUsage("attempt-2");
+		const recovery = coordinator(new WorkerLifecycle({ agentDir, sessionId: "session-terminal-attempt-scope" }));
+
+		expect(recovery.recoveredTerminalCompletion(conversation, "attempt-2")).toBeUndefined();
+		conversation.appendMessage(fauxAssistantMessage("attempt 2 completed", { stopReason: "stop" }));
+		expect(recovery.recoveredTerminalCompletion(conversation, "attempt-2")).toMatchObject({
+			text: "attempt 2 completed",
+			stopReason: "stop",
+		});
+		conversation.beginAttemptUsage("attempt-3");
+		conversation.appendMessage(fauxAssistantMessage("attempt 3 completed", { stopReason: "stop" }));
+		expect(recovery.recoveredTerminalCompletion(conversation, "attempt-2")).toMatchObject({
+			text: "attempt 2 completed",
 			stopReason: "stop",
 		});
 	});
 
 	it("recovers cumulative usage without cloning compacted raw transcript payloads", () => {
 		const agentDir = root();
-		const conversation = new WorkerConversationStore().ensure({
+		const store = new WorkerConversationStore();
+		const conversation = store.ensure({
 			agentDir,
 			parentSessionId: "session-recovery-usage",
 			logicalAgentId: "agent-recovery-usage",
@@ -218,14 +273,128 @@ describe("WorkerRecoveryCoordinator", () => {
 			isError: false,
 			timestamp: 2,
 		});
-		const rawTranscript = vi.spyOn(conversation, "getRawTranscript");
+		const resumeContext = conversation.getResumeContext();
+		const metadataFile = `${resumeContext.sessionFile}.worker.json`;
+		const legacyMetadata = JSON.parse(readFileSync(metadataFile, "utf-8")) as Record<string, unknown>;
+		delete legacyMetadata.usageAccountingVersion;
+		writeFileSync(metadataFile, `${JSON.stringify(legacyMetadata)}\n`);
+		const legacyConversation = store.open({ agentDir, resumeContext });
+		const rawTranscript = vi.spyOn(legacyConversation, "getRawTranscript");
 
 		const usage = coordinator(new WorkerLifecycle({ agentDir, sessionId: "session-recovery-usage" })).initialUsage(
-			conversation,
+			legacyConversation,
 			undefined,
+			"attempt-legacy",
 		);
 
 		expect(rawTranscript).not.toHaveBeenCalled();
 		expect(usage).toMatchObject({ toolCalls: 1, inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+	});
+
+	it("starts versioned recovery at zero when the durable attempt boundary was not appended before a crash", () => {
+		const agentDir = root();
+		const conversation = new WorkerConversationStore().ensure({
+			agentDir,
+			parentSessionId: "session-versioned-missing-boundary",
+			logicalAgentId: "agent-versioned-missing-boundary",
+			cwd: agentDir,
+			resourceProfileNames: [],
+			contextPointers: [],
+		});
+		conversation.appendMessage({
+			...fauxAssistantMessage("prior completed task"),
+			usage: {
+				input: 80,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+			},
+		});
+
+		const usage = coordinator(
+			new WorkerLifecycle({ agentDir, sessionId: "session-versioned-missing-boundary" }),
+		).initialUsage(conversation, undefined, "attempt-prepared-before-crash");
+
+		expect(usage).toEqual({
+			toolCalls: 0,
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			totalTokens: 0,
+			costUsd: 0,
+			activeWallClockMs: 0,
+		});
+	});
+
+	it("reconciles an append-before-checkpoint crash only within the current attempt", () => {
+		const agentDir = root();
+		const conversation = new WorkerConversationStore().ensure({
+			agentDir,
+			parentSessionId: "session-attempt-usage",
+			logicalAgentId: "agent-attempt-usage",
+			cwd: agentDir,
+			resourceProfileNames: [],
+			contextPointers: [],
+		});
+		conversation.appendMessage({
+			...fauxAssistantMessage("prior task"),
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.6 },
+			},
+		});
+		conversation.beginAttemptUsage("attempt-current");
+		conversation.appendMessage({
+			...fauxAssistantMessage("current response persisted before its checkpoint"),
+			usage: {
+				input: 3,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 5,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+			},
+		});
+		conversation.appendMessage({
+			role: "toolResult",
+			toolCallId: "tool-current",
+			toolName: "read",
+			content: [{ type: "text", text: "persisted result" }],
+			isError: false,
+			timestamp: 2,
+		});
+
+		const usage = coordinator(new WorkerLifecycle({ agentDir, sessionId: "session-attempt-usage" })).initialUsage(
+			conversation,
+			{
+				toolCalls: 0,
+				inputTokens: 2,
+				outputTokens: 1,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens: 3,
+				costUsd: 0.02,
+				activeWallClockMs: 40,
+			},
+			"attempt-current",
+		);
+
+		expect(usage).toEqual({
+			toolCalls: 1,
+			inputTokens: 3,
+			outputTokens: 2,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			totalTokens: 5,
+			costUsd: 0.03,
+			activeWallClockMs: 40,
+		});
 	});
 });

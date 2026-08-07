@@ -1820,13 +1820,36 @@ export class InteractiveMode {
 		})();
 	}
 
+	private agentsOverlay: AgentsOverlay | undefined;
 	private agentsOverlayHandle: ReturnType<TUI["showOverlay"]> | undefined;
+
+	private handleAgentsOverlayRemoved(overlay: AgentsOverlay): void {
+		overlay.dispose();
+		if (this.agentsOverlay !== overlay) return;
+		this.agentsOverlay = undefined;
+		this.agentsOverlayHandle = undefined;
+	}
+
+	private closeAgentsOverlay(overlay = this.agentsOverlay): void {
+		if (!overlay) {
+			const handle = this.agentsOverlayHandle;
+			this.agentsOverlayHandle = undefined;
+			handle?.hide();
+			return;
+		}
+		if (this.agentsOverlay !== overlay) {
+			overlay.dispose();
+			return;
+		}
+		const handle = this.agentsOverlayHandle;
+		handle?.hide();
+		if (this.agentsOverlay === overlay) this.handleAgentsOverlayRemoved(overlay);
+	}
 
 	private toggleAgentsOverlay(): void {
 		if (!this.hasHumanAudience) return;
 		if (this.agentsOverlayHandle) {
-			this.agentsOverlayHandle.hide();
-			this.agentsOverlayHandle = undefined;
+			this.closeAgentsOverlay();
 			return;
 		}
 		const overlay = new AgentsOverlay({
@@ -1835,12 +1858,16 @@ export class InteractiveMode {
 				laneRecords: this.session.getLaneRecords(),
 				items: this.activityLane?.getItems() ?? [],
 			}),
-			onClose: () => {
-				this.agentsOverlayHandle?.hide();
-				this.agentsOverlayHandle = undefined;
-			},
+			requestRender: () => this.ui.requestRender(),
+			onClose: () => this.closeAgentsOverlay(overlay),
 		});
-		this.agentsOverlayHandle = this.ui.showOverlay(overlay, { width: "80%", maxHeight: "70%" });
+		this.agentsOverlay = overlay;
+		this.agentsOverlayHandle = this.ui.showOverlay(overlay, {
+			width: "80%",
+			maxHeight: "70%",
+			onRemove: () => this.handleAgentsOverlayRemoved(overlay),
+		});
+		overlay.mount();
 	}
 
 	private showTranscriptPager(): void {
@@ -3621,6 +3648,7 @@ export class InteractiveMode {
 
 	stop(): void {
 		this.unregisterSignalHandlers();
+		this.closeAgentsOverlay();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}

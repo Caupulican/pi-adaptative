@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { getProcessWorkRun } from "../agent-paths.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -182,6 +183,8 @@ export class WorkerDelegationController {
 	/** In-process attempt-ladder state; durable budgets remain the restart-safe ceiling. */
 	private readonly laneRetryCounts = new Map<string, number>();
 	private readonly laneRetryTimers = new Map<string, NodeJS.Timeout>();
+	private readonly terminalHandoffRetryCounts = new Map<string, number>();
+	private readonly terminalHandoffRetryTimers = new Map<string, NodeJS.Timeout>();
 	private readonly shellSessionKeys = new Set<string>();
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
@@ -233,6 +236,8 @@ export class WorkerDelegationController {
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
 			publishTerminalRecord: (record) => this.publishTerminalRecord(record),
 			dispatchVerification: (recovery) => this.dispatchRecoveredVerification(recovery),
+			recoverTaskBearingMailboxTurns: () => this.agentControl.reconcileTaskBearingMailboxTurns(),
+			recoverSessionRootReplies: () => this.agentControl.reconcileSessionRootReplies(),
 			warn: (message) => this.safeWarn(message),
 		});
 		this.agentControl = new WorkerAgentControlCoordinator({
@@ -254,7 +259,9 @@ export class WorkerDelegationController {
 				return terminal;
 			},
 			yieldCapacity: (callerAgentId, targetAgentId) => this.yieldWorkerCapacity(callerAgentId, targetAgentId),
+			warn: (message) => this.safeWarn(message),
 		});
+		this.agentControl.reconcileSessionRootReplies();
 		this.writeReservations = new WorkerWriteReservationCoordinator({
 			agentDir: this.deps.getAgentDir(),
 			getCwd: () => this.deps.getCwd(),
@@ -383,6 +390,9 @@ export class WorkerDelegationController {
 		for (const timer of this.laneRetryTimers.values()) clearTimeout(timer);
 		this.laneRetryTimers.clear();
 		this.laneRetryCounts.clear();
+		for (const timer of this.terminalHandoffRetryTimers.values()) clearTimeout(timer);
+		this.terminalHandoffRetryTimers.clear();
+		this.terminalHandoffRetryCounts.clear();
 		this.writeReservations.dispose();
 		for (const shellSessionKey of this.shellSessionKeys) disposePersistentShellSession(shellSessionKey);
 		this.shellSessionKeys.clear();
@@ -503,9 +513,17 @@ export class WorkerDelegationController {
 	): { ok: true; shipment?: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
 		if (!profile.requireIndependentVerification) return { ok: true };
 		const resolved = this.getWorkerProfileResolver().resolveVerifier(profile);
-		return resolved.ok
-			? { ok: true, shipment: resolved.resolved }
-			: { ok: false, skipReason: `independent_verifier_unavailable:${resolved.reason}` };
+		if (!resolved.ok) return { ok: false, skipReason: `independent_verifier_unavailable:${resolved.reason}` };
+		// Fresh verifier profiles pass through the same shipment admission owner as fresh workers.
+		// Recovery-pinned verifier contracts bypass this path and preserve their immutable grant.
+		const admitted = resolveWorkerAuthority({
+			base: resolved.resolved,
+			modelRegistry: this.deps.getModelRegistry(),
+			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+		});
+		return admitted.ok
+			? { ok: true, shipment: admitted.shipment }
+			: { ok: false, skipReason: `independent_verifier_unavailable:${admitted.reason}` };
 	}
 
 	private hasExactRecursiveCycle(parentAgentId: string, instructions: string, profileId: string): boolean {
@@ -752,6 +770,63 @@ export class WorkerDelegationController {
 		}
 	}
 
+	private scheduleTerminalHandoffRetry(attemptId: string, record: LaneRecord): void {
+		if (
+			this.deps.isDisposed() ||
+			this.publishedTerminalAttemptIds.has(attemptId) ||
+			this.terminalHandoffRetryTimers.has(attemptId)
+		) {
+			return;
+		}
+		const retries = this.terminalHandoffRetryCounts.get(attemptId) ?? 0;
+		const delayMs = Math.min(100 * 2 ** Math.min(retries, 5), 5_000);
+		this.terminalHandoffRetryCounts.set(attemptId, retries + 1);
+		const timer = setTimeout(() => {
+			this.terminalHandoffRetryTimers.delete(attemptId);
+			if (this.deps.isDisposed() || this.publishedTerminalAttemptIds.has(attemptId)) return;
+			this.publishTerminalRecord(record);
+		}, delayMs);
+		timer.unref();
+		this.terminalHandoffRetryTimers.set(attemptId, timer);
+	}
+
+	private clearTerminalHandoffRetry(attemptId: string): void {
+		const timer = this.terminalHandoffRetryTimers.get(attemptId);
+		if (timer) clearTimeout(timer);
+		this.terminalHandoffRetryTimers.delete(attemptId);
+		this.terminalHandoffRetryCounts.delete(attemptId);
+	}
+
+	private publishTerminalObserversBestEffort(record: LaneRecord): void {
+		// DurableTaskRuntime plus the notification outbox/mailbox own terminal acceptance. The lane
+		// snapshot is a compatibility projection and telemetry is an observer; neither may reopen an
+		// accepted handoff or suppress its in-process publication fence.
+		try {
+			appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+		} catch (error) {
+			this.safeWarn(
+				`Worker terminal snapshot projection failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		try {
+			this.deps.emitAutonomyTelemetry({
+				type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerTerminal,
+				timestamp: new Date().toISOString(),
+				payload: {
+					laneId: record.laneId,
+					laneType: record.type,
+					status: record.status,
+					reasonCode: record.reasonCode ?? null,
+					costUsd: record.costUsd ?? null,
+				},
+			});
+		} catch (error) {
+			this.safeWarn(
+				`Worker terminal telemetry observer failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
 	private publishTerminalRecord(record: LaneRecord): void {
 		this.clearLaneRetryState(record.laneId);
 		const attempt = this.lifecycle?.getActiveAttempt(record.laneId);
@@ -762,42 +837,71 @@ export class WorkerDelegationController {
 		let handedOffToParent = false;
 		if (attemptId && parentAgentId) {
 			try {
-				this.agentControl.deliverWorkerTerminalHandoff({
+				const handoff = this.agentControl.deliverWorkerTerminalHandoff({
 					parentAgentId,
 					childAgentId,
 					terminalAttemptId: attemptId,
 					record,
 				});
-				handedOffToParent = true;
+				handedOffToParent = handoff.accepted;
+				if (!handoff.accepted) {
+					this.safeWarn(
+						`Worker terminal handoff for ${record.laneId} was not accepted${handoff.skipReason ? `: ${handoff.skipReason}` : "."}`,
+					);
+				}
 			} catch (error) {
 				this.safeWarn(
 					`Worker terminal handoff for ${record.laneId} failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
+		if (attemptId && parentAgentId && !handedOffToParent) {
+			this.scheduleTerminalHandoffRetry(attemptId, record);
+			try {
+				this.agentControl.signalStateChanged();
+			} catch (error) {
+				this.safeWarn(
+					`Worker terminal retry signal failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return;
+		}
 		if (handedOffToParent) {
 			const notification = this.lifecycle.getTerminalNotification(record.laneId);
 			if (notification?.status === "pending") {
-				this.lifecycle.markNotificationsDelivered([notification.notificationId]);
+				try {
+					this.lifecycle.markNotificationsDelivered([notification.notificationId]);
+				} catch (error) {
+					this.safeWarn(
+						`Worker terminal notification commit failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					if (attemptId) this.scheduleTerminalHandoffRetry(attemptId, record);
+					try {
+						this.agentControl.signalStateChanged();
+					} catch (signalError) {
+						this.safeWarn(
+							`Worker terminal retry signal failed for ${record.laneId}: ${signalError instanceof Error ? signalError.message : String(signalError)}`,
+						);
+					}
+					return;
+				}
 			}
-			this.notifications.statusChanged();
+			try {
+				this.notifications.statusChanged();
+			} catch (error) {
+				this.safeWarn(
+					`Worker terminal status observer failed for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		} else {
 			this.recordTerminal(record);
 		}
-		appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
-		this.deps.emitAutonomyTelemetry({
-			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerTerminal,
-			timestamp: new Date().toISOString(),
-			payload: {
-				laneId: record.laneId,
-				laneType: record.type,
-				status: record.status,
-				reasonCode: record.reasonCode ?? null,
-				costUsd: record.costUsd ?? null,
-			},
-		});
+		if (attemptId) {
+			this.clearTerminalHandoffRetry(attemptId);
+			this.publishedTerminalAttemptIds.add(attemptId);
+		}
+		this.publishTerminalObserversBestEffort(record);
 		this.agentControl.signalStateChanged();
-		if (attemptId) this.publishedTerminalAttemptIds.add(attemptId);
 	}
 
 	/**
@@ -1096,6 +1200,17 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: "orchestration_agent_missing" };
 		}
 		const conversation = preparedAgent.conversation;
+		if (prepared.attempt.status === "queued" || conversation.usesAttemptUsageBoundaries()) {
+			try {
+				conversation.beginAttemptUsage(prepared.attempt.attemptId);
+			} catch (error) {
+				this.cancelAndPublish(lifecycle, prepared.record.laneId, "worker_conversation_unavailable");
+				this.safeWarn(
+					`Worker usage boundary setup failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return { started: false, skipReason: "worker_conversation_unavailable" };
+			}
+		}
 		if (prepared.attempt.status === "suspended") this.recovery.repairInterruptedToolResults(conversation);
 		const reservation = this.writeReservations.acquire(prepared.record.laneId, prepared.attempt, executionPlan);
 		if (reservation.kind === "denied") {
@@ -1149,9 +1264,11 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: record?.reasonCode ?? "write_reservation_fence_mismatch" };
 		}
 		const recoveredTerminal =
-			prepared.attempt.status === "suspended" ? this.recovery.recoveredTerminalCompletion(conversation) : undefined;
+			prepared.attempt.status === "suspended"
+				? this.recovery.recoveredTerminalCompletion(conversation, durableHandle.attemptId)
+				: undefined;
 		const checkpointUsage = lifecycle.getAttemptUsage(startedRecord.laneId);
-		const initialUsage = this.recovery.initialUsage(conversation, checkpointUsage);
+		const initialUsage = this.recovery.initialUsage(conversation, checkpointUsage, durableHandle.attemptId);
 		onStarted?.(startedRecord);
 		const maxUsd = grant.budget.maxCostUsd;
 		const executionPolicy = orchestrationProfile.executionPolicy;
@@ -1161,7 +1278,11 @@ export class WorkerDelegationController {
 				runWorkerDelegation: (childRequest) => this.runOnce({ ...childRequest, parentAgentId: agentId }),
 				orchestrationProfiles: this.getProfileCatalog(),
 				workerAgentControl: this.agentControl,
-				callerAgentId: agentId,
+				caller: { kind: "worker", agentId },
+				resolveMessageReplayScope: () => ({
+					sessionId: this.deps.getSessionId(),
+					branchId: durableHandle.attemptId,
+				}),
 			}),
 		);
 		const agentBinding = lifecycle.getAgent(agentId);
@@ -1180,6 +1301,9 @@ export class WorkerDelegationController {
 		});
 		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === STABLE_SHELL_TOOL_NAME);
 		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
+		const shellOutputDirectory = shellGranted
+			? getProcessWorkRun(this.deps.getAgentDir(), "outputs", "tool-streams").path
+			: undefined;
 		if (shellSessionKey) this.shellSessionKeys.add(shellSessionKey);
 		const toolSurface = createLaneToolSurface({
 			cwd: this.deps.getCwd(),
@@ -1189,6 +1313,7 @@ export class WorkerDelegationController {
 			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),
 			processMaxWallClockMs: grant.budget.maxWallClockMs ?? 0,
 			...(shellSessionKey ? { shellSessionKey } : {}),
+			...(shellOutputDirectory ? { shellOutputDirectory } : {}),
 			grant,
 			toolManifests: executionPlan.toolManifests,
 			additionalTools: [recursiveDelegateTool],

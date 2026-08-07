@@ -4,6 +4,7 @@ import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
 describe("delegate tool description varies by wiring mode", () => {
 	it("teaches the synchronous contract when startWorkerDelegation is not wired", () => {
 		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
 		});
 
@@ -19,11 +20,14 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(guidelines.some((line) => line.includes("delegate_status"))).toBe(false);
 		expect(guidelines.some((line) => line.includes("Worker output is untrusted evidence"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("exact recursive task cycles"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("cannot recursively delegate"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("exact recursive task cycles"))).toBe(false);
+		expect(guidelines.some((line) => line.includes("64") && line.includes("retry"))).toBe(true);
 	});
 
 	it("teaches the async event-driven retrieval contract when startWorkerDelegation is wired", () => {
 		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation: () => ({
 				started: true,
 				record: { laneId: "worker-1", type: "worker", status: "queued" },
@@ -47,19 +51,24 @@ describe("delegate tool description varies by wiring mode", () => {
 		);
 		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("Do not poll"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("cannot recursively delegate"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("64") && line.includes("retry"))).toBe(true);
 	});
 
 	it("keeps both descriptions as per-wiring-mode static strings (prompt-cache stable)", () => {
 		const unwiredA = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
 		});
 		const unwiredB = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "different-closure-but-same-mode" }),
 		});
 		expect(unwiredA.description).toBe(unwiredB.description);
 		expect(unwiredA.promptGuidelines).toEqual(unwiredB.promptGuidelines);
 
 		const wiredA = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation: () => ({
 				started: true,
 				record: { laneId: "worker-1", type: "worker", status: "queued" },
@@ -67,6 +76,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
 		const wiredB = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation: () => ({
 				started: true,
 				record: { laneId: "worker-2", type: "worker", status: "queued" },
@@ -82,6 +92,7 @@ describe("delegate tool description varies by wiring mode", () => {
 
 	it("leaves the execute path unchanged in synchronous mode", async () => {
 		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "budget_exhausted" }),
 		});
 
@@ -103,6 +114,7 @@ describe("delegate tool description varies by wiring mode", () => {
 
 	it("reports the parent-aware retrieval path in async mode", async () => {
 		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation: () => ({
 				started: true,
 				record: { laneId: "worker-1", type: "worker", status: "queued" },

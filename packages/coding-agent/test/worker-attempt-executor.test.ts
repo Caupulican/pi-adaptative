@@ -275,6 +275,67 @@ describe("worker attempt executor", () => {
 		expect(harness.events.indexOf("append:assistant")).toBeLessThan(harness.events.indexOf("append:toolResult"));
 	});
 
+	it("redacts resolved provider failure metadata before persisting the worker result", async () => {
+		const secret = "secret-token-123456789";
+		const assistantText = `The provider documentation mentions Bearer ${secret}.`;
+		const harness = createExecutorHarness(async (options) => {
+			const assistant: AssistantMessage = {
+				...fauxAssistantMessage(assistantText, { stopReason: "error" }),
+				errorMessage: `Provider rejected Authorization: Bearer ${secret} ${"detail ".repeat(100)}`,
+				diagnostics: [
+					{
+						type: "provider_transport_failure",
+						timestamp: 123,
+						error: {
+							name: "TransportFailure",
+							code: `credential=${secret}`,
+							message: `socket failed Authorization: Bearer ${secret}\nraw second line`,
+							stack: `Error: ${secret}\n at provider.ts:1`,
+						},
+						details: { rawAuthorization: `Bearer ${secret}` },
+					},
+				],
+			};
+			await options.onMessage?.(assistant);
+			return {
+				text: assistantText,
+				usage: ZERO_USAGE,
+				stopReason: "error",
+				messages: [...(options.history ?? []), assistant],
+			};
+		});
+
+		const result = await harness.executor.run();
+		const persistedAssistant = harness.conversation
+			.getRawTranscript()
+			.findLast((message): message is AssistantMessage => message.role === "assistant");
+
+		expect(persistedAssistant?.errorMessage).toHaveLength(240);
+		expect(persistedAssistant?.errorMessage).toMatch(/^Provider rejected \[REDACTED\]/);
+		expect(persistedAssistant?.errorMessage?.endsWith("…")).toBe(true);
+		expect(persistedAssistant?.errorMessage).not.toContain(secret);
+		expect(persistedAssistant?.diagnostics).toEqual([
+			{
+				type: "provider_transport_failure",
+				timestamp: 123,
+				error: {
+					name: "TransportFailure",
+					code: "[REDACTED]",
+					message: "socket failed [REDACTED]",
+				},
+			},
+		]);
+		expect(JSON.stringify(persistedAssistant?.diagnostics)).not.toContain(secret);
+		expect(JSON.stringify(persistedAssistant?.diagnostics)).not.toContain("rawAuthorization");
+		expect(JSON.stringify(persistedAssistant?.diagnostics)).not.toContain("provider.ts");
+		expect(persistedAssistant?.content).toEqual([{ type: "text", text: assistantText }]);
+		expect(result.rawOutcome).toMatchObject({
+			reasonCode: "model_error",
+			claim: { status: "failed", summary: "Worker model call failed." },
+		});
+		expect(JSON.stringify(result.rawOutcome)).not.toContain(secret);
+	});
+
 	it("blocks the second provider request after the first response exhausts the token budget", async () => {
 		let providerRequests = 0;
 		const harness = createExecutorHarness(async (options) => {

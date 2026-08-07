@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createDeterministicCompaction } from "@caupulican/pi-agent-core/node";
-import type { Message } from "@caupulican/pi-ai";
+import type { AssistantMessage, Message } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { workerConversationSessionsDir } from "../src/core/agent-paths.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
@@ -11,7 +11,7 @@ function userMessage(text: string): Message {
 	return { role: "user", content: text, timestamp: 1 };
 }
 
-function assistantMessage(text: string): Message {
+function assistantMessage(text: string): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -113,6 +113,82 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getProviderContext().messages).toEqual([...transcript, userMessage("continue")]);
 	});
 
+	it("bounds and projects durable failure diagnostics consistently across commit and reopen", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const created = store.create(options);
+		const secret = "secret-token-123456789";
+		const failure: AssistantMessage = {
+			...assistantMessage("ordinary assistant content remains exact"),
+			stopReason: "error",
+			errorMessage: `Provider rejected Authorization: Bearer ${secret} ${"detail ".repeat(100)}`,
+			diagnostics: Array.from({ length: 12 }, (_entry, index) => ({
+				type: `transport-${index}`,
+				timestamp: index,
+				error: {
+					name: "TransportFailure",
+					code: `credential=${secret}`,
+					message: `socket failed Authorization: Bearer ${secret}\nraw second line`,
+					stack: `Error: ${secret}\n at provider.ts:${index}`,
+				},
+				details: { rawAuthorization: `Bearer ${secret}`, index },
+			})),
+		};
+		const transcript: Message[] = [userMessage("run provider request"), failure];
+
+		expect(created.commitTranscript(transcript)).toBe(2);
+		expect(created.commitTranscript(transcript)).toBe(0);
+		const reopened = store.open({ agentDir: options.agentDir, resumeContext: created.getResumeContext() });
+		expect(reopened.commitTranscript(transcript)).toBe(0);
+
+		const persisted = reopened
+			.getRawTranscript()
+			.findLast((message): message is AssistantMessage => message.role === "assistant");
+		expect(persisted?.errorMessage).toHaveLength(240);
+		expect(persisted?.errorMessage?.endsWith("…")).toBe(true);
+		expect(persisted?.content).toEqual([{ type: "text", text: "ordinary assistant content remains exact" }]);
+		expect(persisted?.diagnostics?.map((diagnostic) => diagnostic.type)).toEqual(
+			Array.from({ length: 8 }, (_entry, index) => `transport-${index + 4}`),
+		);
+		expect(persisted?.diagnostics?.at(-1)).toEqual({
+			type: "transport-11",
+			timestamp: 11,
+			error: {
+				name: "TransportFailure",
+				code: "[REDACTED]",
+				message: "socket failed [REDACTED]",
+			},
+		});
+		expect(JSON.stringify(persisted)).not.toContain(secret);
+		expect(JSON.stringify(persisted)).not.toContain("rawAuthorization");
+		expect(JSON.stringify(persisted)).not.toContain("provider.ts");
+	});
+
+	it("drops provider diagnostics whose timestamps are not finite nonnegative numbers", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const created = store.create(options);
+		created.appendMessage({
+			...assistantMessage("provider recovered"),
+			diagnostics: [
+				{ type: "valid-zero", timestamp: 0 },
+				{ type: "not-a-number", timestamp: Number.NaN },
+				{ type: "infinite", timestamp: Number.POSITIVE_INFINITY },
+				{ type: "negative", timestamp: -1 },
+				{ type: "valid-later", timestamp: 2 },
+			],
+		});
+
+		const reopened = store.open({ agentDir: options.agentDir, resumeContext: created.getResumeContext() });
+		const persisted = reopened
+			.getRawTranscript()
+			.findLast((message): message is AssistantMessage => message.role === "assistant");
+		expect(persisted?.diagnostics).toEqual([
+			{ type: "valid-zero", timestamp: 0 },
+			{ type: "valid-later", timestamp: 2 },
+		]);
+	});
+
 	it("persists bounded changed-file progress without injecting it into provider context", () => {
 		const options = createOptions();
 		const store = new WorkerConversationStore();
@@ -131,6 +207,101 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getChangedFiles("attempt-1")).toEqual(["src/first.ts", "src/second.ts"]);
 		expect(reopened.getChangedFiles("attempt-2")).toEqual(["src/later.ts"]);
 		expect(reopened.getProviderContext().messages).toEqual([userMessage("modify the focused files")]);
+	});
+
+	it("recovers usage only from the current durable attempt boundary", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const conversation = store.create(options);
+		conversation.appendMessage({
+			...assistantMessage("prior task"),
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.6 },
+			},
+		});
+
+		conversation.beginAttemptUsage("attempt-2");
+		conversation.beginAttemptUsage("attempt-2");
+		conversation.appendMessage({
+			...assistantMessage("current task"),
+			usage: {
+				input: 3,
+				output: 2,
+				cacheRead: 4,
+				cacheWrite: 1,
+				totalTokens: 10,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+			},
+		});
+		conversation.appendMessage({
+			role: "toolResult",
+			toolCallId: "tool-attempt-2",
+			toolName: "read",
+			content: [{ type: "text", text: "current result" }],
+			isError: false,
+			timestamp: 3,
+		});
+
+		const reopened = store.open({ agentDir: options.agentDir, resumeContext: conversation.getResumeContext() });
+		expect(reopened.getRawTranscriptUsage("attempt-2")).toEqual({
+			toolCalls: 1,
+			inputTokens: 3,
+			outputTokens: 2,
+			cacheReadTokens: 4,
+			cacheWriteTokens: 1,
+			totalTokens: 10,
+			costUsd: 0.03,
+			activeWallClockMs: 0,
+		});
+		expect(reopened.getProviderContext().messages).toHaveLength(3);
+	});
+
+	it("distinguishes a versioned missing boundary from a genuinely legacy transcript", () => {
+		const options = createOptions();
+		const store = new WorkerConversationStore();
+		const conversation = store.create(options);
+		conversation.appendMessage({
+			...assistantMessage("prior task"),
+			usage: {
+				input: 9,
+				output: 3,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 12,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.12 },
+			},
+		});
+		const resumeContext = conversation.getResumeContext();
+
+		// A new-format task durably prepared before its boundary was appended owns none of the prior spend.
+		const versioned = store.open({ agentDir: options.agentDir, resumeContext });
+		expect(versioned.getRawTranscriptUsage("attempt-missing-after-crash")).toMatchObject({
+			totalTokens: 0,
+			costUsd: 0,
+		});
+
+		const metadataFile = `${resumeContext.sessionFile}.worker.json`;
+		const legacyMetadata = JSON.parse(readFileSync(metadataFile, "utf-8")) as Record<string, unknown>;
+		delete legacyMetadata.usageAccountingVersion;
+		writeFileSync(metadataFile, `${JSON.stringify(legacyMetadata)}\n`);
+		const legacy = store.open({ agentDir: options.agentDir, resumeContext });
+		expect(legacy.usesAttemptUsageBoundaries()).toBe(false);
+		expect(legacy.getRawTranscriptUsage("attempt-never-versioned")).toMatchObject({
+			inputTokens: 9,
+			outputTokens: 3,
+			totalTokens: 12,
+			costUsd: 0.12,
+		});
+
+		legacy.enableAttemptUsageBoundaries();
+		const upgraded = store.open({ agentDir: options.agentDir, resumeContext });
+		expect(upgraded.usesAttemptUsageBoundaries()).toBe(true);
+		expect(upgraded.getRawTranscriptUsage("attempt-prepared-after-upgrade")).toMatchObject({ totalTokens: 0 });
 	});
 
 	it("refuses divergent complete transcripts rather than duplicating or branching context", () => {

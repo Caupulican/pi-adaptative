@@ -14,7 +14,12 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
-import type { ActivityLaneComponent, ActivityLaneKind } from "./components/activity-lane.ts";
+import {
+	type ActivityLaneComponent,
+	type ActivityLaneKind,
+	BACKGROUND_TOOL_ACTIVITY_ID_PREFIX,
+	backgroundToolActivityId,
+} from "./components/activity-lane.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
@@ -170,10 +175,10 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "background_tools":
-			host.activityLane?.removeByPrefix("background-tool:");
+			host.activityLane?.removeByPrefix(BACKGROUND_TOOL_ACTIVITY_ID_PREFIX);
 			for (const task of event.tasks) {
 				host.activityLane?.start({
-					id: `background-tool:${task.taskId}`,
+					id: backgroundToolActivityId(task.taskId),
 					kind: "tool",
 					label: task.description.trim() || `${task.toolName} · ${task.taskId}`,
 					tag: task.toolName,
@@ -247,7 +252,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				id: `tool:${event.toolCallId}`,
 				kind: host.toolActivityKind(event.toolName),
 				label: host.toolActivityLabel(event.toolName),
-				tag: event.toolName.replace(/[_-]+/g, " ").toLowerCase(),
+				tag: event.toolName,
 			});
 			let component = host.toolPanels.getActive(event.toolCallId);
 			if (!component) {

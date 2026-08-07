@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import type { Message } from "@caupulican/pi-ai/types";
 import { describe, expect, it } from "vitest";
@@ -448,12 +450,26 @@ describe("recursive worker orchestration", () => {
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		try {
-			const command = "printf SHELL_CAPABILITY_OK";
+			const command = "printf '%70000sSHELL_CAPABILITY_OK' x";
+			let managedOutputPath = "";
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall(STABLE_SHELL_TOOL_NAME, { command })], {
 					stopReason: "toolUse",
 				}),
-				fauxAssistantMessage('{"summary":"shell executed","status":"completed"}'),
+				(context) => {
+					const shellResult = context.messages.find(
+						(message) => message.role === "toolResult" && message.toolName === STABLE_SHELL_TOOL_NAME,
+					);
+					const text =
+						shellResult?.role === "toolResult"
+							? shellResult.content
+									.filter((content) => content.type === "text")
+									.map((content) => content.text)
+									.join("\n")
+							: "";
+					managedOutputPath = /Full output: ([^\]\n]+)/.exec(text)?.[1]?.trim() ?? "";
+					return fauxAssistantMessage('{"summary":"shell executed","status":"completed"}');
+				},
 			]);
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Prove the local shell capability.",
@@ -473,6 +489,10 @@ describe("recursive worker orchestration", () => {
 			);
 			expect(shellResult).toMatchObject({ role: "toolResult", isError: false });
 			expect(JSON.stringify(shellResult?.content)).toContain("SHELL_CAPABILITY_OK");
+			expect(managedOutputPath).not.toBe("");
+			expect(isAbsolute(managedOutputPath)).toBe(true);
+			expect(relative(harness.tempDir, managedOutputPath).startsWith("..")).toBe(false);
+			expect(existsSync(managedOutputPath)).toBe(true);
 		} finally {
 			await harness.cleanup();
 		}

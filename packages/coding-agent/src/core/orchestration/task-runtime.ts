@@ -276,6 +276,7 @@ const DISPATCH_FIELDS = new Set([
 	"executionKind",
 	"logicalLaneId",
 	"dispatchSequence",
+	"controlMessageId",
 	"provider",
 	"authorizationId",
 	"worktreeLaneKey",
@@ -291,6 +292,7 @@ function dispatchFromValue(value: unknown, label: string): OrchestrationDispatch
 		throw new DurableTaskRuntimeError(`${label}.executionKind is invalid.`);
 	}
 	const logicalLaneId = optionalDispatchIdentifier(dispatch.logicalLaneId, `${label}.logicalLaneId`);
+	const controlMessageId = optionalDispatchIdentifier(dispatch.controlMessageId, `${label}.controlMessageId`);
 	const parentAgentId = optionalDispatchIdentifier(dispatch.parentAgentId, `${label}.parentAgentId`);
 	const provider = optionalDispatchIdentifier(
 		dispatch.provider,
@@ -329,6 +331,7 @@ function dispatchFromValue(value: unknown, label: string): OrchestrationDispatch
 		...(executionKind ? { executionKind } : {}),
 		...(logicalLaneId ? { logicalLaneId } : {}),
 		...(typeof dispatch.dispatchSequence === "number" ? { dispatchSequence: dispatch.dispatchSequence } : {}),
+		...(controlMessageId ? { controlMessageId } : {}),
 		...(provider ? { provider } : {}),
 		...(authorizationId ? { authorizationId } : {}),
 		...(worktreeLaneKey ? { worktreeLaneKey } : {}),

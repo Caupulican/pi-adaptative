@@ -992,6 +992,14 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows("delegate")) {
 				const delegateToolDefinition = createDelegateToolDefinition({
+					caller: { kind: "session_root" },
+					resolveMessageReplayScope: () => {
+						const sessionManager = this.deps.getSessionManager();
+						return {
+							sessionId: sessionManager.getSessionId(),
+							branchId: sessionManager.getLeafId() ?? sessionManager.getSessionId(),
+						};
+					},
 					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),

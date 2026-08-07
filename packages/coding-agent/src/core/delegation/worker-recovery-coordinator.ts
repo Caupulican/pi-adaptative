@@ -20,6 +20,8 @@ export interface WorkerRecoveryCoordinatorOptions {
 	dispatchVerification(
 		recovery: Extract<PendingVerificationRecovery, { action: "dispatch" }>,
 	): WorkerRecoveryDispatchResult;
+	recoverTaskBearingMailboxTurns(): void;
+	recoverSessionRootReplies(): void;
 	warn(message: string): void;
 }
 
@@ -38,7 +40,7 @@ export class WorkerRecoveryCoordinator {
 		this.options = options;
 	}
 
-	/** Idempotently rebuild in-process queue state and replay only durable terminal handoffs. */
+	/** Idempotently rebuild in-process queues, terminal outboxes, and task-bearing mailboxes. */
 	recover(): void {
 		if (this.recoveringDurableState) return;
 		this.recoveringDurableState = true;
@@ -105,6 +107,8 @@ export class WorkerRecoveryCoordinator {
 			for (const notification of lifecycle.getPendingTerminalNotifications()) {
 				this.options.publishTerminalRecord(notification.record);
 			}
+			this.options.recoverSessionRootReplies();
+			this.options.recoverTaskBearingMailboxTurns();
 		} finally {
 			this.recoveringDurableState = false;
 		}
@@ -163,8 +167,9 @@ export class WorkerRecoveryCoordinator {
 	/** Return an already-persisted final assistant response so recovery cannot duplicate provider work. */
 	recoveredTerminalCompletion(
 		conversation: WorkerConversation,
+		attemptId: string,
 	): { text: string; usage: Usage; stopReason: string } | undefined {
-		const last = conversation.getProviderMessages().at(-1);
+		const last = conversation.getLastAttemptMessage(attemptId);
 		if (!last || last.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted") {
 			return undefined;
 		}
@@ -182,8 +187,9 @@ export class WorkerRecoveryCoordinator {
 	initialUsage(
 		conversation: WorkerConversation,
 		checkpointUsage: AttemptUsageSnapshot | undefined,
+		attemptId: string,
 	): AttemptUsageSnapshot {
-		const transcriptUsage = conversation.getRawTranscriptUsage();
+		const transcriptUsage = conversation.getRawTranscriptUsage(attemptId);
 		return checkpointUsage ? reconcileAttemptUsage(checkpointUsage, transcriptUsage) : transcriptUsage;
 	}
 

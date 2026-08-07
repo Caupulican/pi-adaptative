@@ -250,6 +250,15 @@ export function workerAgentMailboxFile(agentDir: string, parentSessionId: string
 }
 
 /**
+ * `<orchestrationSessionDir>/session-root-mailbox.json` -- the bounded durable reply inbox for the
+ * owning foreground session. The parent session identity is already encoded in the enclosing
+ * session directory, so this fixed filename cannot collide with another session root.
+ */
+export function sessionRootMailboxFile(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "session-root-mailbox.json");
+}
+
+/**
  * `<orchestrationSessionDir>/worker-actions/<scope-digest>.json` -- durable, bounded mutation
  * intents and receipts for one fenced worker attempt. The opaque digest intentionally keeps task
  * identifiers out of filesystem path segments and works on Windows and WSL.

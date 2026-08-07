@@ -21,6 +21,7 @@ import { verifierWorkerExecutionContract } from "../orchestration/worker-executi
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
 	isManagedWorkerAttempt,
+	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
 	projectManagedWorkerLaneRecords,
 	projectWorkerLaneRecord,
 	selectedManagedWorkerAttempt,
@@ -86,7 +87,7 @@ export class WorkerLifecycle {
 	}
 
 	/** Queue the next distinct task/attempt for an idle logical agent. */
-	prepareAgentTurn(input: { agentId: string; instructions: string }): {
+	prepareAgentTurn(input: { agentId: string; instructions: string; controlMessageId?: string }): {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
 	} {
@@ -534,7 +535,7 @@ export class WorkerLifecycle {
 
 	private enqueueTerminalNotification(record: LaneRecord): void {
 		const attempt = this.getActiveAttempt(record.laneId) ?? this.getManagedAttempt(record.laneId);
-		if (!attempt || ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return;
+		if (!attempt || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return;
 		const snapshot = this.ledger.runtime.getSnapshot();
 		const task = snapshot.tasks[attempt.taskId];
 		if (!task) return;

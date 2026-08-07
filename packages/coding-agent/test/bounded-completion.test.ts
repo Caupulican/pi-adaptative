@@ -127,6 +127,45 @@ describe("runBoundedCompletion", () => {
 		expect(outcome.failure?.detail).not.toContain("second line");
 	});
 
+	it("redacts secret-like values before retaining executor failure detail", async () => {
+		const outcome = await runBoundedCompletion({
+			maxWallClockMs: 0,
+			execute: async () => {
+				throw new Error("provider rejected Authorization: Bearer secret-token-123456789");
+			},
+		});
+
+		expect(outcome.failure?.detail).toContain("[REDACTED]");
+		expect(outcome.failure?.detail).not.toContain("secret-token-123456789");
+	});
+
+	it("redacts a secret that straddles the retained-detail boundary before truncating", async () => {
+		const secret = "secret-token-123456789";
+		const outcome = await runBoundedCompletion({
+			maxWallClockMs: 0,
+			execute: async () => {
+				throw new Error(`${"x".repeat(225)} Bearer ${secret} ${"tail".repeat(40)}`);
+			},
+		});
+
+		expect(outcome.failure?.detail).toHaveLength(240);
+		expect(outcome.failure?.detail).toContain("[REDACTED]");
+		expect(outcome.failure?.detail).not.toContain(secret);
+		expect(outcome.failure?.detail).not.toContain("Bearer secret");
+		expect(outcome.failure?.detail?.endsWith("…")).toBe(true);
+	});
+
+	it("bounds retained diagnostic work for a huge single-line secret", async () => {
+		const outcome = await runBoundedCompletion({
+			maxWallClockMs: 0,
+			execute: async () => {
+				throw new Error(`Authorization: Bearer ${"a".repeat(100_000)}`);
+			},
+		});
+
+		expect(outcome.failure?.detail).toBe("[REDACTED]…");
+	});
+
 	it("omits the detail for non-message throw values", async () => {
 		const outcome = await runBoundedCompletion({
 			maxWallClockMs: 0,

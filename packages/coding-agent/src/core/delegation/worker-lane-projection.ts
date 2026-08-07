@@ -3,6 +3,10 @@ import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestratio
 import { deriveWorkerTaskLabel } from "./worker-task-label.ts";
 
 export const ACTIVE_WORKER_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running"]);
+export const NONTERMINAL_WORKER_ATTEMPT_STATUSES: ReadonlySet<string> = new Set([
+	...ACTIVE_WORKER_ATTEMPT_STATUSES,
+	"suspended",
+]);
 
 export function isManagedWorkerAttempt(attempt: AttemptRuntimeState): boolean {
 	return attempt.dispatch.executionKind === "managed-process";
@@ -25,7 +29,7 @@ export function selectedWorkerAttempt(
 	if (!task) return undefined;
 	const attempts = task.attemptIds.map((attemptId) => snapshot.attempts[attemptId]).filter(Boolean);
 	return (
-		[...attempts].reverse().find((attempt) => attempt && ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status)) ??
+		[...attempts].reverse().find((attempt) => attempt && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) ??
 		attempts.at(-1)
 	);
 }
@@ -50,7 +54,7 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 				: "failed"
 			: attempt.status === "queued"
 				? "queued"
-				: attempt.status === "leased" || attempt.status === "running"
+				: attempt.status === "leased" || attempt.status === "running" || attempt.status === "suspended"
 					? "running"
 					: terminalStatus(attempt);
 	const reasonCode = task.verification?.reasonCode ?? attempt.result?.reasonCode ?? attempt.reasonCode;

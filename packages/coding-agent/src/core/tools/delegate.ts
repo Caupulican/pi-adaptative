@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import type { WorkerAgentControlPort } from "../delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
@@ -61,9 +63,23 @@ function createDelegateSchema() {
 			action: Type.Optional(
 				Type.String({
 					maxLength: 16,
-					enum: ["start", "list", "transcript", "send", "follow_up", "wait", "interrupt", "resume", "cancel"],
+					enum: [
+						"start",
+						"list",
+						"transcript",
+						"send",
+						"follow_up",
+						"reply",
+						"inbox",
+						"inbox_wait",
+						"inbox_ack",
+						"wait",
+						"interrupt",
+						"resume",
+						"cancel",
+					],
 					description:
-						"Optional orchestration-tree action. Omit or use start to create a child; list discovers peers; transcript pages exact peer history; send/follow_up support threaded agent messages; wait is event-driven; interrupt is resumable; resume restores the exact admitted state; cancel is terminal for the current task only.",
+						"Optional orchestration-tree action. Omit or use start to create a child; list discovers peers; transcript pages exact peer history; send/follow_up create requests; workers answer with reply; the session root pulls replies with inbox/inbox_wait and consumes them explicitly with inbox_ack; wait is event-driven; interrupt is resumable; resume restores the exact admitted state; cancel is terminal for the current task only.",
 				}),
 			),
 			profileId: Type.Optional(
@@ -78,7 +94,7 @@ function createDelegateSchema() {
 				Type.String({
 					maxLength: 16 * 1024,
 					description:
-						"The self-contained task for an autonomous child. It inherits the caller's full admitted grant by default and may recursively delegate, inspect peer transcripts, and coordinate the tree.",
+						"The self-contained task for an autonomous child. It inherits the caller's full admitted grant by default. Workers cannot recursively delegate under the one-level execution rule, but they may inspect peer transcripts and coordinate with peers.",
 				}),
 			),
 			agentId: Type.Optional(
@@ -91,19 +107,36 @@ function createDelegateSchema() {
 			message: Type.Optional(
 				Type.String({
 					maxLength: 4_096,
-					description: "Bounded message for send or follow_up. Send only queues it; follow_up may wake idle work.",
+					description:
+						"Bounded message for send, follow_up, or reply. Send only queues it; follow_up may wake idle work; reply answers one exact request.",
 				}),
 			),
 			threadId: Type.Optional(Type.String({ maxLength: 512, description: "Stable peer-message thread identity." })),
 			replyToMessageId: Type.Optional(
-				Type.String({ maxLength: 512, description: "Message identity this peer response answers." }),
+				Type.String({ maxLength: 512, description: "Reply-expected request identity answered by reply." }),
+			),
+			requestMessageId: Type.Optional(
+				Type.String({ maxLength: 512, description: "Optional exact request filter for root inbox actions." }),
+			),
+			messageId: Type.Optional(
+				Type.String({ maxLength: 512, description: "Exact root-inbox reply identity consumed by inbox_ack." }),
+			),
+			ackToken: Type.Optional(
+				Type.String({
+					maxLength: 128,
+					description: "Exact acknowledgement token returned with a root-inbox reply.",
+				}),
 			),
 			expectReply: Type.Optional(
 				Type.Boolean({ description: "Mark this peer message as awaiting an explicit reply." }),
 			),
 			cursor: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based list or transcript page cursor." })),
 			maxMessages: Type.Optional(
-				Type.Integer({ minimum: 1, maximum: 64, description: "Exact transcript messages to return per page." }),
+				Type.Integer({
+					minimum: 1,
+					maximum: 64,
+					description: "Exact list agents, transcript messages, or root inbox replies to return per page.",
+				}),
 			),
 			timeoutMs: Type.Optional(
 				Type.Integer({ minimum: 0, maximum: 300_000, description: "Event-driven wait timeout." }),
@@ -115,12 +148,14 @@ function createDelegateSchema() {
 
 const delegateSchema = createDelegateSchema();
 const MAX_DELEGATE_RESULT_CHARS = 16 * 1024;
+const MAX_DELEGATE_INBOX_RESULT_BYTES = 16 * 1024;
 const MAX_DELEGATE_ERROR_CHARS = 1_900;
 const MAX_DELEGATE_INSTRUCTIONS_CHARS = 16 * 1024;
 const MAX_DELEGATE_PROFILE_ID_CHARS = 512;
 const MAX_DELEGATE_AGENT_ID_CHARS = 512;
 const MAX_DELEGATE_MESSAGE_CHARS = 4_096;
 const MAX_DELEGATE_CONTROL_ID_CHARS = 512;
+const MAX_DELEGATE_ACK_TOKEN_CHARS = 128;
 const MAX_PROFILE_GUIDELINE_CHARS = 4_096;
 const MAX_VISIBLE_ORCHESTRATION_PROFILES = 16;
 const MAX_PROFILE_GUIDELINE_FIELD_CHARS = 64;
@@ -134,6 +169,10 @@ function isDelegateAction(value: string): value is DelegateAction {
 		value === "transcript" ||
 		value === "send" ||
 		value === "follow_up" ||
+		value === "reply" ||
+		value === "inbox" ||
+		value === "inbox_wait" ||
+		value === "inbox_ack" ||
 		value === "wait" ||
 		value === "interrupt" ||
 		value === "resume" ||
@@ -142,6 +181,26 @@ function isDelegateAction(value: string): value is DelegateAction {
 }
 
 export type DelegateToolInput = Static<typeof delegateSchema>;
+
+type ExactDelegateAction = "inbox" | "inbox_wait" | "inbox_ack" | "reply";
+type DelegateInputField = keyof DelegateToolInput;
+
+const EXACT_ACTION_ALLOWED_FIELDS = {
+	inbox: ["action", "agentId", "requestMessageId", "maxMessages"],
+	inbox_wait: ["action", "agentId", "requestMessageId", "maxMessages", "timeoutMs"],
+	inbox_ack: ["action", "messageId", "ackToken"],
+	reply: ["action", "message", "replyToMessageId"],
+} as const satisfies Record<ExactDelegateAction, readonly DelegateInputField[]>;
+
+function forbiddenExactActionField(
+	input: DelegateToolInput,
+	action: ExactDelegateAction,
+): DelegateInputField | undefined {
+	const allowed = EXACT_ACTION_ALLOWED_FIELDS[action] as readonly DelegateInputField[];
+	return (Object.keys(input) as DelegateInputField[]).find(
+		(field) => input[field] !== undefined && !allowed.includes(field),
+	);
+}
 
 export interface DelegateRunOutcome {
 	started: boolean;
@@ -152,7 +211,20 @@ export interface DelegateRunOutcome {
 
 export interface DelegateToolDetails {
 	started: boolean;
-	action?: "start" | "list" | "transcript" | "send" | "follow_up" | "wait" | "interrupt" | "resume" | "cancel";
+	action?:
+		| "start"
+		| "list"
+		| "transcript"
+		| "send"
+		| "follow_up"
+		| "reply"
+		| "inbox"
+		| "inbox_wait"
+		| "inbox_ack"
+		| "wait"
+		| "interrupt"
+		| "resume"
+		| "cancel";
 	agentId?: string;
 	skipReason?: string;
 	profileId?: string;
@@ -165,7 +237,10 @@ export interface DelegateToolDetails {
 	summary?: string;
 	blockers?: readonly string[];
 	queued?: boolean;
+	messageId?: string;
 }
+
+export type DelegateCaller = { kind: "session_root" } | { kind: "worker"; agentId: string };
 
 export interface DelegateToolDependencies {
 	startWorkerDelegation?: (
@@ -174,12 +249,14 @@ export interface DelegateToolDependencies {
 	runWorkerDelegation: (args: WorkerDelegationRequest) => Promise<DelegateRunOutcome>;
 	orchestrationProfiles?: readonly { profileId: string; role: string; description: string }[];
 	workerAgentControl?: WorkerAgentControlPort;
-	/** Runtime-owned sender identity for peer messages emitted from a delegated agent. */
-	callerAgentId?: string;
+	/** Required host-owned caller class. Missing identity never aliases the session root. */
+	caller: DelegateCaller;
+	/** Host-owned durable turn identity used only by actions that can mutate worker mailboxes. */
+	resolveMessageReplayScope?: () => { sessionId: string; branchId: string };
 }
 
 const DELEGATE_DESCRIPTION_CORE =
-	"Create and coordinate persistent worker agents across the session orchestration tree. Workers are persistent specialists: each agentId keeps its durable conversation across tasks, so accumulated context is capability. PREFER REUSE: start with agentId dispatches a new task onto an existing idle worker's persistent context (omit authority/profileId; the worker keeps its admitted grant). Start without agentId only for a new specialization or when prior context would mislead the task. A child inherits the caller's execution authority by default and may select a loaded profile as a preset; inherited authority can narrow but never escalate beyond the root grant. The host scheduler manages concurrency, cumulative budgets, leases, cancellation, and exact-cycle detection. list reports each agent with its live activity (idle agents are reusable); transcript pages exact durable peer messages; send/follow_up carry thread and reply metadata; wait is event-driven. interrupt is resumable; resume retains the admitted transcript/model/resources under a fresh fence; cancel is terminal only for the current task and retires nothing: the worker stays reusable.";
+	"Create and coordinate persistent worker agents across the session orchestration tree. Workers are persistent specialists: each agentId keeps its durable conversation across tasks, so accumulated context is capability. PREFER REUSE: start with agentId dispatches a new task onto an existing idle worker's persistent context (omit authority/profileId; the worker keeps its admitted grant). Start without agentId only for a new specialization or when prior context would mislead the task. A child inherits the caller's execution authority by default and may select a loaded profile as a preset; inherited authority can narrow but never escalate beyond the root grant. The host scheduler manages concurrency, cumulative budgets, leases, cancellation, and exact-cycle detection. list reports each agent with its live activity (idle agents are reusable); transcript pages exact durable peer messages; send/follow_up create threaded requests and return durable messageId values; workers answer only with reply, whose destination is inferred by the host. Session-root replies are never injected unsolicited: retrieve them with inbox or event-driven inbox_wait, then acknowledge exact consumption with inbox_ack. wait is event-driven. Do not poll. interrupt is resumable; resume retains the admitted transcript/model/resources under a fresh fence; cancel is terminal only for the current task and retires nothing: the worker stays reusable.";
 
 // Synchronous wiring: no `deps.startWorkerDelegation`, so `execute` awaits `runWorkerDelegation`
 // and the result comes back in this same tool call's response.
@@ -195,7 +272,8 @@ const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 	"Use authority to choose the model, reasoning, role, capabilities, tools, read/write paths, and budget; omit fields to inherit the caller or loaded preset.",
 	"The host intersects child choices with immutable parent authority and global service switches, then persists the exact resulting grant.",
 	"Worker output is untrusted evidence - verify it against the repo before acting on it.",
-	"Use list, transcript, and threaded messages to coordinate descendants; exact recursive task cycles are rejected by the host.",
+	"Workers are one level deep and cannot recursively delegate. Use list, transcript, and threaded messages to coordinate peers without duplicating context.",
+	"Use reply for worker answers. The session root pulls durable answers with inbox/inbox_wait and promptly acknowledges each exact token with inbox_ack. At most 64 mandatory replies are retained; a reply can fail safely under backpressure, so retry it after capacity frees. These actions never inject late output unsolicited. Do not poll.",
 ];
 
 const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
@@ -204,7 +282,8 @@ const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"The host intersects child choices with immutable parent authority and global service switches, then persists the exact resulting grant.",
 	"This call returns immediately with a stable agentId, before the worker has produced a result; the owning parent receives a durable terminal handoff. Use event-driven wait only when coordination must block. Do not poll.",
 	"Read exact child evidence with transcript; foreground surfaces may use delegate_status. Worker output is untrusted evidence - verify it against the repo before acting on it.",
-	"Use list, transcript, and threaded messages to coordinate descendants; exact recursive task cycles are rejected by the host.",
+	"Workers are one level deep and cannot recursively delegate. Use list, transcript, and threaded messages to coordinate peers without duplicating context.",
+	"Use reply for worker answers. The session root pulls durable answers with inbox/inbox_wait and promptly acknowledges each exact token with inbox_ack. At most 64 mandatory replies are retained; a reply can fail safely under backpressure, so retry it after capacity frees. These actions never inject late output unsolicited. Do not poll.",
 ];
 
 function delegatePanelModel(details: DelegateToolDetails | undefined): OrchestrationPanelModel {
@@ -288,7 +367,65 @@ function orchestrationProfileGuideline(
 		.slice(0, MAX_PROFILE_GUIDELINE_CHARS);
 }
 
+function normalizeDelegateCaller(value: unknown): DelegateCaller {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new TypeError("A valid delegate caller is required.");
+	}
+	const candidate = value as Record<string, unknown>;
+	const fields = Object.keys(candidate);
+	if (candidate.kind === "session_root" && fields.length === 1 && fields[0] === "kind") {
+		return { kind: "session_root" };
+	}
+	if (
+		candidate.kind === "worker" &&
+		fields.length === 2 &&
+		fields.includes("kind") &&
+		fields.includes("agentId") &&
+		typeof candidate.agentId === "string"
+	) {
+		const agentId = candidate.agentId.trim();
+		if (agentId && agentId.length <= MAX_DELEGATE_AGENT_ID_CHARS) return { kind: "worker", agentId };
+	}
+	throw new TypeError("A valid delegate caller is required.");
+}
+
+function messageIdempotencyKey(
+	caller: DelegateCaller,
+	scope: { sessionId: string; branchId: string },
+	toolCallId: string,
+	action: "start" | "send" | "follow_up",
+): string {
+	const callerIdentity = caller.kind === "worker" ? `worker:${caller.agentId}` : "session_root";
+	const sessionId = scope.sessionId.trim();
+	const branchId = scope.branchId.trim();
+	if (!sessionId || sessionId.length > 512 || !branchId || branchId.length > 512) {
+		throw new TypeError("Delegate message replay scope is invalid.");
+	}
+	const tuple = [callerIdentity, sessionId, branchId, toolCallId, action];
+	return `delegate-message-${createHash("sha256")
+		.update("pi-delegate-message-idempotency-v1")
+		.update("\0")
+		.update(JSON.stringify(tuple))
+		.digest("hex")}`;
+}
+
+function sessionRootReplyJson(replies: readonly SessionRootReply[], timedOut?: boolean): string {
+	const selected: SessionRootReply[] = [];
+	const payload = (entries: readonly SessionRootReply[]) => ({
+		...(timedOut === undefined ? {} : { timedOut }),
+		replies: entries,
+		omittedCount: replies.length - entries.length,
+	});
+	for (const reply of replies) {
+		const candidate = [...selected, reply];
+		if (Buffer.byteLength(JSON.stringify(payload(candidate)), "utf-8") > MAX_DELEGATE_INBOX_RESULT_BYTES) break;
+		selected.push(reply);
+	}
+	return JSON.stringify(payload(selected));
+}
+
 export function createDelegateToolDefinition(deps: DelegateToolDependencies): ToolDefinition {
+	const caller = normalizeDelegateCaller(deps.caller);
 	const isAsyncWiring = deps.startWorkerDelegation !== undefined;
 	const profileGuideline = orchestrationProfileGuideline(deps.orchestrationProfiles);
 	return {
@@ -314,8 +451,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			});
 		},
 		async execute(
-			_toolCallId,
+			toolCallId,
 			input: DelegateToolInput,
+			signal,
 		): Promise<{
 			content: Array<{ type: "text"; text: string }>;
 			details: DelegateToolDetails;
@@ -363,14 +501,31 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			for (const [label, value] of [
 				["threadId", input.threadId],
 				["replyToMessageId", input.replyToMessageId],
+				["requestMessageId", input.requestMessageId],
+				["messageId", input.messageId],
 			] as const) {
-				if (value !== undefined && (value.length === 0 || value.length > MAX_DELEGATE_CONTROL_ID_CHARS)) {
+				if (
+					value !== undefined &&
+					(!value.trim() || value.trim() !== value || value.length > MAX_DELEGATE_CONTROL_ID_CHARS)
+				) {
 					return invalid(`delegate ${label} is invalid`, {
 						started: false,
 						action,
 						skipReason: "control_id_invalid",
 					});
 				}
+			}
+			if (
+				input.ackToken !== undefined &&
+				(!input.ackToken.trim() ||
+					input.ackToken.trim() !== input.ackToken ||
+					input.ackToken.length > MAX_DELEGATE_ACK_TOKEN_CHARS)
+			) {
+				return invalid("delegate ackToken is invalid", {
+					started: false,
+					action,
+					skipReason: "ack_token_invalid",
+				});
 			}
 			if (input.cursor !== undefined && (!Number.isSafeInteger(input.cursor) || input.cursor < 0)) {
 				return invalid("delegate cursor is invalid", { started: false, action, skipReason: "cursor_invalid" });
@@ -385,11 +540,22 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					skipReason: "page_size_invalid",
 				});
 			}
+			if (
+				input.timeoutMs !== undefined &&
+				(!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > 300_000)
+			) {
+				return invalid("delegate timeoutMs is invalid", {
+					started: false,
+					action,
+					skipReason: "timeout_invalid",
+				});
+			}
 			const requireAgentId = (): string | undefined => {
 				const agentId = input.agentId?.trim();
 				if (agentId) return agentId;
 				return undefined;
 			};
+			const workerScope = caller.kind === "worker" ? { callerAgentId: caller.agentId } : undefined;
 			try {
 				if (action === "list") {
 					if (!deps.workerAgentControl)
@@ -398,8 +564,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							action,
 							skipReason: "worker_agent_control_unavailable",
 						});
-					const agents = deps.callerAgentId
-						? deps.workerAgentControl.listWorkerAgents({ callerAgentId: deps.callerAgentId })
+					const agents = workerScope
+						? deps.workerAgentControl.listWorkerAgents(workerScope)
 						: deps.workerAgentControl.listWorkerAgents();
 					const cursor = input.cursor ?? 0;
 					if (cursor > agents.length)
@@ -411,16 +577,12 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					const pageSize = input.maxMessages ?? 64;
 					const control = deps.workerAgentControl;
 					// Activity tells the orchestrator which persistent workers are reusable right now.
-					const page = await Promise.all(
-						agents.slice(cursor, cursor + pageSize).map(async (agent) => ({
-							...agent,
-							activity: (
-								await (deps.callerAgentId
-									? control.waitForWorkerAgent(agent.agentId, 1, { callerAgentId: deps.callerAgentId })
-									: control.waitForWorkerAgent(agent.agentId, 1))
-							).status,
-						})),
-					);
+					const page = agents.slice(cursor, cursor + pageSize).map((agent) => ({
+						...agent,
+						activity: workerScope
+							? control.getWorkerAgentActivity(agent.agentId, workerScope)
+							: control.getWorkerAgentActivity(agent.agentId),
+					}));
 					const nextCursor = cursor + page.length;
 					return {
 						content: [
@@ -435,6 +597,142 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							},
 						],
 						details: { started: true, action },
+					};
+				}
+				if (action === "inbox" || action === "inbox_wait" || action === "inbox_ack") {
+					if (caller.kind !== "session_root") {
+						return invalid(`delegate ${action} is available only to the session root`, {
+							started: false,
+							action,
+							skipReason: "root_only_action",
+						});
+					}
+					if (!deps.workerAgentControl) {
+						return invalid(`delegate ${action} is unavailable`, {
+							started: false,
+							action,
+							skipReason: "worker_agent_control_unavailable",
+						});
+					}
+					const forbiddenField = forbiddenExactActionField(input, action);
+					if (forbiddenField) {
+						return invalid(
+							`delegate ${action} field ${forbiddenField} is forbidden by its exact action contract`,
+							{
+								started: false,
+								action,
+								skipReason: action === "inbox_ack" ? "inbox_ack_fields_forbidden" : "inbox_fields_forbidden",
+							},
+						);
+					}
+					if (action === "inbox_ack") {
+						const messageId = input.messageId?.trim();
+						const ackToken = input.ackToken;
+						if (!messageId || !ackToken) {
+							return invalid("delegate inbox_ack requires messageId and ackToken", {
+								started: false,
+								action,
+								skipReason: "missing_ack_identity",
+							});
+						}
+						const accepted = deps.workerAgentControl.acknowledgeSessionRootReply(messageId, ackToken);
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: accepted
+										? `session-root reply ${messageId} acknowledged`
+										: `session-root reply ${messageId} was not found`,
+								},
+							],
+							details: { started: accepted, action, messageId, accepted },
+						};
+					}
+					const sourceAgentId = input.agentId?.trim();
+					const requestMessageId = input.requestMessageId?.trim();
+					const query = {
+						...(sourceAgentId ? { sourceAgentId } : {}),
+						...(requestMessageId ? { requestMessageId } : {}),
+						maxMessages: input.maxMessages ?? 64,
+					};
+					if (action === "inbox") {
+						const replies = deps.workerAgentControl.listSessionRootReplies(query);
+						return {
+							content: [{ type: "text" as const, text: sessionRootReplyJson(replies) }],
+							details: { started: true, action },
+						};
+					}
+					const waited = await deps.workerAgentControl.waitForSessionRootReplies({
+						...query,
+						...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+						...(signal ? { signal } : {}),
+					});
+					return {
+						content: [{ type: "text" as const, text: sessionRootReplyJson(waited.replies, waited.timedOut) }],
+						details: { started: true, action },
+					};
+				}
+				if (action === "reply") {
+					if (caller.kind !== "worker") {
+						return invalid("delegate reply is available only to workers", {
+							started: false,
+							action,
+							skipReason: "worker_only_action",
+						});
+					}
+					const forbiddenField = forbiddenExactActionField(input, action);
+					if (forbiddenField) {
+						return invalid(
+							`delegate reply field ${forbiddenField} is forbidden; destination is inferred and reply accepts only message and replyToMessageId`,
+							{
+								started: false,
+								action,
+								skipReason: "reply_target_forbidden",
+							},
+						);
+					}
+					const message = input.message?.trim();
+					const replyToMessageId = input.replyToMessageId?.trim();
+					if (!message || !replyToMessageId) {
+						return invalid("delegate reply requires message and replyToMessageId", {
+							started: false,
+							action,
+							skipReason: "missing_reply_fields",
+						});
+					}
+					if (!deps.workerAgentControl) {
+						return invalid("delegate reply is unavailable", {
+							started: false,
+							action,
+							skipReason: "worker_agent_control_unavailable",
+						});
+					}
+					const outcome = deps.workerAgentControl.replyToWorkerAgentMessage(
+						caller.agentId,
+						message,
+						replyToMessageId,
+					);
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `reply ${outcome.messageId} accepted for ${outcome.destination}`,
+							},
+						],
+						details: {
+							started: true,
+							action,
+							messageId: outcome.messageId,
+							accepted: true,
+							queued: true,
+							...(outcome.destination === "worker"
+								? {
+										laneId: outcome.record?.laneId,
+										status: outcome.record?.status,
+										skipReason: outcome.skipReason,
+									}
+								: {}),
+						},
 					};
 				}
 				if (action !== "start") {
@@ -456,7 +754,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						const page = deps.workerAgentControl.readWorkerAgentTranscript(agentId, {
 							...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
 							...(input.maxMessages !== undefined ? { maxMessages: input.maxMessages } : {}),
-							...(deps.callerAgentId ? { callerAgentId: deps.callerAgentId } : {}),
+							...(workerScope ?? {}),
 						});
 						return {
 							content: [{ type: "text" as const, text: JSON.stringify(page) }],
@@ -471,10 +769,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const waited = deps.callerAgentId
-							? await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs, {
-									callerAgentId: deps.callerAgentId,
-								})
+						const waited = workerScope
+							? await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs, workerScope)
 							: await deps.workerAgentControl.waitForWorkerAgent(agentId, input.timeoutMs);
 						return {
 							content: [{ type: "text" as const, text: `worker ${agentId} is ${waited.status}` }],
@@ -482,6 +778,14 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						};
 					}
 					if (action === "send" || action === "follow_up") {
+						if (input.replyToMessageId !== undefined) {
+							return invalid(`delegate ${action} cannot answer a request; use reply`, {
+								started: false,
+								action,
+								agentId,
+								skipReason: "reply_action_required",
+							});
+						}
 						const message = input.message?.trim();
 						if (!message)
 							return invalid(`delegate ${action} requires message`, {
@@ -490,55 +794,71 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "missing_message",
 							});
-						const messageOptions = {
-							...(deps.callerAgentId ? { senderAgentId: deps.callerAgentId } : {}),
-							...(input.threadId ? { threadId: input.threadId.trim() } : {}),
-							...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId.trim() } : {}),
-							...(input.expectReply === true ? { expectReply: true } : {}),
-						};
-						const hasMessageOptions = Object.keys(messageOptions).length > 0;
-						if (action === "send") {
-							if (!deps.workerAgentControl)
-								return invalid("delegate send is unavailable", {
-									started: false,
-									action,
-									agentId,
-									skipReason: "worker_agent_control_unavailable",
-								});
-							const outcome = hasMessageOptions
-								? deps.workerAgentControl.sendWorkerAgentMessage(agentId, message, messageOptions)
-								: deps.workerAgentControl.sendWorkerAgentMessage(agentId, message);
-							return {
-								content: [
-									{
-										type: "text" as const,
-										text: `message queued for ${agentId}; it will not wake the worker`,
-									},
-								],
-								details: { started: true, action, agentId, queued: outcome.queued },
-							};
-						}
 						if (!deps.workerAgentControl)
-							return invalid("delegate follow_up is unavailable", {
+							return invalid(`delegate ${action} is unavailable`, {
 								started: false,
 								action,
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const outcome = hasMessageOptions
-							? deps.workerAgentControl.followUpWorkerAgent(agentId, message, messageOptions)
-							: deps.workerAgentControl.followUpWorkerAgent(agentId, message);
+						const replayScope = deps.resolveMessageReplayScope?.();
+						if (!replayScope) {
+							return invalid(`delegate ${action} requires a durable message replay scope`, {
+								started: false,
+								action,
+								agentId,
+								skipReason: "message_replay_scope_unavailable",
+							});
+						}
+						const idempotencyKey = messageIdempotencyKey(caller, replayScope, toolCallId, action);
+						const messageOptions = {
+							...(input.threadId ? { threadId: input.threadId.trim() } : {}),
+							...(input.expectReply === true ? { expectReply: true } : {}),
+							idempotencyKey,
+						};
+						if (action === "send") {
+							const outcome =
+								caller.kind === "session_root"
+									? deps.workerAgentControl.sendSessionRootWorkerAgentMessage(agentId, message, messageOptions)
+									: deps.workerAgentControl.sendWorkerAgentMessage(agentId, message, {
+											...messageOptions,
+											senderAgentId: caller.agentId,
+										});
+							return {
+								content: [
+									{
+										type: "text" as const,
+										text: `message ${outcome.messageId} queued for ${agentId}; it will not wake the worker`,
+									},
+								],
+								details: {
+									started: true,
+									action,
+									agentId,
+									messageId: outcome.messageId,
+									queued: outcome.queued,
+								},
+							};
+						}
+						const outcome =
+							caller.kind === "session_root"
+								? deps.workerAgentControl.followUpSessionRootWorkerAgent(agentId, message, messageOptions)
+								: deps.workerAgentControl.followUpWorkerAgent(agentId, message, {
+										...messageOptions,
+										senderAgentId: caller.agentId,
+									});
 						return {
 							content: [
 								{
 									type: "text" as const,
-									text: `follow_up ${outcome.started ? "started" : "queued"} for ${agentId}`,
+									text: `follow_up ${outcome.messageId} ${outcome.started ? "started" : "queued"} for ${agentId}`,
 								},
 							],
 							details: {
 								started: outcome.started,
 								action,
 								agentId,
+								messageId: outcome.messageId,
 								laneId: outcome.record?.laneId,
 								status: outcome.record?.status,
 								skipReason: outcome.skipReason,
@@ -553,8 +873,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const outcome = deps.callerAgentId
-							? deps.workerAgentControl.interruptWorkerAgent(agentId, { callerAgentId: deps.callerAgentId })
+						const outcome = workerScope
+							? deps.workerAgentControl.interruptWorkerAgent(agentId, workerScope)
 							: deps.workerAgentControl.interruptWorkerAgent(agentId);
 						return {
 							content: [
@@ -576,8 +896,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								agentId,
 								skipReason: "worker_agent_control_unavailable",
 							});
-						const outcome = deps.callerAgentId
-							? deps.workerAgentControl.resumeWorkerAgent(agentId, { callerAgentId: deps.callerAgentId })
+						const outcome = workerScope
+							? deps.workerAgentControl.resumeWorkerAgent(agentId, workerScope)
 							: deps.workerAgentControl.resumeWorkerAgent(agentId);
 						return {
 							content: [
@@ -605,10 +925,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							agentId,
 							skipReason: "worker_agent_control_unavailable",
 						});
-					const cancelled = deps.callerAgentId
-						? deps.workerAgentControl.cancelWorkerAgent(agentId, undefined, {
-								callerAgentId: deps.callerAgentId,
-							})
+					const cancelled = workerScope
+						? deps.workerAgentControl.cancelWorkerAgent(agentId, undefined, workerScope)
 						: deps.workerAgentControl.cancelWorkerAgent(agentId);
 					return {
 						content: [
@@ -629,7 +947,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						},
 					};
 				}
-				if (deps.callerAgentId) {
+				if (caller.kind === "worker") {
 					return invalid(
 						"Subagent worker delegation is disabled (1-level nesting maximum). Only the root orchestrator may spawn worker agents.",
 						{
@@ -669,19 +987,20 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							},
 						);
 					}
-					const activity = await deps.workerAgentControl.waitForWorkerAgent(reuseAgentId, 1);
-					if (activity.status === "unknown")
-						return invalid(
-							`worker ${reuseAgentId} is unknown; use list to discover reusable agents or start without agentId`,
-							{ started: false, action, agentId: reuseAgentId, skipReason: "unknown_agent" },
-						);
-					if (activity.status !== "idle")
-						return invalid(
-							`worker ${reuseAgentId} is ${activity.status}; wait for it, send a steering message, or resume it before dispatching a new task`,
-							{ started: false, action, agentId: reuseAgentId, skipReason: `worker_${activity.status}` },
-						);
-					const followed = deps.workerAgentControl.followUpWorkerAgent(reuseAgentId, reuseInstructions);
-					if (!followed.started) {
+					const replayScope = deps.resolveMessageReplayScope?.();
+					if (!replayScope) {
+						return invalid("delegate start with agentId requires a durable message replay scope", {
+							started: false,
+							action,
+							agentId: reuseAgentId,
+							skipReason: "message_replay_scope_unavailable",
+						});
+					}
+					const followed = deps.workerAgentControl.startWorkerAgentTask(reuseAgentId, reuseInstructions, {
+						...(workerScope ?? {}),
+						idempotencyKey: messageIdempotencyKey(caller, replayScope, toolCallId, "start"),
+					});
+					if (!followed.started && !followed.messageId) {
 						return invalid(
 							`delegate start could not reuse worker ${reuseAgentId}: ${followed.skipReason ?? "not_started"}`,
 							{
@@ -692,11 +1011,16 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							},
 						);
 					}
+					const queued =
+						followed.record === undefined ||
+						followed.record.status === "queued" ||
+						followed.record.status === "running";
+					const acceptanceState = followed.skipReason ?? (followed.started ? "started" : "wake pending");
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `worker ${reuseAgentId} accepted the task on its persistent context (lane ${followed.record?.laneId ?? "queued"})`,
+								text: `worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState})`,
 							},
 						],
 						details: {
@@ -704,7 +1028,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							action,
 							agentId: reuseAgentId,
 							laneId: followed.record?.laneId,
-							queued: true,
+							status: followed.record?.status,
+							accepted: true,
+							messageId: followed.messageId,
+							queued,
+							skipReason: followed.skipReason,
 						},
 					};
 				}

@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Made startup terminal-response interception transactional across batched input, bracketed paste, queued renders, restarts, and overlay removal so probes cannot consume user keystrokes or leave stale frames behind.
 - Detected East Asian ambiguous character width at startup via a cursor-position probe (DSR 6n) and switched the width engine to two-column ambiguous mode when the terminal renders them wide (CJK-codepage consoles). Under-counted widths made lines auto-wrap, desyncing differential rendering into stale, duplicated frames. `PI_AMBIGUOUS_WIDTH=wide|narrow` overrides detection.
 
 ## [0.86.3] - 2026-08-06

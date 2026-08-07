@@ -7,7 +7,7 @@ import {
 	renderOrchestrationPanelLines,
 } from "../../../core/tools/orchestration-panel.ts";
 import { theme } from "../theme/theme.ts";
-import type { ActivityLaneItem } from "./activity-lane.ts";
+import { type ActivityLaneItem, isBackgroundToolActivityItem } from "./activity-lane.ts";
 import { formatKeyText } from "./keybinding-hints.ts";
 
 /**
@@ -25,6 +25,7 @@ export interface AgentsOverlaySnapshot {
 export interface AgentsOverlayOptions {
 	keybindings: KeybindingsManager;
 	snapshot: () => AgentsOverlaySnapshot;
+	requestRender: () => void;
 	onClose: () => void;
 	/** Injectable clock for tests. */
 	now?: () => number;
@@ -32,6 +33,7 @@ export interface AgentsOverlayOptions {
 
 const MAX_ROWS = 12;
 const MAX_FINISHED_WORKERS = 4;
+const ELAPSED_REDRAW_INTERVAL_MS = 1_000;
 
 export function formatElapsed(ms: number): string {
 	if (!Number.isFinite(ms) || ms < 0) return "";
@@ -85,7 +87,7 @@ export function buildAgentsPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: nu
 		.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
 		.slice(0, MAX_FINISHED_WORKERS);
 	const backgroundTools = snapshot.items.filter(
-		(item) => item.kind === "tool" && (item.status === "active" || item.status === "waiting"),
+		(item) => isBackgroundToolActivityItem(item) && (item.status === "active" || item.status === "waiting"),
 	);
 
 	const rows: OrchestrationPanelRow[] = [
@@ -117,9 +119,39 @@ export function buildAgentsPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: nu
 
 export class AgentsOverlay implements Component {
 	private readonly options: AgentsOverlayOptions;
+	private mounted = false;
+	private elapsedRedrawEnabled = false;
+	private elapsedRedrawTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(options: AgentsOverlayOptions) {
 		this.options = options;
+	}
+
+	mount(): void {
+		if (this.mounted) return;
+		this.mounted = true;
+		this.scheduleElapsedRedraw();
+	}
+
+	private scheduleElapsedRedraw(): void {
+		if (!this.mounted || !this.elapsedRedrawEnabled || this.elapsedRedrawTimer) return;
+		this.elapsedRedrawTimer = setTimeout(() => {
+			this.elapsedRedrawTimer = undefined;
+			if (!this.mounted || !this.elapsedRedrawEnabled) return;
+			this.options.requestRender();
+			this.scheduleElapsedRedraw();
+		}, ELAPSED_REDRAW_INTERVAL_MS);
+		this.elapsedRedrawTimer.unref?.();
+	}
+
+	private setElapsedRedrawEnabled(enabled: boolean): void {
+		this.elapsedRedrawEnabled = enabled;
+		if (!enabled) {
+			if (this.elapsedRedrawTimer) clearTimeout(this.elapsedRedrawTimer);
+			this.elapsedRedrawTimer = undefined;
+			return;
+		}
+		this.scheduleElapsedRedraw();
 	}
 
 	handleInput(data: string): void {
@@ -127,13 +159,24 @@ export class AgentsOverlay implements Component {
 			this.options.keybindings.matches(data, "app.agents.close") ||
 			this.options.keybindings.matches(data, "app.agents.open")
 		) {
+			this.dispose();
 			this.options.onClose();
 		}
 	}
 
 	render(width: number): string[] {
 		const nowMs = this.options.now?.() ?? Date.now();
-		const model = buildAgentsPanelModel(this.options.snapshot(), nowMs);
+		const snapshot = this.options.snapshot();
+		this.setElapsedRedrawEnabled(
+			snapshot.laneRecords.some(
+				(record) =>
+					(record.type === "worker" || record.type === "tmux-worker") &&
+					record.status === "running" &&
+					record.startedAt !== undefined &&
+					!Number.isNaN(Date.parse(record.startedAt)),
+			),
+		);
+		const model = buildAgentsPanelModel(snapshot, nowMs);
 		const surface = (text: string) => theme.bg("customMessageBg", truncateToWidth(text, width, "", true));
 		const closeKey = formatKeyText(this.options.keybindings.getKeys("app.agents.close").join("/"), {
 			capitalize: true,
@@ -148,4 +191,9 @@ export class AgentsOverlay implements Component {
 	}
 
 	invalidate(): void {}
+
+	dispose(): void {
+		this.mounted = false;
+		this.setElapsedRedrawEnabled(false);
+	}
 }

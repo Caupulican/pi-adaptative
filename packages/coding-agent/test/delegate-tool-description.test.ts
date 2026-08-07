@@ -8,6 +8,7 @@ describe("delegate tool capability description", () => {
 			workerDelegation: { writeEnabled: false, writePaths: [] },
 		});
 		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
 		});
 		const descriptionBefore = definition.description;
@@ -25,11 +26,17 @@ describe("delegate tool capability description", () => {
 		const parameters = definition.parameters as unknown as {
 			properties?: {
 				instructions?: { description?: string };
+				message?: { description?: string };
+				maxMessages?: { description?: string };
 				profileId?: { description?: string };
 				authority?: object;
 			};
 		};
 		expect(parameters.properties?.instructions?.description).toContain("inherits the caller's full admitted grant");
+		expect(parameters.properties?.instructions?.description).toContain("cannot recursively delegate");
+		expect(parameters.properties?.instructions?.description).not.toContain("may recursively delegate");
+		expect(parameters.properties?.message?.description).toContain("reply");
+		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
 		expect(parameters.properties?.profileId?.description).toContain("preset, not an authority allowlist");
 		expect(parameters.properties?.authority).toBeDefined();
 		expect((definition.promptGuidelines ?? []).join("\n")).toContain("authority to choose the model");
@@ -39,6 +46,7 @@ describe("delegate tool capability description", () => {
 	it("does not forward a delegate-call memory override to the worker orchestrator", async () => {
 		let received: { instructions: string; profileId?: string } | undefined;
 		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
 			startWorkerDelegation: (request) => {
 				received = request;
 				return {

@@ -290,6 +290,8 @@ export interface OrchestrationDispatchRequest {
 	logicalLaneId?: string;
 	/** Monotonic dispatch sequence within a managed-process logical lane. */
 	dispatchSequence?: number;
+	/** Durable mailbox message whose task-bearing intent owns this logical-agent turn. */
+	controlMessageId?: string;
 	/** External provider identity retained for routing and diagnostics. */
 	provider?: string;
 	/** Owner approval or standing-grant record that authorized an external launch. */

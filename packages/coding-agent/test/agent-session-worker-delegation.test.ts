@@ -7,6 +7,7 @@ import { getPrivateLaneDeniedPaths } from "../src/core/autonomy/lane-private-pat
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
+import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import {
@@ -685,6 +686,135 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("keeps a classified transient retry suspended and nonterminal until its backoff fires", async () => {
+		const harness = await createHarness();
+		const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const runIsolatedCompletion = harness.session.runIsolatedCompletion.bind(harness.session);
+		vi.useFakeTimers();
+		let providerExecutions = 0;
+		const completion = vi.spyOn(harness.session, "runIsolatedCompletion").mockImplementation((options) => {
+			providerExecutions += 1;
+			if (providerExecutions <= 3) {
+				return Promise.reject(new Error("503 service unavailable; retry after 2s"));
+			}
+			return runIsolatedCompletion(options);
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage('{"summary":"retry recovered","status":"completed"}')]);
+
+			const runPromise = harness.session.runWorkerDelegationOnce({ instructions: "Retry one transient outage." });
+			await vi.advanceTimersByTimeAsync(0);
+			for (let retry = providerExecutions; retry < 3; retry++) await vi.advanceTimersToNextTimerAsync();
+			expect(providerExecutions).toBe(3);
+			await vi.advanceTimersByTimeAsync(0);
+
+			const suspended = await runPromise;
+			if (!suspended.record) throw new Error("Expected a durable suspended retry record.");
+			const laneId = suspended.record.laneId;
+			const suspendedSnapshot = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			}).getTaskRuntimeSnapshot();
+			const attemptId = suspendedSnapshot.tasks[laneId]?.attemptIds.at(-1);
+			expect(attemptId ? suspendedSnapshot.attempts[attemptId]?.status : undefined).toBe("suspended");
+			expect(suspended.record.status).toBe("running");
+			expect(harness.session.getWorkerClaimSnapshots()).toEqual([]);
+			expect(workerLaneRecords(harness)).toEqual([]);
+
+			// Ordinary observation/recovery during backoff must not reinterpret suspension as terminal.
+			harness.session.getLaneRecords();
+			harness.session.getLaneRecords();
+			const observedSnapshot = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			}).getTaskRuntimeSnapshot();
+			expect(attemptId ? observedSnapshot.attempts[attemptId]?.status : undefined).toBe("suspended");
+			expect(providerExecutions).toBe(3);
+			expect(harness.session.getWorkerClaimSnapshots()).toEqual([]);
+			expect(workerLaneRecords(harness)).toEqual([]);
+
+			await vi.runOnlyPendingTimersAsync();
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1));
+			expect(providerExecutions).toBe(4);
+			const completedSnapshot = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			}).getTaskRuntimeSnapshot();
+			expect(attemptId ? completedSnapshot.attempts[attemptId]?.status : undefined).toBe("completed");
+			expect(completedSnapshot.tasks[laneId]?.attemptIds).toEqual([attemptId]);
+			expect(workerLaneRecords(harness)).toEqual([expect.objectContaining({ laneId, status: "succeeded" })]);
+			const terminalRecords = harness
+				.eventsOfType("delegate_workers")
+				.flatMap((event) => event.terminalSinceFlush)
+				.filter((record) => record.laneId === laneId);
+			expect(terminalRecords).toEqual([expect.objectContaining({ laneId, status: "succeeded" })]);
+		} finally {
+			await vi.runOnlyPendingTimersAsync();
+			vi.useRealTimers();
+			completion.mockRestore();
+			random.mockRestore();
+			await harness.cleanup();
+		}
+	});
+
+	it("recovers an idle-parent handoff after one wake failure without reopening child evidence", async () => {
+		const harness = await createHarness();
+		let prepareAgentTurn: { mockRestore(): void } | undefined;
+		try {
+			harness.setResponses([fauxAssistantMessage('{"summary":"parent complete","status":"completed"}')]);
+			const parent = await harness.session.runWorkerDelegationOnce({ instructions: "Establish the parent agent." });
+			if (!parent.record) throw new Error("Expected a durable parent agent.");
+
+			prepareAgentTurn = vi.spyOn(WorkerLifecycle.prototype, "prepareAgentTurn").mockImplementationOnce(() => {
+				throw new Error("simulated idle-parent handoff start failure");
+			});
+			harness.setResponses([fauxAssistantMessage('{"summary":"child complete","status":"completed"}')]);
+			const child = await harness.session.runWorkerDelegationOnce({
+				instructions: "Produce child terminal evidence.",
+				parentAgentId: parent.record.laneId,
+			});
+			if (!child.record) throw new Error("Expected a durable child agent.");
+
+			const lifecycle = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			});
+			expect(lifecycle.getTerminalNotification(child.record.laneId)).toMatchObject({ status: "delivered" });
+			const handoffAttempt = Object.values(lifecycle.getTaskRuntimeSnapshot().attempts).find(
+				(attempt) =>
+					attempt.dispatch.logicalLaneId === parent.record?.laneId &&
+					attempt.dispatch.controlMessageId !== undefined &&
+					attempt.dispatch.instructions.includes(`childAgentId=${child.record?.laneId}`),
+			);
+			expect(handoffAttempt).toBeDefined();
+			const controlMessageId = handoffAttempt?.dispatch.controlMessageId;
+			if (!controlMessageId) throw new Error("Expected the recovered terminal handoff control message.");
+			const parentMailbox = new WorkerAgentMailbox({
+				agentDir: harness.tempDir,
+				parentSessionId: harness.session.sessionId,
+				agentId: parent.record.laneId,
+			});
+			expect(parentMailbox.getMessage(controlMessageId)).toMatchObject({
+				deliveredAt: expect.any(String),
+				senderAgentId: child.record.laneId,
+				task: {
+					kind: "terminal_handoff",
+					sourceAttemptId: expect.any(String),
+				},
+			});
+			expect(parentMailbox.pendingTaskBearing()).toEqual([]);
+			const rootTerminalProjections = harness
+				.eventsOfType("delegate_workers")
+				.flatMap((event) => event.terminalSinceFlush)
+				.filter((record) => record.laneId === child.record?.laneId);
+			expect(rootTerminalProjections).toEqual([]);
+		} finally {
+			prepareAgentTurn?.mockRestore();
+			await harness.cleanup();
+		}
+	});
+
 	it("keeps follow-up turns owned by the controller so interrupt can fence them", async () => {
 		const harness = await createHarness();
 		let releaseFollowUp!: (message: AssistantMessage) => void;
@@ -750,7 +880,11 @@ describe("AgentSession worker delegation", () => {
 			});
 			if (!initial.started || !initial.record) throw new Error("Expected the initial worker task to complete.");
 
-			harness.setResponses([fauxAssistantMessage('{"summary":"second task done","status":"completed"}')]);
+			const routeFollowUp: FauxResponseFactory = (context) =>
+				context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
+					? fauxAssistantMessage('{"summary":"second task done","status":"completed"}')
+					: fauxAssistantMessage("Background handoff acknowledged.");
+			harness.setResponses([routeFollowUp, routeFollowUp, routeFollowUp]);
 			const controls = (
 				harness.session as unknown as {
 					_backgroundLanes: {
@@ -775,6 +909,26 @@ describe("AgentSession worker delegation", () => {
 				const transcript = JSON.stringify(controls.readWorkerAgentTranscript(agentId, { maxMessages: 64 }));
 				expect(transcript).toContain("ZEPHYR-9");
 				expect(transcript).toContain("Recall the codeword from the previous task");
+			});
+			await vi.waitFor(() => {
+				const snapshot = new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				}).getTaskRuntimeSnapshot();
+				const followUpTask = followUp.record ? snapshot.tasks[followUp.record.laneId] : undefined;
+				const followUpAttemptId = followUpTask?.attemptIds.at(-1);
+				const followUpAttempt = followUpAttemptId ? snapshot.attempts[followUpAttemptId] : undefined;
+				expect(followUpAttempt?.status).toBe("completed");
+				const baselineId = followUpAttempt?.checkpointIds[0];
+				expect(baselineId ? snapshot.checkpoints[baselineId]?.usage : undefined).toMatchObject({
+					toolCalls: 0,
+					inputTokens: 0,
+					outputTokens: 0,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+					totalTokens: 0,
+					costUsd: 0,
+				});
 			});
 		} finally {
 			harness.cleanup();
@@ -1999,5 +2153,67 @@ describe("AgentSession worker delegation", () => {
 		expect(resolve(5_000).ok).toBe(true);
 		// Unbounded grants remain valid: the floor only guards explicit non-viable limits.
 		expect(resolve(undefined).ok).toBe(true);
+
+		const viable = resolve(5_000);
+		if (!viable.ok) throw new Error("Expected a viable base shipment.");
+		const rejectedBase = resolveWorkerAuthority({
+			authority: undefined,
+			base: {
+				...viable.shipment,
+				profile: {
+					...viable.shipment.profile,
+					budget: { ...viable.shipment.profile.budget, maxTokens: 3_000 },
+				},
+			},
+			foregroundModel: viable.shipment.model,
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(rejectedBase).toEqual({
+			ok: false,
+			reason: "token_budget_below_floor:requested=3000,min=5000",
+		});
+	});
+
+	it("applies the same viable-token floor to a freshly selected required verifier", async () => {
+		const { implementationProfile, verifierProfile } = verifiedWorkerProfiles();
+		const rejectedHarness = await createHarness({
+			workerOrchestrationProfile: implementationProfile,
+			additionalOrchestrationProfiles: [
+				{ ...verifierProfile, budget: { ...verifierProfile.budget, maxTokens: 3_000 } },
+			],
+		});
+		try {
+			await expect(
+				rejectedHarness.session.runWorkerDelegationOnce({ instructions: "Reject the starved verifier" }),
+			).resolves.toEqual({
+				started: false,
+				skipReason: "independent_verifier_unavailable:token_budget_below_floor:requested=3000,min=5000",
+			});
+			expect(rejectedHarness.getPendingResponseCount()).toBe(0);
+		} finally {
+			await rejectedHarness.cleanup();
+		}
+
+		const viableHarness = await createHarness({
+			workerOrchestrationProfile: implementationProfile,
+			additionalOrchestrationProfiles: [
+				{ ...verifierProfile, budget: { ...verifierProfile.budget, maxTokens: 5_000 } },
+			],
+		});
+		try {
+			viableHarness.setResponses([
+				fauxAssistantMessage('{"summary":"implementation complete","status":"completed","findings":[]}'),
+				fauxAssistantMessage(
+					'{"summary":"verification passed","status":"completed","verdict":"accepted","reasonCodes":["focused_checks_passed"],"findings":[]}',
+				),
+			]);
+			const admitted = await viableHarness.session.runWorkerDelegationOnce({
+				instructions: "Admit the minimum viable verifier",
+			});
+			expect(admitted.started).toBe(true);
+		} finally {
+			await viableHarness.cleanup();
+		}
 	});
 });

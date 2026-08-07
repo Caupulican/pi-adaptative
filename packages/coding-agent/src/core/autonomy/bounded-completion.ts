@@ -1,3 +1,5 @@
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+
 /**
  * Shared wall-clock/cancellation envelope for one-shot lane completions (research and delegated workers).
  * Composes an optional external abort signal with an internal wall-clock timeout, executes the
@@ -18,8 +20,6 @@ export interface BoundedCompletionOutcome {
 	failure?: { status: BoundedCompletionFailureStatus; reasonCode: string; detail?: string };
 }
 
-const MAX_FAILURE_DETAIL_CHARS = 240;
-
 /**
  * Preserve the executor's actual error alongside the stable reason code. A bare
  * `completion_error` is undiagnosable from lane records alone (field lesson: workers dying
@@ -28,11 +28,7 @@ const MAX_FAILURE_DETAIL_CHARS = 240;
 export function boundedFailureDetail(error: unknown): string | undefined {
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 	if (!message) return undefined;
-	const firstLine = message.split("\n", 1)[0]?.trim() ?? "";
-	if (firstLine.length === 0) return undefined;
-	return firstLine.length <= MAX_FAILURE_DETAIL_CHARS
-		? firstLine
-		: `${firstLine.slice(0, MAX_FAILURE_DETAIL_CHARS - 1)}…`;
+	return boundedRedactedDiagnosticText(message);
 }
 
 type ExecutorSettlement = { kind: "completion"; completion: BoundedCompletion } | { kind: "error"; error: unknown };

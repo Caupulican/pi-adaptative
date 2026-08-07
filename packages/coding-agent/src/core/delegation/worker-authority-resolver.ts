@@ -82,9 +82,18 @@ function adaptiveProfileId(value: object): string {
 	return `adaptive-${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32)}`;
 }
 
+function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefined {
+	return maxTokens !== undefined && maxTokens < MIN_VIABLE_WORKER_TOKEN_BUDGET
+		? `token_budget_below_floor:requested=${maxTokens},min=${MIN_VIABLE_WORKER_TOKEN_BUDGET}`
+		: undefined;
+}
+
 /** Materialize free-form model choices as one immutable profile-shaped execution snapshot. */
 export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): WorkerAuthorityResolution {
-	if (!input.authority && input.base) return { ok: true, shipment: input.base };
+	if (!input.authority && input.base) {
+		const floorFailure = tokenBudgetFloorFailure(input.base.profile.budget.maxTokens);
+		return floorFailure ? { ok: false, reason: floorFailure } : { ok: true, shipment: input.base };
+	}
 	const binding = selectModelBinding(input.authority, input.base, input.foregroundModel, input.modelRegistry);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
@@ -114,12 +123,8 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		}
 	}
 	const budget = structuredClone(input.authority?.budget ?? input.base?.profile.budget ?? {});
-	if (budget.maxTokens !== undefined && budget.maxTokens < MIN_VIABLE_WORKER_TOKEN_BUDGET) {
-		return {
-			ok: false,
-			reason: `token_budget_below_floor:requested=${budget.maxTokens},min=${MIN_VIABLE_WORKER_TOKEN_BUDGET}`,
-		};
-	}
+	const floorFailure = tokenBudgetFloorFailure(budget.maxTokens);
+	if (floorFailure) return { ok: false, reason: floorFailure };
 	const role = input.authority?.role ?? input.base?.profile.role ?? "orchestrator";
 	const now = new Date().toISOString();
 	const descriptor = {

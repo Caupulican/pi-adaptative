@@ -38,6 +38,8 @@ export class WorkerNotificationCoordinator {
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
+	private retryTimer: ReturnType<typeof setTimeout> | undefined;
+	private retryCount = 0;
 
 	constructor(options: WorkerNotificationCoordinatorOptions) {
 		this.options = options;
@@ -65,13 +67,36 @@ export class WorkerNotificationCoordinator {
 	dispose(): void {
 		this.disposed = true;
 		this.scheduled = false;
+		if (this.retryTimer) clearTimeout(this.retryTimer);
+		this.retryTimer = undefined;
 		this.pending.clear();
 	}
 
 	private schedule(): void {
 		if (this.disposed || this.scheduled) return;
+		if (this.retryTimer) clearTimeout(this.retryTimer);
+		this.retryTimer = undefined;
 		this.scheduled = true;
 		queueMicrotask(() => this.flush());
+	}
+
+	private scheduleRetry(): void {
+		if (this.disposed || this.scheduled || this.retryTimer) return;
+		const delayMs = Math.min(100 * 2 ** Math.min(this.retryCount, 5), 5_000);
+		this.retryCount++;
+		this.retryTimer = setTimeout(() => {
+			this.retryTimer = undefined;
+			this.schedule();
+		}, delayMs);
+		if (typeof this.retryTimer === "object" && "unref" in this.retryTimer) this.retryTimer.unref();
+	}
+
+	private warnBestEffort(message: string): void {
+		try {
+			this.options.warn(message);
+		} catch {
+			// Diagnostics cannot consume or stop durable notification delivery.
+		}
 	}
 
 	private flush(): void {
@@ -79,18 +104,32 @@ export class WorkerNotificationCoordinator {
 		if (this.disposed) return;
 		const batch = [...this.pending.values()];
 		this.pending.clear();
-		const workerRecords = this.options.getWorkerRecords();
+		let workerRecords: readonly LaneRecord[] = [];
+		try {
+			workerRecords = this.options.getWorkerRecords();
+		} catch (error) {
+			this.warnBestEffort(
+				`Background worker status projection failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		const queued = workerRecords.filter((record) => record.status === "queued").length;
 		const running = workerRecords.filter((record) => record.status === "running").length;
 		const terminalSinceFlush = batch.map((notification) => notification.record);
-		this.options.emitStatus({
+		const status = {
 			active: queued + running,
 			queued,
 			running,
 			completedSinceFlush: terminalSinceFlush.filter((record) => record.status === "succeeded").length,
 			failedSinceFlush: terminalSinceFlush.filter((record) => record.status !== "succeeded").length,
 			terminalSinceFlush,
-		});
+		};
+		try {
+			this.options.emitStatus(status);
+		} catch (error) {
+			this.warnBestEffort(
+				`Background worker status observer failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		if (batch.length === 0) return;
 		const delivery = this.deliveryTail.then(async () => {
 			if (this.disposed) return;
@@ -106,6 +145,7 @@ export class WorkerNotificationCoordinator {
 						if (typeof timeout === "object" && timeout && "unref" in timeout) timeout.unref();
 					}),
 				]);
+				this.retryCount = 0;
 				const durableIds = batch.flatMap((notification) =>
 					notification.durableNotificationId ? [notification.durableNotificationId] : [],
 				);
@@ -116,9 +156,10 @@ export class WorkerNotificationCoordinator {
 		});
 		this.deliveryTail = delivery.catch((error: unknown) => {
 			for (const notification of batch) this.pending.set(notification.key, notification);
-			this.options.warn(
+			this.warnBestEffort(
 				`Background worker handoff failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
+			this.scheduleRetry();
 		});
 	}
 }

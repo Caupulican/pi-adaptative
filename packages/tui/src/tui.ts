@@ -20,6 +20,8 @@ import {
 } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 
 function extractKittyImageIds(line: string): number[] {
 	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
@@ -78,6 +80,36 @@ export interface Component {
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
+type TerminalProtocolInput = { data: string; consumed: boolean };
+type TerminalProtocolMatch = { data: string; match: RegExpExecArray | undefined };
+type FullRedrawClearMode = "saved-lines" | "viewport";
+
+function findBracketedPasteEnd(data: string, start: number): number {
+	const endMarker = data.indexOf(BRACKETED_PASTE_END, start + BRACKETED_PASTE_START.length);
+	return endMarker === -1 ? data.length : endMarker + BRACKETED_PASTE_END.length;
+}
+
+/** Remove the first matching terminal response outside bracketed-paste payloads. */
+function stripTerminalProtocolRange(data: string, pattern: RegExp): TerminalProtocolMatch {
+	const matcher = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+	let pasteStart = data.indexOf(BRACKETED_PASTE_START);
+	let pasteEnd = pasteStart === -1 ? -1 : findBracketedPasteEnd(data, pasteStart);
+
+	for (let match = matcher.exec(data); match; match = matcher.exec(data)) {
+		const start = match.index;
+		const end = start + match[0].length;
+		while (pasteStart !== -1 && pasteEnd <= start) {
+			pasteStart = data.indexOf(BRACKETED_PASTE_START, pasteEnd);
+			pasteEnd = pasteStart === -1 ? -1 : findBracketedPasteEnd(data, pasteStart);
+		}
+		if (pasteStart !== -1 && start < pasteEnd && end > pasteStart) {
+			matcher.lastIndex = Math.max(matcher.lastIndex, pasteEnd);
+			continue;
+		}
+		return { data: data.slice(0, start) + data.slice(end), match };
+	}
+	return { data, match: undefined };
+}
 
 /**
  * Interface for components that can receive focus and display a hardware cursor.
@@ -188,6 +220,8 @@ export interface OverlayOptions {
 	visible?: (termWidth: number, termHeight: number) => boolean;
 	/** If true, don't capture keyboard focus when shown */
 	nonCapturing?: boolean;
+	/** Called exactly once after hide() or hideOverlay() permanently removes the overlay; not for setHidden(). */
+	onRemove?: () => void;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -340,9 +374,13 @@ export class TUI extends Container {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private static readonly AMBIGUOUS_WIDTH_PROBE_TIMEOUT_MS = 2000;
+	private static readonly TERMINAL_QUERY_RESPONSE_TIMEOUT_MS = 2000;
+	private cellSizeQueryTimer: NodeJS.Timeout | undefined;
+	private cellSizeQueryPending = false;
 	private ambiguousWidthProbePending = false;
 	private ambiguousWidthProbeTimer: NodeJS.Timeout | undefined;
+	private pendingFullRedrawClearMode: FullRedrawClearMode | undefined;
+	private hasStarted = false;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
@@ -508,6 +546,22 @@ export class TUI extends Container {
 		}
 	}
 
+	private removeOverlay(entry: OverlayStackEntry): void {
+		const index = this.overlayStack.indexOf(entry);
+		if (index === -1) return;
+
+		this.clearOverlayFocusRestoreFor(entry);
+		this.retargetOverlayPreFocus(entry);
+		this.overlayStack.splice(index, 1);
+		if (this.focusedComponent === entry.component) {
+			const topVisible = this.getTopmostVisibleOverlay();
+			this.setFocus(topVisible?.component ?? entry.preFocus);
+		}
+		if (this.overlayStack.length === 0) this.terminal.hideCursor();
+		this.requestRender();
+		entry.options?.onRemove?.();
+	}
+
 	private isComponentMounted(component: Component): boolean {
 		return this.children.some((child) => this.containsComponent(child, component));
 	}
@@ -545,21 +599,7 @@ export class TUI extends Container {
 
 		// Return handle for controlling this overlay
 		return {
-			hide: () => {
-				const index = this.overlayStack.indexOf(entry);
-				if (index !== -1) {
-					this.clearOverlayFocusRestoreFor(entry);
-					this.retargetOverlayPreFocus(entry);
-					this.overlayStack.splice(index, 1);
-					// Restore focus if this overlay had focus
-					if (this.focusedComponent === component) {
-						const topVisible = this.getTopmostVisibleOverlay();
-						this.setFocus(topVisible?.component ?? entry.preFocus);
-					}
-					if (this.overlayStack.length === 0) this.terminal.hideCursor();
-					this.requestRender();
-				}
-			},
+			hide: () => this.removeOverlay(entry),
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
@@ -626,16 +666,7 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack[this.overlayStack.length - 1];
 		if (!overlay) return;
-		this.clearOverlayFocusRestoreFor(overlay);
-		this.retargetOverlayPreFocus(overlay);
-		this.overlayStack.pop();
-		if (this.focusedComponent === overlay.component) {
-			// Find topmost visible overlay, or fall back to preFocus
-			const topVisible = this.getTopmostVisibleOverlay();
-			this.setFocus(topVisible?.component ?? overlay.preFocus);
-		}
-		if (this.overlayStack.length === 0) this.terminal.hideCursor();
-		this.requestRender();
+		this.removeOverlay(overlay);
 	}
 
 	/** Check if there are any visible overlays */
@@ -670,15 +701,22 @@ export class TUI extends Container {
 	}
 
 	start(): void {
+		const restarting = this.hasStarted;
+		this.hasStarted = true;
 		this.stopped = false;
 		this.terminal.start(
 			(data) => this.handleInput(data),
 			() => this.requestRender(),
 		);
 		this.terminal.hideCursor();
+		if (restarting) this.invalidate();
 		this.queryCellSize();
 		this.queryAmbiguousWidth();
-		this.requestRender();
+		if (restarting) {
+			this.requestFullRender("viewport");
+		} else {
+			this.requestRender();
+		}
 	}
 
 	addInputListener(listener: InputListener): () => void {
@@ -693,13 +731,28 @@ export class TUI extends Container {
 	}
 
 	private queryCellSize(): void {
+		this.clearCellSizeQuery();
 		// Only query if terminal supports images (cell size is only used for image rendering)
 		if (!getCapabilities().images) {
 			return;
 		}
 		// Query terminal for cell size in pixels: CSI 16 t
 		// Response format: CSI 6 ; height ; width t
+		this.cellSizeQueryPending = true;
+		this.cellSizeQueryTimer = setTimeout(() => {
+			this.cellSizeQueryTimer = undefined;
+			this.cellSizeQueryPending = false;
+		}, TUI.TERMINAL_QUERY_RESPONSE_TIMEOUT_MS);
+		this.cellSizeQueryTimer.unref?.();
 		this.terminal.write("\x1b[16t");
+	}
+
+	private clearCellSizeQuery(): void {
+		if (this.cellSizeQueryTimer) {
+			clearTimeout(this.cellSizeQueryTimer);
+			this.cellSizeQueryTimer = undefined;
+		}
+		this.cellSizeQueryPending = false;
 	}
 
 	/**
@@ -711,21 +764,22 @@ export class TUI extends Container {
 	 * stays active and a positive answer triggers a full re-render with corrected widths.
 	 */
 	private queryAmbiguousWidth(): void {
+		this.clearAmbiguousWidthProbe();
 		const override = process.env.PI_AMBIGUOUS_WIDTH;
 		if (override === "wide" || override === "narrow") {
-			setAmbiguousWidthMode(override === "wide");
+			this.applyAmbiguousWidthMode(override === "wide");
 			return;
 		}
+		// CPR is byte-identical to modified-F3 input in some terminals, so this
+		// consumer must remain bounded to the startup query window.
 		this.ambiguousWidthProbePending = true;
-		// CPR reports the column after the probe glyph: 2 = narrow, 3 = wide.
-		this.terminal.write("\r·\x1b[6n\r\x1b[2K");
-		// The pending flag must not outlive startup: CPR is indistinguishable from
-		// modified-F3 key sequences in some terminals, so stop consuming after a bit.
 		this.ambiguousWidthProbeTimer = setTimeout(() => {
 			this.ambiguousWidthProbeTimer = undefined;
 			this.ambiguousWidthProbePending = false;
-		}, TUI.AMBIGUOUS_WIDTH_PROBE_TIMEOUT_MS);
+		}, TUI.TERMINAL_QUERY_RESPONSE_TIMEOUT_MS);
 		this.ambiguousWidthProbeTimer.unref?.();
+		// CPR reports the column after the probe glyph: 2 = narrow, 3 = wide.
+		this.terminal.write("\r·\x1b[6n\r\x1b[2K");
 	}
 
 	private clearAmbiguousWidthProbe(): void {
@@ -736,25 +790,36 @@ export class TUI extends Container {
 		this.ambiguousWidthProbePending = false;
 	}
 
-	private consumeAmbiguousWidthResponse(data: string): boolean {
-		if (!this.ambiguousWidthProbePending) return false;
+	private applyAmbiguousWidthMode(wide: boolean): void {
+		if (wide === getAmbiguousWidthMode()) return;
+		setAmbiguousWidthMode(wide);
+		// Every cached width is now stale: rebuild components and repaint from a clean viewport.
+		this.invalidate();
+		if (this.previousWidth === 0 && this.previousHeight === 0) {
+			this.requestRender();
+		} else {
+			this.requestFullRender("viewport");
+		}
+	}
+
+	private consumeAmbiguousWidthResponse(data: string): TerminalProtocolInput {
+		if (!this.ambiguousWidthProbePending) return { data, consumed: false };
 		// Response format: ESC [ row ; col R (CPR)
-		const match = data.match(/^\x1b\[(\d+);(\d+)R$/);
-		if (!match) return false;
+		const protocol = stripTerminalProtocolRange(data, /\x1b\[(\d+);(\d+)R/);
+		const { match } = protocol;
+		if (!match) return { data, consumed: false };
 		this.clearAmbiguousWidthProbe();
 		const probeWidth = parseInt(match[2], 10) - 1;
-		if (probeWidth >= 2 && !getAmbiguousWidthMode()) {
-			setAmbiguousWidthMode(true);
-			// Every cached width is now stale: rebuild components and repaint from a clean screen.
-			this.invalidate();
-			this.requestRender(true);
-		}
-		return true;
+		this.applyAmbiguousWidthMode(probeWidth >= 2);
+		return { data: protocol.data, consumed: true };
 	}
 
 	stop(): void {
 		this.stopped = true;
+		this.clearCellSizeQuery();
 		this.clearAmbiguousWidthProbe();
+		this.renderRequested = false;
+		this.pendingFullRedrawClearMode = undefined;
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
@@ -779,31 +844,39 @@ export class TUI extends Container {
 
 	requestRender(force = false): void {
 		if (force) {
-			this.previousLines = [];
-			this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
-			this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
-			this.cursorRow = 0;
-			this.hardwareCursorRow = 0;
-			this.maxLinesRendered = 0;
-			this.previousViewportTop = 0;
-			if (this.renderTimer) {
-				clearTimeout(this.renderTimer);
-				this.renderTimer = undefined;
-			}
-			this.renderRequested = true;
-			process.nextTick(() => {
-				if (this.stopped || !this.renderRequested) {
-					return;
-				}
-				this.renderRequested = false;
-				this.lastRenderAt = performance.now();
-				this.doRender();
-			});
+			this.requestFullRender("saved-lines");
 			return;
 		}
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
+	}
+
+	private requestFullRender(clearMode: FullRedrawClearMode): void {
+		// A public force redraw remains the strongest request if width detection races it.
+		if (this.pendingFullRedrawClearMode !== "saved-lines") {
+			this.pendingFullRedrawClearMode = clearMode;
+		}
+		this.previousLines = [];
+		this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
+		this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
+		this.cursorRow = 0;
+		this.hardwareCursorRow = 0;
+		this.maxLinesRendered = 0;
+		this.previousViewportTop = 0;
+		if (this.renderTimer) {
+			clearTimeout(this.renderTimer);
+			this.renderTimer = undefined;
+		}
+		this.renderRequested = true;
+		process.nextTick(() => {
+			if (this.stopped || !this.renderRequested) {
+				return;
+			}
+			this.renderRequested = false;
+			this.lastRenderAt = performance.now();
+			this.doRender();
+		});
 	}
 
 	private scheduleRender(): void {
@@ -827,6 +900,15 @@ export class TUI extends Container {
 	}
 
 	private handleInput(data: string): void {
+		// Terminal query responses are private protocol traffic. Remove them before
+		// public listeners while preserving any unrelated bytes batched alongside them.
+		const cellSizeInput = this.consumeCellSizeResponse(data);
+		const ambiguousWidthInput = this.consumeAmbiguousWidthResponse(cellSizeInput.data);
+		data = ambiguousWidthInput.data;
+		if ((cellSizeInput.consumed || ambiguousWidthInput.consumed) && data.length === 0) {
+			return;
+		}
+
 		if (this.inputListeners.size > 0) {
 			let current = data;
 			for (const listener of this.inputListeners) {
@@ -842,16 +924,6 @@ export class TUI extends Container {
 				return;
 			}
 			data = current;
-		}
-
-		// Consume terminal cell size responses without blocking unrelated input.
-		if (this.consumeCellSizeResponse(data)) {
-			return;
-		}
-
-		// Consume the ambiguous-width probe's cursor position report.
-		if (this.consumeAmbiguousWidthResponse(data)) {
-			return;
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)
@@ -900,24 +972,26 @@ export class TUI extends Container {
 		}
 	}
 
-	private consumeCellSizeResponse(data: string): boolean {
+	private consumeCellSizeResponse(data: string): TerminalProtocolInput {
+		if (!this.cellSizeQueryPending) return { data, consumed: false };
 		// Response format: ESC [ 6 ; height ; width t
-		const match = data.match(/^\x1b\[6;(\d+);(\d+)t$/);
+		const protocol = stripTerminalProtocolRange(data, /\x1b\[6;(\d+);(\d+)t/);
+		const { match } = protocol;
 		if (!match) {
-			return false;
+			return { data, consumed: false };
 		}
+		this.clearCellSizeQuery();
 
 		const heightPx = parseInt(match[1], 10);
 		const widthPx = parseInt(match[2], 10);
-		if (heightPx <= 0 || widthPx <= 0) {
-			return true;
+		if (heightPx > 0 && widthPx > 0) {
+			setCellDimensions({ widthPx, heightPx });
+			// Invalidate all components so images re-render with correct dimensions.
+			this.invalidate();
+			this.requestRender();
 		}
 
-		setCellDimensions({ widthPx, heightPx });
-		// Invalidate all components so images re-render with correct dimensions.
-		this.invalidate();
-		this.requestRender();
-		return true;
+		return { data: protocol.data, consumed: true };
 	}
 
 	/**
@@ -1274,6 +1348,8 @@ export class TUI extends Container {
 
 	private doRender(): void {
 		if (this.stopped) return;
+		const fullRedrawClearMode = this.pendingFullRedrawClearMode;
+		this.pendingFullRedrawClearMode = undefined;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
@@ -1303,13 +1379,14 @@ export class TUI extends Container {
 
 		newLines = this.applyLineResets(newLines, cursorPos);
 
-		// Helper to clear scrollback and viewport and render all new lines
+		// Helper to clear the viewport (and optionally saved lines) and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
 			if (clear) {
 				buffer += this.deleteKittyImages(this.previousKittyImageIds);
-				buffer += "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then clear scrollback
+				buffer += "\x1b[2J\x1b[H"; // Clear screen and home.
+				if (fullRedrawClearMode !== "viewport") buffer += "\x1b[3J"; // Clear saved lines unless preserving them.
 			}
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";

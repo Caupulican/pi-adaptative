@@ -11,11 +11,12 @@ import {
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { assertValidSessionId, type SessionContext, SessionManager } from "@caupulican/pi-agent-core/session";
-import type { Message, Usage } from "@caupulican/pi-ai";
+import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import { validateAttemptUsageSnapshot } from "../orchestration/attempt-usage.ts";
 import type { AgentResumeContext, AttemptUsageSnapshot, ResourcePointer } from "../orchestration/contracts.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import {
@@ -26,6 +27,8 @@ import {
 
 const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
+const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
+const MAX_PERSISTED_WORKER_DIAGNOSTICS = 8;
 
 export interface CreateWorkerConversationOptions {
 	agentDir: string;
@@ -82,6 +85,54 @@ export interface WorkerConversationRetentionOutcome {
 interface WorkerConversationMetadata {
 	logicalAgentId: string;
 	resumeContext: AgentResumeContext;
+	/** Version 1 makes a missing current-attempt boundary authoritative zero usage. */
+	usageAccountingVersion?: 1;
+}
+
+type WorkerSessionEntry = ReturnType<SessionManager["getEntries"]>[number];
+
+function workerDiagnosticForPersistence(
+	diagnostic: AssistantMessageDiagnostic,
+): AssistantMessageDiagnostic | undefined {
+	if (!Number.isFinite(diagnostic.timestamp) || diagnostic.timestamp < 0) return undefined;
+	const type = boundedRedactedDiagnosticText(diagnostic.type) ?? "provider_diagnostic";
+	if (!diagnostic.error) return { type, timestamp: diagnostic.timestamp };
+	const name = diagnostic.error.name ? boundedRedactedDiagnosticText(diagnostic.error.name) : undefined;
+	const code =
+		typeof diagnostic.error.code === "string"
+			? boundedRedactedDiagnosticText(diagnostic.error.code)
+			: typeof diagnostic.error.code === "number" && Number.isFinite(diagnostic.error.code)
+				? diagnostic.error.code
+				: undefined;
+	return {
+		type,
+		timestamp: diagnostic.timestamp,
+		error: {
+			...(name ? { name } : {}),
+			message: boundedRedactedDiagnosticText(diagnostic.error.message) ?? "Provider diagnostic unavailable.",
+			...(code !== undefined ? { code } : {}),
+		},
+	};
+}
+
+/** Bound only provider failure metadata; ordinary worker transcript content remains exact. */
+function workerMessageForPersistence(message: Message): Message {
+	if (message.role !== "assistant") return message;
+	const errorMessage =
+		message.errorMessage === undefined
+			? undefined
+			: (boundedRedactedDiagnosticText(message.errorMessage) ?? "Provider request failed.");
+	// Later retry/transport diagnostics are the most actionable, so retain the newest bounded suffix.
+	const diagnostics = message.diagnostics
+		?.slice(-MAX_PERSISTED_WORKER_DIAGNOSTICS)
+		.map(workerDiagnosticForPersistence)
+		.filter((diagnostic): diagnostic is AssistantMessageDiagnostic => diagnostic !== undefined);
+	if (errorMessage === undefined && diagnostics === undefined) return message;
+	return {
+		...message,
+		...(errorMessage !== undefined ? { errorMessage } : {}),
+		...(diagnostics !== undefined ? { diagnostics } : {}),
+	};
 }
 
 function stableWorkerSessionId(parentSessionId: string, logicalAgentId: string): string {
@@ -142,17 +193,27 @@ function metadataFromFile(metadataFile: string): WorkerConversationMetadata {
 	}
 	const logicalAgentId = (metadata as { logicalAgentId?: unknown }).logicalAgentId;
 	const resumeContext = (metadata as { resumeContext?: unknown }).resumeContext;
-	if (typeof logicalAgentId !== "string" || !logicalAgentId.trim() || !resumeContext) {
+	const usageAccountingVersion = (metadata as { usageAccountingVersion?: unknown }).usageAccountingVersion;
+	if (
+		typeof logicalAgentId !== "string" ||
+		!logicalAgentId.trim() ||
+		!resumeContext ||
+		(usageAccountingVersion !== undefined && usageAccountingVersion !== 1)
+	) {
 		throw new Error("Worker conversation metadata is invalid.");
 	}
-	return { logicalAgentId, resumeContext: cloneResumeContext(resumeContext as AgentResumeContext) };
+	return {
+		logicalAgentId,
+		resumeContext: cloneResumeContext(resumeContext as AgentResumeContext),
+		...(usageAccountingVersion === 1 ? { usageAccountingVersion } : {}),
+	};
 }
 
 function assertExactConversationMetadata(
 	metadataFile: string,
 	expected: AgentResumeContext,
 	logicalAgentId?: string,
-): void {
+): WorkerConversationMetadata {
 	const metadata = metadataFromFile(metadataFile);
 	if (logicalAgentId && metadata.logicalAgentId !== logicalAgentId) {
 		throw new Error("Worker conversation logical agent identity conflicts with the persisted transcript.");
@@ -160,6 +221,40 @@ function assertExactConversationMetadata(
 	if (!sameAgentResumeIdentity(metadata.resumeContext, expected)) {
 		throw new Error("Worker conversation resume context conflicts with the persisted transcript.");
 	}
+	return metadata;
+}
+
+function assertAttemptUsageId(attemptId: string): string {
+	const normalized = attemptId.trim();
+	if (!normalized || normalized.length > MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS) {
+		throw new TypeError("Worker usage-boundary attempt id is invalid or exceeds its durable bound.");
+	}
+	return normalized;
+}
+
+/** Sole parser/index owner for durable attempt-usage boundary entries. */
+function attemptUsageBoundaryIndex(
+	entries: readonly WorkerSessionEntry[],
+	attemptId: string | undefined,
+	startIndex = 0,
+): number {
+	for (let index = startIndex; index < entries.length; index++) {
+		const entry = entries[index];
+		if (!entry) continue;
+		if (entry.type !== "custom" || entry.customType !== WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE) continue;
+		const data = entry.data;
+		if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+		const descriptor = Object.getOwnPropertyDescriptor(data, "attemptId");
+		if (
+			descriptor &&
+			"value" in descriptor &&
+			typeof descriptor.value === "string" &&
+			(attemptId === undefined || descriptor.value === attemptId)
+		) {
+			return index;
+		}
+	}
+	return -1;
 }
 
 function assertWorkerConversationFile(agentDir: string, sessionFile: string, sessionId: string): string {
@@ -194,10 +289,21 @@ function assertWorkerConversationFile(agentDir: string, sessionFile: string, ses
 export class WorkerConversation {
 	private readonly sessionManager: SessionManager;
 	private readonly resumeContext: AgentResumeContext;
+	private readonly metadataFile?: string;
+	private readonly logicalAgentId?: string;
+	private usageAccountingVersion: 1 | undefined;
 
-	constructor(sessionManager: SessionManager, resumeContext: AgentResumeContext) {
+	constructor(
+		sessionManager: SessionManager,
+		resumeContext: AgentResumeContext,
+		metadata?: { file: string; logicalAgentId: string; usageAccountingVersion?: 1 },
+	) {
 		this.sessionManager = sessionManager;
 		this.resumeContext = cloneResumeContext(resumeContext);
+		this.metadataFile = metadata?.file;
+		this.logicalAgentId = metadata?.logicalAgentId;
+		// Direct in-memory construction has no legacy metadata to preserve.
+		this.usageAccountingVersion = metadata ? metadata.usageAccountingVersion : 1;
 	}
 
 	/** Resolve current provider-visible messages lazily through SessionManager. */
@@ -230,6 +336,33 @@ export class WorkerConversation {
 			}
 		}
 		return messages;
+	}
+
+	/** Last durable provider message owned by one attempt, never an earlier persistent-worker turn. */
+	getLastAttemptMessage(attemptId: string): Message | undefined {
+		const normalizedAttemptId = assertAttemptUsageId(attemptId);
+		const entries = this.sessionManager.getEntries();
+		const boundaryIndex = attemptUsageBoundaryIndex(entries, normalizedAttemptId);
+		if (boundaryIndex < 0) {
+			if (this.usageAccountingVersion === 1) return undefined;
+			const legacyLast = this.getProviderMessages().at(-1);
+			return legacyLast ? structuredClone(legacyLast) : undefined;
+		}
+		const nextBoundaryIndex = attemptUsageBoundaryIndex(entries, undefined, boundaryIndex + 1);
+		const lastAttemptEntry = nextBoundaryIndex >= 0 ? nextBoundaryIndex - 1 : entries.length - 1;
+		for (let index = lastAttemptEntry; index > boundaryIndex; index--) {
+			const entry = entries[index];
+			if (!entry || entry.type !== "message") continue;
+			if (
+				entry.message.role !== "user" &&
+				entry.message.role !== "assistant" &&
+				entry.message.role !== "toolResult"
+			) {
+				continue;
+			}
+			return structuredClone(entry.message);
+		}
+		return undefined;
 	}
 
 	/** Durable host-observed mutation progress. Custom entries never enter provider context. */
@@ -274,10 +407,54 @@ export class WorkerConversation {
 	}
 
 	/**
-	 * Recover cumulative accounting from raw entry metadata without cloning or resolving message
-	 * payloads that compaction deliberately moved out of the provider-visible working set.
+	 * Mark the first transcript entry owned by one durable attempt. Persistent logical workers share
+	 * a conversation across tasks, so recovery accounting must not replay an earlier task's spend as
+	 * the new attempt's baseline. The marker is idempotent and never enters provider context.
 	 */
-	getRawTranscriptUsage(): AttemptUsageSnapshot {
+	beginAttemptUsage(attemptId: string): void {
+		const normalizedAttemptId = assertAttemptUsageId(attemptId);
+		this.enableAttemptUsageBoundaries();
+		if (attemptUsageBoundaryIndex(this.sessionManager.getEntries(), normalizedAttemptId) >= 0) return;
+		this.sessionManager.appendCustomEntry(WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE, {
+			attemptId: normalizedAttemptId,
+		});
+	}
+
+	/** Whether missing attempt markers have versioned, fail-closed accounting semantics. */
+	usesAttemptUsageBoundaries(): boolean {
+		return this.usageAccountingVersion === 1;
+	}
+
+	/**
+	 * Upgrade a legacy idle conversation before its next durable task is prepared. Persisting this
+	 * evidence first closes the crash window where the task exists but its transcript marker does not.
+	 */
+	enableAttemptUsageBoundaries(): void {
+		if (this.usageAccountingVersion === 1) return;
+		const metadataFile = this.metadataFile;
+		if (!metadataFile) {
+			this.usageAccountingVersion = 1;
+			return;
+		}
+		const sessionFile = this.resumeContext.sessionFile;
+		if (!sessionFile) throw new Error("Worker conversation cannot version usage without a session file.");
+		withFileLockSync(sessionFile, () => {
+			const metadata = assertExactConversationMetadata(metadataFile, this.resumeContext, this.logicalAgentId);
+			if (metadata.usageAccountingVersion !== 1) {
+				writeFileAtomicSync(metadataFile, `${JSON.stringify({ ...metadata, usageAccountingVersion: 1 })}\n`, {
+					mode: 0o600,
+				});
+			}
+			this.usageAccountingVersion = 1;
+		});
+	}
+
+	/**
+	 * Recover cumulative accounting from raw entry metadata without cloning or resolving message
+	 * payloads that compaction deliberately moved out of the provider-visible working set. Attempts
+	 * created before usage boundaries existed conservatively fall back to the complete transcript.
+	 */
+	getRawTranscriptUsage(attemptId?: string): AttemptUsageSnapshot {
 		const usage: AttemptUsageSnapshot = {
 			toolCalls: 0,
 			inputTokens: 0,
@@ -288,7 +465,20 @@ export class WorkerConversation {
 			costUsd: 0,
 			activeWallClockMs: 0,
 		};
-		for (const entry of this.sessionManager.getEntries()) {
+		const entries = this.sessionManager.getEntries();
+		let firstUsageEntry = 0;
+		let lastUsageEntry = entries.length;
+		if (attemptId !== undefined) {
+			const normalizedAttemptId = assertAttemptUsageId(attemptId);
+			const boundaryIndex = attemptUsageBoundaryIndex(entries, normalizedAttemptId);
+			if (boundaryIndex >= 0) {
+				firstUsageEntry = boundaryIndex + 1;
+				const nextBoundaryIndex = attemptUsageBoundaryIndex(entries, undefined, firstUsageEntry);
+				if (nextBoundaryIndex >= 0) lastUsageEntry = nextBoundaryIndex;
+			} else if (this.usageAccountingVersion === 1) firstUsageEntry = entries.length;
+		}
+		for (let index = firstUsageEntry; index < lastUsageEntry; index++) {
+			const entry = entries[index]!;
 			if (entry.type === "compaction" && entry.usage) {
 				usage.inputTokens += entry.usage.input;
 				usage.outputTokens += entry.usage.output;
@@ -408,7 +598,7 @@ export class WorkerConversation {
 
 	/** Append one already-authorized worker message to the canonical transcript. */
 	appendMessage(message: Message): string {
-		return this.sessionManager.appendMessage(structuredClone(message));
+		return this.sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)));
 	}
 
 	/**
@@ -426,7 +616,12 @@ export class WorkerConversation {
 			throw new Error("Worker conversation transcript is shorter than its persisted raw context.");
 		}
 		for (let index = 0; index < persisted.length; index++) {
-			if (!isDeepStrictEqual(persisted[index], transcript[index])) {
+			if (
+				!isDeepStrictEqual(
+					workerMessageForPersistence(persisted[index]!),
+					workerMessageForPersistence(transcript[index]!),
+				)
+			) {
 				throw new Error(`Worker conversation transcript diverges from persisted context at message ${index}.`);
 			}
 		}
@@ -494,13 +689,19 @@ export class WorkerConversationStore {
 		const header = seed.getHeader();
 		if (!header) throw new Error("Unable to create a worker conversation session header.");
 		if (existsSync(metadataFile)) {
-			assertExactConversationMetadata(metadataFile, resumeContext, options.logicalAgentId);
+			const metadata = assertExactConversationMetadata(metadataFile, resumeContext, options.logicalAgentId);
+			if (metadata.usageAccountingVersion !== 1) {
+				writeFileAtomicSync(metadataFile, `${JSON.stringify({ ...metadata, usageAccountingVersion: 1 })}\n`, {
+					mode: 0o600,
+				});
+			}
 		} else {
 			// Metadata lands first: a crash leaves no visible conversation until the ordinary session
 			// header is atomically published, while a later ensure can validate the exact intended identity.
 			writeFileAtomicSync(
 				metadataFile,
-				`${JSON.stringify({ logicalAgentId: options.logicalAgentId, resumeContext })}\n`,
+				`${JSON.stringify({ logicalAgentId: options.logicalAgentId, resumeContext, usageAccountingVersion: 1 })}\n`,
+				{ mode: 0o600 },
 			);
 		}
 		writeFileAtomicSync(sessionFile, `${JSON.stringify(header)}\n`);
@@ -550,18 +751,23 @@ export class WorkerConversationStore {
 		if (sessionManager.getCwd() !== resolve(context.cwd)) {
 			throw new Error("Worker conversation resume context working directory disagrees with the persisted session.");
 		}
-		assertExactConversationMetadata(
-			workerConversationMetadataFile(sessionFile),
-			context,
-			options.expectedLogicalAgentId,
-		);
+		const metadataFile = workerConversationMetadataFile(sessionFile);
+		const metadata = assertExactConversationMetadata(metadataFile, context, options.expectedLogicalAgentId);
 
-		return new WorkerConversation(sessionManager, {
-			...context,
-			sessionDir,
-			sessionFile,
-			cwd: sessionManager.getCwd(),
-		});
+		return new WorkerConversation(
+			sessionManager,
+			{
+				...context,
+				sessionDir,
+				sessionFile,
+				cwd: sessionManager.getCwd(),
+			},
+			{
+				file: metadataFile,
+				logicalAgentId: metadata.logicalAgentId,
+				...(metadata.usageAccountingVersion ? { usageAccountingVersion: metadata.usageAccountingVersion } : {}),
+			},
+		);
 	}
 }
 
