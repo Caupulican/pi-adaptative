@@ -9,7 +9,15 @@ import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
-import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
+import {
+	extractSegments,
+	getAmbiguousWidthMode,
+	normalizeTerminalOutput,
+	setAmbiguousWidthMode,
+	sliceByColumn,
+	sliceWithWidth,
+	visibleWidth,
+} from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 
@@ -332,6 +340,9 @@ export class TUI extends Container {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
+	private static readonly AMBIGUOUS_WIDTH_PROBE_TIMEOUT_MS = 2000;
+	private ambiguousWidthProbePending = false;
+	private ambiguousWidthProbeTimer: NodeJS.Timeout | undefined;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
@@ -666,6 +677,7 @@ export class TUI extends Container {
 		);
 		this.terminal.hideCursor();
 		this.queryCellSize();
+		this.queryAmbiguousWidth();
 		this.requestRender();
 	}
 
@@ -690,8 +702,59 @@ export class TUI extends Container {
 		this.terminal.write("\x1b[16t");
 	}
 
+	/**
+	 * Detect whether the terminal renders East Asian ambiguous characters (·, …, ●, ...) as
+	 * two columns, as CJK-locale consoles do. Guessing from locale env vars is unreliable
+	 * (Windows consoles expose none), so measure the terminal's actual behavior: print an
+	 * ambiguous character at column 1, ask where the cursor ended up (DSR 6n), and erase the
+	 * probe. The CPR response is consumed in handleInput; until it arrives the narrow default
+	 * stays active and a positive answer triggers a full re-render with corrected widths.
+	 */
+	private queryAmbiguousWidth(): void {
+		const override = process.env.PI_AMBIGUOUS_WIDTH;
+		if (override === "wide" || override === "narrow") {
+			setAmbiguousWidthMode(override === "wide");
+			return;
+		}
+		this.ambiguousWidthProbePending = true;
+		// CPR reports the column after the probe glyph: 2 = narrow, 3 = wide.
+		this.terminal.write("\r·\x1b[6n\r\x1b[2K");
+		// The pending flag must not outlive startup: CPR is indistinguishable from
+		// modified-F3 key sequences in some terminals, so stop consuming after a bit.
+		this.ambiguousWidthProbeTimer = setTimeout(() => {
+			this.ambiguousWidthProbeTimer = undefined;
+			this.ambiguousWidthProbePending = false;
+		}, TUI.AMBIGUOUS_WIDTH_PROBE_TIMEOUT_MS);
+		this.ambiguousWidthProbeTimer.unref?.();
+	}
+
+	private clearAmbiguousWidthProbe(): void {
+		if (this.ambiguousWidthProbeTimer) {
+			clearTimeout(this.ambiguousWidthProbeTimer);
+			this.ambiguousWidthProbeTimer = undefined;
+		}
+		this.ambiguousWidthProbePending = false;
+	}
+
+	private consumeAmbiguousWidthResponse(data: string): boolean {
+		if (!this.ambiguousWidthProbePending) return false;
+		// Response format: ESC [ row ; col R (CPR)
+		const match = data.match(/^\x1b\[(\d+);(\d+)R$/);
+		if (!match) return false;
+		this.clearAmbiguousWidthProbe();
+		const probeWidth = parseInt(match[2], 10) - 1;
+		if (probeWidth >= 2 && !getAmbiguousWidthMode()) {
+			setAmbiguousWidthMode(true);
+			// Every cached width is now stale: rebuild components and repaint from a clean screen.
+			this.invalidate();
+			this.requestRender(true);
+		}
+		return true;
+	}
+
 	stop(): void {
 		this.stopped = true;
+		this.clearAmbiguousWidthProbe();
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
@@ -783,6 +846,11 @@ export class TUI extends Container {
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.consumeCellSizeResponse(data)) {
+			return;
+		}
+
+		// Consume the ambiguous-width probe's cursor position report.
+		if (this.consumeAmbiguousWidthResponse(data)) {
 			return;
 		}
 

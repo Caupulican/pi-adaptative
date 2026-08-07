@@ -108,4 +108,10 @@ export {
 	TUI,
 } from "./tui.ts";
 // Utilities
-export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";
+export {
+	getAmbiguousWidthMode,
+	setAmbiguousWidthMode,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "./utils.ts";

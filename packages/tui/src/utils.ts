@@ -45,6 +45,25 @@ const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 const WIDTH_CACHE_SIZE = 512;
 const widthCache = new Map<string, number>();
 
+// East Asian ambiguous characters (·, …, ●, box drawing, ...) occupy one column on most
+// terminals but two columns on CJK-context terminals (e.g. a Windows console with a CJK
+// codepage/font). The mode must match the terminal's actual rendering: differential
+// rendering assumes one physical row per logical line, so an under-counted line auto-wraps
+// and every cursor move after it lands one row short, leaving stale frames on screen.
+// Detected at runtime via a cursor-position probe (see TUI.queryAmbiguousWidth).
+let ambiguousAsWide = false;
+
+/** Set how East Asian ambiguous characters are counted. Invalidates cached widths. */
+export function setAmbiguousWidthMode(wide: boolean): void {
+	if (ambiguousAsWide === wide) return;
+	ambiguousAsWide = wide;
+	widthCache.clear();
+}
+
+export function getAmbiguousWidthMode(): boolean {
+	return ambiguousAsWide;
+}
+
 function isPrintableAscii(str: string): boolean {
 	for (let i = 0; i < str.length; i++) {
 		const code = str.charCodeAt(i);
@@ -221,14 +240,14 @@ function graphemeWidth(segment: string): number {
 		return 2;
 	}
 
-	let width = eastAsianWidth(cp);
+	let width = eastAsianWidth(cp, { ambiguousAsWide });
 
 	// Trailing halfwidth/fullwidth forms and AM vowels that segment with a base.
 	if (segment.length > 1) {
 		for (const char of segment.slice(1)) {
 			const c = char.codePointAt(0)!;
 			if (c >= 0xff00 && c <= 0xffef) {
-				width += eastAsianWidth(c);
+				width += eastAsianWidth(c, { ambiguousAsWide });
 			} else if (c === 0x0e33 || c === 0x0eb3) {
 				width += 1;
 			}
