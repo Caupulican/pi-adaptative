@@ -8,6 +8,7 @@ import {
 	sessionRootAddress,
 	sessionRootReplyMessageId,
 } from "../src/core/delegation/session-root-mailbox.ts";
+import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
 const roots: string[] = [];
 
@@ -295,47 +296,51 @@ describe("SessionRootMailbox", () => {
 		).toThrow("durable replay receipt");
 	});
 
-	it("backpressures new replies before an accepted replay identity could expire", () => {
-		const mailbox = new SessionRootMailbox({ agentDir: root(), parentSessionId: "parent-1" });
-		const original = retainedReply(
-			mailbox.enqueueReply({
-				sourceAgentId: "worker-1",
-				requestMessageId: "request-original",
-				content: "original evidence",
-			}),
-		);
-		mailbox.markSourceReconciled(original.messageId);
-		mailbox.acknowledge(original.messageId, original.ackToken);
+	it(
+		"backpressures new replies before an accepted replay identity could expire",
+		() => {
+			const mailbox = new SessionRootMailbox({ agentDir: root(), parentSessionId: "parent-1" });
+			const original = retainedReply(
+				mailbox.enqueueReply({
+					sourceAgentId: "worker-1",
+					requestMessageId: "request-original",
+					content: "original evidence",
+				}),
+			);
+			mailbox.markSourceReconciled(original.messageId);
+			mailbox.acknowledge(original.messageId, original.ackToken);
 
-		let rejected = false;
-		for (let index = 0; index < 600; index++) {
-			try {
-				const reply = retainedReply(
-					mailbox.enqueueReply({
-						sourceAgentId: "worker-1",
-						requestMessageId: `request-${index}`,
-						content: "later evidence",
-					}),
-				);
-				mailbox.markSourceReconciled(reply.messageId);
-				mailbox.acknowledge(reply.messageId, reply.ackToken);
-			} catch (error) {
-				expect(error).toEqual(expect.objectContaining({ message: expect.stringContaining("replay receipt") }));
-				rejected = true;
-				break;
+			let rejected = false;
+			for (let index = 0; index < 600; index++) {
+				try {
+					const reply = retainedReply(
+						mailbox.enqueueReply({
+							sourceAgentId: "worker-1",
+							requestMessageId: `request-${index}`,
+							content: "later evidence",
+						}),
+					);
+					mailbox.markSourceReconciled(reply.messageId);
+					mailbox.acknowledge(reply.messageId, reply.ackToken);
+				} catch (error) {
+					expect(error).toEqual(expect.objectContaining({ message: expect.stringContaining("replay receipt") }));
+					rejected = true;
+					break;
+				}
 			}
-		}
 
-		expect(rejected).toBe(true);
-		expect(
-			mailbox.enqueueReply({
-				sourceAgentId: "worker-1",
-				requestMessageId: "request-original",
-				content: "original evidence",
-			}),
-		).toEqual({ status: "completed_replay", messageId: original.messageId, created: false });
-		expect(mailbox.pendingReplies({ maxMessages: 64 })).toEqual([]);
-	});
+			expect(rejected).toBe(true);
+			expect(
+				mailbox.enqueueReply({
+					sourceAgentId: "worker-1",
+					requestMessageId: "request-original",
+					content: "original evidence",
+				}),
+			).toEqual({ status: "completed_replay", messageId: original.messageId, created: false });
+			expect(mailbox.pendingReplies({ maxMessages: 64 })).toEqual([]);
+		},
+		windowsLoadedSuiteTimeout(),
+	);
 
 	it("reserves a source-owned reply across projected default lifecycle growth", () => {
 		const agentDir = root();

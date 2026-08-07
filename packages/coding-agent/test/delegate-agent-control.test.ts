@@ -1170,6 +1170,75 @@ describe("delegate persistent worker reuse", () => {
 		});
 	});
 
+	it("surfaces durable retirement as exact agent_retired while an idle identity remains reusable", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "fresh-lane", type: "worker" as const, status: "queued" as const },
+		}));
+		const runWorkerDelegation = vi.fn(async () => ({ started: false as const, skipReason: "provider_must_not_run" }));
+		const startWorkerAgentTask = vi.fn((agentId: string) => {
+			if (agentId === "retired-worker") {
+				return {
+					started: false as const,
+					steering: false as const,
+					messageId: "",
+					skipReason: "agent_retired",
+				};
+			}
+			return {
+				started: true as const,
+				steering: false as const,
+				messageId: "idle-message",
+				record: { laneId: "idle-task", type: "worker" as const, status: "queued" as const },
+			};
+		});
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			startWorkerDelegation,
+			runWorkerDelegation,
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+
+		const retired = await tool.execute(
+			"retired-start",
+			{ action: "start", agentId: "retired-worker", instructions: "Must not restart" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(retired.details).toEqual({
+			started: false,
+			action: "start",
+			agentId: "retired-worker",
+			skipReason: "agent_retired",
+		});
+		expect(delegateText(retired)).toBe("delegate start could not reuse worker retired-worker: agent_retired");
+		expect(startWorkerAgentTask).toHaveBeenCalledOnce();
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(runWorkerDelegation).not.toHaveBeenCalled();
+
+		const idle = await tool.execute(
+			"idle-start",
+			{ action: "start", agentId: "idle-worker", instructions: "Continue" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(idle.details).toMatchObject({
+			started: true,
+			action: "start",
+			agentId: "idle-worker",
+			laneId: "idle-task",
+			accepted: true,
+		});
+		expect(startWorkerAgentTask).toHaveBeenCalledTimes(2);
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(runWorkerDelegation).not.toHaveBeenCalled();
+	});
+
 	it("reports terminal replay and wake-pending reuse as durable acceptance", async () => {
 		const cases = [
 			{

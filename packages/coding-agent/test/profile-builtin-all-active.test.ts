@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import { ALL_ACTIVE_PROFILE_NAME, ProfileRegistry } from "../src/core/profile-registry.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import type { ResourceProfileKind } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
 const RESOURCE_KINDS: ResourceProfileKind[] = ["extensions", "skills", "prompts", "themes", "agents", "tools"];
 
@@ -71,9 +73,11 @@ describe("built-in all-active profile activation", () => {
 		tempDir = join(tmpdir(), `pi-profile-all-active-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
+		vi.stubEnv(ENV_AGENT_DIR, agentDir);
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -90,17 +94,23 @@ describe("built-in all-active profile activation", () => {
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,
 		});
-		const names = session.getActiveToolNames().sort();
-		session.dispose();
-		return names;
+		try {
+			return session.getActiveToolNames().sort();
+		} finally {
+			await session.disposeAndWait();
+		}
 	}
 
-	it("imposes no restriction: a strict superset of the no-active-profile baseline", async () => {
-		// No active profile still excludes externally-sourced extensions (see T5 in
-		// profile-diagnostics.test.ts), so the built-in profile must unlock strictly more, never less.
-		const baseline = await sessionActiveTools();
-		const withAllActive = await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
-		expect(withAllActive).toEqual(expect.arrayContaining(baseline));
-		expect(withAllActive.length).toBeGreaterThan(baseline.length);
-	}, 60_000);
+	it(
+		"imposes no restriction: a strict superset of the no-active-profile baseline",
+		async () => {
+			// No active profile still excludes externally-sourced extensions (see T5 in
+			// profile-diagnostics.test.ts), so the built-in profile must unlock strictly more, never less.
+			const baseline = await sessionActiveTools();
+			const withAllActive = await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
+			expect(withAllActive).toEqual(expect.arrayContaining(baseline));
+			expect(withAllActive.length).toBeGreaterThan(baseline.length);
+		},
+		windowsLoadedSuiteTimeout(60_000),
+	);
 });

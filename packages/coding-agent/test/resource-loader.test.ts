@@ -12,6 +12,7 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
+import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
 function settingsWithExtensionsGranted(...allowedExtensions: string[]): SettingsManager {
 	return SettingsManager.inMemory({
@@ -489,23 +490,27 @@ Content`,
 			);
 		});
 
-		it("should load the bundled tmux agent manager through an active resource profile", async () => {
-			const settingsManager = SettingsManager.inMemory({
-				activeResourceProfile: "portable-tmux",
-				resourceProfiles: {
-					"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
-				},
-			});
-			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-			await loader.reload();
+		it(
+			"should load the bundled tmux agent manager through an active resource profile",
+			async () => {
+				const settingsManager = SettingsManager.inMemory({
+					activeResourceProfile: "portable-tmux",
+					resourceProfiles: {
+						"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
+					},
+				});
+				const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+				await loader.reload();
 
-			const extension = loader
-				.getExtensions()
-				.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
-			expect(extension, JSON.stringify(loader.getExtensions().errors)).toBeDefined();
-			expect(extension?.tools.has("tmux_agent_manager")).toBe(true);
-			expect(loader.getExtensions().errors).toEqual([]);
-		}, 60_000);
+				const extension = loader
+					.getExtensions()
+					.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
+				expect(extension, JSON.stringify(loader.getExtensions().errors)).toBeDefined();
+				expect(extension?.tools.has("tmux_agent_manager")).toBe(true);
+				expect(loader.getExtensions().errors).toEqual([]);
+			},
+			windowsLoadedSuiteTimeout(60_000),
+		);
 
 		it("should suppress external root extensions at load time when no resource profile is active", async () => {
 			const root = join(tempDir, "catalog-no-profile");

@@ -13,6 +13,7 @@ import { ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contract
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
+import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
 const UNAVAILABLE_SHELL_TOOL_NAME = "cmd";
 
@@ -392,76 +393,77 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
-	it("uses the two remaining identities for an implementation and its required verifier", async () => {
-		const verifierProfile = createTestWorkerOrchestrationProfile({
-			profileId: "identity-headroom-control-verifier",
-			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
-			role: "verifier",
-		});
-		const implementationProfile = createTestWorkerOrchestrationProfile({
-			profileId: "identity-headroom-control-implementation",
-			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
-			requireIndependentVerification: true,
-			verificationProfileId: verifierProfile.profileId,
-		});
-		const harness = await createHarness({
-			workerOrchestrationProfile: implementationProfile,
-			additionalOrchestrationProfiles: [verifierProfile],
-		});
-		let resolveVerifier: ((message: AssistantMessage) => void) | undefined;
-		const verifierCompletion = new Promise<AssistantMessage>((resolve) => {
-			resolveVerifier = resolve;
-		});
-		let signalVerifierStarted: (() => void) | undefined;
-		const verifierStarted = new Promise<void>((resolve) => {
-			signalVerifierStarted = resolve;
-		});
-		try {
-			const lifecycle = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
+	it(
+		"uses the two remaining identities for an implementation and its required verifier",
+		async () => {
+			const verifierProfile = createTestWorkerOrchestrationProfile({
+				profileId: "identity-headroom-control-verifier",
+				model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
+				role: "verifier",
 			});
-			for (let index = 0; index < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession - 2; index += 1) {
-				seedAgent(lifecycle, { agentId: `seed-verifier-control-${index}`, cwd: harness.tempDir });
-			}
-			harness.setResponses([
-				fauxAssistantMessage('{"summary":"implementation complete","status":"completed","findings":[]}'),
-				() => {
-					signalVerifierStarted?.();
-					return verifierCompletion;
-				},
-			]);
+			const implementationProfile = createTestWorkerOrchestrationProfile({
+				profileId: "identity-headroom-control-implementation",
+				model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
+				requireIndependentVerification: true,
+				verificationProfileId: verifierProfile.profileId,
+			});
+			const harness = await createHarness({
+				workerOrchestrationProfile: implementationProfile,
+				additionalOrchestrationProfiles: [verifierProfile],
+			});
+			let resolveVerifier: ((message: AssistantMessage) => void) | undefined;
+			const verifierCompletion = new Promise<AssistantMessage>((resolve) => {
+				resolveVerifier = resolve;
+			});
+			let verifierStarted = false;
+			try {
+				const lifecycle = new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				});
+				for (let index = 0; index < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession - 2; index += 1) {
+					seedAgent(lifecycle, { agentId: `seed-verifier-control-${index}`, cwd: harness.tempDir });
+				}
+				harness.setResponses([
+					fauxAssistantMessage('{"summary":"implementation complete","status":"completed","findings":[]}'),
+					() => {
+						verifierStarted = true;
+						return verifierCompletion;
+					},
+				]);
 
-			const admitted = await harness.session.runWorkerDelegationOnce({
-				instructions: "Use the reserved verifier identity.",
-			});
-			expect(admitted.started).toBe(true);
-			await verifierStarted;
-			expect(durableEntityCounts(lifecycle).agents).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession);
-			resolveVerifier?.(
-				fauxAssistantMessage(
-					'{"summary":"verification passed","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
-				),
-			);
-			await vi.waitFor(
-				() => {
-					expect(
-						Object.values(lifecycle.getTaskRuntimeSnapshot().tasks).some(
-							(task) => task.verification?.verdict === "accepted",
-						),
-					).toBe(true);
-				},
-				{ timeout: 10_000 },
-			);
-		} finally {
-			resolveVerifier?.(
-				fauxAssistantMessage(
-					'{"summary":"cleanup","status":"completed","verdict":"rejected","reasonCodes":["cleanup"],"findings":[]}',
-				),
-			);
-			await harness.cleanup();
-		}
-	});
+				const admitted = await harness.session.runWorkerDelegationOnce({
+					instructions: "Use the reserved verifier identity.",
+				});
+				expect(admitted.started).toBe(true);
+				await vi.waitFor(() => expect(verifierStarted).toBe(true), { timeout: 10_000 });
+				expect(durableEntityCounts(lifecycle).agents).toBe(DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession);
+				resolveVerifier?.(
+					fauxAssistantMessage(
+						'{"summary":"verification passed","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
+					),
+				);
+				await vi.waitFor(
+					() => {
+						expect(
+							Object.values(lifecycle.getTaskRuntimeSnapshot().tasks).some(
+								(task) => task.verification?.verdict === "accepted",
+							),
+						).toBe(true);
+					},
+					{ timeout: 10_000 },
+				);
+			} finally {
+				resolveVerifier?.(
+					fauxAssistantMessage(
+						'{"summary":"cleanup","status":"completed","verdict":"rejected","reasonCodes":["cleanup"],"findings":[]}',
+					),
+				);
+				await harness.cleanup();
+			}
+		},
+		windowsLoadedSuiteTimeout(),
+	);
 
 	it.each([
 		{
