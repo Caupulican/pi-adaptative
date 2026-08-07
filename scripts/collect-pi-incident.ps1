@@ -601,6 +601,7 @@ function Write-WindowsEventDiagnostics {
     }
 }
 
+$agentDirWasExplicitlySupplied = -not [string]::IsNullOrWhiteSpace($AgentDir)
 $configuredAgentDir = Get-FirstEnvironmentValue -Names @(
     "PI_ADAPTATIVE_CODING_AGENT_DIR",
     "PI_CHAT_CODING_AGENT_DIR",
@@ -618,16 +619,21 @@ if ([string]::IsNullOrWhiteSpace($AgentDir)) {
 $AgentDir = Resolve-ExistingPath -Path $AgentDir -Description "Pi agent directory" -PathType Container
 
 if ([string]::IsNullOrWhiteSpace($SessionDir)) {
-    $configuredSessionDir = Get-FirstEnvironmentValue -Names @(
-        "PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR",
-        "PI_CHAT_CODING_AGENT_SESSION_DIR",
-        "PI_CODING_AGENT_SESSION_DIR"
-    )
-    if (-not [string]::IsNullOrWhiteSpace($configuredSessionDir)) {
-        $SessionDir = $configuredSessionDir
+    if ($agentDirWasExplicitlySupplied) {
+        $SessionDir = Join-Path $AgentDir "sessions"
     }
     else {
-        $SessionDir = Join-Path $AgentDir "sessions"
+        $configuredSessionDir = Get-FirstEnvironmentValue -Names @(
+            "PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR",
+            "PI_CHAT_CODING_AGENT_SESSION_DIR",
+            "PI_CODING_AGENT_SESSION_DIR"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($configuredSessionDir)) {
+            $SessionDir = $configuredSessionDir
+        }
+        else {
+            $SessionDir = Join-Path $AgentDir "sessions"
+        }
     }
 }
 

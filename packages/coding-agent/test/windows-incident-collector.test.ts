@@ -103,7 +103,9 @@ describe.runIf(process.platform === "win32" || powerShell !== undefined)("native
 		const localCollectorPath = join(root, "collect-pi-incident.ps1");
 		const tuiLog = join(root, "native-tui.log");
 		const commandLog = join(root, "native-command.log");
+		const ambientSessionDir = join(root, "ambient sessions");
 		mkdirSync(sessionDir, { recursive: true });
+		mkdirSync(ambientSessionDir, { recursive: true });
 		mkdirSync(orchestrationDir, { recursive: true });
 		copyFileSync(collectorPath, localCollectorPath);
 
@@ -125,6 +127,10 @@ describe.runIf(process.platform === "win32" || powerShell !== undefined)("native
 		writeFileSync(
 			autoLearnSession,
 			'{"type":"session","id":"auto-learn-newest","timestamp":"2026-01-03T10:00:00Z"}\nautomatic evidence\n',
+		);
+		writeFileSync(
+			join(ambientSessionDir, "unrelated.jsonl"),
+			'{"type":"session","id":"unrelated-session","timestamp":"2026-01-04T10:00:00Z"}\nunrelated evidence\n',
 		);
 		utimesSync(oldSession, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
 		utimesSync(affectedSession, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
@@ -154,7 +160,11 @@ describe.runIf(process.platform === "win32" || powerShell !== undefined)("native
 			writeFileSync(join(agentDir, sensitiveName), `secret from ${sensitiveName}\n`);
 		}
 
-		const collectorEnv: NodeJS.ProcessEnv = { ...process.env, PI_TUI_WRITE_LOG: tuiLog };
+		const collectorEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			PI_TUI_WRITE_LOG: tuiLog,
+			PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR: pathForPowerShell(ambientSessionDir),
+		};
 		if (isWslHost) {
 			collectorEnv.WSLENV = [process.env.WSLENV, "PI_TUI_WRITE_LOG/p"].filter(Boolean).join(":");
 		}

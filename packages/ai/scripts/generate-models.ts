@@ -2388,7 +2388,7 @@ export const MODELS = {
 // Deterministic-build escape hatch: CI must verify the COMMITTED catalog, not refetch live
 // pricing that can drift between the release commit and the CI run (a provider repricing in
 // that window fails `git diff --exit-code` and aborts the npm publish). Explicit refreshes omit
-// this flag; deterministic test and release builds retain the reviewed committed catalog.
+// this flag; deterministic test and CI builds retain the reviewed committed catalog.
 const committedCatalog = join(packageRoot, "src", "models.generated.ts");
 await runModelCatalogGeneration({
 	catalogPath: committedCatalog,
