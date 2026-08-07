@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed TUI startup benchmarks stopping the renderer without disposing session-owned resources, which left packaged smoke and profiling processes running indefinitely.
 - Fixed the native Windows incident collector honoring an ambient session-directory environment variable over an explicitly supplied agent directory.
 - Fixed persistent-worker control recovery so task-bearing wakeups, terminal handoffs, and inferred replies remain crash-safe and replay-safe after mailbox history pruning; bounded mailboxes now reserve mandatory byte, entry, and replay-evidence capacity, terminal notification failures retry autonomously, session-root replies use an explicit acknowledged inbox, and poisoned terminal-correlated tasks no longer block later work.
 - Fixed delegated workers dying with bare `completion_error`: token budgets now charge prompt-cache reads at 10% instead of face value (a fixed ~3k-token cached system prompt no longer turns `maxTokens` into a request counter), non-viable grants (`maxTokens` under 5000) are rejected at `delegate start` with `token_budget_below_floor` instead of starving mid-flight, worker failure summaries and research lane results carry the underlying executor error, and transient provider failures (socket drops, 5xx, rate limits) retry with jittered backoff inside the worker attempt instead of failing instantly at $0.

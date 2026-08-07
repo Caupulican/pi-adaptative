@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { disposeRuntimeAndExit, promptConfirm } from "../src/main.ts";
 import { showDeprecationWarnings } from "../src/migrations.ts";
@@ -71,6 +73,21 @@ describe("headless confirmation liveness", () => {
 			),
 		).rejects.toThrow("dispose failed");
 		expect(exit).toHaveBeenCalledWith(9);
+	});
+
+	it("routes the TUI startup benchmark through terminal runtime disposal", () => {
+		const source = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
+		const interactiveBranch = source.indexOf('} else if (appMode === "interactive") {');
+		const benchmarkStart = source.indexOf("if (startupBenchmark) {", interactiveBranch);
+		const normalStartup = source.indexOf("\n\n\t\tprintTimings();", benchmarkStart);
+		expect(interactiveBranch).toBeGreaterThanOrEqual(0);
+		expect(benchmarkStart).toBeGreaterThan(interactiveBranch);
+		expect(normalStartup).toBeGreaterThan(benchmarkStart);
+
+		const benchmarkBranch = source.slice(benchmarkStart, normalStartup);
+		expect(benchmarkBranch).toMatch(
+			/interactiveMode\.stop\(\);[\s\S]*stopThemeWatcher\(\);[\s\S]*await disposeRuntimeAndExit\(runtime, 0\);/,
+		);
 	});
 
 	it("fails a yes/no safety confirmation closed without reading stdin", async () => {

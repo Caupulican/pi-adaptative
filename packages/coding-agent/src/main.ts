@@ -1171,6 +1171,7 @@ export async function main(args: string[], options?: MainOptions) {
 			if (process.stderr.writableLength > 0) {
 				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
 			}
+			await disposeRuntimeAndExit(runtime, 0);
 			return;
 		}
 
