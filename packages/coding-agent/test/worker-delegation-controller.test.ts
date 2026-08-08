@@ -217,6 +217,12 @@ describe("WorkerDelegationController integration invariants", () => {
 			"goal_dependency_unsatisfied",
 		);
 		expect(goalDepSkipReason.call(controller, { taskContext: { requirementIds: ["R1"] } })).toBeUndefined();
+		expect(
+			goalDepSkipReason.call(controller, {
+				taskContext: { requirementIds: ["R2"] },
+				verificationOfTaskId: "task-123",
+			}),
+		).toBeUndefined();
 	});
 
 	it("automatically injects memory query capability into worker execution plan when memory retrieval is enabled", () => {

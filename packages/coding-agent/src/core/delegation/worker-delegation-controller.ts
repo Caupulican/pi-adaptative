@@ -1177,6 +1177,7 @@ export class WorkerDelegationController {
 	}
 
 	private workerGoalDependencySkipReason(request: WorkerDelegationRequest): string | undefined {
+		if (request.verificationOfTaskId) return undefined;
 		const goal = this.deps.getGoalStateSnapshot();
 		if (!goal || !goal.requirements || goal.requirements.length === 0) return undefined;
 
