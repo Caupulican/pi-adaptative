@@ -133,13 +133,20 @@ function parseAuthority(
 	}
 	if (
 		capabilities.some(
-			(capability) => capability !== "workflow.delegate" && !profile.capabilityCeiling.includes(capability),
+			(capability) =>
+				capability !== "workflow.delegate" &&
+				capability !== "memory.query" &&
+				!profile.capabilityCeiling.includes(capability),
 		)
 	) {
 		throw new WorkerExecutionContractError(`${label} authority exceeds its profile capability ceiling.`);
 	}
 	const toolNames = stringArray(value.toolNames, `${label} authority toolNames`);
-	if (toolNames.some((toolName) => toolName !== "delegate" && !profile.toolNames.includes(toolName))) {
+	if (
+		toolNames.some(
+			(toolName) => toolName !== "delegate" && toolName !== "memory" && !profile.toolNames.includes(toolName),
+		)
+	) {
 		throw new WorkerExecutionContractError(`${label} authority contains a tool outside its profile.`);
 	}
 	const pathArrayOptions = {

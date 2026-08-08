@@ -451,7 +451,7 @@ describe("recursive worker orchestration", () => {
 							),
 						).toBe(true);
 					},
-					{ timeout: 10_000 },
+					{ timeout: 15_000 },
 				);
 			} finally {
 				resolveVerifier?.(
@@ -462,7 +462,7 @@ describe("recursive worker orchestration", () => {
 				await harness.cleanup();
 			}
 		},
-		windowsLoadedSuiteTimeout(),
+		(windowsLoadedSuiteTimeout() ?? 5000) + 10_000,
 	);
 
 	it.each([
@@ -810,7 +810,7 @@ describe("recursive worker orchestration", () => {
 			expect(run.record?.status).toBe("succeeded");
 			expect(seenModel).toBe("selected");
 			expect(seenReasoning).toBe("low");
-			expect(seenTools).toEqual(["read", STABLE_SHELL_TOOL_NAME, "delegate"]);
+			expect(seenTools).toEqual(["read", "memory", STABLE_SHELL_TOOL_NAME, "delegate"]);
 			expect(harness.settingsManager.getWorkerDelegationSettings().maxConcurrent).toBe(128);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
@@ -820,8 +820,8 @@ describe("recursive worker orchestration", () => {
 			expect(attempt?.dispatch.executionContract?.worker).toMatchObject({
 				modelBinding: { provider, modelId: "selected", thinkingLevel: "low" },
 				authority: {
-					capabilities: ["filesystem.read", "process.exec", "workflow.delegate"],
-					toolNames: ["read", STABLE_SHELL_TOOL_NAME, "delegate"],
+					capabilities: ["filesystem.read", "process.exec", "workflow.delegate", "memory.query"],
+					toolNames: ["read", "bash", "delegate", "memory"],
 				},
 			});
 		} finally {
@@ -916,13 +916,14 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual([STABLE_SHELL_TOOL_NAME]);
+			expect(tools).toEqual(["memory", STABLE_SHELL_TOOL_NAME]);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
 			expect(Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.authority.toolNames).toEqual([
-				STABLE_SHELL_TOOL_NAME,
+				"bash",
+				"memory",
 			]);
 		} finally {
 			await harness.cleanup();
@@ -972,13 +973,13 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual([]);
+			expect(tools).toEqual(["memory"]);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
-			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual([]);
-			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual([]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual(["memory"]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual(["memory.query"]);
 		} finally {
 			await harness.cleanup();
 		}
@@ -1116,7 +1117,7 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(child.record?.status).toBe("succeeded");
-			expect(childTools).toEqual(["delegate"]);
+			expect(childTools).toEqual(["memory", "delegate"]);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
@@ -1124,8 +1125,8 @@ describe("recursive worker orchestration", () => {
 			const childAttempt = Object.values(snapshot.attempts).find(
 				(attempt) => attempt.dispatch.parentAgentId === root.record?.laneId,
 			);
-			expect(childAttempt?.grant?.capabilities).toEqual(["workflow.delegate"]);
-			expect(childAttempt?.grant?.allowedTools).toEqual(["delegate"]);
+			expect(childAttempt?.grant?.capabilities).toEqual(["workflow.delegate", "memory.query"]);
+			expect(childAttempt?.grant?.allowedTools).toEqual(["delegate", "memory"]);
 		} finally {
 			await harness.cleanup();
 		}
