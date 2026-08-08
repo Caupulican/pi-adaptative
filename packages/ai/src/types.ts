@@ -495,6 +495,8 @@ export interface OpenAICompletionsCompat {
 export interface OpenAIResponsesCompat {
 	/** Header format for session affinity. OpenRouter uses `x-session-id`; `openai-nosession` omits `session_id`. Default: auto-detected. */
 	sessionAffinityFormat?: SessionAffinityFormat;
+	/** Whether the provider supports the `reasoning` request field. Default: true. */
+	supportsReasoningEffort?: boolean;
 	/** Whether the provider supports `prompt_cache_retention: "24h"`. Default: true. */
 	supportsLongCacheRetention?: boolean;
 }

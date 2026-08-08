@@ -83,6 +83,37 @@ describe("openai-responses provider defaults", () => {
 		});
 	});
 
+	it("omits unsupported reasoning from generated Responses models", async () => {
+		let capturedPayload: unknown;
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		const model: Model<"openai-responses"> = {
+			...getModel("openai", "gpt-5.4"),
+			provider: "opencode",
+			baseUrl: "https://opencode.ai/zen/v1",
+			compat: { supportsReasoningEffort: false },
+			reasoning: true,
+		};
+		await streamOpenAIResponses(
+			model,
+			{ systemPrompt: "sys", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				reasoningEffort: "high",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			},
+		).result();
+
+		expect(capturedPayload).not.toMatchObject({ reasoning: expect.anything() });
+	});
+
 	it("forwards a required tool choice", async () => {
 		let capturedPayload: unknown;
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(

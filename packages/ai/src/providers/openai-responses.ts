@@ -46,6 +46,7 @@ function detectSessionAffinityFormat(model: Pick<Model<"openai-responses">, "pro
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
 		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
+		supportsReasoningEffort: model.compat?.supportsReasoningEffort ?? true,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
 	};
 }
@@ -211,7 +212,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.tool_choice = options.toolChoice;
 	}
 
-	if (model.reasoning) {
+	if (model.reasoning && compat.supportsReasoningEffort) {
 		if (
 			options?.reasoningEffort ||
 			options?.reasoningSummary !== undefined ||
