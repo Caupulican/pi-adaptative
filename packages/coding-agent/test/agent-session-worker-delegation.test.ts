@@ -309,6 +309,7 @@ describe("AgentSession worker delegation", () => {
 				"filesystem.read",
 				"filesystem.write",
 				"workflow.delegate",
+				"memory.query",
 			]);
 		} finally {
 			harness.cleanup();
@@ -1073,7 +1074,16 @@ describe("AgentSession worker delegation", () => {
 				{ request: { source: "worker", workerRequestId: run.record?.laneId }, status: "pending" },
 			]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
-			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit", "delegate"]);
+			expect(request?.envelope.allowedTools).toEqual([
+				"read",
+				"grep",
+				"find",
+				"ls",
+				"memory",
+				"write",
+				"edit",
+				"delegate",
+			]);
 			expect(request?.envelope.allowedTools).toContain("delegate");
 		} finally {
 			harness.cleanup();
@@ -1443,8 +1453,8 @@ describe("AgentSession worker delegation", () => {
 			]);
 			expect(workerReasoning).toEqual(["low", "low"]);
 			expect(workerToolNames).toEqual([
-				["read", "write"],
-				["read", "write"],
+				["read", "memory", "write"],
+				["read", "memory", "write"],
 			]);
 		} finally {
 			unsubscribe();

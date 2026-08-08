@@ -61,11 +61,11 @@ describe("buildWorkerExecutionPlan", () => {
 			memoryEnabled: true,
 		});
 
-		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read"]);
-		expect(plan.requiredCapabilities).toEqual(["filesystem.read"]);
+		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read", "memory"]);
+		expect(plan.requiredCapabilities).toEqual(["filesystem.read", "memory.query"]);
 		expect(plan.writeEnabled).toBe(false);
 		expect(plan.writePaths).toEqual([]);
-		expect(plan.readMemory).toBe(false);
+		expect(plan.readMemory).toBe(true);
 	});
 
 	it("treats the global zero wall-clock setting as disabled without creating an infinite budget value", () => {

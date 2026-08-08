@@ -95,7 +95,7 @@ describe("profile_writer", () => {
 
 			expect(run.started).toBe(true);
 			expect(selectedModel).toBe("fast-worker");
-			expect(selectedTools.sort()).toEqual(["grep", "read"]);
+			expect(selectedTools.sort()).toEqual(["grep", "memory", "read"]);
 			expect(run.record?.profileId).toBe(details.profileId);
 		} finally {
 			harness.cleanup();

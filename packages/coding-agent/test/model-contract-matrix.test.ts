@@ -183,7 +183,7 @@ describe("provider-neutral model contract matrix", () => {
 					provider: entry.provider,
 					reasoning: entry.profileThinking,
 					textProtocol: entry.expectedTextProtocol,
-					toolNames: entry.expectedTextProtocol ? [] : ["read"],
+					toolNames: entry.expectedTextProtocol ? [] : ["read", "memory"],
 					textProtocolPrimer: entry.expectedTextProtocol === true,
 				});
 			} finally {

@@ -275,7 +275,7 @@ describe("profile-shipped lanes", () => {
 
 		expect(run.record?.status).toBe("succeeded");
 		expect(run.outcome?.claim.summary).toBe("profile repair read succeeded");
-		expect(seenTools).toEqual(["read"]);
+		expect(seenTools).toEqual(["read", "memory"]);
 	});
 
 	it("composes owner-authored worker soul with the immutable core and role prompt", async () => {
