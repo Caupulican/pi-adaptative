@@ -104,8 +104,7 @@ export function buildWorkerExecutionPlan(args: {
 		args.settings.writePaths.length > 0 &&
 		(args.profile.capabilityCeiling.includes("filesystem.write") ||
 			args.profile.capabilityCeiling.includes("worktree.mutate"));
-	const memoryEligible =
-		args.memoryEnabled && profileToolNames.has("memory") && args.profile.capabilityCeiling.includes("memory.query");
+	const memoryEligible = args.memoryEnabled;
 	const processEligible =
 		args.profile.capabilityCeiling.includes("process.exec") ||
 		args.profile.capabilityCeiling.includes("tests.execute");
@@ -125,6 +124,15 @@ export function buildWorkerExecutionPlan(args: {
 			: []),
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
+	if (memoryEligible && !toolManifests.some((manifest) => manifest.toolName === "memory")) {
+		toolManifests.push({
+			toolName: "memory",
+			moduleSpecifier: "../tools/memory.ts",
+			capabilities: ["memory.query"],
+			roles: [args.profile.role],
+			enforcements: ["memory-broker"],
+		});
+	}
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
 	const readEnabled = toolManifests.some((manifest) =>
 		manifest.capabilities.some((capability) => capability === "filesystem.read" || capability === "worktree.read"),
@@ -170,6 +178,10 @@ export function compileWorkerExecutionGrant(args: {
 	plan: WorkerExecutionPlan;
 	resources: readonly ResourcePointer[];
 }): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
+	const authorityCapabilities =
+		args.plan.readMemory && !args.profile.capabilityCeiling.includes("memory.query")
+			? [...args.profile.capabilityCeiling, "memory.query" as const]
+			: args.profile.capabilityCeiling;
 	const compiled = new ExecutionPolicyCompiler().compile({
 		objectiveId: args.target.objectiveId,
 		taskId: args.target.taskId,
@@ -178,7 +190,7 @@ export function compileWorkerExecutionGrant(args: {
 		role: args.profile.role,
 		requiredCapabilities: args.plan.requiredCapabilities,
 		requestedCapabilities: args.plan.requiredCapabilities,
-		authorityCapabilities: args.profile.capabilityCeiling,
+		authorityCapabilities,
 		requestedTools: args.plan.toolManifests.map((manifest) => manifest.toolName),
 		toolManifests: args.plan.toolManifests,
 		resources: args.resources,
