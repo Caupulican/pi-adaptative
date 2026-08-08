@@ -196,4 +196,61 @@ describe("WorkerDelegationController integration invariants", () => {
 			expect.objectContaining({ type: "warning", message: expect.stringContaining("handoff cleanup failed") }),
 		);
 	});
+
+	it("refuses worker admission when target requirement dependencies in goal-state are unsatisfied", () => {
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			deps: {
+				getGoalStateSnapshot: () => ({
+					requirements: [
+						{ id: "R1", status: "open" },
+						{ id: "R2", status: "open", dependencies: ["R1"] },
+					],
+				}),
+			},
+		}) as unknown as WorkerDelegationController;
+
+		const goalDepSkipReason = Reflect.get(controller, "workerGoalDependencySkipReason") as (
+			req: unknown,
+		) => string | undefined;
+
+		expect(goalDepSkipReason.call(controller, { taskContext: { requirementIds: ["R2"] } })).toBe(
+			"goal_dependency_unsatisfied",
+		);
+		expect(goalDepSkipReason.call(controller, { taskContext: { requirementIds: ["R1"] } })).toBeUndefined();
+	});
+
+	it("automatically injects memory query capability into worker execution plan when memory retrieval is enabled", () => {
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			deps: {
+				getCwd: () => "/tmp",
+				getAgentDir: () => "/tmp/.agent",
+				getCapabilityEnvelope: () => undefined,
+				getSettingsManager: () => ({
+					getMemoryRetrievalSettings: () => ({ enabled: true }),
+				}),
+			},
+		}) as unknown as WorkerDelegationController;
+
+		const buildPlan = Reflect.get(controller, "buildWorkerExecutionPlan") as (
+			profile: unknown,
+			settings: unknown,
+		) => { readMemory: boolean; requiredCapabilities: readonly string[] };
+
+		const mockProfile = {
+			role: "implementer",
+			toolNames: ["read"],
+			capabilityCeiling: ["filesystem.read"],
+			budget: {},
+		};
+		const mockSettings = {
+			writeEnabled: false,
+			writePaths: [],
+			maxUsd: 0,
+			maxWallClockMs: 0,
+		};
+
+		const plan = buildPlan.call(controller, mockProfile, mockSettings);
+		expect(plan.readMemory).toBe(true);
+		expect(plan.requiredCapabilities).toContain("memory.query");
+	});
 });

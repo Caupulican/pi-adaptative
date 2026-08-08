@@ -49,6 +49,12 @@ const goalSchema = Type.Object(
 			}),
 		),
 		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
+		dependencies: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"Optional IDs of requirements that must be satisfied before this one. Valid for add_requirement.",
+			}),
+		),
 		instructions: Type.Optional(Type.String({ description: "Worker instructions. Required for dispatch_worker." })),
 		evidenceId: Type.Optional(Type.String({ description: "Evidence id. Required for add_evidence." })),
 		evidenceIds: Type.Optional(
@@ -238,7 +244,12 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 				tokenBudget: input.tokenBudget,
 			};
 		case "add_requirement":
-			return { action: "add_requirement", requirementId: input.requirementId ?? "", text: input.text ?? "" };
+			return {
+				action: "add_requirement",
+				requirementId: input.requirementId ?? "",
+				text: input.text ?? "",
+				dependencies: input.dependencies,
+			};
 		case "satisfy_requirement":
 			return {
 				action: "satisfy_requirement",

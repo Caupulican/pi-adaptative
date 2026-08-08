@@ -1176,11 +1176,58 @@ export class WorkerDelegationController {
 		}
 	}
 
+	private workerGoalDependencySkipReason(request: WorkerDelegationRequest): string | undefined {
+		const goal = this.deps.getGoalStateSnapshot();
+		if (!goal || !goal.requirements || goal.requirements.length === 0) return undefined;
+
+		const reqIds = new Set<string>();
+		for (const id of request.taskContext?.requirementIds ?? []) {
+			if (id.trim()) reqIds.add(id.trim());
+		}
+
+		if (reqIds.size === 0 && request.instructions) {
+			for (const req of goal.requirements) {
+				if (request.instructions.includes(req.id)) {
+					reqIds.add(req.id);
+				}
+			}
+		}
+
+		if (reqIds.size > 0) {
+			for (const reqId of reqIds) {
+				const req = goal.requirements.find((r) => r.id === reqId);
+				if (req?.dependencies && req.dependencies.length > 0) {
+					const unsatisfied = req.dependencies.some((depId) => {
+						const dep = goal.requirements.find((r) => r.id === depId);
+						return !dep || dep.status !== "satisfied";
+					});
+					if (unsatisfied) return "goal_dependency_unsatisfied";
+				}
+			}
+		} else {
+			const openReqs = goal.requirements.filter((r) => r.status === "open");
+			const hasOpenReqWithoutUnsatisfiedDeps = openReqs.some((req) => {
+				if (!req.dependencies || req.dependencies.length === 0) return true;
+				return req.dependencies.every((depId) => {
+					const dep = goal.requirements.find((r) => r.id === depId);
+					return dep && dep.status === "satisfied";
+				});
+			});
+			if (openReqs.length > 0 && !hasOpenReqWithoutUnsatisfiedDeps) {
+				return "goal_dependency_unsatisfied";
+			}
+		}
+
+		return undefined;
+	}
+
 	/** One admission owner for every newly generated logical worker identity. */
 	private admitNewWorkerRequest(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
 	): WorkerAdmission {
+		const goalDependencySkipReason = this.workerGoalDependencySkipReason(request);
+		if (goalDependencySkipReason) return { ok: false, skipReason: goalDependencySkipReason };
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request);
 		if (fleetSkipReason) return { ok: false, skipReason: fleetSkipReason };
 		const admission = this.resolveWorkerAdmission(request, pinnedContract);

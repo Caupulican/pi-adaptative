@@ -29,7 +29,7 @@ const MAX_GOAL_URI_LENGTH = 4_096;
  */
 export type GoalAction =
 	| { action: "start"; goalId: string; userGoal: string; tokenBudget?: number }
-	| { action: "add_requirement"; requirementId: string; text: string }
+	| { action: "add_requirement"; requirementId: string; text: string; dependencies?: readonly string[] }
 	| { action: "satisfy_requirement"; requirementId: string; evidenceIds?: readonly string[] }
 	| { action: "block_requirement"; requirementId: string; reason: string }
 	| { action: "reopen_requirement"; requirementId: string }
@@ -173,7 +173,14 @@ function toGoalEvent(
 			if (requirementExists(state, id)) {
 				return { ok: false, error: `Requirement '${id}' already exists.` };
 			}
-			return { ok: true, event: { type: "add_requirement", id, text, now } };
+			if (action.dependencies) {
+				for (const depId of action.dependencies) {
+					if (!requirementExists(state, depId) && depId !== id) {
+						return { ok: false, error: `Dependency requirementId '${depId}' does not exist.` };
+					}
+				}
+			}
+			return { ok: true, event: { type: "add_requirement", id, text, dependencies: action.dependencies, now } };
 		}
 		case "satisfy_requirement": {
 			const id = action.requirementId.trim();
@@ -222,8 +229,22 @@ function toGoalEvent(
 			const instructions = action.instructions.trim();
 			if (!id) return { ok: false, error: "dispatch_worker requires a non-empty requirementId." };
 			if (!instructions) return { ok: false, error: "dispatch_worker requires non-empty instructions." };
-			if (!requirementExists(state, id)) {
-				return { ok: false, error: `Unknown requirement '${id}'.` };
+			const requirement = state.requirements.find((r) => r.id === id);
+			if (!requirement) return { ok: false, error: `Requirement '${id}' does not exist.` };
+			if (requirement.status !== "open") {
+				return { ok: false, error: `Requirement '${id}' is not open (status: ${requirement.status}).` };
+			}
+			if (requirement.dependencies) {
+				const unsatisfied = requirement.dependencies.filter((depId) => {
+					const dep = state.requirements.find((r) => r.id === depId);
+					return !dep || dep.status !== "satisfied";
+				});
+				if (unsatisfied.length > 0) {
+					return {
+						ok: false,
+						error: `Cannot dispatch worker: dependencies not satisfied [${unsatisfied.join(", ")}].`,
+					};
+				}
 			}
 			return { ok: true, event: { type: "dispatch_worker", id, instructions, laneId: action.laneId, now } };
 		}

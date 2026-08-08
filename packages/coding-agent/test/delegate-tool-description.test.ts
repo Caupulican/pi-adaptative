@@ -6,8 +6,6 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
-	MAX_WORKER_AUTHORITY_PATH_LENGTH,
-	MAX_WORKER_AUTHORITY_PATHS,
 } from "../src/core/orchestration/contracts.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition, DELEGATE_ACTIONS } from "../src/core/tools/delegate.ts";
@@ -59,13 +57,8 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties.maxMessages.maximum).toBe(MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES);
 		expect(authority.properties.model.properties?.provider?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH);
 		expect(authority.properties.model.properties?.modelId?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_ID_LENGTH);
-		expect(authority.properties.capabilities.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
 		expect(authority.properties.toolNames.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
 		expect(authority.properties.toolNames.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
-		for (const field of ["readPaths", "writePaths"]) {
-			expect(authority.properties[field]?.maxItems).toBe(MAX_WORKER_AUTHORITY_PATHS);
-			expect(authority.properties[field]?.items?.maxLength).toBe(MAX_WORKER_AUTHORITY_PATH_LENGTH);
-		}
 	});
 
 	it("stays accurate when worker write settings change without a runtime rebuild", () => {
@@ -105,7 +98,7 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties?.instructions?.description).toContain("bounds depth");
 		expect(parameters.properties?.message?.description).toContain("reply");
 		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
-		expect(parameters.properties?.profileId?.description).toContain("preset, not an authority allowlist");
+		expect(parameters.properties?.profileId?.description).toContain("profile preset");
 		expect(parameters.properties?.authority).toBeDefined();
 		expect((definition.promptGuidelines ?? []).join("\n")).toContain("authority to choose the model");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");

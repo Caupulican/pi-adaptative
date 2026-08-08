@@ -40,6 +40,66 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.reasonCode).toBe("goal_blocked");
 	});
 
+	describe("Semantic Circuit Breaker", () => {
+		it("stops the goal when a requirement is blocked 3 times", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "block_requirement",
+				id: "req-1",
+				blockedReason: "failed 1",
+				now: "T1",
+			});
+			state = applyGoalEvent(state, {
+				type: "block_requirement",
+				id: "req-1",
+				blockedReason: "failed 2",
+				now: "T2",
+			});
+			state = applyGoalEvent(state, {
+				type: "block_requirement",
+				id: "req-1",
+				blockedReason: "failed 3",
+				now: "T3",
+			});
+
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+			});
+
+			expect(decision.action).toBe("stop");
+			expect(decision.reasonCode).toBe("stall_limit_reached");
+			expect(decision.message).toMatch(/Circuit Breaker/);
+		});
+
+		it("does not stop the goal if blocked less than 3 times", () => {
+			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+			state = applyGoalEvent(state, {
+				type: "block_requirement",
+				id: "req-1",
+				blockedReason: "failed 1",
+				now: "T1",
+			});
+			state = applyGoalEvent(state, {
+				type: "block_requirement",
+				id: "req-1",
+				blockedReason: "failed 2",
+				now: "T2",
+			});
+
+			const decision = evaluateGoalContinuation({
+				state,
+				settings: { maxStallTurns: 3 },
+			});
+
+			// Only asks user, doesn't force stop
+			expect(decision.action).toBe("ask-user");
+			expect(decision.reasonCode).toBe("blocked_requirements_present");
+		});
+	});
+
 	it("cancelled goal stops", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "cancel_goal", now: "T1" });

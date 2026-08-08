@@ -12,14 +12,11 @@ import type { WorkerDelegationRequest } from "../delegation/worker-delegation-re
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
-	HARNESS_CAPABILITIES,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
-	MAX_WORKER_AUTHORITY_PATH_LENGTH,
-	MAX_WORKER_AUTHORITY_PATHS,
 	ORCHESTRATION_THINKING_LEVELS,
 	WORKER_ROLES,
 } from "../orchestration/contracts.ts";
@@ -53,60 +50,28 @@ export const DELEGATE_ACTIONS = [
 export type DelegateAction = (typeof DELEGATE_ACTIONS)[number];
 
 function createDelegateSchema() {
-	const authority = Type.Object(
-		{
-			role: Type.Optional(Type.Union(WORKER_ROLES.map((role) => Type.Literal(role)))),
-			model: Type.Optional(
-				Type.Object(
-					{
-						provider: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH }),
-						modelId: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_ID_LENGTH }),
-					},
-					{ additionalProperties: false },
+	const authority = Type.Optional(
+		Type.Object(
+			{
+				role: Type.Optional(Type.Union(WORKER_ROLES.map((role) => Type.Literal(role)))),
+				model: Type.Optional(
+					Type.Object(
+						{
+							provider: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH }),
+							modelId: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_ID_LENGTH }),
+						},
+						{ additionalProperties: false },
+					),
 				),
-			),
-			thinkingLevel: Type.Optional(Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level)))),
-			capabilities: Type.Optional(
-				Type.Array(Type.Union(HARNESS_CAPABILITIES.map((capability) => Type.Literal(capability))), {
-					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
-				}),
-			),
-			toolNames: Type.Optional(
-				Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
-					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
-				}),
-			),
-			readPaths: Type.Optional(
-				Type.Array(Type.String({ minLength: 1, maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH }), {
-					maxItems: MAX_WORKER_AUTHORITY_PATHS,
-				}),
-			),
-			writePaths: Type.Optional(
-				Type.Array(Type.String({ minLength: 1, maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH }), {
-					maxItems: MAX_WORKER_AUTHORITY_PATHS,
-				}),
-			),
-			budget: Type.Optional(
-				Type.Object(
-					{
-						maxTokens: Type.Optional(
-							Type.Integer({
-								minimum: 0,
-								description:
-									"Budget-counted work tokens (cache reads charge at 10%). Grants below 5000 are rejected as non-viable: a worker's first response alone costs ~3500.",
-							}),
-						),
-						maxWallClockMs: Type.Optional(Type.Integer({ minimum: 0 })),
-						maxCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
-						maxAttempts: Type.Optional(Type.Integer({ minimum: 0 })),
-						maxToolCalls: Type.Optional(Type.Integer({ minimum: 0 })),
-						requireApprovalAboveCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
-					},
-					{ additionalProperties: false },
+				thinkingLevel: Type.Optional(Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level)))),
+				toolNames: Type.Optional(
+					Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
+						maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+					}),
 				),
-			),
-		},
-		{ additionalProperties: false },
+			},
+			{ additionalProperties: false },
+		),
 	);
 	return Type.Object(
 		{
@@ -122,10 +87,10 @@ function createDelegateSchema() {
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 					description:
-						"Optional loaded profile to use as routing and execution defaults. It is a preset, not an authority allowlist; authority may replace its model, reasoning, tools, capabilities, paths, and budget before the host intersects inherited grants.",
+						"Optional loaded profile preset for the worker (e.g. 'builder-validator'). When omitted, authority specifies model and tools directly.",
 				}),
 			),
-			authority: Type.Optional(authority),
+			authority,
 			instructions: Type.Optional(
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
@@ -153,6 +118,18 @@ function createDelegateSchema() {
 					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
 					description:
 						"Existing same-objective durable task ids that must complete before a start action may run. Discover ids with tasks; forward references and cross-objective edges are rejected.",
+				}),
+			),
+			requirementId: Type.Optional(
+				Type.String({
+					maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+					description: "Optional goal requirement ID bound to this subagent dispatch.",
+				}),
+			),
+			requirementIds: Type.Optional(
+				Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
+					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+					description: "Optional goal requirement IDs bound to this subagent dispatch.",
 				}),
 			),
 			forkTurns: Type.Optional(
@@ -251,7 +228,17 @@ export type DelegateToolInput = Static<typeof delegateSchema>;
 type DelegateInputField = keyof DelegateToolInput;
 
 const EXACT_ACTION_ALLOWED_FIELDS = {
-	start: ["action", "profileId", "authority", "instructions", "agentId", "dependsOn", "forkTurns"],
+	start: [
+		"action",
+		"profileId",
+		"authority",
+		"instructions",
+		"agentId",
+		"dependsOn",
+		"forkTurns",
+		"requirementId",
+		"requirementIds",
+	],
 	tasks: ["action"],
 	list: ["action", "cursor", "maxMessages"],
 	transcript: ["action", "agentId", "cursor", "maxMessages"],
@@ -1391,16 +1378,20 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						skipReason: "missing_instructions",
 					});
 				const profileId = input.profileId?.trim();
+				const requirementIds = [
+					...(input.requirementId?.trim() ? [input.requirementId.trim()] : []),
+					...(input.requirementIds ? input.requirementIds.map((id) => id.trim()).filter(Boolean) : []),
+				];
 				const request = {
 					instructions,
 					...(profileId ? { profileId } : {}),
 					...(input.authority ? { authority: structuredClone(input.authority) } : {}),
 					...(input.forkTurns ? { forkTurns: input.forkTurns } : {}),
-					...(dependsOnTaskIds
+					...(dependsOnTaskIds || requirementIds.length > 0
 						? {
 								taskContext: {
-									requirementIds: [],
-									dependsOnTaskIds,
+									requirementIds,
+									dependsOnTaskIds: dependsOnTaskIds ?? [],
 									acceptanceCriterionIds: [],
 									resourcePointerIds: [],
 								},

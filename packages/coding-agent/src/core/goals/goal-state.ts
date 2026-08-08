@@ -99,6 +99,11 @@ export interface Requirement {
 	 */
 	boundLaneId?: string;
 	/**
+	 * IDs of other requirements that must be satisfied before this requirement can be worked on.
+	 * Implementing this native graph tracking allows the orchestrator to automatically sequence subagent delegations.
+	 */
+	dependencies?: readonly string[];
+	/**
 	 * ISO timestamp of the moment `boundLaneId` was most recently bound to a REAL lane -- the clock
 	 * the never-hang wait-timeout (`evaluateGoalContinuation`'s `worker_wait_timeout` reasonCode)
 	 * reads to detect a worker that has hung past `maxWorkerWaitMs`. Stamped ONLY when a
@@ -125,7 +130,7 @@ export interface GoalEvidenceRef {
 
 export type GoalEvent =
 	| { type: "edit_goal"; userGoal: string; tokenBudget?: number; now: string }
-	| { type: "add_requirement"; id: string; text: string; now: string }
+	| { type: "add_requirement"; id: string; text: string; dependencies?: readonly string[]; now: string }
 	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; now: string }
 	| { type: "block_requirement"; id: string; blockedReason: string; now: string }
 	| { type: "reopen_requirement"; id: string; now: string }
@@ -437,6 +442,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				text: event.text,
 				status: "open",
 				evidenceIds: [],
+				dependencies: event.dependencies,
 				createdAt: existingIndex >= 0 ? newState.requirements[existingIndex].createdAt : event.now,
 				updatedAt: event.now,
 			};

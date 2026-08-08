@@ -144,6 +144,23 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
+	// Semantic Circuit Breaker: check if any requirement has been repeatedly blocked.
+	// If a requirement has failed verification / been blocked 3 or more times, the
+	// subagent loop is stuck. Forcefully retire the goal to prevent infinite orchestrator looping.
+	const MAX_REQUIREMENT_BLOCKS = 3;
+	for (const reqId of blockedRequirementIds) {
+		const blockCount = state.events.filter((e) => e.type === "block_requirement" && e.id === reqId).length;
+
+		if (blockCount >= MAX_REQUIREMENT_BLOCKS) {
+			return {
+				...baseDecision,
+				action: "stop",
+				reasonCode: "stall_limit_reached",
+				message: `Circuit Breaker: Requirement '${reqId}' has been blocked ${blockCount} times (e.g. repeated verification failures). The task is stuck in a loop and requires human intervention.`,
+			};
+		}
+	}
+
 	if (state.status === "usage_limited") {
 		return {
 			...baseDecision,
