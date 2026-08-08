@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- Enforced goal-graph dependency validation during worker admission, blocking worker dispatches whose target requirements depend on unsatisfied or open requirements.
+- Automatically injected memory query capability and memory tools into worker execution plans when memory retrieval is enabled.
+
+### Fixed
+
+- Allowed auto-injected memory query capability and memory tool through worker execution contract boundaries without violating static capability ceilings.
+- Exempted worker verification requests from goal-graph dependency checks so completed worker tasks can always be verified.
+
 ## [0.86.5] - 2026-08-08
 
 ## [0.86.4] - 2026-08-08
