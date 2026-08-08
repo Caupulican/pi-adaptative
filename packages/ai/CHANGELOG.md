@@ -1,4 +1,8 @@
-## [Unreleased]
+## [0.86.5] - 2026-08-08
+
+### Fixed
+
+- Fixed generated OpenAI Responses provider models declaring unsupported reasoning capabilities by enforcing that compatibility field in request construction.
 
 ## [0.86.4] - 2026-08-08
 
