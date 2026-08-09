@@ -275,21 +275,13 @@ describe("delegate logical-agent controls", () => {
 
 		const forbidden = await tool.execute(
 			"tasks-forbidden",
-			{ action: "tasks", instructions: "must not be ignored" },
+			{ action: "tasks", instructions: "must not block execution" },
 			undefined,
 			undefined,
 			context,
 		);
-		expect(forbidden.details).toMatchObject({ started: false, skipReason: "tasks_fields_forbidden" });
-		const malformedForbidden = await tool.execute(
-			"tasks-malformed-forbidden",
-			{ action: "tasks", dependsOn: [""] },
-			undefined,
-			undefined,
-			context,
-		);
-		expect(malformedForbidden.details).toMatchObject({ started: false, skipReason: "tasks_fields_forbidden" });
-		expect(getWorkerTaskSessionView).toHaveBeenCalledOnce();
+		expect(forbidden.details).toMatchObject({ started: true, action: "tasks" });
+		expect(getWorkerTaskSessionView).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([
@@ -315,8 +307,11 @@ describe("delegate logical-agent controls", () => {
 		expect(startWorkerDelegation).not.toHaveBeenCalled();
 	});
 
-	it("rejects irrelevant start fields instead of silently weakening the exact action", async () => {
-		const startWorkerDelegation = vi.fn();
+	it("sanitizes irrelevant start fields so execution proceeds", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "lane-1", type: "worker" as const, status: "queued" as const },
+		}));
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
 			startWorkerDelegation,
@@ -324,13 +319,13 @@ describe("delegate logical-agent controls", () => {
 		});
 		const result = await tool.execute(
 			"start-forbidden",
-			{ action: "start", instructions: "work", message: "silently ignored before" },
+			{ action: "start", instructions: "work", message: "extraneous field sanitized" },
 			undefined,
 			undefined,
 			context,
 		);
-		expect(result.details).toMatchObject({ started: false, skipReason: "start_fields_forbidden" });
-		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(result.details).toMatchObject({ started: true });
+		expect(startWorkerDelegation).toHaveBeenCalledOnce();
 	});
 
 	it.each([
@@ -349,7 +344,7 @@ describe("delegate logical-agent controls", () => {
 		{ action: "resume", input: { action: "resume", agentId: "agent-1", instructions: "ignored" } },
 		{ action: "cancel", input: { action: "cancel", agentId: "agent-1", instructions: "ignored" } },
 	] satisfies Array<{ action: string; input: DelegateToolInput }>)(
-		"rejects irrelevant fields for exact $action commands while the valid command remains accepted",
+		"sanitizes irrelevant fields for exact $action commands so execution proceeds",
 		async ({ action, input }) => {
 			const tool = createDelegateToolDefinition({
 				caller: { kind: "session_root" },
@@ -358,17 +353,11 @@ describe("delegate logical-agent controls", () => {
 				workerAgentControl: workerAgentControl({}),
 			});
 
-			const invalid = await tool.execute(`${action}-invalid`, input, undefined, undefined, context);
-			const { instructions: _ignored, ...validInput } = input;
-			const valid = await tool.execute(`${action}-valid`, validInput, undefined, undefined, context);
-			const validDetails = delegateDetails(valid);
+			const sanitized = await tool.execute(`${action}-sanitized`, input, undefined, undefined, context);
+			const sanitizedDetails = delegateDetails(sanitized);
 
-			expect(invalid.details).toMatchObject({
-				started: false,
-				action,
-				skipReason: `${action}_fields_forbidden`,
-			});
-			expect(validDetails.skipReason).not.toBe(`${action}_fields_forbidden`);
+			expect(sanitizedDetails.action).toBe(action);
+			expect(sanitizedDetails.skipReason).not.toBe(`${action}_fields_forbidden`);
 		},
 	);
 

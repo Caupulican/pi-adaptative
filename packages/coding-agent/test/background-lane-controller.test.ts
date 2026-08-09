@@ -71,7 +71,7 @@ describe("worker terminal handoffs", () => {
 		await handoff;
 
 		expect(timeoutSpy).toHaveBeenCalledTimes(1);
-		expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
+		expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1_800_000);
 		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1);
 		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledWith([
 			{ laneId: "worker-1", status: "succeeded" },
@@ -112,7 +112,7 @@ describe("worker terminal handoffs", () => {
 			await Promise.resolve();
 			expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1);
 
-			await vi.advanceTimersByTimeAsync(30_000);
+			await vi.advanceTimersByTimeAsync(1_800_000);
 			recordTerminal({ laneId: "worker-2", type: "worker", status: "failed" });
 			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
 

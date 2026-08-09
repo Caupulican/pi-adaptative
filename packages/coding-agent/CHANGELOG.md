@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed delegate tool rejections by auto-sanitizing extraneous optional fields on flat action schemas so LLM dispatches proceed cleanly without dropping execution.
+- Increased terminal handoff timeout to 30 minutes (1,800,000ms) and ensured active subagent progress runs unconstrained while idle watchdogs handle transport stalls.
+- Reinforced Team Lead orchestration policy and event-driven wakeup so orchestrators immediately address subagent help requests and steer active parallel execution.
+
 ## [0.86.9] - 2026-08-09
 
 ### Fixed

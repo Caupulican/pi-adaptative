@@ -257,33 +257,33 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	cancel: ["action", "agentId"],
 } as const satisfies Record<DelegateAction, readonly DelegateInputField[]>;
 
-function forbiddenExactActionField(input: DelegateToolInput, action: DelegateAction): DelegateInputField | undefined {
-	const allowed = EXACT_ACTION_ALLOWED_FIELDS[action] as readonly DelegateInputField[];
-	return (Object.keys(input) as DelegateInputField[]).find(
-		(field) => input[field] !== undefined && !allowed.includes(field),
-	);
-}
-
-function exactActionFieldViolation(
+function sanitizeExactActionInput(
+	input: DelegateToolInput,
 	action: DelegateAction,
-	field: DelegateInputField,
-): { message: string; skipReason: string } {
-	if ((action === "send" || action === "follow_up") && field === "replyToMessageId") {
-		return {
-			message: `delegate ${action} cannot answer a request; use reply`,
-			skipReason: "reply_action_required",
-		};
+): { violation?: { message: string; skipReason: string } } {
+	const allowed = EXACT_ACTION_ALLOWED_FIELDS[action] as readonly DelegateInputField[];
+	for (const field of Object.keys(input) as DelegateInputField[]) {
+		if (input[field] !== undefined && !allowed.includes(field)) {
+			if ((action === "send" || action === "follow_up") && field === "replyToMessageId") {
+				return {
+					violation: {
+						message: `delegate ${action} cannot answer a request; use reply`,
+						skipReason: "reply_action_required",
+					},
+				};
+			}
+			if (action === "reply") {
+				return {
+					violation: {
+						message: `delegate reply field ${field} is forbidden; destination is inferred and reply accepts only message and replyToMessageId`,
+						skipReason: "reply_target_forbidden",
+					},
+				};
+			}
+			delete input[field];
+		}
 	}
-	if (action === "reply") {
-		return {
-			message: `delegate reply field ${field} is forbidden; destination is inferred and reply accepts only message and replyToMessageId`,
-			skipReason: "reply_target_forbidden",
-		};
-	}
-	return {
-		message: `delegate ${action} field ${field} is forbidden by its exact action contract`,
-		skipReason: `${action}_fields_forbidden`,
-	};
+	return {};
 }
 
 export interface DelegateRunOutcome {
@@ -628,9 +628,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				});
 			}
 			const action = requestedAction;
-			const forbiddenField = forbiddenExactActionField(input, action);
-			if (forbiddenField) {
-				const violation = exactActionFieldViolation(action, forbiddenField);
+			const { violation } = sanitizeExactActionInput(input, action);
+			if (violation) {
 				return invalid(violation.message, {
 					started: false,
 					action,

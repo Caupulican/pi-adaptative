@@ -1,6 +1,6 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 
-const HANDOFF_TIMEOUT_MS = 30_000;
+const HANDOFF_TIMEOUT_MS = 1_800_000;
 
 export interface WorkerTerminalHandoffRecord {
 	laneId: string;

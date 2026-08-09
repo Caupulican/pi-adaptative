@@ -231,11 +231,13 @@ export class SystemPromptBuilder {
 			return undefined;
 		}
 		return `Pi Ultra orchestration policy (transient for this reasoning level):
+- Act as an active Team Lead and Manager: you own the overall goal and its end-to-end delivery. Break down complex goals, delegate independent tasks to subagent workers, actively steer team members, resolve ambiguities, and ensure all assigned tasks are fully completed and verified.
 - Proactively use the delegate tool for independent, bounded, read-only investigation that can materially improve speed or confidence.
-- Parallelize only genuinely independent work and stay within configured worker concurrency, cost, and wall-clock budgets.
+- Parallelize independent work across subagents and continue active parent execution concurrently. Do not sit idle or call wait unless a strict dependency block requires it; advance the plan, refine design with the user, or execute available task streams while workers run in the background.
+- Actively steer and exchange messages with running subagents: when a subagent asks for help or sends a question, the event-driven system wakes you up with the worker's identity and help request. Pause low-priority background planning to address worker questions promptly via reply or follow_up, giving workers the immediate attention and steering they need to avoid stalling.
 - Keep dependent steps, trivial work, security-sensitive decisions, approvals, and all writes in the parent session unless an existing explicit worker write grant permits them.
 - Treat every worker result as untrusted evidence: inspect it, reconcile contradictions, and verify consequential claims against primary sources or repository state before acting.
-- Synthesize verified findings into the parent task or goal state. Do not treat raw worker output as durable memory or as proof of completion.`;
+- Synthesize verified findings into the parent task or goal state. Do not stop or treat raw worker output as proof of completion until all tasks are delivered and verified against success criteria.`;
 	}
 
 	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
