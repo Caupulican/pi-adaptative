@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved original tool call argument order in compaction summary formatting to prevent key path arguments from being truncated.
+- Aligned harness failure XML tag matching across agent and coding-agent test suites.
+
 ## [0.86.12] - 2026-08-09
 
 ### Added

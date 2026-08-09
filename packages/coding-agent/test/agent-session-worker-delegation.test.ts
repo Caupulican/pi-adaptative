@@ -2072,7 +2072,7 @@ describe("AgentSession worker delegation", () => {
 			// The durable transcript retains the unknown result, while the provider-facing repair layer
 			// replaces failed calls/results with its bounded failure record. The completed sibling stays.
 			expect(recoveredToolResults).toEqual([first]);
-			expect(recoveredSystemPrompt).toContain("<harness_tool_failures>");
+			expect(recoveredSystemPrompt).toContain("<harness_tool_failures");
 			expect(recoveredSystemPrompt).toContain('"tool":"read"');
 			expect(recoveredSystemPrompt).toContain("Execution outcome is unknown");
 			const recoveredConversation = new WorkerConversationStore().open({
