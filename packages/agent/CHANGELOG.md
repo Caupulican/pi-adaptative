@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Adjusted 50k token latency and GC memory delta thresholds in benchmark tests to accommodate shared CI runner environments.
+
 ## [0.86.13] - 2026-08-09
 
 ### Fixed
