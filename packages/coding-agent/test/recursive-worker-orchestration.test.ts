@@ -15,7 +15,7 @@ import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
 import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
-const UNAVAILABLE_SHELL_TOOL_NAME = "cmd";
+const UNAVAILABLE_SHELL_TOOL_NAME = "nonexistent_shell";
 
 interface AgentTranscriptPage {
 	agentId: string;

@@ -13,7 +13,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, delimiter, join, resolve } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getShellConfig } from "../src/utils/shell.ts";
 
@@ -43,8 +43,8 @@ function resolveNativeWindowsPowerShell(): string | undefined {
 }
 
 const powerShell = resolveNativeWindowsPowerShell();
-const collectorPath = resolve(process.cwd(), "../../scripts/collect-pi-incident.ps1");
-const wslCollectorPath = resolve(process.cwd(), "../../scripts/collect-pi-incident.sh");
+const collectorPath = new URL("../../../scripts/collect-pi-incident.ps1", import.meta.url).pathname;
+const wslCollectorPath = new URL("../../../scripts/collect-pi-incident.sh", import.meta.url).pathname;
 const scratchDirectories: string[] = [];
 
 describe("Windows incident collector portability", () => {
@@ -274,10 +274,14 @@ describe.skipIf(process.platform === "win32")("WSL incident collector", () => {
 		writeFileSync(join(stateDir, "failure-corpus.jsonl"), "failure marker\n");
 		writeFileSync(join(orchestrationDir, "events.jsonl"), "current orchestration marker\n");
 
-		const collected = spawnSync("bash", [wslCollectorPath, "--agent-dir", agentDir, "--output-dir", outputDir], {
-			encoding: "utf8",
-			timeout: 30_000,
-		});
+		const collected = spawnSync(
+			"bash",
+			[wslCollectorPath, "--agent-dir", agentDir, "--session-dir", sessionDir, "--output-dir", outputDir],
+			{
+				encoding: "utf8",
+				timeout: 30_000,
+			},
+		);
 		expect(collected.status, collected.stderr || collected.stdout).toBe(0);
 
 		const archives = readdirSync(outputDir).filter((name) => /^pi-incident-.*\.zip$/u.test(name));
