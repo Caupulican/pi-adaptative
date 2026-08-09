@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed delegate worker authority hallucinations crashing the worker by normalizing platform tool aliases (`python_tool` -> `python`, `powershell` -> `bash`) and automatically reconciling the `workflow.delegate` capability when the orchestrator explicitly includes the `delegate` tool in authority constraints.
+- Removed Windows-specific `powershell` prompt guidelines and tool manifests to enforce the strict bash shell contract and prevent model confusion.
 ## [0.86.6] - 2026-08-08
 
 ### Added
