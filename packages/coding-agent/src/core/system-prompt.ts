@@ -298,7 +298,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const hasBash = activeTools.includes("bash");
 	const hasPython = activeTools.includes("python");
-	const hasPowerShell = activeTools.includes("powershell");
 	const hasGrep = activeTools.includes("grep");
 	const hasFind = activeTools.includes("find");
 	const hasLs = activeTools.includes("ls");
@@ -306,11 +305,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// File exploration guidelines
 	if (!fullPrompt && !leanPrompt) {
-		if (hasPowerShell) addGuideline("Use powershell for Windows shell commands");
-		else if (hasBash) addGuideline("Use bash for bounded shell commands");
+		if (hasBash) addGuideline("Use bash for bounded shell commands");
 		if (hasReadOnlyTools) addGuideline("Batch independent reads; keep mutations and dependent calls ordered");
-	} else if (hasPowerShell && !hasGrep && !hasFind && !hasLs) {
-		addGuideline("Use powershell for shell commands on Windows; prefer rg for search and Get-ChildItem for listing");
 	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Use bash for file operations like ls, rg, find");
 	}

@@ -121,6 +121,11 @@ unset NODE_OPTIONS
 unset npm_config_node_options
 unset NPM_CONFIG_NODE_OPTIONS
 
-echo "Running tests with isolated state and without API keys..."
-npm run build
-npm test
+if [ "$#" -gt 0 ]; then
+    echo "Running targeted test(s) with isolated state: $*"
+    node ./node_modules/vitest/dist/cli.js --run "$@"
+else
+    echo "Running tests with isolated state and without API keys..."
+    npm run build
+    npm test
+fi

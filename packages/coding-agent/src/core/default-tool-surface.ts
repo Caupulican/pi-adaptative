@@ -32,14 +32,22 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 /** Current-process default tool request. */
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly string[] = getDefaultActiveToolNames();
 
-/** Map legacy/platform-specific shell names to the stable Bash-like agent contract. */
+/** Map legacy/platform-specific shell and tool alias names to stable agent contracts. */
 export function mapToolNamesForPlatform(
 	names: readonly string[],
 	_platform: NodeJS.Platform = process.platform,
 ): string[] {
 	const mapped: string[] = [];
 	for (const name of names) {
-		const resolved = name === "powershell" ? STABLE_SHELL_TOOL_NAME : name;
+		let resolved = name;
+		const lower = name.toLowerCase().trim();
+		if (lower === "powershell") {
+			resolved = STABLE_SHELL_TOOL_NAME;
+		} else if (["python_tool", "python3", "python_interpreter", "py"].includes(lower)) {
+			resolved = "python";
+		} else if (["bash_tool", "shell", "sh", "terminal", "cmd"].includes(lower)) {
+			resolved = STABLE_SHELL_TOOL_NAME;
+		}
 		if (!mapped.includes(resolved)) mapped.push(resolved);
 	}
 	return mapped;

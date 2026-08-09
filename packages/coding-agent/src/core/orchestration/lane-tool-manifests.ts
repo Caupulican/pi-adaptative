@@ -10,9 +10,9 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"write",
 	"edit",
 	"memory",
+	"python",
 	"run_process",
 	"bash",
-	"powershell",
 ] as const;
 export const ORCHESTRATION_PROFILE_TOOL_NAMES = [
 	...CLASSIFIED_LANE_TOOL_NAMES,

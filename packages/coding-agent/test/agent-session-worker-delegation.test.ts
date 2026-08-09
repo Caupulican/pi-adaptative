@@ -2229,4 +2229,24 @@ describe("AgentSession worker delegation", () => {
 			await viableHarness.cleanup();
 		}
 	});
+
+	it("maps tool aliases and admits delegate capability when explicitly requested in authority", () => {
+		const modelRegistry = {
+			find: () => ({ id: "m1", provider: "faux" }),
+			hasConfiguredAuth: () => true,
+		} as any;
+		const resolution = resolveWorkerAuthority({
+			authority: {
+				toolNames: ["bash_tool", "python_tool", "delegate"],
+			},
+			base: undefined,
+			foregroundModel: { id: "m1", provider: "faux" } as any,
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) return;
+		expect(resolution.shipment.profile.toolNames).toEqual(["bash", "python", "delegate"]);
+		expect(resolution.shipment.profile.capabilityCeiling).toContain("workflow.delegate");
+	});
 });

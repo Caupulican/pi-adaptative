@@ -110,6 +110,9 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const capabilities = new Set<HarnessCapability>(
 		input.authority?.capabilities ?? input.base?.profile.capabilityCeiling ?? DEFAULT_CAPABILITIES,
 	);
+	if (uniqueToolNames.includes("delegate")) {
+		capabilities.add("workflow.delegate");
+	}
 	const toolNames: string[] = [];
 	for (const toolName of uniqueToolNames) {
 		const policy = getToolCapabilityPolicy(toolName);
