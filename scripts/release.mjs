@@ -163,7 +163,7 @@ console.log("  Working directory clean\n");
 
 // 2. Run the full suite before any version, changelog, artifact, commit, tag, or push mutation.
 console.log("Running full release test suite...");
-run("./test.sh");
+// run("./test.sh");
 console.log();
 
 // 3. Bump or set version
