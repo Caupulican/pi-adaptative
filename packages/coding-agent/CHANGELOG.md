@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved `reply_target_forbidden` for explicit destination overrides on `reply` while allowing extraneous fields on `inbox` and `reply` to be automatically sanitized.
+
 ## [0.86.10] - 2026-08-09
 
 ### Fixed

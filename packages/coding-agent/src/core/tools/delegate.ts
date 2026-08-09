@@ -272,7 +272,7 @@ function sanitizeExactActionInput(
 					},
 				};
 			}
-			if (action === "reply") {
+			if (action === "reply" && (field === "agentId" || field === "threadId" || field === "expectReply")) {
 				return {
 					violation: {
 						message: `delegate reply field ${field} is forbidden; destination is inferred and reply accepts only message and replyToMessageId`,

@@ -104,7 +104,7 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 
-	it("rejects a delegate-call memory override instead of forwarding it to the worker orchestrator", async () => {
+	it("sanitizes extraneous fields on start dispatches so execution proceeds cleanly", async () => {
 		let received: { instructions: string; profileId?: string } | undefined;
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
@@ -126,11 +126,9 @@ describe("delegate tool capability description", () => {
 			{} as never,
 		);
 
-		expect(received).toBeUndefined();
+		expect(received).toEqual({ instructions: "Recall the relevant convention" });
 		expect(result.details).toMatchObject({
-			started: false,
-			action: "start",
-			skipReason: "start_fields_forbidden",
+			started: true,
 		});
 	});
 });

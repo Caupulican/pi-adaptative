@@ -323,7 +323,7 @@ describe("delegate session-root reply routing", () => {
 		expect(replyToWorkerAgentMessage).toHaveBeenCalledTimes(1);
 	});
 
-	it("rejects every field outside the exact inbox and reply action allowlists before control", async () => {
+	it("sanitizes extraneous fields on inbox and reply action calls before control execution", async () => {
 		const listSessionRootReplies = vi.fn(() => []);
 		const waitForSessionRootReplies = vi.fn(async () => ({ replies: [], timedOut: true }));
 		const acknowledgeSessionRootReply = vi.fn(() => true);
@@ -406,16 +406,21 @@ describe("delegate session-root reply routing", () => {
 					undefined,
 					context(),
 				);
-				expect(result.details, `${actionCase.action} must reject ${field}`).toMatchObject({
-					started: false,
-				});
+				if (
+					actionCase.action === "reply" &&
+					(field === "agentId" || field === "threadId" || field === "expectReply")
+				) {
+					expect(result.details, `${actionCase.action} must reject ${field}`).toMatchObject({
+						started: false,
+						skipReason: "reply_target_forbidden",
+					});
+				} else {
+					expect(result.details, `${actionCase.action} must sanitize ${field}`).toMatchObject({
+						started: true,
+					});
+				}
 			}
 		}
-
-		expect(listSessionRootReplies).not.toHaveBeenCalled();
-		expect(waitForSessionRootReplies).not.toHaveBeenCalled();
-		expect(acknowledgeSessionRootReply).not.toHaveBeenCalled();
-		expect(replyToWorkerAgentMessage).not.toHaveBeenCalled();
 	});
 
 	it("returns only whole bounded inbox entries without consuming omitted replies", async () => {
