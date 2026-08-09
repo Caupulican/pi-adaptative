@@ -85,7 +85,7 @@ describe("tool failure memory", () => {
 		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toBe(
-			"No safe repair inferred because the tool returned no diagnostic; inspect its contract or request bounded diagnostics before retrying.",
+			"The tool returned no diagnostic output; inspect its contract or request bounded diagnostics to identify the issue before retrying.",
 		);
 	});
 

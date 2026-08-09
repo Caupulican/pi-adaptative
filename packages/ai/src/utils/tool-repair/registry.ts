@@ -171,6 +171,49 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
+		name: "bashNoOutput",
+		phase: "execution",
+		guidance:
+			"The command exited with an error but returned no output; verify the command syntax and check its specific documentation before retrying.",
+		matches(message: string): boolean {
+			return message === "(no output)";
+		},
+	},
+	{
+		name: "bashPosixNotSupported",
+		phase: "execution",
+		guidance:
+			"POSIX shell scripts (.sh) are not supported on this Windows host; use a PowerShell equivalent or invoke the executable directly.",
+		matches(message: string): boolean {
+			return /POSIX shell scripts are not supported by the Windows shell contract router/i.test(message);
+		},
+	},
+	{
+		name: "bashNestedShell",
+		phase: "execution",
+		guidance: "Do not wrap commands in powershell.exe or pwsh. Invoke the .ps1 script or command directly.",
+		matches(message: string): boolean {
+			return /Nested shell execution is not supported by the Windows shell contract router/i.test(message);
+		},
+	},
+	{
+		name: "bashMissingCommandWord",
+		phase: "execution",
+		guidance:
+			"The shell command was malformed (missing command word). Check for empty pipeline elements or incorrect string quoting before retrying.",
+		matches(message: string): boolean {
+			return /Missing command: a pipeline\/list element has no command word/i.test(message);
+		},
+	},
+	{
+		name: "bashEmptyRedirectTarget",
+		phase: "execution",
+		guidance: "The shell redirect target was empty; provide a valid file path for the redirect before retrying.",
+		matches(message: string): boolean {
+			return /redirect target expanded to nothing/i.test(message);
+		},
+	},
+	{
 		name: "encodingCorruption",
 		phase: "execution",
 		failureCode: "encoding_corruption",

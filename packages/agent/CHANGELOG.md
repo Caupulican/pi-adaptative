@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed tool failure memory guidance to prompt the model to analyze the diagnostic and try to self-recover, instead of suggesting that no safe repair is inferred.
+
 ## [0.86.8] - 2026-08-09
 
 ## [0.86.7] - 2026-08-09

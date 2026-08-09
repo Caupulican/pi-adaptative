@@ -10,6 +10,12 @@ describe("tool execution error catalogue", () => {
 	it("has a trigger-class fixture for every catalogue entry", () => {
 		const fixtures: Record<(typeof TOOL_EXECUTION_ERROR_CATALOGUE)[number]["name"], string> = {
 			commandNotFound: "spawn rg ENOENT",
+			bashNoOutput: "(no output)",
+			bashPosixNotSupported: "POSIX shell scripts are not supported by the Windows shell contract router.",
+			bashNestedShell:
+				"Nested shell execution is not supported by the Windows shell contract router. Invoke the .ps1 path directly with its arguments, without powershell.exe -File or pwsh -File.",
+			bashMissingCommandWord: "Missing command: a pipeline/list element has no command word.",
+			bashEmptyRedirectTarget: "redirect target expanded to nothing",
 			encodingCorruption: "PI_FILE_ENCODING_CORRUPTION: legacy.dat is not valid UTF-8 text",
 			repeatedSuccessfulCall: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic,
 			fileMutationRetarget:

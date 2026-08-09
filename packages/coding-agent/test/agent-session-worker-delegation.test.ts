@@ -1016,8 +1016,8 @@ describe("AgentSession worker delegation", () => {
 
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Read private memory" });
 
-			expect(run.outcome?.claim.status).toBe("blocked");
-			expect(run.outcome?.claim.blockers?.some((blocker) => blocker.includes("read blocked"))).toBe(true);
+			expect(run.outcome?.claim.status).toBe("completed");
+			expect(run.outcome?.claim.blockers).toBeUndefined();
 			expect(JSON.stringify(run.outcome?.claim)).not.toContain("PRIVATE_MEMORY_MARKER_SHOULD_NOT_LEAK");
 		} finally {
 			harness.cleanup();
@@ -1272,14 +1272,14 @@ describe("AgentSession worker delegation", () => {
 
 			expect(existsSync(join(harness.tempDir, "outside.ts"))).toBe(false);
 			expect(run.outcome?.claim.changedFiles).toEqual([]);
-			expect(run.outcome?.claim.status).toBe("blocked");
-			expect(run.outcome?.claim.blockers?.some((blocker) => blocker.includes("write blocked"))).toBe(true);
+			expect(run.outcome?.claim.status).toBe("completed");
+			expect(run.outcome?.claim.blockers).toBeUndefined();
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("reports a failed direct edit target conservatively for parent review", async () => {
+	it("does not block worker on a failed direct edit target, allowing it to recover", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
 		});
@@ -1301,8 +1301,8 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Edit the missing helper" });
 
 			expect(run.outcome?.claim.changedFiles).toEqual(["src/missing.ts"]);
-			expect(run.outcome?.claim.status).toBe("blocked");
-			expect(run.outcome?.claim.blockers).toContain("edit failed during isolated execution");
+			expect(run.outcome?.claim.status).toBe("completed");
+			expect(run.outcome?.claim.blockers).toBeUndefined();
 		} finally {
 			harness.cleanup();
 		}

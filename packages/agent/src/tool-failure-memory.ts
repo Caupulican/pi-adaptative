@@ -360,8 +360,8 @@ function fallbackFailureGuidance(state: ToolFailureState, hasDiagnostic: boolean
 	return state === "rejected"
 		? "Re-read the current tool schema and change the invalid operation before retrying."
 		: hasDiagnostic
-			? "No safe repair inferred; use the diagnostic and tool contract for the next action."
-			: "No safe repair inferred because the tool returned no diagnostic; inspect its contract or request bounded diagnostics before retrying.";
+			? "Analyze the diagnostic output to identify the failure cause and repair the tool parameters or take corrective action before retrying."
+			: "The tool returned no diagnostic output; inspect its contract or request bounded diagnostics to identify the issue before retrying.";
 }
 
 export function toolFailureCorrection(

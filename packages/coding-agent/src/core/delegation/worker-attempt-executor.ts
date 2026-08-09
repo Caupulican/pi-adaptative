@@ -541,11 +541,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											persistToolRequest(context.assistantMessage);
 											const decision = await options.toolSurface.beforeToolCall(context, toolSignal);
 											signal.throwIfAborted();
-											if (decision?.block) {
-												toolIssues.add(
-													`${context.toolCall.name} blocked: ${decision.reason ?? "capability denied"}`,
-												);
-											} else {
+											if (!decision?.block) {
 												checkpointUsage(
 													`Authorized worker tool '${context.toolCall.name}' under its durable grant.`,
 												);
@@ -556,7 +552,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											throw error;
 										}
 									},
-									afterToolCall: async ({ toolCall, args, isError }) => {
+									afterToolCall: async ({ toolCall, args }) => {
 										try {
 											if (
 												(toolCall.name === "write" || toolCall.name === "edit") &&
@@ -580,7 +576,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													);
 												}
 											}
-											if (isError) toolIssues.add(`${toolCall.name} failed during isolated execution`);
 											signal.throwIfAborted();
 											return undefined;
 										} catch (error) {

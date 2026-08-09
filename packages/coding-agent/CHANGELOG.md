@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed host-denied capability tool calls (like writing outside workspace bounds or accessing private memory) permanently marking the overall agent worker attempt as blocked; agents can now self-recover from a policy denial and complete the task successfully.
+
 ## [0.86.8] - 2026-08-09
 
 ## [0.86.7] - 2026-08-09

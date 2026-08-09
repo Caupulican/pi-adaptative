@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added specific error repair guidance to the tool execution catalogue for missing bash command output, unsupported Windows bash shell scripts, missing pipeline command words, nested shell invocations, and empty redirect targets.
+
 ## [0.86.8] - 2026-08-09
 
 ## [0.86.7] - 2026-08-09
