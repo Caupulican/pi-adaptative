@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Added `getFullHistoryChainWithPayloads` for eager cross-platform session history payload retrieval.
+- Added cooperative systems harmony test suite and Red Team 1M token performance benchmark suite.
+
+### Fixed
+
+- Fixed tool failure context sanitization to strip failed tool calls/results into system prompt memory (`<harness_tool_failures>`) with category-isolated mistake tracking (`tool_mistakes`).
+- Added O(1) text payload signature deduplication (`fastTextSignature`) to eliminate duplicate content payload clutter across tool calls.
+- Enforced deterministic key-order signature hashing across compaction summaries and operation fingerprinting.
+
 ## [0.86.11] - 2026-08-09
 
 ## [0.86.10] - 2026-08-09

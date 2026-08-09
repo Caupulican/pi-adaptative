@@ -27,6 +27,224 @@ function record(
 }
 
 describe("tool failure memory", () => {
+	it("normalizes tool signatures deterministically regardless of argument key order", () => {
+		const signature1 = normalizeToolSignature([["read", { path: "foo.txt", offset: 10, limit: 100 }]]);
+		const signature2 = normalizeToolSignature([["read", { limit: 100, path: "foo.txt", offset: 10 }]]);
+		expect(signature1).toBe(signature2);
+	});
+
+	it("deduplicates earlier successful tool calls for identical operations, retaining only the latest", () => {
+		const messages: AgentMessage[] = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "data.json" } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "read",
+				content: [{ type: "text", text: '{"key": "value"}' }],
+				isError: false,
+				timestamp: 2,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_2", name: "read", arguments: { path: "data.json" } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 3,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_2",
+				toolName: "read",
+				content: [{ type: "text", text: '{"key": "value"}' }],
+				isError: false,
+				timestamp: 4,
+			},
+		];
+
+		const sanitized = sanitizeToolFailureContext(messages, "base");
+		expect(sanitized.messages).toHaveLength(2);
+		expect(sanitized.messages[0]).toMatchObject({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_2" }],
+		});
+		expect(sanitized.messages[1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "call_2",
+		});
+	});
+
+	it("deduplicates different tool calls returning identical text payload content", () => {
+		const payload =
+			"LOAD_BEARING_DATA_CONTENT_LINE_1\nLOAD_BEARING_DATA_CONTENT_LINE_2\nLOAD_BEARING_DATA_CONTENT_LINE_3";
+		const messages: AgentMessage[] = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_read", name: "read_file", arguments: { path: "config.json" } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_read",
+				toolName: "read_file",
+				content: [{ type: "text", text: payload }],
+				isError: false,
+				timestamp: 2,
+			},
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call_view",
+						name: "view_file",
+						arguments: { AbsolutePath: "/path/config.json" },
+					},
+				],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 3,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_view",
+				toolName: "view_file",
+				content: [{ type: "text", text: payload }],
+				isError: false,
+				timestamp: 4,
+			},
+		];
+
+		const sanitized = sanitizeToolFailureContext(messages, "base");
+		expect(sanitized.messages).toHaveLength(2);
+		expect(sanitized.messages[0]).toMatchObject({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_view" }],
+		});
+		expect(sanitized.messages[1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "call_view",
+		});
+	});
+
+	it("tracks an incremental kind_mistakes counter specific to tool kind to aid self-calibration", () => {
+		const tracker = new Map();
+		const failure1 = rememberToolFailure(
+			tracker,
+			"bash",
+			{ command: "npm test" },
+			"failed",
+			"exit_1",
+			"Fix test failure",
+		);
+		expect(failure1.kindMistakes).toBe(1);
+
+		const failure2 = rememberToolFailure(
+			tracker,
+			"bash",
+			{ command: "npm build" },
+			"failed",
+			"exit_1",
+			"Fix build failure",
+		);
+		expect(failure2.kindMistakes).toBe(2);
+
+		const failureRead = rememberToolFailure(
+			tracker,
+			"read_file",
+			{ path: "missing.txt" },
+			"failed",
+			"file_not_found",
+			"Verify path",
+		);
+		expect(failureRead.kindMistakes).toBe(1);
+
+		const result1 = createToolFailureResult(failure1);
+		expect(result1.content[0].type === "text" && result1.content[0].text).toContain('"kind_mistakes":1');
+
+		const sanitized = sanitizeToolFailureContext(
+			[
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_err", name: "bash", arguments: { command: "npm test" } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_err",
+					toolName: "bash",
+					content: result1.content,
+					details: result1.details,
+					isError: true,
+					timestamp: 2,
+				},
+			],
+			"base",
+		);
+
+		expect(sanitized.systemPrompt).toContain('<harness_tool_failures tool_mistakes="bash:1">');
+		expect(sanitized.systemPrompt).toContain('"kind_mistakes":1');
+	});
+
 	it("fingerprints large operations without retaining or serializing their payload", () => {
 		const largeTail = "x".repeat(1024 * 1024);
 		const firstArgs = {

@@ -440,6 +440,110 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
 	});
 
+	it("bounds semantically identical failed calls even when argument key order changes", async () => {
+		const orderedSchema = Type.Object({ path: Type.String(), offset: Type.Number() });
+		let executions = 0;
+		const failingTool: AgentTool<typeof orderedSchema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: orderedSchema,
+			async execute() {
+				executions++;
+				throw new Error("ENOENT: no such file or directory, open 'C:\\missing\\file.txt'");
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let calls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				calls++;
+				const argumentsValue =
+					calls % 2 === 0
+						? { offset: 1, path: "C:\\missing\\file.txt" }
+						: { path: "C:\\missing\\file.txt", offset: 1 };
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `failed-${calls}`, name: "read_like", arguments: argumentsValue }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxStallTurns: 3,
+			onRunawayStop: (info) => stalls.push(info),
+		};
+
+		const events = await drain(
+			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
+		);
+
+		expect(executions).toBe(3);
+		expect(stalls).toHaveLength(1);
+		expect(stalls[0].repeats).toBe(3);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("keeps the third identical attempt available when it succeeds", async () => {
+		let executions = 0;
+		const recoveringTool = createEchoTool(() => {
+			executions++;
+		});
+		recoveringTool.execute = async (_id, params) => {
+			executions++;
+			if (executions < 3) throw new Error("ETIMEDOUT: transient fixture");
+			return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [recoveringTool] };
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let responses = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				responses++;
+				if (responses <= 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[{ type: "toolCall", id: `retry-${responses}`, name: "echo", arguments: { value: "same" } }],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "recovered" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxStallTurns: 12,
+			onRunawayStop: (info) => stalls.push(info),
+		};
+
+		const events = await drain(
+			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
+		);
+
+		expect(executions).toBe(3);
+		expect(stalls).toHaveLength(0);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
 	it("trips on a period-3 oscillation A→B→C→A→… (bug #28)", async () => {
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [echoTool] };
 		const stalls: Array<{ signature: string; repeats: number }> = [];

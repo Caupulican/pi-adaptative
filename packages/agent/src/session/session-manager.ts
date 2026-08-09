@@ -1769,6 +1769,47 @@ export class SessionManager {
 	}
 
 	/**
+	 * Retrieve the complete history chain of events with full un-truncated message payload data.
+	 * Hydrates cold/disk-backed payload records eagerly and operates efficiently across Windows and Linux.
+	 */
+	getFullHistoryChainWithPayloads(fromId?: string): SessionEntry[] {
+		const branch = this.getBranch(fromId);
+		const coldIds = new Set<string>();
+		for (let i = 0; i < branch.length; i++) {
+			const entry = branch[i];
+			if (entry.type === "message" && this.coldPayloadEntryIds.has(entry.id)) {
+				coldIds.add(entry.id);
+			}
+		}
+
+		if (coldIds.size > 0 && this.sessionFile) {
+			this._ensureEntryFileLocations(coldIds);
+		}
+
+		const hydratedBranch: SessionEntry[] = [];
+		for (let i = 0; i < branch.length; i++) {
+			const entry = branch[i];
+			if (entry.type === "message") {
+				const msg = entry.message;
+				const fullContent = "content" in msg ? msg.content : undefined;
+				const fullOutput = "output" in msg ? msg.output : undefined;
+				hydratedBranch.push({
+					...entry,
+					message: {
+						...msg,
+						...(fullContent !== undefined ? { content: fullContent } : {}),
+						...(fullOutput !== undefined ? { output: fullOutput } : {}),
+					} as typeof msg,
+				});
+			} else {
+				hydratedBranch.push(entry);
+			}
+		}
+
+		return hydratedBranch;
+	}
+
+	/**
 	 * Most recent custom entry of `customType` on the active branch, walking leaf→root
 	 * ancestry (same traversal direction as getBranch(), but stops at the first match instead
 	 * of building the full path). `fromId` starts the walk at that entry instead of the current
