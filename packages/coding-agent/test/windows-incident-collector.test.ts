@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { getShellConfig } from "../src/utils/shell.ts";
 
@@ -43,8 +44,8 @@ function resolveNativeWindowsPowerShell(): string | undefined {
 }
 
 const powerShell = resolveNativeWindowsPowerShell();
-const collectorPath = new URL("../../../scripts/collect-pi-incident.ps1", import.meta.url).pathname;
-const wslCollectorPath = new URL("../../../scripts/collect-pi-incident.sh", import.meta.url).pathname;
+const collectorPath = fileURLToPath(new URL("../../../scripts/collect-pi-incident.ps1", import.meta.url));
+const wslCollectorPath = fileURLToPath(new URL("../../../scripts/collect-pi-incident.sh", import.meta.url));
 const scratchDirectories: string[] = [];
 
 describe("Windows incident collector portability", () => {
