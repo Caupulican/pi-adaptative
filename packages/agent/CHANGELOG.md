@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Removed redundant exact hashing and JSON preview construction from successful tool-result context sanitization.
+
 ## [0.86.16] - 2026-08-10
 
 ## [0.86.15] - 2026-08-10

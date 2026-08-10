@@ -704,7 +704,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 		}
 
 		if (call) {
-			const opKey = operationIdentity(call.name, call.arguments).failureKey;
+			const opKey = getToolFailureKey(call.name, call.arguments);
 			active.delete(opKey);
 			let list = successfulByOpKey.get(opKey);
 			if (!list) {
