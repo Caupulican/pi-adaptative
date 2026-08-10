@@ -440,7 +440,7 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("bounds semantically identical failed calls even when argument key order changes", async () => {
+	it("teaches once then gates semantically identical deterministic failures before re-execution", async () => {
 		const orderedSchema = Type.Object({ path: Type.String(), offset: Type.Number() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof orderedSchema> = {
@@ -485,21 +485,31 @@ describe("runaway-loop backstop", () => {
 		const events = await drain(
 			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
 		);
+		const toolEndMessages = events
+			.filter((event) => event.type === "tool_execution_end")
+			.map(
+				(event) =>
+					(event as { result: { content: Array<{ type: string; text?: string }> } }).result.content.find(
+						(block: { type: string; text?: string }) => block.type === "text",
+					)?.text ?? "",
+			);
 
-		expect(executions).toBe(3);
+		expect(executions).toBe(1);
+		expect(toolEndMessages).toHaveLength(3);
+		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
 		expect(stalls).toHaveLength(1);
 		expect(stalls[0].repeats).toBe(3);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("keeps the third identical attempt available when it succeeds", async () => {
+	it("keeps one policy-authorized identical timeout retry available", async () => {
 		let executions = 0;
 		const recoveringTool = createEchoTool(() => {
 			executions++;
 		});
 		recoveringTool.execute = async (_id, params) => {
 			executions++;
-			if (executions < 3) throw new Error("ETIMEDOUT: transient fixture");
+			if (executions < 2) throw new Error("ETIMEDOUT: transient fixture");
 			return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [recoveringTool] };
@@ -509,7 +519,7 @@ describe("runaway-loop backstop", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				responses++;
-				if (responses <= 3) {
+				if (responses <= 2) {
 					stream.push({
 						type: "done",
 						reason: "toolUse",
@@ -539,9 +549,69 @@ describe("runaway-loop backstop", () => {
 			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
 		);
 
-		expect(executions).toBe(3);
+		expect(executions).toBe(2);
 		expect(stalls).toHaveLength(0);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("allows a materially changed operation after a deterministic failure", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		let executions = 0;
+		const readLike: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute(_id, params) {
+				executions++;
+				if (params.path === "missing.txt") throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+				return { content: [{ type: "text", text: "recovered" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [readLike] };
+		let responses = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				responses++;
+				if (responses <= 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `changed-${responses}`,
+									name: "read_like",
+									arguments: { path: responses === 1 ? "missing.txt" : "present.txt" },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(2);
 	});
 
 	it("trips on a period-3 oscillation A→B→C→A→… (bug #28)", async () => {

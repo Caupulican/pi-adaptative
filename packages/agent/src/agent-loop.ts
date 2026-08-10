@@ -7,6 +7,7 @@ import { EventStream } from "@caupulican/pi-ai/event-stream";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import {
 	formatToolRepairStandingRule,
+	getToolExecutionUnchangedRetryLimit,
 	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
 	type ToolFailurePhase,
 } from "@caupulican/pi-ai/tool-repair-registry";
@@ -20,11 +21,14 @@ import {
 import {
 	assessToolFailure,
 	clearToolFailure,
+	createRepeatedToolFailureResult,
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
+	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	rememberToolFailure,
 	sanitizeToolFailureContext,
+	type ToolFailureMemoryDetails,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
@@ -295,6 +299,7 @@ async function runLoop(
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+	const toolFailureExecutionGate = new Map<string, number>();
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -353,6 +358,7 @@ async function runLoop(
 					validationFailureTracker,
 					repairTeachTracker,
 					toolFailureMemory,
+					toolFailureExecutionGate,
 					previousSuccessfulTextProtocolResults,
 					signal,
 					emit,
@@ -406,6 +412,7 @@ async function runLoop(
 				currentContext = nextTurnSnapshot.context ?? currentContext;
 				if (nextTurnSnapshot.context) {
 					toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+					toolFailureExecutionGate.clear();
 				}
 				config = {
 					...config,
@@ -577,6 +584,19 @@ async function streamAssistantResponse(
 	return finalMessage;
 }
 
+interface ToolExecutionContext {
+	context: AgentContext;
+	assistantMessage: AssistantMessage;
+	config: AgentLoopConfig;
+	validationFailureTracker: ToolValidationFailureTracker;
+	repairTeachTracker: ToolRepairTeachTracker;
+	toolFailureMemory: ToolFailureMemoryTracker;
+	toolFailureExecutionGate: Map<string, number>;
+	previousSuccessfulResults?: readonly ToolResultMessage[];
+	signal?: AbortSignal;
+	emit: AgentEventSink;
+}
+
 /**
  * Execute tool calls from an assistant message.
  */
@@ -587,6 +607,7 @@ async function executeToolCalls(
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureExecutionGate: Map<string, number>,
 	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -595,32 +616,22 @@ async function executeToolCalls(
 	const hasSequentialToolCall = toolCalls.some(
 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
-	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
-		return executeToolCallsSequential(
-			currentContext,
-			assistantMessage,
-			toolCalls,
-			config,
-			validationFailureTracker,
-			repairTeachTracker,
-			toolFailureMemory,
-			previousSuccessfulTextProtocolResults,
-			signal,
-			emit,
-		);
-	}
-	return executeToolCallsParallel(
-		currentContext,
+	const execCtx: ToolExecutionContext = {
+		context: currentContext,
 		assistantMessage,
-		toolCalls,
 		config,
 		validationFailureTracker,
 		repairTeachTracker,
 		toolFailureMemory,
-		previousSuccessfulTextProtocolResults,
+		toolFailureExecutionGate,
+		previousSuccessfulResults: previousSuccessfulTextProtocolResults,
 		signal,
 		emit,
-	);
+	};
+	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+		return executeToolCallsSequential(execCtx, toolCalls);
+	}
+	return executeToolCallsParallel(execCtx, toolCalls);
 }
 
 type ExecutedToolCallBatch = {
@@ -639,79 +650,74 @@ type StartedToolCall =
 	| { kind: "prepared"; preparation: PreparedToolCall };
 
 async function prepareAndStartToolCall(
-	currentContext: AgentContext,
-	assistantMessage: AssistantMessage,
+	execCtx: ToolExecutionContext,
 	toolCall: AgentToolCall,
 	index: number,
-	config: AgentLoopConfig,
-	validationFailureTracker: ToolValidationFailureTracker,
-	toolFailureMemory: ToolFailureMemoryTracker,
-	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
-	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
 ): Promise<StartedToolCall> {
-	const preparation = previousSuccessfulTextProtocolResults
-		? createRepeatedSuccessfulToolCallOutcome(previousSuccessfulTextProtocolResults[index])
-		: await prepareToolCall(currentContext, assistantMessage, toolCall, config, validationFailureTracker, signal);
-	await emitToolExecutionStart(toolCall, emit);
+	const preparation = execCtx.previousSuccessfulResults
+		? createRepeatedSuccessfulToolCallOutcome(execCtx.previousSuccessfulResults[index])
+		: await prepareToolCall(
+				execCtx.context,
+				execCtx.assistantMessage,
+				toolCall,
+				execCtx.config,
+				execCtx.validationFailureTracker,
+				execCtx.toolFailureMemory,
+				execCtx.toolFailureExecutionGate,
+				execCtx.signal,
+			);
+	await emitToolExecutionStart(toolCall, execCtx.emit);
 	if (preparation.kind === "immediate") {
-		emitToolArgumentValidationTelemetry(config, preparation.validationEvent, "not_run", "none");
-		return { kind: "finalized", finalized: finalizeRejectedToolCall(toolCall, preparation, toolFailureMemory) };
+		emitToolArgumentValidationTelemetry(execCtx.config, preparation.validationEvent, "not_run", "none");
+		return {
+			kind: "finalized",
+			finalized: finalizeRejectedToolCall(
+				toolCall,
+				preparation,
+				execCtx.toolFailureMemory,
+				execCtx.toolFailureExecutionGate,
+			),
+		};
 	}
 	return { kind: "prepared", preparation };
 }
 
+async function finalizeStartedToolCall(
+	execCtx: ToolExecutionContext,
+	started: StartedToolCall,
+): Promise<FinalizedToolCallOutcome> {
+	if (started.kind === "finalized") return started.finalized;
+	return executeAndFinalizePreparedToolCall(
+		execCtx.context,
+		execCtx.assistantMessage,
+		started.preparation,
+		execCtx.config,
+		execCtx.repairTeachTracker,
+		execCtx.toolFailureMemory,
+		execCtx.toolFailureExecutionGate,
+		execCtx.signal,
+		execCtx.emit,
+	);
+}
+
 async function executeToolCallsSequential(
-	currentContext: AgentContext,
-	assistantMessage: AssistantMessage,
+	execCtx: ToolExecutionContext,
 	toolCalls: AgentToolCall[],
-	config: AgentLoopConfig,
-	validationFailureTracker: ToolValidationFailureTracker,
-	repairTeachTracker: ToolRepairTeachTracker,
-	toolFailureMemory: ToolFailureMemoryTracker,
-	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
-	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
 
 	for (const [index, toolCall] of toolCalls.entries()) {
-		const started = await prepareAndStartToolCall(
-			currentContext,
-			assistantMessage,
-			toolCall,
-			index,
-			config,
-			validationFailureTracker,
-			toolFailureMemory,
-			previousSuccessfulTextProtocolResults,
-			signal,
-			emit,
-		);
-		let finalized: FinalizedToolCallOutcome;
-		if (started.kind === "finalized") {
-			finalized = started.finalized;
-		} else {
-			finalized = await executeAndFinalizePreparedToolCall(
-				currentContext,
-				assistantMessage,
-				started.preparation,
-				config,
-				repairTeachTracker,
-				toolFailureMemory,
-				signal,
-				emit,
-			);
-		}
+		const started = await prepareAndStartToolCall(execCtx, toolCall, index);
+		const finalized = await finalizeStartedToolCall(execCtx, started);
 
-		await emitToolExecutionEnd(finalized, emit);
+		await emitToolExecutionEnd(finalized, execCtx.emit);
 		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
+		await emitToolResultMessage(toolResultMessage, execCtx.emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
 
-		if (signal?.aborted) {
+		if (execCtx.signal?.aborted) {
 			break;
 		}
 	}
@@ -723,56 +729,24 @@ async function executeToolCallsSequential(
 }
 
 async function executeToolCallsParallel(
-	currentContext: AgentContext,
-	assistantMessage: AssistantMessage,
+	execCtx: ToolExecutionContext,
 	toolCalls: AgentToolCall[],
-	config: AgentLoopConfig,
-	validationFailureTracker: ToolValidationFailureTracker,
-	repairTeachTracker: ToolRepairTeachTracker,
-	toolFailureMemory: ToolFailureMemoryTracker,
-	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
-	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
 
 	for (const [index, toolCall] of toolCalls.entries()) {
-		const started = await prepareAndStartToolCall(
-			currentContext,
-			assistantMessage,
-			toolCall,
-			index,
-			config,
-			validationFailureTracker,
-			toolFailureMemory,
-			previousSuccessfulTextProtocolResults,
-			signal,
-			emit,
-		);
+		const started = await prepareAndStartToolCall(execCtx, toolCall, index);
 		if (started.kind === "finalized") {
-			await emitToolExecutionEnd(started.finalized, emit);
+			await emitToolExecutionEnd(started.finalized, execCtx.emit);
 			finalizedCalls.push(started.finalized);
-			if (signal?.aborted) {
-				break;
-			}
-			continue;
+		} else {
+			finalizedCalls.push(async () => {
+				const finalized = await finalizeStartedToolCall(execCtx, started);
+				await emitToolExecutionEnd(finalized, execCtx.emit);
+				return finalized;
+			});
 		}
-
-		finalizedCalls.push(async () => {
-			const finalized = await executeAndFinalizePreparedToolCall(
-				currentContext,
-				assistantMessage,
-				started.preparation,
-				config,
-				repairTeachTracker,
-				toolFailureMemory,
-				signal,
-				emit,
-			);
-			await emitToolExecutionEnd(finalized, emit);
-			return finalized;
-		});
-		if (signal?.aborted) {
+		if (execCtx.signal?.aborted) {
 			break;
 		}
 	}
@@ -783,7 +757,7 @@ async function executeToolCallsParallel(
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
+		await emitToolResultMessage(toolResultMessage, execCtx.emit);
 		messages.push(toolResultMessage);
 	}
 
@@ -810,6 +784,7 @@ type ImmediateToolCallOutcome = {
 	correction: string;
 	diagnostic?: string;
 	repeatedSuccessfulCall?: { previousToolCallId: string };
+	repeatedToolFailure?: boolean;
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -992,6 +967,8 @@ async function prepareToolCall(
 	toolCall: AgentToolCall,
 	config: AgentLoopConfig,
 	validationFailureTracker: ToolValidationFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureExecutionGate: Map<string, number>,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
@@ -1037,6 +1014,29 @@ async function prepareToolCall(
 		if (validatedArgs !== toolCall.arguments) {
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
+		}
+		const unresolvedRecord = getUnresolvedToolFailure(toolFailureMemory, toolCall.name, validatedArgs);
+		if (unresolvedRecord) {
+			const allowedExecutions = 1 + getToolExecutionUnchangedRetryLimit(unresolvedRecord.failureCode);
+			const currentExecutions = toolFailureExecutionGate.get(unresolvedRecord.failureKey) ?? 0;
+			if (currentExecutions >= allowedExecutions) {
+				toolFailureExecutionGate.set(unresolvedRecord.failureKey, currentExecutions + 1);
+				const result = createRepeatedToolFailureResult(unresolvedRecord);
+				const memoryRecord = (result.details as ToolFailureMemoryDetails).piToolFailureMemory;
+				toolFailureMemory.set(unresolvedRecord.failureKey, memoryRecord);
+				return {
+					kind: "immediate",
+					result,
+					isError: true,
+					phase: unresolvedRecord.phase,
+					failureCode: "repeated_failed_operation",
+					correction: memoryRecord.correction,
+					diagnostic: memoryRecord.diagnostic,
+					repeatedToolFailure: true,
+					validationEvent: createValidationBounceTelemetry(config, toolCall, "repeated_failed_operation"),
+				};
+			}
+			toolFailureExecutionGate.set(unresolvedRecord.failureKey, currentExecutions + 1);
 		}
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
@@ -1116,7 +1116,15 @@ function finalizeRejectedToolCall(
 	toolCall: AgentToolCall,
 	outcome: ImmediateToolCallOutcome,
 	tracker: ToolFailureMemoryTracker,
+	toolFailureExecutionGate: Map<string, number>,
 ): FinalizedToolCallOutcome {
+	if (outcome.repeatedToolFailure) {
+		return {
+			toolCall,
+			result: outcome.result,
+			isError: true,
+		};
+	}
 	const record = rememberToolFailure(
 		tracker,
 		toolCall.name,
@@ -1127,6 +1135,9 @@ function finalizeRejectedToolCall(
 		outcome.diagnostic,
 		outcome.phase,
 	);
+	if (!toolFailureExecutionGate.has(record.failureKey)) {
+		toolFailureExecutionGate.set(record.failureKey, 1);
+	}
 	const failureResult = createToolFailureResult(record, outcome.result.terminate);
 	return {
 		toolCall,
@@ -1183,6 +1194,7 @@ async function executeAndFinalizePreparedToolCall(
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureExecutionGate: Map<string, number>,
 	foregroundSignal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<FinalizedToolCallOutcome> {
@@ -1200,6 +1212,7 @@ async function executeAndFinalizePreparedToolCall(
 			config,
 			repairTeachTracker,
 			toolFailureMemory,
+			toolFailureExecutionGate,
 			foregroundSignal,
 		);
 	}
@@ -1219,6 +1232,7 @@ async function executeAndFinalizePreparedToolCall(
 			config,
 			repairTeachTracker,
 			toolFailureMemory,
+			toolFailureExecutionGate,
 			executionAbort.signal,
 		);
 	})();
@@ -1367,6 +1381,7 @@ async function finalizeExecutedToolCall(
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureExecutionGate: Map<string, number>,
 	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
@@ -1419,9 +1434,13 @@ async function finalizeExecutedToolCall(
 			assessment.diagnostic,
 			assessment.phase,
 		);
+		if (!toolFailureExecutionGate.has(record.failureKey)) {
+			toolFailureExecutionGate.set(record.failureKey, 1);
+		}
 		result = { ...createToolFailureResult(record, result.terminate), usage };
 	} else {
 		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args);
+		toolFailureExecutionGate.clear();
 	}
 
 	const repaired = isError

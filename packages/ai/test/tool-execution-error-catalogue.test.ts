@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	getToolExecutionErrorGuidance,
 	getToolExecutionErrorPolicy,
+	getToolExecutionUnchangedRetryLimit,
 	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
 	TOOL_EXECUTION_ERROR_CATALOGUE,
 } from "../src/utils/tool-repair/registry.ts";
@@ -76,6 +77,7 @@ describe("tool execution error catalogue", () => {
 			failureCode: "encoding_corruption",
 			attemptMemory: "discard",
 			retainDiagnostic: false,
+			unchangedRetryLimit: 0,
 			guidance:
 				"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
 		});
@@ -88,6 +90,7 @@ describe("tool execution error catalogue", () => {
 			failureCode: "repeated_successful_call",
 			attemptMemory: "discard",
 			retainDiagnostic: true,
+			unchangedRetryLimit: 0,
 			guidance: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
 		});
 	});
@@ -101,6 +104,12 @@ describe("tool execution error catalogue", () => {
 			attemptMemory: "discard",
 			retainDiagnostic: true,
 		});
+	});
+
+	it("allows one unchanged retry only for the timeout policy", () => {
+		expect(getToolExecutionUnchangedRetryLimit("timeout")).toBe(1);
+		expect(getToolExecutionUnchangedRetryLimit("file_not_found")).toBe(0);
+		expect(getToolExecutionUnchangedRetryLimit("unknown_failure")).toBe(0);
 	});
 
 	it("leaves uncatalogued errors unchanged", () => {

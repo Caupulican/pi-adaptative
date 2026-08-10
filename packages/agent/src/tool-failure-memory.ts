@@ -303,6 +303,14 @@ function operationIdentity(tool: string, args: unknown): ToolOperationIdentity {
 	};
 }
 
+export function getUnresolvedToolFailure(
+	tracker: ToolFailureMemoryTracker,
+	tool: string,
+	args: unknown,
+): ToolFailureMemoryRecord | undefined {
+	return tracker.get(operationIdentity(tool, args).failureKey);
+}
+
 function boundedFailureCode(value: string): string {
 	const normalized = value
 		.trim()
@@ -843,6 +851,24 @@ export function createToolFailureResult(
 			: { piToolFailureMemory: record },
 		...(terminate === undefined ? {} : { terminate }),
 	};
+}
+
+export function createRepeatedToolFailureResult(
+	record: ToolFailureMemoryRecord,
+): AgentToolResult<ToolFailureResultDetails> {
+	const diagnostic = truncateMiddle(
+		`Unchanged replay blocked after ${record.failureCode}${record.diagnostic ? `: ${record.diagnostic}` : ""}`,
+		MAX_DIAGNOSTIC_CHARS,
+	);
+	return createToolFailureResult({
+		...record,
+		occurrence: record.occurrence + 1,
+		kindMistakes: (record.kindMistakes ?? record.occurrence) + 1,
+		state: "rejected",
+		failureCode: "repeated_failed_operation",
+		diagnostic,
+		correction: truncate(`The unchanged operation was not executed. ${record.correction}`, MAX_CORRECTION_CHARS),
+	});
 }
 
 function escapePromptData(value: string): string {

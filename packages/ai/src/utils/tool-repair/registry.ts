@@ -147,6 +147,8 @@ interface ToolExecutionErrorCatalogueEntry {
 	failureCode?: string;
 	attemptMemory?: ToolExecutionAttemptMemory;
 	retainDiagnostic?: boolean;
+	/** Number of unchanged executions permitted after the first failure in one recovery window. */
+	unchangedRetryLimit?: number;
 	matches(message: string): boolean;
 }
 
@@ -319,6 +321,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		name: "timedOut",
 		phase: "timeout",
 		failureCode: "timeout",
+		unchangedRetryLimit: 1,
 		guidance:
 			"The operation timed out; narrow or split the work, then retry once only when repeating it is safe and still required.",
 		matches(message: string): boolean {
@@ -353,6 +356,7 @@ export interface ToolExecutionErrorPolicy {
 	failureCode?: string;
 	attemptMemory: ToolExecutionAttemptMemory;
 	retainDiagnostic: boolean;
+	unchangedRetryLimit: number;
 }
 
 export function getToolExecutionErrorPolicy(errorMessage: string): ToolExecutionErrorPolicy | undefined {
@@ -365,12 +369,18 @@ export function getToolExecutionErrorPolicy(errorMessage: string): ToolExecution
 		...(entry.failureCode ? { failureCode: entry.failureCode } : {}),
 		attemptMemory: entry.attemptMemory ?? "retain",
 		retainDiagnostic: entry.retainDiagnostic ?? false,
+		unchangedRetryLimit: entry.unchangedRetryLimit ?? 0,
 	};
 }
 
 export function getToolExecutionAttemptMemory(failureCode: string): ToolExecutionAttemptMemory {
 	const entry = executionErrorCatalogue.find((candidate) => candidate.failureCode === failureCode);
 	return entry?.attemptMemory ?? "retain";
+}
+
+export function getToolExecutionUnchangedRetryLimit(failureCode: string): number {
+	const entry = executionErrorCatalogue.find((candidate) => candidate.failureCode === failureCode);
+	return entry?.unchangedRetryLimit ?? 0;
 }
 
 export function getToolExecutionErrorGuidance(errorMessage: string): string | undefined {

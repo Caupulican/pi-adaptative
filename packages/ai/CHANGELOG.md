@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added `unchangedRetryLimit` policy and `getToolExecutionUnchangedRetryLimit` helper to tool execution error catalogue for machine-readable bounded unchanged-retry rules.
+
 ## [0.86.14] - 2026-08-09
 
 ## [0.86.13] - 2026-08-09

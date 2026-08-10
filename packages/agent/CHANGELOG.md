@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed repeated deterministic tool execution failures executing despite recovery guidance by gating re-execution at the run-scoped execution boundary and clearing gate counts on successful recovery.
+
 ## [0.86.14] - 2026-08-09
 
 ### Fixed
