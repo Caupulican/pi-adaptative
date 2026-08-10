@@ -12,6 +12,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 
 // Mock stream for testing - mimics MockAssistantStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -674,18 +675,45 @@ describe("agentLoop with AgentMessage", () => {
 		expect(JSON.stringify(toolResults)).toContain('"diagnostic":"backend exploded"');
 	});
 
-	it("replaces failed execution output with one occurrence ledger and clears it after success", async () => {
+	it("retains one bounded failure ledger through recovery and clears it after matching success", async () => {
 		const toolSchema = Type.Object({ command: Type.String() });
+		const targetKind = "test.command.available";
+		const recoveryAuthority = createAgentToolFailureRecoveryAuthority();
 		let attempts = 0;
+		let repaired = false;
 		const command = `svn status -q; ${"x".repeat(300)}; svn diff --stat`;
+		const recoveryCommand = "svn help status";
 		const tool: AgentTool<typeof toolSchema, { command: string }> = {
 			name: "shell",
 			label: "Shell",
 			description: "Run a command",
 			parameters: toolSchema,
+			failureRecovery: {
+				getFailureTargets: (params, failure) =>
+					failure.failureCode === "invalid_option"
+						? [{ authority: recoveryAuthority, kind: targetKind, scope: params.command }]
+						: [],
+				actions: [
+					{
+						kind: "repair",
+						authority: recoveryAuthority,
+						targetKind,
+						instruction: "Run the declared shell recovery check.",
+						getEvidence: (params, result) =>
+							params.command === recoveryCommand && result.details.command === recoveryCommand ? [command] : [],
+					},
+				],
+			},
 			async execute(_toolCallId, params) {
 				attempts++;
-				if (attempts <= 2) {
+				if (params.command === recoveryCommand) {
+					repaired = true;
+					return {
+						content: [{ type: "text", text: "recovery command succeeded" }],
+						details: { command: params.command },
+					};
+				}
+				if (!repaired) {
 					throw new Error(
 						`RAW_FAILURE_OUTPUT:${"x".repeat(20_000)}\nsvn: invalid option: --stat\nCommand exited with code 1`,
 					);
@@ -711,7 +739,7 @@ describe("agentLoop with AgentMessage", () => {
 				});
 				const mockStream = new MockAssistantStream();
 				queueMicrotask(() => {
-					if (callIndex < 3) {
+					if (callIndex < 4) {
 						mockStream.push({
 							type: "done",
 							reason: "toolUse",
@@ -721,7 +749,7 @@ describe("agentLoop with AgentMessage", () => {
 										type: "toolCall",
 										id: `tool-${callIndex}`,
 										name: "shell",
-										arguments: { command },
+										arguments: { command: callIndex === 2 ? recoveryCommand : command },
 									},
 								],
 								"toolUse",
@@ -747,7 +775,7 @@ describe("agentLoop with AgentMessage", () => {
 		const failedResults = messages.filter(
 			(message): message is ToolResultMessage => message.role === "toolResult" && message.isError === true,
 		);
-		expect(providerContexts).toHaveLength(4);
+		expect(providerContexts).toHaveLength(5);
 		expect(providerContexts[1]?.systemPrompt).toContain("<harness_tool_failures");
 		expect(providerContexts[1]?.systemPrompt).toContain('"occ":1');
 		expect(providerContexts[1]?.systemPrompt).toContain('"state":"failed"');
@@ -761,37 +789,69 @@ describe("agentLoop with AgentMessage", () => {
 		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
 		expect(providerContexts[2]?.systemPrompt).toContain('"occ":2');
 		expect(providerContexts[2]?.systemPrompt.match(/failure_key/g) ?? []).toHaveLength(1);
-		expect(providerContexts[3]?.systemPrompt).not.toContain("<harness_tool_failures");
-		expect(JSON.stringify(providerContexts[3])).not.toContain("RAW_FAILURE_OUTPUT");
-		expect(providerContexts[3]?.messages.some((message) => message.role === "toolResult")).toBe(true);
+		expect(providerContexts[3]?.systemPrompt).toContain('"occ":2');
+		expect(providerContexts[4]?.systemPrompt).not.toContain("<harness_tool_failures");
+		expect(JSON.stringify(providerContexts[4])).not.toContain("RAW_FAILURE_OUTPUT");
+		expect(providerContexts[4]?.messages.some((message) => message.role === "toolResult")).toBe(true);
+		expect(attempts).toBe(3);
 		expect(failedResults).toHaveLength(2);
-		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(3);
+		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(4);
 		expect(
 			events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
-		).toHaveLength(3);
+		).toHaveLength(4);
 		expect(JSON.stringify(failedResults)).not.toContain("RAW_FAILURE_OUTPUT");
 		expect(JSON.stringify(failedResults).length).toBeLessThan(2_500);
 		expect(failedResults[1]?.content).toEqual([
 			expect.objectContaining({
 				type: "text",
-				text: expect.stringMatching(/"occ":2.*"diagnostic":"svn: invalid option: --stat".*"next_action":/),
+				text: expect.stringContaining('"failure_code":"repeated_failed_operation"'),
 			}),
 		]);
+		expect(failedResults[1]?.details).toMatchObject({
+			piToolFailureMemory: {
+				occurrence: 2,
+				failureCode: "invalid_option",
+				diagnostic: "svn: invalid option: --stat",
+			},
+		});
 	});
 
 	it("converts a returned structured tool failure into compact failure memory and clears it on a matching success", async () => {
 		const toolSchema = Type.Object({ command: Type.String() });
+		const targetKind = "test.command.ready";
+		const recoveryAuthority = createAgentToolFailureRecoveryAuthority();
 		const usage = { ...createUsage(), output: 7, totalTokens: 7 };
 		let attempts = 0;
+		let repaired = false;
 		const observedAfterCall: Array<{ isError: boolean; text: string; usage: unknown }> = [];
 		const tool: AgentTool<typeof toolSchema, { exitCode: number }> = {
 			name: "direct_argv",
 			label: "Direct argv",
 			description: "Run a constrained direct argv operation",
 			parameters: toolSchema,
-			async execute() {
+			failureRecovery: {
+				getFailureTargets: (params, failure) =>
+					failure.failureCode === "exit_3"
+						? [{ authority: recoveryAuthority, kind: targetKind, scope: params.command }]
+						: [],
+				actions: [
+					{
+						kind: "repair",
+						authority: recoveryAuthority,
+						targetKind,
+						instruction: "Run the constrained repair check.",
+						getEvidence: (params, result) =>
+							params.command === "repair check" && result.details.exitCode === 0 ? ["check"] : [],
+					},
+				],
+			},
+			async execute(_toolCallId, params) {
 				attempts++;
-				if (attempts === 1) {
+				if (params.command === "repair check") {
+					repaired = true;
+					return { content: [{ type: "text", text: "repair complete" }], details: { exitCode: 0 }, usage };
+				}
+				if (!repaired) {
 					return {
 						content: [
 							{
@@ -832,7 +892,7 @@ describe("agentLoop with AgentMessage", () => {
 				});
 				const mockStream = new MockAssistantStream();
 				queueMicrotask(() => {
-					if (callIndex < 2) {
+					if (callIndex < 3) {
 						mockStream.push({
 							type: "done",
 							reason: "toolUse",
@@ -842,7 +902,7 @@ describe("agentLoop with AgentMessage", () => {
 										type: "toolCall",
 										id: `tool-${callIndex}`,
 										name: "direct_argv",
-										arguments: { command: "check" },
+										arguments: { command: callIndex === 1 ? "repair check" : "check" },
 									},
 								],
 								"toolUse",
@@ -866,9 +926,10 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		const toolResults = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
-		expect(attempts).toBe(2);
+		expect(attempts).toBe(3);
 		expect(observedAfterCall).toEqual([
 			{ isError: true, text: expect.stringContaining("repair marker"), usage },
+			{ isError: false, text: "repair complete", usage },
 			{ isError: false, text: "completed", usage },
 		]);
 		expect(events.filter((event) => event.type === "tool_execution_end")[0]).toMatchObject({ isError: true });
@@ -880,8 +941,10 @@ describe("agentLoop with AgentMessage", () => {
 		expect(JSON.stringify(toolResults[0])).not.toContain("stdout: (empty)");
 		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"repair marker"');
 		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
-		expect(providerContexts[2]?.systemPrompt).not.toContain("<harness_tool_failures");
+		expect(providerContexts[2]?.systemPrompt).toContain('"diagnostic":"repair marker"');
+		expect(providerContexts[3]?.systemPrompt).not.toContain("<harness_tool_failures");
 		expect(toolResults[1]).toMatchObject({ isError: false, usage });
+		expect(toolResults[2]).toMatchObject({ isError: false, usage });
 	});
 
 	it("preserves termination from a returned structured tool failure", async () => {
@@ -1056,9 +1119,10 @@ describe("agentLoop with AgentMessage", () => {
 		const messages = await stream.result();
 		const toolResult = messages.find((message) => message.role === "toolResult");
 		expect(toolResult?.content).toEqual([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"enoent"') }),
+			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"file_not_found"') }),
 		]);
-		expect(JSON.stringify(toolResult)).toContain("list the parent directory or re-read the path");
+		expect(JSON.stringify(toolResult)).toContain("No currently loaded tool declares a recovery action");
+		expect(JSON.stringify(toolResult)).not.toContain("list the parent directory or re-read the path");
 		expect(JSON.stringify(toolResult)).not.toContain("no such file or directory");
 	});
 

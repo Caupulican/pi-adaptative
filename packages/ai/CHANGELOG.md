@@ -4,6 +4,10 @@
 
 - Added `unchangedRetryLimit` policy and `getToolExecutionUnchangedRetryLimit` helper to tool execution error catalogue for machine-readable bounded unchanged-retry rules.
 
+### Changed
+
+- Changed missing-file and edit-text-mismatch catalogue entries to expose stable semantic failure codes for tool-owned recovery contracts.
+
 ## [0.86.14] - 2026-08-09
 
 ## [0.86.13] - 2026-08-09

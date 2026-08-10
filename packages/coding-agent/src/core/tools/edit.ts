@@ -1,4 +1,4 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
+import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core";
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
 import { readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
@@ -22,6 +22,13 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { isValidUTF8 } from "./file-encoding-policy.ts";
+import {
+	EDIT_RETARGET_RECOVERY_TARGET_KIND,
+	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
+	type FileFailureRecoveryAuthority,
+	fileRecoveryTarget,
+	selectFileFailureRecoveryAuthority,
+} from "./file-failure-recovery.ts";
 import {
 	FileMutationIntentController,
 	type FileMutationLease,
@@ -116,6 +123,8 @@ const defaultEditOperations: EditOperations = {
 export interface EditToolOptions {
 	/** Custom operations for file editing. Default: local filesystem */
 	operations?: EditOperations;
+	/** Shared backend identity for exact cross-tool recovery with custom operations. */
+	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Session-owned harness preflight and exact-content-reference authority. */
 	intentController?: FileMutationIntentController;
 }
@@ -386,10 +395,15 @@ export function createEditToolDefinition(
 	options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
 	const ops = options?.operations ?? defaultEditOperations;
+	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
+		options?.operations !== undefined,
+		options?.failureRecoveryAuthority,
+	);
 	if (options?.operations && !options.intentController) {
 		throw new Error("Custom edit operations require a matching file mutation intent controller.");
 	}
 	const intentController = options?.intentController ?? new FileMutationIntentController();
+	const retargetRecoveryAuthority = createAgentToolFailureRecoveryAuthority();
 	let cachedMatchPlan: CachedEditMatchPlan | undefined;
 	return {
 		name: "edit",
@@ -405,6 +419,39 @@ export function createEditToolDefinition(
 		parameters: editSchema,
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
+		failureRecovery: {
+			getFailureTargets: (params, failure) => {
+				if (failure.failureCode === "mutation_retarget_required") {
+					return [
+						{
+							authority: retargetRecoveryAuthority,
+							kind: EDIT_RETARGET_RECOVERY_TARGET_KIND,
+							scope: resolveToCwd(params.path, cwd),
+						},
+					];
+				}
+				if (failure.failureCode === "edit_old_text_not_found" && failureRecoveryAuthority) {
+					return [
+						fileRecoveryTarget(
+							failureRecoveryAuthority,
+							FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
+							params.path,
+							cwd,
+						),
+					];
+				}
+				return [];
+			},
+			actions: [
+				{
+					kind: "correct",
+					authority: retargetRecoveryAuthority,
+					targetKind: EDIT_RETARGET_RECOVERY_TARGET_KIND,
+					instruction:
+						"Use edit with the retained payloadRef and a corrected path naming the intended existing file.",
+				},
+			],
+		},
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const validated = validateEditInput(input);
 			const { path } = validated;

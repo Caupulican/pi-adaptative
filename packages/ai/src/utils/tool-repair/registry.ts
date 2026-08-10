@@ -252,14 +252,20 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "fileNotFound",
 		phase: "execution",
+		failureCode: "file_not_found",
 		guidance: "Path was not found; list the parent directory or re-read the path before retrying.",
 		matches(message: string): boolean {
-			return /\bENOENT\b/i.test(message) || /no such file or directory/i.test(message);
+			return (
+				/\bENOENT\b/i.test(message) ||
+				/no such file or directory/i.test(message) ||
+				/\b(?:file|path) not found\b/i.test(message)
+			);
 		},
 	},
 	{
 		name: "editOldTextNotFound",
 		phase: "execution",
+		failureCode: "edit_old_text_not_found",
 		guidance: "Re-read the target file and use the exact current text before retrying.",
 		matches(message: string): boolean {
 			return /(?:oldText|old text|exact text).*(?:not found|no match|failed to match|must match)/is.test(message);

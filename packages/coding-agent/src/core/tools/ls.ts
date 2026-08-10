@@ -5,6 +5,11 @@ import nodePath from "path";
 import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import {
+	FILE_EXISTS_RECOVERY_TARGET_KIND,
+	type FileFailureRecoveryAuthority,
+	selectFileFailureRecoveryAuthority,
+} from "./file-failure-recovery.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import {
 	formatCollapsibleToolResult,
@@ -58,6 +63,8 @@ const defaultLsOperations: LsOperations = {
 export interface LsToolOptions {
 	/** Custom operations for directory listing. Default: local filesystem */
 	operations?: LsOperations;
+	/** Shared backend identity for exact cross-tool recovery with custom operations. */
+	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 }
 
 function formatLsCall(args: { path?: string; limit?: number } | undefined, theme: Theme, cwd: string): string {
@@ -110,12 +117,29 @@ export function createLsToolDefinition(
 	options?: LsToolOptions,
 ): ToolDefinition<typeof lsSchema, LsToolDetails | undefined> {
 	const ops = options?.operations ?? defaultLsOperations;
+	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
+		options?.operations !== undefined,
+		options?.failureRecoveryAuthority,
+	);
 	return {
 		name: "ls",
 		label: "ls",
 		description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to ${DEFAULT_LIMIT} entries or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
 		promptSnippet: "List directory contents",
 		parameters: lsSchema,
+		failureRecovery: {
+			actions: failureRecoveryAuthority
+				? [
+						{
+							kind: "correct",
+							authority: failureRecoveryAuthority.contractAuthority,
+							targetKind: FILE_EXISTS_RECOVERY_TARGET_KIND,
+							instruction:
+								"Use ls on the parent directory to find the actual entry, then submit a changed path.",
+						},
+					]
+				: [],
+		},
 		toolGroup: "explore",
 		async execute(
 			_toolCallId,

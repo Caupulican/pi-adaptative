@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added explicit recovery contracts for `read`, `write`, `edit`, and `ls`; only raw successful `write` evidence from the same backend authority and canonical path can prove that a missing file was created, while inspection and retarget actions require changed calls. Custom operation adapters must share an explicit authority before cross-tool recovery is taught or admitted.
+
 ## [0.86.14] - 2026-08-09
 
 ## [0.86.13] - 2026-08-09

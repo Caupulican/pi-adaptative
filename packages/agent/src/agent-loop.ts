@@ -7,7 +7,6 @@ import { EventStream } from "@caupulican/pi-ai/event-stream";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import {
 	formatToolRepairStandingRule,
-	getToolExecutionUnchangedRetryLimit,
 	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
 	type ToolFailurePhase,
 } from "@caupulican/pi-ai/tool-repair-registry";
@@ -23,15 +22,22 @@ import {
 	clearToolFailure,
 	createRepeatedToolFailureResult,
 	createToolFailureMemoryTracker,
+	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	rememberToolFailure,
 	sanitizeToolFailureContext,
-	type ToolFailureMemoryDetails,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
+import {
+	TOOL_FAILURE_RECOVERY_ACCOUNTING_WAVE_SIZE,
+	type ToolFailureExecutionReservation,
+	ToolFailureRecoveryGate,
+	type ToolFailureRecoveryGateEffect,
+	type ToolFailureRecoveryHalt,
+} from "./tool-failure-recovery-gate.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -40,7 +46,6 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
-	BackgroundToolCallCompletion,
 	RequestPreflightContext,
 	RequestPreflightResult,
 	StreamFn,
@@ -299,7 +304,7 @@ async function runLoop(
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
-	const toolFailureExecutionGate = new Map<string, number>();
+	const toolFailureRecoveryGate = new ToolFailureRecoveryGate();
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -358,7 +363,7 @@ async function runLoop(
 					validationFailureTracker,
 					repairTeachTracker,
 					toolFailureMemory,
-					toolFailureExecutionGate,
+					toolFailureRecoveryGate,
 					previousSuccessfulTextProtocolResults,
 					signal,
 					emit,
@@ -412,7 +417,6 @@ async function runLoop(
 				currentContext = nextTurnSnapshot.context ?? currentContext;
 				if (nextTurnSnapshot.context) {
 					toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
-					toolFailureExecutionGate.clear();
 				}
 				config = {
 					...config,
@@ -591,7 +595,7 @@ interface ToolExecutionContext {
 	validationFailureTracker: ToolValidationFailureTracker;
 	repairTeachTracker: ToolRepairTeachTracker;
 	toolFailureMemory: ToolFailureMemoryTracker;
-	toolFailureExecutionGate: Map<string, number>;
+	toolFailureRecoveryGate: ToolFailureRecoveryGate;
 	previousSuccessfulResults?: readonly ToolResultMessage[];
 	signal?: AbortSignal;
 	emit: AgentEventSink;
@@ -607,7 +611,7 @@ async function executeToolCalls(
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
-	toolFailureExecutionGate: Map<string, number>,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -623,7 +627,7 @@ async function executeToolCalls(
 		validationFailureTracker,
 		repairTeachTracker,
 		toolFailureMemory,
-		toolFailureExecutionGate,
+		toolFailureRecoveryGate,
 		previousSuccessfulResults: previousSuccessfulTextProtocolResults,
 		signal,
 		emit,
@@ -663,7 +667,7 @@ async function prepareAndStartToolCall(
 				execCtx.config,
 				execCtx.validationFailureTracker,
 				execCtx.toolFailureMemory,
-				execCtx.toolFailureExecutionGate,
+				execCtx.toolFailureRecoveryGate,
 				execCtx.signal,
 			);
 	await emitToolExecutionStart(toolCall, execCtx.emit);
@@ -675,7 +679,7 @@ async function prepareAndStartToolCall(
 				toolCall,
 				preparation,
 				execCtx.toolFailureMemory,
-				execCtx.toolFailureExecutionGate,
+				execCtx.toolFailureRecoveryGate,
 			),
 		};
 	}
@@ -694,7 +698,7 @@ async function finalizeStartedToolCall(
 		execCtx.config,
 		execCtx.repairTeachTracker,
 		execCtx.toolFailureMemory,
-		execCtx.toolFailureExecutionGate,
+		execCtx.toolFailureRecoveryGate,
 		execCtx.signal,
 		execCtx.emit,
 	);
@@ -709,7 +713,10 @@ async function executeToolCallsSequential(
 
 	for (const [index, toolCall] of toolCalls.entries()) {
 		const started = await prepareAndStartToolCall(execCtx, toolCall, index);
-		const finalized = await finalizeStartedToolCall(execCtx, started);
+		const finalized = applyToolFailureRecoveryEffect(
+			execCtx.toolFailureRecoveryGate,
+			await finalizeStartedToolCall(execCtx, started),
+		);
 
 		await emitToolExecutionEnd(finalized, execCtx.emit);
 		const toolResultMessage = createToolResultMessage(finalized);
@@ -724,7 +731,7 @@ async function executeToolCallsSequential(
 
 	return {
 		messages,
-		terminate: shouldTerminateToolBatch(finalizedCalls),
+		terminate: execCtx.toolFailureRecoveryGate.isHalted() || shouldTerminateToolBatch(finalizedCalls),
 	};
 }
 
@@ -732,28 +739,47 @@ async function executeToolCallsParallel(
 	execCtx: ToolExecutionContext,
 	toolCalls: AgentToolCall[],
 ): Promise<ExecutedToolCallBatch> {
-	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
+	let nextIndex = 0;
+	// Account each bounded concurrent wave before launching more calls. Otherwise a single
+	// assistant batch could start an unbounded number of failures before the circuit observes one.
+	while (nextIndex < toolCalls.length && !execCtx.signal?.aborted) {
+		const waveEnd = Math.min(nextIndex + TOOL_FAILURE_RECOVERY_ACCOUNTING_WAVE_SIZE, toolCalls.length);
+		const wave: FinalizedToolCallEntry[] = [];
+		const completionOrder: FinalizedToolCallOutcome[] = [];
+		for (; nextIndex < waveEnd; nextIndex++) {
+			const toolCall = toolCalls[nextIndex];
+			const started = await prepareAndStartToolCall(execCtx, toolCall, nextIndex);
+			if (started.kind === "finalized") {
+				await emitToolExecutionEnd(started.finalized, execCtx.emit);
+				wave.push(started.finalized);
+			} else {
+				wave.push(async () => {
+					const finalized = await finalizeStartedToolCall(execCtx, started);
+					completionOrder.push(finalized);
+					return finalized;
+				});
+			}
+			if (execCtx.signal?.aborted) {
+				nextIndex++;
+				break;
+			}
+		}
 
-	for (const [index, toolCall] of toolCalls.entries()) {
-		const started = await prepareAndStartToolCall(execCtx, toolCall, index);
-		if (started.kind === "finalized") {
-			await emitToolExecutionEnd(started.finalized, execCtx.emit);
-			finalizedCalls.push(started.finalized);
-		} else {
-			finalizedCalls.push(async () => {
-				const finalized = await finalizeStartedToolCall(execCtx, started);
-				await emitToolExecutionEnd(finalized, execCtx.emit);
-				return finalized;
-			});
+		const unappliedWave = await Promise.all(
+			wave.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
+		);
+		const appliedByOriginal = new Map<FinalizedToolCallOutcome, FinalizedToolCallOutcome>();
+		const finalizedWave = unappliedWave.map((finalized) => {
+			const applied = applyToolFailureRecoveryEffect(execCtx.toolFailureRecoveryGate, finalized);
+			appliedByOriginal.set(finalized, applied);
+			return applied;
+		});
+		for (const finalized of completionOrder) {
+			await emitToolExecutionEnd(appliedByOriginal.get(finalized) ?? finalized, execCtx.emit);
 		}
-		if (execCtx.signal?.aborted) {
-			break;
-		}
+		orderedFinalizedCalls.push(...finalizedWave);
 	}
-
-	const orderedFinalizedCalls = await Promise.all(
-		finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
-	);
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		const toolResultMessage = createToolResultMessage(finalized);
@@ -763,7 +789,7 @@ async function executeToolCallsParallel(
 
 	return {
 		messages,
-		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
+		terminate: execCtx.toolFailureRecoveryGate.isHalted() || shouldTerminateToolBatch(orderedFinalizedCalls),
 	};
 }
 
@@ -772,6 +798,7 @@ type PreparedToolCall = {
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
+	executionGateReservation?: ToolFailureExecutionReservation;
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -785,6 +812,7 @@ type ImmediateToolCallOutcome = {
 	diagnostic?: string;
 	repeatedSuccessfulCall?: { previousToolCallId: string };
 	repeatedToolFailure?: boolean;
+	executionGateReservation?: ToolFailureExecutionReservation;
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
 };
 
@@ -799,7 +827,32 @@ type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
 	isError: boolean;
+	executionGateEffect?: ToolFailureRecoveryGateEffect;
 };
+
+function applyToolFailureRecoveryEffect(
+	gate: ToolFailureRecoveryGate,
+	finalized: FinalizedToolCallOutcome,
+): FinalizedToolCallOutcome {
+	const halt = gate.apply(finalized.executionGateEffect);
+	if (!halt) return finalized;
+	return createRecoveryExhaustedToolCallOutcome(finalized, halt);
+}
+
+function createRecoveryExhaustedToolCallOutcome(
+	finalized: FinalizedToolCallOutcome,
+	halt: ToolFailureRecoveryHalt,
+): FinalizedToolCallOutcome {
+	const exhaustedResult = createToolFailureRecoveryExhaustedResult(halt.record, halt.diagnostic);
+	return {
+		...finalized,
+		result: {
+			...exhaustedResult,
+			...(finalized.result.usage ? { usage: finalized.result.usage } : {}),
+		},
+		isError: true,
+	};
+}
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
@@ -835,6 +888,22 @@ function createRepeatedSuccessfulToolCallOutcome(
 		correction: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
 		diagnostic,
 		...(previousResult ? { repeatedSuccessfulCall: { previousToolCallId: previousResult.toolCallId } } : {}),
+	};
+}
+
+function createAbortedToolCallOutcome(
+	validationEvent: ToolArgumentValidationTelemetryEvent | undefined,
+	executionGateReservation: ToolFailureExecutionReservation | undefined,
+): ImmediateToolCallOutcome {
+	return {
+		kind: "immediate",
+		result: createErrorToolResult("Operation aborted"),
+		isError: true,
+		phase: "cancelled",
+		failureCode: "aborted",
+		correction: "Retry only if the operation is still required.",
+		...(executionGateReservation ? { executionGateReservation } : {}),
+		validationEvent,
 	};
 }
 
@@ -968,7 +1037,7 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	validationFailureTracker: ToolValidationFailureTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
-	toolFailureExecutionGate: Map<string, number>,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
@@ -997,6 +1066,7 @@ async function prepareToolCall(
 	}
 
 	let validationEvent: ToolArgumentValidationTelemetryEvent | undefined;
+	let executionGateReservation: ToolFailureExecutionReservation | undefined;
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
@@ -1016,28 +1086,30 @@ async function prepareToolCall(
 			toolCall.arguments = validatedArgs;
 		}
 		const unresolvedRecord = getUnresolvedToolFailure(toolFailureMemory, toolCall.name, validatedArgs);
-		if (unresolvedRecord) {
-			const allowedExecutions = 1 + getToolExecutionUnchangedRetryLimit(unresolvedRecord.failureCode);
-			const currentExecutions = toolFailureExecutionGate.get(unresolvedRecord.failureKey) ?? 0;
-			if (currentExecutions >= allowedExecutions) {
-				toolFailureExecutionGate.set(unresolvedRecord.failureKey, currentExecutions + 1);
-				const result = createRepeatedToolFailureResult(unresolvedRecord);
-				const memoryRecord = (result.details as ToolFailureMemoryDetails).piToolFailureMemory;
-				toolFailureMemory.set(unresolvedRecord.failureKey, memoryRecord);
-				return {
-					kind: "immediate",
-					result,
-					isError: true,
-					phase: unresolvedRecord.phase,
-					failureCode: "repeated_failed_operation",
-					correction: memoryRecord.correction,
-					diagnostic: memoryRecord.diagnostic,
-					repeatedToolFailure: true,
-					validationEvent: createValidationBounceTelemetry(config, toolCall, "repeated_failed_operation"),
-				};
-			}
-			toolFailureExecutionGate.set(unresolvedRecord.failureKey, currentExecutions + 1);
+		const admission = toolFailureRecoveryGate.admit(tool, validatedArgs, unresolvedRecord);
+		if (admission.kind === "blocked") {
+			const failureCode = admission.exhausted ? "recovery_exhausted" : "repeated_failed_operation";
+			const result = admission.exhausted
+				? createToolFailureRecoveryExhaustedResult(
+						admission.record,
+						admission.diagnostic ?? "Tool failure recovery budget exhausted.",
+					)
+				: createRepeatedToolFailureResult(admission.record);
+			const memoryRecord = result.details.piToolFailureMemory;
+			toolFailureMemory.set(admission.record.failureKey, memoryRecord);
+			return {
+				kind: "immediate",
+				result,
+				isError: true,
+				phase: admission.record.phase,
+				failureCode,
+				correction: memoryRecord.correction,
+				diagnostic: memoryRecord.diagnostic,
+				repeatedToolFailure: true,
+				validationEvent: createValidationBounceTelemetry(config, toolCall, failureCode),
+			};
 		}
+		executionGateReservation = admission.reservation;
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{
@@ -1049,15 +1121,7 @@ async function prepareToolCall(
 				signal,
 			);
 			if (signal?.aborted) {
-				return {
-					kind: "immediate",
-					result: createErrorToolResult("Operation aborted"),
-					isError: true,
-					phase: "cancelled",
-					failureCode: "aborted",
-					correction: "Retry only if the operation is still required.",
-					validationEvent,
-				};
+				return createAbortedToolCallOutcome(validationEvent, executionGateReservation);
 			}
 			if (beforeResult?.block) {
 				const reason = beforeResult.reason || "Tool execution was blocked";
@@ -1069,26 +1133,20 @@ async function prepareToolCall(
 					failureCode: "blocked",
 					correction: "Choose an allowed approach or request the required authority before retrying.",
 					diagnostic: reason,
+					...(executionGateReservation ? { executionGateReservation } : {}),
 					validationEvent,
 				};
 			}
 		}
 		if (signal?.aborted) {
-			return {
-				kind: "immediate",
-				result: createErrorToolResult("Operation aborted"),
-				isError: true,
-				phase: "cancelled",
-				failureCode: "aborted",
-				correction: "Retry only if the operation is still required.",
-				validationEvent,
-			};
+			return createAbortedToolCallOutcome(validationEvent, executionGateReservation);
 		}
 		return {
 			kind: "prepared",
 			toolCall,
 			tool,
 			args: validatedArgs,
+			...(executionGateReservation ? { executionGateReservation } : {}),
 			validationEvent,
 		};
 	} catch (error) {
@@ -1107,6 +1165,7 @@ async function prepareToolCall(
 				? validationFailureCorrection(validationEvent, toolCall.name)
 				: toolFailureCorrection(message, "rejected", "preflight"),
 			diagnostic: isToolArgumentValidationError(error) ? undefined : message,
+			...(executionGateReservation ? { executionGateReservation } : {}),
 			validationEvent,
 		};
 	}
@@ -1116,7 +1175,7 @@ function finalizeRejectedToolCall(
 	toolCall: AgentToolCall,
 	outcome: ImmediateToolCallOutcome,
 	tracker: ToolFailureMemoryTracker,
-	toolFailureExecutionGate: Map<string, number>,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 ): FinalizedToolCallOutcome {
 	if (outcome.repeatedToolFailure) {
 		return {
@@ -1135,10 +1194,15 @@ function finalizeRejectedToolCall(
 		outcome.diagnostic,
 		outcome.phase,
 	);
-	if (!toolFailureExecutionGate.has(record.failureKey)) {
-		toolFailureExecutionGate.set(record.failureKey, 1);
-	}
-	const failureResult = createToolFailureResult(record, outcome.result.terminate);
+	const halt = toolFailureRecoveryGate.apply({
+		kind: "failure",
+		record,
+		args: toolCall.arguments,
+		...(outcome.executionGateReservation ? { reservation: outcome.executionGateReservation } : {}),
+	});
+	const failureResult = halt
+		? createToolFailureRecoveryExhaustedResult(halt.record, halt.diagnostic)
+		: createToolFailureResult(record, outcome.result.terminate);
 	return {
 		toolCall,
 		result: outcome.repeatedSuccessfulCall
@@ -1194,7 +1258,7 @@ async function executeAndFinalizePreparedToolCall(
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
-	toolFailureExecutionGate: Map<string, number>,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	foregroundSignal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<FinalizedToolCallOutcome> {
@@ -1212,7 +1276,7 @@ async function executeAndFinalizePreparedToolCall(
 			config,
 			repairTeachTracker,
 			toolFailureMemory,
-			toolFailureExecutionGate,
+			toolFailureRecoveryGate,
 			foregroundSignal,
 		);
 	}
@@ -1220,11 +1284,11 @@ async function executeAndFinalizePreparedToolCall(
 	const executionAbort = createLinkedToolAbort(foregroundSignal);
 	const startedAt = Date.now();
 	let emitForegroundUpdates = true;
-	const completion: Promise<BackgroundToolCallCompletion> = (async () => {
+	const completion = (async (): Promise<FinalizedToolCallOutcome> => {
 		const executed = await executePreparedToolCall(prepared, executionAbort.signal, (event) => {
 			if (emitForegroundUpdates) return emit(event);
 		});
-		return finalizeExecutedToolCall(
+		const finalized = await finalizeExecutedToolCall(
 			currentContext,
 			assistantMessage,
 			prepared,
@@ -1232,9 +1296,10 @@ async function executeAndFinalizePreparedToolCall(
 			config,
 			repairTeachTracker,
 			toolFailureMemory,
-			toolFailureExecutionGate,
+			toolFailureRecoveryGate,
 			executionAbort.signal,
 		);
+		return finalized;
 	})();
 	completion.then(executionAbort.detachForeground, executionAbort.detachForeground);
 
@@ -1261,7 +1326,7 @@ async function executeAndFinalizePreparedToolCall(
 		});
 		triggers.push(manual);
 	}
-	let outcome: { kind: "completed"; value: BackgroundToolCallCompletion } | { kind: "deadline" | "manual" };
+	let outcome: { kind: "completed"; value: FinalizedToolCallOutcome } | { kind: "deadline" | "manual" };
 	try {
 		outcome = await Promise.race([completion.then((value) => ({ kind: "completed" as const, value })), ...triggers]);
 	} finally {
@@ -1271,6 +1336,11 @@ async function executeAndFinalizePreparedToolCall(
 	if (outcome.kind === "completed") return outcome.value;
 	if (executionAbort.signal.aborted) return completion;
 
+	let handoffAccepted = false;
+	const handedOffCompletion = completion.then((finalized) =>
+		handoffAccepted ? applyToolFailureRecoveryEffect(toolFailureRecoveryGate, finalized) : finalized,
+	);
+	void handedOffCompletion.catch(() => undefined);
 	let handoff: ReturnType<NonNullable<AgentLoopConfig["handoffToolCall"]>>;
 	try {
 		handoff = config.handoffToolCall({
@@ -1279,12 +1349,13 @@ async function executeAndFinalizePreparedToolCall(
 			args: prepared.args,
 			context: currentContext,
 			elapsedMs: Math.max(0, Date.now() - startedAt),
-			completion,
+			completion: handedOffCompletion,
 			cancel: executionAbort.cancel,
 		});
 	} catch {
 		return completion;
 	}
+	handoffAccepted = handoff !== undefined;
 	if (!handoff) return completion;
 
 	emitForegroundUpdates = false;
@@ -1381,13 +1452,14 @@ async function finalizeExecutedToolCall(
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
-	toolFailureExecutionGate: Map<string, number>,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	signal: AbortSignal | undefined,
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
 	let failureMessage = executed.failureMessage ?? "";
 	let errorClass = executed.errorClass;
+	let executionGateEffect: ToolFailureRecoveryGateEffect | undefined;
 
 	if (config.afterToolCall) {
 		try {
@@ -1424,23 +1496,41 @@ async function finalizeExecutedToolCall(
 		const effectiveFailureMessage =
 			failureMessage || result.content.find((block) => block.type === "text")?.text || "Tool execution failed";
 		const assessment = assessToolFailure(effectiveFailureMessage, "failed", errorClass);
+		const recoveryPlan = toolFailureRecoveryGate.planFailure(
+			prepared.tool,
+			prepared.args,
+			assessment.failureCode,
+			currentContext.tools ?? [],
+			prepared.executionGateReservation,
+		);
 		const record = rememberToolFailure(
 			toolFailureMemory,
 			prepared.toolCall.name,
 			prepared.args,
 			"failed",
 			assessment.failureCode,
-			assessment.guidance,
+			recoveryPlan.guidance,
 			assessment.diagnostic,
 			assessment.phase,
 		);
-		if (!toolFailureExecutionGate.has(record.failureKey)) {
-			toolFailureExecutionGate.set(record.failureKey, 1);
-		}
+		executionGateEffect = {
+			kind: "failure",
+			record,
+			args: prepared.args,
+			targets: recoveryPlan.targets,
+			...(prepared.executionGateReservation ? { reservation: prepared.executionGateReservation } : {}),
+		};
 		result = { ...createToolFailureResult(record, result.terminate), usage };
 	} else {
 		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args);
-		toolFailureExecutionGate.clear();
+		if (!executed.isError) {
+			executionGateEffect = {
+				kind: "success",
+				tool: prepared.tool,
+				args: prepared.args,
+				evidenceResult: executed.result,
+			};
+		}
 	}
 
 	const repaired = isError
@@ -1457,6 +1547,7 @@ async function finalizeExecutedToolCall(
 		toolCall: prepared.toolCall,
 		result: repaired.result,
 		isError,
+		executionGateEffect,
 	};
 }
 

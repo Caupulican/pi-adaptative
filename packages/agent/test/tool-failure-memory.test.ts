@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	assessToolFailure,
+	createRepeatedToolFailureResult,
+	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	normalizeToolSignature,
 	rememberToolFailure,
@@ -243,6 +245,7 @@ describe("tool failure memory", () => {
 
 		expect(sanitized.systemPrompt).toContain('<harness_tool_failures tool_mistakes="bash:1">');
 		expect(sanitized.systemPrompt).toContain('"kind_mistakes":1');
+		expect(sanitized.systemPrompt).toContain("matching the failed target's backend authority, kind, and exact scope");
 	});
 
 	it("fingerprints large operations without retaining or serializing their payload", () => {
@@ -334,10 +337,65 @@ describe("tool failure memory", () => {
 	it("uses catalogued recovery guidance without retaining redundant raw errors", () => {
 		const assessment = assessToolFailure("ENOENT: no such file or directory, open 'missing.txt'", "failed", "Error");
 
-		expect(assessment.failureCode).toBe("enoent");
+		expect(assessment.failureCode).toBe("file_not_found");
 		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toContain("list the parent directory or re-read the path");
+	});
+
+	it("preserves the original failure evidence across repeated blocked replays", () => {
+		const original = {
+			...record("failed", "invalid_option"),
+			diagnostic: "svn: invalid option: --stat",
+			correction: "Remove or replace the invalid option.",
+		};
+
+		const firstBlocked = createRepeatedToolFailureResult(original);
+		const retainedAfterFirst = firstBlocked.details.piToolFailureMemory;
+		const secondBlocked = createRepeatedToolFailureResult(retainedAfterFirst);
+		const retainedAfterSecond = secondBlocked.details.piToolFailureMemory;
+		const secondText = secondBlocked.content[0]?.type === "text" ? secondBlocked.content[0].text : "";
+
+		expect(retainedAfterFirst).toMatchObject({
+			failureCode: "invalid_option",
+			diagnostic: original.diagnostic,
+			correction: original.correction,
+			occurrence: 2,
+		});
+		expect(retainedAfterSecond).toMatchObject({
+			failureCode: "invalid_option",
+			diagnostic: original.diagnostic,
+			correction: original.correction,
+			occurrence: 3,
+		});
+		expect(secondText).toContain('"failure_code":"repeated_failed_operation"');
+		expect(secondText).toContain("Unchanged replay blocked after invalid_option");
+		expect(secondText.match(/Unchanged replay blocked/g)).toHaveLength(1);
+		expect(secondText.match(/The unchanged operation was not executed\./g)).toHaveLength(1);
+	});
+
+	it("terminates an exhausted recovery circuit without replacing its root evidence", () => {
+		const original = {
+			...record("failed", "file_not_found"),
+			diagnostic: "ENOENT: missing.txt",
+			correction: "Create or retarget the missing path.",
+		};
+
+		const exhausted = createToolFailureRecoveryExhaustedResult(
+			original,
+			"Recovery circuit opened after two blocked replays.",
+		);
+		const text = exhausted.content[0]?.type === "text" ? exhausted.content[0].text : "";
+
+		expect(exhausted.terminate).toBe(true);
+		expect(text).toContain('"failure_code":"recovery_exhausted"');
+		expect(text).toContain("Stop retrying tools in this run");
+		expect(exhausted.details.piToolFailureMemory).toMatchObject({
+			failureCode: "file_not_found",
+			diagnostic: original.diagnostic,
+			correction: original.correction,
+			occurrence: 2,
+		});
 	});
 
 	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {

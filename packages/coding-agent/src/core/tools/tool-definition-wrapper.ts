@@ -12,6 +12,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 		description: definition.description,
 		parameters: definition.parameters,
 		prepareArguments: definition.prepareArguments,
+		failureRecovery: definition.failureRecovery,
 		executionMode: definition.executionMode,
 		execute: (toolCallId, params, signal, onUpdate) =>
 			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
@@ -39,6 +40,7 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
 		description: tool.description,
 		parameters: tool.parameters as any,
 		prepareArguments: tool.prepareArguments,
+		failureRecovery: tool.failureRecovery,
 		executionMode: tool.executionMode,
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};

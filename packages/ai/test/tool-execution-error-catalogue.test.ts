@@ -56,6 +56,21 @@ describe("tool execution error catalogue", () => {
 			name: "permissionDenied",
 			phase: "policy",
 		});
+		expect(getToolExecutionErrorPolicy("oldText failed to match the current file contents")).toMatchObject({
+			name: "editOldTextNotFound",
+			failureCode: "edit_old_text_not_found",
+			phase: "execution",
+		});
+		expect(getToolExecutionErrorPolicy("No such file or directory: missing.txt")).toMatchObject({
+			name: "fileNotFound",
+			failureCode: "file_not_found",
+			phase: "execution",
+		});
+		expect(getToolExecutionErrorPolicy("Path not found: missing.txt")).toMatchObject({
+			name: "fileNotFound",
+			failureCode: "file_not_found",
+			phase: "execution",
+		});
 	});
 
 	it("keeps the provisioning boundary authoritative over a nested ENOENT diagnostic", () => {

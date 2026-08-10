@@ -53,6 +53,10 @@ export {
 	type ExtensionifyToolOptions,
 } from "./extensionify.ts";
 export {
+	createFileFailureRecoveryAuthority,
+	type FileFailureRecoveryAuthority,
+} from "./file-failure-recovery.ts";
+export {
 	type FileContentReference,
 	FileMutationIntentController,
 	type FileMutationIntentControllerOptions,

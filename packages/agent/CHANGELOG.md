@@ -1,8 +1,12 @@
 ## [Unreleased]
 
+### Added
+
+- Added the `AgentTool.failureRecovery` contract for tool-owned failure targets, opaque shared backend authorities, loaded-surface corrective actions, and exact raw-success evidence.
+
 ### Fixed
 
-- Fixed repeated deterministic tool execution failures executing despite recovery guidance by gating re-execution at the run-scoped execution boundary and clearing gate counts on successful recovery.
+- Fixed tool-failure loops executing despite recovery guidance by admitting at most one evidence-backed recovery probe and enforcing bounded unresolved-failure budgets without inferring recovery from argument text or hook-mutated results; exact operation success clears only its own budget, and exact admission identity remains separate from volatile-normalized diagnostic fingerprints.
 
 ## [0.86.14] - 2026-08-09
 

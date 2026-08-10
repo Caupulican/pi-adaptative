@@ -10,6 +10,7 @@ import {
 	fauxAssistantMessage,
 	type Model,
 	type ToolCall,
+	type ToolResultMessage,
 } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -35,6 +36,59 @@ function phoneModel(): Model<Api> {
 
 function phoneCall(name: string, args: Record<string, unknown>): string {
 	return `<pi:call name="${name}">${JSON.stringify(args)}</pi:call>`;
+}
+
+type PhoneResponseStep = string | ((context: Context) => string);
+
+async function createPhoneWorkflowSession(cwd: string, agentDir: string, responses: PhoneResponseStep[]) {
+	let responseIndex = 0;
+	const model = phoneModel();
+	const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+	authStorage.setRuntimeApiKey(model.provider, "test-key");
+	const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const settingsManager = SettingsManager.create(cwd, agentDir);
+	settingsManager.setAutoLearnSettings({ enabled: false, reflectionReview: false });
+	modelRegistry.registerProvider(model.provider, {
+		api: model.api,
+		streamSimple: (streamModel, context) => {
+			const responseStep = responses[responseIndex++];
+			if (responseStep === undefined) throw new Error("phone workflow requested an unexpected response");
+			const response = typeof responseStep === "function" ? responseStep(context) : responseStep;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: {
+						...fauxAssistantMessage(response),
+						api: streamModel.api,
+						provider: streamModel.provider,
+						model: streamModel.id,
+					},
+				});
+			});
+			return stream;
+		},
+	});
+	const created = await createAgentSession({
+		cwd,
+		agentDir,
+		model,
+		authStorage,
+		modelRegistry,
+		settingsManager,
+		sessionManager: SessionManager.inMemory(cwd),
+	});
+	return {
+		session: created.session,
+		get responseIndex() {
+			return responseIndex;
+		},
+		async dispose(): Promise<void> {
+			await created.session.disposeAndWait();
+			modelRegistry.unregisterProvider(model.provider);
+		},
+	};
 }
 
 describe("non-native phone filesystem workflow", () => {
@@ -349,6 +403,97 @@ describe("non-native phone filesystem workflow", () => {
 		} finally {
 			await created.session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("admits a phone read probe only after same-path raw write evidence", async () => {
+		const cwd = join(root, "project");
+		const agentDir = join(root, "agent");
+		const missingPath = join(cwd, "created-by-recovery.txt");
+		const content = "phone-recovery-evidence";
+		let recoveryTeachingObserved = false;
+		const responses: PhoneResponseStep[] = [
+			phoneCall("read", { path: missingPath }),
+			(context) => {
+				const prompt = `${context.systemPrompt ?? ""}\n${JSON.stringify(context.messages)}`;
+				expect(prompt).toContain('"failure_code":"file_not_found"');
+				expect(prompt).toContain("If the goal requires this exact missing file and its content is known");
+				recoveryTeachingObserved = true;
+				return phoneCall("write", { path: missingPath, content });
+			},
+			phoneCall("read", { path: missingPath }),
+			"recovery complete",
+		];
+		const harness = await createPhoneWorkflowSession(cwd, agentDir, responses);
+
+		try {
+			await harness.session.prompt(
+				`Read ${missingPath}; create that exact file with known content if it is missing.`,
+				{ autoContinueGoal: false },
+			);
+
+			expect(recoveryTeachingObserved).toBe(true);
+			expect(harness.responseIndex).toBe(responses.length);
+			expect(await readFile(missingPath, "utf8")).toBe(content);
+			const toolResults = harness.session.messages.filter((message) => message.role === "toolResult");
+			expect(toolResults.map((message) => [message.toolName, message.isError])).toEqual([
+				["read", true],
+				["write", false],
+				["read", false],
+			]);
+			const phoneCalls = harness.session.messages
+				.filter((message) => message.role === "assistant")
+				.flatMap((message) => message.content)
+				.filter((content): content is ToolCall => content.type === "toolCall");
+			expect(phoneCalls).toHaveLength(3);
+			expect(phoneCalls.every((call) => call.source === "text-protocol")).toBe(true);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("blocks a phone read retry after unrelated-path write success", async () => {
+		const cwd = join(root, "project");
+		const agentDir = join(root, "agent");
+		const missingPath = join(cwd, "still-missing.txt");
+		const unrelatedPath = join(cwd, "unrelated.txt");
+		let blockedContext = "";
+		const responses: PhoneResponseStep[] = [
+			phoneCall("read", { path: missingPath }),
+			phoneCall("write", { path: unrelatedPath, content: "unrelated" }),
+			phoneCall("read", { path: missingPath }),
+			(context) => {
+				blockedContext = `${context.systemPrompt ?? ""}\n${JSON.stringify(context.messages)}`;
+				return "the requested file remains unavailable";
+			},
+		];
+		const harness = await createPhoneWorkflowSession(cwd, agentDir, responses);
+
+		try {
+			await harness.session.prompt(`Read ${missingPath}. Do not substitute a different path.`, {
+				autoContinueGoal: false,
+			});
+
+			expect(blockedContext).toContain('"failure_code":"file_not_found"');
+			expect(blockedContext).toContain('"occ":2');
+			expect(blockedContext).toContain("Do not repeat an unchanged operation");
+			expect(blockedContext).not.toContain('"failure_code":"repeated_failed_operation"');
+			expect(harness.responseIndex).toBe(responses.length);
+			expect(await readFile(unrelatedPath, "utf8")).toBe("unrelated");
+			const readResults = harness.session.messages.filter(
+				(message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === "read",
+			);
+			expect(readResults).toHaveLength(2);
+			const readResultTexts = readResults.map((message) =>
+				message.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n"),
+			);
+			expect(readResultTexts[0]).toContain('"failure_code":"file_not_found"');
+			expect(readResultTexts[1]).toContain('"failure_code":"repeated_failed_operation"');
+		} finally {
+			await harness.dispose();
 		}
 	});
 });

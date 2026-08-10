@@ -33,9 +33,9 @@ export type StreamFn = (
  * Configuration for how tool calls from a single assistant message are executed.
  *
  * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
- * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
- *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
- *   while tool-result message artifacts are emitted later in assistant source order.
+ * - "parallel": tool calls are prepared and executed in bounded concurrent accounting waves.
+ *   Each wave updates failure-recovery state before later calls launch. `tool_execution_end` is
+ *   emitted in completion order within each wave, while tool-result artifacts remain in source order.
  */
 export type ToolExecutionMode = "sequential" | "parallel";
 
@@ -345,9 +345,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Tool execution mode.
 	 * - "sequential": execute tool calls one by one
-	 * - "parallel": preflight tool calls sequentially, then execute allowed tools concurrently;
-	 *   emit `tool_execution_end` in tool completion order after each tool is finalized,
-	 *   then emit tool-result message artifacts later in assistant source order
+	 * - "parallel": preflight and execute tool calls in bounded concurrent accounting waves;
+	 *   update recovery state between waves, emit `tool_execution_end` in completion order within
+	 *   each wave, then emit tool-result message artifacts in assistant source order
 	 *
 	 * Default: "parallel"
 	 */
@@ -509,6 +509,75 @@ export interface AgentToolResult<T> {
 /** Callback used by tools to stream partial execution updates. */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+const AGENT_TOOL_FAILURE_RECOVERY_AUTHORITY = Symbol("AgentToolFailureRecoveryAuthority");
+
+/** Opaque identity shared only by tool instances that act on the same authoritative backend. */
+export interface AgentToolFailureRecoveryAuthority {
+	readonly [AGENT_TOOL_FAILURE_RECOVERY_AUTHORITY]: true;
+}
+
+/** Create an unforgeable, process-local recovery authority for intentionally cooperating tools. */
+export function createAgentToolFailureRecoveryAuthority(): AgentToolFailureRecoveryAuthority {
+	return Object.freeze({ [AGENT_TOOL_FAILURE_RECOVERY_AUTHORITY]: true as const });
+}
+
+/** Validate recovery authority values supplied by tool-owned contracts. */
+export function isAgentToolFailureRecoveryAuthority(value: unknown): value is AgentToolFailureRecoveryAuthority {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		(value as { [AGENT_TOOL_FAILURE_RECOVERY_AUTHORITY]?: unknown })[AGENT_TOOL_FAILURE_RECOVERY_AUTHORITY] === true
+	);
+}
+
+/** Exact, opaque state requirement shared only by tools that intentionally cooperate on recovery. */
+export interface AgentToolFailureRecoveryTarget {
+	/** Backend identity; equality is object identity and the harness never serializes it. */
+	authority: AgentToolFailureRecoveryAuthority;
+	/** Stable semantic namespace owned by the declaring tools. The harness never interprets it. */
+	kind: string;
+	/** Exact resource/state identity within `kind`. The harness compares it byte-for-byte. */
+	scope: string;
+}
+
+/** Bounded failure identity supplied to a failed tool's recovery contract. */
+export interface AgentToolFailureRecoveryContext {
+	failureCode: string;
+}
+
+/**
+ * One action a tool can actually perform for a declared failure target.
+ *
+ * A `correct` action teaches a materially changed operation and never unlocks an unchanged retry.
+ * A `repair` action must emit exact evidence after success; only that evidence may unlock one probe.
+ */
+export type AgentToolFailureRecoveryAction<TParameters extends TSchema, TDetails> =
+	| {
+			kind: "correct";
+			authority: AgentToolFailureRecoveryAuthority;
+			targetKind: string;
+			instruction: string;
+	  }
+	| {
+			kind: "repair";
+			authority: AgentToolFailureRecoveryAuthority;
+			targetKind: string;
+			instruction: string;
+			getEvidence: (params: Static<TParameters>, result: AgentToolResult<TDetails>) => readonly string[];
+	  };
+
+/** Tool-owned failure targets and recovery actions. Undeclared behavior has no recovery authority. */
+export interface AgentToolFailureRecoveryContract<TParameters extends TSchema, TDetails> {
+	/** Derive exact recovery requirements from validated arguments and a classified failure. */
+	getFailureTargets?: (
+		params: Static<TParameters>,
+		failure: AgentToolFailureRecoveryContext,
+	) => readonly AgentToolFailureRecoveryTarget[];
+	/** Actions this tool can perform when it is present in the active tool surface. */
+	actions?: readonly AgentToolFailureRecoveryAction<TParameters, TDetails>[];
+}
+
 /** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
@@ -518,6 +587,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Must return an object that matches `TParameters`.
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
+	/** Explicit failure-recovery authority; the agent loop never infers recovery from argument text. */
+	failureRecovery?: AgentToolFailureRecoveryContract<TParameters, TDetails>;
 	/**
 	 * Execute the tool call. Throw for exceptional execution failures, or return
 	 * `{ isError: true }` with bounded diagnostic content for an expected

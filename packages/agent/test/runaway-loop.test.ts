@@ -2,7 +2,15 @@ import { type AssistantMessage, type AssistantMessageEvent, EventStream, type Me
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+	AgentToolResult,
+} from "../src/types.ts";
+import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 
 /**
  * Runaway-loop backstop (cost guard, bug #23): a model wedged repeating the SAME tool call forever
@@ -82,10 +90,18 @@ const writeLikeSchema = Type.Union([
 const identityConverter = (messages: AgentMessage[]): Message[] =>
 	messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 
+const TEST_RECOVERY_AUTHORITY = createAgentToolFailureRecoveryAuthority();
+
 async function drain(stream: ReturnType<typeof agentLoop>) {
 	const events: AgentEvent[] = [];
 	for await (const event of stream) events.push(event);
 	return events;
+}
+
+function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode: string): boolean {
+	return result.content.some(
+		(block) => block.type === "text" && block.text.includes(`"failure_code":"${failureCode}"`),
+	);
 }
 
 describe("runaway-loop backstop", () => {
@@ -502,6 +518,1088 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
+	it("does not treat changed volatile-looking arguments as an unchanged operation", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		const firstPath = "missing-123e4567-e89b-12d3-a456-426614174000.txt";
+		const secondPath = "missing-123e4567-e89b-12d3-a456-426614174111.txt";
+		let executions = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute(_id, params) {
+				executions++;
+				throw new Error(`ENOENT: no such file or directory, open '${params.path}'`);
+			},
+		};
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `volatile-${turn}`,
+									name: "read_like",
+									arguments: { path: turn === 1 ? firstPath : secondPath },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [failingTool] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(2);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					event.toolCallId === "volatile-3" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toBe(true);
+	});
+
+	it("keeps the execution gate across replacement contexts and bypasses hooks for blocked calls", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		let executions = 0;
+		let beforeCalls = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute() {
+				executions++;
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
+		let calls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				calls++;
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[
+							{
+								type: "toolCall",
+								id: `refresh-${calls}`,
+								name: "read_like",
+								arguments: { path: "missing.txt" },
+							},
+						],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 3,
+					beforeToolCall: async () => {
+						beforeCalls++;
+						return undefined;
+					},
+					prepareNextTurn: ({ context: currentContext }) => ({
+						context: { ...currentContext, messages: currentContext.messages.slice() },
+					}),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+		const toolResultIds = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
+		);
+		const blocked = events.filter(
+			(event) =>
+				event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "repeated_failed_operation"),
+		);
+		const exhausted = events.filter(
+			(event) =>
+				event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+		);
+
+		expect(executions).toBe(1);
+		expect(beforeCalls).toBe(1);
+		expect(toolResultIds).toEqual(["refresh-1", "refresh-2", "refresh-3"]);
+		expect(blocked).toHaveLength(1);
+		expect(exhausted).toHaveLength(1);
+	});
+
+	it("keeps run-scoped failure authority when a replacement context omits the failure transcript", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		let executions = 0;
+		let beforeCalls = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute() {
+				executions++;
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		let calls = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [failingTool] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 2,
+					beforeToolCall: async () => {
+						beforeCalls++;
+						return undefined;
+					},
+					prepareNextTurn: ({ context: currentContext }) => ({
+						context: {
+							...currentContext,
+							messages: currentContext.messages.filter((message) => message.role === "user"),
+						},
+					}),
+				},
+				undefined,
+				() => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						calls++;
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: assistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: `omitted-memory-${calls}`,
+										name: "read_like",
+										arguments: { path: "missing.txt" },
+									},
+								],
+								"toolUse",
+							),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		expect(executions).toBe(1);
+		expect(beforeCalls).toBe(1);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					event.toolCallId === "omitted-memory-2" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toBe(true);
+	});
+
+	it("reopens after recovery and clears the operation budget after exact success", async () => {
+		const pathSchema = Type.Object({ path: Type.String() });
+		const repairSchema = Type.Object({ target: Type.String() });
+		const targetKind = "test.file.exists";
+		let repaired = false;
+		let targetExecutions = 0;
+		let repairExecutions = 0;
+		const targetTool: AgentTool<typeof pathSchema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: pathSchema,
+			failureRecovery: {
+				getFailureTargets: (params, failure) =>
+					failure.failureCode === "file_not_found"
+						? [{ authority: TEST_RECOVERY_AUTHORITY, kind: targetKind, scope: params.path }]
+						: [],
+			},
+			async execute() {
+				targetExecutions++;
+				if (!repaired) throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+				return { content: [{ type: "text", text: "recovered" }], details: {} };
+			},
+		};
+		const repairTool: AgentTool<typeof repairSchema, { repaired: boolean }> = {
+			name: "repair_like",
+			label: "Repair-like",
+			description: "Repair a path",
+			parameters: repairSchema,
+			failureRecovery: {
+				actions: [
+					{
+						kind: "repair",
+						authority: TEST_RECOVERY_AUTHORITY,
+						targetKind,
+						instruction: "Use repair_like on the failed target.",
+						getEvidence: (params, result) => (result.details.repaired ? [params.target] : []),
+					},
+				],
+			},
+			async execute() {
+				repairExecutions++;
+				repaired = true;
+				return { content: [{ type: "text", text: "repaired" }], details: { repaired: true } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, repairTool] };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 5) {
+					const recoveryTurn = turn === 3;
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								recoveryTurn
+									? {
+											type: "toolCall",
+											id: "repair",
+											name: "repair_like",
+											arguments: { target: "missing.txt" },
+										}
+									: {
+											type: "toolCall",
+											id: `target-${turn}`,
+											name: "read_like",
+											arguments: { path: "missing.txt" },
+										},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(targetExecutions).toBe(3);
+		expect(repairExecutions).toBe(1);
+		expect(
+			events.filter(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toHaveLength(1);
+		expect(
+			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-4"),
+		).toMatchObject({
+			type: "tool_execution_end",
+			isError: false,
+		});
+		expect(
+			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-5"),
+		).toMatchObject({
+			type: "tool_execution_end",
+			isError: false,
+		});
+	});
+
+	it("does not infer recovery from matching-looking arguments without declared evidence", async () => {
+		const targetSchema = Type.Object({ path: Type.String() });
+		const unrelatedSchema = Type.Object({ value: Type.String() });
+		let targetExecutions = 0;
+		let unrelatedExecutions = 0;
+		const targetTool: AgentTool<typeof targetSchema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: targetSchema,
+			async execute() {
+				targetExecutions++;
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const unrelatedTool: AgentTool<typeof unrelatedSchema> = {
+			name: "unrelated",
+			label: "Unrelated",
+			description: "Perform unrelated work",
+			parameters: unrelatedSchema,
+			async execute() {
+				unrelatedExecutions++;
+				return { content: [{ type: "text", text: "unrelated success" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, unrelatedTool] };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 3) {
+					const unrelatedTurn = turn === 2;
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								unrelatedTurn
+									? {
+											type: "toolCall",
+											id: "unrelated-1",
+											name: "unrelated",
+											arguments: { value: "missing.txt" },
+										}
+									: {
+											type: "toolCall",
+											id: `target-${turn}`,
+											name: "read_like",
+											arguments: { path: "missing.txt" },
+										},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(targetExecutions).toBe(1);
+		expect(unrelatedExecutions).toBe(1);
+		expect(
+			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-3"),
+		).toMatchObject({ type: "tool_execution_end", isError: true });
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					event.toolCallId === "target-3" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toBe(true);
+	});
+
+	it("does not reopen for throwing or non-matching repair evidence", async () => {
+		const targetSchema = Type.Object({ path: Type.String() });
+		const repairSchema = Type.Object({ target: Type.String() });
+		const targetKind = "test.file.exists";
+		let targetExecutions = 0;
+		const targetTool: AgentTool<typeof targetSchema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: targetSchema,
+			failureRecovery: {
+				getFailureTargets: (params) => [
+					{ authority: TEST_RECOVERY_AUTHORITY, kind: targetKind, scope: params.path },
+				],
+			},
+			async execute() {
+				targetExecutions++;
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const repairTool: AgentTool<typeof repairSchema, { repaired: boolean }> = {
+			name: "repair_like",
+			label: "Repair-like",
+			description: "Inspect a possible repair",
+			parameters: repairSchema,
+			failureRecovery: {
+				actions: [
+					{
+						kind: "repair",
+						authority: TEST_RECOVERY_AUTHORITY,
+						targetKind,
+						instruction: "Exercise a broken evidence callback.",
+						getEvidence: () => {
+							throw new Error("broken recovery evidence");
+						},
+					},
+					{
+						kind: "repair",
+						authority: TEST_RECOVERY_AUTHORITY,
+						targetKind,
+						instruction: "Use repair_like on the failed target.",
+						getEvidence: (params, result) => (result.details.repaired ? [params.target] : ["different.txt"]),
+					},
+				],
+			},
+			async execute() {
+				return {
+					content: [{ type: "text", text: "no repair was performed" }],
+					details: { repaired: false },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, repairTool] };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								turn === 2
+									? {
+											type: "toolCall",
+											id: "repair-no-evidence",
+											name: "repair_like",
+											arguments: { target: "missing.txt" },
+										}
+									: {
+											type: "toolCall",
+											id: `target-no-evidence-${turn}`,
+											name: "read_like",
+											arguments: { path: "missing.txt" },
+										},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					afterToolCall: async ({ toolCall }) =>
+						toolCall.name === "repair_like" ? { details: { repaired: true } } : undefined,
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(targetExecutions).toBe(1);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					event.toolCallId === "target-no-evidence-3" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toBe(true);
+	});
+
+	it("teaches only declared recovery actions from the loaded tool surface", async () => {
+		const targetSchema = Type.Object({ path: Type.String() });
+		const repairSchema = Type.Object({ target: Type.String() });
+		const targetKind = "test.file.exists";
+		const targetTool: AgentTool<typeof targetSchema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: targetSchema,
+			failureRecovery: {
+				getFailureTargets: (params) => [
+					{ authority: TEST_RECOVERY_AUTHORITY, kind: targetKind, scope: params.path },
+				],
+			},
+			async execute() {
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const loadedRepairTool: AgentTool<typeof repairSchema> = {
+			name: "loaded_repair",
+			label: "Loaded repair",
+			description: "Repair a target",
+			parameters: repairSchema,
+			failureRecovery: {
+				actions: [
+					{
+						kind: "repair",
+						authority: TEST_RECOVERY_AUTHORITY,
+						targetKind,
+						instruction: "Create the missing target with loaded_repair.",
+						getEvidence: () => [],
+					},
+				],
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "unused" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "base", messages: [], tools: [targetTool, loadedRepairTool] };
+		const providerPrompts: string[] = [];
+		let turn = 0;
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				(_model, providerContext) => {
+					providerPrompts.push(providerContext.systemPrompt ?? "");
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						stream.push({
+							type: "done",
+							reason: turn === 1 ? "toolUse" : "stop",
+							message:
+								turn === 1
+									? assistantMessage(
+											[
+												{
+													type: "toolCall",
+													id: "teach-target",
+													name: "read_like",
+													arguments: { path: "missing.txt" },
+												},
+											],
+											"toolUse",
+										)
+									: assistantMessage([{ type: "text", text: "done" }], "stop"),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		expect(providerPrompts[1]).toContain("Create the missing target with loaded_repair.");
+		expect(providerPrompts[1]).not.toContain("list the parent directory or re-read the path");
+		expect(providerPrompts[1]).not.toContain("unloaded_repair");
+	});
+
+	it("does not teach an action owned by a different backend authority", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		const otherAuthority = createAgentToolFailureRecoveryAuthority();
+		const targetTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			failureRecovery: {
+				getFailureTargets: (params) => [
+					{ authority: TEST_RECOVERY_AUTHORITY, kind: "test.file.exists", scope: params.path },
+				],
+			},
+			async execute() {
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const otherBackendTool: AgentTool<typeof schema> = {
+			name: "other_backend",
+			label: "Other backend",
+			description: "Repairs a different backend",
+			parameters: schema,
+			failureRecovery: {
+				actions: [
+					{
+						kind: "repair",
+						authority: otherAuthority,
+						targetKind: "test.file.exists",
+						instruction: "Repair with the other backend.",
+						getEvidence: (params) => [params.path],
+					},
+				],
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "unused" }], details: {} };
+			},
+		};
+		const malformedContractTool: AgentTool<typeof schema> = {
+			name: "malformed_contract",
+			label: "Malformed contract",
+			description: "Exposes a broken recovery contract",
+			parameters: schema,
+			async execute() {
+				return { content: [{ type: "text", text: "unused" }], details: {} };
+			},
+		};
+		Object.defineProperty(malformedContractTool, "failureRecovery", {
+			get() {
+				throw new Error("broken recovery contract getter");
+			},
+		});
+		const providerPrompts: string[] = [];
+		let turn = 0;
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{
+					systemPrompt: "base",
+					messages: [],
+					tools: [targetTool, otherBackendTool, malformedContractTool],
+				},
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				(_model, providerContext) => {
+					providerPrompts.push(providerContext.systemPrompt ?? "");
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						stream.push({
+							type: "done",
+							reason: turn === 1 ? "toolUse" : "stop",
+							message:
+								turn === 1
+									? assistantMessage(
+											[
+												{
+													type: "toolCall",
+													id: "no-action-target",
+													name: "read_like",
+													arguments: { path: "missing.txt" },
+												},
+											],
+											"toolUse",
+										)
+									: assistantMessage([{ type: "text", text: "done" }], "stop"),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		expect(providerPrompts[1]).toContain("No currently loaded tool declares a recovery action");
+		expect(providerPrompts[1]).not.toContain("Repair with the other backend.");
+		expect(providerPrompts[1]).not.toContain("list the parent directory or re-read the path");
+	});
+
+	it("halts after one failed recovery probe instead of alternating forever", async () => {
+		const targetSchema = Type.Object({ path: Type.String() });
+		const recoverySchema = Type.Object({ target: Type.String() });
+		const targetKind = "test.file.exists";
+		let targetExecutions = 0;
+		let recoveryExecutions = 0;
+		const targetTool: AgentTool<typeof targetSchema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: targetSchema,
+			failureRecovery: {
+				getFailureTargets: (params) => [
+					{ authority: TEST_RECOVERY_AUTHORITY, kind: targetKind, scope: params.path },
+				],
+			},
+			async execute() {
+				targetExecutions++;
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const recoveryTool: AgentTool<typeof recoverySchema, { repaired: boolean }> = {
+			name: "repair_like",
+			label: "Repair-like",
+			description: "Attempt a repair",
+			parameters: recoverySchema,
+			failureRecovery: {
+				actions: [
+					{
+						kind: "repair",
+						authority: TEST_RECOVERY_AUTHORITY,
+						targetKind,
+						instruction: "Attempt the declared repair.",
+						getEvidence: (params, result) => (result.details.repaired ? [params.target] : []),
+					},
+				],
+			},
+			async execute() {
+				recoveryExecutions++;
+				return { content: [{ type: "text", text: "repair attempted" }], details: { repaired: true } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, recoveryTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				if (turns <= 6) {
+					const recoveryTurn = turns % 2 === 0;
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								recoveryTurn
+									? {
+											type: "toolCall",
+											id: `recovery-${turns}`,
+											name: "repair_like",
+											arguments: { target: "missing.txt" },
+										}
+									: {
+											type: "toolCall",
+											id: `target-${turns}`,
+											name: "read_like",
+											arguments: { path: "missing.txt" },
+										},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "should not be reached" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(turns).toBe(3);
+		expect(targetExecutions).toBe(2);
+		expect(recoveryExecutions).toBe(1);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+			),
+		).toBe(true);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("halts repeated blocked replays even when the generic stall detector is disabled", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		let executions = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute() {
+				executions++;
+				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				if (turns <= 8) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `blocked-${turns}`,
+									name: "read_like",
+									arguments: { path: "missing.txt" },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "should not be reached" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(turns).toBe(3);
+		expect(executions).toBe(1);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+			),
+		).toBe(true);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("bounds varied-argument failures by failure family", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		let executions = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute(_id, params) {
+				executions++;
+				throw new Error(`ENOENT: no such file or directory, open '${params.path}'`);
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				if (turns <= 10) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `varied-${turns}`,
+									name: "read_like",
+									arguments: { path: `missing-${turns}.txt` },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "should not be reached" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(turns).toBe(4);
+		expect(executions).toBe(4);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+			),
+		).toBe(true);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("bounds varied policy rejections without executing the tool", async () => {
+		let executions = 0;
+		let beforeCalls = 0;
+		const guardedTool = createEchoTool(() => executions++);
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [guardedTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				if (turns <= 10) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `policy-${turns}`,
+									name: "echo",
+									arguments: { value: `forbidden-${turns}` },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "should not be reached" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 0,
+					beforeToolCall: async () => {
+						beforeCalls++;
+						return { block: true, reason: "fixture policy rejection" };
+					},
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(turns).toBe(4);
+		expect(beforeCalls).toBe(4);
+		expect(executions).toBe(0);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+			),
+		).toBe(true);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("bounds total failures when a model varies both operation and failure family", async () => {
+		const schema = Type.Object({ attempt: Type.Number() });
+		let executions = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "variable_failure",
+			label: "Variable failure",
+			description: "Fail with a different classified code",
+			parameters: schema,
+			async execute(_id, params) {
+				executions++;
+				throw new Error(`EFAIL_${params.attempt}: distinct fixture failure`);
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				if (turns <= 16) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `diverse-${turns}`,
+									name: "variable_failure",
+									arguments: { attempt: turns },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "should not be reached" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(turns).toBe(12);
+		expect(executions).toBe(12);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
 	it("keeps one policy-authorized identical timeout retry available", async () => {
 		let executions = 0;
 		const recoveringTool = createEchoTool(() => {
@@ -552,6 +1650,276 @@ describe("runaway-loop backstop", () => {
 		expect(executions).toBe(2);
 		expect(stalls).toHaveLength(0);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("teaches when the timeout retry is available and when it is exhausted", async () => {
+		const timingOutTool = createEchoTool();
+		timingOutTool.execute = async () => {
+			throw new Error("ETIMEDOUT: transient fixture");
+		};
+		const providerPrompts: string[] = [];
+		let turn = 0;
+		const streamFn = (_model: unknown, providerContext: { systemPrompt?: string }) => {
+			providerPrompts.push(providerContext.systemPrompt ?? "");
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				stream.push({
+					type: "done",
+					reason: turn <= 2 ? "toolUse" : "stop",
+					message:
+						turn <= 2
+							? assistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: `timeout-guidance-${turn}`,
+											name: "echo",
+											arguments: { value: "same" },
+										},
+									],
+									"toolUse",
+								)
+							: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [timingOutTool] },
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(providerPrompts[1]).toContain("permits one unchanged retry");
+		expect(providerPrompts[2]).toContain("unchanged retry is exhausted");
+	});
+
+	it("reserves one timeout retry across parallel duplicates and blocks the excess call", async () => {
+		let executions = 0;
+		const timingOutTool = createEchoTool();
+		timingOutTool.execute = async () => {
+			executions++;
+			throw new Error("ETIMEDOUT: transient fixture");
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [timingOutTool] };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn <= 2) {
+					const callCount = turn === 1 ? 1 : 2;
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							Array.from({ length: callCount }, (_, index) => ({
+								type: "toolCall" as const,
+								id: `timeout-${turn}-${index}`,
+								name: "echo",
+								arguments: { value: "same" },
+							})),
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, toolExecution: "parallel" },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(2);
+		expect(
+			events.filter(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toHaveLength(1);
+	});
+
+	it("accounts parallel failures in bounded waves before launching more work", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		let executions = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			async execute(_id, params) {
+				executions++;
+				throw new Error(`ENOENT: no such file or directory, open '${params.path}'`);
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						Array.from({ length: 10 }, (_, index) => ({
+							type: "toolCall" as const,
+							id: `parallel-varied-${index}`,
+							name: "read_like",
+							arguments: { path: `missing-${index}.txt` },
+						})),
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 0,
+					toolExecution: "parallel",
+				},
+				undefined,
+				streamFn,
+			),
+		);
+		const pairedResultIds = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
+		);
+
+		expect(turns).toBe(1);
+		expect(executions).toBe(4);
+		expect(pairedResultIds).toEqual(Array.from({ length: 10 }, (_, index) => `parallel-varied-${index}`));
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("applies parallel gate outcomes in assistant-call order", async () => {
+		const schema = Type.Object({ value: Type.String() });
+		const targetKind = "test.resource.ready";
+		let targetExecutions = 0;
+		let releaseFirstFailure: (() => void) | undefined;
+		const firstFailureMayFinish = new Promise<void>((resolve) => {
+			releaseFirstFailure = resolve;
+		});
+		const targetTool: AgentTool<typeof schema> = {
+			name: "target",
+			label: "Target",
+			description: "Target operation",
+			parameters: schema,
+			failureRecovery: {
+				getFailureTargets: (params) => [
+					{ authority: TEST_RECOVERY_AUTHORITY, kind: targetKind, scope: params.value },
+				],
+			},
+			async execute() {
+				targetExecutions++;
+				if (targetExecutions === 1) {
+					await firstFailureMayFinish;
+					throw new Error("ENOENT: no such file or directory, open 'target.txt'");
+				}
+				return { content: [{ type: "text", text: "target recovered" }], details: {} };
+			},
+		};
+		const recoveryTool: AgentTool<typeof schema, { repaired: boolean }> = {
+			name: "recovery",
+			label: "Recovery",
+			description: "Recovery operation",
+			parameters: schema,
+			failureRecovery: {
+				actions: [
+					{
+						kind: "repair",
+						authority: TEST_RECOVERY_AUTHORITY,
+						targetKind,
+						instruction: "Repair the matching resource.",
+						getEvidence: (params, result) => (result.details.repaired ? [params.value] : []),
+					},
+				],
+			},
+			async execute() {
+				setTimeout(() => releaseFirstFailure?.(), 0);
+				return { content: [{ type: "text", text: "recovery complete" }], details: { repaired: true } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, recoveryTool] };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn++;
+				if (turn === 1) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{ type: "toolCall", id: "target-1", name: "target", arguments: { value: "same" } },
+								{ type: "toolCall", id: "recovery-1", name: "recovery", arguments: { value: "same" } },
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				if (turn === 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[{ type: "toolCall", id: "target-2", name: "target", arguments: { value: "same" } }],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, toolExecution: "parallel" },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(targetExecutions).toBe(2);
+		expect(
+			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-2"),
+		).toMatchObject({
+			type: "tool_execution_end",
+			isError: false,
+		});
 	});
 
 	it("allows a materially changed operation after a deterministic failure", async () => {

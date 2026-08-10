@@ -22,6 +22,13 @@ import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import {
+	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
+	FILE_EXISTS_RECOVERY_TARGET_KIND,
+	type FileFailureRecoveryAuthority,
+	fileRecoveryTarget,
+	selectFileFailureRecoveryAuthority,
+} from "./file-failure-recovery.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -180,6 +187,8 @@ export interface ReadToolOptions {
 	autoResizeImages?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
+	/** Shared backend identity for exact cross-tool recovery with custom operations. */
+	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Whole-file load budget for text reads; larger files stream line slices instead. Default 16 MiB. */
 	maxTextReadBytes?: number;
 	/** Pathology guard for image reads; larger images return downscale guidance. Default 128 MiB. */
@@ -336,6 +345,10 @@ export function createReadToolDefinition(
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = options?.operations ?? defaultReadOperations;
+	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
+		options?.operations !== undefined,
+		options?.failureRecoveryAuthority,
+	);
 	const maxTextReadBytes = options?.maxTextReadBytes ?? DEFAULT_MAX_TEXT_READ_BYTES;
 	const maxImageReadBytes = options?.maxImageReadBytes ?? DEFAULT_MAX_IMAGE_READ_BYTES;
 	return {
@@ -345,6 +358,23 @@ export function createReadToolDefinition(
 		promptSnippet: "Read file contents",
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		parameters: readSchema,
+		failureRecovery: {
+			getFailureTargets: (params, failure) =>
+				failure.failureCode === "file_not_found" && failureRecoveryAuthority
+					? [fileRecoveryTarget(failureRecoveryAuthority, FILE_EXISTS_RECOVERY_TARGET_KIND, params.path, cwd)]
+					: [],
+			actions: failureRecoveryAuthority
+				? [
+						{
+							kind: "correct",
+							authority: failureRecoveryAuthority.contractAuthority,
+							targetKind: FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
+							instruction:
+								"Use read on the failed edit path to obtain current text, then submit a changed edit with exact current text.",
+						},
+					]
+				: [],
+		},
 		async execute(
 			_toolCallId,
 			{

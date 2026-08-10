@@ -1,11 +1,18 @@
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
+import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core";
 import { Container, Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import {
+	FILE_EXISTS_RECOVERY_TARGET_KIND,
+	type FileFailureRecoveryAuthority,
+	fileRecoveryScope,
+	selectFileFailureRecoveryAuthority,
+	WRITE_RETARGET_RECOVERY_TARGET_KIND,
+} from "./file-failure-recovery.ts";
 import {
 	type FileContentReference,
 	FileMutationIntentController,
@@ -62,6 +69,8 @@ const defaultWriteOperations: WriteOperations = {
 export interface WriteToolOptions {
 	/** Custom operations for file writing. Default: local filesystem */
 	operations?: WriteOperations;
+	/** Shared backend identity for exact cross-tool recovery with custom operations. */
+	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Session-owned harness preflight and exact-content-reference authority. */
 	intentController?: FileMutationIntentController;
 }
@@ -296,10 +305,15 @@ export function createWriteToolDefinition(
 	options?: WriteToolOptions,
 ): ToolDefinition<typeof writeSchema, WriteToolDetails> {
 	const ops = options?.operations ?? defaultWriteOperations;
+	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
+		options?.operations !== undefined,
+		options?.failureRecoveryAuthority,
+	);
 	if (options?.operations && !options.intentController) {
 		throw new Error("Custom write operations require a matching file mutation intent controller.");
 	}
 	const intentController = options?.intentController ?? new FileMutationIntentController();
+	const retargetRecoveryAuthority = createAgentToolFailureRecoveryAuthority();
 	return {
 		name: "write",
 		label: "write",
@@ -312,6 +326,42 @@ export function createWriteToolDefinition(
 			"Write is create-only; edit existing files. Reuse contentRef for exact copies.",
 		],
 		parameters: writeSchema,
+		failureRecovery: {
+			getFailureTargets: (params, failure) =>
+				failure.failureCode === "mutation_retarget_required"
+					? [
+							{
+								authority: retargetRecoveryAuthority,
+								kind: WRITE_RETARGET_RECOVERY_TARGET_KIND,
+								scope: resolveToCwd(params.path, cwd),
+							},
+						]
+					: [],
+			actions: [
+				{
+					kind: "correct",
+					authority: retargetRecoveryAuthority,
+					targetKind: WRITE_RETARGET_RECOVERY_TARGET_KIND,
+					instruction:
+						"Use write with the retained payloadRef and a corrected new path; write cannot overwrite an existing entry.",
+				},
+				...(failureRecoveryAuthority
+					? [
+							{
+								kind: "repair" as const,
+								authority: failureRecoveryAuthority.contractAuthority,
+								targetKind: FILE_EXISTS_RECOVERY_TARGET_KIND,
+								instruction:
+									"If the goal requires this exact missing file and its content is known, create it with write.",
+								getEvidence: (params: WriteToolInput, result: { details: WriteToolDetails }) =>
+									result.details.phase === "written"
+										? [fileRecoveryScope(failureRecoveryAuthority, params.path, cwd)]
+										: [],
+							},
+						]
+					: []),
+			],
+		},
 		async execute(_toolCallId, input: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const { path } = input;
 			const absolutePath = resolveToCwd(path, cwd);
