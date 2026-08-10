@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,14 +17,19 @@ import { createWriteTool } from "../src/core/tools/write.ts";
 
 const temporaryRoots: string[] = [];
 
+async function createTemporaryRoot(prefix: string): Promise<string> {
+	const root = await mkdtemp(join(await realpath(tmpdir()), prefix));
+	temporaryRoots.push(root);
+	return root;
+}
+
 afterEach(async () => {
 	await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe("tool-owned failure recovery contracts", () => {
 	it("lets read declare an exact missing-file target without interpreting argument text", async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "pi-read-recovery-contract-"));
-		temporaryRoots.push(cwd);
+		const cwd = await createTemporaryRoot("pi-read-recovery-contract-");
 		const read = createReadTool(cwd);
 
 		const targets = read.failureRecovery?.getFailureTargets?.(
@@ -42,8 +47,7 @@ describe("tool-owned failure recovery contracts", () => {
 	});
 
 	it("emits file-exists evidence only from write's successful written result", async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "pi-write-recovery-contract-"));
-		temporaryRoots.push(cwd);
+		const cwd = await createTemporaryRoot("pi-write-recovery-contract-");
 		const read = createReadTool(cwd);
 		const write = createWriteTool(cwd);
 		const input = { path: "nested/../created.txt", content: "created" };
@@ -64,8 +68,7 @@ describe("tool-owned failure recovery contracts", () => {
 	});
 
 	it("declares changed-operation guidance without granting repair evidence", async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "pi-correction-contract-"));
-		temporaryRoots.push(cwd);
+		const cwd = await createTemporaryRoot("pi-correction-contract-");
 		const read = createReadTool(cwd);
 		const write = createWriteTool(cwd);
 		const edit = createEditTool(cwd);
@@ -91,8 +94,7 @@ describe("tool-owned failure recovery contracts", () => {
 	});
 
 	it("does not claim local recovery authority for custom operation adapters", async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "pi-custom-recovery-contract-"));
-		temporaryRoots.push(cwd);
+		const cwd = await createTemporaryRoot("pi-custom-recovery-contract-");
 		const read = createReadTool(cwd, {
 			operations: {
 				readFile: async () => Buffer.from("remote"),
@@ -148,8 +150,7 @@ describe("tool-owned failure recovery contracts", () => {
 	});
 
 	it("matches only custom tools that share one explicit backend authority", async () => {
-		const cwd = await mkdtemp(join(tmpdir(), "pi-shared-recovery-contract-"));
-		temporaryRoots.push(cwd);
+		const cwd = await createTemporaryRoot("pi-shared-recovery-contract-");
 		const authority = createFileFailureRecoveryAuthority((absolutePath) => `remote:${absolutePath}`);
 		const read = createReadTool(cwd, {
 			operations: {

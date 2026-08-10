@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows tool-failure recovery contract fixtures to use canonical temporary paths.
+
 ## [0.86.15] - 2026-08-10
 
 ### Added
