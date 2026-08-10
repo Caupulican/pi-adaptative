@@ -1595,6 +1595,27 @@ async function generateModels() {
 		});
 	}
 
+	// Retain Gemini 2.0 Flash while it remains part of the public Google API contract.
+	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-2.0-flash")) {
+		allModels.push({
+			id: "gemini-2.0-flash",
+			name: "Gemini 2.0 Flash",
+			api: "google-generative-ai",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			provider: "google",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: {
+				input: 0.1,
+				output: 0.4,
+				cacheRead: 0.025,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 8192,
+		});
+	}
+
 	// GPT-5.6 public API metadata is kept explicit so the alias and the full family
 	// remain available even when models.dev is still rolling out catalogue updates.
 	const openAiGpt56Models = [

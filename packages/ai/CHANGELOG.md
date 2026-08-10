@@ -8,6 +8,10 @@
 
 - Changed missing-file and edit-text-mismatch catalogue entries to expose stable semantic failure codes for tool-owned recovery contracts.
 
+### Fixed
+
+- Retained Gemini 2.0 Flash in the generated Google model catalogue when upstream metadata omits it.
+
 ## [0.86.14] - 2026-08-09
 
 ## [0.86.13] - 2026-08-09
