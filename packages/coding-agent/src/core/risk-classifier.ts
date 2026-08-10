@@ -191,10 +191,18 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 		};
 	}
 	if (input.toolName === "secret_store") {
+		if (command === "migrate") {
+			return {
+				risk: "scoped-write",
+				reasonCode: "authorized_credential_migration",
+				reasons: ["Credential values move through a model-blind host adapter into the current-project vault"],
+				requiresApproval: false,
+			};
+		}
 		return {
 			risk: "read-only",
 			reasonCode: "authorized_credential_use",
-			reasons: ["Credential activation is limited to an owner-authorized current-project binding"],
+			reasons: ["Credential operations are model-blind and limited to the user plane and current project"],
 			requiresApproval: false,
 		};
 	}

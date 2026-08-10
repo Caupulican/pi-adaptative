@@ -158,7 +158,7 @@ export class SystemPromptBuilder {
 		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
 		const settingsGate =
 			autonomy.mode === "full"
-				? "In autonomy.mode=full, autonomy/autoLearn setting tuning is covered by the standing autonomy grant; ask before changing credentials, provider auth, package sources, or unrelated preferences."
+				? "In autonomy.mode=full, autonomy/autoLearn setting tuning is covered by the standing autonomy grant; ask before credential disclosure, provider-auth changes, credential operations outside an active user-plane secret_store grant, package-source changes, or unrelated preferences."
 				: "Ask for explicit approval before changing global settings.";
 		if (profile.class !== "full") {
 			return `Pi self-modification boundary: edit Pi core only under ${sourceStatus}. Inspect first, preserve concurrent work, make a small auditable change, and run focused validation. ${settingsGate} Always ask before publishing, pushing, tagging, or releasing.`;
@@ -204,13 +204,13 @@ export class SystemPromptBuilder {
 		const reflection = autoLearn.reflectionReview ?? autonomy.mode !== "off";
 		const model = autoLearn.model?.trim() || "active";
 		if (profile.class !== "full") {
-			return `Pi autonomy policy (${autonomy.mode}): configured background learning may run using model ${model}, but the active task stays primary. Treat observations as evidence, keep changes bounded, and require explicit approval for publication, push/tag/release, credentials, destructive deletion, or broader authority.`;
+			return `Pi autonomy policy (${autonomy.mode}): configured background learning may run using model ${model}, but the active task stays primary. Treat observations as evidence, keep changes bounded, and require explicit approval for publication, push/tag/release, credential disclosure, provider-auth changes, credential operations outside an active user-plane secret_store grant, destructive deletion, or broader authority.`;
 		}
 		if (autonomy.mode === "full") {
 			return `Pi autonomy policy (mode full, standing autonomy):
 - Setting-authorized background learners may run after long sessions or corrective/complex turns using model ${model}; they may act without asking first inside this standing grant.
 - Standing grant: write high-confidence durable memory, create/patch user/project skills, create/patch small user/project extensions/tools, tune autonomy/autoLearn settings, edit the authorized selfModification.sourcePath, run validation, and leave audit/rollback evidence.
-- Hard stops still require explicit foreground approval: publish/npm release, git push, tag creation, credential/provider-auth changes, destructive user-data deletion, network-exposed services, or expanding authority beyond this policy.
+- Hard stops still require explicit foreground approval: publish/npm release, git push, tag creation, credential disclosure, provider-auth changes, credential operations outside an active user-plane secret_store grant, destructive user-data deletion, network-exposed services, or expanding authority beyond this policy.
 - Treat current-turn evidence as a cue, not proof; prefer deterministic or longitudinal corroboration for durable behavior changes.
 - Active-task work remains primary: autonomy runs must not interrupt user-visible execution or claim task completion without evidence.`;
 		}

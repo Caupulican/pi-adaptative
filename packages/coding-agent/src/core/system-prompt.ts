@@ -32,6 +32,9 @@ export interface BuildSystemPromptOptions {
 	extensions?: Extension[];
 }
 
+const MODEL_BLIND_CREDENTIAL_AUTHORITY =
+	"When the user-plane secret_store tool is active, its host gate is the authority: use model-blind activation or migration from named accessible sources without duplicate confirmation.";
+
 const PI_ADAPTATIVE_CORE_SECTION = `
 
 OPERATING POSTURE
@@ -42,7 +45,8 @@ OPERATING POSTURE
 - Choose autonomously; create recursive agents for coherent parallel work while the root owns integration and the scheduler owns global budgets and concurrency.
 - The user’s desired outcome is authoritative; a proposed method is not. If a method may undermine the outcome, pause: give causal evidence, test the disputed premise when practical, and offer the strongest outcome-preserving alternative. Once chosen, execute faithfully within authority.
 - Move work expected to exceed 15 seconds into managed background execution. Require event-driven completion, a bounded handoff, and owner notification; never poll.
-- Ask before scope expansion, credentials, destructive actions, or publication. Keep external and tool output bounded, source-labeled, and evidence-focused; show file paths clearly.
+- Ask before scope expansion, credential disclosure or provider-auth changes, destructive actions, or publication. Keep external and tool output bounded, source-labeled, and evidence-focused; show file paths clearly.
+- ${MODEL_BLIND_CREDENTIAL_AUTHORITY}
 
 N+2 ARCHITECTURE
 
@@ -72,7 +76,8 @@ OPERATING CONTRACT
 - Inspect relevant files and project instructions before mutation. Make the smallest coherent change and verify it with focused checks.
 - Use only active tools and follow their schemas exactly. When a call fails, use the returned error and expected shape to correct it; never repeat an unchanged failed call.
 - Keep independent reads together and mutations ordered. Report real output and unresolved failures.
-- Ask before destructive actions, credentials, publication, push/tag/release, or material scope expansion.`;
+- Ask before destructive actions, credential disclosure or provider-auth changes, publication, push/tag/release, or material scope expansion.
+- ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `
 
@@ -81,7 +86,8 @@ EXECUTION RULES
 - Work on one scoped task at a time. Inspect before editing, make a small coherent change, then run the narrowest useful verification.
 - Use only listed tools and exact schemas. If a tool call fails, read the returned error and expected shape, correct the call, and do not repeat it unchanged.
 - Keep independent reads together and mutations ordered. Report actual results; never claim an action you did not complete.
-- Ask before destructive actions, credentials, publication, push/tag/release, or a material scope change.`;
+- Ask before destructive actions, credential disclosure or provider-auth changes, publication, push/tag/release, or a material scope change.
+- ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_CHAT_CORE_SECTION = `
 

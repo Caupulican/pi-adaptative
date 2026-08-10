@@ -1,6 +1,11 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { parseDotenvDocument, validateDotenvValue, validateDotenvVariableName } from "./secret-dotenv.ts";
+import {
+	MAX_DOTENV_VARIABLES,
+	parseDotenvDocument,
+	validateDotenvValue,
+	validateDotenvVariableName,
+} from "./secret-dotenv.ts";
 
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_KEY_PATTERN = /^(?:git|local):[a-f0-9]{64}$/;
@@ -17,6 +22,7 @@ export type CredentialManagerErrorCode =
 	| "invalid_provider_record"
 	| "invalid_session_key"
 	| "owner_setup_required"
+	| "profile_exists"
 	| "profile_not_found"
 	| "project_not_bound";
 
@@ -167,8 +173,8 @@ function validateProjectIdentity(identity: CredentialProjectIdentity): Credentia
 export function validateCredentialProfileRecord(record: CredentialProfileRecord): CredentialProfileRecord {
 	validateCredentialProfileName(record.profile);
 	validateCredentialDescription(record.description);
-	if (record.variables.length === 0) {
-		throw new CredentialManagerError("invalid_provider_record", "Credential profile has no variables.");
+	if (record.variables.length === 0 || record.variables.length > MAX_DOTENV_VARIABLES) {
+		throw new CredentialManagerError("invalid_provider_record", "Credential profile has an invalid variable count.");
 	}
 	const variableNames = new Set<string>();
 	for (const variable of record.variables) {
@@ -228,6 +234,21 @@ function canonicalizeExistingPath(path: string): string {
 
 function cloneEnvironment(values: Record<string, string>): Record<string, string> {
 	return Object.fromEntries(Object.entries(values));
+}
+
+function findReplaceableProfile(
+	summaries: readonly StoredCredentialProfileSummary[],
+	profile: string,
+	replaceExisting: boolean | undefined,
+): StoredCredentialProfileSummary | undefined {
+	const existing = summaries.find((summary) => summary.profile === profile);
+	if (existing && replaceExisting !== true) {
+		throw new CredentialManagerError(
+			"profile_exists",
+			"Credential profile already exists; replacement must be explicitly allowed.",
+		);
+	}
+	return existing;
 }
 
 export class CredentialManager {
@@ -340,6 +361,35 @@ export class CredentialManager {
 		input: { profile: string; description?: string; dotenv: string },
 		signal?: AbortSignal,
 	): Promise<CredentialMutationResult> {
+		const parsed = parseDotenvDocument(input.dotenv);
+		return this.storeVariablesForProject(
+			cwd,
+			{ profile: input.profile, description: input.description, variables: parsed.variables, replaceExisting: true },
+			signal,
+		);
+	}
+
+	async prepareForMigration(
+		cwd: string,
+		input: { profile: string; replaceExisting?: boolean },
+		signal?: AbortSignal,
+	): Promise<void> {
+		await this.ensureConnected(signal);
+		const generation = this.connectionGeneration;
+		this.assertAccessGeneration(generation);
+		const profile = validateCredentialProfileName(input.profile);
+		validateProjectIdentity(await this.resolveProject(cwd));
+		this.assertAccessGeneration(generation);
+		const summaries = await this.storage.listProfiles(signal);
+		this.assertAccessGeneration(generation);
+		findReplaceableProfile(summaries, profile, input.replaceExisting);
+	}
+
+	async storeVariablesForProject(
+		cwd: string,
+		input: { profile: string; description?: string; variables: CredentialVariable[]; replaceExisting?: boolean },
+		signal?: AbortSignal,
+	): Promise<CredentialMutationResult> {
 		await this.ensureConnected(signal);
 		const generation = this.connectionGeneration;
 		this.assertAccessGeneration(generation);
@@ -347,10 +397,9 @@ export class CredentialManager {
 		const description = validateCredentialDescription(input.description);
 		const identity = validateProjectIdentity(await this.resolveProject(cwd));
 		this.assertAccessGeneration(generation);
-		const parsed = parseDotenvDocument(input.dotenv);
 		const summaries = await this.storage.listProfiles(signal);
 		this.assertAccessGeneration(generation);
-		const existing = summaries.find((summary) => summary.profile === profile);
+		const existing = findReplaceableProfile(summaries, profile, input.replaceExisting);
 		const existingRecord = existing
 			? validateCredentialProfileRecord(await this.storage.readProfile(profile, signal))
 			: undefined;
@@ -361,7 +410,7 @@ export class CredentialManager {
 			...((description ?? existingRecord?.description)
 				? { description: description ?? existingRecord?.description }
 				: {}),
-			variables: parsed.variables.map((variable) => ({ name: variable.name, value: variable.value })),
+			variables: input.variables.map((variable) => ({ name: variable.name, value: variable.value })),
 			projectKeys,
 		};
 		validateCredentialProfileRecord(record);
@@ -475,7 +524,7 @@ export class CredentialManager {
 		if (!sessionKey) {
 			throw new CredentialManagerError(
 				"owner_setup_required",
-				"Bitwarden is not connected. The owner can provide a session key with /secrets.",
+				"Bitwarden needs a BW_SESSION key through Pi's masked owner prompt.",
 			);
 		}
 		const generation = this.connectionGeneration;

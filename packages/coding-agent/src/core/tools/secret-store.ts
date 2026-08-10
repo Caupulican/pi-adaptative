@@ -8,22 +8,68 @@ import {
 	CredentialStorageError,
 } from "../secrets/credential-manager.ts";
 import {
+	CredentialMigrationSourceError,
+	type CredentialMigrationSourceResolver,
+	resolveCredentialMigrationSources,
+} from "../secrets/credential-migration-source.ts";
+import {
+	connectCredentialSessionWithMaskedPrompt,
+	isCredentialSessionKeyRequired,
+} from "../secrets/credential-session-connection.ts";
+import { SECRET_VARIABLE_NAME_MAX_CHARS, SECRET_VARIABLE_NAME_PATTERN } from "../secrets/secret-dotenv.ts";
+import {
 	emptyOrchestrationCall,
 	OrchestrationPanelComponent,
 	type OrchestrationPanelModel,
 } from "./orchestration-panel.ts";
 
+const migrationSourceSchema = Type.Union([
+	Type.Object(
+		{
+			kind: Type.Literal("environment"),
+			name: Type.String({ maxLength: SECRET_VARIABLE_NAME_MAX_CHARS, pattern: SECRET_VARIABLE_NAME_PATTERN }),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{ kind: Type.Literal("dotenv_file"), path: Type.String({ minLength: 1, maxLength: 4096 }) },
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			kind: Type.Literal("file"),
+			path: Type.String({ minLength: 1, maxLength: 4096 }),
+			variable: Type.String({ maxLength: SECRET_VARIABLE_NAME_MAX_CHARS, pattern: SECRET_VARIABLE_NAME_PATTERN }),
+		},
+		{ additionalProperties: false },
+	),
+]);
+
 const secretStoreSchema = Type.Object(
 	{
-		action: Type.Union([Type.Literal("status"), Type.Literal("list"), Type.Literal("activate")], {
-			description: "Credential-use action. Credential mutation is owner-only through /secrets.",
-		}),
+		action: Type.Union(
+			[Type.Literal("status"), Type.Literal("list"), Type.Literal("activate"), Type.Literal("migrate")],
+			{
+				description: "Inspect, activate, or migrate model-blind credential sources.",
+			},
+		),
 		profile: Type.Optional(
 			Type.String({
 				minLength: 1,
 				maxLength: 96,
 				pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-				description: "Bound profile to activate. Omit when the project has exactly one bound profile.",
+				description: "Profile to activate or create during migration.",
+			}),
+		),
+		description: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+		overwrite: Type.Optional(
+			Type.Boolean({ description: "Explicitly replace an existing profile while preserving project bindings." }),
+		),
+		sources: Type.Optional(
+			Type.Array(migrationSourceSchema, {
+				minItems: 1,
+				maxItems: 64,
+				description: "Host-side credential sources. Values are never accepted in tool arguments.",
 			}),
 		),
 	},
@@ -32,7 +78,14 @@ const secretStoreSchema = Type.Object(
 
 export type SecretStoreToolInput = Static<typeof secretStoreSchema>;
 
-export type SecretStoreStatus = "activated" | "available" | "cancelled" | "error" | "listed" | "unavailable";
+export type SecretStoreStatus =
+	| "activated"
+	| "available"
+	| "cancelled"
+	| "error"
+	| "listed"
+	| "migrated"
+	| "unavailable";
 
 export interface SecretStoreToolDetails {
 	action: SecretStoreToolInput["action"];
@@ -44,10 +97,12 @@ export interface SecretStoreToolDetails {
 	connected?: boolean;
 	code?: string;
 	message?: string;
+	sourceRetained?: boolean;
 }
 
 export interface SecretStoreToolOptions {
 	manager: CredentialManager;
+	resolveMigrationSources?: CredentialMigrationSourceResolver;
 }
 
 type SecretStoreResult = {
@@ -59,7 +114,41 @@ function result(details: SecretStoreToolDetails, text: string): SecretStoreResul
 	return { content: [{ type: "text", text }], details };
 }
 
+function ownerSetupRequired(action: SecretStoreToolInput["action"]): SecretStoreResult {
+	const message =
+		"Bitwarden needs one owner input: a BW_SESSION key supplied through Pi's masked prompt or process environment, never through chat.";
+	return result(
+		{
+			action,
+			status: "unavailable",
+			...(action === "status" ? { connected: false } : {}),
+			code: "owner_setup_required",
+			message,
+		},
+		message,
+	);
+}
+
+function cancelled(action: SecretStoreToolInput["action"]): SecretStoreResult {
+	return result({ action, status: "cancelled", code: "cancelled" }, "Credential action cancelled.");
+}
+
 function invalid(input: SecretStoreToolInput): SecretStoreResult | undefined {
+	if (input.action === "migrate") {
+		if (!input.profile || !input.sources) {
+			return result(
+				{ action: input.action, status: "error", code: "missing_migration_input" },
+				"Credential migration requires a profile and at least one source.",
+			);
+		}
+		return undefined;
+	}
+	if (input.description !== undefined || input.sources !== undefined || input.overwrite !== undefined) {
+		return result(
+			{ action: input.action, status: "error", code: "unexpected_migration_input" },
+			`Action ${input.action} does not accept migration inputs.`,
+		);
+	}
 	if (input.action !== "activate" && input.profile !== undefined) {
 		return result(
 			{
@@ -75,9 +164,23 @@ function invalid(input: SecretStoreToolInput): SecretStoreResult | undefined {
 }
 
 function failed(input: SecretStoreToolInput, error: unknown): SecretStoreResult {
-	const known = error instanceof CredentialManagerError || error instanceof CredentialStorageError;
+	const known =
+		error instanceof CredentialManagerError ||
+		error instanceof CredentialStorageError ||
+		error instanceof CredentialMigrationSourceError;
 	const code = known ? error.code : "safe_failure";
-	const message = known ? error.message : "Credential activation failed safely without exposing values.";
+	const migrationMessages: Record<string, string> = {
+		duplicate_variable: "Credential migration defines the same variable more than once.",
+		invalid_source: "Credential migration source data is invalid.",
+		source_not_found: "A requested credential source is unavailable.",
+		source_unavailable: "A requested credential source could not be read.",
+	};
+	const message =
+		error instanceof CredentialMigrationSourceError
+			? (migrationMessages[error.code] ?? "Credential migration failed safely without exposing values.")
+			: known
+				? error.message
+				: "Credential action failed safely without exposing values.";
 	const status: SecretStoreStatus = ["owner_setup_required", "not_connected", "provider_unavailable"].includes(code)
 		? "unavailable"
 		: "error";
@@ -95,7 +198,7 @@ function failed(input: SecretStoreToolInput, error: unknown): SecretStoreResult 
 
 function panelModel(details: SecretStoreToolDetails | undefined, expanded: boolean): OrchestrationPanelModel {
 	if (!details) return { label: "secrets", status: "error", emptyText: "No credential result was retained." };
-	const success = ["activated", "available", "listed"].includes(details.status);
+	const success = ["activated", "available", "listed", "migrated"].includes(details.status);
 	return {
 		label: "secrets",
 		action: details.status,
@@ -126,19 +229,24 @@ function panelModel(details: SecretStoreToolDetails | undefined, expanded: boole
 
 export function createSecretStoreToolDefinition(options: SecretStoreToolOptions) {
 	const { manager } = options;
+	const resolveSources = options.resolveMigrationSources ?? resolveCredentialMigrationSources;
 	return defineTool<typeof secretStoreSchema, SecretStoreToolDetails>({
 		name: "secret_store",
 		label: "Secret Store",
 		description:
-			"Discover and activate owner-authorized Bitwarden credential profiles for the current project without exposing values.",
+			"Discover, migrate, and activate Bitwarden credential profiles for the current project without exposing values.",
 		promptSnippet:
-			"Activate project credentials with secret_store before credential-dependent commands. Credential setup and mutation are owner-only through /secrets.",
+			"Use secret_store to migrate accessible credential sources directly into Bitwarden or activate project credentials without exposing values.",
 		promptGuidelines: [
+			"The active user-plane secret_store host gate authorizes model-blind migration; do not ask for duplicate confirmation.",
+			"Call secret_store directly when credentials are needed. If Bitwarden is disconnected, the TUI host requests only one masked BW_SESSION key; never ask for it in chat or request other setup work.",
 			"Use secret_store activate before credential-dependent work. It works in TUI, print, and RPC modes and returns metadata only.",
 			"Omit profile when the project has one binding. Use list to select among multiple authorized profiles.",
 			"Never ask the owner to paste a credential into chat or pass a value through tool arguments.",
 			"After activation, run the consuming command normally. Never print, inspect, grep, or echo credential environment values.",
-			"If owner_setup_required is returned, tell the owner to run /secrets in a TUI session. Do not repeatedly retry.",
+			"Use migrate with environment-variable names, dotenv-file paths, or key-file paths. Never place a credential value in tool arguments.",
+			"Migration retains source files. Set overwrite only when intentionally replacing an existing Bitwarden profile.",
+			"If owner_setup_required is returned without a UI, state that BW_SESSION is the only missing owner input and must be supplied out of band to Pi. Do not request anything else or repeatedly retry.",
 		],
 		parameters: secretStoreSchema,
 		executionMode: "sequential",
@@ -158,28 +266,14 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 		},
 		async execute(_toolCallId, input, signal, _onUpdate, ctx) {
 			if (signal?.aborted) {
-				return result(
-					{ action: input.action, status: "cancelled", code: "cancelled" },
-					"Credential action cancelled.",
-				);
+				return cancelled(input.action);
 			}
 			const validation = invalid(input);
 			if (validation) return validation;
 			try {
 				if (input.action === "status") {
 					const status = manager.status;
-					if (!status.sessionAvailable) {
-						return result(
-							{
-								action: input.action,
-								status: "unavailable",
-								connected: false,
-								code: "owner_setup_required",
-								message: "The owner must connect Bitwarden with /secrets.",
-							},
-							"Bitwarden owner setup is required. Run /secrets in a TUI session.",
-						);
-					}
+					if (!status.sessionAvailable) return ownerSetupRequired(input.action);
 					return result(
 						{ action: input.action, status: "available", connected: status.connected },
 						status.connected
@@ -187,24 +281,87 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 							: "A Bitwarden session key is available and will be validated on activation.",
 					);
 				}
-				if (input.action === "list") {
-					const profiles = await manager.listForProject(ctx.cwd, signal);
+
+				const executeCredentialAction = async (): Promise<SecretStoreResult> => {
+					if (input.action === "list") {
+						const profiles = await manager.listForProject(ctx.cwd, signal);
+						return result(
+							{ action: input.action, status: "listed", profiles },
+							`Found ${profiles.length} credential profile${profiles.length === 1 ? "" : "s"}; only metadata was returned.`,
+						);
+					}
+					if (input.action === "migrate") {
+						const { profile, sources } = input;
+						if (!profile || !sources) {
+							return result(
+								{ action: input.action, status: "error", code: "missing_migration_input" },
+								"Credential migration requires a profile and at least one source.",
+							);
+						}
+						await manager.prepareForMigration(
+							ctx.cwd,
+							{ profile, replaceExisting: input.overwrite === true },
+							signal,
+						);
+						let variables = await resolveSources(sources, ctx.cwd, signal);
+						try {
+							const migrated = await manager.storeVariablesForProject(
+								ctx.cwd,
+								{
+									profile,
+									...(input.description ? { description: input.description } : {}),
+									variables,
+									replaceExisting: input.overwrite === true,
+								},
+								signal,
+							);
+							return result(
+								{
+									action: input.action,
+									status: "migrated",
+									profile: migrated.profile,
+									variableNames: migrated.variableNames,
+									project: migrated.project,
+									sourceRetained: true,
+								},
+								`Migrated and activated ${migrated.profile} for ${migrated.project}. Source material was retained.`,
+							);
+						} finally {
+							for (const variable of variables) variable.value = "";
+							variables = [];
+						}
+					}
+					const activated = await manager.activateForProject(ctx.cwd, input.profile, signal);
 					return result(
-						{ action: input.action, status: "listed", profiles },
-						`Found ${profiles.length} credential profile${profiles.length === 1 ? "" : "s"}; only metadata was returned.`,
+						{
+							action: input.action,
+							status: "activated",
+							profile: activated.profile,
+							variableNames: activated.variableNames,
+							project: activated.project,
+						},
+						`Activated ${activated.profile} for ${activated.project}. Credential values remain hidden.`,
 					);
+				};
+
+				const connectWithOwnerKey = async (): Promise<SecretStoreResult | undefined> => {
+					if (!ctx.hasUI) return ownerSetupRequired(input.action);
+					const connection = await connectCredentialSessionWithMaskedPrompt(manager, ctx.ui, signal);
+					return connection === "connected" ? undefined : cancelled(input.action);
+				};
+
+				if (!manager.status.sessionAvailable) {
+					const setup = await connectWithOwnerKey();
+					if (setup) return setup;
 				}
-				const activated = await manager.activateForProject(ctx.cwd, input.profile, signal);
-				return result(
-					{
-						action: input.action,
-						status: "activated",
-						profile: activated.profile,
-						variableNames: activated.variableNames,
-						project: activated.project,
-					},
-					`Activated ${activated.profile} for ${activated.project}. Credential values remain hidden.`,
-				);
+				try {
+					return await executeCredentialAction();
+				} catch (error) {
+					if (!isCredentialSessionKeyRequired(error)) throw error;
+					const setup = await connectWithOwnerKey();
+					if (setup) return setup;
+					return await executeCredentialAction();
+				}
 			} catch (error) {
 				return failed(input, error);
 			}

@@ -326,6 +326,13 @@ export {
 	type CredentialVariable,
 	type StoredCredentialProfileSummary,
 } from "./core/secrets/credential-manager.ts";
+export {
+	type CredentialMigrationSource,
+	CredentialMigrationSourceError,
+	type CredentialMigrationSourceErrorCode,
+	type CredentialMigrationSourceResolver,
+	resolveCredentialMigrationSources,
+} from "./core/secrets/credential-migration-source.ts";
 export { createPortableGitProjectKey, resolveCredentialProject } from "./core/secrets/credential-project.ts";
 export {
 	type CompactionSettings,

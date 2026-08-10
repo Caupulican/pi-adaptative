@@ -216,7 +216,7 @@ export function credentialToolBlockReason(
 	if (DIRECT_PATH_TOOLS.has(toolName)) {
 		const path = directPathFromArgs(args);
 		if (path && isProtectedCredentialPath(path, cwd, boundary)) {
-			return "Credential file access is model-blind. Use secret_store to activate an owner-authorized profile, then run the consuming application without inspecting credential data.";
+			return "Credential file access is model-blind. Use secret_store migrate with this path, or activate an existing profile, without inspecting credential data.";
 		}
 	}
 	if (toolName === "grep") {
@@ -226,7 +226,7 @@ export function credentialToolBlockReason(
 			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
 			(glob && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob))
 		) {
-			return "Credential dotenv files are excluded from model-facing search. Use secret_store metadata instead.";
+			return "Credential dotenv files are model-blind. Use secret_store migrate with the file path instead of searching its contents.";
 		}
 		if (!(path && isExistingRegularFile(path, cwd)) && !(glob && isCredentialSafeGlob(glob))) {
 			return "Credential-safe grep requires one explicit regular file or a narrow non-dotenv file glob (for example *.ts). Refine the search instead of scanning a directory without a file filter.";
@@ -239,7 +239,7 @@ export function credentialToolBlockReason(
 			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
 			(pattern && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(pattern))
 		) {
-			return "Credential dotenv files are excluded from model-facing discovery. Use secret_store list instead.";
+			return "Credential dotenv files are model-blind. Use secret_store migrate with a known file path instead of discovering their contents.";
 		}
 	}
 	if (toolName === "bash" || toolName === "powershell" || toolName === "run_process") {
@@ -249,10 +249,10 @@ export function credentialToolBlockReason(
 			return "Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.";
 		}
 		if (shellRisk === "process_environment") {
-			return "Direct jq projection of the process environment is blocked because it can expose credentials. Query bounded JSON inputs instead.";
+			return "Direct process-environment projection is blocked because it can expose credentials. Use secret_store migrate with known environment-variable names.";
 		}
 		if (SHELL_SECRET_READ_RE.test(command) || shellRisk === "credential_path") {
-			return "Direct shell inspection of credential dotenv files is blocked. Use secret_store, then run the credential-consuming command normally.";
+			return "Direct shell inspection of credential files is blocked. Use secret_store migrate with the file path, then run the credential-consuming command normally.";
 		}
 	}
 	if (toolName === "python") {
@@ -263,7 +263,7 @@ export function credentialToolBlockReason(
 			pythonInspectsCredentialPath(code, cwd, boundary) ||
 			(scriptPath !== undefined && isProtectedCredentialPath(scriptPath, cwd, boundary))
 		) {
-			return "Direct Python inspection of credential dotenv files is blocked. Use secret_store, then run the credential-consuming program normally.";
+			return "Direct Python inspection of credential files is blocked. Use secret_store migrate with the file path, then run the credential-consuming program normally.";
 		}
 	}
 	return undefined;

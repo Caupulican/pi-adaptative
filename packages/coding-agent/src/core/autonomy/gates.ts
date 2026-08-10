@@ -85,6 +85,18 @@ export function extractCandidatePaths(toolName: string, args: unknown): string[]
 		if (typeof obj.path === "string" && obj.path.trim()) {
 			paths.push(obj.path.trim());
 		}
+	} else if (toolName === "secret_store" && obj.action === "migrate" && Array.isArray(obj.sources)) {
+		for (const source of obj.sources) {
+			if (
+				source &&
+				typeof source === "object" &&
+				"path" in source &&
+				typeof source.path === "string" &&
+				source.path.trim()
+			) {
+				paths.push(source.path.trim());
+			}
+		}
 	}
 
 	return paths;
@@ -210,6 +222,9 @@ export function evaluateToolGate(input: {
 		else if (input.toolName === "python" && argsObj && typeof argsObj.scriptPath === "string") {
 			command = `python ${argsObj.scriptPath}`;
 		}
+	} else if (input.toolName === "secret_store") {
+		const argsObj = input.args as Record<string, unknown>;
+		if (argsObj && typeof argsObj.action === "string") command = argsObj.action;
 	}
 
 	const riskResult = assessOperationRisk({

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added autonomous model-blind credential migration from environment variables, dotenv files, and credential/key files into current-project Bitwarden profiles without exposing values; an unavailable TUI vault requests only one masked `BW_SESSION` key before continuing.
+
 ## [0.86.17] - 2026-08-10
 
 ## [0.86.16] - 2026-08-10

@@ -77,6 +77,16 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt.length).toBeLessThanOrEqual(2_048);
 	});
 
+	it.each(["full", "lean", "minimal"] as const)(
+		"does not make %s tool-capable models ask twice for authorized model-blind migration",
+		(capabilityClass) => {
+			const prompt = buildForCapability(capabilityClass);
+
+			expect(prompt).toContain("secret_store");
+			expect(prompt).toContain("without duplicate confirmation");
+		},
+	);
+
 	it("bounds adversarially many deferred instruction paths and fails closed before mutation", () => {
 		const options: BuildSystemPromptOptions = {
 			modelCapability: deriveModelCapabilityProfile({ contextWindow: 8_192 }),

@@ -101,7 +101,7 @@ The agent is instructed to edit only that source checkout, preserve unrelated ch
 
 Use `/settings` → **Autonomy** to choose one preset and the foreground goal-loop round budget, or `/autonomy off|safe|balanced|full` to switch the preset while preserving the configured round budget. `full` is the standing-autonomy mode: it schedules post-turn reflection whenever concurrency allows and grants autonomous authority for high-confidence memory writes, user/project skill creation or patching, small user/project extension/tool improvements, autonomy/Auto Learn setting tuning, and edits under the authorized `selfModification.sourcePath` when validation and rollback evidence are recorded.
 
-Hard stops still require explicit foreground approval even in `full`: publishing, npm release, git push, tag creation, credential changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
+Hard stops still require explicit foreground approval even in `full`: publishing, npm release, git push, tag creation, credential disclosure or provider-auth changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. An active user-plane `secret_store` grant is the narrow exception: model-blind activation and migration from named accessible sources require no duplicate confirmation. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
 
 ```json
 {

@@ -7,6 +7,7 @@ import {
 	type CredentialProfileSummary,
 	CredentialStorageError,
 } from "../../core/secrets/credential-manager.ts";
+import { connectCredentialSessionWithMaskedPrompt } from "../../core/secrets/credential-session-connection.ts";
 import {
 	formatDotenvVariables,
 	MAX_DOTENV_VALUE_BYTES,
@@ -151,21 +152,7 @@ export class SecretMenuController {
 	}
 
 	private async connect(ui: ExtensionUIContext): Promise<boolean> {
-		while (true) {
-			let sessionKey = await ui.input("Connect Bitwarden", "Paste BW_SESSION session key", {
-				sensitive: true,
-			});
-			if (sessionKey === undefined) return false;
-			try {
-				await this.manager.connect(sessionKey);
-				ui.notify("Bitwarden connected. Pi keeps the session key in memory only.", "info");
-				return true;
-			} catch (error) {
-				ui.notify(safeErrorMessage(error), "error");
-			} finally {
-				sessionKey = "";
-			}
-		}
+		return (await connectCredentialSessionWithMaskedPrompt(this.manager, ui)) === "connected";
 	}
 
 	private async addOrUpdate(ui: ExtensionUIContext, profiles: CredentialProfileSummary[]): Promise<void> {
