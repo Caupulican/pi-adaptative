@@ -6,7 +6,11 @@
  * - Unicode Format characters (crash string-width due to a bug)
  * - Characters with undefined code points
  */
+const UNSAFE_OUTPUT_CHARACTER_PATTERN =
+	/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ud800-\udfff\ufff9-\ufffb]/u;
+
 export function sanitizeBinaryOutput(str: string): string {
+	if (!UNSAFE_OUTPUT_CHARACTER_PATTERN.test(str)) return str;
 	return Array.from(str)
 		.filter((char) => {
 			// Filter out characters that cause string-width to crash

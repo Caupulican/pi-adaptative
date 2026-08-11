@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Avoided rebuilding already-safe tool diagnostics during failure-context sanitization, restoring latency headroom for million-token histories under shared-runner load.
+
 ## [0.90.0] - 2026-08-11
 
 ### Fixed
