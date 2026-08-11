@@ -114,7 +114,7 @@ describe("provider request planning", () => {
 
 		const response = await startAgentProviderRequest(initial, config, undefined, (_streamModel, context, options) => {
 			transportedContext = context;
-			expect(options?.textToolCallProtocol).toBeUndefined();
+			expect(options?.textToolCallProtocol).toBe(true);
 			return new MockAssistantStream(assistant('<pi:call name="echo">{"value":"hi"}</pi:call>'));
 		});
 		const result = await response.result();
@@ -127,6 +127,7 @@ describe("provider request planning", () => {
 		expect(transportedContext?.tools).toBeUndefined();
 		expect(transportedContext?.systemPrompt).toContain("SYSTEM");
 		expect(transportedContext?.systemPrompt).toContain('<pi:call name="TOOL">');
+		expect(transportedContext?.systemPrompt?.match(/<pi:call name="TOOL">/gu)).toHaveLength(1);
 		expect(JSON.stringify(transportedContext?.messages)).toContain("compacted history");
 		expect(JSON.stringify(transportedContext?.messages)).toContain("mandatory transient 1");
 		expect(JSON.stringify(transportedContext?.messages)).not.toContain("uncompacted history");

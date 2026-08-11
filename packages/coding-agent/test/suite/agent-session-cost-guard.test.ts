@@ -58,7 +58,7 @@ describe("AgentSession cost guard", () => {
 		expect(requestMaxTokens).toBeUndefined();
 	});
 
-	it("includes the full system prompt and tool schemas in the foreground projection", async () => {
+	it("prices the exact provider projection instead of execution-only tool prose", async () => {
 		let seenSystemPromptLength = 0;
 		let seenToolDescriptionLength = 0;
 		const harness = await createHarness({
@@ -79,6 +79,7 @@ describe("AgentSession cost guard", () => {
 		const tools = harness.session.agent.state.tools;
 		const firstTool = tools[0];
 		if (!firstTool) throw new Error("Expected an active tool");
+		const projectedDescription = firstTool.providerDescription ?? firstTool.description;
 		harness.session.agent.state.systemPrompt = "S".repeat(200_000);
 		harness.session.agent.state.tools = [{ ...firstTool, description: "T".repeat(200_000) }, ...tools.slice(1)];
 
@@ -93,9 +94,10 @@ describe("AgentSession cost guard", () => {
 
 		const decision = harness.session.getLastCostGuardDecision();
 		expect(seenSystemPromptLength).toBeGreaterThan(0);
-		expect(seenToolDescriptionLength).toBe(200_000);
-		expect(decision?.over).toBe(true);
-		expect(decision?.estUsd).toBeGreaterThan(0.6);
+		expect(seenToolDescriptionLength).toBe(projectedDescription.length);
+		expect(seenToolDescriptionLength).toBeLessThan(200_000);
+		expect(decision?.over).toBe(false);
+		expect(decision?.estUsd).toBeLessThan(0.6);
 	});
 
 	it("projects a GPT-5.6 Sol cache-miss prefix at the possible write rate", async () => {
@@ -121,7 +123,14 @@ describe("AgentSession cost guard", () => {
 		const tools = harness.session.agent.state.tools;
 		const firstTool = tools[0];
 		if (!firstTool) throw new Error("Expected an active tool");
-		harness.session.agent.state.tools = [{ ...firstTool, description: "T".repeat(1_185_000) }, ...tools.slice(1)];
+		harness.session.agent.state.tools = [
+			{
+				...firstTool,
+				description: "T".repeat(1_185_000),
+				providerDescription: "T".repeat(1_185_000),
+			},
+			...tools.slice(1),
+		];
 
 		harness.setResponses([
 			(context) => {

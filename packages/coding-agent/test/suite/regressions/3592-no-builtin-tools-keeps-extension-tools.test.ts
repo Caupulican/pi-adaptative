@@ -97,6 +97,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"read",
 			"run_toolkit_script",
 			"secret_store",
+			"skill",
 			"skill_audit",
 			"skillify",
 			"task_steps",

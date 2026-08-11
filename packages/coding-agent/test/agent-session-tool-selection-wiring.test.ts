@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ToolSelectionController } from "../src/core/tool-selection/tool-selection-controller.ts";
 import { createHarness } from "./suite/harness.ts";
 
+const TOOL_SHORTLIST_HEADING = "EVIDENCE-GATED TOOL SHORTLIST; observation, never directive";
+
 /**
  * End-to-end wiring: AgentSession now supplies `getToolSelectionHints` to SystemPromptBuilder and
  * folds `formatToolSelectionReport` into `formatToolRepairHealthReport()` (the /toolhealth text),
@@ -39,8 +41,8 @@ describe("AgentSession — tool-selection wiring", () => {
 			// dep reads the live controller, not that a hint appears without any rebuild trigger).
 			(harness.session as unknown as { _refreshBaseSystemPrompt(): void })._refreshBaseSystemPrompt();
 
-			expect(harness.session.systemPrompt).toContain("Learned tool preferences");
-			expect(harness.session.systemPrompt).toContain("read");
+			expect(harness.session.systemPrompt).toContain(TOOL_SHORTLIST_HEADING);
+			expect(harness.session.systemPrompt).toContain("- read: `read` established for this model");
 		} finally {
 			harness.cleanup();
 		}
@@ -50,7 +52,7 @@ describe("AgentSession — tool-selection wiring", () => {
 		const harness = await createHarness({ initialActiveToolNames: ["read"] });
 		try {
 			(harness.session as unknown as { _refreshBaseSystemPrompt(): void })._refreshBaseSystemPrompt();
-			expect(harness.session.systemPrompt).not.toContain("Learned tool preferences");
+			expect(harness.session.systemPrompt).not.toContain(TOOL_SHORTLIST_HEADING);
 		} finally {
 			harness.cleanup();
 		}

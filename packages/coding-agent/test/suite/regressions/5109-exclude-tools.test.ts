@@ -61,6 +61,7 @@ describe("regression #5109: exclude tools", () => {
 				"python",
 				"run_toolkit_script",
 				"secret_store",
+				"skill",
 				"task_steps",
 				"write",
 			]);

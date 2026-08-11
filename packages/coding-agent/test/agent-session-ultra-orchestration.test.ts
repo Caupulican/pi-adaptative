@@ -2,7 +2,7 @@ import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { createHarness } from "./suite/harness.ts";
 
-const ULTRA_POLICY_HEADING = "Pi Ultra orchestration policy";
+const ULTRA_POLICY_HEADING = "PI ULTRA ORCHESTRATION";
 
 describe("AgentSession Ultra orchestration", () => {
 	it("reinforces delegation only while Ultra is selected", async () => {
@@ -14,7 +14,9 @@ describe("AgentSession Ultra orchestration", () => {
 
 			harness.session.setThinkingLevel("ultra");
 			expect(harness.session.systemPrompt).toContain(ULTRA_POLICY_HEADING);
-			expect(harness.session.systemPrompt).toContain("Proactively use the delegate tool");
+			expect(harness.session.systemPrompt).toContain(
+				"Own delivery; delegate useful independent bounded reads, parallelize while parent continues.",
+			);
 
 			harness.session.setThinkingLevel("max");
 			expect(harness.session.systemPrompt).not.toContain(ULTRA_POLICY_HEADING);

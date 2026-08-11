@@ -101,7 +101,7 @@ describe("Context GC", () => {
 
 		expect(result.report.packedCount).toBe(1);
 		expect(textOf(result.messages[1])).toContain("Context GC packed stale tool result");
-		expect(textOf(result.messages[1])).toContain("older read snapshot superseded");
+		expect(textOf(result.messages[1])).toContain("superseded by later same-file read");
 		expect(textOf(result.messages[4])).toContain("NEW SNAPSHOT");
 		expect(textOf(result.messages[4])).not.toContain("Context GC packed");
 	});

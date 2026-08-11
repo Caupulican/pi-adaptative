@@ -2436,7 +2436,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			expect.objectContaining({
 				role: "user",
 				content: expect.stringMatching(
-					/childAgentId=child[\s\S]*bounded raw transcript pages[\s\S]*complete durable entries[\s\S]*omittedMessages/,
+					/childAgentId=child[\s\S]*delegate action="transcript" agentId="child"[\s\S]*Entries complete[\s\S]*omittedMessages[\s\S]*nextCursor/,
 				),
 			}),
 		);

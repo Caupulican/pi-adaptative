@@ -419,9 +419,9 @@ function startTextToolProtocolStream<TOptions extends StreamOptions>(
 }
 
 /**
- * Send one already-admitted materialization. Text-protocol input projection is disabled for the
- * nested stream function, while response parsing remains owned here. This keeps wrapped/custom
- * stream functions from adding the primer twice.
+ * Send one already-admitted materialization. Its provider context has no native tool surface, so a
+ * nested public stream cannot render the primer again. Preserve the protocol option for provider
+ * history serialization; response parsing remains owned here.
  */
 export async function startMaterializedProviderStream<TOptions extends StreamOptions>(
 	model: Model<Api>,
@@ -436,11 +436,7 @@ export async function startMaterializedProviderStream<TOptions extends StreamOpt
 
 	const abortController = new AbortController();
 	const combined = combineAbortSignals([options?.signal, abortController.signal]);
-	const providerOptions = {
-		...options,
-		textToolCallProtocol: undefined,
-		signal: combined.signal,
-	} as TOptions;
+	const providerOptions = { ...options, signal: combined.signal } as TOptions;
 	try {
 		const stream = await startProviderStream(request.context, providerOptions);
 		return withTextToolProtocolResult(stream, model, request.sourceContext, options, {

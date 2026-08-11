@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved the text-tool protocol option through pre-materialized provider requests so history serialization remains correct without duplicating the primer.
+
 ## [0.87.0] - 2026-08-11
 
 ### Added

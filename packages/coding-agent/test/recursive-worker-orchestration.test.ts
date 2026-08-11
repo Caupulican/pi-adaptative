@@ -8,6 +8,7 @@ import { STABLE_SHELL_TOOL_NAME } from "../src/core/default-tool-surface.ts";
 import type { WorkerAgentView } from "../src/core/delegation/worker-agent-control.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import { DEFAULT_LANE_MAX_OUTPUT_TOKENS } from "../src/core/model-capability.ts";
 import { budgetedTokens } from "../src/core/orchestration/capability-gateway.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
@@ -1023,7 +1024,9 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(child.record?.status).toBe("succeeded");
-			expect(childMaxTokens).toBe(treeTokenBudget - budgetedTokens(rootUsage));
+			const remainingTreeTokens = treeTokenBudget - budgetedTokens(rootUsage);
+			expect(remainingTreeTokens).toBeGreaterThan(DEFAULT_LANE_MAX_OUTPUT_TOKENS);
+			expect(childMaxTokens).toBe(Math.min(DEFAULT_LANE_MAX_OUTPUT_TOKENS, remainingTreeTokens));
 		} finally {
 			await harness.cleanup();
 		}

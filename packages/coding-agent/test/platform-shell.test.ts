@@ -79,7 +79,7 @@ describe("automatic platform shell contract", () => {
 		expect(tool.name).toBe("bash");
 		expect(tool.description).toContain("stable Bash-like command contract");
 		expect(tool.promptSnippet).toContain("routes them deterministically");
-		expect((tool.promptGuidelines ?? []).join("\n")).toContain("do not write PowerShell");
+		expect((tool.promptGuidelines ?? []).join("\n")).toContain("never write PowerShell");
 
 		const result = await tool.execute(
 			"call-1",
@@ -116,7 +116,7 @@ describe("automatic platform shell contract", () => {
 
 	it("generates prompt guidance for the stable contract without a shell choice", () => {
 		const prompt = buildSystemPrompt({ cwd: process.cwd(), selectedTools: ["read", "bash"] });
-		expect(prompt).toContain("Use bash for file operations");
+		expect(prompt).toContain("Bash: ls, rg, find");
 		expect(prompt).not.toContain("choose a shell");
 	});
 
