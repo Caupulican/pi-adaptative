@@ -9,6 +9,7 @@ import {
 	TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE,
 	type ToolValidationEscalationRecord,
 } from "../src/core/agent-session.ts";
+import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { createHarness } from "./suite/harness.ts";
 
 /**
@@ -65,6 +66,76 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		try {
 			expect(harness.session.agent.onRunawayStop).toBeTypeOf("function");
 			expect(harness.session.agent.onToolValidationEscalation).toBeTypeOf("function");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("blocks an active goal when the runaway backstop trips so auto-continuation cannot restart it", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-runaway", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			const prompt = vi.spyOn(harness.session, "prompt").mockResolvedValue(undefined);
+
+			harness.session.agent.onRunawayStop?.({ signature: "tool_task:{wait}", repeats: 12 });
+
+			const blocked = harness.session.getGoalStateSnapshot();
+			expect(blocked).toMatchObject({
+				goalId: "goal-runaway",
+				status: "blocked",
+			});
+			expect(blocked?.blockedReason).toContain("runaway_tool_loop");
+			expect(blocked?.blockedReason).toContain("tool_task:{wait}");
+
+			const result = await harness.session.continueGoalOnce({ maxStallTurns: 20 });
+			expect(result.submitted).toBe(false);
+			expect(result.snapshot.continuation.action).toBe("ask-user");
+			expect(prompt).not.toHaveBeenCalled();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("blocks an active goal when the tool-failure recovery circuit terminates the run", async () => {
+		let executions = 0;
+		const failingTool: AgentTool = {
+			name: "failing_tool",
+			label: "Failing Tool",
+			description: "Always fails",
+			parameters: Type.Object({ value: Type.String() }),
+			execute: async () => {
+				executions++;
+				throw new Error("Credential profile is unavailable.");
+			},
+		};
+		const harness = await createHarness({ tools: [failingTool] });
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-recovery", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			harness.session.agent.maxStallTurns = 0;
+			harness.setResponses([
+				...Array.from({ length: 3 }, () =>
+					fauxAssistantMessage(fauxToolCall("failing_tool", { value: "same" }), { stopReason: "toolUse" }),
+				),
+				fauxAssistantMessage("The tool failure requires owner action."),
+			]);
+
+			await harness.session.prompt("go", { autoContinueGoal: false });
+
+			expect(executions).toBe(1);
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-recovery",
+				status: "blocked",
+				blockedReason: expect.stringContaining("terminal_tool_failure: failing_tool"),
+			});
 		} finally {
 			harness.cleanup();
 		}

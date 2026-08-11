@@ -6,6 +6,8 @@ import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
 	type BackgroundToolTaskRecord,
 } from "../src/core/background-tool-task-controller.ts";
+import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
+import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
 
 const slowParameters = Type.Object({});
@@ -320,6 +322,57 @@ describe("AgentSession background tool tasks", () => {
 
 			const wait = await taskTool!.execute("wait-task", { action: "wait", taskId: "tool-task-7" });
 			expect(wait.content).toEqual([{ type: "text", text: "retained output" }]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("blocks goal continuation after a failed durable task wait exhausts recovery", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const failedTask: BackgroundToolTaskRecord = {
+			sessionId: sessionManager.getSessionId(),
+			taskId: "tool-task-1",
+			toolCallId: "failed-call",
+			toolName: "bash",
+			status: "failed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:30.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "bash failed after timing out",
+			output: "Background bash task timed out after 30 seconds.",
+		};
+		sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, failedTask);
+		const goal = applyGoalEvent(
+			createGoalState({ goalId: "goal-task-wait", userGoal: "Finish the audit", now: "T0" }),
+			{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+		);
+		appendGoalStateSnapshot(sessionManager, goal);
+
+		const responses = Array.from({ length: 3 }, (_, index) => ({
+			toolCalls: [
+				{
+					id: `wait-call-${index + 1}`,
+					name: "tool_task",
+					args: { action: "wait", taskId: failedTask.taskId },
+				},
+			],
+		}));
+		const harness = createHarness({
+			sessionManager,
+			responses: [...responses, "The background task failure requires owner action."],
+		});
+		harness.session.setActiveToolsByName(["tool_task", "goal"]);
+		harness.agent.maxStallTurns = 0;
+
+		try {
+			await harness.session.prompt("inspect the failed task", { autoContinueGoal: false });
+
+			expect(harness.faux.callCount).toBe(4);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-task-wait",
+				status: "blocked",
+				blockedReason: expect.stringContaining("terminal_tool_failure: tool_task"),
+			});
 		} finally {
 			harness.cleanup();
 		}

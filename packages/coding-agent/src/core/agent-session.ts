@@ -1618,6 +1618,7 @@ export class AgentSession {
 	 * warning through the same event the context-window/compaction backstops use.
 	 */
 	private _handleRunawayStop(info: { signature: string; repeats: number }): void {
+		const goalBlocked = this._goals.markRunawayBlocked(info);
 		const record: RunawayStopRecord = {
 			signature: info.signature,
 			repeats: info.repeats,
@@ -1628,7 +1629,7 @@ export class AgentSession {
 		this.sessionManager.appendCustomEntry(RUNAWAY_STOP_CUSTOM_TYPE, record);
 		this._emit({
 			type: "warning",
-			message: `Stopped: the model repeated the same tool call ${info.repeats} times in a row without making progress. Review the last tool result and steer or retry with a different approach.`,
+			message: `Stopped: the model repeated the same tool call ${info.repeats} times in a row without making progress.${goalBlocked ? " The active goal was blocked to prevent automatic restart." : ""} Review the last tool result and steer or retry with a different approach.`,
 		});
 	}
 
@@ -1754,6 +1755,9 @@ export class AgentSession {
 				tool: event.toolName,
 				details: event.result.details,
 			});
+			if (event.result.terminate === true) {
+				this._goals.markTerminalToolFailureBlocked(event.toolName);
+			}
 		}
 
 		// Emit to extensions first

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Projected failed and canceled background-task waits as tool errors, and blocked active goals after recovery-exhausted or runaway stops so automatic continuation cannot restart the loop.
+
 ## [0.90.0] - 2026-08-11
 
 ## [0.89.0] - 2026-08-11

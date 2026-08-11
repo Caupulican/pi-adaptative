@@ -77,6 +77,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 				return {
 					content: [{ type: "text" as const, text: `${input.action} requires a valid taskId.` }],
 					details: { kind: "error" as const, reason: "invalid_task_id" },
+					isError: true,
 				};
 			}
 
@@ -101,6 +102,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 
 			try {
 				const record = await deps.wait(taskId, signal);
+				const isError = record.status !== "completed";
 				return {
 					content: [{ type: "text" as const, text: record.output || record.summary }],
 					details: {
@@ -109,12 +111,14 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 						status: record.status,
 						...(record.artifactId ? { artifactId: record.artifactId } : {}),
 					},
+					...(isError ? { isError: true } : {}),
 				};
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				return {
 					content: [{ type: "text" as const, text: reason }],
 					details: { kind: "error" as const, taskId, reason },
+					isError: true,
 				};
 			}
 		},

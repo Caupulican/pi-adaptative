@@ -158,16 +158,24 @@ export class GoalSessionController {
 	}
 
 	markToolUnavailable(): void {
-		const state = this.getState();
-		const stopped = stopGoalFromSystem(
-			state,
-			{
-				status: "blocked",
-				reason: "goal_tool_unavailable: the active capability surface cannot update durable goal state",
-			},
-			new Date().toISOString(),
+		this.stopActiveGoal(
+			"blocked",
+			"goal_tool_unavailable: the active capability surface cannot update durable goal state",
 		);
-		if (stopped.ok && state) this.saveState(stopped.state, getGoalStateRevision(state));
+	}
+
+	markRunawayBlocked(info: { signature: string; repeats: number }): boolean {
+		return this.stopActiveGoal(
+			"blocked",
+			`runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`,
+		);
+	}
+
+	markTerminalToolFailureBlocked(toolName: string): boolean {
+		return this.stopActiveGoal(
+			"blocked",
+			`terminal_tool_failure: ${toolName} reported an unrecoverable error and terminated the run`,
+		);
 	}
 
 	getRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
@@ -197,17 +205,18 @@ export class GoalSessionController {
 		const message = error instanceof Error ? error.message : String(error);
 		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
-		const stopped = stopGoalFromSystem(
-			state,
-			{ status, reason: `${classified.reason}: ${message}` },
-			new Date().toISOString(),
-		);
-		if (stopped.ok) this.saveState(stopped.state, getGoalStateRevision(state));
+		this.stopActiveGoal(status, `${classified.reason}: ${message}`);
 	}
 
 	private markBudgetLimited(reason: string): void {
+		this.stopActiveGoal("budget_limited", reason);
+	}
+
+	private stopActiveGoal(status: "blocked" | "usage_limited" | "budget_limited", reason: string): boolean {
 		const state = this.getState();
-		const stopped = stopGoalFromSystem(state, { status: "budget_limited", reason }, new Date().toISOString());
-		if (stopped.ok && state) this.saveState(stopped.state, getGoalStateRevision(state));
+		const stopped = stopGoalFromSystem(state, { status, reason }, new Date().toISOString());
+		if (!stopped.ok || !state) return false;
+		this.saveState(stopped.state, getGoalStateRevision(state));
+		return true;
 	}
 }
