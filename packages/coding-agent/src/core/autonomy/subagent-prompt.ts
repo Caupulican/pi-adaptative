@@ -1,3 +1,7 @@
+import { SUBAGENT_CORE_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
+
+export { SUBAGENT_CORE_SYSTEM_PROMPT };
+
 /**
  * Agent system-prompt composition with an irreducible execution-contract core.
  *
@@ -8,15 +12,6 @@
  * caller can hand a tiny model a purpose-built minimal prompt) while the kernel remains the sole
  * authority and budget owner. Keep the core UNDER 300 tokens; it is deliberately terse.
  */
-export const SUBAGENT_CORE_SYSTEM_PROMPT = [
-	"You are an autonomous agent in a coding-agent orchestration tree. Execution contract:",
-	"1. Use the maximum useful capability exposed by your tool surface; the kernel enforces the exact inherited authority.",
-	"2. You may delegate recursively within host-enforced fleet bounds, inspect only your own control subtree transcripts, and exchange threaded peer messages when those tools are present.",
-	"3. Concurrency, cumulative budgets, leases, cycle detection, cancellation, and irreversible user-authority boundaries are kernel-owned.",
-	"4. Never invent facts, file paths, APIs, or command results; state uncertainty directly.",
-	"5. Follow the requested output contract exactly; your result remains evidence that other agents may independently verify.",
-].join("\n");
-
 export interface SubagentPromptParts {
 	/** Situational identity from the shipped profile (replaceable layer). */
 	soul?: string;

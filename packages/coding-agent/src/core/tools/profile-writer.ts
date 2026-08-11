@@ -1,96 +1,159 @@
-import { type Static, Type } from "typebox";
-import type { ToolDefinition } from "../extensions/types.ts";
-import { ORCHESTRATION_THINKING_LEVELS } from "../orchestration/contracts.ts";
+import { Type } from "typebox";
+import {
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	ORCHESTRATION_THINKING_LEVELS,
+} from "../orchestration/contracts.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
 	TaskProfileInspection,
 	TaskProfileWriterPort,
 } from "../orchestration/task-profile-writer.ts";
+import type { OrchestrationPanelModel } from "./orchestration-panel.ts";
 
-const thinkingLevelSchema = Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level)));
+export const DELEGATE_PROFILE_ACTIONS = ["profile_inspect", "profile_create"] as const;
 
-const budgetSchema = Type.Object(
-	{
-		maxTokens: Type.Optional(Type.Number({ minimum: 0 })),
-		maxWallClockMs: Type.Optional(Type.Number({ minimum: 0 })),
-		maxCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
-		maxAttempts: Type.Optional(Type.Number({ minimum: 0 })),
-		maxToolCalls: Type.Optional(Type.Number({ minimum: 0 })),
-		requireApprovalAboveCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
-	},
-	{ additionalProperties: false },
-);
+export type DelegateProfileAction = (typeof DELEGATE_PROFILE_ACTIONS)[number];
 
-const profileWriterSchema = Type.Union([
-	Type.Object({ action: Type.Literal("inspect") }, { additionalProperties: false }),
-	Type.Object(
-		{
-			action: Type.Literal("create"),
-			task: Type.String({ minLength: 1, maxLength: 3_500 }),
-			baseProfileId: Type.Optional(Type.String({ minLength: 1 })),
-			model: Type.Optional(
-				Type.Object(
-					{
-						provider: Type.String({ minLength: 1 }),
-						modelId: Type.String({ minLength: 1 }),
-						thinkingLevel: thinkingLevelSchema,
-					},
-					{ additionalProperties: false },
-				),
-			),
-			toolNames: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 64 })),
-			resourceProfileNames: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 64 })),
-			budget: Type.Optional(budgetSchema),
-		},
-		{ additionalProperties: false },
-	),
-]);
+export interface DelegateProfileInput {
+	task?: string;
+	baseProfileId?: string;
+	model?: TaskProfileCreateInput["model"];
+	toolNames?: readonly string[];
+	resourceProfileNames?: readonly string[];
+	budget?: TaskProfileCreateInput["budget"];
+}
 
-export type ProfileWriterToolInput = Static<typeof profileWriterSchema>;
-
-export interface ProfileWriterToolDetails extends TaskProfileCreateResult {
-	action: "inspect" | "create";
+export interface DelegateProfileToolDetails extends TaskProfileCreateResult {
+	started: boolean;
+	action: DelegateProfileAction;
+	kind: "profile";
 	inspection?: TaskProfileInspection;
 }
 
-export function createProfileWriterToolDefinition(writer: TaskProfileWriterPort): ToolDefinition {
+export function createDelegateProfileParameterSchemas() {
 	return {
-		name: "profile_writer",
-		label: "profile_writer",
-		description:
-			"Inspect authorized worker bases or create an optional immutable session preset that only narrows a base. Direct delegation does not require a profile.",
-		promptSnippet: "Inspect or create an optional session worker preset",
-		promptGuidelines: [
-			"Use this only when a reusable task-specific preset helps; delegate.authority can select execution directly.",
-			"Pass the returned profileId unchanged to delegate; never invent ids or write one-off profile files.",
-		],
-		parameters: profileWriterSchema,
-		execute(_toolCallId, input: ProfileWriterToolInput) {
-			if (input.action === "inspect") {
-				const inspection = writer.inspectTaskProfileOptions();
-				return Promise.resolve({
-					content: [
-						{
-							type: "text" as const,
-							text: `Authorized bases: ${inspection.baseProfiles.map((profile) => profile.profileId).join(", ") || "none"}. Available configured models: ${inspection.models.length}.`,
-						},
-					],
-					details: { action: "inspect" as const, created: false, inspection },
-				});
-			}
-			const result = writer.createTaskProfile(input as TaskProfileCreateInput);
-			return Promise.resolve({
-				content: [
+		task: Type.Optional(Type.String({ minLength: 1, maxLength: 3_500 })),
+		baseProfileId: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH })),
+		model: Type.Optional(
+			Type.Object(
+				{
+					provider: Type.String({
+						minLength: 1,
+						maxLength: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+					}),
+					modelId: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_ID_LENGTH }),
+					thinkingLevel: Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level))),
+				},
+				{ additionalProperties: false },
+			),
+		),
+		toolNames: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
+				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+			}),
+		),
+		resourceProfileNames: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
+				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+			}),
+		),
+		budget: Type.Optional(
+			Type.Object(
+				{
+					maxTokens: Type.Optional(Type.Number({ minimum: 0 })),
+					maxWallClockMs: Type.Optional(Type.Number({ minimum: 0 })),
+					maxCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
+					maxAttempts: Type.Optional(Type.Number({ minimum: 0 })),
+					maxToolCalls: Type.Optional(Type.Number({ minimum: 0 })),
+					requireApprovalAboveCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
+				},
+				{ additionalProperties: false },
+			),
+		),
+	};
+}
+
+export function delegateProfilePanelModel(details: DelegateProfileToolDetails): OrchestrationPanelModel {
+	if (details.action === "profile_inspect") {
+		return {
+			label: "worker profiles",
+			action: "inspected",
+			status: "success",
+			summary: [
+				`${details.inspection?.baseProfiles.length ?? 0} bases`,
+				`${details.inspection?.models.length ?? 0} models`,
+			],
+		};
+	}
+	return {
+		label: "worker profiles",
+		action: details.created ? "created" : "rejected",
+		status: details.created ? "success" : "warning",
+		rows: details.profileId
+			? [
 					{
-						type: "text" as const,
-						text: result.created
-							? `Created immutable session task profile ${result.profileId} from ${result.baseProfileId}.`
-							: `profile_writer rejected the request: ${result.reason}.`,
+						status: "succeeded",
+						label: details.profileId,
+						meta: details.baseProfileId ? [`base ${details.baseProfileId}`] : undefined,
 					},
-				],
-				details: { action: "create" as const, ...result },
-			});
-		},
+				]
+			: undefined,
+		emptyText: details.reason,
+	};
+}
+
+export function executeDelegateProfileAction(
+	action: DelegateProfileAction,
+	input: DelegateProfileInput,
+	writer: TaskProfileWriterPort,
+): { content: Array<{ type: "text"; text: string }>; details: DelegateProfileToolDetails } {
+	if (action === "profile_inspect") {
+		const inspection = writer.inspectTaskProfileOptions();
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Authorized bases: ${inspection.baseProfiles.map((profile) => profile.profileId).join(", ") || "none"}. Available configured models: ${inspection.models.length}.`,
+				},
+			],
+			details: { started: true, action, kind: "profile", created: false, inspection },
+		};
+	}
+
+	if (input.task === undefined) {
+		return {
+			content: [{ type: "text", text: "delegate profile_create requires task" }],
+			details: {
+				started: false,
+				action,
+				kind: "profile",
+				created: false,
+				reason: "missing_profile_task",
+			},
+		};
+	}
+	const request: TaskProfileCreateInput = {
+		task: input.task,
+		...(input.baseProfileId !== undefined ? { baseProfileId: input.baseProfileId } : {}),
+		...(input.model !== undefined ? { model: input.model } : {}),
+		...(input.toolNames !== undefined ? { toolNames: input.toolNames } : {}),
+		...(input.resourceProfileNames !== undefined ? { resourceProfileNames: input.resourceProfileNames } : {}),
+		...(input.budget !== undefined ? { budget: input.budget } : {}),
+	};
+	const result = writer.createTaskProfile(request);
+	return {
+		content: [
+			{
+				type: "text",
+				text: result.created
+					? `Created immutable session task profile ${result.profileId} from ${result.baseProfileId}.`
+					: `delegate profile_create rejected the request: ${result.reason}.`,
+			},
+		],
+		details: { started: result.created, action, kind: "profile", ...result },
 	};
 }

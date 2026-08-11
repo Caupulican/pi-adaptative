@@ -406,7 +406,7 @@ describe("secret_store tool", () => {
 		for (const forbidden of ['"set"', '"remove"', '"lock"', '"materialize"', '"dotenv"', '"value"', '"secret"']) {
 			expect(schema).not.toContain(forbidden);
 		}
-		expect(teachings).toContain("requests only one masked BW_SESSION key");
+		expect(teachings).toContain("one masked BW_SESSION only");
 		expect(teachings).not.toContain("run /secrets");
 	});
 });

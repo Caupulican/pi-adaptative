@@ -193,56 +193,28 @@ export function serializeConversation(messages: Message[]): string {
 // Summarization System Prompt
 // ============================================================================
 
-export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context checkpointer. Input: a serialized agent conversation. Output: ONLY the checkpoint, exactly in the format below. No preamble. No commentary. Same language as the user. Never include secrets/keys/tokens — write [REDACTED].
+export const SUMMARIZATION_SYSTEM_PROMPT = `Context checkpointer. Input: serialized agent conversation. Output only checkpoint, exact headings/order below, user language, no preamble/commentary. Never include secrets/keys/tokens; write [REDACTED].
 
-RULES:
-- Recent turns weigh heaviest. Old turns contribute only rules, decisions, and file knowledge.
-- ## Active Task: the user's most recent UNFULFILLED input, near-verbatim. A question awaiting an answer IS an active task. If the user's last signal cancels earlier work (stop/undo/never mind), record the cancellation and DROP the cancelled work everywhere.
-- ### Mandatory Rules: every user prohibition ("do not X", "never Y", "stop doing Z") as one bullet each, imperative, with source turn if known. PRESERVE existing rules verbatim. A user-corrected mistake appears ONLY here as "DO NOT <mistake>" — the mistaken work itself must not survive.
-- ## Working Set: the currently active/recent files — path — why they matter.
-- ## Files: bare paths only; modified files must all appear, read files should be recalled when relevant.
-- ## Open Problems: unresolved errors only — command/operation plus first error line. Drop resolved/transient errors.
-- ## Done: numbered caveman log — "N. VERB target — outcome". Exact paths, commands, line numbers, error strings.
-- Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
-- Sections with nothing: write "(none)".
+MANDATORY
+- Weight recent turns most; retain old rules, decisions, file knowledge only.
+- Active Task: latest unfulfilled user input, near-verbatim. An unanswered question is active. A final stop/undo/never-mind cancels prior work: record cancellation, drop cancelled work everywhere.
+- Mandatory Rules: every user prohibition, one imperative bullet, source turn when known. Preserve existing rules verbatim. Corrected mistake survives only as "DO NOT <mistake>" here; never retain mistaken work elsewhere.
+- Working Set: active/recent file path plus relevance.
+- Files: bare paths; every modified file, relevant read files.
+- Open Problems: unresolved command/operation plus first error line only. Drop resolved/transient errors.
+- Done: numbered "N. VERB target — outcome"; exact paths, commands, line numbers, errors.
+- Key Decisions, Constraints & Preferences, Critical Context: durable facts only.
+- Never retain superseded approaches or file bodies. Empty section: "(none)".
 
-EXAMPLE INPUT (excerpt):
-[user]: add retry to the fetcher, and do not touch the legacy client
-[assistant]: (edits src/fetcher.ts, adds retry loop)
-[tool write src/fetcher.ts]: ok
-[tool bash npm test]: 2 failed: fetcher.test.ts
-[assistant]: (tries wrapping legacy client instead)
-[user]: no — stop changing the legacy client, I said don't touch it. Fix the two tests instead.
-
-EXAMPLE OUTPUT:
+FORMAT
 ## Active Task
-User: "Fix the two failing tests" (fetcher.test.ts) — retry work continues, legacy-client changes cancelled.
-
 ### Mandatory Rules
-- DO NOT touch the legacy client (user, twice)
-
 ## Working Set
-- test/fetcher.test.ts — 2 failing, current focus
-- src/fetcher.ts — retry loop added
-
 ## Files
-- src/fetcher.ts
-- test/fetcher.test.ts
-
 ## Open Problems
-- TEST npm test: 2 failed: fetcher.test.ts
-
 ## Done
-1. EDIT src/fetcher.ts — added retry loop
-2. TEST npm test — 2 failed: fetcher.test.ts
-
 ## Key Decisions
-(none)
-
 ## Constraints & Preferences
-(none)
-
 ## Critical Context
-(none)
 
-Note what the example TEACHES (not just shows): the legacy-client wrapping attempt (cancelled work) appears nowhere except as the DO-NOT rule; the Active Task is the tail, near-verbatim; Done lines are caveman-format.`;
+Cancellation example: user forbids legacy-client edits, later catches one, requests test fixes. Active Task contains test fixes; Mandatory Rules contains "DO NOT touch legacy client"; cancelled edit appears nowhere; Done keeps only completed valid work.`;

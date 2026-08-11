@@ -608,13 +608,13 @@ function exampleTools(tools: readonly Tool[]): Tool[] {
 
 function protocolHeader(variant: TextToolProtocolVariant): string[] {
 	return [
-		"Text tool-call protocol is enabled. To call a tool, emit an envelope in exactly this shape:",
+		"Text tool-call protocol is enabled. Call tools only with this exact envelope:",
 		formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}'),
-		"Arguments are one JSON object: double-quoted keys/strings, arrays as [ ] (never a quoted string), optional args omitted rather than null.",
-		"Reasoning may appear as prose before an envelope, never inside one.",
-		"Emit several envelopes in one reply to call multiple tools in parallel; each is executed and answered on its own.",
-		"After a successful tool result, use it and continue; do not repeat the same unchanged call.",
-		"Files, directories, searches, edits, writes, and shell commands always go through a tool envelope - never type out shell commands, file paths, or invented results yourself.",
+		"Arguments: one JSON object; quote keys/strings; arrays [ ] never quoted; omit optional args, never null.",
+		"Reasoning before envelope only.",
+		"Parallel: multiple envelopes/reply; each runs, returns independently.",
+		"Success: use result; do not repeat unchanged successful calls.",
+		"File-read request: first reply one read call only, never guess. All file/directory/search/edit/write/shell work uses envelopes; never substitute prose commands/paths/invented results.",
 	];
 }
 

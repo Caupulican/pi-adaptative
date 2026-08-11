@@ -25,11 +25,11 @@ export function buildResumablePiAgentWakePrompt(payload: ResumablePayload): stri
 				`- ${JSON.stringify({ id: pointer.id, kind: pointer.kind, uri: pointer.uri, readOnly: pointer.readOnly }).slice(0, 1_000)}`,
 		);
 	return [
-		"Resume this interrupted delegated task using the persisted session context and the same logical agent identity.",
+		"Resume interrupted delegated task; same logical agent/session.",
 		...(taskSummary ? [`Task: ${taskSummary}`] : []),
 		...(context.latestCheckpointId ? [`Latest checkpoint: ${context.latestCheckpointId}`] : []),
-		...(contextPointers.length > 0 ? ["Persisted context pointers:", ...contextPointers] : []),
-		"Continue from the persisted transcript and referenced checkpoints or artifacts, then finish with a persisted terminal result.",
+		...(contextPointers.length > 0 ? ["Context pointers:", ...contextPointers] : []),
+		"Continue persisted transcript/checkpoints/artifacts; finish with persisted terminal result.",
 	].join("\n");
 }
 

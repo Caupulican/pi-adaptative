@@ -100,11 +100,9 @@ describe("compaction bounds", () => {
 
 		// Chunking is map-reduce: every chunk is summarized before the final checkpoint merge.
 		expect(completeSimpleMock).toHaveBeenCalledTimes(4);
-		expect(completeSimpleMock.mock.calls[0]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
-		expect(completeSimpleMock.mock.calls[2]?.[1].messages[0]?.content[0]?.text).toContain("conversation-chunk");
-		expect(completeSimpleMock.mock.calls[3]?.[1].messages[0]?.content[0]?.text).toContain(
-			"Checkpoint the conversation",
-		);
+		expect(completeSimpleMock.mock.calls[0]?.[1].messages[0]?.content[0]?.text).toContain("CHAT CHUNK");
+		expect(completeSimpleMock.mock.calls[2]?.[1].messages[0]?.content[0]?.text).toContain("CHAT CHUNK");
+		expect(completeSimpleMock.mock.calls[3]?.[1].messages[0]?.content[0]?.text).toContain("Create checkpoint");
 	});
 
 	it("truncates oversized output by dropping lower-priority sections", async () => {
@@ -234,7 +232,7 @@ describe("compaction bounds", () => {
 		completeSimpleMock.mockImplementation(
 			(_model, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
 				const prompt = request.messages[0]?.content[0]?.text ?? "";
-				if (prompt.includes("conversation-chunk")) {
+				if (prompt.includes("CHAT CHUNK")) {
 					chunkCalls += 1;
 					return Promise.resolve(response(chunkCalls <= 21 ? "s".repeat(4000) : "reduced chunk"));
 				}
@@ -260,15 +258,15 @@ describe("compaction bounds", () => {
 
 		const prompts = completeSimpleMock.mock.calls.map(firstPromptText);
 		expect(chunkCalls).toBeGreaterThan(21);
-		expect(prompts[21]).toContain("conversation-chunk");
-		expect(prompts[prompts.length - 1]).toContain("Checkpoint the conversation");
+		expect(prompts[21]).toContain("CHAT CHUNK");
+		expect(prompts[prompts.length - 1]).toContain("Create checkpoint");
 	});
 
 	it("throws input-overflow instead of sending an over-window prompt after bounded reduce passes", async () => {
 		completeSimpleMock.mockImplementation(
 			(_model, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
 				const prompt = request.messages[0]?.content[0]?.text ?? "";
-				if (prompt.includes("conversation-chunk")) {
+				if (prompt.includes("CHAT CHUNK")) {
 					return Promise.resolve(response("s".repeat(4000)));
 				}
 				return Promise.resolve(response("## Active Task\nshould not send"));
@@ -294,7 +292,7 @@ describe("compaction bounds", () => {
 		).rejects.toThrow("input-overflow");
 
 		const prompts = completeSimpleMock.mock.calls.map(firstPromptText);
-		expect(prompts.some((prompt) => prompt.includes("Checkpoint the conversation"))).toBe(false);
+		expect(prompts.some((prompt) => prompt.includes("Create checkpoint"))).toBe(false);
 	});
 
 	it("instructs update summaries to refresh working set and clear resolved open problems", async () => {
@@ -363,10 +361,11 @@ describe("compaction bounds", () => {
 		);
 
 		const prompt = firstPromptText(completeSimpleMock.mock.calls[0] ?? []);
-		expect(prompt).toContain("Drop previous ## Open Problems resolved by the new turns.");
-		expect(prompt).toContain("Drop ## Working Set files untouched since the previous checkpoint");
+		expect(prompt).toContain("Drop resolved ## Open Problems.");
+		expect(prompt).toContain("Drop ## Working Set files untouched since OLD CHECKPOINT");
 		expect(prompt).toContain(previousSummary);
 		expect(prompt).toContain(factsBlock);
+		expect(prompt).not.toMatch(/<\/?(?:conversation|previous-summary)>/);
 	});
 
 	it("throws for deterministic compaction when bounded gate demand cannot fit reserve", async () => {

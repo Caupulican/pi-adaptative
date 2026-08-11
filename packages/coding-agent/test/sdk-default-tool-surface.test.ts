@@ -27,7 +27,7 @@ describe("SDK default tool surface", () => {
 		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("keeps goal, delegation, and toolkit capabilities on capable SDK-created sessions", async () => {
+	it("keeps skill, goal, delegation, and toolkit capabilities on capable SDK-created sessions", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
 		await resourceLoader.reload();
@@ -43,13 +43,15 @@ describe("SDK default tool surface", () => {
 			sessionManager: SessionManager.inMemory(),
 		});
 		try {
-			expect(session.getActiveToolNames()).toEqual([
-				...DEFAULT_ACTIVE_TOOL_NAMES,
-				"artifact_retrieve",
-				"delegate_status",
-			]);
+			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
+			expect(session.getActiveToolNames()).toContain("skill");
+			expect(session.getToolDefinition("skill")).toBeDefined();
 			expect(session.getActiveToolNames()).toContain("delegate");
 			expect(session.getActiveToolNames()).toContain("tool_task");
+			expect(session.getToolDefinition("delegate_status")).toBeUndefined();
+			expect(session.getToolDefinition("profile_writer")).toBeUndefined();
+			expect(session.getToolDefinition("context_audit")).toBeDefined();
+			expect(session.getActiveToolNames()).not.toContain("context_audit");
 			expect(session.getToolDefinition("tool_task")).toBeDefined();
 		} finally {
 			session.dispose();
@@ -179,11 +181,7 @@ describe("SDK default tool surface", () => {
 		try {
 			expect(reload).toHaveBeenCalledTimes(1);
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
-			expect(session.getActiveToolNames()).toEqual([
-				...DEFAULT_ACTIVE_TOOL_NAMES,
-				"artifact_retrieve",
-				"delegate_status",
-			]);
+			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
 		} finally {
 			session.dispose();
 		}
@@ -209,11 +207,7 @@ describe("SDK default tool surface", () => {
 		});
 		try {
 			expect(settingsManager.getActiveResourceProfileNames()).toEqual([]);
-			expect(session.getActiveToolNames()).toEqual([
-				...DEFAULT_ACTIVE_TOOL_NAMES,
-				"artifact_retrieve",
-				"delegate_status",
-			]);
+			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
 		} finally {
 			session.dispose();
 		}

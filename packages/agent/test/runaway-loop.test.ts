@@ -66,6 +66,19 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: Assi
 	} satisfies AssistantMessage;
 }
 
+function completeMandatoryDelivery(
+	stream: MockAssistantStream,
+	providerContext: { tools?: readonly unknown[] },
+): boolean {
+	if (providerContext.tools?.length !== 0) return false;
+	stream.push({
+		type: "done",
+		reason: "stop",
+		message: assistantMessage([{ type: "text", text: "reported mandatory recovery blocker" }], "stop"),
+	});
+	return true;
+}
+
 const toolSchema = Type.Object({ value: Type.String() });
 function createEchoTool(onExecute?: () => void): AgentTool<typeof toolSchema, { value: string }> {
 	return {
@@ -164,7 +177,7 @@ describe("runaway-loop backstop", () => {
 			const text =
 				event.result.content.find((block: { type: string; text?: string }) => block.type === "text")?.text ?? "";
 			expect(text).toContain('"failure_code":"repeated_successful_call"');
-			expect(text).toContain('"next_action":"Use the previous successful result and continue');
+			expect(text).toContain('"next_action":"Use prior successful result; continue');
 			expect(text).toContain("echoed: stuck");
 		}
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
@@ -472,9 +485,14 @@ describe("runaway-loop backstop", () => {
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		const stalls: Array<{ signature: string; repeats: number }> = [];
 		let calls = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				calls++;
 				const argumentsValue =
 					calls % 2 === 0
@@ -513,8 +531,8 @@ describe("runaway-loop backstop", () => {
 		expect(executions).toBe(1);
 		expect(toolEndMessages).toHaveLength(3);
 		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
-		expect(stalls).toHaveLength(1);
-		expect(stalls[0].repeats).toBe(3);
+		expect(stalls).toHaveLength(0);
+		expect(deliveryTurns).toBe(1);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
@@ -601,9 +619,14 @@ describe("runaway-loop backstop", () => {
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		let calls = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				calls++;
 				stream.push({
 					type: "done",
@@ -657,6 +680,7 @@ describe("runaway-loop backstop", () => {
 
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
+		expect(deliveryTurns).toBe(1);
 		expect(toolResultIds).toEqual(["refresh-1", "refresh-2", "refresh-3"]);
 		expect(blocked).toHaveLength(1);
 		expect(exhausted).toHaveLength(1);
@@ -1233,7 +1257,7 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(providerPrompts[1]).toContain("No currently loaded tool declares a recovery action");
+		expect(providerPrompts[1]).toContain("No loaded tool declares recovery");
 		expect(providerPrompts[1]).not.toContain("Repair with the other backend.");
 		expect(providerPrompts[1]).not.toContain("list the parent directory or re-read the path");
 	});
@@ -1282,9 +1306,14 @@ describe("runaway-loop backstop", () => {
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, recoveryTool] };
 		let turns = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				turns++;
 				if (turns <= 6) {
 					const recoveryTurn = turns % 2 === 0;
@@ -1331,6 +1360,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(3);
+		expect(deliveryTurns).toBe(1);
 		expect(targetExecutions).toBe(2);
 		expect(recoveryExecutions).toBe(1);
 		expect(
@@ -1357,9 +1387,14 @@ describe("runaway-loop backstop", () => {
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		let turns = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				turns++;
 				if (turns <= 8) {
 					stream.push({
@@ -1398,6 +1433,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(3);
+		expect(deliveryTurns).toBe(1);
 		expect(executions).toBe(1);
 		expect(
 			events.some(
@@ -1423,9 +1459,14 @@ describe("runaway-loop backstop", () => {
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		let turns = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				turns++;
 				if (turns <= 10) {
 					stream.push({
@@ -1464,6 +1505,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(4);
+		expect(deliveryTurns).toBe(1);
 		expect(executions).toBe(4);
 		expect(
 			events.some(
@@ -1480,9 +1522,14 @@ describe("runaway-loop backstop", () => {
 		const guardedTool = createEchoTool(() => executions++);
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [guardedTool] };
 		let turns = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				turns++;
 				if (turns <= 10) {
 					stream.push({
@@ -1529,6 +1576,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(4);
+		expect(deliveryTurns).toBe(1);
 		expect(beforeCalls).toBe(4);
 		expect(executions).toBe(0);
 		expect(
@@ -1555,9 +1603,14 @@ describe("runaway-loop backstop", () => {
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		let turns = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				turns++;
 				if (turns <= 16) {
 					stream.push({
@@ -1596,6 +1649,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(12);
+		expect(deliveryTurns).toBe(1);
 		expect(executions).toBe(12);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
@@ -1695,8 +1749,8 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(providerPrompts[1]).toContain("permits one unchanged retry");
-		expect(providerPrompts[2]).toContain("unchanged retry is exhausted");
+		expect(providerPrompts[1]).toContain("Timeout policy allows 1 unchanged retry");
+		expect(providerPrompts[2]).toContain("Timeout unchanged retry exhausted");
 	});
 
 	it("reserves one timeout retry across parallel duplicates and blocks the excess call", async () => {
@@ -1772,9 +1826,14 @@ describe("runaway-loop backstop", () => {
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		let turns = 0;
-		const streamFn = () => {
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
 				turns++;
 				stream.push({
 					type: "done",
@@ -1811,6 +1870,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(1);
+		expect(deliveryTurns).toBe(1);
 		expect(executions).toBe(4);
 		expect(pairedResultIds).toEqual(Array.from({ length: 10 }, (_, index) => `parallel-varied-${index}`));
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);

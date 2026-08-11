@@ -53,9 +53,6 @@ export default function (pi: ExtensionAPI) {
 		// Convert messages to readable text format
 		const conversationText = serializeConversation(convertToLlm(allMessages));
 
-		// Include previous summary context if available
-		const previousContext = previousSummary ? `\n\nPrevious session summary for context:\n${previousSummary}` : "";
-
 		// Build messages that ask for a comprehensive summary
 		const summaryMessages = [
 			{
@@ -63,22 +60,13 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text" as const,
-						text: `You are a conversation summarizer. Create a comprehensive summary of this conversation that captures:${previousContext}
+						text: `Create complete replacement checkpoint. Preserve goals, mandatory rules, decisions/rationale, code/file details, current state, blockers/open questions, next steps. Omit resolved/transient noise. Structured Markdown, concise but sufficient to resume.
 
-1. The main goals and objectives discussed
-2. Key decisions made and their rationale
-3. Important code changes, file modifications, or technical details
-4. Current state of any ongoing work
-5. Any blockers, issues, or open questions
-6. Next steps that were planned or suggested
+OLD CHECKPOINT
+${previousSummary ?? "(none)"}
 
-Be thorough but concise. The summary will replace the ENTIRE conversation history, so include all information needed to continue the work effectively.
-
-Format the summary as structured markdown with clear sections.
-
-<conversation>
-${conversationText}
-</conversation>`,
+CHAT
+${conversationText}`,
 					},
 				],
 				timestamp: Date.now(),

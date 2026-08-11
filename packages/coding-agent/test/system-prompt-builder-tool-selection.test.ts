@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
+import type { Skill } from "../src/core/skills.ts";
 import { SystemPromptBuilder, type SystemPromptBuilderDeps } from "../src/core/system-prompt-builder.ts";
 import type { ToolSelectionHint } from "../src/core/tool-selection/promotion.ts";
 
@@ -63,10 +64,32 @@ const readHint: ToolSelectionHint = {
 };
 
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it("keeps skill metadata host-side for extensions without rendering a catalog", () => {
+		const skill = {
+			name: "secret-skill",
+			description: "secret-description",
+			filePath: "/secret/SKILL.md",
+			baseDir: "/secret",
+			disableModelInvocation: false,
+			sourceInfo: {},
+		} as Skill;
+		const resourceLoader = {
+			...makeDeps().getResourceLoader(),
+			getActiveSkills: () => [skill],
+		} as ResourceLoader;
+		const builder = new SystemPromptBuilder(makeDeps({ getResourceLoader: () => resourceLoader }));
+
+		const prompt = builder.rebuildSystemPrompt(["read"]);
+
+		expect(builder.getBaseSystemPromptOptions().skills).toEqual([skill]);
+		expect(prompt).not.toContain("secret-skill");
+		expect(prompt).not.toContain("/secret/SKILL.md");
+	});
+
 	it("renders no hint block when there are no active hints", () => {
 		const builder = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => [] }));
 		const prompt = builder.rebuildSystemPrompt(["read"]);
-		expect(prompt).not.toContain("Learned tool preferences");
+		expect(prompt).not.toContain("EVIDENCE-GATED TOOL SHORTLIST");
 	});
 
 	it("behaves as no hints when the dep is not supplied at all (optional, decoupled wiring)", () => {
@@ -74,13 +97,13 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		// agent-session.ts) that has not wired the dep in yet.
 		const builder = new SystemPromptBuilder(makeDeps());
 		expect(() => builder.rebuildSystemPrompt(["read"])).not.toThrow();
-		expect(builder.rebuildSystemPrompt(["read"])).not.toContain("Learned tool preferences");
+		expect(builder.rebuildSystemPrompt(["read"])).not.toContain("EVIDENCE-GATED TOOL SHORTLIST");
 	});
 
 	it("renders a compact block naming the promoted tool once a hint is active", () => {
 		const builder = new SystemPromptBuilder(makeDeps({ getToolSelectionHints: () => [readHint] }));
 		const prompt = builder.rebuildSystemPrompt(["read"]);
-		expect(prompt).toContain("Learned tool preferences");
+		expect(prompt).toContain("EVIDENCE-GATED TOOL SHORTLIST");
 		expect(prompt).toContain("read_file");
 	});
 

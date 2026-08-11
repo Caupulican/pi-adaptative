@@ -412,9 +412,9 @@ export function createEditToolDefinition(
 			"Edit existing UTF-8 text in one call. Send path and all edits; after a path-only failure, reuse the returned payloadRef with only the corrected path. The harness preflights, revalidates, and stale-checks every exact replacement.",
 		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
 		promptGuidelines: [
-			"Call edit once with path and all replacements; preparation and stale-target checks are harness-owned.",
-			"If a path failure returns payloadRef, choose the correct existing path and reuse that reference instead of regenerating edits.",
-			"oldText is exact, unique, minimal, and original-file based; pass the inclusive line range from the supplying read when known, batch separate edits, and merge overlaps.",
+			"Call once with path/all replacements; harness owns preparation/stale checks.",
+			"Path failure with payloadRef: choose correct existing path, reuse reference; never regenerate edits.",
+			"oldText: exact/unique/minimal/from original. Include supplying read's inclusive lines when known; batch separate edits, merge overlaps.",
 		],
 		parameters: editSchema,
 		renderShell: "self",

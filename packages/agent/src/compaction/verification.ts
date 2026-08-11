@@ -332,8 +332,8 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 
 export function buildRetryPrompt(report: VerificationReport, previousAttempt?: string): string {
 	const failures = report.failures.map((failure) => `${failure.check}: ${failure.detail}`).join("; ");
-	const previous = previousAttempt ? `\n\n<previous-attempt>\n${previousAttempt}\n</previous-attempt>` : "";
-	return `Your previous checkpoint failed verification: ${failures}. Fix ONLY these omissions.${previous}`;
+	const previous = previousAttempt ? `\n\nPREVIOUS CHECKPOINT\n${previousAttempt}` : "";
+	return `Checkpoint failed verification: ${failures}. Fix only listed omissions.${previous}`;
 }
 
 export function formatVerificationReports(reports: readonly VerificationReport[]): string {

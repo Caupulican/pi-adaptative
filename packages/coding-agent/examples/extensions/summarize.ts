@@ -105,13 +105,11 @@ const buildConversationText = (entries: SessionEntry[]): string => {
 
 const buildSummaryPrompt = (conversationText: string): string =>
 	[
-		"Summarize this conversation so I can resume it later.",
-		"Include goals, key decisions, progress, open questions, and next steps.",
-		"Keep it concise and structured with headings.",
+		"Create concise structured checkpoint for later resume.",
+		"Keep goals, mandatory rules, decisions, progress, open questions, next steps.",
 		"",
-		"<conversation>",
+		"CHAT",
 		conversationText,
-		"</conversation>",
 	].join("\n");
 
 const showSummaryUi = async (summary: string, ctx: ExtensionCommandContext) => {

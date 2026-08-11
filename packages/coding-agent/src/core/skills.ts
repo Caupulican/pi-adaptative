@@ -1,17 +1,18 @@
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import { existsSync, readFileSync, statSync } from "fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
-import { escapePromptXml } from "./prompt-markup.ts";
 import { isResourcePathWithin } from "./resource-traversal.ts";
 import { discoverSkillFiles } from "./skill-discovery.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { sameFileVersion } from "./util/bounded-file.ts";
 
-/** Max name length per spec */
-const MAX_SKILL_FILE_BYTES = 8 * 1024 * 1024;
+/** Discovery retains only this bounded metadata prefix, never the whole skill body. */
+export const MAX_SKILL_FRONTMATTER_BYTES = 16 * 1024;
+const SKILL_FRONTMATTER_READ_CHUNK_BYTES = 1024;
 
 const MAX_NAME_LENGTH = 64;
 
@@ -32,6 +33,8 @@ export interface SkillFrontmatter {
 	"disable-model-invocation"?: boolean;
 	/** Optional thinking-level hint (R1 follow-up); see Skill.thinking. */
 	thinking?: string;
+	/** Reflection-generated skill marker used by the curator. */
+	promoted?: boolean;
 	[key: string]: unknown;
 }
 
@@ -42,6 +45,7 @@ export interface Skill {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	promoted?: boolean;
 	/**
 	 * Optional thinking-level hint parsed from frontmatter (R1 follow-up: skill-surfaced thinking
 	 * governance, alongside resource-profile thinking). Core only parses and surfaces this value —
@@ -135,6 +139,41 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
 }
 
 /**
+ * Read one stable, bounded frontmatter prefix. The closing delimiter ends the read, so discovery
+ * cost depends on metadata size, never body size. Unterminated metadata fails at the explicit cap.
+ */
+export function readSkillFrontmatterFile(filePath: string): string {
+	const fileDescriptor = openSync(filePath, "r");
+	try {
+		const before = fstatSync(fileDescriptor);
+		if (!before.isFile()) throw new Error("Skill is not a regular file.");
+		const chunks: Buffer[] = [];
+		let totalBytes = 0;
+		while (totalBytes < MAX_SKILL_FRONTMATTER_BYTES) {
+			const chunk = Buffer.allocUnsafe(
+				Math.min(SKILL_FRONTMATTER_READ_CHUNK_BYTES, MAX_SKILL_FRONTMATTER_BYTES - totalBytes),
+			);
+			const bytesRead = readSync(fileDescriptor, chunk, 0, chunk.length, totalBytes);
+			if (bytesRead > 0) {
+				chunks.push(chunk.subarray(0, bytesRead));
+				totalBytes += bytesRead;
+			}
+			const prefix = Buffer.concat(chunks, totalBytes).toString("utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+			const hasOpeningDelimiter = prefix.length >= 3 && prefix.startsWith("---");
+			const closingDelimiter = hasOpeningDelimiter ? prefix.indexOf("\n---", 3) : -1;
+			if (!hasOpeningDelimiter || closingDelimiter !== -1 || bytesRead === 0) {
+				const after = fstatSync(fileDescriptor);
+				if (!sameFileVersion(before, after)) throw new Error("Skill changed while metadata was being read.");
+				return closingDelimiter === -1 ? prefix : prefix.slice(0, closingDelimiter + 4);
+			}
+		}
+		throw new Error(`Skill frontmatter exceeds ${MAX_SKILL_FRONTMATTER_BYTES} bytes or is unterminated.`);
+	} finally {
+		closeSync(fileDescriptor);
+	}
+}
+
+/**
  * Load skills from a directory.
  *
  * Discovery rules:
@@ -172,19 +211,7 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
-		// A skill file is prompt material; anything beyond this is a mistake (or
-		// hostile) and would otherwise be loaded whole into the heap at startup.
-		const { size } = statSync(filePath);
-		if (size > MAX_SKILL_FILE_BYTES) {
-			diagnostics.push({
-				type: "warning",
-				path: filePath,
-				message: `Skill file is ${Math.round(size / (1024 * 1024))}MB (limit ${Math.round(MAX_SKILL_FILE_BYTES / (1024 * 1024))}MB); skipped.`,
-			});
-			return { skill: null, diagnostics };
-		}
-		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
+		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(readSkillFrontmatterFile(filePath));
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
 
@@ -216,6 +243,7 @@ function loadSkillFromFile(
 				baseDir: skillDir,
 				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+				promoted: frontmatter.promoted === true,
 				thinking: isSkillThinkingLevel(frontmatter.thinking) ? frontmatter.thinking : undefined,
 			},
 			diagnostics,
@@ -225,45 +253,6 @@ function loadSkillFromFile(
 		diagnostics.push({ type: "warning", message, path: filePath });
 		return { skill: null, diagnostics };
 	}
-}
-
-/**
- * Format skills for inclusion in a system prompt.
- * Uses XML format per Agent Skills standard.
- * See: https://agentskills.io/integrate-skills
- *
- * Skills with disableModelInvocation=true are excluded from the prompt
- * (they can only be invoked explicitly via /skill:name commands).
- */
-export function formatSkillsForPrompt(skills: Skill[]): string {
-	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
-
-	if (visibleSkills.length === 0) {
-		return "";
-	}
-
-	const lines = [
-		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use the read tool to load a skill's file when the task matches its description.",
-		"When multiple skills seem relevant, prefer the narrowest task-specific skill; combine skills only when their descriptions clearly cover distinct parts of the request.",
-		"Do not use a skill merely because it is loaded; if the fit is unclear, inspect the skill or ask before applying broad behavior.",
-		"Resource-profile blocks inside skill files are configuration data, not task instructions, and are stripped from /skill expansion.",
-		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
-		"",
-		"<available_skills>",
-	];
-
-	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapePromptXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapePromptXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapePromptXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
-	}
-
-	lines.push("</available_skills>");
-
-	return lines.join("\n");
 }
 
 export interface LoadSkillsOptions {

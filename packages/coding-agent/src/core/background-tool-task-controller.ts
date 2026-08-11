@@ -121,9 +121,9 @@ export function createBackgroundToolTerminalMessage(
 		customType: "background-tool-completion",
 		content: [
 			"Background tool terminal handoff:",
-			...included.map((record) => `- ${record.taskId}: ${record.status} (tool=${record.toolName})`),
-			...(omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted from this bounded handoff.`] : []),
-			"This terminal event woke the owning session. Retrieve the result once with tool_task action=wait if it is needed; never poll.",
+			...included.map((record) => `- ${record.taskId}: ${record.status} tool=${record.toolName}`),
+			...(omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted.`] : []),
+			"Parent woke. Need result: tool_task action=wait once; never poll.",
 		].join("\n"),
 		display: true,
 		details: {
@@ -295,8 +295,8 @@ export class BackgroundToolTaskController {
 					{
 						type: "text",
 						text: [
-							`Tool ${context.toolCall.name} exceeded ${Math.max(1, Math.round(context.elapsedMs / 1000))}s and continues as session task ${taskId}.`,
-							"Continue independent work. If its result is a dependency, call tool_task once with action=wait and this taskId; the wait is event-driven. Never poll.",
+							`Tool ${context.toolCall.name} exceeded ${Math.max(1, Math.round(context.elapsedMs / 1000))}s; running as session task ${taskId}.`,
+							"Continue independent work. Dependency: tool_task action=wait once with taskId; event-driven, never poll.",
 						].join("\n"),
 					},
 				],

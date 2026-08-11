@@ -4,7 +4,7 @@ import type { CapabilityEnvelope, WorkerClaim } from "../src/core/autonomy/contr
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
-import { createDelegateStatusToolDefinition } from "../src/core/tools/delegate-status.ts";
+import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
 import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
@@ -166,7 +166,7 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		expect(getInFlightWorkUnits(agentDir)).toEqual([]);
 	});
 
-	it("surfaces an out-of-scope tmux-worker mutation as UNREVIEWED through the existing delegate_status tool", async () => {
+	it("surfaces an out-of-scope tmux-worker mutation as UNREVIEWED through delegate status", async () => {
 		const agentDir = "/tmp/pi-test-tmux-review-delegate-status";
 		const { deps, savedClaims } = buildDeps(agentDir, {
 			envelope: { id: "env-1", capabilities: ["filesystem.write"], allowedPaths: ["/repo/src"] },
@@ -187,11 +187,21 @@ describe("host re-review of a managed (tmux) lane's changed files", () => {
 		const internalLaneId = controller.getLaneRecords()[0]?.laneId;
 		expect(internalLaneId).toBeDefined();
 
-		const statusTool = createDelegateStatusToolDefinition({
-			getLaneRecords: () => controller.getLaneRecords(),
-			getWorkerClaimSnapshots: () => savedClaims.map((entry) => entry.claim),
+		const statusTool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			status: {
+				getLaneRecords: () => controller.getLaneRecords(),
+				getWorkerClaimSnapshots: () => savedClaims.map((entry) => entry.claim),
+			},
 		});
-		const result = await statusTool.execute("call", { laneId: internalLaneId }, undefined, undefined, ctx);
+		const result = await statusTool.execute(
+			"call",
+			{ action: "status", laneId: internalLaneId },
+			undefined,
+			undefined,
+			ctx,
+		);
 		const text = result.content
 			.filter((entry): entry is { type: "text"; text: string } => entry.type === "text")
 			.map((entry) => entry.text)

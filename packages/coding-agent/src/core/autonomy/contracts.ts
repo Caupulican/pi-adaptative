@@ -153,7 +153,7 @@ export interface WorkerClaim {
 	 * distinct from `false`, which means the gate explicitly cleared it. */
 	parentReviewRequired?: boolean;
 	/** ISO 8601 timestamp set once the parent explicitly acknowledges an unreviewed mutation via
-	 * delegate_status's "review" action. Presence means reviewed; absence keeps the notice sticky.
+	 * delegate's "review" action. Presence means reviewed; absence keeps the notice sticky.
 	 * The ack is durable — re-derived from the latest persisted snapshot, not session-local state. */
 	parentReviewedAt?: string;
 	/** Typed semantic verdict emitted only by a verifier-profile worker. */

@@ -28,82 +28,78 @@ export interface ToolRepairRegistryEntry {
 export const TOOL_REPAIR_REGISTRY: readonly ToolRepairRegistryEntry[] = [
 	{
 		name: "nullOptionalDrop",
-		noteTemplate: "sent null for optional `{path}` -> omit the field instead",
-		standingRule: "Omit optional fields instead of sending null.",
+		noteTemplate: "optional `{path}` was null; omit field",
+		standingRule: "Optional field: omit, never null.",
 	},
 	{
 		name: "nullRequiredBounce",
-		noteTemplate: "`{path}` is required and cannot be null -> send a real value",
-		standingRule: "Send real values for required fields; never send null for a required field.",
+		noteTemplate: "required `{path}` was null; send real value",
+		standingRule: "Required field: real value, never null.",
 	},
 	{
 		name: "jsonStringParse",
-		noteTemplate: "sent `{path}` as a quoted JSON string -> send a raw JSON array/object",
-		standingRule:
-			"Send raw JSON arrays/objects where the tool schema expects arrays/objects; do not quote them as JSON strings.",
+		noteTemplate: "`{path}` was quoted JSON; send raw array/object",
+		standingRule: "Schema array/object: raw JSON, never quoted JSON string.",
 	},
 	{
 		name: "jsonObjectPropertySalvage",
-		noteTemplate:
-			"sent `{path}` as malformed JSON with recoverable declared properties -> keep the schema-declared properties",
-		standingRule:
-			"When sending JSON objects, use strict JSON syntax with commas between properties and no extra text inside the object.",
+		noteTemplate: "`{path}` was malformed JSON; retained declared properties",
+		standingRule: "JSON object: strict syntax, commas between properties, no extra inner text.",
 	},
 	{
 		name: "singleObjectWrap",
-		noteTemplate: "sent one object where `{path}` takes a list -> wrap it in [ ]",
-		standingRule: "Wrap a single object in [ ] when the tool schema expects a list.",
+		noteTemplate: "`{path}` needs list; wrap object in [ ]",
+		standingRule: "List schema: wrap one object in [ ].",
 	},
 	{
 		name: "bareScalarWrap",
-		noteTemplate: "sent a single value where `{path}` takes a list -> wrap it in [ ]",
-		standingRule: "Wrap a single scalar in [ ] when the tool schema expects a list.",
+		noteTemplate: "`{path}` needs list; wrap scalar in [ ]",
+		standingRule: "List schema: wrap one scalar in [ ].",
 	},
 	{
 		name: "emptyObjectPlaceholder",
-		noteTemplate: "sent `{}` as a placeholder -> omit `{path}`; its default applies",
-		standingRule: "Omit defaulted object fields instead of sending `{}` placeholders.",
+		noteTemplate: "`{path}` was `{}` placeholder; omit for default",
+		standingRule: "Defaulted object field: omit, never `{}` placeholder.",
 	},
 	{
 		name: "numberFromString",
-		noteTemplate: "sent `{path}` as a quoted number -> send a bare number",
-		standingRule: "Send bare numbers where the tool schema expects numbers; do not quote them.",
+		noteTemplate: "`{path}` was quoted number; send bare number",
+		standingRule: "Number schema: bare number, never quoted.",
 	},
 	{
 		name: "boolFromString",
-		noteTemplate: "sent `{path}` as a quoted boolean -> send bare true/false",
-		standingRule: "Send bare true/false where the tool schema expects booleans; do not quote them.",
+		noteTemplate: "`{path}` was quoted boolean; send bare true/false",
+		standingRule: "Boolean schema: bare true/false, never quoted.",
 	},
 	{
 		name: "enumCaseNormalize",
-		noteTemplate: "`{path}` matched a declared enum value after case/space normalization",
-		standingRule: "Use enum values exactly as declared, preserving case and spacing.",
+		noteTemplate: "`{path}` normalized to declared enum case/spacing",
+		standingRule: "Enum value: exact declared case/spacing.",
 	},
 	{
 		name: "propertyCaseNormalize",
-		noteTemplate: "sent `{path}` with different property-key casing -> use the schema key casing",
-		standingRule: "Use tool argument property names exactly as declared in the schema, preserving case.",
+		noteTemplate: "`{path}` used wrong key case; use schema case",
+		standingRule: "Argument property: exact schema name/case.",
 	},
 	{
 		name: "singleElementUnwrap",
-		noteTemplate: "sent `{path}` as a 1-item list where a single value was expected -> send the value",
-		standingRule:
-			"Send a single value directly when the tool schema expects a single value; do not wrap it in a one-item list.",
+		noteTemplate: "`{path}` needs scalar; unwrap 1-item list",
+		standingRule: "Scalar schema: direct value, never 1-item list.",
 	},
 	{
 		name: "stringifiedNumberInArray",
-		noteTemplate: "list `{path}` holds quoted numbers -> send bare numbers",
-		standingRule: "Use bare numbers inside number arrays; do not quote them.",
+		noteTemplate: "number list `{path}` held quoted values; send bare numbers",
+		standingRule: "Number array: bare numbers, never quoted.",
 	},
 	{
 		name: "bashCommandArgvJoin",
-		noteTemplate: "bash takes one command string, not an argv list -> joined the argv values",
-		standingRule: "For bash, send one command string rather than an argv array.",
+		noteTemplate: "bash needs one command string; joined argv values",
+		standingRule: "bash command: one string, never argv array.",
 	},
 	{
 		name: "bashCommandUnwrap",
-		noteTemplate: "bash `command` is a string -> unwrapped the command object",
-		standingRule: "For bash, send `command` as a string rather than an object wrapper.",
+		noteTemplate: "bash `command` needs string; unwrapped object",
+		standingRule: "bash `command`: string, never object wrapper.",
 	},
 ] as const;
 
@@ -137,7 +133,7 @@ export const REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE = {
 	failureCode: "repeated_successful_call",
 	diagnostic: "The identical phone tool call already succeeded and was not executed again.",
 	guidance:
-		"Use the previous successful result and continue; it is quoted in the diagnostic. Answer the user if the task is complete, or call a different required tool. Do not retry the same call unchanged.",
+		"Use prior successful result; continue. Task complete: answer user. Otherwise call different required tool. Never retry unchanged.",
 } as const;
 
 interface ToolExecutionErrorCatalogueEntry {
@@ -158,8 +154,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		phase: "provisioning",
 		failureCode: "provisioning_failed",
 		retainDiagnostic: true,
-		guidance:
-			"Provisioning failed; use the exact diagnostic, repair that cause, and retry only after the environment changes.",
+		guidance: "Provisioning failed. Use exact diagnostic, fix cause; retry only after environment changes.",
 		matches(message: string): boolean {
 			return /\bPI_TOOL_PROVISIONING_FAILED\b/i.test(message);
 		},
@@ -167,7 +162,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "commandNotFound",
 		phase: "provisioning",
-		guidance: "Command was not found; check the command name or available tools before retrying.",
+		guidance: "Command not found. Check exact name/available tools before retry.",
 		matches(message: string): boolean {
 			return /^spawn \S+ ENOENT\b/i.test(message) || /(?:^|\n|:)\s*command not found\b/i.test(message);
 		},
@@ -175,8 +170,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "bashNoOutput",
 		phase: "execution",
-		guidance:
-			"The command exited with an error but returned no output; verify the command syntax and check its specific documentation before retrying.",
+		guidance: "Command failed without output. Verify syntax, exact command documentation before retry.",
 		matches(message: string): boolean {
 			return message === "(no output)";
 		},
@@ -184,8 +178,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "bashPosixNotSupported",
 		phase: "execution",
-		guidance:
-			"POSIX shell scripts (.sh) are not supported on this Windows host; use a PowerShell equivalent or invoke the executable directly.",
+		guidance: "Windows host rejects POSIX .sh scripts. Use PowerShell equivalent or invoke executable directly.",
 		matches(message: string): boolean {
 			return /POSIX shell scripts are not supported by the Windows shell contract router/i.test(message);
 		},
@@ -193,7 +186,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "bashNestedShell",
 		phase: "execution",
-		guidance: "Do not wrap commands in powershell.exe or pwsh. Invoke the .ps1 script or command directly.",
+		guidance: "Never wrap command in powershell.exe/pwsh. Invoke .ps1 or command directly.",
 		matches(message: string): boolean {
 			return /Nested shell execution is not supported by the Windows shell contract router/i.test(message);
 		},
@@ -201,8 +194,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "bashMissingCommandWord",
 		phase: "execution",
-		guidance:
-			"The shell command was malformed (missing command word). Check for empty pipeline elements or incorrect string quoting before retrying.",
+		guidance: "Missing shell command word. Fix empty pipeline element or string quoting before retry.",
 		matches(message: string): boolean {
 			return /Missing command: a pipeline\/list element has no command word/i.test(message);
 		},
@@ -210,7 +202,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "bashEmptyRedirectTarget",
 		phase: "execution",
-		guidance: "The shell redirect target was empty; provide a valid file path for the redirect before retrying.",
+		guidance: "Empty redirect target. Supply valid file path before retry.",
 		matches(message: string): boolean {
 			return /redirect target expanded to nothing/i.test(message);
 		},
@@ -221,7 +213,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		failureCode: "encoding_corruption",
 		attemptMemory: "discard",
 		guidance:
-			"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
+			"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
 		matches(message: string): boolean {
 			return /\bPI_FILE_ENCODING_CORRUPTION\b/i.test(message);
 		},
@@ -244,7 +236,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		attemptMemory: "discard",
 		retainDiagnostic: true,
 		guidance:
-			"The mutation payload is already retained by the harness. Choose only the corrected target path and reuse the exact payloadRef from the diagnostic; do not regenerate content or edits.",
+			"Harness retained mutation. Choose corrected target path, reuse exact diagnostic payloadRef; never regenerate content/edits.",
 		matches(message: string): boolean {
 			return /\bPI_FILE_MUTATION_RETARGET\b/i.test(message);
 		},
@@ -253,7 +245,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		name: "fileNotFound",
 		phase: "execution",
 		failureCode: "file_not_found",
-		guidance: "Path was not found; list the parent directory or re-read the path before retrying.",
+		guidance: "Path not found. List parent directory or re-read path before retry.",
 		matches(message: string): boolean {
 			return (
 				/\bENOENT\b/i.test(message) ||
@@ -266,7 +258,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		name: "editOldTextNotFound",
 		phase: "execution",
 		failureCode: "edit_old_text_not_found",
-		guidance: "Re-read the target file and use the exact current text before retrying.",
+		guidance: "Re-read target; use exact current text before retry.",
 		matches(message: string): boolean {
 			return /(?:oldText|old text|exact text).*(?:not found|no match|failed to match|must match)/is.test(message);
 		},
@@ -274,7 +266,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
 		name: "pathOutsideCwd",
 		phase: "policy",
-		guidance: "Choose a path inside the current working directory, or ask before changing scope.",
+		guidance: "Choose path inside current working directory; ask before scope change.",
 		matches(message: string): boolean {
 			return /outside (?:the )?(?:current working directory|cwd|workspace|root)/i.test(message);
 		},
@@ -284,8 +276,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		phase: "policy",
 		failureCode: "permission_denied",
 		retainDiagnostic: true,
-		guidance:
-			"Access was denied; verify the target path and current authority, then request or change permissions before retrying.",
+		guidance: "Access denied. Verify target/current authority; obtain permissions before retry.",
 		matches(message: string): boolean {
 			return /\b(?:EACCES|EPERM)\b/i.test(message) || /(?:permission|access) (?:is )?denied/i.test(message);
 		},
@@ -295,7 +286,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		phase: "execution",
 		failureCode: "invalid_option",
 		retainDiagnostic: true,
-		guidance: "Option rejected; re-read command help and remove or replace it before retrying.",
+		guidance: "Option rejected. Read command help; remove/replace option before retry.",
 		matches(message: string): boolean {
 			return /\b(?:invalid|unknown|unrecognized) (?:command-line )?(?:option|argument)\b/i.test(message);
 		},
@@ -305,7 +296,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		phase: "execution",
 		failureCode: "invalid_pattern",
 		retainDiagnostic: true,
-		guidance: "The search pattern was invalid; simplify it or correct its regex/glob escaping before retrying.",
+		guidance: "Invalid search pattern. Simplify or fix regex/glob escaping before retry.",
 		matches(message: string): boolean {
 			return (
 				/(?:regex|regular expression|glob) (?:parse )?error\b/i.test(message) ||
@@ -317,8 +308,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		name: "outputLimit",
 		phase: "execution",
 		failureCode: "output_limit",
-		guidance:
-			"Output exceeded its bound; narrow the scope, page the request, or use the retained artifact before retrying.",
+		guidance: "Output exceeded bound. Narrow scope, page request, or use retained artifact before retry.",
 		matches(message: string): boolean {
 			return /\b(?:output|result|response).*(?:limit|truncat|too large)\b/i.test(message);
 		},
@@ -328,8 +318,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		phase: "timeout",
 		failureCode: "timeout",
 		unchangedRetryLimit: 1,
-		guidance:
-			"The operation timed out; narrow or split the work, then retry once only when repeating it is safe and still required.",
+		guidance: "Operation timed out. Narrow/split work; one unchanged retry only when safe, still required.",
 		matches(message: string): boolean {
 			return (
 				/\b(?:command|operation|process|request|tool)\s+(?:timed out|timeout(?: after)?)\b/i.test(message) ||
@@ -341,8 +330,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		name: "cancelled",
 		phase: "cancelled",
 		failureCode: "cancelled",
-		guidance:
-			"The operation was cancelled; retry only if it is still required and the cancellation condition has cleared.",
+		guidance: "Operation cancelled. Retry only when still required, cancellation condition cleared.",
 		matches(message: string): boolean {
 			return (
 				/^(?:operation|request|tool) (?:was )?(?:aborted|cancelled|canceled)\b/i.test(message) ||

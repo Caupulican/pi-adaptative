@@ -143,11 +143,11 @@ function formatStatus(status: SyncStatus): string[] {
 }
 
 const WORKTREE_SYNC_PROMPT_GUIDELINES = [
-	"Work ONLY inside your lane worktree on your lane branch; never edit the hub checkout or touch main directly -- main moves exclusively through the land action.",
-	"Commit your work on the lane branch, then land. Landing is refused while the lane is stale (G3): call sync first, resolve conflicts locally, then land.",
-	"When a sync stops on conflicts, edit exactly the listed files, then call continue -- staging, marker verification, and rebase continuation are mechanical.",
-	"After any other lane lands, your lane becomes stale; under the mandatory policy your file mutations are refused until you sync. git add/commit stay available to save WIP first.",
-	"Check status when unsure -- it is the deterministic full picture; never infer sync state from raw git output.",
+	"Work ONLY in lane worktree/branch; never hub/main. main moves only through land.",
+	"Commit lane, then land. stale lane: sync, resolve conflicts locally, land.",
+	"sync conflict: edit listed files, call continue; staging/marker checks/rebase are mechanical.",
+	"After another land, mutations fail until sync; git add/commit may save WIP first.",
+	"status is authoritative sync state; never infer from raw git.",
 ];
 
 export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): ToolDefinition {
@@ -156,7 +156,7 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 		label: "worktree_sync",
 		description:
 			"Hard-gated worktree-per-lane parallel work: each agent works in its own git worktree/branch; integration is always rebase-onto-main + ff-only land, serialized under one integration lock with the gate command verified at the exact landing tip. status/create_lane/sync/continue/abort_sync/land/release_lane/reconcile. Every outcome is a tagged code with the exact recovery step; landing while stale is structurally impossible.",
-		promptSnippet: "Coordinate parallel work: lane worktrees, rebase-onto-main sync, serialized gated landing.",
+		promptSnippet: "Coordinate lane worktrees, rebase-to-main sync, gated serialized land.",
 		promptGuidelines: WORKTREE_SYNC_PROMPT_GUIDELINES,
 		parameters: worktreeSyncSchema,
 		executionMode: "sequential",

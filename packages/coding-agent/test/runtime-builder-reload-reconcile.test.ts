@@ -14,6 +14,7 @@ import { registerInFlightWork, resetInFlightWorkRegistryForTests } from "../src/
 import { RuntimeBuilder, type RuntimeBuilderDeps } from "../src/core/runtime-builder.ts";
 import type { ResourceProfileFilterSettings } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { SkillVaultController } from "../src/core/skill-vault.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
 
 /**
@@ -57,6 +58,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 	let toolProfileFilter: Required<ResourceProfileFilterSettings> | undefined;
 	let unboundToolGrantWarnings: string[] = [];
 	let calls = 0;
+	const skillVault = new SkillVaultController({ getSkills: () => resourceLoader.getActiveSkills() });
 
 	const deps: RuntimeBuilderDeps = {
 		getAgent: () => agent,
@@ -69,6 +71,7 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		getModelRegistry: () => modelRegistry,
 		isModelExhausted: () => false,
 		getResourceLoader: () => resourceLoader,
+		getSkillVault: () => skillVault,
 		getExtensionRunner: () => extensionRunner,
 		setExtensionRunner: (runner) => {
 			extensionRunner = runner;

@@ -631,7 +631,11 @@ export type SessionEvent =
 // Agent Events
 // ============================================================================
 
-/** Fired before each LLM call. Can modify messages. */
+/**
+ * Fired while planning each provider request. Handlers must be replay-safe: compaction or stale
+ * state may invoke them again before one request is committed. `messages` is compactable history;
+ * provider-only additions belong in `ContextEventResult.transientMessages`.
+ */
 export interface ContextEvent {
 	type: "context";
 	messages: AgentMessage[];
@@ -1035,7 +1039,10 @@ export type ExtensionEvent =
 // ============================================================================
 
 export interface ContextEventResult {
+	/** Replacement projection of compactable durable history. */
 	messages?: AgentMessage[];
+	/** Provider-only context, retained across compaction and never written into session history. */
+	transientMessages?: AgentMessage[];
 }
 
 export type BeforeProviderRequestEventResult = unknown;
@@ -1393,7 +1400,7 @@ export interface ExtensionAPI {
 
 	/**
 	 * Report an out-of-process managed lane's dispatch or terminal outcome (e.g. a tmux worker) so the
-	 * host's LaneTracker treats it as a first-class lane — visible in `/autonomy` + `delegate_status`,
+	 * host's LaneTracker treats it as a first-class lane — visible in `/autonomy` + `delegate status`,
 	 * holding a reload-quiesce unit while dispatched, and leaving a bounded claim snapshot on terminal.
 	 *
 	 * HONEST TRUST BOUNDARY: this is a report, not a grant of in-process sandboxing — the host is the

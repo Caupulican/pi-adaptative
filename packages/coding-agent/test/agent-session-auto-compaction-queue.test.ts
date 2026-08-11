@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
-import type { AssistantMessage, Message, Model } from "@caupulican/pi-ai";
+import type { AgentMessage, ProviderRequestAdmissionResult } from "@caupulican/pi-agent-core/types";
+import type { AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -59,6 +59,45 @@ vi.mock("@caupulican/pi-agent-core/compaction/compaction", async (importOriginal
 		settings: { enabled: boolean; reserveTokens: number },
 	) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
 }));
+
+async function admitProviderPlan(
+	session: AgentSession,
+	messages: AgentMessage[],
+): Promise<ProviderRequestAdmissionResult> {
+	const model = session.model;
+	const planContext = session.agent.planContext;
+	const admitProviderRequest = session.agent.admitProviderRequest;
+	if (!model || !planContext || !admitProviderRequest) throw new Error("Expected provider request planning hooks");
+	const plan = await planContext({ messages, attempt: 0 });
+	try {
+		const compactableMessages = await session.agent.convertToLlm(plan.messages);
+		const messagesWithTransients = await session.agent.convertToLlm([
+			...plan.messages,
+			...(plan.transientMessages ?? []),
+		]);
+		const context: Context = {
+			systemPrompt: session.agent.state.systemPrompt,
+			messages: messagesWithTransients,
+			tools: [],
+		};
+		return await admitProviderRequest({
+			model,
+			context,
+			nonCompactableContext: {
+				...context,
+				messages: messagesWithTransients.slice(compactableMessages.length),
+			},
+			sourceContext: {
+				systemPrompt: session.agent.state.systemPrompt,
+				messages,
+				tools: session.agent.state.tools,
+			},
+			attempt: 0,
+		});
+	} finally {
+		plan.discard?.();
+	}
+}
 
 describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
@@ -236,9 +275,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 		sessionManager.appendMessage(toolResult);
 		session.agent.state.messages = [user, assistant, toolResult];
 
-		const transformed = await session.agent.transformContext?.([user, assistant, toolResult], undefined);
+		const decision = await admitProviderPlan(session, [user, assistant, toolResult]);
 
-		expect(transformed).toEqual(session.agent.state.messages);
+		expect(decision).toEqual({
+			action: "replan",
+			context: expect.objectContaining({ messages: session.agent.state.messages }),
+		});
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 
@@ -247,7 +289,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	// needlessly on a turn context-gc, running moments later in the same pass, would have relieved).
 	it("should suppress threshold compaction when this turn's own context-gc savings drop tokens below threshold", async () => {
 		const baseModel = session.model!;
-		session.agent.state.model = { ...baseModel, contextWindow: 2000 };
+		session.agent.state.model = { ...baseModel, contextWindow: 10_000 };
 		const model = session.model!;
 		const at = Date.now();
 
@@ -269,13 +311,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: at,
 		};
 		// Old, packable bash output (well past the default 8-message preserve-recent window) --
-		// context-gc packs this down to a small stub. Alone it is far larger than the 1500-token
-		// hard trigger (contextWindow 2000 - 25%-capped reserve 500).
+		// context-gc packs this down to a small stub. Alone it is larger than the 7500-token
+		// hard trigger (contextWindow 10000 - 25%-capped reserve 2500).
 		const staleToolResult = {
 			role: "toolResult" as const,
 			toolCallId: "call-old",
 			toolName: "bash",
-			content: [{ type: "text" as const, text: "x".repeat(20_000) }],
+			content: [{ type: "text" as const, text: "x".repeat(40_000) }],
 			isError: false,
 			timestamp: at + 1,
 		};
@@ -290,7 +332,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.agent.state.messages = messages;
 
 		const latestBefore = sessionManager.getEntries().length;
-		await session.agent.transformContext?.(messages, undefined);
+		await admitProviderPlan(session, messages);
 
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
 		expect(sessionManager.getEntries().length).toBe(latestBefore);
@@ -298,7 +340,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 	it("should still compact when the turn stays over threshold even after this turn's context-gc savings", async () => {
 		const baseModel = session.model!;
-		session.agent.state.model = { ...baseModel, contextWindow: 2000 };
+		session.agent.state.model = { ...baseModel, contextWindow: 10_000 };
 		const model = session.model!;
 		const at = Date.now();
 
@@ -324,7 +366,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			role: "toolResult" as const,
 			toolCallId: "call-old",
 			toolName: "bash",
-			content: [{ type: "text" as const, text: "x".repeat(20_000) }],
+			content: [{ type: "text" as const, text: "x".repeat(40_000) }],
 			isError: false,
 			timestamp: at + 1,
 		};
@@ -340,7 +382,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			role: "toolResult" as const,
 			toolCallId: "call-recent",
 			toolName: "bash",
-			content: [{ type: "text" as const, text: "x".repeat(20_000) }],
+			content: [{ type: "text" as const, text: "x".repeat(40_000) }],
 			isError: false,
 			timestamp: at + 100,
 		};
@@ -349,8 +391,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 		for (const message of messages) sessionManager.appendMessage(message);
 		session.agent.state.messages = messages;
 
-		await session.agent.transformContext?.(messages, undefined);
+		const decision = await admitProviderPlan(session, messages);
 
+		expect(decision.action).toBe("replan");
 		expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 	});
 

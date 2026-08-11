@@ -153,9 +153,9 @@ describe("text tool-call protocol round-trip", () => {
 			.filter((message) => message.role === "user")
 			.map((message) => (typeof message.content === "string" ? message.content : ""))
 			.join("\n");
-		expect(trailingUserText).toContain("Tool result (read; succeeded):");
+		expect(trailingUserText).toContain("TOOL read OK");
 		expect(trailingUserText).toContain("hello from a.txt");
-		expect(trailingUserText).toContain("Use this result and continue. Do not repeat this unchanged successful call.");
+		expect(trailingUserText).toContain("Use result; continue. Never repeat unchanged call.");
 	});
 
 	it("leaves native (non-text-protocol) serialization byte-unchanged (the cloud hot path must not move)", () => {
@@ -241,12 +241,10 @@ describe("text tool-call protocol round-trip", () => {
 			.join("\n");
 
 		expect(messages.some((message) => message.role === "tool")).toBe(false);
-		expect(resultText).toContain("Tool result (read; failed):");
+		expect(resultText).toContain("TOOL read FAILED");
 		expect(resultText).toContain('"phase":"execution"');
 		expect(resultText).toContain('"diagnostic":"path not found"');
 		expect(resultText).toContain('"next_action":"List the parent directory, correct the path, then retry."');
-		expect(resultText).toContain(
-			"Follow the repair or next_action before retrying; do not resend the unchanged call.",
-		);
+		expect(resultText).toContain("Do repair/next_action before retry; never resend unchanged.");
 	});
 });

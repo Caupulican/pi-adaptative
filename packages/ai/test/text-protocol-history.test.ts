@@ -147,7 +147,7 @@ describe("text-protocol-history render helpers", () => {
 
 		it("labels the result by tool name so a phone model (no tool_call_id) links it by name + order", () => {
 			expect(renderTextProtocolToolResult(makeResult("file body", "read"))).toBe(
-				"Tool result (read; succeeded):\nfile body\nUse this result and continue. Do not repeat this unchanged successful call.",
+				"TOOL read OK\nfile body\nUse result; continue. Never repeat unchanged call.",
 			);
 		});
 
@@ -164,7 +164,7 @@ describe("text-protocol-history render helpers", () => {
 				timestamp: 1,
 			};
 			expect(renderTextProtocolToolResult(result)).toBe(
-				"Tool result (grep; succeeded):\nline 1\nline 2\nUse this result and continue. Do not repeat this unchanged successful call.",
+				"TOOL grep OK\nline 1\nline 2\nUse result; continue. Never repeat unchanged call.",
 			);
 		});
 
@@ -178,7 +178,7 @@ describe("text-protocol-history render helpers", () => {
 				timestamp: 1,
 			};
 			expect(renderTextProtocolToolResult(result)).toBe(
-				"Tool result (read; succeeded):\n(see attached image)\nUse this result and continue. Do not repeat this unchanged successful call.",
+				"TOOL read OK\n(see attached image)\nUse result; continue. Never repeat unchanged call.",
 			);
 		});
 
@@ -187,7 +187,7 @@ describe("text-protocol-history render helpers", () => {
 			result.isError = true;
 
 			expect(renderTextProtocolToolResult(result)).toBe(
-				"Tool result (read; failed):\npermission denied\nFollow the repair or next_action before retrying; do not resend the unchanged call.",
+				"TOOL read FAILED\npermission denied\nDo repair/next_action before retry; never resend unchanged.",
 			);
 		});
 	});

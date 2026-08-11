@@ -105,7 +105,7 @@ describe("bundled skills discovery", () => {
 
 		const content = readFileSync(skill.filePath, "utf8");
 		expect(existsSync(join(dirname(skill.filePath), "agents", "openai.yaml"))).toBe(false);
-		expect(content).toContain("profile_writer");
+		expect(content).toContain('action: "profile_create"');
 		expect(content).toContain("exact harness-issued profile ID");
 		expect(content).toContain("Human edge");
 		expect(content.split("\n").length).toBeLessThan(500);

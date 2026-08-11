@@ -230,7 +230,8 @@ describe("InteractiveMode.handleUsageCommand", () => {
 		expect(output).toContain("Manual controls");
 		expect(output).toContain("/compact");
 		expect(output).toContain("/settings");
-		expect(output).toContain("context_audit");
+		expect(output).toContain("/context");
+		expect(output).not.toContain("context_audit");
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 });

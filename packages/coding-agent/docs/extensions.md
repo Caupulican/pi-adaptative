@@ -531,7 +531,7 @@ pi.on("before_agent_start", async (event, ctx) => {
   //   .appendSystemPrompt - text from --append-system-prompt flags
   //   .cwd - working directory
   //   .contextFiles - eagerly loaded AGENTS.md/CLAUDE.md/GEMINI.md context files
-  //   .skills - discovered skills; startup prompt includes locations only, not frontmatter
+  //   .skills - discovered frontmatter metadata, host-side; not rendered into the startup prompt
 
   return {
     // Inject a persistent message (stored in session, sent to LLM)
@@ -638,32 +638,48 @@ pi.on("tool_execution_end", async (event, ctx) => {
 
 #### context
 
-Fired before each LLM call. Modify messages non-destructively. See [Session Format](session-format.md) for message types.
+Fired while planning each provider request. A plan may be replayed after compaction or invalidated resource state, so handlers must be replay-safe and must not perform durable side effects.
+
+Return `messages` to replace compactable durable history. Return `transientMessages` for provider-only prompt material that must survive history compaction without entering session history or a compaction summary. Both classes are audited and budgeted before the request is admitted. See [Session Format](session-format.md) for message types.
 
 ```typescript
 pi.on("context", async (event, ctx) => {
   // event.messages - deep copy, safe to modify
   const filtered = event.messages.filter(m => !shouldPrune(m));
-  return { messages: filtered };
+  return {
+    messages: filtered,
+    transientMessages: [{
+      role: "custom",
+      customType: "my-provider-context",
+      content: "Request-local instructions",
+      display: false,
+      details: undefined,
+      timestamp: Date.now(),
+    }],
+  };
 });
 ```
+
+Later `context` handlers see the current `messages` projection. Transient additions accumulate separately and are not exposed as durable history to later handlers.
 
 #### before_provider_request
 
 Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. Returning `undefined` keeps the payload unchanged. Returning any other value replaces the payload for later handlers and for the actual request.
 
-This hook can rewrite provider-level system instructions or remove them entirely. Those payload-level changes are not reflected by `ctx.getSystemPrompt()`, which reports Pi's system prompt string rather than the final serialized provider payload.
+This is a trusted post-admission hook. A replacement may shrink or size-neutral-rewrite the serialized payload, but Pi rejects a replacement whose JSON representation is larger than the admitted payload. Add provider-visible prompt material with `context.transientMessages`; late prompt expansion fails closed instead of bypassing request admission.
+
+Payload-level changes are not reflected by `ctx.getSystemPrompt()`, which reports Pi's system prompt string rather than the final serialized provider payload.
 
 ```typescript
 pi.on("before_provider_request", (event, ctx) => {
   console.log(JSON.stringify(event.payload, null, 2));
 
-  // Optional: replace payload
+  // Optional: replace without increasing its serialized size
   // return { ...event.payload, temperature: 0 };
 });
 ```
 
-This is mainly useful for debugging provider serialization and cache behavior.
+This is mainly useful for debugging provider serialization, cache behavior, and bounded provider controls. It is not a prompt-injection boundary.
 
 #### after_provider_response
 
@@ -860,7 +876,7 @@ Fired when user input is received, after extension commands are checked but befo
 **Processing order:**
 1. Extension commands (`/cmd`) checked first - if found, handler runs and input event is skipped
 2. `input` event fires - can intercept, transform, or handle
-3. If not handled: skill commands (`/skill:name`) expanded to skill content
+3. If not handled: skill commands (`/skill:name`) load request-local skill context; arguments remain input
 4. If not handled: prompt templates (`/template`) expanded to template content
 5. Agent processing begins (`before_agent_start`, etc.)
 

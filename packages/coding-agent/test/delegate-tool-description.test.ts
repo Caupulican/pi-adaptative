@@ -20,7 +20,34 @@ describe("delegate tool capability description", () => {
 			properties?: { action?: { enum?: readonly string[] } };
 		};
 
-		expect(parameters.properties?.action?.enum).toEqual(DELEGATE_ACTIONS);
+		expect(parameters.properties?.action?.enum).toEqual(["start"]);
+		const fullDefinition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
+			status: {
+				getLaneRecords: () => [],
+				getWorkerClaimSnapshots: () => [],
+				acknowledgeWorkerReview: () => ({
+					ok: true,
+					requestId: "worker-1",
+					reviewedAt: "2026-08-10T12:00:00.000Z",
+				}),
+			},
+			profileWriter: {
+				inspectTaskProfileOptions: () => ({ baseProfiles: [], models: [] }),
+				createTaskProfile: () => ({ created: false, reason: "test" }),
+			},
+		});
+		const fullParameters = fullDefinition.parameters as unknown as {
+			properties?: { action?: { enum?: readonly string[] } };
+		};
+		expect(fullParameters.properties?.action?.enum).toEqual([
+			"start",
+			"status",
+			"review",
+			"profile_inspect",
+			"profile_create",
+		]);
 		expect(new Set(DELEGATE_ACTIONS).size).toBe(DELEGATE_ACTIONS.length);
 	});
 
@@ -49,7 +76,16 @@ describe("delegate tool capability description", () => {
 		};
 
 		expect(parameters.properties.instructions.maxLength).toBe(MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH);
-		for (const field of ["profileId", "agentId", "threadId", "replyToMessageId", "requestMessageId", "messageId"]) {
+		for (const field of [
+			"profileId",
+			"agentId",
+			"threadId",
+			"replyToMessageId",
+			"requestMessageId",
+			"messageId",
+			"laneId",
+			"baseProfileId",
+		]) {
 			expect(parameters.properties[field]?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
 		}
 		expect(parameters.properties.agentIds.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
@@ -100,7 +136,7 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
 		expect(parameters.properties?.profileId?.description).toContain("profile preset");
 		expect(parameters.properties?.authority).toBeDefined();
-		expect((definition.promptGuidelines ?? []).join("\n")).toContain("authority to choose the model");
+		expect((definition.promptGuidelines ?? []).join("\n")).toContain("authority selects model");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 

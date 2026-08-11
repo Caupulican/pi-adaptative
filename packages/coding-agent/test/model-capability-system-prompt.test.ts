@@ -39,10 +39,10 @@ describe("capability-shaped system prompts", () => {
 	it("reframes an 8k model as a focused executor and defers oversized project instructions", () => {
 		const prompt = buildForCapability("minimal");
 
-		expect(prompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+		expect(prompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).toContain("read each relevant listed file completely before any mutation");
-		expect(prompt).toContain("read the returned error and expected shape");
+		expect(prompt).toContain("On failure, read error, expected shape");
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("N+2 ARCHITECTURE");
 		expect(prompt.length).toBeLessThanOrEqual(4_096);
@@ -51,7 +51,7 @@ describe("capability-shaped system prompts", () => {
 	it("keeps the rich prompt and eager project instructions for a full-capability model", () => {
 		const prompt = buildForCapability("full");
 
-		expect(prompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
+		expect(prompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
 		expect(prompt).toContain("N+2 ARCHITECTURE");
 		expect(prompt).toContain(OVERSIZED_CONTEXT_TAIL);
 	});
@@ -59,7 +59,7 @@ describe("capability-shaped system prompts", () => {
 	it("uses a bounded coding role and deferred resources for a lean model", () => {
 		const prompt = buildForCapability("lean");
 
-		expect(prompt).toMatch(/^You are Pi-Adaptative's bounded coding agent\./);
+		expect(prompt).toMatch(/^Pi-Adaptative bounded coding agent\./);
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("N+2 ARCHITECTURE");
@@ -69,7 +69,7 @@ describe("capability-shaped system prompts", () => {
 	it("uses a concise no-execution role for a chat-class model", () => {
 		const prompt = buildForCapability("chat");
 
-		expect(prompt).toMatch(/^You are Pi-Adaptative's concise chat assistant\./);
+		expect(prompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
 		expect(prompt).toContain("No execution tools are active");
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
@@ -83,7 +83,7 @@ describe("capability-shaped system prompts", () => {
 			const prompt = buildForCapability(capabilityClass);
 
 			expect(prompt).toContain("secret_store");
-			expect(prompt).toContain("without duplicate confirmation");
+			expect(prompt).toContain("no duplicate confirmation");
 		},
 	);
 
@@ -101,7 +101,8 @@ describe("capability-shaped system prompts", () => {
 		};
 		const prompt = buildSystemPrompt(options);
 
-		expect(prompt).toContain("<omitted count=");
+		expect(prompt).toContain("omitted=");
+		expect(prompt).not.toContain("<omitted");
 		expect(prompt).toContain("Do not mutate until the omitted instruction paths are supplied");
 		expect(prompt).not.toContain("ignoredignored");
 		expect(prompt.length).toBeLessThanOrEqual(4_096);

@@ -9,7 +9,10 @@ import {
 	selectWorkerResourcePointers,
 	workerResourcePointerId,
 } from "../src/core/delegation/worker-resource-catalog.ts";
-import { WorkerResourceMaterializer } from "../src/core/delegation/worker-resource-materializer.ts";
+import {
+	materializeWorkerResourceBundle,
+	WorkerResourceMaterializer,
+} from "../src/core/delegation/worker-resource-materializer.ts";
 import type { ResourcePointer } from "../src/core/orchestration/contracts.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -168,6 +171,25 @@ describe("worker resource pointer catalog", () => {
 });
 
 describe("WorkerResourceMaterializer", () => {
+	it("renders admitted content as compact JSON without presentation-only XML", () => {
+		const root = tempRoot();
+		const file = join(root, "resource.md");
+		writeFileSync(file, "use exact evidence");
+		const pointers = catalogWorkerResourcePointers({
+			cwd: root,
+			resourceLoader: { getDiscoverableSkillPaths: () => [], getDiscoverablePromptPaths: () => [file] },
+			resourceProfiles: [profile({ prompts: { allow: ["*"] } })],
+		});
+
+		const result = materializeWorkerResourceBundle(pointers);
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error("Expected resource bundle");
+		expect(result.systemPrompt).toContain("use exact evidence");
+		expect(result.systemPrompt).toContain("never expands tools");
+		expect(result.systemPrompt).not.toContain("<worker_resources_json>");
+	});
+
 	it("reads only a selected admitted pointer and bounds materialized output", () => {
 		const root = tempRoot();
 		const selected = join(root, "selected.md");

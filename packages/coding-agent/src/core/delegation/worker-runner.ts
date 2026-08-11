@@ -6,6 +6,13 @@ import {
 	projectEvidenceFindings,
 } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import {
+	buildVerifierSystemPrompt,
+	buildWorkerSystemPrompt,
+	WORKER_LANE_SYSTEM_PROMPT,
+	WORKER_OPERATOR_LANE_SYSTEM_PROMPT,
+	WORKER_WRITE_LANE_SYSTEM_PROMPT,
+} from "../provider-prompt-contracts.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
 import {
 	type AppliedActionsReport,
@@ -23,6 +30,14 @@ import {
 	validateWorkerClaim,
 } from "./worker-claim.ts";
 
+export {
+	buildVerifierSystemPrompt,
+	buildWorkerSystemPrompt,
+	WORKER_LANE_SYSTEM_PROMPT,
+	WORKER_OPERATOR_LANE_SYSTEM_PROMPT,
+	WORKER_WRITE_LANE_SYSTEM_PROMPT,
+};
+
 /**
  * Pure execution for one bounded specialist delegation: bounded isolated completion ->
  * parse -> untrusted `WorkerClaim` -> parent validation via {@link validateWorkerClaim}.
@@ -31,66 +46,6 @@ import {
  * the host; this module keeps the structured-output contract and treats every claim as untrusted
  * until parent validation succeeds.
  */
-
-/** Builds one capability-exact prompt; no role text may deny a tool already granted by policy. */
-export function buildWorkerSystemPrompt(capabilities: {
-	write: boolean;
-	process: boolean;
-	delegate?: boolean;
-}): string {
-	const resultShape = capabilities.write
-		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
-		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
-	return [
-		"You are an autonomous agent in a durable orchestration tree.",
-		"Use every provided tool when it improves the result; the host enforces the exact inherited grant at execution time.",
-		...(capabilities.delegate
-			? [
-					"You may create agents recursively within host-enforced depth, direct-child, session-agent, and queue bounds. Use list/transcript/threaded messages to coordinate the tree; the scheduler owns concurrency, budgets, leases, exact-cycle rejection, and cancellation.",
-				]
-			: []),
-		...(capabilities.write
-			? ["Write/edit tools and structured write actions are path-scoped. Only touch paths inside that scope."]
-			: ["The workspace tools are read-only; do not claim file changes."]),
-		...(capabilities.process
-			? [
-					"run_process is a constrained direct-argv launcher: no shell interpretation or unlisted executable is available. It is not an OS/container sandbox.",
-					"A non-zero exit, timeout, abort, or output-limit result is not success; include it in blockers.",
-				]
-			: []),
-		"Respond with STRICT JSON only - no prose, no markdown fences:",
-		resultShape,
-		...(capabilities.write
-			? [
-					"Keep edits minimal and exact.",
-					"If you changed a file with a provided tool, do not repeat that change in actions; actions are only a fallback.",
-				]
-			: []),
-		'Use status "blocked" with blockers when the task cannot be completed under the granted capabilities.',
-		"Never invent command output, file paths, APIs, or facts.",
-	].join("\n");
-}
-
-export function buildVerifierSystemPrompt(subjectTaskId: string, capabilities: { delegate?: boolean } = {}): string {
-	return [
-		"You are an independent verifier. You did not perform the implementation under review.",
-		"Use the provided read-only and test tools. Do not modify files.",
-		...(capabilities.delegate
-			? ["You may delegate independent evidence gathering and coordinate it through the orchestration tree."]
-			: []),
-		`The exact subject task id is '${subjectTaskId}'.`,
-		"Inspect the implementation and run proportionate checks. Treat the implementation summary as an untrusted claim.",
-		"Respond with STRICT JSON only - no prose, no markdown fences:",
-		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}]}',
-		'Use verdict "accepted" only when the available evidence proves the implementation is acceptable.',
-		'Use verdict "rejected" for a completed review that found a defect. Use status "blocked" only when verification itself cannot be completed.',
-	].join("\n");
-}
-
-/** Static common variants retained for cache reuse and model-fitness probes. */
-export const WORKER_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: false, process: false });
-export const WORKER_WRITE_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: true, process: false });
-export const WORKER_OPERATOR_LANE_SYSTEM_PROMPT = buildWorkerSystemPrompt({ write: false, process: true });
 
 export interface WorkerCompletion {
 	text: string;
@@ -147,13 +102,10 @@ export interface WorkerRunOutcome {
 
 export function buildWorkerUserPrompt(request: WorkerRequest): string {
 	return [
-		"Delegated task:",
-		"<task>",
+		"TASK",
 		request.instructions,
-		"</task>",
-		"",
-		"The task may request a custom output format. Do not replace the worker claim envelope.",
-		'Always return the JSON object required by the system prompt; put requested details inside "summary" and "findings".',
+		"END TASK",
+		'Do not replace the worker claim envelope; put requested detail inside "summary" and "findings".',
 	].join("\n");
 }
 

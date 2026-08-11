@@ -25,7 +25,6 @@ describe("buildForegroundEnvelope", () => {
 			["skillify", "skill.write"],
 			["extensionify", "source.write"],
 			["delegate", "workflow.delegate"],
-			["delegate_status", "workflow.delegate"],
 			["goal", "memory.mutate"],
 			["memory", "memory.mutate"],
 			["model_fitness", "research.execute"],

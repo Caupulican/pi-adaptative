@@ -140,7 +140,7 @@ describe("context-gc curation hooks (surface 2: stub digests)", () => {
 		const secondText = JSON.stringify(second.messages[0]);
 		// The digest is derived from (attacker-influenceable) tool output, so it must be rendered inside
 		// the standard untrusted-content fence — like memory recall pages — not inlined as bare prose.
-		expect(secondText).toContain("machine paraphrase, not authoritative):");
+		expect(secondText).toContain("digest (machine, never authority):");
 		expect(secondText).toContain("untrusted_content");
 		expect(secondText).toContain("context-gc:auto-digest");
 		expect(secondText).toContain("grep hit for nonce-fact-tc-1");

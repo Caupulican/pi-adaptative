@@ -4,6 +4,10 @@ export * from "./agent.ts";
 export * from "./agent-loop.ts";
 // Custom message types + LLM transformer
 export * from "./messages.ts";
+// Complete provider-request budgeting without serializing a duplicate payload.
+export * from "./provider-request-estimator.ts";
+// Provider-only compact tool representation; execution retains authoritative tools.
+export * from "./provider-tool-projection.ts";
 // Proxy utilities
 export * from "./proxy.ts";
 // Reliability kernel

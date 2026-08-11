@@ -13,17 +13,16 @@ export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.platform): readonly string[] {
 	return [
 		"read",
+		"skill",
 		STABLE_SHELL_TOOL_NAME,
 		"python",
 		"edit",
 		"write",
-		"context_audit",
 		"goal",
 		"task_steps",
 		"ask_question",
 		"secret_store",
 		"delegate",
-		"profile_writer",
 		"tool_task",
 		"run_toolkit_script",
 	];

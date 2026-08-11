@@ -173,11 +173,11 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 		name: "run_process",
 		label: "Run Process",
 		description: `Run one owner-allowed executable using direct argv without a shell. Allowed executables: ${executableCatalogDescription(options.policy.allowedExecutables)}.`,
-		promptSnippet: "Run an owner-allowed executable through a constrained direct-argv launcher (not OS isolation).",
+		promptSnippet: "Run owner-allowed executable via constrained direct argv; not OS isolation.",
 		promptGuidelines: [
-			"Use only an executable listed by the profile. Arguments are passed literally; shell operators and interpolation are unavailable.",
-			"Owner-authorized project credentials are injected only when their variable names are also allowed by the execution profile.",
-			"Treat a non-zero exit code, timeout, abort, or output-limit termination as failure.",
+			"Executable must be profile-listed. Arguments literal; no shell operators/interpolation.",
+			"Project credentials inject only when execution profile also allows variable names.",
+			"Nonzero exit/timeout/abort/output-limit means failure.",
 		],
 		parameters: runProcessSchema,
 		async execute(_toolCallId, input: RunProcessInput, signal) {

@@ -229,10 +229,11 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 							.join("\n"),
 			)
 			.join("\n");
-		expect(providerText.match(/<active_goal\b/g)).toHaveLength(1);
+		expect(providerText.match(/(?:^|\n)ACTIVE GOAL\n/g)).toHaveLength(1);
 		expect(providerText).toContain(objective);
-		const activeGoalBlock = providerText.match(/<active_goal\b[\s\S]*?<\/active_goal>/)?.[0];
-		expect(activeGoalBlock?.length).toBeLessThan(1_000);
-		expect(providerText).not.toContain("Continue working toward the active goal.");
+		const activeGoalStart = providerText.indexOf("ACTIVE GOAL\n");
+		const activeGoalBlock = providerText.slice(activeGoalStart).split("\n").slice(0, 4).join("\n");
+		expect(activeGoalBlock.length).toBeLessThan(1_000);
+		expect(providerText).not.toContain("Continue active goal.");
 	}, 30_000);
 });

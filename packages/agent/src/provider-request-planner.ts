@@ -1,0 +1,229 @@
+import { materializeProviderRequest, startMaterializedProviderStream, streamSimple } from "@caupulican/pi-ai/stream";
+import type { Context, Message } from "@caupulican/pi-ai/types";
+import { projectToolsForProvider } from "./provider-tool-projection.ts";
+import { sanitizeToolFailureContext } from "./tool-failure-memory.ts";
+import type {
+	AgentContext,
+	AgentContextPlan,
+	AgentLoopConfig,
+	AgentMessage,
+	RequestPreflightContext,
+	RequestPreflightResult,
+	StreamFn,
+} from "./types.ts";
+
+const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
+const MAX_PROVIDER_REQUEST_REPLANS = 2;
+
+function nextStalePlanCount(count: number): number {
+	const next = count + 1;
+	if (next >= MAX_STALE_PROVIDER_REQUEST_PLANS) {
+		throw new Error(`Provider request plan stayed stale after ${MAX_STALE_PROVIDER_REQUEST_PLANS} attempts`);
+	}
+	return next;
+}
+
+function narrowRequestMaxTokens(
+	ownerMaxTokens: number | undefined,
+	requestedMaxTokens: number | undefined,
+	modelMaxTokens: number,
+	label: string,
+): number | undefined {
+	if (ownerMaxTokens !== undefined && (!Number.isSafeInteger(ownerMaxTokens) || ownerMaxTokens <= 0)) {
+		throw new TypeError("request maxTokens must be a positive safe integer");
+	}
+	if (requestedMaxTokens === undefined) return ownerMaxTokens;
+	if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0) {
+		throw new TypeError(`${label}.maxTokens must be a positive safe integer`);
+	}
+	const ceilings = [requestedMaxTokens];
+	if (ownerMaxTokens !== undefined) ceilings.push(ownerMaxTokens);
+	if (Number.isSafeInteger(modelMaxTokens) && modelMaxTokens > 0) ceilings.push(modelMaxTokens);
+	return Math.min(...ceilings);
+}
+
+/** Apply one request-local preflight without mutating persistent loop configuration. */
+export async function resolveRequestPreflightMaxTokens(options: {
+	requestPreflight?: (
+		context: RequestPreflightContext,
+		signal?: AbortSignal,
+	) => RequestPreflightResult | undefined | Promise<RequestPreflightResult | undefined>;
+	model: RequestPreflightContext["model"];
+	context: RequestPreflightContext["context"];
+	maxTokens?: number;
+	signal?: AbortSignal;
+}): Promise<number | undefined> {
+	if (!options.requestPreflight) return options.maxTokens;
+	const preflight = await options.requestPreflight(
+		{ model: options.model, context: options.context, maxTokens: options.maxTokens },
+		options.signal,
+	);
+	return narrowRequestMaxTokens(options.maxTokens, preflight?.maxTokens, options.model.maxTokens, "requestPreflight");
+}
+
+async function buildContextPlan(
+	messages: AgentMessage[],
+	attempt: number,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+): Promise<AgentContextPlan> {
+	if (config.planContext) return await config.planContext({ messages, attempt }, signal);
+	return {
+		messages: config.transformContext ? await config.transformContext(messages, signal) : messages,
+	};
+}
+
+function nonCompactableProviderContext(
+	context: Context,
+	compactableMessageCount: number,
+	usesTextToolProtocol: boolean,
+): Context {
+	const protocolGuardCount = usesTextToolProtocol && context.messages.length > 0 ? 1 : 0;
+	return {
+		...context,
+		messages: [
+			...context.messages.slice(0, protocolGuardCount),
+			...context.messages.slice(protocolGuardCount + compactableMessageCount),
+		],
+	};
+}
+
+function sameToolSurface(left: AgentContext["tools"], right: AgentContext["tools"]): boolean {
+	if (left === right) return true;
+	if (!left || !right || left.length !== right.length) return false;
+	return left.every((tool, index) => tool === right[index]);
+}
+
+function validateReplannedSourceContext(previous: AgentContext, next: AgentContext): void {
+	if (previous.systemPrompt !== next.systemPrompt || !sameToolSurface(previous.tools, next.tools)) {
+		throw new TypeError("Provider request admission may replan durable messages only");
+	}
+}
+
+/** Preserve the loop-owned messages array so shallow response-context projections observe compaction. */
+function adoptReplannedMessages(target: AgentContext, accepted: AgentContext): void {
+	if (target.messages === accepted.messages) return;
+	const messages = accepted.messages.slice();
+	target.messages.length = 0;
+	for (const message of messages) target.messages.push(message);
+}
+
+/**
+ * Canonical two-phase provider boundary: plan replay-safe context, materialize once, admit the exact
+ * payload, commit only the accepted plan, then send the admitted object unchanged.
+ */
+export async function startPlannedAgentProviderRequest(
+	initialContext: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	streamFn?: StreamFn,
+): Promise<Awaited<ReturnType<StreamFn>>> {
+	let sourceContext = initialContext;
+	let admissionAttempt = 0;
+	let stalePlanCount = 0;
+	while (true) {
+		signal?.throwIfAborted();
+		const sanitized = sanitizeToolFailureContext(sourceContext.messages, sourceContext.systemPrompt);
+		const plan = await buildContextPlan(sanitized.messages, admissionAttempt, config, signal);
+		let keepPlan = false;
+		try {
+			signal?.throwIfAborted();
+			if (plan.isCurrent?.() === false) {
+				stalePlanCount = nextStalePlanCount(stalePlanCount);
+				continue;
+			}
+
+			const transientMessages = plan.transientMessages ?? [];
+			const compactableMessages = await config.convertToLlm(plan.messages);
+			const providerTransients = transientMessages.length > 0 ? await config.convertToLlm(transientMessages) : [];
+			const llmMessages: Message[] = [...compactableMessages, ...providerTransients];
+			signal?.throwIfAborted();
+
+			const sourceProviderContext: Context = {
+				systemPrompt: sanitized.systemPrompt,
+				messages: llmMessages,
+				tools: projectToolsForProvider(sourceContext.tools),
+			};
+			const materialized = materializeProviderRequest(sourceProviderContext, config);
+			const nonCompactableContext = nonCompactableProviderContext(
+				materialized.context,
+				compactableMessages.length,
+				materialized.usesTextToolProtocol,
+			);
+
+			if (plan.isCurrent?.() === false) {
+				stalePlanCount = nextStalePlanCount(stalePlanCount);
+				continue;
+			}
+			const admission = await config.admitProviderRequest?.(
+				{
+					model: config.model,
+					context: materialized.context,
+					nonCompactableContext,
+					sourceContext,
+					maxTokens: config.maxTokens,
+					attempt: admissionAttempt,
+				},
+				signal,
+			);
+			signal?.throwIfAborted();
+			if (admission?.action === "replan") {
+				validateReplannedSourceContext(sourceContext, admission.context);
+				if (admissionAttempt >= MAX_PROVIDER_REQUEST_REPLANS) {
+					throw new Error(`Provider request admission exceeded ${MAX_PROVIDER_REQUEST_REPLANS} replans`);
+				}
+				sourceContext = admission.context;
+				admissionAttempt++;
+				stalePlanCount = 0;
+				continue;
+			}
+			let requestMaxTokens = narrowRequestMaxTokens(
+				config.maxTokens,
+				admission?.maxTokens,
+				config.model.maxTokens,
+				"admitProviderRequest",
+			);
+			requestMaxTokens = await resolveRequestPreflightMaxTokens({
+				requestPreflight: config.requestPreflight,
+				model: config.model,
+				context: materialized.context,
+				maxTokens: requestMaxTokens,
+				signal,
+			});
+			signal?.throwIfAborted();
+
+			const resolvedApiKey =
+				(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+			signal?.throwIfAborted();
+			const requestReasoning = config.resolveRequestReasoning
+				? config.resolveRequestReasoning(config.reasoning, {
+						model: config.model,
+						context: materialized.context,
+						maxTokens: requestMaxTokens,
+					})
+				: config.reasoning;
+			const streamFunction = streamFn ?? streamSimple;
+			if (plan.isCurrent?.() === false || plan.prepareCommit?.() === false) {
+				stalePlanCount = nextStalePlanCount(stalePlanCount);
+				continue;
+			}
+			plan.commit?.();
+			adoptReplannedMessages(initialContext, sourceContext);
+			keepPlan = true;
+			return (await startMaterializedProviderStream(
+				config.model,
+				materialized,
+				{
+					...config,
+					apiKey: resolvedApiKey,
+					maxTokens: requestMaxTokens,
+					reasoning: requestReasoning,
+					signal,
+				},
+				(providerContext, providerOptions) => streamFunction(config.model, providerContext, providerOptions),
+			)) as Awaited<ReturnType<StreamFn>>;
+		} finally {
+			if (!keepPlan) plan.discard?.();
+		}
+	}
+}

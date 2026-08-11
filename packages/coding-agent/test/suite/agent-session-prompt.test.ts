@@ -144,12 +144,12 @@ describe("AgentSession prompt characterization", () => {
 		expect(sawImage).toBe(true);
 	});
 
-	it("expands skill commands before sending the prompt", async () => {
+	it("loads slash-command skills request-locally without persisting or XML-wrapping the body", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
 		const skillPath = join(tempDir, "test-skill.md");
-		writeFileSync(skillPath, "# Test Skill\n\nUse the skill body.");
+		writeFileSync(skillPath, "---\nname: test\ndescription: Test skill\n---\n\n# Test Skill\n\nUse the skill body.");
 
 		const resourceLoader = {
 			...createTestResourceLoader(),
@@ -174,21 +174,28 @@ describe("AgentSession prompt characterization", () => {
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
-		let expandedPrompt = "";
+		let providerUserText: string[] = [];
 
 		harness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
-				expandedPrompt = user ? getMessageText(user) : "";
+				providerUserText = context.messages
+					.filter((message) => message.role === "user")
+					.map((message) => getMessageText(message));
 				return fauxAssistantMessage("ok");
 			},
 		]);
 
 		await harness.session.prompt("/skill:test explain this");
 
-		expect(expandedPrompt).toContain('<skill name="test" location="');
-		expect(expandedPrompt).toContain("Use the skill body.");
-		expect(expandedPrompt).toContain("explain this");
+		expect(providerUserText).toContain("explain this");
+		expect(providerUserText.some((text) => text.includes("Use the skill body."))).toBe(true);
+		expect(providerUserText.join("\n")).not.toContain("<skill");
+		expect(harness.session.messages.map((message) => getMessageText(message)).join("\n")).not.toContain(
+			"Use the skill body.",
+		);
+		expect(harness.session.getContextCompositionReport().messageClasses).toEqual(
+			expect.arrayContaining([expect.objectContaining({ label: "custom (active_skill_context)" })]),
+		);
 	});
 
 	it("expands prompt templates before sending the prompt", async () => {
@@ -277,21 +284,19 @@ describe("AgentSession prompt characterization", () => {
 		]);
 		expect(harness.session.getActiveToolNames()).toEqual([
 			"read",
+			"skill",
 			"bash",
 			"python",
 			"edit",
 			"write",
-			"context_audit",
 			"goal",
 			"task_steps",
 			"ask_question",
 			"secret_store",
 			"delegate",
-			"profile_writer",
 			"tool_task",
 			"run_toolkit_script",
 			"artifact_retrieve",
-			"delegate_status",
 		]);
 
 		await harness.session.prompt("/testcmd should-run");

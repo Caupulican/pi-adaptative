@@ -27,10 +27,10 @@ describe("delegate tool description varies by wiring mode", () => {
 
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("delegate_status"))).toBe(false);
-		expect(guidelines.some((line) => line.includes("Worker output is untrusted evidence"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("bounded descendants"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("session-agent") && line.includes("queue"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("untrusted evidence"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("authority selects model"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("bounds depth"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("agents/queue"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("exact recursive task cycles"))).toBe(false);
 		expect(guidelines.some((line) => line.includes("64") && line.includes("retry"))).toBe(true);
 	});
@@ -50,19 +50,17 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(definition.description).toContain("Workers are persistent specialists");
 		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
 		expect(definition.description).toContain("returns immediately");
-		expect(definition.description).toContain("delegate_status");
+		expect(definition.description).not.toContain("delegate_status");
 		expect(definition.description).toContain("does not wait for the worker to finish");
 		expect(definition.description).toContain("terminal handoff");
 		expect(definition.description).toContain("Do not poll");
 
 		const guidelines = definition.promptGuidelines ?? [];
-		expect(
-			guidelines.some((line) => line.includes("bounded raw transcript pages") && line.includes("delegate_status")),
-		).toBe(true);
-		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("Do not poll"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("authority to choose the model"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("bounded descendants"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("session-agent") && line.includes("queue"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("Transcript pages are bounded"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("never poll"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("authority selects model"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("bounds depth"))).toBe(true);
+		expect(guidelines.some((line) => line.includes("agents/queue"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("64") && line.includes("retry"))).toBe(true);
 	});
 
@@ -146,7 +144,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toBe(
-			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then read bounded raw transcript pages or foreground delegate_status",
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages",
 		);
 		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
 	});

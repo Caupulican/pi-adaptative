@@ -1,3 +1,7 @@
+import type { Context } from "@caupulican/pi-ai/types";
+
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
 function jsonStringLength(value: string): number {
 	let length = 2;
 	for (let index = 0; index < value.length; index++) {
@@ -84,7 +88,17 @@ function measuredJsonValue(value: unknown, key: string, active: Set<object>): nu
 	}
 }
 
-/** Exact UTF-16 length of standard JSON-compatible data without constructing the serialized payload. */
+/** Exact UTF-16 length of standard JSON-compatible data without allocating its serialized copy. */
 export function measureJsonLength(value: unknown): number | undefined {
 	return measuredJsonValue(value, "", new Set());
+}
+
+/** Bounded planning estimate over the complete, already-materialized provider Context. */
+export function estimateProviderRequestTokens(context: Context): number {
+	const serializedLength = measureJsonLength({
+		systemPrompt: context.systemPrompt,
+		messages: context.messages,
+		tools: context.tools,
+	});
+	return serializedLength === undefined ? 0 : Math.ceil(serializedLength / CHARS_PER_TOKEN_ESTIMATE);
 }

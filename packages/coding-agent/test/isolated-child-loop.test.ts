@@ -577,7 +577,7 @@ describe("isolated child tool loop", () => {
 			expect(preflightContexts).toHaveLength(2);
 			expect(contexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
 			expect(contexts[1]?.messages.some((message) => message.role === "assistant")).toBe(false);
-			expect(contexts[1]?.systemPrompt).toContain("<harness_tool_failures");
+			expect(contexts[1]?.systemPrompt).toContain("ACTIVE TOOL FAILURES");
 			expect(JSON.stringify(contexts[1]?.messages)).not.toContain("raw failed output must not survive");
 		} finally {
 			harness.cleanup();

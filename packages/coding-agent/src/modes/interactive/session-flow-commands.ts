@@ -862,7 +862,7 @@ export function handleTaskCommand(host: TaskCommandHost, text: string): void {
 	}
 	if (parsed.command.type === "retired_execution") {
 		host.showStatus(
-			`/task ${parsed.command.operation} was retired with the detached extension runner. Ask Pi to use native delegate/delegate_status; session-owned worker lanes notify on completion without polling.`,
+			`/task ${parsed.command.operation} was retired with the detached extension runner. Ask Pi to use native delegate; session-owned worker lanes notify on completion without polling.`,
 		);
 		return;
 	}

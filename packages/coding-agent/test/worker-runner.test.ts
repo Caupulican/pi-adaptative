@@ -132,9 +132,11 @@ describe("parseWorkerOutput", () => {
 });
 
 describe("buildWorkerUserPrompt", () => {
-	it("fences the task and keeps the worker claim envelope authoritative", () => {
+	it("fences the task without decorative XML and keeps the worker claim envelope authoritative", () => {
 		const prompt = buildWorkerUserPrompt(workerRequest());
-		expect(prompt).toContain("<task>\nScout the delegation module");
+		expect(prompt).toContain("TASK\nScout the delegation module");
+		expect(prompt).toContain("END TASK");
+		expect(prompt).not.toContain("<task>");
 		expect(prompt).toContain("Do not replace the worker claim envelope");
 		expect(prompt).toContain('inside "summary" and "findings"');
 	});
@@ -146,6 +148,7 @@ describe("buildWorkerSystemPrompt", () => {
 		expect(prompt).toContain("Write/edit tools");
 		expect(prompt).toContain("run_process");
 		expect(prompt).not.toContain("workspace tools are read-only");
+		expect(prompt.length).toBeLessThan(1_000);
 	});
 });
 

@@ -111,7 +111,7 @@ Some conversational prelude.
 			existingMemory: "MEMORY:\nPrefer npm ci\nObsolete fact here",
 			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
 			complete: async (system, user) => {
-				expect(system).toContain("You are a reflection engine");
+				expect(system).toContain("Reflection engine");
 				expect(user).toContain("Recent turn transcript");
 				return mockResponse;
 			},

@@ -96,11 +96,6 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
-	createProfileWriterToolDefinition,
-	type ProfileWriterToolDetails,
-	type ProfileWriterToolInput,
-} from "./profile-writer.ts";
-export {
 	createPythonTool,
 	createPythonToolDefinition,
 	DEFAULT_PYTHON_TIMEOUT_SECONDS,
@@ -129,6 +124,11 @@ export {
 	type SecretStoreToolInput,
 	type SecretStoreToolOptions,
 } from "./secret-store.ts";
+export {
+	createSkillVaultToolDefinition,
+	type SkillToolDetails,
+	type SkillToolInput,
+} from "./skill.ts";
 export {
 	createSkillAuditTool,
 	createSkillAuditToolDefinition,

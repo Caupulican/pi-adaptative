@@ -1,5 +1,7 @@
+import { estimateProviderRequestTokens, projectToolsForProvider } from "@caupulican/pi-agent-core";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import {
+	assessCompactionNeed,
 	type CompactionPreparation,
 	type CompactionResult,
 	type CompactionSettings,
@@ -22,6 +24,7 @@ import { type CompactionEntry, getLatestCompactionEntry, type SessionManager } f
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
+import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -29,6 +32,29 @@ import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 export type AutoCompactionReason = "overflow" | "threshold";
+
+export interface ProviderRequestCompactionInput {
+	requestTokens: number;
+	nonCompactableTokens: number;
+	attempt: number;
+}
+
+export type ProviderRequestCompactionDecision = { action: "send" } | { action: "replan" };
+
+interface AutoCompactionRunOptions {
+	initialTokens?: number;
+	singlePass?: boolean;
+	allowTrailingCompactionAsPrevious?: boolean;
+	forceDeterministic?: boolean;
+	recordThresholdFrontier?: boolean;
+}
+
+export class ProviderRequestEnvelopeOverflowError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ProviderRequestEnvelopeOverflowError";
+	}
+}
 
 const COMPACTION_RETRY_PREPARATION_OPTIONS = { allowTrailingCompactionAsPrevious: true } as const;
 const INEFFECTIVE_THRESHOLD_SKIP_REASON =
@@ -161,6 +187,66 @@ export class CompactionController {
 		this.overflowRecoveryAttempted = false;
 	}
 
+	async admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision> {
+		const model = this.deps.getModel();
+		const contextWindow = model?.contextWindow ?? 0;
+		if (!model || contextWindow <= 0) return { action: "send" };
+
+		if (input.nonCompactableTokens >= contextWindow) {
+			throw new ProviderRequestEnvelopeOverflowError(
+				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, exceeding the ${contextWindow}-token model context. Mandatory context was not dropped. Reduce the system/tool/active-skill envelope or select a larger-context model.`,
+			);
+		}
+		const settings = this.deps.getAdaptedSettings();
+		const triggerTokens = model.autoCompactionTriggerTokens;
+		const requestNeed = assessCompactionNeed(input.requestTokens, contextWindow, settings, triggerTokens);
+		const envelopeNeed = assessCompactionNeed(input.nonCompactableTokens, contextWindow, settings, triggerTokens);
+		if (envelopeNeed === "hard") {
+			throw new ProviderRequestEnvelopeOverflowError(
+				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, beyond the ${contextWindow}-token model's reserved request boundary. Mandatory context was not dropped. Reduce the system/tool/active-skill envelope or select a larger-context model.`,
+			);
+		}
+		if (requestNeed === "none") {
+			if (input.requestTokens >= contextWindow) {
+				throw new ProviderRequestEnvelopeOverflowError(
+					`The provider request needs about ${input.requestTokens} tokens, exceeding the ${contextWindow}-token model context while auto-compaction is disabled.`,
+				);
+			}
+			return { action: "send" };
+		}
+		// An optional cost trigger caused entirely by fixed context cannot be improved by history compaction.
+		if (requestNeed === "early" && envelopeNeed === "early") return { action: "send" };
+		// Early compaction is a cost optimization: one paid summary is its complete budget.
+		if (requestNeed === "early" && input.attempt > 0) return { action: "send" };
+		if (this.isRunning()) {
+			if (requestNeed === "early") return { action: "send" };
+			throw new ProviderRequestEnvelopeOverflowError(
+				"Provider request admission could not compact history because another compaction is active.",
+			);
+		}
+		if (input.attempt >= 2) {
+			if (requestNeed === "early") return { action: "send" };
+			throw new ProviderRequestEnvelopeOverflowError(
+				`Provider request still needs about ${input.requestTokens} tokens after bounded history compaction. Mandatory transient context was not dropped.`,
+			);
+		}
+
+		const latestBefore = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
+		await this.runAuto("threshold", false, {
+			initialTokens: input.requestTokens,
+			singlePass: true,
+			allowTrailingCompactionAsPrevious: input.attempt > 0,
+			forceDeterministic: input.attempt > 0,
+			recordThresholdFrontier: false,
+		});
+		const latestAfter = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
+		if (latestAfter && latestAfter !== latestBefore) return { action: "replan" };
+		if (requestNeed === "early") return { action: "send" };
+		throw new ProviderRequestEnvelopeOverflowError(
+			`Provider request needs about ${input.requestTokens} tokens, but bounded history compaction made no progress. Mandatory transient context was not dropped.`,
+		);
+	}
+
 	abort(): void {
 		this.manualAbortController?.abort();
 		this.autoAbortController?.abort();
@@ -172,14 +258,16 @@ export class CompactionController {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 
-		const systemPromptTokens = Math.ceil((this.deps.agent.state.systemPrompt ?? "").length / 4);
-		let toolsChars = 0;
-		for (const tool of this.deps.agent.state.tools || []) {
-			toolsChars += tool.name.length;
-			toolsChars += tool.description?.length ?? 0;
-			if (tool.parameters) toolsChars += JSON.stringify(tool.parameters).length;
-		}
-		const baseTokens = systemPromptTokens + Math.ceil(toolsChars / 4);
+		const baseTokens = estimateProviderRequestTokens(
+			materializeProviderRequest(
+				{
+					systemPrompt: this.deps.agent.state.systemPrompt,
+					messages: [],
+					tools: projectToolsForProvider(this.deps.agent.state.tools),
+				},
+				{ textToolCallProtocol: this.deps.agent.textToolCallProtocol },
+			).context,
+		);
 
 		if (baseTokens >= contextWindow) {
 			this.deps.emit({
@@ -192,32 +280,6 @@ export class CompactionController {
 				message: `Base configuration (system prompt and active tools) consumes ${baseTokens} tokens (${Math.round((baseTokens / contextWindow) * 100)}% of the ${contextWindow} context window). This leaves very little room for conversation history and may cause immediate compaction or context overflow.`,
 			});
 		}
-	}
-
-	async maybeCompactBeforeContextTransform(
-		messages: AgentMessage[],
-		projectContextGc: (messages: AgentMessage[]) => AgentMessage[],
-	): Promise<boolean> {
-		const settings = this.deps.getAdaptedSettings();
-		const model = this.deps.getModel();
-		const contextWindow = model?.contextWindow ?? 0;
-		if (!settings.enabled || !model || contextWindow <= 0 || this.isRunning()) return false;
-
-		const triggerTokens = model.autoCompactionTriggerTokens;
-		const contextTokens = this.deps.estimateCurrentContextTokens(messages);
-		if (!shouldCompact(contextTokens, contextWindow, settings, triggerTokens)) return false;
-		const projectedMessages = projectContextGc(messages);
-		const projectedTokens = this.deps.estimateCurrentContextTokens(projectedMessages);
-		if (!shouldCompact(projectedTokens, contextWindow, settings, triggerTokens)) return false;
-		if (this.shouldDeferThresholdRetry(projectedTokens, model, settings)) {
-			this.emitIneffectiveThresholdSkip();
-			return false;
-		}
-
-		const latestBefore = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
-		await this.deps.runAutoCompaction("threshold", false);
-		const latestAfter = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
-		return Boolean(latestAfter && latestAfter !== latestBefore);
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
@@ -448,7 +510,7 @@ export class CompactionController {
 		return Math.max(calculateContextTokens(assistantMessage.usage), estimatedTokens);
 	}
 
-	runAuto(reason: AutoCompactionReason, willRetry: boolean): Promise<boolean> {
+	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {
 		if (this.autoRunPromise) return this.autoRunPromise;
 		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());
 
@@ -456,7 +518,7 @@ export class CompactionController {
 		this.autoAbortController = abortController;
 		let runPromise: Promise<boolean>;
 		runPromise = Promise.resolve()
-			.then(() => this.runAutoOnce(reason, willRetry, abortController.signal))
+			.then(() => this.runAutoOnce(reason, willRetry, abortController.signal, options))
 			.finally(() => {
 				if (this.autoRunPromise === runPromise) this.autoRunPromise = undefined;
 				if (this.autoAbortController === abortController) this.autoAbortController = undefined;
@@ -465,7 +527,12 @@ export class CompactionController {
 		return runPromise;
 	}
 
-	private async runAutoOnce(reason: AutoCompactionReason, willRetry: boolean, signal: AbortSignal): Promise<boolean> {
+	private async runAutoOnce(
+		reason: AutoCompactionReason,
+		willRetry: boolean,
+		signal: AbortSignal,
+		options: AutoCompactionRunOptions,
+	): Promise<boolean> {
 		const settings = this.deps.getAdaptedSettings();
 		const model = this.deps.getModel();
 		this.deps.emit({ type: "compaction_start", reason });
@@ -492,7 +559,7 @@ export class CompactionController {
 			const effectiveInstructions = await this.buildCompactionInstructions();
 			const outcome = await runCompactionLoop({
 				getBranch: () => this.deps.sessionManager.getBranch(),
-				measureLiveTokens: () => this.deps.measureLiveContextTokens(),
+				measureLiveTokens: () => options.initialTokens ?? this.deps.measureLiveContextTokens(),
 				shouldCompact:
 					reason === "overflow"
 						? () => true
@@ -560,7 +627,9 @@ export class CompactionController {
 					lastCompaction = result;
 					await this.applyResult(result, fromExtension);
 				},
-				verifyPostApplyEffect: reason === "overflow" ? () => false : undefined,
+				verifyPostApplyEffect: reason === "overflow" || options.singlePass ? () => false : undefined,
+				allowTrailingCompactionAsPrevious: options.allowTrailingCompactionAsPrevious,
+				forceDeterministic: options.forceDeterministic,
 				onTransition: ({ cycle, cause, detail }) => {
 					this.deps.emit({
 						type: "warning",
@@ -595,8 +664,9 @@ export class CompactionController {
 
 			const result = outcome.kind === "success" ? outcome.result : lastCompaction;
 			if (!result) throw new Error("Auto-compaction succeeded without a result");
-			if (reason === "threshold") this.recordThresholdFrontier(model, settings, margin);
-			else this.ineffectiveThresholdFrontier = undefined;
+			if (reason === "threshold" && options.recordThresholdFrontier !== false) {
+				this.recordThresholdFrontier(model, settings, margin);
+			} else this.ineffectiveThresholdFrontier = undefined;
 			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			if (willRetry) {
 				const messages = this.deps.agent.state.messages;

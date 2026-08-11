@@ -144,7 +144,7 @@ describe("model adaptation system prompt", () => {
 
 		const created = await createSession(cwd, agentDir, model);
 		try {
-			expect(created.session.agent.state.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			expect(created.session.agent.state.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 			expect(created.session.agent.state.systemPrompt).toContain(ruleText);
 		} finally {
 			await created.session.disposeAndWait();

@@ -22,6 +22,6 @@ export function renderTextProtocolToolResult(toolResult: ToolResultMessage): str
 	const text = joinTextContent(toolResult.content);
 	const result = text.length > 0 ? text : "(see attached image)";
 	return toolResult.isError
-		? `Tool result (${toolResult.toolName}; failed):\n${result}\nFollow the repair or next_action before retrying; do not resend the unchanged call.`
-		: `Tool result (${toolResult.toolName}; succeeded):\n${result}\nUse this result and continue. Do not repeat this unchanged successful call.`;
+		? `TOOL ${toolResult.toolName} FAILED\n${result}\nDo repair/next_action before retry; never resend unchanged.`
+		: `TOOL ${toolResult.toolName} OK\n${result}\nUse result; continue. Never repeat unchanged call.`;
 }

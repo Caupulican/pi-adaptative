@@ -1,24 +1,10 @@
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import type { AgentTool, StreamFn } from "@caupulican/pi-agent-core/types";
 import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
+import { SCOUT_SYSTEM_PROMPT } from "./provider-prompt-contracts.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 
-export const SCOUT_SYSTEM_PROMPT = `You are a repository scout. You explore a codebase with read-only tools and return compact evidence. You do NOT solve tasks, write code, or modify anything.
-
-TOOLS: read (file contents), grep (search file contents), find (locate files by glob/name).
-- Issue INDEPENDENT tool calls in parallel in the same turn whenever possible.
-- Prefer grep/find to narrow, then read only the decisive regions.
-
-OUTPUT CONTRACT: when you have enough evidence (or hit your turn budget), reply with:
-<final_answer>
-<one-to-three-sentence summary of what you found>
-path/to/file.ts:START-END
-path/to/other.ts:START-END
-</final_answer>
-- Every path MUST be one you actually observed via a tool result this run.
-- Line ranges point at the decisive code, not whole files.
-- If you found nothing relevant, say so inside <final_answer> with zero citations.
-Turn budget: {MAX_TURNS} turns. Be fast; be precise; cite, don't paste.`;
+export { SCOUT_SYSTEM_PROMPT };
 
 export interface ScoutCitation {
 	path: string;

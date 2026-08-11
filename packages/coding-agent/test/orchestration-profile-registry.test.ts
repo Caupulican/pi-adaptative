@@ -195,7 +195,7 @@ describe("OrchestrationProfileRegistry", () => {
 			profileId: "architect",
 			role: "orchestrator",
 			capabilityCeiling: ["workflow.delegate"],
-			toolNames: ["delegate", "delegate_status"],
+			toolNames: ["delegate"],
 			resourceProfileNames: [],
 			dispatchProfileIds: [worker.profileId],
 		};
@@ -224,7 +224,7 @@ describe("OrchestrationProfileRegistry", () => {
 			profileId: "architect-verification",
 			role: "orchestrator",
 			capabilityCeiling: ["workflow.delegate"],
-			toolNames: ["delegate", "delegate_status"],
+			toolNames: ["delegate"],
 			resourceProfileNames: [],
 			dispatchProfileIds: [worker.profileId],
 		};

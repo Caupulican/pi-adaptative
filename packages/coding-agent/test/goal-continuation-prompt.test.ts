@@ -9,7 +9,7 @@ describe("goal continuation trigger", () => {
 		const first = buildGoalContinuationPrompt();
 		const second = buildGoalContinuationPrompt();
 
-		expect(first).toEqual({ text: "Continue working toward the active goal.", truncated: false });
+		expect(first).toEqual({ text: "Continue active goal.", truncated: false });
 		expect(second).toEqual(first);
 		expect(first.text.length).toBeLessThan(64);
 		expect(GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE).toBe("goal_continuation_trigger");

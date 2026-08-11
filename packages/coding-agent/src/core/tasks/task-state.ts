@@ -494,23 +494,19 @@ export function formatTaskStepsContext(state: TaskStepsState, maxItems = 12): st
 	if (open.length === 0) return undefined;
 	const limit = Math.max(1, Math.min(MAX_TASK_STEPS, Math.floor(maxItems)));
 	const lines = [
-		"Current native task_steps context for this session:",
-		"Open task_steps:",
+		"TASK STEPS",
 		...open.slice(0, limit).map((step) => `- [${step.status}] ${step.activeForm || step.content}`),
 	];
-	if (open.length > limit) lines.push(`- … ${open.length - limit} more open step(s)`);
+	if (open.length > limit) lines.push(`- omitted=${open.length - limit}`);
 	const active = open.find((step) => step.status === "in_progress");
 	lines.push(
-		"",
 		active
-			? `Continue the in_progress step first: ${active.activeForm || active.content}. Update it completed, blocked, or cancelled as soon as evidence is known.`
-			: `No step is in_progress. Start the first open step before unrelated work: ${open[0].activeForm || open[0].content}.`,
-		"Use task_steps to keep this checklist current and leave no stale in_progress step before the final response.",
+			? `FIRST: continue in_progress step: ${active.activeForm || active.content}. Evidence known: set completed/blocked/cancelled.`
+			: `No in_progress step. Start first: ${open[0].activeForm || open[0].content}.`,
+		"Keep task_steps current; no stale in_progress before final.",
 	);
 	if (hasUnverifiedCompletedStep(state)) {
-		lines.push(
-			"A completed step has no evidence attached; attach evidence via task_steps update before treating it as verified.",
-		);
+		lines.push("Completed step lacks evidence; attach via task_steps before verified.");
 	}
 	// Wrapped in a marker (mirrors the <memory_context> precedent) so context-gc's
 	// semantic-memory packer can recognize this as a deterministic, re-derivable context page and

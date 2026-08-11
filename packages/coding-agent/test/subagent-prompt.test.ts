@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { composeSubagentSystemPrompt, SUBAGENT_CORE_SYSTEM_PROMPT } from "../src/core/autonomy/subagent-prompt.ts";
 
 describe("subagent level-0 prompt composition", () => {
-	it("keeps the core under 300 tokens (~4 chars/token)", () => {
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(300);
+	it("keeps the core under 140 tokens (~4 chars/token)", () => {
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(140);
 	});
 
 	it("describes bounded delegation and transcript authority without granting peer transcript access", () => {

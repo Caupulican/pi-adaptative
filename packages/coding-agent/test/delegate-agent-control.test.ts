@@ -11,10 +11,7 @@ import {
 	type DelegateToolDetails,
 	type DelegateToolInput,
 } from "../src/core/tools/delegate.ts";
-import {
-	createDelegateStatusToolDefinition,
-	type DelegateStatusToolDetails,
-} from "../src/core/tools/delegate-status.ts";
+import type { DelegateStatusToolDetails } from "../src/core/tools/delegate-status.ts";
 
 const context = {
 	sessionManager: {
@@ -423,10 +420,11 @@ describe("delegate logical-agent controls", () => {
 			})),
 		});
 
-		const guideline = tool.promptGuidelines?.[0];
-		expect(guideline?.length).toBeLessThanOrEqual(4_096);
-		expect(guideline).toContain("40 configured");
-		expect(guideline).toContain("24 omitted");
+		const guidelines = tool.promptGuidelines ?? [];
+		expect(guidelines.every((guideline) => guideline.length <= 140)).toBe(true);
+		expect(guidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_200);
+		expect(guidelines.join("\n")).toContain("Owner profiles: 40");
+		expect(guidelines.join("\n")).toContain("39 omitted");
 	});
 
 	it("validates action-specific fields before routing worker controls", async () => {
@@ -933,17 +931,17 @@ describe("delegate logical-agent controls", () => {
 	});
 });
 
-describe("delegate_status wait", () => {
+describe("delegate wait and status", () => {
 	it("requires a logical agent id and waits through the event-driven callback without polling", async () => {
 		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
-		const tool = createDelegateStatusToolDefinition({
-			getLaneRecords: () => [],
-			getWorkerClaimSnapshots: () => [],
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({ waitForWorkerAgent }),
 		});
 
 		const missing = await tool.execute("call", { action: "wait" }, undefined, undefined, context);
-		expect(missing.content).toEqual([{ type: "text", text: "wait action requires agentId" }]);
+		expect(missing.content).toEqual([{ type: "text", text: "delegate wait requires agentId" }]);
 		expect(waitForWorkerAgent).not.toHaveBeenCalled();
 
 		const result = await tool.execute(
@@ -954,7 +952,7 @@ describe("delegate_status wait", () => {
 			context,
 		);
 		expect(waitForWorkerAgent).toHaveBeenCalledWith("agent-1", 1_000);
-		expect(result.details).toMatchObject({ kind: "wait", agentId: "agent-1", agentStatus: "idle" });
+		expect(result.details).toMatchObject({ started: true, action: "wait", agentId: "agent-1" });
 		expect(tool.description).toContain("event-driven");
 		expect(tool.description).toContain("Do not poll");
 	});
@@ -966,11 +964,15 @@ describe("delegate_status wait", () => {
 			requestId: "unused",
 			reviewedAt: "2026-07-27T00:00:00.000Z",
 		}));
-		const tool = createDelegateStatusToolDefinition({
-			getLaneRecords: () => [],
-			getWorkerClaimSnapshots: () => [],
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 			workerAgentControl: workerAgentControl({ waitForWorkerAgent }),
-			acknowledgeWorkerReview,
+			status: {
+				getLaneRecords: () => [],
+				getWorkerClaimSnapshots: () => [],
+				acknowledgeWorkerReview,
+			},
 		});
 
 		const oversizedAgentId = "a".repeat(513);
@@ -990,7 +992,7 @@ describe("delegate_status wait", () => {
 			context,
 		);
 
-		expect(wait.details).toMatchObject({ kind: "wait", reason: "invalid_agent_id" });
+		expect(wait.details).toMatchObject({ started: false, action: "wait", skipReason: "agent_id_too_long" });
 		expect(review.details).toMatchObject({ kind: "review", reviewed: false, reason: "invalid_lane_id" });
 		expect(waitForWorkerAgent).not.toHaveBeenCalled();
 		expect(acknowledgeWorkerReview).not.toHaveBeenCalled();
@@ -1002,19 +1004,23 @@ describe("delegate_status wait", () => {
 			type: "worker" as const,
 			status: "succeeded" as const,
 		}));
-		const tool = createDelegateStatusToolDefinition({
-			getLaneRecords: () => records,
-			getWorkerClaimSnapshots: () =>
-				records.map((record) => ({
-					requestId: record.laneId,
-					status: "completed" as const,
-					summary: `claim-${record.laneId}-${"x".repeat(8_000)}`,
-					changedFiles: [],
-					parentReviewRequired: true,
-				})),
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			status: {
+				getLaneRecords: () => records,
+				getWorkerClaimSnapshots: () =>
+					records.map((record) => ({
+						requestId: record.laneId,
+						status: "completed" as const,
+						summary: `claim-${record.laneId}-${"x".repeat(8_000)}`,
+						changedFiles: [],
+						parentReviewRequired: true,
+					})),
+			},
 		});
 
-		const result = await tool.execute("call", {}, undefined, undefined, context);
+		const result = await tool.execute("call", { action: "status" }, undefined, undefined, context);
 		const content = result.content.find(
 			(item): item is Extract<(typeof result.content)[number], { type: "text" }> => item.type === "text",
 		);

@@ -130,5 +130,5 @@ export function broadQueryInvalidationNote(
 	if (!tracker) return undefined;
 	const count = tracker.recordBroadQuery(key);
 	if (count < REPEATED_BROAD_QUERY_THRESHOLD) return undefined;
-	return `Do not repeat: ${humanQueryDescription} has produced broad/truncated results ${count} times in this session. Narrow the path/glob/pattern.`;
+	return `MANDATORY: Do not repeat unchanged. ${humanQueryDescription} returned broad/truncated results ${count} times. Narrow path/glob/pattern.`;
 }

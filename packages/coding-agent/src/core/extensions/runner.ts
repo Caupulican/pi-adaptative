@@ -2,7 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { type AgentMessage, measureJsonLength } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { KeyId } from "@caupulican/pi-tui";
@@ -148,6 +148,11 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+
+export interface ExtensionContextPlan {
+	messages: AgentMessage[];
+	transientMessages: AgentMessage[];
+}
 
 export function createExtensionHandlerError(extensionPath: string, event: string, error: unknown): ExtensionError {
 	return {
@@ -926,9 +931,10 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+	async emitContext(messages: AgentMessage[]): Promise<ExtensionContextPlan> {
 		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
+		const transientMessages: AgentMessage[] = [];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
@@ -937,40 +943,49 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
-
-					if (handlerResult && (handlerResult as ContextEventResult).messages) {
-						currentMessages = (handlerResult as ContextEventResult).messages!;
-					}
+					const handlerResult = (await handler(event, ctx)) as ContextEventResult | undefined;
+					if (handlerResult?.messages) currentMessages = handlerResult.messages;
+					if (handlerResult?.transientMessages) transientMessages.push(...handlerResult.transientMessages);
 				} catch (err) {
 					this.reportHandlerError(ext.path, "context", err);
 				}
 			}
 		}
 
-		return currentMessages;
+		return { messages: currentMessages, transientMessages };
 	}
 
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
 		const ctx = this.createContext();
 		let currentPayload = payload;
+		const admittedPayloadLength = measureJsonLength(payload) ?? 0;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				let handlerResult: unknown;
 				try {
 					const event: BeforeProviderRequestEvent = {
 						type: "before_provider_request",
-						payload: currentPayload,
+						payload: structuredClone(currentPayload),
 					};
-					const handlerResult = await handler(event, ctx);
-					if (handlerResult !== undefined) {
-						currentPayload = handlerResult;
-					}
+					handlerResult = await handler(event, ctx);
 				} catch (err) {
 					this.reportHandlerError(ext.path, "before_provider_request", err);
+					continue;
+				}
+				if (handlerResult !== undefined) {
+					const nextPayloadLength = measureJsonLength(handlerResult) ?? 0;
+					if (nextPayloadLength > admittedPayloadLength) {
+						const error = new Error(
+							"before_provider_request cannot expand provider payload beyond its admitted size; add provider-only prompt context with context.transientMessages",
+						);
+						this.reportHandlerError(ext.path, "before_provider_request", error);
+						throw error;
+					}
+					currentPayload = handlerResult;
 				}
 			}
 		}

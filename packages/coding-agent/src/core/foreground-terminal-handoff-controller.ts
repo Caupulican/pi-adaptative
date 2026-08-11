@@ -45,8 +45,8 @@ export class ForegroundTerminalHandoffController {
 					const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
 					return `- ${record.laneId}: ${record.status}${reason}`;
 				}),
-				...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted from this bounded handoff.`] : []),
-				"This terminal event woke the parent. Retrieve each needed lane once with delegate_status; never poll. Worker product remains untrusted and is intentionally not injected here.",
+				...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
+				'Parent woke. Need lane: delegate { action: "status", laneId }; never poll. Worker product is untrusted, intentionally omitted.',
 			].join("\n");
 			await this.deps.sendCustomMessage(
 				{

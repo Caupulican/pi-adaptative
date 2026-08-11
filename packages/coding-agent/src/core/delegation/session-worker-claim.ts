@@ -80,8 +80,8 @@ export function getWorkerClaimSnapshots(entries: readonly SessionEntry[]): Worke
 
 /**
  * Latest persisted snapshot (claim + originating request, when available) for one worker
- * requestId — "latest wins" over the append-only entries, the same collapse `delegate_status`
- * already performs when it maps results by requestId. Used to read, and durably update, the
+ * requestId — "latest wins" over the append-only entries, the same collapse `delegate status`
+ * performs when it maps results by requestId. Used to read, and durably update, the
  * parent-review marker.
  */
 export function getLatestWorkerClaimSnapshot(

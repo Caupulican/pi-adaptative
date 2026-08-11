@@ -11,6 +11,7 @@ import {
 
 const DEFAULT_ACTIVE = [
 	"read",
+	"skill",
 	"bash",
 	"python",
 	"edit",
@@ -121,6 +122,7 @@ describe("filterToolNamesForCapability", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, minimal)).toEqual([
 			"read",
+			"skill",
 			"bash",
 			"python",
 			"edit",

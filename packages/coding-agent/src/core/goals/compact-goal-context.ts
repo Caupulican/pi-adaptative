@@ -1,7 +1,6 @@
 import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { TextContent } from "@caupulican/pi-ai";
-import { escapePromptXmlText } from "../prompt-markup.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import { projectGoalRecord } from "./goal-record.ts";
 import type { GoalState } from "./goal-state.ts";
@@ -33,16 +32,21 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 	const budgetText = record.tokenBudget === undefined ? "unbounded" : String(record.tokenBudget);
 	const remainingText = record.tokensRemaining === undefined ? "unbounded" : String(record.tokensRemaining);
 	const instruction = continuationTurn
-		? "Continue now: inspect authoritative current state and make concrete progress toward the full objective."
-		: "This objective persists across turns; the current user message controls immediate steering without replacing it.";
+		? "Continue now: inspect authoritative state, make concrete progress toward full objective."
+		: "Goal persists; current user message steers this turn, never replaces objective.";
+	const encodedRecord = JSON.stringify({
+		objective: record.objective,
+		tokensUsed: record.tokensUsed,
+		tokenBudget: budgetText,
+		tokensRemaining: remainingText,
+	})
+		.replaceAll("<", "\\u003c")
+		.replaceAll(">", "\\u003e");
 	return [
-		`<active_goal tokens_used="${record.tokensUsed}" token_budget="${budgetText}" tokens_remaining="${remainingText}">`,
-		"<objective>",
-		escapePromptXmlText(record.objective),
-		"</objective>",
+		"ACTIVE GOAL",
+		encodedRecord,
 		instruction,
-		"Use task_steps for decomposition, delegate for workers, and current tool/artifact results as evidence. Keep the goal active unless completion is proven or the same genuine blocker persists for three goal turns.",
-		"</active_goal>",
+		"Use task_steps for decomposition, delegate for workers, tool/artifact results as evidence. Keep active unless completion is proven or same genuine blocker persists 3 goal turns.",
 	].join("\n");
 }
 

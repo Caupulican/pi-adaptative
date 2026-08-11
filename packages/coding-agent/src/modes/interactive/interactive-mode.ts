@@ -804,7 +804,7 @@ export class InteractiveMode {
 	public toolActivityKind(toolName: string): ActivityLaneKind {
 		if (toolName === "task_steps") return "task";
 		if (toolName === "goal") return "goal";
-		if (toolName === "delegate" || toolName === "delegate_status") return "worker";
+		if (toolName === "delegate") return "worker";
 		return "tool";
 	}
 

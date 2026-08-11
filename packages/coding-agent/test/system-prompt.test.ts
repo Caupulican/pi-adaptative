@@ -23,7 +23,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("show file paths clearly");
+			expect(prompt).toContain("show paths");
 		});
 	});
 
@@ -36,8 +36,8 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Issue independent read-only tool calls together in one assistant turn");
-			expect(prompt).toContain("Keep dependent calls, mutations, and stateful commands ordered");
+			expect(prompt).toContain("Batch independent reads");
+			expect(prompt).toContain("order dependent/mutating/stateful calls");
 		});
 
 		test("includes the compact Pi-Adaptative and language-agnostic N+2 contract", () => {
@@ -47,17 +47,31 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
-			expect(prompt).toContain("Treat a clear outcome expressed in normal conversation as a goal");
-			expect(prompt).toContain("Move work expected to exceed 15 seconds into managed background execution");
+			expect(prompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
+			expect(prompt).toContain("Clear conversational outcome is goal");
+			expect(prompt).toContain("Work over 15 seconds: managed background run");
 			expect(prompt).toContain("N+2 ARCHITECTURE");
-			expect(prompt).toContain("Apply these language-agnostic principles");
+			expect(prompt).toContain("Language-agnostic principles");
 			expect(prompt).toContain("Never concatenate growing prefixes");
-			expect(prompt).toContain("The user’s desired outcome is authoritative; a proposed method is not");
-			expect(prompt).toContain("If a method may undermine the outcome");
-			expect(prompt).toContain("Detect → Verify → Score → Gate");
+			expect(prompt).toContain("User outcome governs, method does not");
+			expect(prompt).toContain("Outcome risk: show evidence");
+			expect(prompt).toContain("Detect, verify, score, gate");
 			expect(prompt.match(/N\+2 ARCHITECTURE/g)).toHaveLength(1);
-			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(6_500);
+			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_000);
+		});
+
+		test("applies ultra-terse output without dropping meaning-bearing words or exact technical text", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("ULTRA-TERSE OUTPUT");
+			expect(prompt).toContain("Never drop not/never/no/only/except");
+			expect(prompt).toContain("never invent abbreviations or use causal arrows");
+			expect(prompt).toContain("Preserve numbers, units, code symbols, function/API names, commands, errors");
+			expect(prompt).toContain("Full grammar: security, irreversible actions, ambiguous order");
 		});
 
 		test("includes all default tools when snippets are provided", () => {
@@ -86,7 +100,8 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Resolve `docs/...` and `examples/...` from those roots");
+			expect(prompt).toContain("PI DOCS: root=");
+			expect(prompt).toContain("README.md, `docs/...`, `examples/...`");
 		});
 	});
 
@@ -98,14 +113,17 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain('<project_instructions path="/repo/AGENTS.md">');
-			expect(prompt).toContain("Project-specific instructions and guidelines");
+			expect(prompt).toContain('FILE "/repo/AGENTS.md"');
+			expect(prompt).toContain("PROJECT-SPECIFIC INSTRUCTIONS");
 			expect(prompt).toContain("SECRET PROJECT INSTRUCTIONS");
-			expect(prompt).not.toContain("available_context_files");
+			expect(prompt).toContain("END FILE");
+			expect(prompt).not.toContain("<project_instructions");
 		});
 
-		test("lists skill names, descriptions, and locations without injecting full instructions", () => {
+		test("keeps skill metadata out of the stable prompt and emits only the mandatory vault rule", () => {
 			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "skill"],
+				toolSnippets: { skill: "Search, load, unload specialized instructions on demand." },
 				contextFiles: [],
 				skills: [
 					{
@@ -120,10 +138,23 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("<name>secret-skill-name</name>");
-			expect(prompt).toContain("<description>SECRET SKILL DESCRIPTION</description>");
-			expect(prompt).toContain("<location>/skills/secret/SKILL.md</location>");
-			expect(prompt).toContain("Use the read tool to load a skill's file");
+			expect(prompt).toContain("SKILL VAULT, NON-NEGOTIABLE");
+			expect(prompt).toContain("iff");
+			expect(prompt).toContain("specialist help");
+			expect(prompt).not.toContain("secret-skill-name");
+			expect(prompt).not.toContain("SECRET SKILL DESCRIPTION");
+			expect(prompt).not.toContain("/skills/secret/SKILL.md");
+		});
+
+		test("omits the vault rule when the skill tool is not active", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("SKILL VAULT, NON-NEGOTIABLE");
 		});
 	});
 

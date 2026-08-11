@@ -1,4 +1,8 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import {
+	type AgentMessage,
+	normalizeProviderToolDescription,
+	projectToolSchemaForProvider,
+} from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { CurationTelemetrySnapshot } from "./brain-curator.ts";
 
@@ -70,7 +74,13 @@ export interface ContextCompositionReport {
 
 export interface BuildContextCompositionInput {
 	systemPrompt: string;
-	tools: Array<{ name: string; description?: string; parameters?: unknown; source?: "built-in" | "extension" }>;
+	tools: Array<{
+		name: string;
+		description?: string;
+		providerDescription?: string;
+		parameters?: unknown;
+		source?: "built-in" | "extension";
+	}>;
 	extensions: Array<{
 		name: string;
 		path: string;
@@ -127,7 +137,11 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 		.map((tool) => ({
 			name: tool.name,
 			schemaTokens: estimateTextTokens(
-				JSON.stringify({ name: tool.name, description: tool.description ?? "", parameters: tool.parameters ?? {} }),
+				JSON.stringify({
+					name: tool.name,
+					description: normalizeProviderToolDescription(tool.providerDescription ?? tool.description ?? ""),
+					parameters: projectToolSchemaForProvider(tool.parameters ?? {}),
+				}),
 			),
 			source: tool.source ?? ("built-in" as const),
 		}))

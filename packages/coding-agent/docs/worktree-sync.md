@@ -164,12 +164,12 @@ environment value a lane-bound process can set to shed the worker ceiling below.
 
 ### Forbidden-tool ceiling
 
-A worker session can never activate: `goal`, `delegate`, `delegate_status`, `improvement_loop`,
+A worker session can never activate: `goal`, `delegate`, `improvement_loop`,
 `extensionify`, `skillify`, `run_toolkit_script`, `model_fitness`, `tmux_agent_manager`,
 `context_scout`, `python`. This is enforced as the FIRST line of the tool registry's allow
 predicate (`RuntimeBuilder.refreshToolRegistry`'s `isAllowedTool`) -- it wins over an allow-list,
 an exclude-list, or an active resource profile that names the tool explicitly. `goal`/`delegate`/
-`delegate_status`/`tmux_agent_manager` are sub-orchestration (a worker dispatching its own workers
+`tmux_agent_manager` are sub-orchestration (a worker dispatching its own workers
 defeats single-owner lane accountability); `improvement_loop`/`extensionify`/`skillify` are
 self-adaptation surface a worker should never mutate; `run_toolkit_script`/`model_fitness` spend
 budget a worker's dispatcher does not control. **`python`** is included because it is a bounded but

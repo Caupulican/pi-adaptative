@@ -116,7 +116,7 @@ export class ToolFailureRecoveryGate {
 		args: unknown,
 		record: ToolFailureMemoryRecord | undefined,
 	): ToolFailureRecoveryAdmission {
-		const stateCapacityHalt = this.currentHalt();
+		const stateCapacityHalt = this.halted;
 		if (stateCapacityHalt) {
 			return {
 				kind: "blocked",
@@ -180,7 +180,7 @@ export class ToolFailureRecoveryGate {
 		return this.halted !== undefined;
 	}
 
-	private currentHalt(): ToolFailureRecoveryHalt | undefined {
+	getHalt(): ToolFailureRecoveryHalt | undefined {
 		return this.halted;
 	}
 
@@ -470,18 +470,18 @@ function formatRecoveryGuidance(
 	const hasTimeoutRetryPolicy = getToolExecutionUnchangedRetryLimit(failureCode) > 0;
 	const timeoutPolicy = hasTimeoutRetryPolicy
 		? unchangedRetryRemaining
-			? "The timeout policy permits one unchanged retry. If it fails, do not retry unchanged again."
-			: "The timeout policy's unchanged retry is exhausted. Do not retry unchanged."
+			? "Timeout policy allows 1 unchanged retry; if it fails, never retry unchanged."
+			: "Timeout unchanged retry exhausted; never retry unchanged."
 		: undefined;
 	if (actions.length === 0) {
-		if (timeoutPolicy) return `${timeoutPolicy} Change or narrow the operation, or report the blocker.`;
-		return "No currently loaded tool declares a recovery action for this failure. Do not retry unchanged. Submit only a materially different operation justified by the diagnostic and current tool schema, or report the blocker.";
+		if (timeoutPolicy) return `${timeoutPolicy} Change/narrow operation, or report blocker.`;
+		return "No loaded tool declares recovery. Never retry unchanged. Use materially different operation justified by diagnostic/schema, or report blocker.";
 	}
 	const available = actions.map((action) => `${action.toolName} ${action.kind}: ${action.instruction}`).join(" ");
 	const hasRepair = actions.some((action) => action.kind === "repair");
 	const authority = hasRepair
-		? "Only exact matching repair evidence permits one probe; otherwise change the operation."
-		: "These actions require a changed operation and never reopen the unchanged call.";
+		? "Only exact matching repair evidence grants 1 probe; else change operation."
+		: "Actions require changed operation; unchanged remains blocked.";
 	return truncate(
 		`${timeoutPolicy ? `${timeoutPolicy} ` : ""}Loaded actions: ${available} ${authority}`,
 		MAX_RECOVERY_GUIDANCE_CHARS,

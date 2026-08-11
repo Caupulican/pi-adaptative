@@ -50,7 +50,6 @@ export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapa
 
 export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"delegate",
-	"profile_writer",
 	"context_audit",
 	"goal",
 	"worktree_sync",
@@ -63,6 +62,7 @@ export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 ];
 export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"read",
+	"skill",
 	"bash",
 	"python",
 	"powershell",

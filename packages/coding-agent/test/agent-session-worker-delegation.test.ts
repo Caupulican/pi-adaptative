@@ -146,7 +146,7 @@ describe("AgentSession worker delegation", () => {
 				candidates: [{ provider: "faux", modelId: "faux-model", thinkingLevel: "off" }],
 			},
 			capabilityCeiling: ["workflow.delegate"],
-			toolNames: ["delegate", "delegate_status"],
+			toolNames: ["delegate"],
 			resourceProfileNames: [],
 			dispatchProfileIds: ["test-worker"],
 			budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
@@ -224,7 +224,7 @@ describe("AgentSession worker delegation", () => {
 				candidates: [{ provider: "faux", modelId: "faux-model", thinkingLevel: "off" }],
 			},
 			capabilityCeiling: ["workflow.delegate"],
-			toolNames: ["delegate", "delegate_status"],
+			toolNames: ["delegate"],
 			resourceProfileNames: [],
 			dispatchProfileIds: ["worker-a", "worker-b"],
 			budget: { maxCostUsd: 1, maxTokens: 8_192, maxToolCalls: 4, maxWallClockMs: 60_000 },
@@ -885,7 +885,7 @@ describe("AgentSession worker delegation", () => {
 			if (!initial.started || !initial.record) throw new Error("Expected the initial worker task to complete.");
 
 			const routeFollowUp: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
+				context.systemPrompt?.includes("Autonomous orchestration-tree agent")
 					? fauxAssistantMessage('{"summary":"second task done","status":"completed"}')
 					: fauxAssistantMessage("Background handoff acknowledged.");
 			harness.setResponses([routeFollowUp, routeFollowUp, routeFollowUp]);
@@ -1397,7 +1397,7 @@ describe("AgentSession worker delegation", () => {
 			const workerReasoning: unknown[] = [];
 			const workerToolNames: string[][] = [];
 			const routeResponse: FauxResponseFactory = (context, options, _state, model) => {
-				if (!context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")) {
+				if (!context.systemPrompt?.includes("Autonomous orchestration-tree agent")) {
 					return fauxAssistantMessage("Delegations started.");
 				}
 				workerModelIds.push(model.id);
@@ -1474,7 +1474,7 @@ describe("AgentSession worker delegation", () => {
 			};
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
+			context.systemPrompt?.includes("Autonomous orchestration-tree agent")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
 		let resolveTerminal!: () => void;
@@ -1563,7 +1563,7 @@ describe("AgentSession worker delegation", () => {
 			signalForegroundStarted = resolve;
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
+			context.systemPrompt?.includes("Autonomous orchestration-tree agent")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
 		const heldForegroundResponse: FauxResponseFactory = () => {
@@ -1646,7 +1646,7 @@ describe("AgentSession worker delegation", () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
 			const routeResponse: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("You are an autonomous agent in a coding-agent orchestration tree")
+				context.systemPrompt?.includes("Autonomous orchestration-tree agent")
 					? fauxAssistantMessage(WORKER_JSON)
 					: fauxAssistantMessage("Delegation reviewed.");
 			harness.setResponses([
@@ -2072,7 +2072,7 @@ describe("AgentSession worker delegation", () => {
 			// The durable transcript retains the unknown result, while the provider-facing repair layer
 			// replaces failed calls/results with its bounded failure record. The completed sibling stays.
 			expect(recoveredToolResults).toEqual([first]);
-			expect(recoveredSystemPrompt).toContain("<harness_tool_failures");
+			expect(recoveredSystemPrompt).toContain("ACTIVE TOOL FAILURES");
 			expect(recoveredSystemPrompt).toContain('"tool":"read"');
 			expect(recoveredSystemPrompt).toContain("Execution outcome is unknown");
 			const recoveredConversation = new WorkerConversationStore().open({

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
+import { projectToolsForProvider } from "@caupulican/pi-agent-core";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
@@ -36,7 +36,6 @@ import { getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai/mo
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import { getAgentDir } from "../config.ts";
-import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
@@ -112,7 +111,6 @@ import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
-import { injectCompactGoalContext } from "./goals/compact-goal-context.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -122,7 +120,7 @@ import { HumanInputController } from "./human-input-controller.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
-import { type CurationProposals, isPromotedFrontmatter, SkillCurator } from "./learning/skill-curator.ts";
+import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { MemoryController } from "./memory-controller.ts";
@@ -153,6 +151,8 @@ import { resolveConfiguredOrchestrationModel } from "./orchestration/model-bindi
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
+import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -163,7 +163,6 @@ import {
 } from "./research/session-evidence-bundle.ts";
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
@@ -171,6 +170,7 @@ import { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
+import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -326,9 +326,11 @@ export class AgentSession {
 	private readonly _memory: MemoryController;
 	private readonly _compactionSupport: CompactionSupport;
 	private readonly _compaction: CompactionController;
+	/** Provider request hook generation, replay-safe planning, admission, and lifecycle commit. */
+	private readonly _providerRequestRuntime: ProviderRequestRuntimeController;
 	/** Per-turn context-shaping subsystem (see context-pipeline.ts); owns the latest
 	 * audit/policy/correlation/enforcement/gc reports, the brain-curation sidecar + its skip reasons,
-	 * and the tool-output artifact store. Invoked stage-by-stage from the context transform. */
+	 * and the tool-output artifact store. Invoked stage-by-stage by provider-request planning. */
 	private readonly _pipeline: ContextPipeline;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
@@ -361,6 +363,7 @@ export class AgentSession {
 	private readonly _failureCorpus: FailureCorpusRecorder;
 	private readonly _toolRecoveryLogger: ToolRecoveryLogger;
 	private readonly _toolRecoveryEventLogPath: string;
+	private readonly _skillVault: SkillVaultController;
 	private _skillCuratorInstance?: SkillCurator;
 	private _disposed = false;
 	private _disposeCompletion: Promise<void> | undefined;
@@ -476,6 +479,13 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
+		this._skillVault = new SkillVaultController({
+			getSkills: () => this._resourceLoader.getActiveSkills(),
+			getMaxBodyBytes: () => resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
+			onSkillUsed: (skill) => {
+				if (skill.promoted) this._skillCurator.recordUse(skill.name, Date.now());
+			},
+		});
 		this._toolProtocol = new ToolProtocolController({
 			agent: this.agent,
 			agentDir: this._agentDir,
@@ -695,6 +705,31 @@ export class AgentSession {
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
 			compactWithRetry: (run, signal, provider) => this._compactWithRetry(run, signal, provider),
 		});
+		const providerRequestContext = new ProviderRequestContextController({
+			transformExtensions: async (messages) => {
+				const runner = this._extensionRunner;
+				const projection = runner.hasHandlers("context")
+					? await runner.emitContext(messages)
+					: { messages, transientMessages: [] };
+				return { ...projection, isCurrent: () => this._extensionRunner === runner };
+			},
+			runContextAudit: (messages) => this._runContextAudit(messages),
+			runPromptPolicyPlanning: (report) => this._runPromptPolicyPlanning(report),
+			runMemoryRetrieval: (messages) => this._runMemoryRetrieval(messages),
+			applyContextGc: (messages, writePayloads) => this._applyContextGc(messages, writePayloads),
+			correlatePromptPolicyWithContextGc: (report) => this._correlatePromptPolicyWithContextGc(report),
+			runPromptEnforcement: (messages, report) => this._runPromptEnforcement(messages, report),
+			enqueueRelevanceCuration: (messages, report) => this._enqueueRelevanceCuration(messages, report),
+			maybeDrainBrainCuration: () => this._maybeDrainBrainCuration(),
+			appendMemoryEvidence: (messages, report) => this._maybeAppendMemoryEvidenceBlock(messages, report),
+			getGoalState: () => this.getGoalStateSnapshot(),
+			skillVault: this._skillVault,
+		});
+		this._providerRequestRuntime = new ProviderRequestRuntimeController({
+			agent: this.agent,
+			compaction: this._compaction,
+			context: providerRequestContext,
+		});
 		this._toolRecoveryLogger = new ToolRecoveryLogger({
 			enabled: toolRepairSettings.logging,
 			sessionId: this.sessionManager.getSessionId(),
@@ -802,6 +837,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getResourceLoader: () => this._resourceLoader,
+			getSkillVault: () => this._skillVault,
 			getExtensionRunner: () => this._extensionRunner,
 			setExtensionRunner: (runner) => {
 				this._extensionRunner = runner;
@@ -1004,7 +1040,7 @@ export class AgentSession {
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
-		this._installAgentContextTransform();
+		this._providerRequestRuntime.install();
 		this._installAgentTurnRefresh();
 
 		this._runtimeBuilder.buildRuntime({
@@ -1065,7 +1101,7 @@ export class AgentSession {
 				model,
 				{
 					systemPrompt: this._baseSystemPrompt,
-					tools: this.agent.state.tools,
+					tools: projectToolsForProvider(this.agent.state.tools),
 					messages: [],
 				},
 				options,
@@ -1155,60 +1191,6 @@ export class AgentSession {
 		sessionModel: Model<Api>,
 	): ThinkingLevel | undefined {
 		return this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel);
-	}
-
-	/**
-	 * Install tool hooks once on the Agent instance.
-	 *
-	 * The callbacks read `this._extensionRunner` at execution time, so extension reload swaps in the
-	 * new runner without reinstalling hooks. Extension-specific tool wrappers are still used to adapt
-	 * registered tool execution to the extension context. Tool call and tool result interception now
-	 * happens here instead of in wrappers.
-	 */
-	private _installAgentContextTransform(): void {
-		const previousTransformContext = this.agent.transformContext?.bind(this.agent);
-		this.agent.transformContext = async (messages, signal) => {
-			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
-			// The agent loop may deliberately project a safer request context (for example, removing a
-			// failed mutation attempt after retaining its payload). Replacing that projection with raw
-			// session state would disclose the discarded attempt and defeat tool-failure repair.
-			const authoritativeMessages = transformed;
-			let currentMessages = authoritativeMessages;
-			try {
-				if (
-					!this.isCompacting &&
-					(await this._compaction.maybeCompactBeforeContextTransform(
-						authoritativeMessages,
-						(messages) => this._applyContextGc(messages, false).messages,
-					))
-				) {
-					currentMessages = this.agent.state.messages.slice();
-				}
-			} catch {
-				currentMessages = authoritativeMessages;
-			}
-
-			let finalMessages = currentMessages;
-			if (this._extensionRunner.hasHandlers("context")) {
-				finalMessages = await this._extensionRunner.emitContext(currentMessages);
-			}
-			const auditReport = this._runContextAudit(finalMessages);
-			const shadowReport = this._runPromptPolicyPlanning(auditReport);
-			const memoryReport = await this._runMemoryRetrieval(finalMessages);
-			const gcResult = this._applyContextGc(finalMessages, true);
-			this._correlatePromptPolicyWithContextGc(gcResult.report);
-			const enforcementResult = this._runPromptEnforcement(gcResult.messages, shadowReport);
-			this._enqueueRelevanceCuration(gcResult.messages, shadowReport);
-			// Fire-and-forget: the local curator overlaps the frontier call; it never blocks a turn.
-			this._maybeDrainBrainCuration();
-			// Appended LAST, after gc and enforcement, so the bounded evidence block is
-			// never packed/stubbed/reshaped by either pass and always reflects this turn's
-			// fresh retrieval. Because nothing downstream trims it, memory-prompt-block.ts's
-			// character caps are the only budget protection for this block -- load-bearing,
-			// not merely defensive.
-			const gcMessages = this._maybeAppendMemoryEvidenceBlock(enforcementResult.messages, memoryReport);
-			return injectCompactGoalContext(gcMessages, this.getGoalStateSnapshot());
-		};
 	}
 
 	/**
@@ -1370,8 +1352,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.runContextAudit}. Kept as a
-	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan hot-path delegation to {@link ContextPipeline.runContextAudit}. Kept as a
+	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _runContextAudit(messages: AgentMessage[]): ContextAuditReport {
 		return this._pipeline.runContextAudit(messages);
@@ -1383,8 +1365,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.runPromptPolicyPlanning}. Kept as
-	 * a one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan hot-path delegation to {@link ContextPipeline.runPromptPolicyPlanning}. Kept as a
+	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _runPromptPolicyPlanning(auditReport: ContextAuditReport): PromptPolicyShadowReport {
 		return this._pipeline.runPromptPolicyPlanning(auditReport);
@@ -1396,8 +1378,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.correlatePromptPolicyWithContextGc}.
-	 * Kept as a one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan commit delegation to {@link ContextPipeline.correlatePromptPolicyWithContextGc}.
+	 * Kept as a one-line method so the request context controller owns pass ordering.
 	 */
 	private _correlatePromptPolicyWithContextGc(gcReport: ContextGcReport): void {
 		this._pipeline.correlatePromptPolicyWithContextGc(gcReport);
@@ -1409,8 +1391,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.runPromptEnforcement}. Kept as a
-	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan hot-path delegation to {@link ContextPipeline.runPromptEnforcement}. Kept as a
+	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _runPromptEnforcement(
 		messages: AgentMessage[],
@@ -1420,8 +1402,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.enqueueRelevanceCuration}. Kept as
-	 * a one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan commit delegation to {@link ContextPipeline.enqueueRelevanceCuration}. Kept as a
+	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _enqueueRelevanceCuration(messages: AgentMessage[], shadowReport: PromptPolicyShadowReport): void {
 		this._pipeline.enqueueRelevanceCuration(messages, shadowReport);
@@ -1433,8 +1415,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.maybeDrainBrainCuration}. Kept as a
-	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan commit delegation to {@link ContextPipeline.maybeDrainBrainCuration}. Kept as a
+	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _maybeDrainBrainCuration(): void {
 		this._pipeline.maybeDrainBrainCuration();
@@ -1464,7 +1446,7 @@ export class AgentSession {
 	getContextCompositionReport(): ContextCompositionReport {
 		const rawMessages = this.agent.state.messages.slice();
 		const gcResult = this._applyContextGc(rawMessages, false);
-		const activeNames = new Set(this.getActiveToolNames());
+		const requestMessages = this._skillVault.previewContext(gcResult.messages);
 		const extensions = this._resourceLoader.getExtensions().extensions;
 		const extensionToolNames = new Set(extensions.flatMap((extension) => [...extension.tools.keys()]));
 		const usage = this.getContextUsage();
@@ -1481,21 +1463,20 @@ export class AgentSession {
 			.reduce((sum, item) => sum + Math.max(0, Math.ceil((item.originalChars ?? 0) / 4) - 50), 0);
 		return buildContextCompositionReport({
 			systemPrompt: this.systemPrompt ?? "",
-			tools: this.getAllTools()
-				.filter((tool) => activeNames.has(tool.name))
-				.map((tool) => ({
-					name: tool.name,
-					description: tool.description,
-					parameters: tool.parameters,
-					source: extensionToolNames.has(tool.name) ? ("extension" as const) : ("built-in" as const),
-				})),
+			tools: this.agent.state.tools.map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				providerDescription: tool.providerDescription,
+				parameters: tool.parameters,
+				source: extensionToolNames.has(tool.name) ? ("extension" as const) : ("built-in" as const),
+			})),
 			extensions: extensions.map((extension) => ({
 				name: basename(extension.path),
 				path: extension.path,
 				toolNames: [...extension.tools.keys()],
 				commandCount: extension.commands.size,
 			})),
-			messages: gcResult.messages,
+			messages: requestMessages,
 			providerReportedTokens: usage?.tokens ?? null,
 			contextWindow: usage?.contextWindow ?? this.model?.contextWindow ?? null,
 			gc: { packedCount: gcResult.report.packedCount, savedTokens: gcResult.report.savedTokens },
@@ -1576,8 +1557,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link MemoryController.runMemoryRetrieval}. Kept as a
-	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan hot-path delegation to {@link MemoryController.runMemoryRetrieval}. Kept as a
+	 * one-line method so the request context controller owns pass ordering.
 	 */
 	private _runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
 		return this._memory.runMemoryRetrieval(messages);
@@ -1589,8 +1570,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link MemoryController.maybeAppendMemoryEvidenceBlock}.
-	 * Kept as a one-line method (not inlined) so the transform stays the single owner of the pass ordering.
+	 * Provider-plan hot-path delegation to {@link MemoryController.maybeAppendMemoryEvidenceBlock}.
+	 * Kept as a one-line method so the request context controller owns pass ordering.
 	 */
 	private _maybeAppendMemoryEvidenceBlock(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[] {
 		return this._memory.maybeAppendMemoryEvidenceBlock(messages, report);
@@ -1602,8 +1583,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Context-transform hot-path delegation to {@link ContextPipeline.applyContextGc}. Kept as a
-	 * one-line method (not inlined) so the transform stays the single owner of the pass ordering;
+	 * Provider-plan hot-path delegation to {@link ContextPipeline.applyContextGc}. Kept as a
+	 * one-line method so the request context controller owns pass ordering;
 	 * also serves the composition dashboard and {@link getContextGcReport} read-only paths.
 	 */
 	private _applyContextGc(
@@ -1762,6 +1743,9 @@ export class AgentSession {
 					}
 				}
 			}
+		}
+		if (event.type === "turn_end" || event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+			this._skillVault.noteActivity();
 		}
 		if (event.type === "tool_execution_end" && event.isError) {
 			this._toolRecoveryLogger.recordToolExecutionFailure({
@@ -2058,6 +2042,7 @@ export class AgentSession {
 		safely(() => this.abortCompaction());
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
+		safely(() => this._skillVault.unload());
 		safely(() => disposeShellExecutionSession(this._shellSessionKey));
 		safely(() => this._cancelPrefixWarm());
 		safely(() => this.agent.abort());
@@ -2067,11 +2052,11 @@ export class AgentSession {
 		safely(() => this._reflection.cancelScheduled());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._backgroundLanes.abortInFlightLanes());
+		safely(() => this._providerRequestRuntime.dispose());
 		safely(() => {
 			this.agent.afterToolCall = undefined;
 			this.agent.handoffToolCall = undefined;
 			this.agent.subscribeToolCallHandoffRequest = undefined;
-			this.agent.transformContext = undefined;
 		});
 		safely(() => this._extensionRunner.invalidate());
 		safely(() => this._disconnectFromAgent());
@@ -2230,10 +2215,6 @@ export class AgentSession {
 		) {
 			addIfRegistered("artifact_retrieve");
 		}
-		if (validToolNames.includes("delegate")) {
-			addIfRegistered("delegate_status");
-		}
-
 		this.agent.state.tools = tools;
 
 		// Rebuild base system prompt with new tool set
@@ -2814,11 +2795,7 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Expand skill commands (/skill:name args) to their full content.
-	 * Returns the expanded text, or the original text if not a skill command or skill not found.
-	 * Emits errors via extension runner if file read fails.
-	 */
+	/** Route explicit /skill:name through the same host-owned vault as model tool calls. */
 	private _expandSkillCommand(text: string): string {
 		if (!text.startsWith("/skill:")) return text;
 
@@ -2826,30 +2803,16 @@ export class AgentSession {
 		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
-		// Resolve only against profile-active skills so a `/skill:` the active profile blocks cannot be
-		// expanded/invoked — by the user OR the agent — even if it loaded before a runtime profile switch.
-		const skill = this.resourceLoader.getActiveSkills().find((s) => s.name === skillName);
-		if (!skill) return text; // Unknown or profile-blocked skill, pass through unchanged
-
-		try {
-			const content = readFileSync(skill.filePath, "utf-8");
-			// Curator (#32): record use of a reflection-PROMOTED skill so stale ones can later be proposed
-			// for archival. Only promoted skills carry the marker, so hand-authored skills are untouched.
-			if (isPromotedFrontmatter(content)) {
-				this._skillCurator.recordUse(skill.name, Date.now());
-			}
-			const body = stripResourceProfileBlocks(stripFrontmatter(content)).trim();
-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
-		} catch (err) {
-			// Emit error like extension commands do
+		const result = this._skillVault.load(skillName, "user");
+		if (!result.ok) {
 			this._extensionRunner.emitError({
-				extensionPath: skill.filePath,
-				event: "skill_expansion",
-				error: err instanceof Error ? err.message : String(err),
+				extensionPath: "<skill-vault>",
+				event: "skill_load",
+				error: result.message,
 			});
-			return text; // Return original on error
+			return text;
 		}
+		return args || `Use loaded skill ${JSON.stringify(skillName)} for this request.`;
 	}
 
 	/** Reject extension commands, then expand a queued message through the shared skill/template path. */

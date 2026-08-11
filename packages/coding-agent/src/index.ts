@@ -87,6 +87,7 @@ export type {
 	BuildSystemPromptOptions,
 	CompactOptions,
 	ContextEvent,
+	ContextEventResult,
 	ContextUsage,
 	CustomToolCallEvent,
 	EditToolCallEvent,
@@ -348,13 +349,26 @@ export {
 	SettingsManager,
 	type SettingsManagerCreateOptions,
 } from "./core/settings-manager.ts";
+export {
+	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+	DEFAULT_SKILL_IDLE_TIMEOUT_MS,
+	MAX_ACTIVE_SKILL_BODY_BYTES,
+	MIN_ACTIVE_SKILL_BODY_BYTES,
+	resolveActiveSkillBodyByteLimit,
+	type SkillLoadResult,
+	type SkillSearchResult,
+	SkillVaultController,
+	type SkillVaultControllerOptions,
+	type SkillVaultStatus,
+} from "./core/skill-vault.ts";
 // Skills
 export {
-	formatSkillsForPrompt,
 	type LoadSkillsFromDirOptions,
 	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
+	MAX_SKILL_FRONTMATTER_BYTES,
+	readSkillFrontmatterFile,
 	type Skill,
 	type SkillFrontmatter,
 } from "./core/skills.ts";
@@ -438,6 +452,11 @@ export {
 	type WriteToolOptions,
 	withFileMutationQueue,
 } from "./core/tools/index.ts";
+export {
+	createSkillVaultToolDefinition,
+	type SkillToolDetails,
+	type SkillToolInput,
+} from "./core/tools/skill.ts";
 // Skill-audit primitives — exported so extensions (e.g. continuous-learning) can reuse the native
 // Jaccard overlap audit via `import { runSkillAudit } from "@caupulican/pi-adaptative"` instead of
 // carrying a duplicate copy.

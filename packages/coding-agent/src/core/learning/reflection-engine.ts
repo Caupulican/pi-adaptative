@@ -1,4 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai";
+import { REFLECTION_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
+
+export { REFLECTION_SYSTEM_PROMPT };
 
 export type StopReason = "stop" | "toolUse" | "aborted" | "error" | string;
 
@@ -85,29 +88,6 @@ export interface ReflectionResult {
  * so the provider prompt-cache reuses this prefix instead of re-billing it each pass (cost guard).
  * Do NOT interpolate per-call data into this constant or caching breaks.
  */
-export const REFLECTION_SYSTEM_PROMPT = `You are a reflection engine. Your job is to analyze the recent conversation turn, compare it against the agent's existing memory, and decide if any memory updates are needed.
-
-Memory guidelines:
-- "MEMORY" is for project facts, configuration, repeatable workflows, and coding findings.
-- "USER" is for user preferences, patterns, and style specifications.
-- Avoid duplicate facts. If the fact is already represented, do not add it.
-- CONFRONT existing memory: if the new turn contradicts or updates an existing fact, use "memory_replace" or "memory_remove" to supersede the old fact rather than blindly appending.
-- Keep memories short, factual, and direct. No fluff.
-- Do NOT capture transient/environment-specific noise: tool/network failures, one-off errors, or a single narrative event. Persist only durable facts and preferences.
-- PROMOTE to behavior: if the turn established a REPEATABLE, multi-step PROCEDURE/workflow (not a one-off fact) that should govern a future class of tasks, emit a "promote_skill" instead of (or in addition to) a memory fact. Only promote a genuinely reusable procedure — never a single fact, a one-off narrative, or environment-specific noise. Prefer a memory fact when unsure.
-
-You must output your analysis and writes in the following JSON format inside a \`\`\`json\`\`\` code fence:
-{
-  "rationale": "Explanation of your reasoning",
-  "writes": [
-    { "kind": "memory_add", "section": "MEMORY" | "USER", "text": "New direct fact to append" },
-    { "kind": "memory_replace", "target": "Exact text substring to replace", "text": "New replacement text" },
-    { "kind": "memory_remove", "target": "Exact text substring to remove" },
-    { "kind": "promote_skill", "name": "kebab-case-skill-name", "description": "one line of when to use it", "body": "Markdown: the step-by-step procedure" }
-  ]
-}
-`;
-
 export class ReflectionEngine {
 	/**
 	 * Build the reflection prompt, call the injected isolated complete(),
@@ -118,13 +98,13 @@ export class ReflectionEngine {
 		const systemPrompt = REFLECTION_SYSTEM_PROMPT;
 
 		// Variable inputs go in the USER prompt so the system prefix above stays cache-stable (#33).
-		const userPrompt = `Existing Memory snapshot:
+		const userPrompt = `Existing memory:
 ${input.existingMemory}
 
 Recent turn transcript:
 ${input.recentTurnText}
 
-Analyze this turn against the existing memory and output your memory updates.`;
+Return JSON updates.`;
 
 		let usage: Usage | undefined;
 		try {

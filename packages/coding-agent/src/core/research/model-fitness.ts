@@ -1,10 +1,22 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
-import { CURATION_DIGEST_SYSTEM_PROMPT } from "../context/brain-curator.ts";
 import { runWorker } from "../delegation/worker-runner.ts";
 import { parseModelOutputJsonObject } from "../model-output-json.ts";
 import { runRouteJudge } from "../model-router/route-judge.ts";
+import {
+	CAPACITY_PROBE_SYSTEM_PROMPT,
+	CURATION_DIGEST_SYSTEM_PROMPT,
+	SEARCH_PROBE_SYSTEM_PROMPT,
+	TOOL_CALL_PROBE_SYSTEM_PROMPT,
+} from "../provider-prompt-contracts.ts";
 import { runResearch } from "./research-runner.ts";
+
+export {
+	CAPACITY_PROBE_SYSTEM_PROMPT,
+	CURATION_DIGEST_SYSTEM_PROMPT as DIGEST_PROBE_SYSTEM_PROMPT,
+	SEARCH_PROBE_SYSTEM_PROMPT,
+	TOOL_CALL_PROBE_SYSTEM_PROMPT,
+};
 
 /**
  * Model fitness probe: measures whether a candidate model can actually drive the harness's
@@ -114,34 +126,11 @@ export interface ModelFitnessReport {
 }
 
 /** Static prompts for the heavy-lifter surfaces (stable for provider prompt caching). */
-export const SEARCH_PROBE_SYSTEM_PROMPT = [
-	"You plan code searches for a coding agent. You never answer the question yourself.",
-	"Given a question about a codebase, respond with STRICT JSON only - no prose:",
-	'{"queries":[{"pattern":"<regex or literal to grep>","glob":"<file glob like **/*.ts>"}]}',
-	"Return 1 to 4 queries, most specific first.",
-].join("\n");
-
-export const TOOL_CALL_PROBE_SYSTEM_PROMPT = [
-	"You operate tools for a coding agent. You have exactly one tool:",
-	"grep(pattern: string, path: string) - search files under a path for a pattern.",
-	"Respond to every task with STRICT JSON only - no prose:",
-	'{"tool":"grep","arguments":{"pattern":"<pattern>","path":"<path>"}}',
-].join("\n");
-
-export const CAPACITY_PROBE_SYSTEM_PROMPT = [
-	"You are a context-window capacity probe for a local model server.",
-	"Find the unique NEEDLE token in the user's text and echo that token only.",
-	"Do not summarize, explain, or add punctuation.",
-].join("\n");
-
 const SEARCH_PROBE_TASKS: readonly string[] = [
 	"Where is the retry/backoff logic for HTTP requests implemented?",
 	"Which files define the settings for background research?",
 	"Find where session entries of type custom are appended.",
 ];
-
-// The probe measures the REAL curation contract — same prompt the BrainCurator ships.
-export { CURATION_DIGEST_SYSTEM_PROMPT as DIGEST_PROBE_SYSTEM_PROMPT } from "../context/brain-curator.ts";
 
 /**
  * Digest probe chunks each carry a NONCE identifier that cannot be guessed from the

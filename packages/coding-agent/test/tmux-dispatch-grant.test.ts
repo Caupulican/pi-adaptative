@@ -427,17 +427,17 @@ describe("tmux extension routing guidance", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tmux-guidance-"));
 		try {
 			const { registeredTool } = installExtension(tempDir);
-			const guidance = [
-				registeredTool.description,
-				registeredTool.promptSnippet,
-				...(registeredTool.promptGuidelines ?? []),
-			]
+			const promptGuidelines = registeredTool.promptGuidelines ?? [];
+			const guidance = [registeredTool.description, registeredTool.promptSnippet, ...promptGuidelines]
 				.filter((value): value is string => value !== undefined)
 				.join("\n");
 			expect(guidance).toContain("native delegate");
-			expect(guidance).toContain("explicitly requests");
-			expect(guidance).toContain("Never create or edit orchestration profiles during dispatch");
+			expect(guidance).toContain("owner request");
+			expect(guidance).toContain("Never edit profiles during dispatch");
 			expect(guidance).not.toContain("Use tmux_agent_manager for Windows/Linux tmux-managed workers");
+			expect(registeredTool.promptSnippet?.length).toBeLessThanOrEqual(120);
+			expect(promptGuidelines.every((guideline) => guideline.length <= 140)).toBe(true);
+			expect(promptGuidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_200);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}

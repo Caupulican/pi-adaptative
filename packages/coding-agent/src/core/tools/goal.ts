@@ -362,9 +362,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			"Read or update the durable goal for explicitly persistent work. Use task_steps for plans and delegate for workers; owner or system controls lifecycle and budget stops.",
 		promptSnippet: "Read or update the durable goal.",
 		promptGuidelines: [
-			"Start only for an explicit persistent goal from chat or system; no slash command is needed. Use get when uncertain, never replace an unfinished goal, and set tokenBudget only when explicitly requested.",
-			"Use task_steps for plans and delegate for workers; use legacy actions only on legacy goals.",
-			"Complete only with current authoritative evidence and no remaining work; block_goal only after the same real impasse lasts three goal turns.",
+			"Start only for explicit persistent chat/system goal. get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
+			"Plans: task_steps. Workers: delegate. Legacy actions only for legacy goals.",
+			"complete needs current authoritative evidence, no remaining work. block_goal needs same real impasse for 3 goal turns.",
 		],
 		parameters: goalSchema,
 		renderShell: "self",

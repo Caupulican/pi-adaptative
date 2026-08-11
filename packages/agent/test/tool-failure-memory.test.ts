@@ -243,9 +243,10 @@ describe("tool failure memory", () => {
 			"base",
 		);
 
-		expect(sanitized.systemPrompt).toContain('<harness_tool_failures tool_mistakes="bash:1">');
+		expect(sanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
 		expect(sanitized.systemPrompt).toContain('"kind_mistakes":1');
-		expect(sanitized.systemPrompt).toContain("matching the failed target's backend authority, kind, and exact scope");
+		expect(sanitized.systemPrompt).toContain("matching backend authority, target kind, and exact scope");
+		expect(sanitized.systemPrompt).not.toContain("<harness_tool_failures");
 	});
 
 	it("fingerprints large operations without retaining or serializing their payload", () => {
@@ -295,7 +296,7 @@ describe("tool failure memory", () => {
 			failureCode: "invalid_option",
 			phase: "execution",
 			diagnostic: "svn: invalid option: --stat",
-			guidance: "Option rejected; re-read command help and remove or replace it before retrying.",
+			guidance: "Option rejected. Read command help; remove/replace option before retry.",
 		});
 	});
 
@@ -306,7 +307,7 @@ describe("tool failure memory", () => {
 		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toBe(
-			"The tool returned no diagnostic output; inspect its contract or request bounded diagnostics to identify the issue before retrying.",
+			"No diagnostic output. Inspect tool contract or request bounded diagnostic before retry.",
 		);
 	});
 
@@ -323,7 +324,7 @@ describe("tool failure memory", () => {
 			failureCode: "invalid_option",
 			phase: "execution",
 			diagnostic: "configdelphi: unknown option --auto",
-			guidance: "Option rejected; re-read command help and remove or replace it before retrying.",
+			guidance: "Option rejected. Read command help; remove/replace option before retry.",
 		});
 	});
 
@@ -331,7 +332,7 @@ describe("tool failure memory", () => {
 		const assessment = assessToolFailure(`LEGACY_RAW_OUTPUT:${"x".repeat(10_000)}`, "failed");
 
 		expect(assessment.diagnostic).toBeUndefined();
-		expect(assessment.guidance).toContain("tool returned no diagnostic");
+		expect(assessment.guidance).toContain("No diagnostic output");
 	});
 
 	it("uses catalogued recovery guidance without retaining redundant raw errors", () => {
@@ -340,7 +341,7 @@ describe("tool failure memory", () => {
 		expect(assessment.failureCode).toBe("file_not_found");
 		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
-		expect(assessment.guidance).toContain("list the parent directory or re-read the path");
+		expect(assessment.guidance).toContain("List parent directory or re-read path");
 	});
 
 	it("preserves the original failure evidence across repeated blocked replays", () => {
@@ -408,7 +409,7 @@ describe("tool failure memory", () => {
 			failureCode: "encoding_corruption",
 			phase: "execution",
 			guidance:
-				"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
+				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
 			attemptMemory: "discard",
 		});
 
@@ -639,7 +640,7 @@ describe("tool failure memory", () => {
 
 		expect(sanitized.messages).toEqual([]);
 		expect(sanitized.systemPrompt).toContain('"next_action":');
-		expect(sanitized.systemPrompt).toContain("tool returned no diagnostic");
+		expect(sanitized.systemPrompt).toContain("No diagnostic output");
 		expect(sanitized.systemPrompt).not.toContain("Change the arguments or approach");
 		expect(sanitized.systemPrompt).not.toContain('"repair":');
 	});

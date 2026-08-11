@@ -344,18 +344,21 @@ export const MIN_COMPACTION_SAVINGS = 0.12;
  * - EARLY (fractional, context-efficiency guard): context exceeds `contextWindow * triggerPercent` — compact only if
  *   the summary would actually save enough (`MIN_COMPACTION_SAVINGS`), so we don't thrash for tiny gains.
  */
-export function shouldCompact(
+export type CompactionNeed = "none" | "early" | "hard";
+
+/** Classify why compaction is needed so callers never confuse a cost optimization with capacity. */
+export function assessCompactionNeed(
 	contextTokens: number,
 	contextWindow: number,
 	settings: CompactionSettings,
 	triggerTokens?: number,
-): boolean {
-	if (!settings.enabled) return false;
+): CompactionNeed {
+	if (!settings.enabled) return "none";
 
 	// Hard trigger: near-full, or a caller-supplied lower override. Always compacts (avoid overflow).
 	const reserveTrigger = contextWindow - settings.reserveTokens;
 	const hardTrigger = triggerTokens === undefined ? reserveTrigger : Math.min(reserveTrigger, triggerTokens);
-	if (contextTokens > hardTrigger) return true;
+	if (contextTokens > hardTrigger) return "hard";
 
 	// Early fractional trigger: bounds per-turn input cost on large-window models, gated by anti-thrashing.
 	const pct = settings.triggerPercent ?? 0;
@@ -364,10 +367,19 @@ export function shouldCompact(
 		if (contextTokens > fractionalTrigger) {
 			// Projected saving ≈ the non-protected fraction (everything but the recent tail we keep).
 			const projectedSavings = contextTokens > 0 ? 1 - settings.keepRecentTokens / contextTokens : 0;
-			return projectedSavings >= MIN_COMPACTION_SAVINGS;
+			return projectedSavings >= MIN_COMPACTION_SAVINGS ? "early" : "none";
 		}
 	}
-	return false;
+	return "none";
+}
+
+export function shouldCompact(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	triggerTokens?: number,
+): boolean {
+	return assessCompactionNeed(contextTokens, contextWindow, settings, triggerTokens) !== "none";
 }
 
 // ============================================================================
@@ -601,7 +613,7 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = `Checkpoint the conversation above. Format from your instructions, sections in this order:
+const SUMMARIZATION_PROMPT = `Create checkpoint. Exact heading order:
 ## Active Task
 ### Mandatory Rules
 ## Working Set
@@ -612,31 +624,29 @@ const SUMMARIZATION_PROMPT = `Checkpoint the conversation above. Format from you
 ## Constraints & Preferences
 ## Critical Context
 
-Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
+NEVER carry resolved/transient errors, replaced approaches, file bodies. Record paths/intent.
 
-Verification checklist (the verifier checks exactly these channels; satisfy every listed include/drop demand):
-<facts>
+MANDATORY VERIFICATION:
 {FACTS_BLOCK}
-</facts>
 
-Budget: ~{BUDGET} tokens. Concrete beats complete.`;
+Budget ~{BUDGET} tokens. Concrete facts first.`;
 
-const UPDATE_SUMMARIZATION_PROMPT = `Update the checkpoint in <previous-summary> with the NEW turns above. RULES:
-- PRESERVE every existing ### Mandatory Rules bullet VERBATIM; append new ones.
-- Continue the ## Done numbering. Keep the 15 most recent numbered items verbatim; compress everything older into the single first line "1. (earlier work compressed) <one line>". The checkpoint must not grow without bound across updates.
-- Update ## Active Task to the newest unfulfilled user input; apply the cancellation rule.
-- Keep ## Files current (add new, keep still-relevant, drop obsolete).
-- Drop previous ## Open Problems resolved by the new turns.
-- Drop ## Working Set files untouched since the previous checkpoint unless the active task references them.
-- Preserve exact paths, commands, errors.
-- Do NOT carry resolved/transient errors, superseded approaches, or file contents. Record paths and intent, never bodies.
+const UPDATE_SUMMARIZATION_PROMPT = `Update OLD CHECKPOINT with CHAT turns.
+MANDATORY:
+- Copy every existing ### Mandatory Rules bullet verbatim; append new.
+- Continue ## Done numbering. Keep newest 15 items verbatim. Replace all older items with first line: "1. (earlier work compressed) <one line>". Bound growth.
+- Set ## Active Task to newest unfulfilled user input; apply cancellation rule.
+- Keep ## Files current: add new, retain relevant, drop obsolete.
+- Drop resolved ## Open Problems.
+- Drop ## Working Set files untouched since OLD CHECKPOINT unless active task names them.
+- Keep exact paths/commands/errors.
+- NEVER carry resolved/transient errors, replaced approaches, file bodies. Record paths/intent.
 
-Same section order. Verification checklist (the verifier checks exactly these channels; satisfy every listed include/drop demand):
-<facts>
+Keep required heading order.
+MANDATORY VERIFICATION:
 {FACTS_BLOCK}
-</facts>
 
-Budget: ~{BUDGET} tokens.`;
+Budget ~{BUDGET} tokens.`;
 
 function createSummarizationOptions(
 	model: Model<any>,
@@ -877,7 +887,7 @@ function fillPromptTemplate(template: string, factsBlock: string, budget: number
 const SUMMARY_BUDGET_BASE_TOKENS = 1_500;
 /** Worst-case selection assumption for summary output when exact bounded facts are not available. */
 export const SUMMARY_BUDGET_MAX_TOKENS = 4_000;
-/** Prompt-side margin beyond the raw conversation input (system prompt, tags, instructions). */
+/** Prompt-side margin beyond raw conversation input (system prompt, labels, instructions). */
 const SUMMARIZER_PROMPT_MARGIN_TOKENS = 2_000;
 
 function getSummaryBudget(reserveTokens: number, model: Model<any>, factsBlock?: string): number {
@@ -928,11 +938,11 @@ function buildSummarizationPrompt(
 	previousSummary: string | undefined,
 	promptSuffix: string,
 ): string {
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	let promptText = `CHAT\n${conversationText}\n\n`;
 	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+		promptText += `OLD CHECKPOINT\n${previousSummary}\n\n`;
 	}
-	return promptText + promptSuffix;
+	return `${promptText}TASK\n${promptSuffix}`;
 }
 
 const CHUNK_SUMMARIZATION_HEADROOM_TOKENS = 1000;
@@ -942,7 +952,7 @@ export function getChunkSummarizationTokenBudget(inputBound: number): number {
 }
 
 export function buildChunkSummarizationPrompt(chunk: string, index: number, total: number): string {
-	return `<conversation-chunk index="${index}" total="${total}">\n${chunk}\n</conversation-chunk>\n\nSummarize this chunk for a later checkpoint merge. Preserve exact file paths, commands, errors, user prohibitions, and active work. Output concise notes only.`;
+	return `CHAT CHUNK ${index}/${total}\n${chunk}\n\nTASK\nCondense for checkpoint merge. Keep exact paths/commands/errors, user prohibitions, active work. Notes only.`;
 }
 
 async function summarizeChunks(
@@ -1194,20 +1204,18 @@ export function prepareCompaction(
 // Main compaction function
 // ============================================================================
 
-const TURN_PREFIX_SUMMARIZATION_PROMPT = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
-
-Summarize the prefix to provide context for the retained suffix:
+const TURN_PREFIX_SUMMARIZATION_PROMPT = `Summarize discarded early part of split turn; recent suffix remains.
 
 ## Original Request
-[What did the user ask for in this turn?]
+[User request]
 
 ## Early Progress
-- [Key decisions and work done in the prefix]
+- [Decisions/work]
 
 ## Context for Suffix
-- [Information needed to understand the retained recent work]
+- [Facts needed by retained work]
 
-Be concise. Focus on what's needed to understand the kept suffix.`;
+Only facts needed to understand suffix.`;
 
 interface VerifiedSummaryResult {
 	summary: string;
@@ -1499,7 +1507,7 @@ async function generateTurnPrefixSummary(
 	); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `CHAT\n${conversationText}\n\nTASK\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const response = await completeSummarizationPrompt(
 		promptText,
 		model,

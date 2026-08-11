@@ -227,7 +227,7 @@ describe("reload failsafe and context audit", () => {
 		await session.disposeAndWait();
 	}, 60_000);
 
-	it("registers the built-in context_audit extension tool by default", async () => {
+	it("registers context_audit for explicit diagnostics without activating it by default", async () => {
 		const tempDir = join(tmpdir(), `pi-context-audit-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		tempDirs.push(tempDir);
 		const agentDir = join(tempDir, "agent");
@@ -247,9 +247,11 @@ describe("reload failsafe and context audit", () => {
 		});
 		try {
 			await session.bindExtensions({});
-			expect(session.getActiveToolNames()).toContain("context_audit");
+			expect(session.getActiveToolNames()).not.toContain("context_audit");
 			const definition = session.getToolDefinition("context_audit");
 			expect(definition).toBeDefined();
+			session.setActiveToolsByName([...session.getActiveToolNames(), "context_audit"]);
+			expect(session.getActiveToolNames()).toContain("context_audit");
 			const result = await definition!.execute(
 				"audit-call",
 				{ maxItems: 5 },

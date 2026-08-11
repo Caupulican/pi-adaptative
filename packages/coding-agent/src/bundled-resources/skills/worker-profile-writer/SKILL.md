@@ -20,7 +20,7 @@ Create the smallest immutable profile that can complete one explicit task, then 
 ### 1. Establish the contract
 
 1. State the worker's single outcome, required evidence, intended files, and completion boundary.
-2. Call `profile_writer` with `action: "inspect"` when authorized bases or configured model/thinking combinations are unknown.
+2. Call `delegate` with `action: "profile_inspect"` when authorized bases or configured model/thinking combinations are unknown.
 3. Choose an owner-authored base whose role and authority already cover the task. Never derive from another generated task profile.
 4. Prefer the fastest model with demonstrated ability to satisfy the task contract. Configuration and authentication prove availability, not fitness; use existing fitness evidence or `model_fitness` when the risk justifies its token cost.
 5. Request only the tools and resource profiles the task needs. Omitted fields inherit the base; supplied fields must be exact subsets. Budgets may only tighten.
@@ -29,10 +29,10 @@ Human edge: if the task requires an unlisted base, unavailable credentials, broa
 
 ### 2. Execute and verify
 
-1. Call `profile_writer` with `action: "create"`; never supply or invent a profile ID.
+1. Call `delegate` with `action: "profile_create"`; never supply or invent a profile ID.
 2. Confirm `created: true`, the expected base, and the reported changed fields.
 3. Pass the returned `profileId` unchanged to one bounded `delegate` task with explicit acceptance criteria.
-4. Wait for the event-driven terminal handoff, retrieve once with `delegate_status`, and independently verify worker claims.
+4. Wait for the terminal handoff, retrieve once with `delegate { action: "status", laneId }`, independently verify worker claims.
 5. Treat rejection before persistence as a successful safety boundary. Change the approach or request authority; do not retry the same expansion with different wording.
 
 ## Anti-Patterns
@@ -47,7 +47,7 @@ Human edge: if the task requires an unlisted base, unavailable credentials, broa
 
 Positive: inspect, derive from a read/write implementer, select an authenticated fast model at `low`, narrow tools to `read`, `grep`, and `edit`, tighten token/tool-call limits, then delegate with the returned `task-...` ID.
 
-Negative: a base exposes only `read` and `grep`, but the task requires `edit`. Do not request `edit` from `profile_writer`; select an authorized write-capable base or ask the user for an owner-profile change.
+Negative: a base exposes only `read` and `grep`, but the task requires `edit`. Do not request `edit` from `profile_create`; select an authorized write-capable base or ask the user for an owner-profile change.
 
 ## Self-Check
 

@@ -54,10 +54,10 @@ export function createExtensionifyToolDefinitionWithRuntime(
 			"Smoke-test a draft extension in an isolated throwaway runtime. Pure analysis tool: creates temporary scaffold, loads it, inspects registrations, then completely deletes temp dir. Does NOT write to the real extensions dir or modify the live runtime. Returns proposal with registration details.",
 		promptSnippet: "Smoke-test a draft extension",
 		promptGuidelines: [
-			"Use extensionify to validate draft extensions before creating them.",
-			"Fix any factory errors or registration issues; review tools and commands registered.",
-			"The tool runs in complete isolation; the live session is never touched.",
-			"Persistent write and activation happen later via a separate step.",
+			"Validate draft extension before creation.",
+			"Fix factory/registration errors; review registered tools/commands.",
+			"Isolated run; never touches live session.",
+			"Persistent write/activation is separate, later.",
 		],
 		parameters: extensionifySchema,
 		async execute(_toolCallId, { name, code, packageJson }) {

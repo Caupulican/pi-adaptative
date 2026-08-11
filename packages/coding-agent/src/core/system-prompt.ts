@@ -2,19 +2,20 @@
  * System prompt construction and project context loading
  */
 
-import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { dirname } from "node:path";
+import { getReadmePath } from "../config.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { Extension } from "./extensions/types.ts";
 import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
-import { escapePromptXml } from "./prompt-markup.ts";
-import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+import { SKILL_VAULT_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
+import type { Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
 	/** Capability profile that selects the stable prompt shape. Missing means full/legacy behavior. */
 	modelCapability?: Pick<ModelCapabilityProfile, "class" | "contextWindow" | "reasonCode" | "systemPromptMaxChars">;
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
-	/** Tools to include in prompt. Default: [read, bash, edit, write, context_audit] */
+	/** Tools to include in the prompt. Defaults come from the shared active-tool surface. */
 	selectedTools?: string[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
@@ -26,79 +27,89 @@ export interface BuildSystemPromptOptions {
 	cwd: string;
 	/** Eagerly loaded project/agent instruction files. */
 	contextFiles?: Array<{ path: string; content?: string }>;
-	/** Discovered skills; startup prompt lists only lazy-loadable locations. */
+	/** Discovered skills remain host-side; retained for extension/API construction compatibility. */
 	skills?: Skill[];
 	/** Discovered extensions currently active. */
 	extensions?: Extension[];
 }
 
 const MODEL_BLIND_CREDENTIAL_AUTHORITY =
-	"When the user-plane secret_store tool is active, its host gate is the authority: use model-blind activation or migration from named accessible sources without duplicate confirmation.";
+	"Active secret_store: host gate authorizes model-blind activation/migration from named accessible sources; no duplicate confirmation.";
+
+const ULTRA_TERSE_OUTPUT_POLICY = `
+
+ULTRA-TERSE OUTPUT
+
+- Drop articles/filler/pleasantries/hedging; fragments valid. Strip conjunctions only when clear; each fact once.
+- Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Preserve numbers, units, code symbols, function/API names, commands, errors.
+- No self-reference/tool narration/tables/emoji/log dumps. Keep user language. Full grammar: security, irreversible actions, ambiguous order. Replies terse; artifacts normal prose.`;
 
 const PI_ADAPTATIVE_CORE_SECTION = `
 
-OPERATING POSTURE
+OPERATING CONTRACT
 
-- Treat a clear outcome expressed in normal conversation as a goal; no slash command is required. Persist evidence and progress, survive compaction, and continue until delivered or stopped.
-- Hold scope. Verify uncertainty from authoritative sources; use the simplest proven design that satisfies ownership, lifecycle, performance, and failure needs.
-- Store durable facts in memory, reusable specialization in skills, and behavior in source. Shard and index oversized memory; discard noise.
-- Choose autonomously; create recursive agents for coherent parallel work while the root owns integration and the scheduler owns global budgets and concurrency.
-- The user’s desired outcome is authoritative; a proposed method is not. If a method may undermine the outcome, pause: give causal evidence, test the disputed premise when practical, and offer the strongest outcome-preserving alternative. Once chosen, execute faithfully within authority.
-- Move work expected to exceed 15 seconds into managed background execution. Require event-driven completion, a bounded handoff, and owner notification; never poll.
-- Ask before scope expansion, credential disclosure or provider-auth changes, destructive actions, or publication. Keep external and tool output bounded, source-labeled, and evidence-focused; show file paths clearly.
+- Clear conversational outcome is goal; persist progress/evidence through compaction; finish or report blocker.
+- Hold scope; verify unknowns from primary sources; simplest proven design, one owner/path per invariant.
+- User outcome governs, method does not. Outcome risk: show evidence, test when practical, offer safest effective path, execute.
+- Work over 15 seconds: managed background run, event terminal, bounded handoff, owner notice; never poll.
+- Delegate independent work within host bounds; root integrates/verifies. Facts: memory, specialization: skills, behavior: source; discard noise.
+- Ask before broader scope, credential or authentication change/disclosure, destructive action, publication. Bound, source-label output; show paths.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}
 
 N+2 ARCHITECTURE
 
-Apply these language-agnostic principles with direct runtime facilities:
+Language-agnostic principles:
+1. Bounded flat arenas/pools/rings/chunks, batch recycle.
+2. Safe zero/default data/state, no hidden allocation, one activation owner.
+3. Validate trust boundary once; internal miss gets safe stub/default, external failure explicit.
+4. Stable IDs/indexes/buffers/batches; avoid pointer graphs/dispatch/fallback.
+5. Never concatenate growing prefixes, prepend, rescan consumed input, serialize unchanged history, rebuild incremental state; materialize once.
 
-1. Group Lifetimes: Put overlapping lifetimes in bounded arenas, pools, rings, chunks, or flat owners; recycle in batches and avoid per-item churn.
+EVIDENCE GATE
 
-2. Valid Defaults: Make zero/default data, handles, states, and resources safe without hidden allocation; one system owns activation.
-
-3. Stubs and Boundaries: Validate trust and external boundaries once. Internal misses return benign stubs, sentinels, or defaults; external failures stay explicit.
-
-4. Flat Ownership: Prefer flat/chunked data, stable IDs, compact indexes, buffers, and batches over pointer graphs, needless dispatch, fallbacks, or wrappers.
-
-5. Linear Bounds: Never concatenate growing prefixes, prepend repeatedly, rescan consumed input, serialize unchanged history, or rebuild full incremental state. Materialize only the needed window once.
-
-ENGINEERING WORKFLOW
-
-- Map flow, lifetimes, boundaries, hot paths, and one authoritative path per invariant.
-- Detect → Verify → Score → Gate: baseline; reproduce with a negative control; fix the lowest owner; run focused, then proportionate gates.
-- Scanner, fuzzer, log, static, and model findings are candidates until reproduced. Never weaken tests or claim success from incomplete probes.`;
+- Map flow/lifetimes/boundaries/hot paths. Detect, verify, score, gate: baseline; deterministic positive/negative controls; lowest-owner fix; focused/proportionate checks.
+- Scanner/fuzzer/log/static/model finding stays candidate pending reproduction. Never weaken tests, claim success from skipped/incomplete probes.`;
 
 const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
 
 OPERATING CONTRACT
 
-- Complete the current goal within scope and granted authority. Keep progress and evidence concise.
-- Inspect relevant files and project instructions before mutation. Make the smallest coherent change and verify it with focused checks.
-- Use only active tools and follow their schemas exactly. When a call fails, use the returned error and expected shape to correct it; never repeat an unchanged failed call.
-- Keep independent reads together and mutations ordered. Report real output and unresolved failures.
-- Ask before destructive actions, credential disclosure or provider-auth changes, publication, push/tag/release, or material scope expansion.
+- Complete current goal within scope, granted authority; keep progress, evidence concise.
+- Inspect relevant files, project instructions before mutation; make smallest coherent change, run focused checks.
+- Use active tools, exact schemas. On failure, read error, expected shape, correct call; never repeat unchanged failure.
+- Batch independent reads, order mutations; report real output, unresolved failures.
+- Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, material scope expansion.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `
 
 EXECUTION RULES
 
-- Work on one scoped task at a time. Inspect before editing, make a small coherent change, then run the narrowest useful verification.
-- Use only listed tools and exact schemas. If a tool call fails, read the returned error and expected shape, correct the call, and do not repeat it unchanged.
-- Keep independent reads together and mutations ordered. Report actual results; never claim an action you did not complete.
-- Ask before destructive actions, credential disclosure or provider-auth changes, publication, push/tag/release, or a material scope change.
+- Work one scoped task. Inspect before editing, make small coherent change, run narrowest useful check.
+- Use listed tools, exact schemas. On failure, read error, expected shape, correct call; never repeat unchanged failure.
+- Batch independent reads, order mutations. Report actual results; never claim incomplete action.
+- Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, material scope change.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_CHAT_CORE_SECTION = `
 
 CHAT RULES
 
-- Answer concisely from the conversation and state uncertainty.
+- Answer concisely from conversation; state uncertainty.
 - No execution tools are active. Do not claim to read files, run commands, or make changes.
 - Say when the request requires a tool-capable model or additional user-provided context.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
-const LEAN_SKILL_CATALOG_BUDGET_CHARS = 500;
+const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;
+
+function compactPromptText(value: string, maxChars: number): string {
+	const normalized = value.replace(/\s+/g, " ").trim();
+	if (normalized.length <= maxChars) return normalized;
+	let end = maxChars - 1;
+	const code = normalized.charCodeAt(end - 1);
+	if (code >= 0xd800 && code <= 0xdbff) end--;
+	return `${normalized.slice(0, end)}…`;
+}
 
 function formatContextFilesForPrompt(
 	contextFiles: Array<{ path: string; content?: string }>,
@@ -109,19 +120,15 @@ function formatContextFilesForPrompt(
 	}
 	if (options.deferContents) {
 		const lines = [
-			"\n\n<project_context>",
-			"",
-			"Project instruction contents are deferred for this capability profile to preserve working context.",
+			"\n\nPROJECT RULE PATHS — contents deferred for this capability profile.",
 			options.canRead
 				? "Before editing, writing, or running a mutating command, read each relevant listed file completely before any mutation. Follow its instructions; if a file cannot fit, ask for a scoped instruction digest."
 				: "No read tool is active. Ask the user for the relevant project instructions before giving project-specific guidance.",
-			"",
-			"<deferred_project_instructions>",
 		];
 		let pathChars = 0;
 		let included = 0;
 		for (const { path } of contextFiles) {
-			const line = `  <file path="${escapePromptXml(path)}" />`;
+			const line = `- ${JSON.stringify(path)}`;
 			if (pathChars + line.length > DEFERRED_CONTEXT_PATH_BUDGET_CHARS) break;
 			lines.push(line);
 			pathChars += line.length + 1;
@@ -129,9 +136,8 @@ function formatContextFilesForPrompt(
 		}
 		const omitted = contextFiles.length - included;
 		if (omitted > 0) {
-			lines.push(`  <omitted count="${omitted}" />`);
+			lines.push(`- omitted=${omitted}`);
 		}
-		lines.push("</deferred_project_instructions>", "", "</project_context>");
 		if (omitted > 0) {
 			lines.push(
 				"Do not mutate until the omitted instruction paths are supplied or a more capable profile is used.",
@@ -140,34 +146,17 @@ function formatContextFilesForPrompt(
 		return lines.join("\n");
 	}
 
-	const lines = ["\n\n<project_context>", "", "Project-specific instructions and guidelines:", ""];
+	const lines = ["\n\nPROJECT-SPECIFIC INSTRUCTIONS (apply in listed order)"];
+	const seen = new Set<string>();
 
 	for (const { path, content } of contextFiles) {
-		lines.push(`<project_instructions path="${escapePromptXml(path)}">`);
+		const identity = `${path}\0${content ?? ""}`;
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		lines.push(`FILE ${JSON.stringify(path)} (${(content ?? "").length} chars)`);
 		lines.push(content ?? "");
-		lines.push("</project_instructions>", "");
+		lines.push("END FILE");
 	}
-
-	lines.push("</project_context>");
-	return lines.join("\n");
-}
-
-function formatLeanSkillsForPrompt(skills: Skill[]): string {
-	const eligibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
-	if (eligibleSkills.length === 0) return "";
-	const lines = ["\n\nSpecialized skills (load only when clearly relevant):", "<available_skills>"];
-	let catalogChars = 0;
-	let included = 0;
-	for (const skill of eligibleSkills) {
-		const line = `  <skill name="${escapePromptXml(skill.name)}" location="${escapePromptXml(skill.filePath)}">${escapePromptXml(skill.description.slice(0, 120))}</skill>`;
-		if (catalogChars + line.length > LEAN_SKILL_CATALOG_BUDGET_CHARS) break;
-		lines.push(line);
-		catalogChars += line.length + 1;
-		included++;
-	}
-	lines.push("</available_skills>");
-	const omitted = eligibleSkills.length - included;
-	if (omitted > 0) lines.push(`${omitted} additional skill(s) are not preloaded on this profile.`);
 	return lines.join("\n");
 }
 
@@ -176,11 +165,9 @@ function appendPromptResources(
 	options: {
 		appendSection: string;
 		contextFiles: Array<{ path: string; content?: string }>;
-		skills: Skill[];
 		extensions: Extension[];
 		visibleTools: string[];
 		fullPrompt: boolean;
-		leanPrompt: boolean;
 		hasRead: boolean;
 		date: string;
 		promptCwd: string;
@@ -193,10 +180,6 @@ function appendPromptResources(
 		deferContents: !options.fullPrompt,
 		canRead: options.hasRead,
 	});
-	if (options.hasRead && options.skills.length > 0) {
-		if (options.fullPrompt) result += formatSkillsForPrompt(options.skills);
-		else if (options.leanPrompt) result += formatLeanSkillsForPrompt(options.skills);
-	}
 	// Extension metadata is redundant with the active tool snippets on constrained profiles.
 	if (options.fullPrompt && options.extensions.length > 0) {
 		result += formatExtensionsForPrompt(options.extensions, options.visibleTools);
@@ -214,7 +197,7 @@ function appendPromptResources(
  * single cache breakpoint covering the whole system prompt). The caller (SystemPromptBuilder /
  * AgentSession, see `_rebuildSystemPrompt` in agent-session.ts) rebuilds it only when the TOOL
  * SURFACE changes — never per turn. For a fixed `options` (fixed tool surface, cwd, context
- * files, skills, extensions), two calls on the SAME CALENDAR DAY must return byte-identical
+ * files, extensions), two calls on the SAME CALENDAR DAY must return byte-identical
  * output, because `date` below is deliberately truncated to Y-M-D granularity. Do NOT widen it
  * to a timestamp (HH:MM:SS) or otherwise fold in any per-turn-volatile field (turn counters,
  * elapsed time, random ids, etc.) — that would cache-bust this entire block on EVERY turn instead
@@ -230,7 +213,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		appendSystemPrompt,
 		cwd,
 		contextFiles: providedContextFiles,
-		skills: providedSkills,
 	} = options;
 	const resolvedCwd = cwd;
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
@@ -246,7 +228,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
 
 	const contextFiles = providedContextFiles ?? [];
-	const skills = providedSkills ?? [];
 	const capabilityClass = options.modelCapability?.class ?? "full";
 	const fullPrompt = capabilityClass === "full";
 	const leanPrompt = capabilityClass === "lean";
@@ -261,19 +242,19 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			: capabilityClass === "minimal"
 				? PI_ADAPTATIVE_MINIMAL_CORE_SECTION
 				: PI_ADAPTATIVE_CHAT_CORE_SECTION;
+	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}` : "";
+	const operatingContract = `${coreSection}${skillVaultContract}${ULTRA_TERSE_OUTPUT_POLICY}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
 
-		prompt += coreSection;
+		prompt += operatingContract;
 		return appendPromptResources(prompt, {
 			appendSection,
 			contextFiles,
-			skills,
 			extensions: options.extensions ?? [],
 			visibleTools,
 			fullPrompt,
-			leanPrompt,
 			hasRead,
 			date,
 			promptCwd,
@@ -281,10 +262,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		});
 	}
 
-	// Get absolute paths to documentation and examples
-	const readmePath = getReadmePath();
-	const docsPath = getDocsPath();
-	const examplesPath = getExamplesPath();
+	const packageRoot = dirname(getReadmePath());
 
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
@@ -314,23 +292,17 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		if (hasBash) addGuideline("Use bash for bounded shell commands");
 		if (hasReadOnlyTools) addGuideline("Batch independent reads; keep mutations and dependent calls ordered");
 	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
-		addGuideline("Use bash for file operations like ls, rg, find");
+		addGuideline("Bash: ls, rg, find");
 	}
 	if (fullPrompt || leanPrompt) {
 		if (hasBash || hasGrep || hasFind) {
-			addGuideline(
-				"Use scoped rg to filter text and jq to project JSON: pass explicit roots and filters, inspect only selected records natively, and route unavoidable exhaustive output to a file",
-			);
+			addGuideline("rg/jq: scoped roots/filters, exhaustive output to file");
 		}
 		if (hasPython) {
-			addGuideline(
-				"Use python for bounded scripts and data shaping when clearer than shell; use read/edit/write for exact source edits",
-			);
+			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");
 		}
 		if (hasReadOnlyTools) {
-			addGuideline(
-				"Issue independent read-only tool calls together in one assistant turn. Keep dependent calls, mutations, and stateful commands ordered",
-			);
+			addGuideline("Batch independent reads; order dependent/mutating/stateful calls");
 		}
 	}
 
@@ -347,44 +319,35 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const toolGuidelinesSection = guidelines.length > 0 ? `\n\nTOOL GUIDELINES\n\n${guidelines}` : "";
 
 	const introduction = fullPrompt
-		? "You are Pi-Adaptative, a self-evolving assistant. Complete and deliver the user’s goals within granted authority; preserve continuity through compaction and own the integrated result."
+		? "Pi-Adaptative: self-evolving assistant. Deliver goals within authority; preserve continuity, own integration."
 		: leanPrompt
-			? "You are Pi-Adaptative's bounded coding agent. Complete the current goal with the active surface and preserve enough evidence for handoff."
+			? "Pi-Adaptative bounded coding agent. Complete current goal with active surface; preserve handoff evidence."
 			: capabilityClass === "minimal"
-				? "You are Pi-Adaptative's focused coding executor. Complete one scoped task with active tools and report verified results."
-				: "You are Pi-Adaptative's concise chat assistant. No execution tools are active.";
+				? "Pi-Adaptative focused coding executor. Complete one scoped task with active tools; report verified results."
+				: "Pi-Adaptative concise chat assistant. No execution tools active.";
 	const toolSurfaceRule =
 		fullPrompt || leanPrompt
-			? "Use only capabilities present in the active tool surface; others may exist in the environment."
+			? "Use active tool surface only; unlisted capabilities may exist."
 			: "Use only the active tool surface.";
 	let prompt = `${introduction}
 
 Available tools:
 ${toolsList}
 
-${toolSurfaceRule}${coreSection}${toolGuidelinesSection}`;
+${toolSurfaceRule}${operatingContract}${toolGuidelinesSection}`;
 
 	if (fullPrompt) {
 		prompt += `
 
-PI-ADAPTATIVE DOCUMENTATION
-
-Only when asked about Pi-Adaptative, read the relevant files completely from:
-- Main documentation: ${readmePath}
-- Additional documentation: ${docsPath}
-- Examples: ${examplesPath}
-
-Resolve \`docs/...\` and \`examples/...\` from those roots and follow relevant Markdown cross-references before implementing.`;
+PI DOCS: root=${packageRoot}. Relevant work only; read needed README.md, \`docs/...\`, \`examples/...\` fully, follow links.`;
 	}
 
 	return appendPromptResources(prompt, {
 		appendSection,
 		contextFiles,
-		skills,
 		extensions: options.extensions ?? [],
 		visibleTools,
 		fullPrompt,
-		leanPrompt,
 		hasRead,
 		date,
 		promptCwd,
@@ -397,7 +360,7 @@ function formatExtensionsForPrompt(extensions: Extension[], visibleTools: string
 		return "";
 	}
 
-	const lines = ["\n\nThe following extensions are currently loaded and active:", "", "<active_extensions>"];
+	const lines = ["\n\nEXTENSIONS: name, path, tools, commands, description"];
 	let added = 0;
 
 	for (const ext of extensions) {
@@ -412,20 +375,15 @@ function formatExtensionsForPrompt(extensions: Extension[], visibleTools: string
 			continue;
 		}
 
-		lines.push("  <extension>");
-		lines.push(`    <name>${escapePromptXml(name)}</name>`);
-		if (description) {
-			lines.push(`    <description>${escapePromptXml(description)}</description>`);
-		}
-		lines.push(`    <path>${escapePromptXml(ext.path)}</path>`);
-
-		if (tools.length > 0) {
-			lines.push(`    <registered_tools>${tools.map(escapePromptXml).join(", ")}</registered_tools>`);
-		}
-		if (commands.length > 0) {
-			lines.push(`    <registered_commands>${commands.map(escapePromptXml).join(", ")}</registered_commands>`);
-		}
-		lines.push("  </extension>");
+		lines.push(
+			JSON.stringify({
+				name,
+				path: ext.path,
+				...(tools.length > 0 ? { tools } : {}),
+				...(commands.length > 0 ? { commands } : {}),
+				...(description ? { description: compactPromptText(description, EXTENSION_DESCRIPTION_BUDGET_CHARS) } : {}),
+			}),
+		);
 		added++;
 	}
 
@@ -433,6 +391,5 @@ function formatExtensionsForPrompt(extensions: Extension[], visibleTools: string
 		return "";
 	}
 
-	lines.push("</active_extensions>");
 	return lines.join("\n");
 }

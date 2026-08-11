@@ -102,6 +102,7 @@ import {
 	type ResourceProfileFilterSettings,
 	type SettingsManager,
 } from "./settings-manager.ts";
+import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -111,19 +112,18 @@ import { executeToolkitScript } from "./toolkit/script-runner.ts";
 import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
-import { createDelegateStatusToolDefinition } from "./tools/delegate-status.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { createFindTool } from "./tools/find.ts";
 import { createGoalToolDefinition } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
-import { createProfileWriterToolDefinition } from "./tools/profile-writer.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
+import { createSkillVaultToolDefinition } from "./tools/skill.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import {
@@ -229,6 +229,8 @@ export interface RuntimeBuilderDeps {
 	isModelExhausted(model: Model<Api>): boolean;
 	/** Extension/skill/prompt/theme discovery + the reload/commit/rollback generation swap. */
 	getResourceLoader(): ResourceLoader;
+	/** Host-owned transient skill lifecycle shared by tool execution and context projection. */
+	getSkillVault(): SkillVaultController;
 
 	/** Live extension runner (host-owned; pervasive). */
 	getExtensionRunner(): ExtensionRunner;
@@ -874,6 +876,10 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			if (toolAccess.allows("skill")) {
+				const definition = createSkillVaultToolDefinition(this.deps.getSkillVault());
+				this._baseToolDefinitions.set(definition.name, definition);
+			}
 			if (toolAccess.allows("run_process")) {
 				const orchestrationProfile = this.deps.getOrchestrationProfile?.();
 				if (orchestrationProfile?.executionPolicy) {
@@ -921,7 +927,7 @@ export class RuntimeBuilder {
 					// kind:"tool" evidence refs verify against real session records.
 					hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
 					// kind:"worker" evidence refs verify against the SAME live lane/claim accessors the
-					// delegate_status tool already uses below -- live wiring (these were declared optional
+					// delegate action=status uses below -- live wiring (these were declared optional
 					// and read-defensive on the goal-tool deps type).
 					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
 					getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
@@ -991,6 +997,15 @@ export class RuntimeBuilder {
 				this._baseToolDefinitions.set(secretStoreToolDefinition.name, secretStoreToolDefinition);
 			}
 			if (toolAccess.allows("delegate")) {
+				const workerAgentControl = this.deps.workerAgentControl;
+				const profileWriter =
+					workerAgentControl?.inspectTaskProfileOptions && workerAgentControl.createTaskProfile
+						? {
+								inspectTaskProfileOptions: () => workerAgentControl.inspectTaskProfileOptions!(),
+								createTaskProfile: (input: Parameters<TaskProfileWriterPort["createTaskProfile"]>[0]) =>
+									workerAgentControl.createTaskProfile!(input),
+							}
+						: undefined;
 				const delegateToolDefinition = createDelegateToolDefinition({
 					caller: { kind: "session_root" },
 					resolveMessageReplayScope: () => {
@@ -1003,36 +1018,16 @@ export class RuntimeBuilder {
 					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
-					...(this.deps.workerAgentControl ? { workerAgentControl: this.deps.workerAgentControl } : {}),
+					...(workerAgentControl ? { workerAgentControl } : {}),
+					status: {
+						getLaneRecords: () => this.deps.getWorkerLaneRecords(),
+						getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
+						acknowledgeWorkerReview: (requestId) =>
+							acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId),
+					},
+					...(profileWriter ? { profileWriter } : {}),
 				});
 				this._baseToolDefinitions.set(delegateToolDefinition.name, delegateToolDefinition);
-			}
-			if (toolAccess.allows("delegate_status")) {
-				const delegateStatusToolDefinition = createDelegateStatusToolDefinition({
-					getLaneRecords: () => this.deps.getWorkerLaneRecords(),
-					getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
-					// Durable ack persists straight through the session log; routed here (rather than
-					// a new agent-session dep) because getSessionManager() is already a stable, generic
-					// passthrough dep, so no other package needs to change for this to work.
-					acknowledgeWorkerReview: (requestId) =>
-						acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId),
-					...(this.deps.workerAgentControl ? { workerAgentControl: this.deps.workerAgentControl } : {}),
-				});
-				this._baseToolDefinitions.set(delegateStatusToolDefinition.name, delegateStatusToolDefinition);
-			}
-			if (
-				toolAccess.allows("profile_writer") &&
-				this.deps.workerAgentControl?.inspectTaskProfileOptions &&
-				this.deps.workerAgentControl.createTaskProfile
-			) {
-				const writer = this.deps.workerAgentControl;
-				this._baseToolDefinitions.set(
-					"profile_writer",
-					createProfileWriterToolDefinition({
-						inspectTaskProfileOptions: () => writer.inspectTaskProfileOptions!(),
-						createTaskProfile: (input) => writer.createTaskProfile!(input),
-					}),
-				);
 			}
 			// Registered but not default-active: probes spend tokens on the probed model, so
 			// activation is an explicit choice (settings/profile/setActiveTools or /autonomy fitness).

@@ -1,7 +1,7 @@
 /**
  * Skills Configuration
  *
- * Skills provide specialized instructions loaded into the system prompt.
+ * Skills provide specialized instructions loaded request-locally through the host vault.
  * Discover, filter, merge, or replace them.
  */
 

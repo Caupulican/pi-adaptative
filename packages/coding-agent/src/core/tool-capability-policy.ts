@@ -29,13 +29,14 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 		(toolName) => [toolName, PROCESS_POLICY] as const,
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
+	["skill", policy(["skill.read"], "path-scope")],
 	["skill_audit", policy(["skill.read"], "path-scope")],
 	["skillify", policy(["skill.write"], "path-scope")],
 	["extensionify", policy(["source.write"], "path-scope")],
 	["goal", policy(["memory.mutate"], "memory-broker")],
 	["memory", policy(["memory.mutate", "memory.query"], "memory-broker")],
 	["secret_store", policy(["credentials.use"], "service-proxy")],
-	...["delegate", "delegate_status", "profile_writer"].map((toolName) => [toolName, DELEGATE_POLICY] as const),
+	["delegate", DELEGATE_POLICY],
 	["model_fitness", policy(["research.execute"], "control-plane")],
 ]);
 

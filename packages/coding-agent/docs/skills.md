@@ -50,7 +50,7 @@ Unload specific skills with settings filters. Put user-wide filters in `~/.pi/ag
 }
 ```
 
-The existing `skills` array also accepts resource patterns: plain entries include local files/directories, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.skills` is the explicit reversible unload form. It removes matching skills from the system prompt and skill commands after reload.
+The existing `skills` array also accepts resource patterns: plain entries include local files/directories, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.skills` is the explicit reversible unload form. It removes matching skills from vault search and skill commands after reload; an active skill is invalidated before another request can use it.
 
 ### Using Skills from Other Harnesses
 
@@ -75,14 +75,18 @@ For project-level Claude Code skills, add to `.pi/settings.json`:
 
 ## How Skills Work
 
-1. At startup, pi scans skill locations and extracts names and descriptions
-2. The system prompt includes available skills in XML format per the [specification](https://agentskills.io/integrate-skills)
-3. When a task matches, the agent uses `read` to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
-4. The agent follows the instructions, using relative paths to reference scripts and assets
+1. At startup, Pi reads a bounded frontmatter prefix from each skill. It retains routing metadata, not the body.
+2. When the `skill` tool is active, the stable system prompt carries one brief rule: search the vault if, and only if, specialist focus would help. It contains no skill catalog, paths, bodies, or XML wrappers.
+3. The agent searches metadata with `skill { action: "search", query: "..." }`, then loads an exact name. `/skill:name` performs the same load when the user selects a skill explicitly.
+4. The host keeps one loaded skill. It appends that body as a hidden, request-local message after normal context processing; it never writes the body into session history or concatenates it into the system prompt.
+5. The host moves the skill from `loaded_pending` to `active` on the first provider request. It records monotonic time on provider projections, completed model turns, tool execution; invalidates changed or profile-blocked resources; expires ten minutes of observed inactivity before the next host event. No polling timer runs.
+6. Loading another skill replaces the current one. Explicit unload is optional; host expiry and invalidation do not depend on model cooperation.
 
-This is progressive disclosure: names and descriptions are always in context, while full instructions load on-demand.
+This is progressive disclosure: the reminder and compact tool schema are stable, searches return at most a bounded name/description list, only one selected body enters a request.
 
-When multiple skills are loaded, descriptions are the routing contract. Write narrow descriptions and prefer the most task-specific skill. Combine skills only when they cover distinct parts of the request. Do not rely on the agent to apply every loaded skill.
+Descriptions are the routing contract. Write narrow descriptions so metadata search can select the most task-specific skill. The `/context` dashboard includes the active request-local body in its estimate without refreshing the skill's activity clock.
+
+Compaction never serializes an active skill body into history or a summary. Provider admission treats it as mandatory request-local context, compacts durable history around it, then re-injects it from the host vault on the replanned request. If the fixed envelope still cannot fit, Pi reports an explicit overflow instead of truncating or dropping the skill. Skill-vault state is in memory: `/new`, `/resume`, `/fork`, or a process restart starts a new unloaded vault. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
 
 Skills may carry optional resource profile blocks:
 
@@ -92,7 +96,7 @@ Skills may carry optional resource profile blocks:
 </resource-profile>
 ```
 
-These blocks are JSON config, not instructions. Pi parses only matching profile blocks and strips them from `/skill:name` expansion.
+These blocks are JSON config, not instructions. Pi parses only matching profile blocks and strips them from every vault activation.
 
 ## Skill Commands
 
@@ -103,7 +107,7 @@ Skills register as `/skill:name` commands:
 /skill:pdf-tools extract      # Load skill with arguments
 ```
 
-Arguments after the command are appended to the skill content as `User: <args>`.
+Arguments after the command remain the user request. The selected body is injected separately and request-locally.
 
 Toggle skill commands via `/settings` in interactive mode or in `settings.json`:
 
@@ -170,7 +174,7 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
-| `disable-model-invocation` | No | When `true`, skill is hidden from system prompt. Users must use `/skill:name`. For full project/user unload, prefer `disabledResources.skills` in settings. |
+| `disable-model-invocation` | No | When `true`, skill is hidden from model search and cannot be model-loaded. Users may still use `/skill:name`. For full project/user unload, prefer `disabledResources.skills` in settings. |
 
 ### Name Rules
 

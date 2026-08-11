@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added reusable provider-request materialization and exact admitted-context streaming, including text-only tool primers and protocol guards.
+
+### Changed
+
+- Reduced text-only tool-protocol input with one compact activation steer and compact tool-result guidance while preserving user messages byte-for-byte.
+
 ## [0.86.17] - 2026-08-10
 
 ## [0.86.16] - 2026-08-10

@@ -50,6 +50,7 @@ function assistantWithUsage(tokens: number, timestamp: number): AssistantMessage
 function createFixture(options: {
 	measureLiveContextTokens: () => number;
 	createResult(attempt: number, entryIds: string[]): Promise<CompactionResult>;
+	settings?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number; triggerPercent: number };
 }) {
 	const sessionManager = SessionManager.inMemory();
 	const messages: AgentMessage[] = [];
@@ -97,12 +98,13 @@ function createFixture(options: {
 		sessionManager,
 		settingsManager: {} as SettingsManager,
 		getModel: () => model as Model<Api>,
-		getAdaptedSettings: () => ({
-			enabled: true,
-			reserveTokens: 3_000,
-			keepRecentTokens: 1_200,
-			triggerPercent: 0,
-		}),
+		getAdaptedSettings: () =>
+			options.settings ?? {
+				enabled: true,
+				reserveTokens: 3_000,
+				keepRecentTokens: 1_200,
+				triggerPercent: 0,
+			},
 		getRequestAuth: async () => ({}),
 		resolveModelAndAuth: async () => ({ model: model as Model<Api> }),
 		resolveModel: () => model as Model<Api>,
@@ -146,6 +148,63 @@ function checkpoint(attempt: number, entryIds: string[]): CompactionResult {
 }
 
 describe("CompactionController auto-compaction re-entry", () => {
+	it("rejects an irreducible mandatory envelope without buying a compaction probe", async () => {
+		const { compactWithRetry, controller, sessionManager } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+
+		await expect(
+			controller.admitProviderRequest({
+				requestTokens: 3_500,
+				nonCompactableTokens: 3_500,
+				attempt: 0,
+			}),
+		).rejects.toThrow("non-compactable request envelope");
+		expect(compactWithRetry).not.toHaveBeenCalled();
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	});
+
+	it("compacts from the exact admitted request total and asks the loop to replan", async () => {
+		const { compactWithRetry, controller, sessionManager } = createFixture({
+			measureLiveContextTokens: () => 500,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+
+		await expect(
+			controller.admitProviderRequest({
+				requestTokens: 3_000,
+				nonCompactableTokens: 500,
+				attempt: 0,
+			}),
+		).resolves.toEqual({ action: "replan" });
+		expect(compactWithRetry).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("does not buy a deterministic second pass for an optional early-cost trigger", async () => {
+		const { compactWithRetry, controller, sessionManager } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			settings: {
+				enabled: true,
+				reserveTokens: 500,
+				keepRecentTokens: 1_000,
+				triggerPercent: 0.5,
+			},
+		});
+
+		await expect(
+			controller.admitProviderRequest({
+				requestTokens: 3_000,
+				nonCompactableTokens: 500,
+				attempt: 1,
+			}),
+		).resolves.toEqual({ action: "send" });
+		expect(compactWithRetry).not.toHaveBeenCalled();
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	});
+
 	it("uses one paid summary then deterministic progress when an image turn remains above the threshold", async () => {
 		const { compactWithRetry, controller, events, sessionManager } = createFixture({
 			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500, 2_500, 2_500]),

@@ -65,7 +65,7 @@ describe("Cooperative Systems & Tool Call Optimization Harmony Suite", () => {
 		const sanitized = sanitizeToolFailureContext(messages, "Base prompt");
 
 		// 1. Failure turns must be stripped from message trajectory and summarized into harness context
-		expect(sanitized.systemPrompt).toContain('<harness_tool_failures tool_mistakes="bash:2">');
+		expect(sanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:2");
 		expect(sanitized.systemPrompt).toContain('"kind_mistakes":2');
 
 		// 2. Earlier duplicate payload (call_read_1) must be superseded by call_view_1
@@ -108,7 +108,7 @@ describe("Cooperative Systems & Tool Call Optimization Harmony Suite", () => {
 		);
 
 		const initialSanitized = sanitizeToolFailureContext(initialMessages, "base");
-		expect(initialSanitized.systemPrompt).toContain('<harness_tool_failures tool_mistakes="bash:1">');
+		expect(initialSanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
 
 		// Follow up with matching successful attempt on bash
 		const resolvedMessages: AgentMessage[] = [
@@ -120,7 +120,7 @@ describe("Cooperative Systems & Tool Call Optimization Harmony Suite", () => {
 
 		// HARD HARMONY GATE: Success must clear failure memory and restore base system prompt
 		expect(resolvedSanitized.systemPrompt).toBe("base");
-		expect(resolvedSanitized.systemPrompt).not.toContain("<harness_tool_failures>");
+		expect(resolvedSanitized.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
 	});
 
 	it("retrieves the full history chain with complete un-truncated payloads cross-platform", () => {

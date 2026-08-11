@@ -174,7 +174,38 @@ export interface ToolValidationEscalationEvent {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
-/** Provider-ready request inspected after context transformation and immediately before transport. */
+/** Input for one replay-safe context-planning attempt. */
+export interface AgentContextPlanRequest {
+	/** Sanitized durable history used as the compactable portion of this request. */
+	messages: AgentMessage[];
+	/** Zero-based admission generation; freshness-only retries repeat the same value. */
+	attempt: number;
+}
+
+/**
+ * Replay-safe context plan. `messages` is compactable history; `transientMessages` is mandatory,
+ * request-local context that compaction must never summarize or drop.
+ */
+export interface AgentContextPlan {
+	messages: AgentMessage[];
+	transientMessages?: AgentMessage[];
+	/** Cheap freshness check immediately before admission/commit. */
+	isCurrent?: () => boolean;
+	/**
+	 * Pure final validation for expensive projections. Return false to discard and replan; do not
+	 * mutate durable state here.
+	 */
+	prepareCommit?: () => boolean;
+	/**
+	 * Apply lifecycle side effects after every composed validator passed. Synchronous, infallible by
+	 * contract, and must not change the planned payload.
+	 */
+	commit?: () => void;
+	/** Release request-local planning resources when a plan is not accepted. */
+	discard?: () => void;
+}
+
+/** Provider-ready request inspected after full materialization and immediately before transport. */
 export interface RequestPreflightContext {
 	model: Model<Api>;
 	context: Context;
@@ -186,6 +217,20 @@ export interface RequestPreflightContext {
 export interface RequestPreflightResult {
 	maxTokens?: number;
 }
+
+/** Exact materialization offered to the host-owned compaction/admission gate. */
+export interface ProviderRequestAdmissionContext extends RequestPreflightContext {
+	/** Agent-level request snapshot from which this materialization was planned. */
+	sourceContext: AgentContext;
+	/** Provider context containing only the non-compactable system/tool/transient envelope. */
+	nonCompactableContext: Context;
+	/** Zero-based admission generation; increments only after an accepted history replan. */
+	attempt: number;
+}
+
+export type ProviderRequestAdmissionResult =
+	| { action: "send"; maxTokens?: number }
+	| { action: "replan"; context: AgentContext };
 
 /**
  * Default runaway-loop backstop: a single identical tool-call signature recurring this many times
@@ -248,7 +293,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
-	 * Runs after context transformation and conversion, immediately before every provider request.
+	 * Preferred two-phase replacement for `transformContext`. Planning is replay-safe and may run
+	 * again after compaction or invalidation; only the accepted plan's `commit` is invoked.
+	 */
+	planContext?: (request: AgentContextPlanRequest, signal?: AbortSignal) => Promise<AgentContextPlan>;
+
+	/**
+	 * Host-owned admission gate over the complete provider-visible materialization. It may accept the
+	 * request or compact durable history and return a replacement source context for replanning.
+	 */
+	admitProviderRequest?: (
+		request: ProviderRequestAdmissionContext,
+		signal?: AbortSignal,
+	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
+
+	/**
+	 * Runs after admission against the exact transport-ready context, immediately before every provider request.
 	 *
 	 * Use this for request-local budget/authority checks whose state can change between tool turns.
 	 * Throwing prevents transport. A returned `maxTokens` must be a positive safe integer and can
@@ -582,6 +642,8 @@ export interface AgentToolFailureRecoveryContract<TParameters extends TSchema, T
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
 	label: string;
+	/** Compact provider-facing capability description. Execution keeps the full `description`. */
+	providerDescription?: string;
 	/**
 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
 	 * Must return an object that matches `TParameters`.

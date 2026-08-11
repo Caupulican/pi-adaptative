@@ -119,7 +119,7 @@ describe("runModelFitnessProbe", () => {
 			trials: 1,
 			judgePrompts: [],
 			complete: async ({ systemPrompt }) => {
-				const text = systemPrompt.includes("context curator") ? (replies[digestCall++] ?? "{}") : "{}";
+				const text = systemPrompt === DIGEST_PROBE_SYSTEM_PROMPT ? (replies[digestCall++] ?? "{}") : "{}";
 				return { text, costUsd: 0, stopReason: "stop" };
 			},
 		});
@@ -246,9 +246,10 @@ describe("isProbeAllFailed", () => {
 			complete: async ({ systemPrompt }) => {
 				// Echoes the FIRST digest task's nonce verbatim; that task's reply parses and is
 				// faithful, the other two digest tasks (different nonces) do not match -> partial pass.
-				const text = systemPrompt.includes("context curator")
-					? '{"digest":"retryWithJitter_zx41 in src/http/client.ts does capped exponential backoff."}'
-					: "{}";
+				const text =
+					systemPrompt === DIGEST_PROBE_SYSTEM_PROMPT
+						? '{"digest":"retryWithJitter_zx41 in src/http/client.ts does capped exponential backoff."}'
+						: "{}";
 				return { text, costUsd: 0, stopReason: "stop" };
 			},
 		});

@@ -49,9 +49,20 @@ describe("text tool-call protocol", () => {
 		expect(primer).toContain("search");
 		expect(primer).toContain("value");
 		expect(primer).toContain('<pi:call name="echo">{"value":"value"}</pi:call>');
-		expect(primer).toContain(
-			"After a successful tool result, use it and continue; do not repeat the same unchanged call.",
-		);
+		expect(primer).toContain("Success: use result; do not repeat unchanged successful calls.");
+	});
+
+	it("keeps the phone-model primer compact without dropping execution rules or live capability shape", () => {
+		const primer = generateTextToolProtocolPrimer([makeTool("echo"), makeTool("search")]);
+
+		expect(primer.length).toBeLessThanOrEqual(750);
+		expect(primer).toContain('<pi:call name="TOOL">{"arg":"value"}</pi:call>');
+		expect(primer).toContain("one JSON object");
+		expect(primer).toContain("arrays");
+		expect(primer).toMatch(/parallel/i);
+		expect(primer).toContain("do not repeat unchanged successful calls");
+		expect(primer).toContain("echo(value:string) - Echo a value");
+		expect(primer).toContain("search(value:string) - Echo a value");
 	});
 
 	it("prefers core read and edit worked examples when present", () => {
@@ -408,7 +419,43 @@ describe("text tool-call protocol", () => {
 		expect(countOccurrences(payloadText, primer)).toBe(1);
 	});
 
-	it("keeps transformed historical user turns stable for prompt-cache reuse", async () => {
+	it("keeps the phone steer one-time and leaves every user turn verbatim", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		let request: Context | undefined;
+		registration.setResponses([
+			(context) => {
+				request = context;
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await complete(
+			registration.getModel(),
+			{
+				systemPrompt: "base",
+				messages: [
+					{ role: "user", content: "first exact turn", timestamp: 1 },
+					{ role: "user", content: "second exact turn", timestamp: 2 },
+				],
+				tools: [makeTool()],
+			},
+			{ textToolCallProtocol: true },
+		);
+
+		const userTexts = (request?.messages ?? [])
+			.filter((message) => message.role === "user")
+			.map((message) =>
+				typeof message.content === "string"
+					? message.content
+					: message.content.map((block) => (block.type === "text" ? block.text : "")).join(""),
+			);
+		expect(userTexts).toHaveLength(3);
+		expect(userTexts[0]?.length).toBeLessThanOrEqual(140);
+		expect(userTexts.slice(1)).toEqual(["first exact turn", "second exact turn"]);
+	});
+
+	it("keeps historical user turns stable for prompt-cache reuse", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);
 		const tools = [makeTool()];

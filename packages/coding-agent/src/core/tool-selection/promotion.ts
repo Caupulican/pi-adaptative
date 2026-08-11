@@ -101,10 +101,6 @@ export function formatToolSelectionHints(hints: readonly ToolSelectionHint[]): s
 	if (hints.length === 0) return undefined;
 	const lines = [...hints]
 		.sort((left, right) => left.intentClass.localeCompare(right.intentClass))
-		.map((hint) => `- ${hint.intentClass}: \`${hint.tool}\` has the established track record for this model.`);
-	return [
-		"Learned tool preferences (evidence-gated observation, not a directive):",
-		...lines,
-		"Treat as a shortlist signal only — use judgment for the actual task at hand.",
-	].join("\n");
+		.map((hint) => `- ${hint.intentClass}: \`${hint.tool}\` established for this model`);
+	return ["EVIDENCE-GATED TOOL SHORTLIST; observation, never directive", ...lines, "Use task judgment."].join("\n");
 }

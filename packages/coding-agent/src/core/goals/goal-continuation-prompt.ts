@@ -12,7 +12,7 @@ export interface GoalContinuationPrompt {
  */
 export function buildGoalContinuationPrompt(): GoalContinuationPrompt {
 	return {
-		text: "Continue working toward the active goal.",
+		text: "Continue active goal.",
 		truncated: false,
 	};
 }

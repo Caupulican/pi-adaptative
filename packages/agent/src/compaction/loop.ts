@@ -38,6 +38,10 @@ export interface CompactionLoopDeps {
 	onTransition(info: { cycle: number; from: string; cause: string; detail?: string }): void;
 	getBaseKeepRecentTokens?(): number;
 	verifyPostApplyEffect?(): boolean;
+	/** Permit one new checkpoint to tighten the immediately preceding compaction during request replanning. */
+	allowTrailingCompactionAsPrevious?: boolean;
+	/** Skip the summarizer and build the deterministic checkpoint on cycle one. */
+	forceDeterministic?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -74,7 +78,7 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 		if (branch.length > 0 && trailingEntry?.type === "compaction") {
 			if (appliedResult && trailingEntry.id === ownTrailingCompactionId) {
 				if (!ownTrailingCompactionNeedsRetry) return { kind: "success", result: appliedResult, cycles: cycle - 1 };
-			} else {
+			} else if (!(cycle === 1 && deps.allowTrailingCompactionAsPrevious)) {
 				return { kind: "skip", reason: "already compacted" };
 			}
 		}
@@ -90,7 +94,12 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 			};
 		}
 
-		const selectedParams = selectCycleParams(cycle, lastCause, lastParams, baseKeepRecent);
+		const selectedParams = deps.forceDeterministic
+			? {
+					...selectCycleParams(cycle, lastCause, lastParams, baseKeepRecent),
+					deterministicOnly: true,
+				}
+			: selectCycleParams(cycle, lastCause, lastParams, baseKeepRecent);
 		let params = enforceMonotonicProgress(selectedParams, lastParams, observedTokens, lastObservedTokens, lastCause);
 		lastObservedTokens = observedTokens;
 

@@ -466,14 +466,15 @@ function createShellToolDefinition(
 			: "Execute Bash commands (ls, grep, find, etc.)",
 		promptGuidelines: routesWindowsContract
 			? [
-					"Use ordinary Bash-like commands on Windows; do not write PowerShell or ask the user to choose a shell.",
-					"Word-list and arithmetic for loops, nested break/continue, printf and the documented portable builtins, pipelines, redirection, expansion (variables, command substitution, globs), chaining (&&/||/;), and cd/export/unset are supported and routed to a bundled Python engine; shell arithmetic expansion outside a for header, job control, process substitution, heredocs, nested shells, and other named constructs fail closed with an actionable message instead of being guessed.",
-					"Working directory and environment changes from cd/export/unset persist across subsequent bash calls, including calls that route to the PowerShell tier.",
-					"Supported Bash-like file commands are converted with literal-path operations; verify targets before recursive rm, cp, or mv calls.",
-					`Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, and prefer the bounded grep/find tools. Broad shell searches are rejected; use broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" only for an unavoidable exhaustive scan, then inspect the returned file with bounded reads or narrower searches.`,
+					"On Windows, use Bash-like commands; never write PowerShell/ask owner to choose shell.",
+					"Supports for, break/continue, printf, pipes/redirection, variable/command/glob expansion, chaining, cd/export/unset.",
+					"Arithmetic outside for, job control, process substitution, heredocs, nested shells fail closed.",
+					"cd/export/unset state persists across bash calls and PowerShell/Python tiers.",
+					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
+					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
 				]
 			: [
-					`Keep searches scoped and purpose-driven: discover paths first, pass an explicit root and filters, and prefer the bounded grep/find tools. Broad shell searches are rejected; use broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" only for an unavoidable exhaustive scan, then inspect the returned file with bounded reads or narrower searches.`,
+					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
 				],
 		parameters: bashSchema,
 		async execute(

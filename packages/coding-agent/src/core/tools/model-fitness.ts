@@ -48,11 +48,11 @@ export function createModelFitnessToolDefinition(deps: ModelFitnessToolDependenc
 		label: "model_fitness",
 		description:
 			"Probe whether a candidate model can drive the harness's subagent contracts: runs the real research-lane, delegated-worker, and routing-judge runners against the model and reports parse/success rates, judge discrimination, latency, and probe cost. Use it to evaluate small/local models (e.g. Ollama) before configuring them as lane or judge models.",
-		promptSnippet: "Benchmark a candidate model against the research/worker/judge subagent contracts.",
+		promptSnippet: "Benchmark model against research/worker/judge contracts.",
 		promptGuidelines: [
-			"Use model_fitness before pinning a model in a worker orchestration profile, researchLane.model, or modelRouter.judgeModel.",
-			"A good lane model has high research/worker success; a good judge additionally routes trivial prompts cheap while keeping planning elevated.",
-			"Probes spend real tokens on the probed model; prefer local/free models or small trial counts.",
+			"Use before pinning model in worker profile, researchLane.model, modelRouter.judgeModel.",
+			"Lane: high research/worker success. Judge: trivial cheap, planning elevated.",
+			"Probes spend real tokens; prefer local/free models or few trials.",
 		],
 		parameters: modelFitnessSchema,
 		async execute(

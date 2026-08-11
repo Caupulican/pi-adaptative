@@ -121,13 +121,14 @@ describe("compact() structurally-broken-summary retry", () => {
 		expect(call).toBe(2);
 		// The retry must NOT re-run the pre-digest LLM pass over the unchanged span.
 		expect(preDigest).toHaveBeenCalledTimes(1);
-		// Both attempts must send the SAME pre-digested <conversation> block (not a re-serialized/raw
+		// Both attempts must send the SAME pre-digested CHAT block (not a re-serialized/raw
 		// resend) — only the retry instructions appended after it may differ.
-		const extractConversation = (prompt: string) => /<conversation>\n([\s\S]*?)\n<\/conversation>/.exec(prompt)?.[1];
+		const extractConversation = (prompt: string) => /CHAT\n([\s\S]*?)\n\nTASK/.exec(prompt)?.[1];
 		const conversation0 = extractConversation(promptsSeen[0]);
 		const conversation1 = extractConversation(promptsSeen[1]);
 		expect(conversation0).toContain("[DIGESTED]:");
 		expect(conversation1).toBe(conversation0);
+		expect(promptsSeen[0]).not.toMatch(/<\/?conversation>/);
 		expect(result.verification).toEqual({ ok: true, failures: [] });
 	});
 

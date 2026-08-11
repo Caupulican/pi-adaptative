@@ -18,4 +18,12 @@ describe("compaction chunk sizing", () => {
 
 		expect(estimateStringTokens(prompt)).toBeLessThanOrEqual(inputBound);
 	});
+
+	it("uses compact labels instead of presentation-only XML", () => {
+		const prompt = buildChunkSummarizationPrompt("USER: inspect src/a.ts", 1, 2);
+
+		expect(prompt).toContain("CHAT CHUNK 1/2");
+		expect(prompt).toContain("TASK\n");
+		expect(prompt).not.toMatch(/<\/?conversation-chunk\b/);
+	});
 });

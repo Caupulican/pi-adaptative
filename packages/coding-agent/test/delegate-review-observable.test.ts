@@ -12,7 +12,8 @@ import {
 } from "../src/core/delegation/session-worker-claim.ts";
 import { isParentReviewRequired } from "../src/core/delegation/worker-claim.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { createDelegateStatusToolDefinition } from "../src/core/tools/delegate-status.ts";
+import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
+import type { DelegateStatusDependencies } from "../src/core/tools/delegate-status.ts";
 
 const context = {} as ExtensionContext;
 
@@ -208,13 +209,21 @@ describe("persistence of the review marker (session-worker-claim.ts)", () => {
 	});
 });
 
-describe("delegate_status surfaces unreviewed mutations and acks them (delegate-status.ts)", () => {
+describe("delegate status/review surfaces unreviewed mutations", () => {
+	function statusTool(status: DelegateStatusDependencies) {
+		return createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			status,
+		});
+	}
+
 	function buildSessionBackedTool() {
 		const sessionManager = SessionManager.inMemory();
 		const laneRecords = [
 			{ laneId: "req-1", type: "worker" as const, status: "succeeded" as const, reasonCode: "worker_completed" },
 		];
-		const tool = createDelegateStatusToolDefinition({
+		const tool = statusTool({
 			getLaneRecords: () => laneRecords,
 			getWorkerClaimSnapshots: () => getWorkerClaimSnapshots(sessionManager.getEntries()),
 			acknowledgeWorkerReview: (requestId) => acknowledgeWorkerClaimReview(sessionManager, requestId),
@@ -222,7 +231,7 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 		return { sessionManager, tool };
 	}
 
-	function textOf(result: Awaited<ReturnType<ReturnType<typeof createDelegateStatusToolDefinition>["execute"]>>) {
+	function textOf(result: Awaited<ReturnType<ReturnType<typeof createDelegateToolDefinition>["execute"]>>) {
 		return result.content
 			.filter((entry) => entry.type === "text")
 			.map((entry) => entry.text)
@@ -233,12 +242,12 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 		const { sessionManager, tool } = buildSessionBackedTool();
 		appendWorkerClaimSnapshot(sessionManager, { ...baseClaim, blockers: ["verify this"] }, mockRequest);
 
-		const overview = await tool.execute("call", {}, undefined, undefined, context);
+		const overview = await tool.execute("call", { action: "status" }, undefined, undefined, context);
 		expect(textOf(overview)).toContain("1 unreviewed worker mutation");
 		expect(textOf(overview)).toContain("req-1");
 		expect((overview.details as { unreviewedCount: number }).unreviewedCount).toBe(1);
 
-		const single = await tool.execute("call", { laneId: "req-1" }, undefined, undefined, context);
+		const single = await tool.execute("call", { action: "status", laneId: "req-1" }, undefined, undefined, context);
 		expect(textOf(single)).toContain("UNREVIEWED MUTATION");
 		expect((single.details as { unreviewed: boolean }).unreviewed).toBe(true);
 	});
@@ -247,7 +256,7 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 		const { sessionManager, tool } = buildSessionBackedTool();
 		appendWorkerClaimSnapshot(sessionManager, baseClaim, mockRequest);
 
-		const overview = await tool.execute("call", {}, undefined, undefined, context);
+		const overview = await tool.execute("call", { action: "status" }, undefined, undefined, context);
 		expect(textOf(overview)).not.toContain("unreviewed");
 		expect((overview.details as { unreviewedCount: number }).unreviewedCount).toBe(0);
 	});
@@ -256,7 +265,7 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 		const { sessionManager, tool } = buildSessionBackedTool();
 		appendWorkerClaimSnapshot(sessionManager, { ...baseClaim, blockers: ["verify this"] }, mockRequest);
 
-		const before = await tool.execute("call", {}, undefined, undefined, context);
+		const before = await tool.execute("call", { action: "status" }, undefined, undefined, context);
 		expect((before.details as { unreviewedCount: number }).unreviewedCount).toBe(1);
 
 		const ackResult = await tool.execute(
@@ -271,14 +280,14 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 
 		// Fresh tool instance over the SAME session-backed store, simulating a later turn re-reading
 		// persisted state from scratch — the ack must be durable, not in-memory to one tool instance.
-		const rewiredTool = createDelegateStatusToolDefinition({
+		const rewiredTool = statusTool({
 			getLaneRecords: () => [
 				{ laneId: "req-1", type: "worker" as const, status: "succeeded" as const, reasonCode: "worker_completed" },
 			],
 			getWorkerClaimSnapshots: () => getWorkerClaimSnapshots(sessionManager.getEntries()),
 			acknowledgeWorkerReview: (requestId) => acknowledgeWorkerClaimReview(sessionManager, requestId),
 		});
-		const after = await rewiredTool.execute("call", {}, undefined, undefined, context);
+		const after = await rewiredTool.execute("call", { action: "status" }, undefined, undefined, context);
 		expect((after.details as { unreviewedCount: number }).unreviewedCount).toBe(0);
 		expect(textOf(after)).not.toContain("unreviewed");
 	});
@@ -302,7 +311,7 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 	});
 
 	it("review action degrades gracefully when the ack dependency isn't wired (never throws)", async () => {
-		const tool = createDelegateStatusToolDefinition({
+		const tool = statusTool({
 			getLaneRecords: () => [{ laneId: "req-1", type: "worker", status: "succeeded" }],
 			getWorkerClaimSnapshots: () => [{ ...baseClaim, blockers: ["x"], parentReviewRequired: true }],
 		});
@@ -326,13 +335,13 @@ describe("delegate_status surfaces unreviewed mutations and acks them (delegate-
 			});
 			appendWorkerClaimSnapshot(sessionManager, { ...baseClaim, requestId: laneId }, { ...mockRequest, id: laneId });
 		}
-		const tool = createDelegateStatusToolDefinition({
+		const tool = statusTool({
 			getLaneRecords: () => laneRecords,
 			getWorkerClaimSnapshots: () => getWorkerClaimSnapshots(sessionManager.getEntries()),
 			acknowledgeWorkerReview: (requestId) => acknowledgeWorkerClaimReview(sessionManager, requestId),
 		});
 
-		const overview = await tool.execute("call", {}, undefined, undefined, context);
+		const overview = await tool.execute("call", { action: "status" }, undefined, undefined, context);
 		const text = textOf(overview);
 		expect((overview.details as { unreviewedCount: number }).unreviewedCount).toBe(1);
 		expect((overview.details as { unreviewedLaneIds: string[] }).unreviewedLaneIds).toEqual(["req-1"]);

@@ -13,14 +13,14 @@
  * live {@link MemoryManager} — is reached through narrow deps accessors rather than the whole
  * AgentSession.
  *
- * Context-transform boundary (deliberate): the per-turn stages ({@link estimateCurrentContextTokens},
+ * Provider-request planning boundary (deliberate): the per-turn stages ({@link estimateCurrentContextTokens},
  * {@link runContextAudit}, {@link runPromptPolicyPlanning}, {@link applyContextGc},
  * {@link correlatePromptPolicyWithContextGc}, {@link runPromptEnforcement},
  * {@link enqueueRelevanceCuration}, {@link maybeDrainBrainCuration}) are invoked from the session's
- * context transform as one-line delegations, so the transform stays the single owner of the pass
+ * request context controller as one-line delegations, so that controller owns the pass
  * ordering. This controller reaches {@link MemoryController} functionality only through
  * {@link ContextPipelineDeps.getMemoryManager} (never imports it), and MemoryController never imports
- * the pipeline — keeping the transform the one place the two subsystems meet.
+ * the pipeline — keeping request planning the one place the two subsystems meet.
  */
 
 import {
@@ -356,7 +356,7 @@ export class ContextPipeline {
 	 * session that never packed anything doesn't force-create a store/dir just to audit.
 	 * Never throws into a live turn: any failure degrades to an empty report.
 	 *
-	 * This is the memoized hot path (the real per-turn context transform calls it every
+	 * This is the memoized hot path (provider-request planning calls it every
 	 * round trip via agent-session.ts's one-line delegation) -- see `_auditMemo`'s doc for the
 	 * incremental design. `getContextAuditReport`/`getPromptPolicyReport`'s `messages`-arg
 	 * recompute variants deliberately do NOT go through this method (see

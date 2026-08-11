@@ -25,6 +25,7 @@ describe("model switch capability ordering", () => {
 
 			expect(observedTools).toEqual([
 				"read",
+				"skill",
 				"bash",
 				"python",
 				"edit",

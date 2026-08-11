@@ -122,12 +122,12 @@ describe("task step state", () => {
 			"T1",
 		);
 		const context = formatTaskStepsContext(state);
-		expect(context).toContain("Current native task_steps context for this session");
+		expect(context).toContain("TASK STEPS");
 		expect(context).toContain("[in_progress] Inspecting context");
 		expect(context).toContain("[pending] Implement context injection");
 		expect(context).not.toContain("Completed history");
 		expect(context).not.toContain("step-2");
-		expect(context).toContain("Continue the in_progress step");
+		expect(context).toContain("continue in_progress step");
 	});
 
 	it("dedupes a duplicate open add but still allows a terminal same-content re-add", () => {
@@ -153,11 +153,11 @@ describe("task step state", () => {
 			"T1",
 		);
 		expect(formatTaskStepsContext(state)).toContain(
-			"A completed step has no evidence attached; attach evidence via task_steps update before treating it as verified.",
+			"Completed step lacks evidence; attach via task_steps before verified.",
 		);
 
 		state = updateTaskStep(state, "step-1", { evidence: ["verified"] }, "T2");
-		expect(formatTaskStepsContext(state)).not.toContain("no evidence attached");
+		expect(formatTaskStepsContext(state)).not.toContain("lacks evidence");
 	});
 
 	it("clears state while preserving the monotonic step number", () => {

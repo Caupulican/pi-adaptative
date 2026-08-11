@@ -29,10 +29,10 @@ Both use the same structured summary format and track file operations cumulative
 Auto-compaction triggers when:
 
 ```
-contextTokens > contextWindow - reserveTokens
+requestTokens > contextWindow - reserveTokens
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
+`requestTokens` estimates the complete materialized provider context, not only stored conversation history. It includes the system prompt, projected tool schemas, text-only tool protocol, and request-local context. By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 
@@ -83,8 +83,35 @@ Memory providers receive `onPreCompress` once per manual or automatic compaction
 combined handoff at 4,000 characters and reuses it for extension handling and every summarizer retry,
 so a retry ladder does not repeat provider work or grow the prompt. Durable goals do not depend on the
 summary model recalling a large ledger: the next provider context contains exactly one bounded
-`<active_goal>` projection, while the hidden continuation trigger remains transient and is never
+`ACTIVE GOAL` projection, while the hidden continuation trigger remains transient and is never
 stored as fake user history.
+
+### Provider Request Admission
+
+Every model turn uses one bounded plan/admit/commit boundary:
+
+```text
+durable history
+  -> replay-safe context plan
+  -> provider conversion + tool projection + text-protocol materialization
+  -> estimate complete request and fixed envelope
+  -> admit, or compact durable history and replan
+  -> validate freshness, commit accepted host effects
+  -> send the admitted Context object through the provider adapter
+```
+
+The context plan separates two classes of input:
+
+- **Compactable:** durable conversation history, including an accepted compaction summary and retained recent messages.
+- **Non-compactable:** system prompt, provider-visible tool schemas, text-only tool primer and guard, extension `transientMessages`, memory evidence, the active goal projection, and the active skill body.
+
+Compaction can replace only the durable class. After a compaction entry is accepted, Pi replans from the reloaded session history and adopts that history in the running agent loop before transport. The exact admitted `Context` object then enters the provider adapter; the planner does not rebuild it or append context after admission.
+
+An optional early-cost trigger gets at most one normal summary pass. A hard boundary can use that pass plus one deterministic tightening pass. No-progress, repeated invalidation, an active conflicting compaction, or a fixed envelope at the hard boundary fails explicitly; Pi does not drop mandatory request-local context to make the request fit.
+
+Planning is replay-safe. Extension/resource, active-skill, and goal revisions can invalidate a plan before commit; stale retries have their own bound and do not consume the compaction-replan allowance. Previewed context-GC and skill usage effects are committed only for the accepted plan.
+
+An active skill remains host state during in-process compaction and is re-injected on every replan. Its body is absent from durable history and summaries. Process or session replacement starts a new skill-vault lifecycle, so a skill must be loaded again after a process restart, `/new`, `/resume`, or `/fork`. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
 
 ### Split Turns
 
@@ -223,39 +250,32 @@ See [`collectEntriesForBranchSummary()`](https://github.com/earendil-works/pi-mo
 Both compaction and branch summarization use the same structured format:
 
 ```markdown
-## Goal
-[What the user is trying to accomplish]
+## Active Task
+[Newest unfulfilled user request]
 
-## Constraints & Preferences
-- [Requirements mentioned by user]
+### Mandatory Rules
+- [Exact user constraints that still apply]
 
-## Progress
-### Done
-- [x] [Completed tasks]
+## Working Set
+- [Current symbols, commands, and evidence]
 
-### In Progress
-- [ ] [Current work]
+## Files
+- [Relevant paths and their purpose]
 
-### Blocked
-- [Issues, if any]
+## Open Problems
+- [Unresolved blockers or errors]
+
+## Done
+1. [Recent completed work]
 
 ## Key Decisions
 - **[Decision]**: [Rationale]
 
-## Next Steps
-1. [What should happen next]
+## Constraints & Preferences
+- [Durable requirements and preferences]
 
 ## Critical Context
 - [Data needed to continue]
-
-<read-files>
-path/to/file1.ts
-path/to/file2.ts
-</read-files>
-
-<modified-files>
-path/to/changed.ts
-</modified-files>
 ```
 
 ### Message Serialization

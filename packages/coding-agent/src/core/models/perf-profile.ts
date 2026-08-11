@@ -1,4 +1,4 @@
-import type { StreamFn, StreamIdleOptions } from "@caupulican/pi-agent-core";
+import { estimateProviderRequestTokens, type StreamFn, type StreamIdleOptions } from "@caupulican/pi-agent-core";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type {
 	Api,
@@ -9,10 +9,8 @@ import type {
 	ProviderResponse,
 } from "@caupulican/pi-ai/types";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
-import { measureJsonLength } from "../util/json-size.ts";
 
 const PERF_EWMA_ALPHA = 0.3;
-const CHARS_PER_TOKEN_ESTIMATE = 4;
 const DEFERRED_HEADERS_MAX_GAP_MS = 100;
 const DEFERRED_HEADERS_MIN_REQUEST_MS = 1_000;
 export const DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS = 30 * 60 * 1000;
@@ -133,12 +131,7 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 }
 
 export function estimateContextPromptTokens(context: Context): number {
-	const serializedLength = measureJsonLength({
-		systemPrompt: context.systemPrompt,
-		messages: context.messages,
-		tools: context.tools,
-	});
-	return serializedLength === undefined ? 0 : Math.ceil(serializedLength / CHARS_PER_TOKEN_ESTIMATE);
+	return estimateProviderRequestTokens(context);
 }
 
 export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProfileStreamRecorder): StreamFn {

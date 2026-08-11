@@ -159,7 +159,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	info += `${theme.fg("dim", "/compact")}: compact the active context now\n`;
 	info += `${theme.fg("dim", "/settings")}: adjust Auto Learn, cost guard, compaction, and model-router config\n`;
 	info += `${theme.fg("dim", "/auto-learn status|run")}: inspect or launch background learning\n`;
-	info += `${theme.fg("dim", "context_audit")}: ask the agent to inspect provider-visible context contributors\n`;
+	info += `${theme.fg("dim", "/context")}: inspect provider-visible context contributors without model tokens\n`;
 
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(new Text(info, 1, 0));

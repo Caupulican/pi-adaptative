@@ -1,6 +1,13 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import { parseModelOutputJsonObject } from "../model-output-json.ts";
+import {
+	CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT,
+	CURATION_DIGEST_SYSTEM_PROMPT,
+	CURATION_RELEVANCE_SYSTEM_PROMPT,
+} from "../provider-prompt-contracts.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
+
+export { CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT, CURATION_DIGEST_SYSTEM_PROMPT, CURATION_RELEVANCE_SYSTEM_PROMPT };
 
 /**
  * Brain-assisted context curation (see docs/model-router-rework/brain-context-curation-design.md):
@@ -14,28 +21,6 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
  * telemetry rather than silent. Results are keyed for idempotency (digests by the GC record's
  * content hash, relevance by the audit item id), so re-enqueueing the same work is free.
  */
-
-export const CURATION_DIGEST_SYSTEM_PROMPT = [
-	"You digest tool-output chunks for a coding agent's context curator. You never solve the task.",
-	"Given a chunk, respond with STRICT JSON only - no prose:",
-	'{"digest":"<one or two sentences, max 200 characters, keeping exact identifiers>"}',
-	"Keep exact file paths, symbol names, error codes, and version strings verbatim.",
-].join("\n");
-
-export const CURATION_RELEVANCE_SYSTEM_PROMPT = [
-	"You judge whether a stale tool output is still relevant to the user's current goal.",
-	"You never solve the task. Respond with STRICT JSON only - no prose:",
-	'{"relevant":true|false,"confidence":<0..1>}',
-	"relevant=false means the chunk is about something the current goal no longer needs.",
-	"When uncertain, answer relevant=true with low confidence - keeping content is the safe default.",
-].join("\n");
-
-export const CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT = [
-	"You pre-digest a chunk of an agent conversation for compaction. You never continue the conversation.",
-	"Extract ONLY durable facts: decisions made, file paths and symbols touched, errors and their causes,",
-	"user requirements, and outcomes. Respond with STRICT JSON only - no prose:",
-	'{"digest":"<bullet-style summary, max 700 characters, exact identifiers verbatim>"}',
-].join("\n");
 
 export function parseCompactionChunkDigest(text: string): string | undefined {
 	const parsed = parseModelOutputJsonObject(text);
@@ -102,7 +87,7 @@ export async function preDigestConversationText(args: {
 			bounded.completion && !bounded.failure ? parseCompactionChunkDigest(bounded.completion.text) : undefined;
 		if (digest !== undefined) {
 			digested++;
-			parts.push(`[locally pre-digested chunk ${index + 1}/${chunks.length} (${chunk.length} chars):]\n${digest}`);
+			parts.push(`[locally pre-digested chunk ${index + 1}/${chunks.length}, ${chunk.length} chars]\n${digest}`);
 		} else {
 			failed++;
 			parts.push(chunk);

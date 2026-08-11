@@ -1,8 +1,26 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `formatSkillsForPrompt`; skill catalogs are no longer rendered into system prompts. Use the host-owned `skill` vault/tool lifecycle.
+- Provider prompt additions from extensions must use replay-safe `context.transientMessages`; `before_provider_request` now rejects payload growth after request admission.
+
 ### Added
 
 - Added autonomous model-blind credential migration from environment variables, dotenv files, and credential/key files into current-project Bitwarden profiles without exposing values; an unavailable TUI vault requests only one masked `BW_SESSION` key before continuing.
+- Added import-free provider-prompt and tool-contract budgets that reject oversized harness prose before it reaches a model.
+- Added provider-only extension context messages that remain outside durable session history and compaction summaries while participating in complete request admission.
+
+### Changed
+
+- Compressed system, tool, worker, recovery, and dynamic provider context while retaining mandatory rules, exact capabilities, security boundaries, and user or skill content.
+- Unified worker status, review, event waits, and profile management under `delegate`; removed `context_audit` and obsolete split delegation tools from the default model surface while retaining `/context` and explicit diagnostics.
+- Changed skill discovery to retain bounded frontmatter only; one compact tool now searches metadata and loads one exact body request-locally, while the host owns monotonic usage, idle expiry, file/profile invalidation, and context-cost reporting.
+
+### Fixed
+
+- Made tool-failure recovery records explicitly mandatory and guaranteed one tool-free user delivery after the recovery circuit opens.
+- Made provider request planning transactional across extensions, memory, goals, active skills, tool projection, and text-only tool protocol; only durable history is compacted, replanned history is adopted by the live loop, and irreducible mandatory envelopes fail explicitly.
 
 ## [0.86.17] - 2026-08-10
 

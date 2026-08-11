@@ -52,7 +52,7 @@ describe("native /task command integration", () => {
 		expect(harness.errors.at(-1)).toMatch(/not found/i);
 
 		handleTaskCommand(harness.host, "/task run current");
-		expect(harness.statuses.at(-1)).toContain("native delegate/delegate_status");
+		expect(harness.statuses.at(-1)).toContain("native delegate");
 		expect(harness.getState()).toBeUndefined();
 	});
 });

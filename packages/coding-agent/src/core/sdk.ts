@@ -80,7 +80,7 @@ export interface CreateAgentSessionOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tools (read, bash, edit, write, context_audit,
+	 * - "builtin": disable the default built-in tools (read, bash, python, edit, write,
 	 *   goal, delegate, and run_toolkit_script)
 	 *   but keep extension/custom tools enabled
 	 */

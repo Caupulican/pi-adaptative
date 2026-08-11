@@ -735,7 +735,7 @@ describe("recursive worker orchestration", () => {
 				candidates: [{ provider: "faux", modelId: "faux-1", thinkingLevel: "off" as const }],
 			},
 			capabilityCeiling: ["workflow.delegate" as const],
-			toolNames: ["delegate", "delegate_status"],
+			toolNames: ["delegate"],
 			resourceProfileNames: [],
 			dispatchProfileIds: ["test-worker"],
 			budget: { maxCostUsd: 1 },

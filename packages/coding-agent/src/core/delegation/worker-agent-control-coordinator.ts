@@ -1363,7 +1363,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			`laneId=${args.record.laneId}`,
 			`status=${args.record.status}`,
 			...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
-			`Read bounded raw transcript pages with delegate action="transcript" agentId="${args.childAgentId}". Messages present in each page are complete durable entries; omittedMessages discloses whole-message omissions, and an empty page may still continue via nextCursor.`,
+			`Transcript: delegate action="transcript" agentId="${args.childAgentId}". Entries complete; omittedMessages marks whole omissions; empty page may continue via nextCursor.`,
 		].join("\n");
 		const idempotencyKey = `terminal-handoff:${args.terminalAttemptId}`;
 		const transcriptInput: MandatoryTranscriptControlInput = {

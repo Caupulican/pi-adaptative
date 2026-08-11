@@ -8,7 +8,7 @@ import {
 	SESSION_TASK_PROFILE_CUSTOM_TYPE,
 	SessionTaskProfileStore,
 } from "../src/core/orchestration/session-task-profile-store.ts";
-import type { ProfileWriterToolDetails } from "../src/core/tools/profile-writer.ts";
+import type { DelegateProfileToolDetails } from "../src/core/tools/profile-writer.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
 
@@ -39,7 +39,7 @@ function taskProfile(profileId: string): OrchestrationProfile {
 	};
 }
 
-describe("profile_writer", () => {
+describe("delegate profile actions", () => {
 	it("creates one immutable session profile and dispatches the selected fast model with only requested tools", async () => {
 		const base = workerProfile("base-profile", "base-worker");
 		const harness = await createHarness({
@@ -51,14 +51,14 @@ describe("profile_writer", () => {
 			workerOrchestrationProfile: base,
 		});
 		try {
-			const tool = harness.session.getToolDefinition("profile_writer");
+			const tool = harness.session.getToolDefinition("delegate");
 			expect(tool).toBeDefined();
 			if (!tool) return;
 
 			const created = await tool.execute(
 				"profile-call-1",
 				{
-					action: "create",
+					action: "profile_create",
 					task: "Search the owned source and implement the smallest verified fix.",
 					baseProfileId: base.profileId,
 					model: { provider: "faux", modelId: "fast-worker", thinkingLevel: "low" },
@@ -70,7 +70,7 @@ describe("profile_writer", () => {
 				undefined,
 				undefined as never,
 			);
-			const details = created.details as ProfileWriterToolDetails;
+			const details = created.details as DelegateProfileToolDetails;
 			expect(details).toMatchObject({ created: true, baseProfileId: base.profileId });
 			expect(details.profileId).toMatch(/^task-/);
 			expect(details.changedFields).toEqual(["description", "model", "tools", "budget"]);
@@ -113,7 +113,7 @@ describe("profile_writer", () => {
 			workerOrchestrationProfile: base,
 		});
 		try {
-			const tool = harness.session.getToolDefinition("profile_writer");
+			const tool = harness.session.getToolDefinition("delegate");
 			expect(tool).toBeDefined();
 			if (!tool) return;
 			const invalidInputs = [
@@ -139,7 +139,7 @@ describe("profile_writer", () => {
 			for (const [index, input] of invalidInputs.entries()) {
 				const result = await tool.execute(
 					`invalid-profile-${index}`,
-					{ action: "create", ...input },
+					{ action: "profile_create", ...input },
 					undefined,
 					undefined,
 					undefined as never,
@@ -166,7 +166,7 @@ describe("profile_writer", () => {
 				model: { provider: "faux", id: "foreground", maxTokens: 8_192 },
 				role: "orchestrator",
 				capabilityCeiling: ["workflow.delegate"],
-				toolNames: ["delegate", "delegate_status", "profile_writer"],
+				toolNames: ["delegate"],
 			}),
 			dispatchProfileIds: [allowed.profileId],
 			createdAt: now,
@@ -182,12 +182,12 @@ describe("profile_writer", () => {
 			orchestrationProfile: architect,
 		});
 		try {
-			const tool = harness.session.getToolDefinition("profile_writer");
+			const tool = harness.session.getToolDefinition("delegate");
 			expect(tool).toBeDefined();
 			if (!tool) return;
 			const rejected = await tool.execute(
 				"profile-denied",
-				{ action: "create", task: "Attempt forbidden base", baseProfileId: denied.profileId },
+				{ action: "profile_create", task: "Attempt forbidden base", baseProfileId: denied.profileId },
 				undefined,
 				undefined,
 				undefined as never,
@@ -199,7 +199,7 @@ describe("profile_writer", () => {
 
 			const accepted = await tool.execute(
 				"profile-allowed",
-				{ action: "create", task: "Use the allowed base", baseProfileId: allowed.profileId },
+				{ action: "profile_create", task: "Use the allowed base", baseProfileId: allowed.profileId },
 				undefined,
 				undefined,
 				undefined as never,

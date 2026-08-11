@@ -9,10 +9,29 @@ const user = (text: string) => ({ role: "user" as const, content: [{ type: "text
 
 describe("buildContextCompositionReport", () => {
 	it("decomposes system prompt, tools, extensions, and message classes with honest totals", () => {
+		const rawMegaSchemaTokens = Math.ceil(
+			JSON.stringify({
+				name: "mega_tool",
+				description: "d".repeat(8000),
+				parameters: {
+					type: "object",
+					properties: { query: { type: "string", description: "q".repeat(2000) } },
+				},
+			}).length / 4,
+		);
 		const report = buildContextCompositionReport({
 			systemPrompt: "s".repeat(4000),
 			tools: [
-				{ name: "mega_tool", description: "d".repeat(8000), parameters: {}, source: "extension" },
+				{
+					name: "mega_tool",
+					description: "d".repeat(8000),
+					providerDescription: "Search the external index.",
+					parameters: {
+						type: "object",
+						properties: { query: { type: "string", description: "q".repeat(2000) } },
+					},
+					source: "extension",
+				},
 				{ name: "read", description: "read a file", parameters: { type: "object" } },
 			],
 			extensions: [{ name: "my-ext", path: "/ext/my-ext", toolNames: ["mega_tool"], commandCount: 2 }],
@@ -45,6 +64,7 @@ describe("buildContextCompositionReport", () => {
 
 		expect(report.systemPromptTokens).toBe(1000);
 		expect(report.tools[0]!.name).toBe("mega_tool"); // sorted heaviest first
+		expect(report.tools[0]!.schemaTokens).toBeLessThan(rawMegaSchemaTokens * 0.2);
 		expect(report.extensions[0]!.activeToolSchemaTokens).toBe(report.tools[0]!.schemaTokens);
 		const labels = report.messageClasses.map((row) => row.label);
 		expect(labels).toContain("gc-packed stub");
@@ -54,8 +74,8 @@ describe("buildContextCompositionReport", () => {
 			report.systemPromptTokens + report.toolSchemaTokens + report.messageTokens,
 		);
 		expect(report.adjustments).toEqual({ memoryEvidenceTokens: 0, enforcementSavedTokens: 0 });
-		// the mega tool dominates -> actionable observation; provider delta is large -> flagged
-		expect(report.observations.some((line) => line.includes("mega_tool"))).toBe(true);
+		// Provider projection removes annotation prose, preventing a source-only schema hotspot.
+		expect(report.observations.some((line) => line.includes("mega_tool"))).toBe(false);
 		expect(report.observations.some((line) => line.includes("provider-reported"))).toBe(true);
 	});
 
@@ -101,7 +121,31 @@ describe("AgentSession.getContextCompositionReport", () => {
 		try {
 			const report = harness.session.getContextCompositionReport();
 			expect(report.systemPromptTokens).toBeGreaterThan(0);
-			expect(report.tools.length).toBeGreaterThan(0);
+			expect(report.tools.map((tool) => tool.name).sort()).toEqual(
+				[
+					"artifact_retrieve",
+					"ask_question",
+					"bash",
+					"delegate",
+					"edit",
+					"goal",
+					"python",
+					"read",
+					"run_toolkit_script",
+					"secret_store",
+					"skill",
+					"task_steps",
+					"tool_task",
+					"write",
+				].sort(),
+			);
+			expect(report.toolSchemaTokens).toBeLessThanOrEqual(2_900);
+			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
+			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
+			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(825);
+			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(430);
+			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
+			expect(toolTokens.get("goal")).toBeLessThanOrEqual(250);
 			// sorted heaviest-first
 			for (let index = 1; index < report.tools.length; index++) {
 				expect(report.tools[index - 1]!.schemaTokens).toBeGreaterThanOrEqual(report.tools[index]!.schemaTokens);

@@ -104,7 +104,7 @@ describe("Phase 10D: AgentSession Goal Continuation Once", () => {
 
 		expect(promptCalls.length).toBe(1);
 		const call = promptCalls[0];
-		expect(call.text).toBe("Continue working toward the active goal.");
+		expect(call.text).toBe("Continue active goal.");
 
 		expect(call.options).toEqual({
 			expandPromptTemplates: false,

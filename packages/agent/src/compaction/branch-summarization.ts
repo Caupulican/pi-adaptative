@@ -240,39 +240,35 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 // Summary Generation
 // ============================================================================
 
-const BRANCH_SUMMARY_PREAMBLE = `The user explored a different conversation branch before returning here.
-Summary of that exploration:
+const BRANCH_SUMMARY_PREAMBLE = `Prior branch explored, then returned here. Summary:
 
 `;
 
-const BRANCH_SUMMARY_PROMPT = `Create a structured summary of this conversation branch for context when returning later.
-
-Use this EXACT format:
+const BRANCH_SUMMARY_PROMPT = `Summarize branch for later return. Exact format:
 
 ## Goal
-[What was the user trying to accomplish in this branch?]
+[User goal]
 
 ## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned]
-- [Or "(none)" if none were mentioned]
+- [Constraints/preferences, or "(none)"]
 
 ## Progress
 ### Done
-- [x] [Completed tasks/changes]
+- [x] [Completed work]
 
 ### In Progress
-- [ ] [Work that was started but not finished]
+- [ ] [Started, unfinished work]
 
 ### Blocked
-- [Issues preventing progress, if any]
+- [Blockers, if any]
 
 ## Key Decisions
-- **[Decision]**: [Brief rationale]
+- **[Decision]**: [Rationale]
 
 ## Next Steps
-1. [What should happen next to continue this work]
+1. [Next action]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Concise. Preserve exact paths/function names/errors.`;
 
 /**
  * Generate a summary of abandoned branch entries.
@@ -330,7 +326,7 @@ export async function generateBranchSummary(
 	} else {
 		instructions = BRANCH_SUMMARY_PROMPT;
 	}
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
+	const promptText = `CHAT\n${conversationText}\n\nTASK\n${instructions}`;
 
 	const summarizationMessages = [
 		{

@@ -44,10 +44,10 @@ describe("task_steps_context GC eligibility", () => {
 		expect(context).toBeDefined();
 		expect(context!.startsWith(`<task_steps_context revision=${state.revision}>\n`)).toBe(true);
 		expect(context!.endsWith("\n</task_steps_context>")).toBe(true);
-		// Single-turn content is identical to pre-wrap output aside from the marker wrapper.
-		expect(context).toContain("Current native task_steps context for this session");
+		// Compact instruction content remains inside the executable GC marker.
+		expect(context).toContain("TASK STEPS");
 		expect(context).toContain("[in_progress] Investigate root cause");
-		expect(context).toContain("Continue the in_progress step");
+		expect(context).toContain("continue in_progress step");
 	});
 
 	it("packs stale task_steps_context pages from earlier turns while preserving the most recent one", () => {

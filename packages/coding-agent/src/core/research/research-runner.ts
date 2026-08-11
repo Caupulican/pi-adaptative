@@ -6,8 +6,11 @@ import {
 	projectEvidenceFindings,
 } from "../autonomy/evidence-finding-projection.ts";
 import { parseModelOutputJsonObject } from "../model-output-json.ts";
+import { RESEARCH_LANE_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
 import { createEvidenceBundle } from "./evidence-bundle.ts";
 import { evaluateResearchRequest } from "./research-gate.ts";
+
+export { RESEARCH_LANE_SYSTEM_PROMPT };
 
 /**
  * Pure orchestration for one autonomous research pass: gate -> bounded isolated completion ->
@@ -19,15 +22,6 @@ import { evaluateResearchRequest } from "./research-gate.ts";
  */
 
 /** Static across calls so callers can use `cacheRetention: "short"` and only pay for the variable tail. */
-export const RESEARCH_LANE_SYSTEM_PROMPT = [
-	"You are a read-only research lane for a coding agent.",
-	"You receive a research query plus bounded context and produce findings that help satisfy open goal requirements.",
-	"Use only the provided read-only workspace tools. You cannot change files or delegate more workers.",
-	"Respond with STRICT JSON only - no prose, no markdown fences:",
-	'{"findings":[{"summary":"<one concrete, actionable finding>","confidence":<0..1>}]}',
-	"Base findings only on the provided context and files you inspect with those tools. Never invent file paths, APIs, or facts.",
-].join("\n");
-
 export interface ResearchCompletion {
 	text: string;
 	costUsd: number;
@@ -76,18 +70,18 @@ export function buildResearchUserPrompt(args: {
 	sources?: readonly EvidenceRef[];
 	maxFindings: number;
 }): string {
-	const parts = [`Research query: ${args.query}`];
+	const parts = [`QUERY ${args.query}`];
 	if (args.context && args.context.length > 0) {
-		parts.push("", "Context:", args.context);
+		parts.push("", "CONTEXT", args.context);
 	}
 	if (args.sources && args.sources.length > 0) {
-		parts.push("", "Workspace sources (pointer-first; open the file to read full context):");
+		parts.push("", "WORKSPACE SOURCES; open files for full context");
 		for (const source of args.sources) {
 			const pointer = source.title ?? source.uri ?? source.id;
 			parts.push(source.excerpt ? `- ${pointer}: ${source.excerpt}` : `- ${pointer}`);
 		}
 	}
-	parts.push("", `Return at most ${args.maxFindings} findings.`);
+	parts.push("", `MAX FINDINGS ${args.maxFindings}`);
 	return parts.join("\n");
 }
 

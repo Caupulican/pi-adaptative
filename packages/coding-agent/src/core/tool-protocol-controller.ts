@@ -445,9 +445,7 @@ export class ToolProtocolController {
 	private textProtocolCalibrationContext(variant: TextToolProtocolVariant, token: string): Context {
 		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_ECHO_TOOL], { variant });
 		const exactEnvelope = formatVariantEnvelope(variant, "echo", JSON.stringify({ data: token }));
-		const instruction =
-			`Text tool protocol calibration trial. Using the protocol above, call echo with data exactly "${token}". ` +
-			`Output only this exact tool-call envelope:\n${exactEnvelope}`;
+		const instruction = `Text tool protocol calibration trial. Call echo, data exactly "${token}". Output only:\n${exactEnvelope}`;
 		return {
 			systemPrompt: `${primer}\n\n${instruction}`,
 			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
@@ -504,9 +502,7 @@ export class ToolProtocolController {
 	}
 
 	private async runNativeReadTaskProbeTrial(model: Model<Api>, path: string): Promise<boolean> {
-		const instruction =
-			`Native tool-call capability probe: task-scale read. Use provider-native tool calling, not prose. ` +
-			`Call read exactly once with path exactly "${path}".`;
+		const instruction = `Native tool-call capability probe: task-scale read. Provider-native call only: read once, path exactly "${path}".`;
 		return this.runNativeToolProbeTrial(
 			model,
 			instruction,
@@ -519,9 +515,7 @@ export class ToolProtocolController {
 	}
 
 	private async runNativeEchoToolProbeTrial(model: Model<Api>, token: string): Promise<boolean> {
-		const instruction =
-			`Native tool-call capability probe: echo-only. Use provider-native tool calling, not prose. ` +
-			`Call echo with data exactly "${token}".`;
+		const instruction = `Native tool-call capability probe: echo-only. Provider-native call only: echo, data exactly "${token}".`;
 		return this.runNativeToolProbeTrial(model, instruction, TEXT_TOOL_PROTOCOL_ECHO_TOOL, 256, "echo", "data", token);
 	}
 
@@ -653,7 +647,7 @@ export class ToolProtocolController {
 		if (this.correctiveSteerCount !== 1 && this.correctiveSteerCount % TEXT_TOOL_PROTOCOL_STEER_INTERVAL !== 0) {
 			return;
 		}
-		const reminder = `Reminder: to call a tool, emit exactly this envelope shape: ${formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}')} — no other format is recognized. Reasoning may appear as prose before the envelope, never inside it.`;
+		const reminder = `MANDATORY, NON-NEGOTIABLE: to call a tool, emit exactly this envelope shape: ${formatVariantEnvelope(variant, "TOOL", '{"arg":"value"}')} Only this parses. Reasoning before envelope only.`;
 		this.deps.sendCorrectiveSteer(reminder).catch(() => {
 			// Best-effort steer.
 		});

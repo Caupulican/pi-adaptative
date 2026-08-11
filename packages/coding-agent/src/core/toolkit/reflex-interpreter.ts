@@ -1,7 +1,10 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { type IsolatedCompletionRunner, runIsolatedTextCompletion } from "../isolated-text-completion.ts";
+import { REFLEX_INTERPRETER_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
 import { reportSpawnedUsage, type SpawnedUsageReporter } from "../spawned-usage.ts";
 import type { ToolkitScript } from "./script-registry.ts";
+
+export { REFLEX_INTERPRETER_SYSTEM_PROMPT };
 
 /**
  * Reflex interpreter (the BRAIN half of the user-ratified brain->muscle pipeline, statistically
@@ -10,14 +13,6 @@ import type { ToolkitScript } from "./script-registry.ts";
  * anything — it only proposes `{script, args, danger, confidence}` for the deterministic
  * executor path, which still enforces every safety rule (danger confirmation included).
  */
-
-export const REFLEX_INTERPRETER_SYSTEM_PROMPT = [
-	"You are a strict instruction interpreter for a script executor. You NEVER execute anything.",
-	"Given a user request and the script registry, output STRICT JSON only:",
-	'{"script":"<exact registry name>","args":["..."],"danger":true|false,"confidence":<0..1>}',
-	"Pick the single best script. Extract arguments exactly as the script expects. Mark danger from the registry.",
-	'If no script fits, output {"script":"none","args":[],"danger":false,"confidence":0}.',
-].join("\n");
 
 export interface ReflexPlan {
 	script: string;

@@ -6,7 +6,7 @@ Task steps complement the native goal and delegation systems:
 
 - `task_steps` tracks the current execution checklist.
 - `goal` records durable outcome requirements and evidence.
-- `delegate` starts isolated background worker lanes; `delegate_status` retrieves their results.
+- `delegate` starts worker lanes, retrieves status, reviews claims, and coordinates them.
 
 ## Statuses
 
@@ -79,7 +79,7 @@ Use `/task` or its `/steps` alias:
 
 ## Background work migration
 
-The old user-level task-steps extension also implemented detached jobs, teams, and polling. Those duplicate execution commands are not part of the native checklist. `/task run`, `/task route`, `/task bg`, and `/task team` now point to Pi's session-owned `delegate` and `delegate_status` tools instead.
+The old user-level task-steps extension also implemented detached jobs, teams, and polling. Those duplicate execution commands are not part of the native checklist. `/task run`, `/task route`, `/task bg`, and `/task team` now point to Pi's session-owned `delegate` tool instead.
 
 Native worker lanes emit terminal handoff notifications and retain bounded results for explicit retrieval; task steps do not poll worker processes or inspect logs to detect completion.
 

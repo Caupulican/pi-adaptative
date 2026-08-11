@@ -300,7 +300,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				host.toolPanels.finish(event.toolCallId);
 				host.ui.requestRender();
 			}
-			if (["task_steps", "goal", "delegate", "delegate_status"].includes(event.toolName)) {
+			if (["task_steps", "goal", "delegate"].includes(event.toolName)) {
 				host.refreshActivityLane();
 			}
 			break;

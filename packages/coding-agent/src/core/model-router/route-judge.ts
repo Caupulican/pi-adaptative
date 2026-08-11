@@ -1,6 +1,9 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { RouteDecision } from "../autonomy/contracts.ts";
 import { parseModelOutputJsonObject } from "../model-output-json.ts";
+import { ROUTE_JUDGE_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
+
+export { ROUTE_JUDGE_SYSTEM_PROMPT };
 
 /**
  * Routing-only judge: a bounded, tool-less completion (default: the medium model) that decides the
@@ -12,17 +15,6 @@ import { parseModelOutputJsonObject } from "../model-output-json.ts";
  */
 
 /** Static across calls — callers pass cacheRetention "short" so only the variable tail is billed. */
-export const ROUTE_JUDGE_SYSTEM_PROMPT = [
-	"You are a routing judge for a coding agent. You only route; you never answer the task.",
-	"Pick which model tier should handle the user prompt:",
-	'- "cheap": trivial, mechanical, read-only lookups only.',
-	'- "medium": normal implementation, scoped edits, tests, and NON-trivial planning/design.',
-	'- "expensive": architecture, ambiguity, security/auth, destructive or release operations, high-impact changes.',
-	"Planning, design, and strategy prompts are NEVER cheap unless the task is genuinely trivial.",
-	"Respond with STRICT JSON only - no prose:",
-	'{"tier":"cheap"|"medium"|"expensive","risk":"read-only"|"scoped-write"|"high-impact"|"approval-required","trivial":true|false,"reason":"<short reason>"}',
-].join("\n");
-
 export const ROUTE_JUDGE_MAX_OUTPUT_TOKENS = 128;
 export const ROUTE_JUDGE_MAX_WALL_CLOCK_MS = 10_000;
 
@@ -35,8 +27,8 @@ export interface RouteJudgeVerdict {
 
 export function buildRouteJudgeUserPrompt(args: { prompt: string; baseline: RouteDecision }): string {
 	return [
-		`Baseline (regex) verdict: tier=${args.baseline.tier}, risk=${args.baseline.risk}, reason=${args.baseline.reasonCode}.`,
-		"User prompt:",
+		`BASELINE tier=${args.baseline.tier} risk=${args.baseline.risk} reason=${args.baseline.reasonCode}`,
+		"USER PROMPT",
 		args.prompt.slice(0, 4000),
 	].join("\n");
 }

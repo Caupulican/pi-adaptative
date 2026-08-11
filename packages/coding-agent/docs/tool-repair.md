@@ -2,12 +2,28 @@
 
 Pi validates every model-emitted tool call against its TypeBox schema before execution. Valid calls run unchanged. Invalid calls either pass through a named deterministic repair and then execute with the repaired arguments, or they bounce with schema feedback when no safe repair applies.
 
-Execution failures are not argument repairs. Pi removes their potentially large failed protocol turns from provider context and normally retains one bounded failure record: constant-size operation fingerprint, bounded operation preview, occurrence count, failure code, a cause-bearing diagnostic when available, and `next_action`. A matching successful retry clears the record. Change-approach classes such as non-UTF-8 text edits are different: Pi discards the complete attempted operation, exposes one bounded reason/directive for the next assistant response, then expires it. Pi uses `repair` only for argument/protocol rejections with a concrete call correction; policy, preflight, abort, and execution failures use `next_action`. It never invents a deterministic repair from an unknown nonzero exit.
+Execution failures are not argument repairs. Pi removes their potentially large failed protocol turns from provider context and normally retains one bounded failure record: constant-size operation fingerprint, bounded operation preview, occurrence count, failure code, a cause-bearing diagnostic when available, and `next_action`. Every retained record carries `"MUST":true`; the provider receives one canonical `mandatory_tool_failure_recovery_protocol` template explaining that `repair` or `next_action` is an execution constraint, unchanged retries are gated, and unrelated argument changes are not recovery. A matching successful retry clears the record. Change-approach classes such as non-UTF-8 text edits are different: Pi discards the complete attempted operation, exposes one bounded reason/directive for the next assistant response, then expires it. Pi uses `repair` only for argument/protocol rejections with a concrete call correction; policy, preflight, abort, and execution failures use `next_action`. It never invents a deterministic repair from an unknown nonzero exit.
+
+Canonical execution-failure template:
+
+```json
+{
+  "MUST": true,
+  "failure_key": "<bounded operation identity>",
+  "state": "failed",
+  "phase": "execution",
+  "tool": "<tool name>",
+  "failure_code": "<classified cause>",
+  "diagnostic": "<bounded cause-bearing detail>",
+  "next_action": "<mandatory capability-backed recovery or blocker delivery>"
+}
+```
 
 ## Runtime behavior
 
 - The shared validation choke point is `validateToolArguments` in `packages/ai/src/utils/validation.ts`.
 - Repair is validate-then-repair: schema-valid arguments are returned unchanged; only invalid arguments enter the repair layer.
+- Recovery exhaustion opens the run-scoped circuit, disables tools, and permits exactly one provider delivery turn. A tool call emitted despite that empty tool surface is paired with a rejected result without running hooks or tool code, followed by a deterministic blocker delivery.
 - Repair is built-in and has no settings toggle. `PI_TOOL_REPAIR_DISABLED=1` is only an emergency diagnostic kill switch; normal configuration should leave repair on.
 - Teaching can be disabled independently with `toolRepair.teach: false` or `PI_TOOL_REPAIR_TEACH_DISABLED=1`. Repairs can still execute; the in-band "Tool argument repair note" is suppressed.
 - Tool-recovery logging can be disabled with `toolRepair.logging: false`. Repairs still run, but Pi does not enqueue recovery records or spawn the background recovery-log worker.
@@ -83,6 +99,7 @@ Confirmed against current source:
 - Repair mode names and standing-rule text: `packages/ai/src/utils/tool-repair/registry.ts`.
 - Agent repair event metadata and teach-note gate: `packages/agent/src/types.ts`, `packages/agent/src/agent-loop.ts`.
 - Bounded execution-failure assessment and retry memory: `packages/agent/src/tool-failure-memory.ts`.
+- Mandatory recovery template and terminal-delivery prompt: `packages/agent/src/tool-failure-recovery-protocol.ts`.
 - Interactive marker: `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`.
 - Settings/env kill switches: `packages/coding-agent/src/core/settings-manager.ts`, `packages/coding-agent/src/core/tool-repair-settings.ts`.
 - Health, tool probing, rule removal, and protocol reset: `packages/coding-agent/src/core/tool-repair-health.ts`, `packages/coding-agent/src/core/models/adaptation-store.ts`, `packages/coding-agent/src/core/slash-commands.ts`, `packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.

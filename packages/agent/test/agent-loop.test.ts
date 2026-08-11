@@ -776,7 +776,7 @@ describe("agentLoop with AgentMessage", () => {
 			(message): message is ToolResultMessage => message.role === "toolResult" && message.isError === true,
 		);
 		expect(providerContexts).toHaveLength(5);
-		expect(providerContexts[1]?.systemPrompt).toContain("<harness_tool_failures");
+		expect(providerContexts[1]?.systemPrompt).toContain("ACTIVE TOOL FAILURES");
 		expect(providerContexts[1]?.systemPrompt).toContain('"occ":1');
 		expect(providerContexts[1]?.systemPrompt).toContain('"state":"failed"');
 		expect(providerContexts[1]?.systemPrompt).toContain("svn status -q");
@@ -790,7 +790,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(providerContexts[2]?.systemPrompt).toContain('"occ":2');
 		expect(providerContexts[2]?.systemPrompt.match(/failure_key/g) ?? []).toHaveLength(1);
 		expect(providerContexts[3]?.systemPrompt).toContain('"occ":2');
-		expect(providerContexts[4]?.systemPrompt).not.toContain("<harness_tool_failures");
+		expect(providerContexts[4]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
 		expect(JSON.stringify(providerContexts[4])).not.toContain("RAW_FAILURE_OUTPUT");
 		expect(providerContexts[4]?.messages.some((message) => message.role === "toolResult")).toBe(true);
 		expect(attempts).toBe(3);
@@ -942,7 +942,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"repair marker"');
 		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
 		expect(providerContexts[2]?.systemPrompt).toContain('"diagnostic":"repair marker"');
-		expect(providerContexts[3]?.systemPrompt).not.toContain("<harness_tool_failures");
+		expect(providerContexts[3]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
 		expect(toolResults[1]).toMatchObject({ isError: false, usage });
 		expect(toolResults[2]).toMatchObject({ isError: false, usage });
 	});
@@ -1059,7 +1059,7 @@ describe("agentLoop with AgentMessage", () => {
 			// consume
 		}
 
-		expect(providerContext?.systemPrompt).toContain("<harness_tool_failures");
+		expect(providerContext?.systemPrompt).toContain("ACTIVE TOOL FAILURES");
 		expect(providerContext?.systemPrompt).toContain("legacy command");
 		expect(JSON.stringify(providerContext)).not.toContain("LEGACY_RAW_OUTPUT");
 		expect(providerContext?.messages.some((message) => message.role === "toolResult")).toBe(false);
@@ -1121,7 +1121,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResult?.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"file_not_found"') }),
 		]);
-		expect(JSON.stringify(toolResult)).toContain("No currently loaded tool declares a recovery action");
+		expect(JSON.stringify(toolResult)).toContain("No loaded tool declares recovery");
 		expect(JSON.stringify(toolResult)).not.toContain("list the parent directory or re-read the path");
 		expect(JSON.stringify(toolResult)).not.toContain("no such file or directory");
 	});
@@ -1268,7 +1268,7 @@ describe("agentLoop with AgentMessage", () => {
 			false,
 			true,
 		]);
-		expect(resultTexts[0]).toContain("send a raw JSON array/object");
+		expect(resultTexts[0]).toContain("send raw array/object");
 	});
 
 	it("stores repaired tool args on the assistant message while preserving raw args", async () => {
@@ -1527,7 +1527,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(failureText).toContain('"failure_code":"preflight_error"');
 		expect(failureText).toContain('"phase":"preflight"');
 		expect(failureText).toContain('"diagnostic":"host capability lookup unavailable"');
-		expect(failureText).toContain("arguments were valid");
+		expect(failureText).toMatch(/arguments valid/i);
 		expect(failureText).not.toContain("change the invalid operation");
 	});
 

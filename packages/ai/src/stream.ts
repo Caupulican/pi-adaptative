@@ -7,7 +7,6 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
-	Message,
 	Model,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
@@ -61,21 +60,6 @@ function withEnvAuth<TOptions extends StreamOptions>(
 	return { ...options, apiKey } as TOptions;
 }
 
-function withTextProtocolUserReminder(message: Message): Message {
-	if (message.role !== "user") return message;
-	const reminder =
-		"Tool-use reminder: if this request asks to read a file, call exactly one tool named read before answering; do not guess file contents.";
-	if (typeof message.content === "string") return { ...message, content: `${message.content}\n\n${reminder}` };
-	return { ...message, content: [...message.content, { type: "text", text: reminder }] };
-}
-
-function withTextProtocolUserReminders(messages: readonly Message[]): Message[] {
-	// Apply the same transformation to historical user turns. A reminder added only
-	// to the live turn disappears when that turn becomes history, changing the prior
-	// request prefix and defeating provider prompt-cache reuse.
-	return messages.map(withTextProtocolUserReminder);
-}
-
 function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	if (!protocolOptions || !context.tools?.length) return context;
@@ -89,18 +73,46 @@ function withTextToolProtocolContext(context: Context, options: StreamOptions | 
 					content: [
 						{
 							type: "text" as const,
-							text: "Tool-call instructions for this conversation are defined in the system prompt above. Do not answer this instruction; apply the system-prompt tool-call format to subsequent user requests. If the next user request asks to read a file, your first response must be a read tool call and nothing else.",
+							text: "Apply system tool protocol; never answer this message.",
 						},
 					],
 					timestamp: 0,
 				},
-				...withTextProtocolUserReminders(context.messages),
+				...context.messages,
 			]
 		: context.messages;
 	return {
 		...providerContext,
 		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${primer}` : primer,
 		messages,
+	};
+}
+
+/**
+ * Immutable provider-input materialization. `context` is the exact Context object passed to the
+ * provider transport; `sourceContext` retains native tool definitions only for response parsing.
+ */
+export interface MaterializedProviderRequest {
+	context: Context;
+	sourceContext: Context;
+	usesTextToolProtocol: boolean;
+}
+
+/**
+ * Resolve provider-visible context once, including the text-only tool primer and synthetic guard
+ * message. Callers may budget/admit `result.context`, then send that same object through
+ * {@link startMaterializedProviderStream} without re-rendering it.
+ */
+export function materializeProviderRequest(
+	context: Context,
+	options: StreamOptions | undefined,
+): MaterializedProviderRequest {
+	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
+	const usesTextToolProtocol = protocolOptions !== undefined && Boolean(context.tools?.length);
+	return {
+		context: usesTextToolProtocol ? withTextToolProtocolContext(context, options) : context,
+		sourceContext: context,
+		usesTextToolProtocol,
 	};
 }
 
@@ -392,19 +404,53 @@ function startTextToolProtocolStream<TOptions extends StreamOptions>(
 		providerOptions: TOptions | undefined,
 	) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
-	if (!protocolOptions || !context.tools?.length) return startProviderStream(context, options);
+	const request = materializeProviderRequest(context, options);
+	if (!request.usesTextToolProtocol) return startProviderStream(request.context, options);
 	const abortController = new AbortController();
 	const combined = combineAbortSignals([options?.signal, abortController.signal]);
 	const providerOptions = { ...options, signal: combined.signal } as TOptions;
-	const protocolContext = withTextToolProtocolContext(context, providerOptions);
 	return withTextToolProtocolResult(
-		startProviderStream(protocolContext, providerOptions),
+		startProviderStream(request.context, providerOptions),
 		model,
-		context,
+		request.sourceContext,
 		providerOptions,
 		{ abortController, cleanup: combined.cleanup },
 	);
+}
+
+/**
+ * Send one already-admitted materialization. Text-protocol input projection is disabled for the
+ * nested stream function, while response parsing remains owned here. This keeps wrapped/custom
+ * stream functions from adding the primer twice.
+ */
+export async function startMaterializedProviderStream<TOptions extends StreamOptions>(
+	model: Model<Api>,
+	request: MaterializedProviderRequest,
+	options: TOptions | undefined,
+	startProviderStream: (
+		providerContext: Context,
+		providerOptions: TOptions | undefined,
+	) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
+): Promise<AssistantMessageEventStream> {
+	if (!request.usesTextToolProtocol) return await startProviderStream(request.context, options);
+
+	const abortController = new AbortController();
+	const combined = combineAbortSignals([options?.signal, abortController.signal]);
+	const providerOptions = {
+		...options,
+		textToolCallProtocol: undefined,
+		signal: combined.signal,
+	} as TOptions;
+	try {
+		const stream = await startProviderStream(request.context, providerOptions);
+		return withTextToolProtocolResult(stream, model, request.sourceContext, options, {
+			abortController,
+			cleanup: combined.cleanup,
+		});
+	} catch (error) {
+		combined.cleanup();
+		throw error;
+	}
 }
 
 function resolveApiProvider(api: Api) {

@@ -52,11 +52,11 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 		label: "run_toolkit_script",
 		description:
 			"Run one of the user's registered toolkit scripts (daily-ops allowlist). Finding is a registry lookup — ambiguous requests return a shortlist to disambiguate, never a guess. The harness executes (uv/powershell/bash) and ALWAYS returns exit code, stdout, and stderr; failures are reported as errors — a failed script can never look like success.",
-		promptSnippet: "Run a registered toolkit script by name/alias; output and errors come back structurally.",
+		promptSnippet: "Run registered toolkit script by name/alias; structured output/errors.",
 		promptGuidelines: [
-			"Prefer the exact registered name; on a shortlist response, ask the user which one (or pick only when their request clearly names it).",
-			"Scripts flagged dangerous require confirm: true — obtain explicit user confirmation first.",
-			"Report the script's real output/exit code; never claim success when exitCode is non-zero.",
+			"Prefer exact name. Shortlist: ask owner; pick only if request clearly names one.",
+			"Dangerous script needs explicit user confirmation, then confirm:true.",
+			"Report real output/exitCode; never claim success for nonzero exitCode.",
 		],
 		parameters: runToolkitScriptSchema,
 		async execute(

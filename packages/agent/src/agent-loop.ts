@@ -4,19 +4,19 @@
  */
 
 import { EventStream } from "@caupulican/pi-ai/event-stream";
-import { streamSimple } from "@caupulican/pi-ai/stream";
 import {
 	formatToolRepairStandingRule,
 	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
 	type ToolFailurePhase,
 } from "@caupulican/pi-ai/tool-repair-registry";
-import type { AssistantMessage, Context, ToolResultMessage } from "@caupulican/pi-ai/types";
+import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
 	type ToolArgumentExecutionOutcome,
 	ToolArgumentValidationError,
 	type ToolArgumentValidationTelemetryEvent,
 	validateToolArguments,
 } from "@caupulican/pi-ai/validation";
+import { startPlannedAgentProviderRequest } from "./provider-request-planner.ts";
 import {
 	assessToolFailure,
 	clearToolFailure,
@@ -27,7 +27,6 @@ import {
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	rememberToolFailure,
-	sanitizeToolFailureContext,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
@@ -38,6 +37,7 @@ import {
 	type ToolFailureRecoveryGateEffect,
 	type ToolFailureRecoveryHalt,
 } from "./tool-failure-recovery-gate.ts";
+import { appendMandatoryToolFailureDeliveryPrompt } from "./tool-failure-recovery-protocol.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -46,13 +46,13 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
-	RequestPreflightContext,
-	RequestPreflightResult,
 	StreamFn,
 	ToolCallRepairInfo,
 } from "./types.ts";
 import { DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
+
+export { resolveRequestPreflightMaxTokens } from "./provider-request-planner.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -178,6 +178,28 @@ function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, abort
 	};
 }
 
+function createMandatoryRecoveryDeliveryFallback(
+	halt: ToolFailureRecoveryHalt,
+	config: AgentLoopConfig,
+): AssistantMessage {
+	const diagnostic = halt.record.diagnostic ?? halt.diagnostic;
+	return {
+		role: "assistant",
+		content: [
+			{
+				type: "text",
+				text: `Tool recovery stopped for ${halt.record.tool}: ${diagnostic} Required recovery: ${halt.record.correction}`,
+			},
+		],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: createEmptyUsage(),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
 function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	return new EventStream<AgentEvent, AgentMessage[]>(
 		(event: AgentEvent) => event.type === "agent_end",
@@ -242,41 +264,6 @@ function repeatsSuccessfulTextProtocolBatch(
 }
 
 /**
- * Apply one request-local preflight without mutating persistent loop configuration.
- * Shared with isolated tool-free provider calls so every transport boundary has identical
- * validation and non-widening semantics.
- */
-export async function resolveRequestPreflightMaxTokens(options: {
-	requestPreflight?: (
-		context: RequestPreflightContext,
-		signal?: AbortSignal,
-	) => RequestPreflightResult | undefined | Promise<RequestPreflightResult | undefined>;
-	model: RequestPreflightContext["model"];
-	context: RequestPreflightContext["context"];
-	maxTokens?: number;
-	signal?: AbortSignal;
-}): Promise<number | undefined> {
-	if (!options.requestPreflight) return options.maxTokens;
-	if (options.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) {
-		throw new TypeError("request maxTokens must be a positive safe integer");
-	}
-	const preflight = await options.requestPreflight(
-		{ model: options.model, context: options.context, maxTokens: options.maxTokens },
-		options.signal,
-	);
-	if (preflight?.maxTokens === undefined) return options.maxTokens;
-	if (!Number.isSafeInteger(preflight.maxTokens) || preflight.maxTokens <= 0) {
-		throw new TypeError("requestPreflight.maxTokens must be a positive safe integer");
-	}
-	const ceilings = [preflight.maxTokens];
-	if (options.maxTokens !== undefined) ceilings.push(options.maxTokens);
-	if (Number.isSafeInteger(options.model.maxTokens) && options.model.maxTokens > 0) {
-		ceilings.push(options.model.maxTokens);
-	}
-	return Math.min(...ceilings);
-}
-
-/**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
 async function runLoop(
@@ -305,6 +292,7 @@ async function runLoop(
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
 	const toolFailureRecoveryGate = new ToolFailureRecoveryGate();
+	let mandatoryRecoveryDeliveryPending = false;
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -333,8 +321,26 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			// Recovery exhaustion receives exactly one provider turn without tools so the mandatory
+			// diagnostic can reach the user instead of terminating on an undelivered tool result.
+			const recoveryDeliveryTurn = mandatoryRecoveryDeliveryPending;
+			const recoveryDeliveryHalt = recoveryDeliveryTurn ? toolFailureRecoveryGate.getHalt() : undefined;
+			if (recoveryDeliveryTurn && !recoveryDeliveryHalt) {
+				throw new Error("Mandatory recovery delivery started without a recovery halt");
+			}
+			const responseContext = recoveryDeliveryHalt
+				? {
+						...currentContext,
+						systemPrompt: appendMandatoryToolFailureDeliveryPrompt(currentContext.systemPrompt, {
+							tool: recoveryDeliveryHalt.record.tool,
+							failureCode: recoveryDeliveryHalt.record.failureCode,
+							diagnostic: recoveryDeliveryHalt.record.diagnostic ?? recoveryDeliveryHalt.diagnostic,
+							requiredAction: recoveryDeliveryHalt.record.correction,
+						}),
+						tools: [],
+					}
+				: currentContext;
+			const message = await streamAssistantResponse(responseContext, config, signal, emit, streamFn);
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -347,6 +353,30 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
+			if (recoveryDeliveryTurn) {
+				if (!recoveryDeliveryHalt) {
+					throw new Error("Mandatory recovery delivery continued without a recovery halt");
+				}
+				if (toolCalls.length > 0) {
+					toolResults.push(...(await rejectRecoveryDeliveryToolCalls(toolCalls, recoveryDeliveryHalt, emit)));
+					for (const result of toolResults) {
+						currentContext.messages.push(result);
+						newMessages.push(result);
+					}
+				}
+				await emit({ type: "turn_end", message, toolResults });
+				if (toolCalls.length > 0) {
+					const fallback = createMandatoryRecoveryDeliveryFallback(recoveryDeliveryHalt, config);
+					currentContext.messages.push(fallback);
+					newMessages.push(fallback);
+					await emit({ type: "turn_start" });
+					await emit({ type: "message_start", message: fallback });
+					await emit({ type: "message_end", message: fallback });
+					await emit({ type: "turn_end", message: fallback, toolResults: [] });
+				}
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
@@ -369,7 +399,12 @@ async function runLoop(
 					emit,
 				);
 				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
+				if (toolFailureRecoveryGate.isHalted()) {
+					mandatoryRecoveryDeliveryPending = true;
+					hasMoreToolCalls = true;
+				} else {
+					hasMoreToolCalls = !executedToolBatch.terminate;
+				}
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -394,7 +429,7 @@ async function runLoop(
 			await emit({ type: "turn_end", message, toolResults });
 
 			// Runaway-loop backstop (cost guard): detect a model stuck repeating one action.
-			if (stallLimit > 0 && toolCalls.length > 0) {
+			if (!mandatoryRecoveryDeliveryPending && stallLimit > 0 && toolCalls.length > 0) {
 				const signature = normalizeToolSignature(toolCalls.map((c) => [c.name, c.arguments ?? null]));
 				stallWindow.push(signature);
 				if (stallWindow.length > stallLimit * STALL_WINDOW_PERIODS) stallWindow.shift();
@@ -426,12 +461,13 @@ async function runLoop(
 			}
 
 			if (
-				await config.shouldStopAfterTurn?.({
+				!mandatoryRecoveryDeliveryPending &&
+				(await config.shouldStopAfterTurn?.({
 					message,
 					toolResults,
 					context: currentContext,
 					newMessages,
-				})
+				}))
 			) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -468,51 +504,7 @@ export async function startAgentProviderRequest(
 	signal: AbortSignal | undefined,
 	streamFn?: StreamFn,
 ): Promise<Awaited<ReturnType<StreamFn>>> {
-	// Failed protocol turns never reach host transforms or provider conversion. Their bounded,
-	// unresolved state is carried separately in the system prompt until the same operation succeeds.
-	const sanitized = sanitizeToolFailureContext(context.messages, context.systemPrompt);
-	let messages = sanitized.messages;
-	if (config.transformContext) {
-		messages = await config.transformContext(messages, signal);
-	}
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await config.convertToLlm(messages);
-
-	// Build LLM context
-	const llmContext: Context = {
-		systemPrompt: sanitized.systemPrompt,
-		messages: llmMessages,
-		tools: context.tools,
-	};
-
-	const streamFunction = streamFn || streamSimple;
-
-	const requestMaxTokens = await resolveRequestPreflightMaxTokens({
-		requestPreflight: config.requestPreflight,
-		model: config.model,
-		context: llmContext,
-		maxTokens: config.maxTokens,
-		signal,
-	});
-	// Resolve credentials only after the request-local authority/budget gate accepts the request.
-	// This prevents an already-exhausted background lane from refreshing OAuth/SSO credentials.
-	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
-	const requestReasoning = config.resolveRequestReasoning
-		? config.resolveRequestReasoning(config.reasoning, {
-				model: config.model,
-				context: llmContext,
-				maxTokens: requestMaxTokens,
-			})
-		: config.reasoning;
-
-	return await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		maxTokens: requestMaxTokens,
-		reasoning: requestReasoning,
-		signal,
-	});
+	return startPlannedAgentProviderRequest(context, config, signal, streamFn);
 }
 
 /**
@@ -1604,4 +1596,28 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
 	await emit({ type: "message_start", message: toolResultMessage });
 	await emit({ type: "message_end", message: toolResultMessage });
+}
+
+async function rejectRecoveryDeliveryToolCalls(
+	toolCalls: readonly AgentToolCall[],
+	halt: ToolFailureRecoveryHalt,
+	emit: AgentEventSink,
+): Promise<ToolResultMessage[]> {
+	const messages: ToolResultMessage[] = [];
+	for (const toolCall of toolCalls) {
+		await emitToolExecutionStart(toolCall, emit);
+		const finalized: FinalizedToolCallOutcome = {
+			toolCall,
+			result: createToolFailureRecoveryExhaustedResult(
+				halt.record,
+				"Tool execution is disabled during the mandatory recovery delivery turn.",
+			),
+			isError: true,
+		};
+		await emitToolExecutionEnd(finalized, emit);
+		const message = createToolResultMessage(finalized);
+		await emitToolResultMessage(message, emit);
+		messages.push(message);
+	}
+	return messages;
 }

@@ -5,6 +5,7 @@ import {
 	getToolExecutionUnchangedRetryLimit,
 	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
 	TOOL_EXECUTION_ERROR_CATALOGUE,
+	TOOL_REPAIR_REGISTRY,
 } from "../src/utils/tool-repair/registry.ts";
 
 describe("tool execution error catalogue", () => {
@@ -35,6 +36,17 @@ describe("tool execution error catalogue", () => {
 
 		for (const entry of TOOL_EXECUTION_ERROR_CATALOGUE) {
 			expect(getToolExecutionErrorGuidance(fixtures[entry.name])).toBe(entry.guidance);
+		}
+	});
+
+	it("keeps recurring repair teaching compact without causal-arrow shorthand", () => {
+		for (const entry of TOOL_REPAIR_REGISTRY) {
+			expect(entry.noteTemplate.length).toBeLessThanOrEqual(130);
+			expect(entry.standingRule.length).toBeLessThanOrEqual(130);
+			expect(entry.noteTemplate).not.toContain("->");
+		}
+		for (const entry of TOOL_EXECUTION_ERROR_CATALOGUE) {
+			expect(entry.guidance.length).toBeLessThanOrEqual(180);
 		}
 	});
 
@@ -94,7 +106,7 @@ describe("tool execution error catalogue", () => {
 			retainDiagnostic: false,
 			unchangedRetryLimit: 0,
 			guidance:
-				"Change approach: exact UTF-8 text replacement is unsafe for this file. Use an encoding-aware or byte-safe tool/workflow instead; do not replay the text edit.",
+				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
 		});
 	});
 

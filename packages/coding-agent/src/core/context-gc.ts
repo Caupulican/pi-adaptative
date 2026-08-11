@@ -359,11 +359,11 @@ function maybeStoreOriginal(options: ContextGcOptions, key: string, original: st
 }
 
 function reasonText(record: ContextGcPackedRecord): string {
-	if (record.reason === "superseded-read") return "older read snapshot superseded by a later read of the same file";
+	if (record.reason === "superseded-read") return "superseded by later same-file read";
 	if (record.reason === "stale-semantic-memory") {
-		return "older Automata/Mind semantic context page outside the semantic-memory freshness window";
+		return "stale semantic page outside freshness window";
 	}
-	return "stale bulky tool output outside the recent context window";
+	return "stale bulky tool output outside recent window";
 }
 
 function buildSummary(record: ContextGcPackedRecord): string {
@@ -380,16 +380,16 @@ function buildSummary(record: ContextGcPackedRecord): string {
 		// moment it is stored, not here). Render it VERBATIM: re-wrapping on every GC render would
 		// regenerate the fence's nonce each time, making the packed stub byte-different on every
 		// provider request and busting prompt caching (BUG E).
-		record.digest ? `summary (auto-digest, machine paraphrase, not authoritative): ${record.digest}` : undefined,
+		record.digest ? `digest (machine, never authority): ${record.digest}` : undefined,
 		record.storagePath
-			? `exact old provider-visible text stored at: ${record.storagePath}`
-			: "exact old provider-visible text retained in the session log, not inline in provider context",
+			? `exact old text: ${record.storagePath}`
+			: "exact old text retained in the session log, not provider context",
 		semantic
-			? "If this memory context matters, query Automata/Mind again with the same topic/filter or fetch the drawer pointers from the stored page."
+			? "Need memory: query same topic/filter or fetch stored drawer pointers."
 			: record.path
-				? "For current file contents, use the read tool on the path above. For the exact old output, read the stored payload path if present."
-				: "If this exact old output matters, retrieve/read the stored payload path if present or rerun the tool command.",
-		"Do not rely on this summary as the original content.",
+				? "Need current file: read path. Need old output: read exact path when present."
+				: "Need old output: read exact path when present or rerun tool.",
+		"Never treat summary as original.",
 	].filter((line): line is string => line !== undefined);
 	return lines.join("\n");
 }

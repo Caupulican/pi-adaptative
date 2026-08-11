@@ -210,11 +210,11 @@ export function createCoreDiagnosticsToolDefinitions(
 			label: "Context Audit",
 			description:
 				"Audit the current provider-visible context composition: model window usage, system prompt estimate, active tool schema estimate, active session message rows, and heaviest context contributors.",
-			promptSnippet: "Audit current loaded context composition before optimizing context usage.",
+			promptSnippet: "Audit provider-visible context before context optimization.",
 			promptGuidelines: [
-				"Use context_audit when the user asks what is consuming context, why the footer shows a high percentage, or which messages/tools/system prompt content are loaded.",
-				"Keep output bounded; use query/minTokens/maxItems to narrow rather than dumping full context.",
-				"Treat token counts as estimates except provider usage from ctx.getContextUsage, which is still model/provider dependent.",
+				"Use context_audit for context consumers, high footer percentage, loaded messages/tools/system text.",
+				"Bound output with query/minTokens/maxItems; never dump full context.",
+				"Token counts are estimates; provider usage remains model/provider dependent.",
 			],
 			parameters: Type.Object(
 				{

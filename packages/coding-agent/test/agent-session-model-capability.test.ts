@@ -18,21 +18,19 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("full");
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
+				"skill",
 				"bash",
 				"python",
 				"edit",
 				"write",
-				"context_audit",
 				"goal",
 				"task_steps",
 				"ask_question",
 				"secret_store",
 				"delegate",
-				"profile_writer",
 				"tool_task",
 				"run_toolkit_script",
 				"artifact_retrieve",
-				"delegate_status",
 			]);
 		} finally {
 			harness.cleanup();
@@ -48,7 +46,7 @@ describe("model capability auto-detection", () => {
 			const profile = harness.session.getModelCapabilityProfile();
 			expect(profile.class).toBe("minimal");
 			expect(profile.backgroundLanesEnabled).toBe(false);
-			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 			expect(harness.session.systemPrompt).not.toContain("N+2 ARCHITECTURE");
 			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
 			const composition = harness.session.getContextCompositionReport();
@@ -60,6 +58,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.agent.textToolCallProtocol).toBeUndefined();
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
+				"skill",
 				"bash",
 				"python",
 				"edit",
@@ -88,7 +87,7 @@ describe("model capability auto-detection", () => {
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
 			expect(harness.session.getActiveToolNames()).toEqual([]);
-			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's concise chat assistant\./);
+			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
 		} finally {
 			harness.cleanup();
 		}
@@ -100,7 +99,7 @@ describe("model capability auto-detection", () => {
 		});
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("minimal");
-			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 			harness.setResponses([fauxAssistantMessage("done")]);
 			await harness.session.prompt("Use the configured tool protocol.");
 			expect(harness.session.agent.textToolCallProtocol).toBe(true);
@@ -160,7 +159,7 @@ describe("model capability auto-detection", () => {
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("full");
 			expect(harness.session.getActiveToolNames()).toContain("goal");
-			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
+			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
 			expect(harness.session.systemPrompt).toContain("N+2 ARCHITECTURE");
 		} finally {
 			harness.cleanup();
@@ -177,13 +176,13 @@ describe("model capability auto-detection", () => {
 		try {
 			const fullSet = harness.session.getActiveToolNames();
 			expect(fullSet).toContain("goal");
-			const delegateSnippet =
-				"Create and coordinate an autonomous agent with inherited or explicitly selected authority.";
+			const delegateSnippet = "Create/coordinate autonomous agent with inherited or selected authority.";
 			expect(harness.session.systemPrompt).toContain(delegateSnippet);
 
 			await harness.session.setModel(harness.getModel("small-model")!);
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
+				"skill",
 				"bash",
 				"python",
 				"edit",
@@ -193,11 +192,11 @@ describe("model capability auto-detection", () => {
 				"artifact_retrieve",
 			]);
 			expect(harness.session.systemPrompt).not.toContain(delegateSnippet);
-			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative's focused coding executor\./);
+			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 
 			await harness.session.setModel(harness.getModel("big-model")!);
 			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
-			expect(harness.session.systemPrompt).toMatch(/^You are Pi-Adaptative, a self-evolving assistant\./);
+			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
 		} finally {
 			harness.cleanup();
 		}
@@ -219,6 +218,7 @@ describe("model capability auto-detection", () => {
 			(harness.session as unknown as { _refreshToolRegistry: () => void })._refreshToolRegistry();
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
+				"skill",
 				"bash",
 				"python",
 				"edit",
@@ -252,6 +252,7 @@ describe("model capability auto-detection", () => {
 			expect(firstCycle?.model.id).toBe("small-model");
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
+				"skill",
 				"bash",
 				"python",
 				"edit",

@@ -14,6 +14,8 @@ import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
 	AgentContext,
+	AgentContextPlan,
+	AgentContextPlanRequest,
 	AgentEvent,
 	AgentLoopConfig,
 	AgentLoopTurnUpdate,
@@ -22,6 +24,8 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	ProviderRequestAdmissionContext,
+	ProviderRequestAdmissionResult,
 	QueueMode,
 	StreamFn,
 	ToolExecutionMode,
@@ -90,6 +94,11 @@ export interface AgentOptions {
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	planContext?: (request: AgentContextPlanRequest, signal?: AbortSignal) => Promise<AgentContextPlan>;
+	admitProviderRequest?: (
+		request: ProviderRequestAdmissionContext,
+		signal?: AbortSignal,
+	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
 	resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
@@ -184,6 +193,11 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	public planContext?: (request: AgentContextPlanRequest, signal?: AbortSignal) => Promise<AgentContextPlan>;
+	public admitProviderRequest?: (
+		request: ProviderRequestAdmissionContext,
+		signal?: AbortSignal,
+	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
 	public resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
@@ -229,6 +243,8 @@ export class Agent {
 		this._state = createMutableAgentState(options.initialState);
 		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
 		this.transformContext = options.transformContext;
+		this.planContext = options.planContext;
+		this.admitProviderRequest = options.admitProviderRequest;
 		this.resolveRequestReasoning = options.resolveRequestReasoning;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
@@ -487,6 +503,8 @@ export class Agent {
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
+			planContext: this.planContext,
+			admitProviderRequest: this.admitProviderRequest,
 			resolveRequestReasoning: this.resolveRequestReasoning,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {

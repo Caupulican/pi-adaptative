@@ -97,7 +97,7 @@ self-reported worker usage are **advisory** — a claim to review, never a hard 
 boundary (the child bills under its own authentication).
 
 Dispatched tmux workers appear as `tmux-worker` lanes alongside in-process worker lanes in `/autonomy`
-and `delegate_status`; a worker's self-reported changed files are re-checked against the session's active
+and `delegate { action: "status" }`; a worker's self-reported changed files are re-checked against the session's active
 write scope and flagged for parent review when out of scope, exactly like an in-process worker's.
 
 ## Goal-bound dispatch (`goal dispatch_worker dispatchTarget:"tmux"`)

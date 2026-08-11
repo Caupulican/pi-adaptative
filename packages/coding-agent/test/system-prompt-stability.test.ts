@@ -47,6 +47,22 @@ describe("system prompt cache-stability invariant", () => {
 		expect(second).toBe(first);
 	});
 
+	it("is independent of skill count and metadata", () => {
+		const withoutSkills = buildSystemPrompt({ ...baseOptions, skills: [] });
+		const withManySkills = buildSystemPrompt({
+			...baseOptions,
+			skills: Array.from({ length: 100 }, (_, index) => ({
+				...baseOptions.skills![0]!,
+				name: `skill-${index}`,
+				description: `description-${index}`,
+				filePath: `/skills/${index}/SKILL.md`,
+				baseDir: `/skills/${index}`,
+			})),
+		});
+
+		expect(withManySkills).toBe(withoutSkills);
+	});
+
 	it("stays byte-identical as the wall clock moves within the same calendar day", () => {
 		// If a future change widened `date` to include time-of-day (or any other per-turn-volatile
 		// field leaked in), this would fail: the two builds below are hours apart on the same day.

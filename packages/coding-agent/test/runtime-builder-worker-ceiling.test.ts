@@ -9,6 +9,7 @@ import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { RuntimeBuilder, type RuntimeBuilderDeps } from "../src/core/runtime-builder.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { SkillVaultController } from "../src/core/skill-vault.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
 
 /**
@@ -85,6 +86,7 @@ function makeDeps(
 		reload: async () => unreachable("resourceLoader.reload"),
 		getDiscoverableExtensionPaths: async () => [],
 	};
+	const skillVault = new SkillVaultController({ getSkills: () => resourceLoader.getActiveSkills() });
 
 	return {
 		getAgent: () => agent,
@@ -97,6 +99,7 @@ function makeDeps(
 		getModelRegistry: () => modelRegistry,
 		isModelExhausted: () => false,
 		getResourceLoader: () => resourceLoader,
+		getSkillVault: () => skillVault,
 		getExtensionRunner: () => extensionRunner,
 		setExtensionRunner: (runner) => {
 			extensionRunner = runner;

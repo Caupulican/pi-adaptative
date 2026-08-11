@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- Reduced provider input by removing annotation-only prose and non-enumerable TypeBox metadata, canonicalizing equivalent literal unions, and compacting model-facing recovery and compaction instructions while preserving executable schema constraints.
+
+### Fixed
+
+- Made every retained tool-failure recovery instruction explicitly mandatory, taught the execution-gate protocol in provider context, and added one bounded tool-free delivery turn after recovery exhaustion.
+- Added a transactional provider-request boundary that budgets the complete materialized context, compacts and replans durable history only, rejects irreducible fixed-envelope overflow, bounds stale plans independently, and sends the accepted context without rebuilding it.
+
 ## [0.86.17] - 2026-08-10
 
 ### Fixed
