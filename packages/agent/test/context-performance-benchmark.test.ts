@@ -180,33 +180,34 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			const smallSuite = generateTrajectory(500); // N = 500
 			const largeSuite = generateTrajectory(2000); // N = 2000 (4x)
 
-			const measureDuration = (messages: AgentMessage[]) => {
-				const start = performance.now();
-				sanitizeToolFailureContext(messages, "base");
-				return performance.now() - start;
+			const measureCpuMicros = (messages: AgentMessage[]) => {
+				const start = process.cpuUsage();
+				for (let pass = 0; pass < 4; pass++) sanitizeToolFailureContext(messages, "base");
+				const elapsed = process.cpuUsage(start);
+				return elapsed.user + elapsed.system;
 			};
 			const median = (values: number[]) =>
 				values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
 
-			// Warm both sizes, then alternate their order so JIT compilation, GC, and shared-runner
-			// scheduling cannot turn one transient sample into a false complexity verdict.
-			measureDuration(smallSuite);
-			measureDuration(largeSuite);
+			// Absolute latency is gated above. Measure batched process CPU here so shared-runner
+			// scheduling pauses cannot turn one transient wall-clock sample into a false complexity verdict.
+			measureCpuMicros(smallSuite);
+			measureCpuMicros(largeSuite);
 			const smallDurations: number[] = [];
 			const largeDurations: number[] = [];
-			for (let sample = 0; sample < 5; sample++) {
+			for (let sample = 0; sample < 7; sample++) {
 				if (sample % 2 === 0) {
-					smallDurations.push(measureDuration(smallSuite));
-					largeDurations.push(measureDuration(largeSuite));
+					smallDurations.push(measureCpuMicros(smallSuite));
+					largeDurations.push(measureCpuMicros(largeSuite));
 				} else {
-					largeDurations.push(measureDuration(largeSuite));
-					smallDurations.push(measureDuration(smallSuite));
+					largeDurations.push(measureCpuMicros(largeSuite));
+					smallDurations.push(measureCpuMicros(smallSuite));
 				}
 			}
 			const durationSmall = median(smallDurations);
 			const durationLarge = median(largeDurations);
 
-			// O(N) scaling check: the median of five samples at 4x input must stay below 5.5x.
+			// O(N) scaling check: the median of seven batched samples at 4x input must stay below 5.5x.
 			// A quadratic implementation remains near 16x and fails without relying on a timing outlier.
 			const scalingFactor = durationLarge / Math.max(durationSmall, 0.1);
 			expect(scalingFactor).toBeLessThan(5.5);

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made the failure-context scaling gate measure batched process CPU time so shared-runner scheduling pauses cannot create false complexity regressions.
+
 ## [0.90.1] - 2026-08-11
 
 ### Fixed
