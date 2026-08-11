@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reduced tool-failure context sanitizer omission bookkeeping allocations for large successful histories.
+
 ## [0.89.0] - 2026-08-11
 
 ### Fixed

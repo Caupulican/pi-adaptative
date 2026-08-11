@@ -180,15 +180,34 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			const smallSuite = generateTrajectory(500); // N = 500
 			const largeSuite = generateTrajectory(2000); // N = 2000 (4x)
 
-			const startSmall = performance.now();
-			sanitizeToolFailureContext(smallSuite, "base");
-			const durationSmall = performance.now() - startSmall;
+			const measureDuration = (messages: AgentMessage[]) => {
+				const start = performance.now();
+				sanitizeToolFailureContext(messages, "base");
+				return performance.now() - start;
+			};
+			const median = (values: number[]) =>
+				values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
 
-			const startLarge = performance.now();
-			sanitizeToolFailureContext(largeSuite, "base");
-			const durationLarge = performance.now() - startLarge;
+			// Warm both sizes, then alternate their order so JIT compilation, GC, and shared-runner
+			// scheduling cannot turn one transient sample into a false complexity verdict.
+			measureDuration(smallSuite);
+			measureDuration(largeSuite);
+			const smallDurations: number[] = [];
+			const largeDurations: number[] = [];
+			for (let sample = 0; sample < 5; sample++) {
+				if (sample % 2 === 0) {
+					smallDurations.push(measureDuration(smallSuite));
+					largeDurations.push(measureDuration(largeSuite));
+				} else {
+					largeDurations.push(measureDuration(largeSuite));
+					smallDurations.push(measureDuration(smallSuite));
+				}
+			}
+			const durationSmall = median(smallDurations);
+			const durationLarge = median(largeDurations);
 
-			// O(N) scaling check: 4x input size must take <= 5.5x duration (quadratic O(N^2) would take 16x)
+			// O(N) scaling check: the median of five samples at 4x input must stay below 5.5x.
+			// A quadratic implementation remains near 16x and fails without relying on a timing outlier.
 			const scalingFactor = durationLarge / Math.max(durationSmall, 0.1);
 			expect(scalingFactor).toBeLessThan(5.5);
 		});

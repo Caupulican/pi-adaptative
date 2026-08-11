@@ -626,17 +626,15 @@ function fastTextSignature(text: string): string {
 
 function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnalysis {
 	const callById = new Map<string, AgentToolCall>();
-	const failedCalls = new Set<AgentToolCall>();
-	const failedResults = new Set<ToolResultMessage>();
-	const supersededCalls = new Set<AgentToolCall>();
-	const supersededResults = new Set<ToolResultMessage>();
+	const omittedCallIds = new Set<string>();
+	const orphanFailedResults = new Set<ToolResultMessage>();
 	const active = new Map<string, ActiveFailure>();
 	const activeDirectives = new Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>();
 	let sequence = 0;
 	const kindMistakesMap = new Map<string, number>();
 
-	const latestSuccessfulByOpKey = new Map<string, { call: AgentToolCall; result: ToolResultMessage }>();
-	const latestSuccessfulByPayloadKey = new Map<string, { call: AgentToolCall; result: ToolResultMessage }>();
+	const latestSuccessfulByOpKey = new Map<string, string>();
+	const latestSuccessfulByPayloadKey = new Map<string, string>();
 
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
@@ -665,8 +663,8 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 			if (directive) {
 				activeDirectives.delete(directive.failureCode);
 				activeDirectives.set(directive.failureCode, directive);
-				if (call) failedCalls.add(call);
-				failedResults.add(message);
+				if (call) omittedCallIds.add(call.id);
+				else orphanFailedResults.add(message);
 				continue;
 			}
 			const retained = readFailureRecord(message.details);
@@ -720,37 +718,31 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				if (oldest === undefined) break;
 				active.delete(oldest);
 			}
-			if (call) failedCalls.add(call);
-			failedResults.add(message);
+			if (call) omittedCallIds.add(call.id);
+			else orphanFailedResults.add(message);
 			continue;
 		}
 
 		if (call) {
 			const opKey = getToolFailureKey(call.name, call.arguments);
 			active.delete(opKey);
-			const previousOperation = latestSuccessfulByOpKey.get(opKey);
-			if (previousOperation) {
-				supersededCalls.add(previousOperation.call);
-				supersededResults.add(previousOperation.result);
-			}
-			latestSuccessfulByOpKey.set(opKey, { call, result: message });
+			const previousOperationCallId = latestSuccessfulByOpKey.get(opKey);
+			if (previousOperationCallId) omittedCallIds.add(previousOperationCallId);
+			latestSuccessfulByOpKey.set(opKey, call.id);
 
 			const textPayload = firstText(message);
 			if (textPayload.length >= 64) {
 				const payloadKey = `payload:${fastTextSignature(textPayload)}`;
-				const previousPayload = latestSuccessfulByPayloadKey.get(payloadKey);
-				if (previousPayload) {
-					supersededCalls.add(previousPayload.call);
-					supersededResults.add(previousPayload.result);
-				}
-				latestSuccessfulByPayloadKey.set(payloadKey, { call, result: message });
+				const previousPayloadCallId = latestSuccessfulByPayloadKey.get(payloadKey);
+				if (previousPayloadCallId) omittedCallIds.add(previousPayloadCallId);
+				latestSuccessfulByPayloadKey.set(payloadKey, call.id);
 			}
 		}
 	}
 
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
 
-	if (failedResults.size === 0 && supersededResults.size === 0) {
+	if (omittedCallIds.size === 0 && orphanFailedResults.size === 0) {
 		return { messages, activeRecords: [], activeDirectives: [], kindMistakesSummary };
 	}
 
@@ -758,7 +750,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		if (message.role === "toolResult") {
-			if (failedResults.has(message) || supersededResults.has(message)) continue;
+			if (omittedCallIds.has(message.toolCallId) || orphanFailedResults.has(message)) continue;
 			filteredMessages.push(message);
 			continue;
 		}
@@ -767,10 +759,16 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 			continue;
 		}
 		const content = message.content;
+		if (content.length === 1) {
+			const block = content[0];
+			if (block.type === "toolCall" && omittedCallIds.has(block.id)) continue;
+			filteredMessages.push(message);
+			continue;
+		}
 		let hasOmitted = false;
 		for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
 			const block = content[blockIdx];
-			if (block.type === "toolCall" && (failedCalls.has(block) || supersededCalls.has(block))) {
+			if (block.type === "toolCall" && omittedCallIds.has(block.id)) {
 				hasOmitted = true;
 				break;
 			}
@@ -779,9 +777,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 			filteredMessages.push(message);
 			continue;
 		}
-		const retainedContent = content.filter(
-			(block) => block.type !== "toolCall" || (!failedCalls.has(block) && !supersededCalls.has(block)),
-		);
+		const retainedContent = content.filter((block) => block.type !== "toolCall" || !omittedCallIds.has(block.id));
 		if (retainedContent.length > 0) {
 			filteredMessages.push({ ...message, content: retainedContent } satisfies AssistantMessage);
 		}
