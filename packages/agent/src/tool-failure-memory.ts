@@ -138,6 +138,10 @@ function updateHashRange(hash: SignatureHash, value: string, start = 0, end = va
 }
 
 function updateNormalizedHashString(hash: SignatureHash, value: string): void {
+	if (value.length < 10) {
+		updateExactHashString(hash, value);
+		return;
+	}
 	VOLATILE_SIGNATURE_PATTERN.lastIndex = 0;
 	let offset = 0;
 	let normalizedLength = value.length;
@@ -211,24 +215,34 @@ function updateStructuredHash(
 		for (const item of value) updateStructuredHash(hash, item, active, depth + 1, updateHashString);
 		updateHashRange(hash, "];");
 	} else {
-		const entries = Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-		updateHashRange(hash, `object:${entries.length}{`);
-		for (const [key, item] of entries) {
+		const keys = Object.keys(value).sort();
+		updateHashRange(hash, `object:${keys.length}{`);
+		for (const key of keys) {
 			updateHashString(hash, key);
-			updateStructuredHash(hash, item, active, depth + 1, updateHashString);
+			updateStructuredHash(hash, (value as Record<string, unknown>)[key], active, depth + 1, updateHashString);
 		}
 		updateHashRange(hash, "};");
 	}
 	active.delete(value);
 }
 
-function structuredHash(value: unknown, normalizeVolatile: boolean): string {
-	const hash: SignatureHash = {
+function createSignatureHash(): SignatureHash {
+	return {
 		first: 0x811c9dc5,
 		second: 0x9e3779b9,
 		third: 0x85ebca6b,
 		fourth: 0xc2b2ae35,
 	};
+}
+
+function renderSignatureHash(hash: SignatureHash): string {
+	return [hash.first, hash.second, hash.third, hash.fourth]
+		.map((part) => (part >>> 0).toString(16).padStart(8, "0"))
+		.join("");
+}
+
+function structuredHash(value: unknown, normalizeVolatile: boolean): string {
+	const hash = createSignatureHash();
 	updateStructuredHash(
 		hash,
 		value,
@@ -236,9 +250,7 @@ function structuredHash(value: unknown, normalizeVolatile: boolean): string {
 		0,
 		normalizeVolatile ? updateNormalizedHashString : updateExactHashString,
 	);
-	return [hash.first, hash.second, hash.third, hash.fourth]
-		.map((part) => (part >>> 0).toString(16).padStart(8, "0"))
-		.join("");
+	return renderSignatureHash(hash);
 }
 
 function boundedJsonPreview(value: unknown, maxChars: number): string {
@@ -322,7 +334,15 @@ export function normalizeToolSignature(pairs: Array<[string, unknown]>): string 
 
 function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolean): string {
 	const boundedTool = truncate(tool, MAX_TOOL_NAME_CHARS);
-	const signature = structuredHash([[tool, args]], normalizeVolatile);
+	const hash = createSignatureHash();
+	const updateHashString = normalizeVolatile ? updateNormalizedHashString : updateExactHashString;
+	const active = new Set<object>();
+	// Preserve the stable structured-hash wire identity without allocating the two synthetic arrays.
+	updateHashRange(hash, "array:1[array:2[");
+	updateStructuredHash(hash, tool, active, 2, updateHashString);
+	updateStructuredHash(hash, args, active, 2, updateHashString);
+	updateHashRange(hash, "];];");
+	const signature = renderSignatureHash(hash);
 	return `${boundedTool}:${signature}`;
 }
 
@@ -615,8 +635,8 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 	let sequence = 0;
 	const kindMistakesMap = new Map<string, number>();
 
-	const successfulByOpKey = new Map<string, Array<{ call: AgentToolCall; result: ToolResultMessage }>>();
-	const successfulByPayloadKey = new Map<string, Array<{ call: AgentToolCall; result: ToolResultMessage }>>();
+	const latestSuccessfulByOpKey = new Map<string, { call: AgentToolCall; result: ToolResultMessage }>();
+	const latestSuccessfulByPayloadKey = new Map<string, { call: AgentToolCall; result: ToolResultMessage }>();
 
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
@@ -708,39 +728,25 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 		if (call) {
 			const opKey = getToolFailureKey(call.name, call.arguments);
 			active.delete(opKey);
-			let list = successfulByOpKey.get(opKey);
-			if (!list) {
-				list = [];
-				successfulByOpKey.set(opKey, list);
+			const previousOperation = latestSuccessfulByOpKey.get(opKey);
+			if (previousOperation) {
+				supersededCalls.add(previousOperation.call);
+				supersededResults.add(previousOperation.result);
 			}
-			list.push({ call, result: message });
+			latestSuccessfulByOpKey.set(opKey, { call, result: message });
 
 			const textPayload = firstText(message);
 			if (textPayload.length >= 64) {
 				const payloadKey = `payload:${fastTextSignature(textPayload)}`;
-				let payloadList = successfulByPayloadKey.get(payloadKey);
-				if (!payloadList) {
-					payloadList = [];
-					successfulByPayloadKey.set(payloadKey, payloadList);
+				const previousPayload = latestSuccessfulByPayloadKey.get(payloadKey);
+				if (previousPayload) {
+					supersededCalls.add(previousPayload.call);
+					supersededResults.add(previousPayload.result);
 				}
-				payloadList.push({ call, result: message });
+				latestSuccessfulByPayloadKey.set(payloadKey, { call, result: message });
 			}
 		}
 	}
-
-	const markSuperseded = (maps: Iterable<Map<string, Array<{ call: AgentToolCall; result: ToolResultMessage }>>>) => {
-		for (const map of maps) {
-			for (const list of map.values()) {
-				if (list.length > 1) {
-					for (let index = 0; index < list.length - 1; index++) {
-						supersededCalls.add(list[index].call);
-						supersededResults.add(list[index].result);
-					}
-				}
-			}
-		}
-	};
-	markSuperseded([successfulByOpKey, successfulByPayloadKey]);
 
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
 

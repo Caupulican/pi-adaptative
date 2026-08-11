@@ -126,9 +126,11 @@ export type ResumeWorkerLaunchOutcome =
 
 export interface ProcessMatrixRuntimeHandle {
 	stop(): Promise<void> | void;
+	/** Resolve after every watcher task that is active at the call boundary has settled. */
+	waitForIdle(): Promise<void>;
 }
 
-const NOOP_HANDLE: ProcessMatrixRuntimeHandle = { stop: () => {} };
+const NOOP_HANDLE: ProcessMatrixRuntimeHandle = { stop: () => {}, waitForIdle: async () => {} };
 export const PROCESS_MATRIX_RESUMABLE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 function resolveProcessMatrixStore(config: ProcessMatrixRuntimeConfig): ProcessMatrixStorePort {
@@ -246,6 +248,10 @@ async function startMasterBranch(
 	});
 
 	return {
+		async waitForIdle() {
+			await maintenance;
+			await heartbeatTask;
+		},
 		async stop() {
 			if (stopped) return;
 			stopped = true;
@@ -652,7 +658,7 @@ async function startWorkerBranch(
 	let currentParentSessionId = parentSessionId;
 	let stopped = false;
 	let timer: NodeJS.Timeout | undefined;
-	let ticking = false;
+	let watchTask: Promise<void> | undefined;
 	let preserveResumableOnExit = false;
 	let stopTask: Promise<void> | undefined;
 	const generationStartedAt = entry.startedAt;
@@ -746,14 +752,21 @@ async function startWorkerBranch(
 		await config.requestExit();
 	};
 
+	const runWatchTick = (tick: () => Promise<void>): Promise<void> => {
+		if (watchTask) return watchTask;
+		const task = tick().finally(() => {
+			if (watchTask === task) watchTask = undefined;
+		});
+		watchTask = task;
+		return task;
+	};
+
+	const waitForIdle = async (): Promise<void> => {
+		while (watchTask) await watchTask;
+	};
+
 	const startHealthyWatch = (): void => {
-		timer = setInterval(() => {
-			if (ticking) return;
-			ticking = true;
-			void healthyTick().finally(() => {
-				ticking = false;
-			});
-		}, config.settings.watcherPollMs);
+		timer = setInterval(() => runWatchTick(healthyTick), config.settings.watcherPollMs);
 		timer.unref?.();
 	};
 
@@ -805,13 +818,7 @@ async function startWorkerBranch(
 
 	const startGraceWatch = (): void => {
 		const graceDeadline = now() + config.settings.adoptionGraceMs;
-		timer = setInterval(() => {
-			if (ticking) return;
-			ticking = true;
-			void graceTick(graceDeadline).finally(() => {
-				ticking = false;
-			});
-		}, config.settings.watcherPollMs);
+		timer = setInterval(() => runWatchTick(() => graceTick(graceDeadline)), config.settings.watcherPollMs);
 		timer.unref?.();
 	};
 
@@ -858,5 +865,5 @@ async function startWorkerBranch(
 
 	startHealthyWatch();
 
-	return { stop };
+	return { stop, waitForIdle };
 }

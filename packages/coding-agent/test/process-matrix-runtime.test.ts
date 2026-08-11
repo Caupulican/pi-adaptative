@@ -16,6 +16,7 @@ import {
 	PI_TASK_REF_ENV,
 	PROCESS_MATRIX_RESUMABLE_RETENTION_MS,
 	type ProcessMatrixRuntimeConfig,
+	type ProcessMatrixRuntimeHandle,
 	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
 import { buildEntryId, listEntries, readEntry, writeEntry } from "../src/core/process-matrix/store.ts";
@@ -172,8 +173,9 @@ async function settle(): Promise<void> {
 	}
 }
 
-async function tick(ms: number): Promise<void> {
+async function tick(ms: number, handle: ProcessMatrixRuntimeHandle): Promise<void> {
 	await vi.advanceTimersByTimeAsync(ms);
+	await handle.waitForIdle();
 	await settle();
 }
 
@@ -268,7 +270,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		});
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await tick(POLL_MS * 3);
+		await tick(POLL_MS * 3, handle);
 
 		expect(await listEntries(harness.agentDir)).toEqual([]);
 		expect(harness.notices).toEqual([]);
@@ -296,7 +298,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			agent: harness.config.agent,
 		});
 
-		await tick(POLL_MS * 3);
+		await tick(POLL_MS * 3, handle);
 		const stillRunning = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "running",
@@ -304,6 +306,53 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(stillRunning?.status).toBe("running");
 		expect(harness.notices).toEqual([]);
 		expect(harness.exitRequests).toBe(0);
+		await handle.stop();
+	});
+
+	it("exposes asynchronous watcher completion to deterministic timer drivers", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useWorkerEnv("parent-session-1");
+		let markParentReadStarted!: () => void;
+		let releaseParentRead!: () => void;
+		const parentReadStarted = new Promise<void>((resolve) => {
+			markParentReadStarted = resolve;
+		});
+		const parentReadGate = new Promise<void>((resolve) => {
+			releaseParentRead = resolve;
+		});
+		let delayParentRead = false;
+		const parentEntryId = buildEntryId("master", "parent-session-1");
+		const harness = makeHarness();
+		harness.config.store = {
+			...localProcessMatrixStore,
+			readEntry: async (agentDir, entryId) => {
+				if (delayParentRead && entryId === parentEntryId) {
+					delayParentRead = false;
+					markParentReadStarted();
+					await parentReadGate;
+				}
+				return localProcessMatrixStore.readEntry(agentDir, entryId);
+			},
+		};
+		await registerLiveParent(harness, "parent-session-1");
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await awaitState(
+			() => readWorkerEntry(harness),
+			(entry) => entry !== undefined,
+		);
+
+		delayParentRead = true;
+		let advancementSettled = false;
+		const advancement = tick(POLL_MS, handle).then(() => {
+			advancementSettled = true;
+		});
+		await parentReadStarted;
+		await settle();
+		expect(advancementSettled).toBe(false);
+
+		releaseParentRead();
+		await advancement;
+		expect(advancementSettled).toBe(true);
 		await handle.stop();
 	});
 
@@ -320,7 +369,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		});
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await tick(POLL_MS * 2);
+		await tick(POLL_MS * 2, handle);
 		const woundDown = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "resumable",
@@ -338,7 +387,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		await settle();
 
 		harness.livePids.delete(PARENT_PID);
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 
 		const entry = await awaitState(
 			() => readWorkerEntry(harness),
@@ -380,7 +429,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		});
 		const handle = await startProcessMatrixRuntime(harness.config);
 		harness.livePids.delete(PARENT_PID);
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 
 		const entry = await awaitState(
 			() => readWorkerEntry(harness),
@@ -405,7 +454,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		await settle();
 
 		harness.livePids.delete(PARENT_PID);
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const resumable = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "resumable",
@@ -420,7 +469,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			applyAdoption(orphaned, { parentPid: NEW_PARENT_PID, parentSessionId: "adopter-session" }),
 		);
 
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const adopted = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "running" && entry?.parentPid === NEW_PARENT_PID,
@@ -434,7 +483,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		// The healthy watch now tracks the NEW parent: its death triggers a second wind-down.
 		harness.livePids.delete(NEW_PARENT_PID);
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const rewoundDown = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "resumable" && entry?.windDownReason === "parent_lost",
@@ -452,7 +501,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		await settle();
 
 		harness.livePids.delete(PARENT_PID);
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const resumable = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "resumable",
@@ -461,11 +510,11 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		// Still inside the grace window: no exit.
 		harness.clock.ms = T0 + GRACE_MS - 1;
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		expect(harness.exitRequests).toBe(0);
 
 		harness.clock.ms = T0 + GRACE_MS;
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		await awaitState(
 			async () => harness.exitRequests,
 			(count) => count === 1,
@@ -473,7 +522,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		expect(harness.exitRequests).toBe(1);
 
 		// The watcher stopped itself: more polls never double-fire the exit.
-		await tick(POLL_MS * 3);
+		await tick(POLL_MS * 3, handle);
 		expect(harness.exitRequests).toBe(1);
 		// The resumable payload survives for a future session to pick up.
 		expect((await readWorkerEntry(harness))?.status).toBe("resumable");
@@ -495,7 +544,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			beginWindDown(fresh, "user_cleanup", new Date(harness.clock.ms).toISOString()),
 		);
 
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const woundDown = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "closed",
@@ -508,7 +557,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		);
 		expect(harness.exitRequests).toBe(1);
 
-		await tick(POLL_MS * 3);
+		await tick(POLL_MS * 3, handle);
 		expect(harness.exitRequests).toBe(1);
 		await handle.stop();
 	});
@@ -519,7 +568,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 		const harness = makeHarness();
 		const handle = await startProcessMatrixRuntime(harness.config);
 
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const resumable = (await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "resumable",
@@ -529,7 +578,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 			beginWindDown(resumable, "user_cleanup", new Date(harness.clock.ms).toISOString()),
 		);
 
-		await tick(POLL_MS);
+		await tick(POLL_MS, handle);
 		const closed = await awaitState(
 			() => readWorkerEntry(harness),
 			(entry) => entry?.status === "closed",
@@ -548,7 +597,7 @@ describe("startProcessMatrixRuntime (worker branch)", () => {
 
 		await handle.stop();
 		harness.livePids.delete(PARENT_PID);
-		await tick(POLL_MS * 3);
+		await tick(POLL_MS * 3, handle);
 
 		expect((await readWorkerEntry(harness))?.status).toBe("closed");
 		expect(harness.notices).toEqual([]);
@@ -610,7 +659,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		expect(registered?.heartbeatAt).toBe(new Date(T0).toISOString());
 
 		harness.clock.ms = T0 + HEARTBEAT_MS;
-		await tick(HEARTBEAT_MS);
+		await tick(HEARTBEAT_MS, handle);
 		const heartbeated = await awaitState(
 			() => readEntry(harness.agentDir, entryId),
 			(entry) => entry?.heartbeatAt === new Date(T0 + HEARTBEAT_MS).toISOString(),
@@ -638,7 +687,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, newer);
 
 		harness.clock.ms = T0 + HEARTBEAT_MS;
-		await tick(HEARTBEAT_MS);
+		await tick(HEARTBEAT_MS, handle);
 		await awaitState(
 			async () => harness.diagnostics,
 			(diagnostics) => diagnostics.some((message) => message.includes("ownership moved")),

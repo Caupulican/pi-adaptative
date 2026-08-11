@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reduced tool-failure context sanitization allocations by retaining only the latest successful operation and payload during supersession.
+
 ## [0.88.0] - 2026-08-11
 
 ## [0.87.0] - 2026-08-11

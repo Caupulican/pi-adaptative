@@ -78,7 +78,7 @@ describe("automatic platform shell contract", () => {
 		const tool = createBashToolDefinition(process.cwd(), options);
 		expect(tool.name).toBe("bash");
 		expect(tool.description).toContain("stable Bash-like command contract");
-		expect(tool.promptSnippet).toContain("routes them deterministically");
+		expect(tool.promptSnippet).toBe("Run Bash-like commands; Pi routes Windows.");
 		expect((tool.promptGuidelines ?? []).join("\n")).toContain("never write PowerShell");
 
 		const result = await tool.execute(

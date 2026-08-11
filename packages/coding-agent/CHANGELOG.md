@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Kept the Windows Bash tool schema within the provider-context budget without removing its routing contract.
+- Made process-matrix watcher ticks expose their asynchronous completion to deterministic timer drivers.
+
 ## [0.88.0] - 2026-08-11
 
 ## [0.87.0] - 2026-08-11

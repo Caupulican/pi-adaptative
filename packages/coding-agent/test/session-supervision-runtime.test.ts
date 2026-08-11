@@ -84,7 +84,7 @@ describe("SessionSupervisionRuntime", () => {
 		expect(stopSettled).toBe(false);
 
 		worktree.resolve({ stop: stopWorktree });
-		processMatrix.resolve({ stop: stopProcessMatrix });
+		processMatrix.resolve({ stop: stopProcessMatrix, waitForIdle: async () => {} });
 		await Promise.all([start, stop]);
 
 		expect(stopWorktree).toHaveBeenCalledOnce();
@@ -108,7 +108,10 @@ describe("SessionSupervisionRuntime", () => {
 		});
 		const stopProcessMatrix = vi.fn(() => processStop.promise);
 		runtimeMocks.startWorktreeSyncRuntime.mockResolvedValueOnce({ stop: stopWorktree });
-		runtimeMocks.startProcessMatrixRuntime.mockResolvedValueOnce({ stop: stopProcessMatrix });
+		runtimeMocks.startProcessMatrixRuntime.mockResolvedValueOnce({
+			stop: stopProcessMatrix,
+			waitForIdle: async () => {},
+		});
 
 		const supervision = createSupervision();
 		await supervision.start(createSession());

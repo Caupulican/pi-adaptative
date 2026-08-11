@@ -462,7 +462,7 @@ function createShellToolDefinition(
 		label: toolName,
 		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
 		promptSnippet: routesWindowsContract
-			? "Execute Bash-like commands; Pi routes them deterministically to PowerShell or a bundled Python engine on Windows"
+			? "Run Bash-like commands; Pi routes Windows."
 			: "Execute Bash commands (ls, grep, find, etc.)",
 		promptGuidelines: routesWindowsContract
 			? [
