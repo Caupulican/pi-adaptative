@@ -7,6 +7,31 @@ import {
 } from "../src/tool-failure-memory.ts";
 import type { AgentMessage, AgentToolCall } from "../src/types.ts";
 
+type CpuSampler = (operation: () => void) => number;
+
+const MIN_STABLE_CPU_SAMPLE_MICROS = 100_000;
+const MAX_CPU_SAMPLE_REPETITIONS = 4096;
+const median = (values: number[]) => values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
+const measureCpuMicros: CpuSampler = (operation) => {
+	const start = process.cpuUsage();
+	operation();
+	const elapsed = process.cpuUsage(start);
+	return elapsed.user + elapsed.system;
+};
+const measureStableCpuMicros = (operation: () => void, sampleCpu: CpuSampler = measureCpuMicros) => {
+	for (let repetitions = 1; repetitions <= MAX_CPU_SAMPLE_REPETITIONS; repetitions *= 2) {
+		const elapsed = sampleCpu(() => {
+			for (let run = 0; run < repetitions; run++) operation();
+		});
+		// Windows process CPU accounting advances in coarse quanta. Accumulate enough work to
+		// keep a zero-tick sample from becoming the denominator of a complexity ratio.
+		if (elapsed >= MIN_STABLE_CPU_SAMPLE_MICROS) return elapsed / repetitions;
+	}
+	throw new Error(
+		`CPU clock did not produce a stable ${MIN_STABLE_CPU_SAMPLE_MICROS}µs sample within ${MAX_CPU_SAMPLE_REPETITIONS} repetitions`,
+	);
+};
+
 function buildSyntheticTurn(
 	callId: string,
 	toolName: string,
@@ -123,16 +148,40 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 		});
 	});
 
-	describe("50k to 1 Million Token Scale Benchmarks (Hard Latency & Memory Gate)", () => {
-		const median = (values: number[]) =>
-			values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
-		const measureCpuMicros = (operation: () => void) => {
-			const start = process.cpuUsage();
-			operation();
-			const elapsed = process.cpuUsage(start);
-			return elapsed.user + elapsed.system;
-		};
+	describe("cross-platform CPU benchmark sampling", () => {
+		it("accumulates quantized CPU samples until the clock has a stable denominator", () => {
+			const quantizedSamples = [0, 31_000, 62_000, 124_000];
+			let operationRuns = 0;
 
+			const elapsedPerRun = measureStableCpuMicros(
+				() => operationRuns++,
+				(operation) => {
+					operation();
+					return quantizedSamples.shift() ?? 124_000;
+				},
+			);
+
+			expect(elapsedPerRun).toBe(15_500);
+			expect(operationRuns).toBe(15);
+		});
+
+		it("keeps a precise one-pass CPU sample unchanged", () => {
+			let operationRuns = 0;
+
+			const elapsedPerRun = measureStableCpuMicros(
+				() => operationRuns++,
+				(operation) => {
+					operation();
+					return 125_000;
+				},
+			);
+
+			expect(elapsedPerRun).toBe(125_000);
+			expect(operationRuns).toBe(1);
+		});
+	});
+
+	describe("50k to 1 Million Token Scale Benchmarks (Hard Latency & Memory Gate)", () => {
 		it("processes a 50k token context trajectory efficiently", () => {
 			const messageCount = 500; // ~50k tokens of synthetic history
 			const payloadBlock = "X".repeat(500); // 500 chars per result
@@ -169,7 +218,7 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			const durations: number[] = [];
 			for (let sample = 0; sample < 5; sample++) {
 				durations.push(
-					measureCpuMicros(() => {
+					measureStableCpuMicros(() => {
 						sanitized = sanitizeToolFailureContext(messages, "Base prompt");
 					}),
 				);
@@ -198,7 +247,7 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			const largeSuite = generateTrajectory(2000); // N = 2000 (4x)
 
 			const measureBatchCpuMicros = (messages: AgentMessage[]) =>
-				measureCpuMicros(() => {
+				measureStableCpuMicros(() => {
 					for (let pass = 0; pass < 4; pass++) sanitizeToolFailureContext(messages, "base");
 				});
 
