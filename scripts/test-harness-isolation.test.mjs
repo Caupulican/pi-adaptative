@@ -260,12 +260,15 @@ test("the mandatory root check owns the isolated release-test harness contract",
 test("the release command runs the full isolated suite before version mutation", () => {
 	const source = readFileSync(releasePath, "utf8");
 	const fullSuiteCall = 'run("./test.sh");';
+	const executableFullSuiteCall = /^\s*run\("\.\/test\.sh"\);\s*$/m;
 	const cleanWorktreeCheck = 'const status = run("git status --porcelain", { silent: true });';
 	const versionMutation = "const version = bumpOrSetVersion(RELEASE_TARGET);";
 
 	assert.equal(source.split(fullSuiteCall).length - 1, 1, "release must own exactly one full-suite invocation");
-	assert.ok(source.indexOf(cleanWorktreeCheck) < source.indexOf(fullSuiteCall), "cleanliness must be checked first");
-	assert.ok(source.indexOf(fullSuiteCall) < source.indexOf(versionMutation), "tests must precede version mutation");
+	assert.match(source, executableFullSuiteCall, "the full-suite invocation must be executable, not commented out");
+	const fullSuiteCallIndex = source.search(executableFullSuiteCall);
+	assert.ok(source.indexOf(cleanWorktreeCheck) < fullSuiteCallIndex, "cleanliness must be checked first");
+	assert.ok(fullSuiteCallIndex < source.indexOf(versionMutation), "tests must precede version mutation");
 });
 
 test(
