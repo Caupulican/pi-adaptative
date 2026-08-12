@@ -1018,6 +1018,7 @@ export class RuntimeBuilder {
 					startWorkerDelegation: (args) => this.deps.startWorkerDelegation(args),
 					runWorkerDelegation: (args) => this.deps.runWorkerDelegationOnce(args),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
+					workerModelPinPolicy: settingsManager.getWorkerModelPinPolicy(),
 					...(workerAgentControl ? { workerAgentControl } : {}),
 					status: {
 						getLaneRecords: () => this.deps.getWorkerLaneRecords(),

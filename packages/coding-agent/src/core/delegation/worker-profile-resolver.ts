@@ -25,6 +25,13 @@ export interface ResolvedWorkerProfile {
 	soul?: string;
 }
 
+export interface ResolvedWorkerProfilePreset {
+	profile: OrchestrationProfile;
+	/** Metadata-only pointers admitted from the profile-linked resource configuration. */
+	resourcePointers: readonly ResourcePointer[];
+	soul?: string;
+}
+
 export interface WorkerProfileResolverOptions {
 	agentDir: string;
 	cwd: string;
@@ -62,12 +69,20 @@ export class WorkerProfileResolver {
 		request: WorkerDelegationRequest,
 		defaultProfileId: string | undefined,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
+		const preset = this.resolvePreset(request, defaultProfileId);
+		return preset.ok ? this.bindPreset(preset.resolved) : preset;
+	}
+
+	resolvePreset(
+		request: WorkerDelegationRequest,
+		defaultProfileId: string | undefined,
+	): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string } {
 		const requestedProfileId = request.profileId?.trim();
 		// Profiles are routing presets, not authority cages. Any loaded preset may be selected; the
 		// execution controller independently intersects its materialized plan with inherited authority.
 		const profileId = requestedProfileId || defaultProfileId;
 		if (!profileId) return { ok: false, reason: "orchestration_profile_required" };
-		const selected = this.resolveProfileId(profileId);
+		const selected = this.resolveProfilePresetId(profileId);
 		if (!selected.ok) return selected;
 		const profile = selected.resolved.profile;
 		if (request.verificationOfTaskId && profile.role !== "verifier") {
@@ -82,15 +97,56 @@ export class WorkerProfileResolver {
 	resolveVerifier(
 		workerProfile: OrchestrationProfile,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
+		const preset = this.resolveVerifierPreset(workerProfile);
+		return preset.ok ? this.bindPreset(preset.resolved) : preset;
+	}
+
+	resolveVerifierPreset(
+		workerProfile: OrchestrationProfile,
+	): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string } {
 		if (!workerProfile.requireIndependentVerification || !workerProfile.verificationProfileId) {
 			return { ok: false, reason: "independent_verifier_not_configured" };
 		}
-		const selected = this.resolveProfileId(workerProfile.verificationProfileId);
+		const selected = this.resolveProfilePresetId(workerProfile.verificationProfileId);
 		if (!selected.ok) return selected;
 		if (selected.resolved.profile.role !== "verifier") {
 			return { ok: false, reason: "verification_profile_role_mismatch" };
 		}
 		return selected;
+	}
+
+	bindPreset(
+		preset: ResolvedWorkerProfilePreset,
+		modelPin?: OrchestrationModelBinding,
+	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
+		const resolvedModel = modelPin
+			? resolvePinnedOrchestrationModel(modelPin, this.options.getModelRegistry(), (model) =>
+					this.options.isModelExhausted(model),
+				)
+			: resolveConfiguredOrchestrationModel(preset.profile, this.options.getModelRegistry(), (model) =>
+					this.options.isModelExhausted(model),
+				);
+		if (!resolvedModel) {
+			return {
+				ok: false,
+				reason: modelPin ? "orchestration_model_unavailable" : "orchestration_profile_model_unavailable",
+			};
+		}
+		return {
+			ok: true,
+			resolved: {
+				model: resolvedModel.model,
+				modelBinding: resolvedModel.binding,
+				profile: modelPin
+					? {
+							...structuredClone(preset.profile),
+							modelPolicy: { mode: "fixed", candidates: [resolvedModel.binding] },
+						}
+					: structuredClone(preset.profile),
+				resourcePointers: structuredClone(preset.resourcePointers),
+				...(preset.soul ? { soul: preset.soul } : {}),
+			},
+		};
 	}
 
 	resolveContract(
@@ -116,16 +172,12 @@ export class WorkerProfileResolver {
 		};
 	}
 
-	private resolveProfileId(
+	private resolveProfilePresetId(
 		profileId: string,
 		loaded: LoadedWorkerProfiles = this.loadProfiles(),
-	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
+	): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string } {
 		const profile = loaded.registry.get(profileId);
 		if (!profile) return { ok: false, reason: "orchestration_profile_not_found" };
-		const resolvedModel = resolveConfiguredOrchestrationModel(profile, this.options.getModelRegistry(), (model) =>
-			this.options.isModelExhausted(model),
-		);
-		if (!resolvedModel) return { ok: false, reason: "orchestration_profile_model_unavailable" };
 		const linkedProfiles = profile.resourceProfileNames.map((name) =>
 			this.options.getSettingsManager().getProfileRegistry().getProfile(name),
 		);
@@ -146,9 +198,7 @@ export class WorkerProfileResolver {
 		return {
 			ok: true,
 			resolved: {
-				model: resolvedModel.model,
-				modelBinding: resolvedModel.binding,
-				profile,
+				profile: structuredClone(profile),
 				resourcePointers,
 				...(soul ? { soul } : {}),
 			},

@@ -19,10 +19,12 @@ import {
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	ORCHESTRATION_THINKING_LEVELS,
+	type OrchestrationThinkingLevel,
 	WORKER_ROLES,
 } from "../orchestration/contracts.ts";
 import { createRiskBudgetSchema } from "../orchestration/risk-budget.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
+import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import {
 	DELEGATE_STATUS_ACTIONS,
 	type DelegateStatusDependencies,
@@ -384,6 +386,8 @@ export interface DelegateDispatchToolDetails {
 	agentIdsOmitted?: number;
 	skipReason?: string;
 	profileId?: string;
+	modelRef?: string;
+	thinkingLevel?: OrchestrationThinkingLevel;
 	laneId?: string;
 	label?: string;
 	status?: LaneRecord["status"];
@@ -428,6 +432,8 @@ export interface DelegateToolDependencies {
 	) => { started: false; skipReason: string } | { started: true; record: LaneRecord };
 	runWorkerDelegation: (args: WorkerDelegationRequest) => Promise<DelegateRunOutcome>;
 	orchestrationProfiles?: readonly { profileId: string; role: string; description: string }[];
+	/** Active owner settings only; omitted/absent preserves the existing lean prompt verbatim. */
+	workerModelPinPolicy?: WorkerModelPinPolicy;
 	workerAgentControl?: WorkerAgentControlPort;
 	/** Root-only bounded lane inspection and durable mutation-review acknowledgement. */
 	status?: DelegateStatusDependencies;
@@ -520,6 +526,8 @@ function delegatePanelModel(details: DelegateToolDetails | undefined): Orchestra
 	const rowStatus: OrchestrationRowStatus = laneStatus;
 	const meta = [
 		details.profileId ? `profile ${details.profileId}` : undefined,
+		details.modelRef ? `model ${details.modelRef}` : undefined,
+		details.thinkingLevel ? `thinking ${details.thinkingLevel}` : undefined,
 		details.reasonCode,
 		details.accepted === undefined ? undefined : details.accepted ? "accepted" : "not accepted",
 		details.costUsd === undefined ? undefined : `$${details.costUsd.toFixed(4)}`,
@@ -596,6 +604,14 @@ function orchestrationProfileGuidelines(
 		...entries,
 		...(omitted > 0 ? [`${omitted} omitted; inspect owner profile catalog.`] : []),
 	];
+}
+
+function workerModelPinAuthorityGuideline(policy: WorkerModelPinPolicy | undefined): string | undefined {
+	if (!policy || policy.status === "absent") return undefined;
+	if (policy.status === "invalid") {
+		return "CAVEMAN MODE - MANDATORY: invalid pins block fresh starts. Never retry; report the configuration error.";
+	}
+	return "CAVEMAN MODE - MANDATORY: pins win fresh model/thinking. Choose role; never evade/retry; start reports binding.";
 }
 
 function normalizeDelegateCaller(value: unknown): DelegateCaller {
@@ -802,6 +818,12 @@ function workerTaskSessionJson(view: ReturnType<WorkerAgentControlPort["getWorke
 }
 
 function delegateStartSkipText(reason: string): string {
+	if (reason === "worker_model_pins_invalid") {
+		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_model_pins_invalid is an owner configuration error. Fresh workers are blocked. Do not retry, remove authority fields, or select a fallback; report that the user must repair workerDelegation.modelPins.";
+	}
+	if (reason.includes("worker_model_pin_unavailable:")) {
+		return `delegate not started: CAVEMAN MODE - MANDATORY: ${reason} means the owner-pinned model cannot be used. Fail closed. Do not retry another model, omit fields, or fall back; report the exact role and let the user repair availability or configuration.`;
+	}
 	if (reason === "orchestration_profile_not_found") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: orchestration_profile_not_found is expected routing policy, not harness failure. Retry once with profileId omitted to use adaptive authority, or use an exact listed profile; never invent profile IDs.";
 	}
@@ -827,6 +849,15 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 	const caller = normalizeDelegateCaller(deps.caller);
 	const isAsyncWiring = deps.startWorkerDelegation !== undefined;
 	const profileGuidelines = orchestrationProfileGuidelines(deps.orchestrationProfiles);
+	const modelPinAuthorityGuideline = workerModelPinAuthorityGuideline(deps.workerModelPinPolicy);
+	const basePromptGuidelines = isAsyncWiring
+		? ASYNC_DELEGATE_PROMPT_GUIDELINES
+		: SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES;
+	const promptGuidelines = modelPinAuthorityGuideline
+		? basePromptGuidelines.map((guideline) =>
+				guideline.startsWith("authority selects model/") ? modelPinAuthorityGuideline : guideline,
+			)
+		: basePromptGuidelines;
 	const availableActions = availableDelegateActions(caller, deps);
 	const unifiedActionDescription = [
 		availableActions.includes("status") ? "status inspects bounded claims; review acknowledges mutations" : undefined,
@@ -841,10 +872,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		label: "delegate",
 		description: `${isAsyncWiring ? ASYNC_DELEGATE_DESCRIPTION : SYNCHRONOUS_DELEGATE_DESCRIPTION}${unifiedActionDescription ? ` ${unifiedActionDescription}.` : ""}`,
 		promptSnippet: "Coordinate persistent workers with bounded authority.",
-		promptGuidelines: [
-			...profileGuidelines,
-			...(isAsyncWiring ? ASYNC_DELEGATE_PROMPT_GUIDELINES : SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES),
-		],
+		promptGuidelines: [...profileGuidelines, ...promptGuidelines],
 		parameters: createDelegateSchema(availableActions),
 		renderShell: "self",
 		renderCall() {
@@ -1647,11 +1675,14 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						followed.record.status === "queued" ||
 						followed.record.status === "running";
 					const acceptanceState = followed.skipReason ?? (followed.started ? "started" : "wake pending");
+					const effectiveBinding = followed.record?.modelRef
+						? `; effective model ${followed.record.modelRef}, thinking ${followed.record.thinkingLevel ?? "unknown"}`
+						: "";
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState})${followed.record?.status === "queued" || followed.record === undefined ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: `worker ${reuseAgentId} durably accepted task message ${followed.messageId} on its persistent context (lane ${followed.record?.laneId ?? "queued"}; ${acceptanceState}${effectiveBinding})${followed.record?.status === "queued" || followed.record === undefined ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
 							},
 						],
 						details: {
@@ -1660,6 +1691,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							agentId: reuseAgentId,
 							laneId: followed.record?.laneId,
 							status: followed.record?.status,
+							modelRef: followed.record?.modelRef,
+							thinkingLevel: followed.record?.thinkingLevel,
 							accepted: true,
 							messageId: followed.messageId,
 							queued,
@@ -1711,7 +1744,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						content: [
 							{
 								type: "text" as const,
-								text: `delegate started (${started.record.status}) — stable agentId ${started.record.laneId}, task laneId ${started.record.laneId}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
+								text: `delegate started (${started.record.status}) — stable agentId ${started.record.laneId}, task laneId ${started.record.laneId}${started.record.modelRef ? `; effective model ${started.record.modelRef}, thinking ${started.record.thinkingLevel ?? "unknown"}` : ""}; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages${started.record.status === "queued" ? `\n${WORKER_QUEUED_CAVEMAN_GUIDANCE}` : ""}`,
 							},
 						],
 						details: {
@@ -1723,6 +1756,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							laneId: started.record.laneId,
 							...(started.record.label ? { label: started.record.label } : {}),
 							status: started.record.status,
+							modelRef: started.record.modelRef,
+							thinkingLevel: started.record.thinkingLevel,
 						},
 					};
 				}
@@ -1743,6 +1778,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				const lines: string[] = [
 					`delegate ${run.record?.status ?? "unknown"}${run.record?.reasonCode ? ` (${run.record.reasonCode})` : ""}`,
 				];
+				if (run.record?.modelRef) {
+					lines.push(
+						`effective model: ${run.record.modelRef}; thinking: ${run.record.thinkingLevel ?? "unknown"}`,
+					);
+				}
 				if (outcome) {
 					lines.push(
 						`accepted: ${outcome.accepted} [${outcome.acceptance.outcome}/${outcome.acceptance.reasonCode}]`,
@@ -1770,6 +1810,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						laneId: run.record?.laneId,
 						label: run.record?.label,
 						status: run.record?.status,
+						modelRef: run.record?.modelRef,
+						thinkingLevel: run.record?.thinkingLevel,
 						reasonCode: run.record?.reasonCode,
 						accepted: outcome?.accepted,
 						costUsd: outcome?.costUsd,

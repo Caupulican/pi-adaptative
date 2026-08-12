@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added optional provider-neutral worker model pins with global-first role/default precedence, immutable fresh-worker and verifier admission, fail-closed validation and availability checks, effective-binding reporting, and zero provider prompt/routing overhead when unconfigured.
+
 ## [0.90.4] - 2026-08-12
 
 ## [0.90.3] - 2026-08-12

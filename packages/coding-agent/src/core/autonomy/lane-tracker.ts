@@ -6,6 +6,8 @@
  * snapshots. Terminal lane records are persisted separately via `session-lane-record.ts`.
  */
 
+import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
+
 export type LaneType = "research" | "worker" | "learning" | "tmux-worker";
 
 export type LaneTerminalStatus =
@@ -27,6 +29,10 @@ export interface LaneRecord {
 	label?: string;
 	/** Owner-authored profile that fixed the worker's model, thinking, tools, and budget. */
 	profileId?: string;
+	/** Effective provider/model admitted into the immutable worker execution contract. */
+	modelRef?: string;
+	/** Effective thinking level admitted with modelRef. */
+	thinkingLevel?: OrchestrationThinkingLevel;
 	reasonCode?: string;
 	startedAt?: string;
 	completedAt?: string;
@@ -53,6 +59,7 @@ const TERMINAL_STATUSES: readonly string[] = [
 	"budget_exhausted",
 ];
 const LANE_STATUSES: readonly string[] = ["queued", "running", ...TERMINAL_STATUSES];
+const ORCHESTRATION_THINKING_LEVEL_SET: ReadonlySet<string> = new Set(ORCHESTRATION_THINKING_LEVELS);
 
 export function isLaneTerminalStatus(value: unknown): value is LaneTerminalStatus {
 	return typeof value === "string" && TERMINAL_STATUSES.includes(value);
@@ -70,6 +77,13 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 	if (typeof record.status !== "string" || !LANE_STATUSES.includes(record.status)) return false;
 	if (!isOptionalString(record.label)) return false;
 	if (!isOptionalString(record.profileId)) return false;
+	if (!isOptionalString(record.modelRef)) return false;
+	if (
+		record.thinkingLevel !== undefined &&
+		(typeof record.thinkingLevel !== "string" || !ORCHESTRATION_THINKING_LEVEL_SET.has(record.thinkingLevel))
+	) {
+		return false;
+	}
 	if (!isOptionalString(record.reasonCode)) return false;
 	if (!isOptionalString(record.startedAt)) return false;
 	if (!isOptionalString(record.completedAt)) return false;

@@ -152,6 +152,36 @@ Pi's native delegation runtime is a durable recursive agent tree. A profile is n
 
 An agent may set `authority` on `delegate` to choose its child's role label, authenticated model, supported reasoning level, semantic capabilities, tools, read/write paths, and budget. Omitted fields inherit from the parent or selected preset. The host validates the request, resolves the concrete model and tools, intersects execution authority with the immutable parent grant and live global switches, then persists the exact result before the child starts. A descendant can specialize or narrow authority but cannot add an execution capability, tool, path, or budget that the parent did not hold. Profile selection also cannot add context: every child resource pointer must fully match an ancestral pointer (ID alone is insufficient), soul text must match exactly, and a verifier stays within its previously admitted ancestral verifier or worker boundary. Roles are descriptive routing and audit labels; the built-in compiler does not impose hidden role ceilings, though an embedding may supply an explicit host ceiling.
 
+`workerDelegation.modelPins` optionally lets the owner fix the provider, model, and thinking level used by each fresh worker role. With no pins, delegation keeps the adaptive behavior above exactly. An applicable pin overrides model/thinking chosen by `authority` or a preset, while role, tools, resources, paths, and budgets still follow normal admission. This applies to fresh top-level workers, fresh nested workers, and mandatory verifiers. The admitted binding is persisted and reported by `delegate start`; queued work, retries, resumes, recovery, and later tasks on a reused `agentId` keep that immutable contract even if settings change.
+
+Pin precedence is deliberately different from ordinary deep-merged settings: global role, global default, trusted local role, trusted local default, then adaptive routing. A global default therefore wins over every project role. Within trusted local settings, the user-level directory overlay wins over the project file at the same role/default tier. Untrusted project settings are ignored. Every binding must contain an exact `provider`, `modelId`, and supported `thinkingLevel`. Malformed pin configuration blocks fresh worker admission with `worker_model_pins_invalid`; an unavailable applicable pin blocks with `worker_model_pin_unavailable:<role>`. Neither condition falls back to another model. Configure pins directly in JSON; `/settings` does not edit them.
+
+```json
+{
+  "workerDelegation": {
+    "modelPins": {
+      "default": {
+        "provider": "openai-codex",
+        "modelId": "gpt-5.6-luna",
+        "thinkingLevel": "high"
+      },
+      "roles": {
+        "explorer": {
+          "provider": "openai-codex",
+          "modelId": "gpt-5.6-terra",
+          "thinkingLevel": "medium"
+        },
+        "verifier": {
+          "provider": "openai-codex",
+          "modelId": "gpt-5.6-terra",
+          "thinkingLevel": "high"
+        }
+      }
+    }
+  }
+}
+```
+
 For a new logical agent, `forkTurns` chooses immutable sanitized birth context: `"none"`, `"all"`, or a positive user-turn count encoded as a string, such as `"3"`. When omitted, an exact same-provider/model top-level worker defaults to `"all"`, while a nested worker defaults to `"none"` so the parent's global orchestration request cannot replace the child's self-contained task. A worker that changes provider or model also defaults to `"none"`, and explicitly requesting inherited turns across that boundary is rejected. Explicit nested `"all"` or count inheritance remains available inside the exact provider/model boundary. The bounded snapshot keeps whole text-only user/complete-assistant turns and a valid compaction checkpoint when needed. It excludes system/developer/custom context, reasoning/commentary, tool protocol and results, mailbox controls, attachments, and incomplete assistant output. A reused `agentId` continues its existing transcript and cannot replace its birth context.
 
 ```json
@@ -211,6 +241,7 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.maxConcurrent` | number | `20` | Global running-agent concurrency inside the fixed fleet and queue bounds |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.writePaths` | string[] | `["."]` | Global envelope for direct child writes; an explicit empty array revokes direct `write`/`edit` |
+| `workerDelegation.modelPins` | object | - | Optional exact `default` and per-role provider/model/thinking bindings for fresh workers; malformed or unavailable applicable pins fail closed |
 
 ### Tool Repair
 

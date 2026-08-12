@@ -74,6 +74,12 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 		status,
 		label,
 		profileId: attempt.dispatch.profileId,
+		...(attempt.dispatch.executionContract
+			? {
+					modelRef: `${attempt.dispatch.executionContract.worker.modelBinding.provider}/${attempt.dispatch.executionContract.worker.modelBinding.modelId}`,
+					thinkingLevel: attempt.dispatch.executionContract.worker.modelBinding.thinkingLevel,
+				}
+			: {}),
 		...(reasonCode ? { reasonCode } : {}),
 		...(attempt.status !== "queued" ? { startedAt: attempt.createdAt } : {}),
 		...(status === "queued" || status === "running"

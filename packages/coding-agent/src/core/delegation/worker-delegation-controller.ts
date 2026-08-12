@@ -29,6 +29,7 @@ import {
 	type OrchestrationProfile,
 	type ResourcePointer,
 	type WorkerExecutionContract,
+	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
@@ -44,6 +45,7 @@ import {
 	createWorkerExecutionContract,
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
+import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
@@ -83,7 +85,11 @@ import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
-import { type ResolvedWorkerProfile, WorkerProfileResolver } from "./worker-profile-resolver.ts";
+import {
+	type ResolvedWorkerProfile,
+	type ResolvedWorkerProfilePreset,
+	WorkerProfileResolver,
+} from "./worker-profile-resolver.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
@@ -619,24 +625,32 @@ export class WorkerDelegationController {
 		return this.getTaskProfileWriter().createTaskProfile(input);
 	}
 
-	private resolveWorkerShipment(
+	private resolveWorkerPreset(
 		request: WorkerDelegationRequest,
 		settings: ResolvedWorkerDelegationSettings,
-	): { ok: true; shipment: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
-		const resolved = this.getWorkerProfileResolver().resolve(request, settings.orchestrationProfile);
-		return resolved.ok ? { ok: true, shipment: resolved.resolved } : { ok: false, skipReason: resolved.reason };
+	): { ok: true; preset: ResolvedWorkerProfilePreset } | { ok: false; skipReason: string } {
+		const resolved = this.getWorkerProfileResolver().resolvePreset(request, settings.orchestrationProfile);
+		return resolved.ok ? { ok: true, preset: resolved.resolved } : { ok: false, skipReason: resolved.reason };
 	}
 
 	private resolveRequiredVerifier(
 		profile: OrchestrationProfile,
+		modelPinPolicy: WorkerModelPinPolicy,
 	): { ok: true; shipment?: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
 		if (!profile.requireIndependentVerification) return { ok: true };
-		const resolved = this.getWorkerProfileResolver().resolveVerifier(profile);
-		if (!resolved.ok) return { ok: false, skipReason: `independent_verifier_unavailable:${resolved.reason}` };
+		const preset = this.getWorkerProfileResolver().resolveVerifierPreset(profile);
+		if (!preset.ok) return { ok: false, skipReason: `independent_verifier_unavailable:${preset.reason}` };
+		const modelPin = resolveWorkerModelPin(modelPinPolicy, "verifier");
+		const resolved = this.getWorkerProfileResolver().bindPreset(preset.resolved, modelPin?.binding);
+		if (!resolved.ok) {
+			const reason = modelPin ? "worker_model_pin_unavailable:verifier" : resolved.reason;
+			return { ok: false, skipReason: `independent_verifier_unavailable:${reason}` };
+		}
 		// Fresh verifier profiles pass through the same shipment admission owner as fresh workers.
 		// Recovery-pinned verifier contracts bypass this path and preserve their immutable grant.
 		const admitted = resolveWorkerAuthority({
 			base: resolved.resolved,
+			...(modelPin ? { modelPin: modelPin.binding } : {}),
 			modelRegistry: this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
 		});
@@ -741,6 +755,12 @@ export class WorkerDelegationController {
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
 		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
+		const modelPinPolicy = pinnedContract
+			? ({ status: "absent" } as const)
+			: this.deps.getSettingsManager().getWorkerModelPinPolicy();
+		if (modelPinPolicy.status === "invalid") {
+			return { ok: false, skipReason: "worker_model_pins_invalid" };
+		}
 		const parentAgent = request.parentAgentId ? this.lifecycle.getAgent(request.parentAgentId) : undefined;
 		if (request.parentAgentId && !parentAgent) {
 			return { ok: false, skipReason: "orchestration_parent_agent_unknown" };
@@ -765,6 +785,7 @@ export class WorkerDelegationController {
 			}
 		}
 		let baseShipment: ResolvedWorkerProfile | undefined;
+		let basePreset: ResolvedWorkerProfilePreset | undefined;
 		if (pinnedContract) {
 			const pinned = this.getWorkerProfileResolver().resolveContract(pinnedContract.worker);
 			if (!pinned.ok) return { ok: false, skipReason: pinned.reason };
@@ -774,20 +795,42 @@ export class WorkerDelegationController {
 			if (!inherited.ok) return { ok: false, skipReason: inherited.reason };
 			baseShipment = inherited.resolved;
 		} else if (request.profileId || settings.orchestrationProfile) {
-			const configured = this.resolveWorkerShipment(request, settings);
+			const configured = this.resolveWorkerPreset(request, settings);
 			if (!configured.ok) return configured;
-			baseShipment = configured.shipment;
+			basePreset = configured.preset;
+		}
+		const effectiveRole: WorkerRole =
+			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? "orchestrator";
+		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole);
+		if (basePreset) {
+			const bound = this.getWorkerProfileResolver().bindPreset(basePreset, modelPin?.binding);
+			if (!bound.ok) {
+				return {
+					ok: false,
+					skipReason: modelPin ? `worker_model_pin_unavailable:${effectiveRole}` : bound.reason,
+				};
+			}
+			baseShipment = bound.resolved;
 		}
 		const adaptive = pinnedContract
 			? { ok: true as const, shipment: baseShipment! }
 			: resolveWorkerAuthority({
 					authority,
 					...(baseShipment ? { base: baseShipment } : {}),
+					...(modelPin ? { modelPin: modelPin.binding } : {}),
 					...(this.deps.getModel() ? { foregroundModel: this.deps.getModel() } : {}),
 					modelRegistry: this.deps.getModelRegistry(),
 					isModelExhausted: (model) => this.deps.isModelExhausted(model),
 				});
-		if (!adaptive.ok) return { ok: false, skipReason: adaptive.reason };
+		if (!adaptive.ok) {
+			return {
+				ok: false,
+				skipReason:
+					modelPin && adaptive.reason === "orchestration_model_unavailable"
+						? `worker_model_pin_unavailable:${effectiveRole}`
+						: adaptive.reason,
+			};
+		}
 		let shipment = adaptive.shipment;
 		if (parentContract) {
 			const narrowed = this.narrowWorkerShipmentContext(shipment, parentContract.worker);
@@ -811,7 +854,7 @@ export class WorkerDelegationController {
 			}
 			verifierShipment = verifier.resolved;
 		} else {
-			const verifier = this.resolveRequiredVerifier(shipment.profile);
+			const verifier = this.resolveRequiredVerifier(shipment.profile, modelPinPolicy);
 			if (!verifier.ok) return verifier;
 			verifierShipment = verifier.shipment;
 		}
@@ -1803,6 +1846,7 @@ export class WorkerDelegationController {
 				startWorkerDelegation: (childRequest) => this.start({ ...childRequest, parentAgentId: agentId }),
 				runWorkerDelegation: (childRequest) => this.runOnce({ ...childRequest, parentAgentId: agentId }),
 				orchestrationProfiles: this.getProfileCatalog(),
+				workerModelPinPolicy: this.deps.getSettingsManager().getWorkerModelPinPolicy(),
 				workerAgentControl: this.agentControl,
 				caller: { kind: "worker", agentId },
 				resolveMessageReplayScope: () => ({

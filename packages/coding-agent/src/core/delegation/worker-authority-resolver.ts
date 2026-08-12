@@ -52,6 +52,7 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 export interface WorkerAuthorityResolutionInput {
 	authority?: WorkerDelegationAuthorityRequest;
 	base?: ResolvedWorkerProfile;
+	modelPin?: OrchestrationModelBinding;
 	foregroundModel?: Model<Api>;
 	modelRegistry: ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
@@ -67,11 +68,13 @@ export type WorkerAuthorityResolution =
 	| { ok: false; reason: string };
 
 function selectModelBinding(
+	modelPin: OrchestrationModelBinding | undefined,
 	authority: WorkerDelegationAuthorityRequest | undefined,
 	base: ResolvedWorkerProfile | undefined,
 	foregroundModel: Model<Api> | undefined,
 	modelRegistry: ModelRegistry,
 ): OrchestrationModelBinding | undefined {
+	if (modelPin) return { ...modelPin };
 	const provider = authority?.model?.provider ?? base?.modelBinding.provider ?? foregroundModel?.provider;
 	const modelId = authority?.model?.modelId ?? base?.modelBinding.modelId ?? foregroundModel?.id;
 	if (!provider || !modelId) return undefined;
@@ -103,9 +106,34 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
 export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): WorkerAuthorityResolution {
 	if (!input.authority && input.base) {
 		const floorFailure = tokenBudgetFloorFailure(input.base.profile.budget.maxTokens);
-		return floorFailure ? { ok: false, reason: floorFailure } : { ok: true, shipment: input.base };
+		if (floorFailure) return { ok: false, reason: floorFailure };
+		if (!input.modelPin) return { ok: true, shipment: input.base };
+		const resolvedModel = resolvePinnedOrchestrationModel(
+			input.modelPin,
+			input.modelRegistry,
+			input.isModelExhausted,
+		);
+		if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };
+		return {
+			ok: true,
+			shipment: {
+				...input.base,
+				model: resolvedModel.model,
+				modelBinding: resolvedModel.binding,
+				profile: {
+					...input.base.profile,
+					modelPolicy: { mode: "fixed", candidates: [resolvedModel.binding] },
+				},
+			},
+		};
 	}
-	const binding = selectModelBinding(input.authority, input.base, input.foregroundModel, input.modelRegistry);
+	const binding = selectModelBinding(
+		input.modelPin,
+		input.authority,
+		input.base,
+		input.foregroundModel,
+		input.modelRegistry,
+	);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
 	if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };

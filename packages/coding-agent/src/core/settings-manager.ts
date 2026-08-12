@@ -25,6 +25,11 @@ import {
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	MAX_WORKER_AUTHORITY_PATHS,
 } from "./orchestration/contracts.ts";
+import {
+	compileWorkerModelPinPolicy,
+	type WorkerModelPinPolicy,
+	type WorkerModelPinsSettings,
+} from "./orchestration/worker-model-pins.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
 import {
 	mergeResourceProfileMap,
@@ -283,9 +288,12 @@ export interface WorkerDelegationSettings {
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	writePaths?: string[]; // default: ["."]; explicit empty array revokes direct write/edit tools
 	maxConcurrent?: number; // default: 20; running-worker concurrency; fixed fleet safety ceilings separately bound depth, children, identities, and queued dispatches
+	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 }
 
-export type ResolvedWorkerDelegationSettings = Required<Omit<WorkerDelegationSettings, "orchestrationProfile">> &
+export type ResolvedWorkerDelegationSettings = Required<
+	Omit<WorkerDelegationSettings, "orchestrationProfile" | "modelPins">
+> &
 	Pick<WorkerDelegationSettings, "orchestrationProfile">;
 
 /** Staleness-propagation policy for worktree-sync; see `core/worktree-sync/codes.ts`. */
@@ -1248,6 +1256,8 @@ export class SettingsManager {
 	private reportWorkerDelegationDiagnostics(scope: SettingsErrorScope, settings: Settings): void {
 		const diagnostics: string[] = [];
 		normalizeWorkerDelegationLayer(settings.workerDelegation, (message) => diagnostics.push(message));
+		const pinPolicy = compileWorkerModelPinPolicy({ [scope]: settings.workerDelegation?.modelPins });
+		if (pinPolicy.status === "invalid") diagnostics.push(...pinPolicy.diagnostics);
 		if (diagnostics.length > 0) {
 			this.recordError(scope, new Error(`Worker delegation settings: ${diagnostics.join("; ")}`));
 		}
@@ -3623,6 +3633,14 @@ export class SettingsManager {
 		return resolved;
 	}
 
+	getWorkerModelPinPolicy(): WorkerModelPinPolicy {
+		return compileWorkerModelPinPolicy({
+			global: this.globalSettings.workerDelegation?.modelPins,
+			project: this.projectSettings.workerDelegation?.modelPins,
+			directoryProfile: this.directoryProfileSettings.workerDelegation?.modelPins,
+		});
+	}
+
 	getActiveOrchestrationProfile(): string | undefined {
 		const profileId = this.settings.activeOrchestrationProfile;
 		return typeof profileId === "string" && profileId.trim().length > 0 ? profileId.trim() : undefined;
@@ -3630,6 +3648,17 @@ export class SettingsManager {
 
 	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope: SettingsScope = "global"): void {
 		const normalizedSettings = normalizeWorkerDelegationLayer(settings) ?? {};
+		const sourceSettings = scope === "project" ? this.projectSettings : this.globalSettings;
+		const existingPins = sourceSettings.workerDelegation?.modelPins;
+		if (Object.hasOwn(settings, "modelPins")) {
+			const policy = compileWorkerModelPinPolicy({ [scope]: settings.modelPins });
+			if (policy.status === "invalid") {
+				throw new Error(`Invalid worker model pin settings: ${policy.diagnostics.join("; ")}`);
+			}
+			if (settings.modelPins !== undefined) normalizedSettings.modelPins = structuredClone(settings.modelPins);
+		} else if (existingPins !== undefined) {
+			normalizedSettings.modelPins = structuredClone(existingPins);
+		}
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
 			projectSettings.workerDelegation = normalizedSettings;

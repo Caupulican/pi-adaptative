@@ -18,6 +18,8 @@ const tool = createDelegateToolDefinition({
 				reasonCode: "worker_completed",
 				label: "Inspect the router",
 				profileId: "fast-reviewer",
+				modelRef: "openai-codex/gpt-5.6-terra",
+				thinkingLevel: "low",
 			},
 			{ laneId: "worker-2", type: "worker", status: "running" },
 			{ laneId: "tmux-worker-1", type: "tmux-worker", status: "succeeded", reasonCode: "worker_completed" },
@@ -51,8 +53,17 @@ describe("delegate status", () => {
 		expect(text).toContain("UNTRUSTED");
 		expect(text).toContain("inspect this");
 		expect(text).toContain("usage-1");
+		expect(text).toContain("effective model: openai-codex/gpt-5.6-terra; thinking: low");
 		expect(result.details).toMatchObject({
-			lanes: [{ laneId: "worker-1", label: "Inspect the router", profileId: "fast-reviewer" }],
+			lanes: [
+				{
+					laneId: "worker-1",
+					label: "Inspect the router",
+					profileId: "fast-reviewer",
+					modelRef: "openai-codex/gpt-5.6-terra",
+					thinkingLevel: "low",
+				},
+			],
 		});
 	});
 

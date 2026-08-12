@@ -20,6 +20,8 @@ export interface DelegateStatusLaneView {
 	laneId: string;
 	label?: string;
 	profileId?: string;
+	modelRef?: string;
+	thinkingLevel?: NonNullable<LaneRecord["thinkingLevel"]>;
 	type: LaneRecord["type"];
 	status: LaneRecord["status"];
 	reasonCode?: string;
@@ -79,6 +81,9 @@ function formattedRecordStatus(record: LaneRecord): string {
 
 function formatRecord(record: LaneRecord, claim: WorkerClaim | undefined): string {
 	const lines = [`${record.laneId}: ${formattedRecordStatus(record)}`];
+	if (record.modelRef) {
+		lines.push(`effective model: ${record.modelRef}; thinking: ${record.thinkingLevel ?? "unknown"}`);
+	}
 	if (record.status === "queued") lines.push(WORKER_QUEUED_CAVEMAN_GUIDANCE);
 	if (record.reasonCode === "worker_blocked") {
 		lines.push(
@@ -107,6 +112,8 @@ function laneView(record: LaneRecord, claim: WorkerClaim | undefined): DelegateS
 		laneId: record.laneId,
 		...(record.label ? { label: record.label } : {}),
 		...(record.profileId ? { profileId: record.profileId } : {}),
+		...(record.modelRef ? { modelRef: record.modelRef } : {}),
+		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel } : {}),
 		type: record.type,
 		status: record.status,
 		...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
@@ -118,6 +125,8 @@ function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusTool
 	const meta = [
 		view.label ? view.laneId : undefined,
 		view.profileId ? `profile ${view.profileId}` : undefined,
+		view.modelRef ? `model ${view.modelRef}` : undefined,
+		view.thinkingLevel ? `thinking ${view.thinkingLevel}` : undefined,
 		view.type === "tmux-worker" ? "tmux" : undefined,
 		view.reasonCode,
 		view.unreviewed ? "review required" : undefined,
