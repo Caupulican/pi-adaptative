@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stabilized CPU scaling benchmarks on Windows hosts with coarse process-time accounting.
+
 ## [0.90.3] - 2026-08-12
 
 ### Fixed
