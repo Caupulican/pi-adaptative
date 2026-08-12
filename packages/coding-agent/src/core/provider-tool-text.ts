@@ -10,16 +10,24 @@ function oneLine(text: string): string {
 		.trim();
 }
 
+function truncateWithEllipsis(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	if (maxChars <= 0) return "";
+	if (maxChars === 1) return "…";
+
+	let end = maxChars - 1;
+	const finalCodeUnit = text.charCodeAt(end - 1);
+	if (finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff) {
+		end -= 1;
+	}
+	return `${text.slice(0, end).trimEnd()}…`;
+}
+
 export function normalizeProviderPromptSnippet(text: string | undefined): string | undefined {
 	if (!text) return undefined;
 	const normalized = oneLine(text);
 	if (normalized.length === 0) return undefined;
-	if (normalized.length > MAX_PROVIDER_TOOL_SNIPPET_CHARS) {
-		throw new Error(
-			`Provider tool snippet exceeds ${MAX_PROVIDER_TOOL_SNIPPET_CHARS} characters (${normalized.length}): ${normalized.slice(0, 48)}`,
-		);
-	}
-	return normalized;
+	return truncateWithEllipsis(normalized, MAX_PROVIDER_TOOL_SNIPPET_CHARS);
 }
 
 export function normalizeProviderPromptGuidelines(guidelines: string[] | undefined): string[] {
@@ -28,19 +36,17 @@ export function normalizeProviderPromptGuidelines(guidelines: string[] | undefin
 	let total = 0;
 	for (const guideline of guidelines) {
 		const normalized = oneLine(guideline);
-		if (normalized.length === 0 || unique.has(normalized)) continue;
-		if (normalized.length > MAX_PROVIDER_TOOL_GUIDELINE_CHARS) {
-			throw new Error(
-				`Provider tool guideline exceeds ${MAX_PROVIDER_TOOL_GUIDELINE_CHARS} characters (${normalized.length}): ${normalized.slice(0, 48)}`,
-			);
-		}
-		total += normalized.length;
-		if (total > MAX_PROVIDER_TOOL_GUIDELINES_CHARS) {
-			throw new Error(
-				`Provider tool guidelines exceed ${MAX_PROVIDER_TOOL_GUIDELINES_CHARS} characters (${total}).`,
-			);
-		}
-		unique.add(normalized);
+		if (normalized.length === 0) continue;
+		const bounded = truncateWithEllipsis(normalized, MAX_PROVIDER_TOOL_GUIDELINE_CHARS);
+		if (unique.has(bounded)) continue;
+
+		const remaining = MAX_PROVIDER_TOOL_GUIDELINES_CHARS - total;
+		if (remaining <= 0) break;
+		const admitted = truncateWithEllipsis(bounded, remaining);
+		if (admitted.length === 0) break;
+		unique.add(admitted);
+		total += admitted.length;
+		if (admitted.length < bounded.length) break;
 	}
 	return Array.from(unique);
 }

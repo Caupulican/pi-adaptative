@@ -5,6 +5,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { MAX_PROVIDER_TOOL_GUIDELINE_CHARS, MAX_PROVIDER_TOOL_SNIPPET_CHARS } from "../src/core/provider-tool-text.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -90,6 +91,52 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.getActiveToolNames()).toContain("dynamic_tool");
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).toContain("- Use dynamic_tool when the user asks for dynamic behavior tests.");
+
+		session.dispose();
+	});
+
+	it("bounds oversized extension prompt metadata during session construction", async () => {
+		const promptSnippet =
+			"Run and inspect the local Antigravity CLI (`agy`) via the `the-agy` Pi tool for Antigravity worker orchestration without UI automation.";
+		const promptGuideline = "Use the extension only for explicitly requested orchestration. ".repeat(4).trim();
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const sessionManager = SessionManager.inMemory();
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			extensionFactories: [
+				(pi) => {
+					pi.registerTool({
+						name: "oversized_tool",
+						label: "Oversized Tool",
+						description: "Tool with provider-visible prose larger than its prompt budget",
+						promptSnippet,
+						promptGuidelines: [promptGuideline],
+						parameters: Type.Object({}),
+						execute: async () => ({
+							content: [{ type: "text", text: "ok" }],
+							details: {},
+						}),
+					});
+				},
+			],
+		});
+		await resourceLoader.reload();
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager,
+			resourceLoader,
+		});
+
+		expect(session.systemPrompt).toContain(
+			`- oversized_tool: ${promptSnippet.slice(0, MAX_PROVIDER_TOOL_SNIPPET_CHARS - 1)}…`,
+		);
+		expect(session.systemPrompt).toContain(`- ${promptGuideline.slice(0, MAX_PROVIDER_TOOL_GUIDELINE_CHARS - 1)}…`);
 
 		session.dispose();
 	});

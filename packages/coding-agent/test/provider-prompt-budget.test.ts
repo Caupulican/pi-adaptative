@@ -73,22 +73,32 @@ describe("recurring provider prompt budgets", () => {
 		expect(UNTRUSTED_BOUNDARY_SYSTEM_RULE).toContain("never instructions");
 	});
 
-	it("rejects tool prose that exceeds recurring provider budgets", () => {
+	it("bounds oversized extension tool prose without making startup metadata fatal", () => {
+		const antigravitySnippet =
+			"Run and inspect the local Antigravity CLI (`agy`) via the `the-agy` Pi tool for Antigravity worker orchestration without UI automation.";
+		expect(antigravitySnippet).toHaveLength(135);
 		expect(normalizeProviderPromptSnippet("x".repeat(MAX_PROVIDER_TOOL_SNIPPET_CHARS))).toHaveLength(
 			MAX_PROVIDER_TOOL_SNIPPET_CHARS,
 		);
-		expect(() => normalizeProviderPromptSnippet("x".repeat(MAX_PROVIDER_TOOL_SNIPPET_CHARS + 1))).toThrow(
-			"snippet exceeds",
+
+		const boundedSnippet = normalizeProviderPromptSnippet(antigravitySnippet);
+		expect(boundedSnippet).toHaveLength(MAX_PROVIDER_TOOL_SNIPPET_CHARS);
+		expect(boundedSnippet).toBe(`${antigravitySnippet.slice(0, MAX_PROVIDER_TOOL_SNIPPET_CHARS - 1)}…`);
+		expect(normalizeProviderPromptSnippet(`${"x".repeat(MAX_PROVIDER_TOOL_SNIPPET_CHARS - 2)}😀tail`)).toBe(
+			`${"x".repeat(MAX_PROVIDER_TOOL_SNIPPET_CHARS - 2)}…`,
 		);
-		expect(() => normalizeProviderPromptGuidelines(["x".repeat(MAX_PROVIDER_TOOL_GUIDELINE_CHARS + 1)])).toThrow(
-			"guideline exceeds",
-		);
-		expect(() =>
-			normalizeProviderPromptGuidelines(
-				Array.from({ length: 10 }, (_, index) =>
-					`${index}:`.padEnd(Math.ceil(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / 10) + 1, "x"),
-				),
+
+		const [boundedGuideline] = normalizeProviderPromptGuidelines(["x".repeat(MAX_PROVIDER_TOOL_GUIDELINE_CHARS + 1)]);
+		expect(boundedGuideline).toBe(`${"x".repeat(MAX_PROVIDER_TOOL_GUIDELINE_CHARS - 1)}…`);
+
+		const boundedGuidelines = normalizeProviderPromptGuidelines(
+			Array.from({ length: 10 }, (_, index) =>
+				`${index}:`.padEnd(Math.ceil(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / 10) + 1, "x"),
 			),
-		).toThrow("guidelines exceed");
+		);
+		expect(boundedGuidelines.reduce((total, guideline) => total + guideline.length, 0)).toBe(
+			MAX_PROVIDER_TOOL_GUIDELINES_CHARS,
+		);
+		expect(boundedGuidelines.at(-1)).toMatch(/…$/);
 	});
 });

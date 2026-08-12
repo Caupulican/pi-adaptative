@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed oversized extension tool prompt snippets and guidelines crashing session startup instead of being bounded for provider-visible context.
+
 ## [0.90.5] - 2026-08-12
 
 ### Added
