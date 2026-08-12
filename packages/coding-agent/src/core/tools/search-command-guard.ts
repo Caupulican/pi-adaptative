@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
 
 export const BROAD_SEARCH_OUTPUT_ROUTE = "route-to-file" as const;
@@ -57,6 +57,9 @@ export interface ShellSearchInvocationScope {
 
 function targetScope(target: string, cwd: string): TargetScope {
 	const normalized = target.trim().replace(/[\\/]+$/u, "") || target.trim();
+	const resolvedCwd = resolve(cwd);
+	const resolvedTarget = resolve(cwd, normalized);
+	const cwdFromTarget = relative(resolvedTarget, resolvedCwd);
 	if (
 		normalized === "/" ||
 		normalized === "\\" ||
@@ -64,7 +67,11 @@ function targetScope(target: string, cwd: string): TargetScope {
 		normalized === "~" ||
 		normalized === "$HOME" ||
 		normalized === "%USERPROFILE%" ||
-		resolve(normalized) === resolve(homedir())
+		resolve(normalized) === resolve(homedir()) ||
+		(cwdFromTarget !== "" &&
+			cwdFromTarget !== ".." &&
+			!cwdFromTarget.startsWith(`..${sep}`) &&
+			!isAbsolute(cwdFromTarget))
 	) {
 		return "global";
 	}
@@ -77,7 +84,7 @@ function targetScope(target: string, cwd: string): TargetScope {
 		normalized === "$PWD" ||
 		normalized === "$(pwd)" ||
 		normalized === "%CD%" ||
-		resolve(cwd, normalized) === resolve(cwd)
+		resolvedTarget === resolvedCwd
 	)
 		return "current";
 	return "narrow";

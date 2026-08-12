@@ -295,7 +295,7 @@ export interface WorkerAgentControlPort {
 		agentId: string,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
-	): Promise<{ status: WorkerAgentActivity }>;
+	): Promise<{ status: WorkerAgentActivity; timedOut: boolean }>;
 	waitForWorkerAgents(
 		agentIds: readonly string[],
 		mode: WorkerAgentWaitMode,

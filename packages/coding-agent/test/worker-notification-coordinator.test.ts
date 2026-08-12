@@ -103,4 +103,35 @@ describe("WorkerNotificationCoordinator", () => {
 		expect(markDurableDelivered).toHaveBeenCalledWith(["notification-status-projection"]);
 		coordinator.dispose();
 	});
+
+	it("keeps partial and blocked handoffs out of the actual failure counter", async () => {
+		vi.useFakeTimers();
+		const records: LaneRecord[] = [
+			{ laneId: "worker-partial", type: "worker", status: "partial" },
+			{ laneId: "worker-blocked", type: "worker", status: "blocked" },
+		];
+		const emitStatus = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => records,
+			emitStatus,
+			notify: async () => undefined,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		for (const record of records) coordinator.recordTerminal(record);
+		await vi.runAllTimersAsync();
+
+		expect(emitStatus).toHaveBeenCalledWith(
+			expect.objectContaining({
+				completedSinceFlush: 0,
+				failedSinceFlush: 0,
+				terminalSinceFlush: [
+					expect.objectContaining({ status: "partial" }),
+					expect.objectContaining({ status: "blocked" }),
+				],
+			}),
+		);
+		coordinator.dispose();
+	});
 });

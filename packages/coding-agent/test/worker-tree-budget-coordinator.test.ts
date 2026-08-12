@@ -201,6 +201,8 @@ describe("WorkerTreeBudgetCoordinator", () => {
 		expect(child.remainingTokens()).toBe(0);
 		await expect(child.reserveProviderBudget(1, "child provider request")).rejects.toMatchObject({
 			field: "maxTokens",
+			status: "budget_exhausted",
+			reasonCode: "worker_tree_token_budget_exhausted",
 		} satisfies Partial<WorkerTreeBudgetExceededError>);
 	});
 
@@ -274,10 +276,15 @@ describe("WorkerTreeBudgetCoordinator", () => {
 	});
 
 	it.each([
-		["maxCostUsd", { maxCostUsd: 1 }, usage({ costUsd: 1 })],
-		["maxToolCalls", { maxToolCalls: 2 }, usage({ toolCalls: 2 })],
-		["maxWallClockMs", { maxWallClockMs: 50 }, usage({ activeWallClockMs: 50 })],
-	] as const)("enforces cumulative %s across the tree", (field, budget, spent) => {
+		["maxCostUsd", { maxCostUsd: 1 }, usage({ costUsd: 1 }), "worker_tree_cost_budget_exhausted"],
+		["maxToolCalls", { maxToolCalls: 2 }, usage({ toolCalls: 2 }), "worker_tree_tool_call_budget_exhausted"],
+		[
+			"maxWallClockMs",
+			{ maxWallClockMs: 50 },
+			usage({ activeWallClockMs: 50 }),
+			"worker_tree_wall_clock_budget_exhausted",
+		],
+	] as const)("enforces cumulative %s across the tree", (field, budget, spent, reasonCode) => {
 		const port = new WorkerTreeBudgetCoordinator().createPort({
 			rootAgentId: "root",
 			attemptId: "attempt-root",
@@ -287,7 +294,11 @@ describe("WorkerTreeBudgetCoordinator", () => {
 		});
 
 		expect(() => port.assertBudgetAvailable("provider request")).toThrowError(
-			expect.objectContaining<Partial<WorkerTreeBudgetExceededError>>({ field }),
+			expect.objectContaining<Partial<WorkerTreeBudgetExceededError>>({
+				field,
+				status: "budget_exhausted",
+				reasonCode,
+			}),
 		);
 	});
 
@@ -309,7 +320,11 @@ describe("WorkerTreeBudgetCoordinator", () => {
 		});
 
 		expect(() => child.assertBudgetAvailable("provider request")).toThrowError(
-			expect.objectContaining<Partial<WorkerTreeBudgetExceededError>>({ field: "maxAttempts" }),
+			expect.objectContaining<Partial<WorkerTreeBudgetExceededError>>({
+				field: "maxAttempts",
+				status: "budget_exhausted",
+				reasonCode: "worker_tree_attempt_budget_exhausted",
+			}),
 		);
 	});
 });

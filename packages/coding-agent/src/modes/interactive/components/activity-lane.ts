@@ -6,7 +6,7 @@ import type { TaskStep, TaskStepsState } from "../../../core/tasks/task-state.ts
 import type { Theme, ThemeColor } from "../theme/theme.ts";
 
 export type ActivityLaneKind = "runtime" | "tool" | "task" | "worker" | "goal" | "queue" | "notice";
-export type ActivityLaneStatus = "active" | "waiting" | "success" | "failure" | "neutral";
+export type ActivityLaneStatus = "active" | "waiting" | "success" | "warning" | "failure" | "neutral";
 
 export interface ActivityLaneItem {
 	id: string;
@@ -46,6 +46,7 @@ const STATUS_COLORS: Record<ActivityLaneStatus, ThemeColor> = {
 	active: "muted",
 	waiting: "warning",
 	success: "success",
+	warning: "warning",
 	failure: "error",
 	neutral: "muted",
 };
@@ -152,6 +153,8 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 		.filter(
 			(record) =>
 				record.status === "succeeded" ||
+				record.status === "partial" ||
+				record.status === "blocked" ||
 				record.status === "failed" ||
 				record.status === "timeout" ||
 				record.status === "budget_exhausted" ||
@@ -164,7 +167,14 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 				label: boundedLabel(
 					`${record.status === "succeeded" ? "Finished" : record.status} · ${record.label ?? record.laneId}`,
 				),
-				status: record.status === "succeeded" ? "success" : record.status === "canceled" ? "neutral" : "failure",
+				status:
+					record.status === "succeeded"
+						? "success"
+						: record.status === "partial" || record.status === "blocked"
+							? "warning"
+							: record.status === "canceled"
+								? "neutral"
+								: "failure",
 			}),
 		);
 	return { active, terminal };
@@ -198,7 +208,7 @@ const PLAN_TEXT_MIN = 24;
 const SLOT_GAP_WIDTH = 2;
 
 function isTerminalStatus(status: ActivityLaneStatus): boolean {
-	return status === "success" || status === "failure" || status === "neutral";
+	return status === "success" || status === "warning" || status === "failure" || status === "neutral";
 }
 
 interface AggregateGroup {

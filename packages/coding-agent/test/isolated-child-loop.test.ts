@@ -230,6 +230,25 @@ describe("isolated child tool loop", () => {
 		}
 	});
 
+	it("returns the final provider error detail to the isolated lane owner", async () => {
+		const harness = await createHarness();
+		try {
+			const errorMessage = "Provider service overloaded; try again later";
+			harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage })]);
+
+			const result = await harness.session.runIsolatedCompletion({
+				systemPrompt: "isolated",
+				messages: [{ role: "user", content: "inspect", timestamp: Date.now() }],
+				tools: [],
+				cacheRetention: "none",
+			});
+
+			expect(result).toMatchObject({ stopReason: "error", errorMessage });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("applies a child-owned context projection before every provider turn while returning raw history", async () => {
 		const harness = await createHarness();
 		try {

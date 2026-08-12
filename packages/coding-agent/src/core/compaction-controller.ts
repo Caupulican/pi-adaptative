@@ -705,7 +705,6 @@ export class CompactionController {
 			frontier.reserveTokens !== settings.reserveTokens ||
 			frontier.keepRecentTokens !== settings.keepRecentTokens ||
 			frontier.triggerPercent !== settings.triggerPercent ||
-			contextTokens < frontier.tokensAfter ||
 			contextTokens >= frontier.retryAtTokens
 		) {
 			this.ineffectiveThresholdFrontier = undefined;

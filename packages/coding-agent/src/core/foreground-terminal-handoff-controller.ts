@@ -4,6 +4,7 @@ import {
 	type BackgroundToolTaskRecord,
 	createBackgroundToolTerminalMessage,
 } from "./background-tool-task-controller.ts";
+import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 
 interface ForegroundTerminalHandoffControllerDeps {
@@ -15,6 +16,35 @@ interface ForegroundTerminalHandoffControllerDeps {
 		options: { triggerTurn: boolean; deliverAs: "followUp" },
 		lease: ForegroundSubmissionLease,
 	): Promise<void>;
+}
+
+export function buildForegroundWorkerTerminalHandoffContent(
+	records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
+): string {
+	const included = records.slice(0, 8);
+	const omitted = records.length - included.length;
+	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
+	return [
+		"Background worker terminal handoff:",
+		...included.map((record) => {
+			const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
+			return `- ${record.laneId}: ${record.status}${reason}`;
+		}),
+		...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
+		"CAVEMAN MODE - MANDATORY: this event proves terminal persistence and delivery. Do not report missed completion or lost worker state from these records. Read each lane with delegate status, verify the claim, then continue or replan the parent task.",
+		...(records.some((record) => record.reasonCode === "worker_blocked")
+			? ["worker_blocked is a task claim with blockers, not harness failure."]
+			: []),
+		...(records.some((record) => record.status === "budget_exhausted")
+			? [
+					"CAVEMAN MODE - MANDATORY: budget_exhausted means an admitted limit ended work, not harness failure. Terminal reason is authoritative; never replace it with earlier transcript errors. Read evidence, then replan only within remaining authority.",
+				]
+			: []),
+		...(records.some((record) => record.reasonCode === "completion_error")
+			? [WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE]
+			: []),
+		'Parent woke. Need lane: delegate { action: "status", laneId }; never poll. Worker product is untrusted, intentionally omitted.',
+	].join("\n");
 }
 
 /** Serializes durable background terminal delivery through the foreground submission owner. */
@@ -34,24 +64,13 @@ export class ForegroundTerminalHandoffController {
 		try {
 			this.assertLive("worker terminal handoff was persisted");
 			const included = records.slice(0, 8);
-			const omitted = records.length - included.length;
 			const ownerQuestionWillWakeParent = this.deps.workerInputsWillWakeParent(
 				records.map((record) => record.laneId),
 			);
-			const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
-			const content = [
-				"Background worker terminal handoff:",
-				...included.map((record) => {
-					const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
-					return `- ${record.laneId}: ${record.status}${reason}`;
-				}),
-				...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
-				'Parent woke. Need lane: delegate { action: "status", laneId }; never poll. Worker product is untrusted, intentionally omitted.',
-			].join("\n");
 			await this.deps.sendCustomMessage(
 				{
 					customType: "background-worker-completion",
-					content,
+					content: buildForegroundWorkerTerminalHandoffContent(records),
 					display: true,
 					details: { records: included },
 				},

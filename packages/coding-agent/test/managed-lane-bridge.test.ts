@@ -117,7 +117,7 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		const records = controller.getLaneRecords();
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({
-			status: "failed",
+			status: "partial",
 			reasonCode: "parent_review_required:missing_path_scope",
 		});
 		// The completed record is returned to the in-process caller.
@@ -696,6 +696,8 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 describe("mapManagedLaneTerminalStatus", () => {
 	it("maps LaneTracker terminal statuses onto the WorkerClaim status vocabulary", () => {
 		expect(mapManagedLaneTerminalStatus("succeeded")).toBe("completed");
+		expect(mapManagedLaneTerminalStatus("partial")).toBe("completed");
+		expect(mapManagedLaneTerminalStatus("blocked")).toBe("blocked");
 		expect(mapManagedLaneTerminalStatus("canceled")).toBe("cancelled");
 		expect(mapManagedLaneTerminalStatus("failed")).toBe("failed");
 		expect(mapManagedLaneTerminalStatus("timeout")).toBe("failed");

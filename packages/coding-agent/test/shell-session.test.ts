@@ -9,6 +9,7 @@ import {
 	type PersistentShellSession,
 	type ShellSessionExecOptions,
 } from "../src/core/tools/shell-session.ts";
+import { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -18,7 +19,7 @@ function pwshAvailable(): boolean {
 		return (
 			spawnSync(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Write-Output ok"], {
 				encoding: "utf-8",
-				timeout: 15_000,
+				timeout: POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 				windowsHide: true,
 			}).status === 0
 		);

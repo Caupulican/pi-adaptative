@@ -1,5 +1,11 @@
 import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
-import { type AgentBindingContract, MAX_ORCHESTRATION_AGENT_BINDINGS } from "../orchestration/contracts.ts";
+import {
+	type AgentBindingContract,
+	MAX_ORCHESTRATION_AGENT_BINDINGS,
+	MAX_ORCHESTRATION_AGENT_DEPTH,
+	MAX_ORCHESTRATION_DIRECT_CHILDREN,
+	type OrchestrationDelegationLimits,
+} from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 
 /**
@@ -10,15 +16,63 @@ export interface WorkerFleetLimits {
 	maxDepth: number;
 	maxAgentsPerSession: number;
 	maxChildrenPerAgent: number;
+	maxNestedAgentsPerSession: number;
 	maxQueuedDispatches: number;
 }
 
 export const DEFAULT_WORKER_FLEET_LIMITS: Readonly<WorkerFleetLimits> = Object.freeze({
-	maxDepth: 8,
+	maxDepth: MAX_ORCHESTRATION_AGENT_DEPTH,
 	maxAgentsPerSession: MAX_ORCHESTRATION_AGENT_BINDINGS,
-	maxChildrenPerAgent: 64,
+	maxChildrenPerAgent: MAX_ORCHESTRATION_DIRECT_CHILDREN,
+	maxNestedAgentsPerSession: MAX_ORCHESTRATION_AGENT_BINDINGS,
 	maxQueuedDispatches: 256,
 });
+
+/** Profile-free workers get one useful nested identity without an open-ended recursive fleet. */
+export const LEAN_WORKER_DELEGATION_LIMITS: Readonly<OrchestrationDelegationLimits> = Object.freeze({
+	maxDepth: 1,
+	maxChildrenPerAgent: 1,
+	maxNestedAgentsPerSession: 1,
+});
+
+/** Materialize an optional profile limit inside the process-independent host safety ceiling. */
+export function resolveWorkerFleetLimits(
+	delegationLimits?: Readonly<OrchestrationDelegationLimits>,
+): Readonly<WorkerFleetLimits> {
+	return {
+		...DEFAULT_WORKER_FLEET_LIMITS,
+		maxDepth: Math.min(
+			delegationLimits?.maxDepth ?? DEFAULT_WORKER_FLEET_LIMITS.maxDepth,
+			MAX_ORCHESTRATION_AGENT_DEPTH,
+		),
+		maxChildrenPerAgent: Math.min(
+			delegationLimits?.maxChildrenPerAgent ?? DEFAULT_WORKER_FLEET_LIMITS.maxChildrenPerAgent,
+			MAX_ORCHESTRATION_DIRECT_CHILDREN,
+		),
+		maxNestedAgentsPerSession: Math.min(
+			delegationLimits?.maxNestedAgentsPerSession ?? DEFAULT_WORKER_FLEET_LIMITS.maxNestedAgentsPerSession,
+			MAX_ORCHESTRATION_AGENT_BINDINGS,
+		),
+	};
+}
+
+/** Descendant routing may preserve or narrow an ancestor's recursive authority, never widen it. */
+export function intersectWorkerDelegationLimits(
+	requested?: Readonly<OrchestrationDelegationLimits>,
+	boundary?: Readonly<OrchestrationDelegationLimits>,
+): OrchestrationDelegationLimits | undefined {
+	if (!requested && !boundary) return undefined;
+	const requestedLimits = resolveWorkerFleetLimits(requested);
+	const boundaryLimits = resolveWorkerFleetLimits(boundary);
+	return {
+		maxDepth: Math.min(requestedLimits.maxDepth, boundaryLimits.maxDepth),
+		maxChildrenPerAgent: Math.min(requestedLimits.maxChildrenPerAgent, boundaryLimits.maxChildrenPerAgent),
+		maxNestedAgentsPerSession: Math.min(
+			requestedLimits.maxNestedAgentsPerSession,
+			boundaryLimits.maxNestedAgentsPerSession,
+		),
+	};
+}
 
 export type NewWorkerAdmission =
 	| { ok: true; depth: number }
@@ -29,6 +83,7 @@ export type NewWorkerAdmission =
 				| "worker_agent_parent_retired"
 				| "worker_agent_depth_limit_reached"
 				| "worker_agent_child_limit_reached"
+				| "worker_agent_nested_session_limit_reached"
 				| "worker_agent_session_limit_reached";
 	  };
 
@@ -136,6 +191,13 @@ export function evaluateNewWorkerAdmission(
 	}
 	if (directChildren >= limits.maxChildrenPerAgent) {
 		return { ok: false, reasonCode: "worker_agent_child_limit_reached" };
+	}
+	let nestedAgents = 0;
+	for (const agent of Object.values(agents)) {
+		if (agent.parentAgentId) nestedAgents += 1;
+	}
+	if (nestedAgents >= limits.maxNestedAgentsPerSession) {
+		return { ok: false, reasonCode: "worker_agent_nested_session_limit_reached" };
 	}
 	return { ok: true, depth };
 }

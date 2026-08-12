@@ -30,7 +30,7 @@ export function resolveManagedLaneTerminalStatus(status: string | undefined): La
 		case "completed":
 			return "succeeded";
 		case "blocked":
-			return "failed";
+			return "blocked";
 		case "dismissed":
 		case "cancelled":
 			return "canceled";
@@ -43,6 +43,10 @@ export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): Worker
 	switch (status) {
 		case "succeeded":
 			return "completed";
+		case "partial":
+			return "completed";
+		case "blocked":
+			return "blocked";
 		case "canceled":
 			return "cancelled";
 		case "failed":

@@ -1,5 +1,36 @@
 ## [Unreleased]
 
+### Fixed
+
+- Removed the implicit `$0.50` and two-minute worker-tree ceilings while preserving explicitly configured global, profile, and inherited budgets.
+- Renewed durable worker leases during long provider and tool waits so active workers can checkpoint and publish terminal handoffs after the original lease expiry, with host-safe intervals for explicitly unbounded leases.
+- Rejected `laneId` on `delegate start` instead of silently discarding it and creating an unexpectedly anonymous worker.
+- Preserved provider-authored `delegate` arguments while sanitizing action-specific dispatch copies so durable worker transcripts cannot diverge after tool execution.
+- Retried provider-neutral isolated worker error completions and retained bounded failure detail for durable recovery instead of flattening them to `model_error`.
+- Suppressed ineffective auto-compaction retries when the next context estimate drifts downward without material growth.
+- Classified recursive ancestor-directory shell searches as broad and exposed the existing bash timeout ceiling in the tool schema so model-generated calls cannot silently request millisecond-style hour-long commands.
+- Kept ordinary fresh delegation lean when budget authority is omitted, exposed explicit per-worker authority ceilings alongside inherited and profile budgets, removed the runtime-only verifier role from the model-facing start contract, restored bounded recursion to the profile-free baseline, and kept that recursion when ordinary worker tools are narrowed unless an explicit capability restriction makes the worker a leaf.
+- Limited profile-free workers to one direct child at depth one through immutable admission state, while preserving broader owner-authored profile limits and preventing descendants from widening an ancestor's limit.
+- Limited the lean profile-free session to one retained nested identity across all root workers so parallel roots cannot each create a duplicate child tree; authored profiles can explicitly raise the session-wide nested limit.
+- Aligned PowerShell discovery with its cold-start availability probe and bounded the native incident-collector test around both PowerShell subprocesses under loaded Windows/WSL hosts.
+- Marked broad-search guard rejections as pre-execution operation feedback so compaction cannot promote a corrected search call into a harness failure.
+- Defaulted nested workers to self-contained birth context so foreground orchestration instructions cannot make a scoped read-only leaf report missing parent authority as a harness failure; explicit same-model inheritance remains available.
+- Marked inherited foreground history as context-only in the mandatory worker system contract so parent-owned orchestration cannot override the latest task envelope or consume nested capacity.
+- Classified queued workers as admitted event-driven work across start, status, and task projections, forbade interrupting healthy workers to force a queue, taught read-only authority narrowing for genuine parallel review, and required cancellation of a superseded queued task after its replacement starts so safety serialization cannot become duplicate execution.
+- Preserved review-pending results as `partial`, project-level blockers as `blocked`, and evidence-classified retries as nonterminal so foreground orchestration does not mistake them for harness failures.
+- Rejected worker self-waits and made child waits yield then reacquire the caller's exact fenced write reservation so queued recursive orchestration can run without concurrent mutation or a parent-created deadlock.
+- Identified depth, direct-child, nested-session, and session identity capacity denials as expected policy outcomes and directed workers to reuse an eligible idle worker instead of misreporting the denial as harness instability.
+- Required parents to drain every paginated child transcript before judging a terminal handoff and added mandatory literal guidance that delivered `worker_blocked` claims are task blockers, not lost worker state or harness failures.
+- Allowed one exact failed shell probe to run again after a successful `edit` or `write` mutation in the same canonical workspace, while keeping policy failures, unrelated workspaces, and untrusted custom adapters isolated.
+- Distinguished explicit-reply inbox waits from worker-completion waits, preserved pre-deadline completion through delayed caller-resource restoration, reported late idle results as completed-after-timeout, required non-timeout idle waits to retrieve durable claims through status or every transcript page, classified suspended workers as durable nonterminal state with host-owned retry guidance, and added mandatory literal timeout and follow-up guidance so waits cannot become false worker stalls or missed-completion diagnoses.
+- Rejected profile-only `task` and top-level `budget` fields on `delegate start` instead of silently dropping a child objective or turning explicitly bounded work into an unbudgeted dispatch; mandatory guidance classifies both as expected API corrections and requires one immediate retry with the value unchanged in `instructions` or `authority.budget`.
+- Preserved attempt-local and worker-tree budget exhaustion as authoritative `budget_exhausted` terminal outcomes instead of flattening bounded denials to generic `completion_error` failures, with mandatory handoff guidance that earlier transient transcript errors cannot replace the terminal cause.
+- Classified an unknown optional worker profile as correctable routing policy, with mandatory guidance to omit `profileId` for adaptive authority or use an exact listed preset instead of reporting harness failure.
+- Classified unavailable optional worker models and presets as correctable routing policy, with mandatory guidance to omit the model/profile selection and inherit adaptive authority instead of reporting harness failure.
+- Classified `agentId` as reuse-only in mandatory guidance and treated an unknown reuse identifier as a side-effect-free API correction rather than lost worker state or harness failure, preserving the instructions and intended authority for one fresh retry.
+- Kept the fully wired root delegate schema and guideline surfaces below the provider startup ceilings while retaining explicit budgets and mandatory caveman task, budget, timeout, reuse, and profile rules.
+- Kept terminal worker execution errors separate from harness health and added mandatory caveman handoff/status guidance that tool timeouts and provider, API, network, WebSocket, fetch, overload, or exhausted-retry failures must not stop healthy siblings unless orchestration state, delivery, or control evidence actually fails.
+
 ## [0.90.2] - 2026-08-11
 
 ## [0.90.1] - 2026-08-11

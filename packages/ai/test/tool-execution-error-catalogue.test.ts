@@ -11,6 +11,7 @@ import {
 describe("tool execution error catalogue", () => {
 	it("has a trigger-class fixture for every catalogue entry", () => {
 		const fixtures: Record<(typeof TOOL_EXECUTION_ERROR_CATALOGUE)[number]["name"], string> = {
+			operationRejected: "PI_TOOL_OPERATION_REJECTED: broad search blocked before execution",
 			commandNotFound: "spawn rg ENOENT",
 			bashNoOutput: "(no output)",
 			bashPosixNotSupported: "POSIX shell scripts are not supported by the Windows shell contract router.",
@@ -51,6 +52,14 @@ describe("tool execution error catalogue", () => {
 	});
 
 	it("assigns deterministic phases and bounded retry actions to common execution failures", () => {
+		expect(
+			getToolExecutionErrorPolicy("PI_TOOL_OPERATION_REJECTED: broad search blocked before execution"),
+		).toMatchObject({
+			name: "operationRejected",
+			phase: "policy",
+			failureCode: "operation_rejected",
+			attemptMemory: "discard",
+		});
 		expect(getToolExecutionErrorPolicy("Command timed out after 30000ms")).toMatchObject({
 			name: "timedOut",
 			phase: "timeout",

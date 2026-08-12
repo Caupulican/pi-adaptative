@@ -165,13 +165,16 @@ describe("mandatory tool failure recovery protocol", () => {
 
 		expect(sanitized.systemPrompt).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
 		expect(sanitized.systemPrompt).toContain("MANDATORY AND NON-NEGOTIABLE");
+		expect(sanitized.systemPrompt).toContain(
+			"CAVEMAN MODE - MANDATORY: blocked/rejected means not executed; never repeat the same call",
+		);
 		expect(sanitized.systemPrompt).toContain("Irrelevant argument changes never recover it");
 		expect(sanitized.systemPrompt).toContain("blocked call preserves tool-result pairing but runs no hook/tool code");
 		expect(sanitized.systemPrompt).toContain('"MUST":true');
 		expect(sanitized.systemPrompt).not.toContain("<mandatory_tool_failure");
 	});
 
-	it("uses one tool-free provider turn to deliver after the recovery circuit opens", async () => {
+	it("uses one tool-free provider turn after replaying an already-open operation circuit", async () => {
 		const schema = Type.Object({ action: Type.String(), project: Type.String() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof schema> = {
@@ -193,9 +196,9 @@ describe("mandatory tool failure recovery protocol", () => {
 				providerTurns++;
 				stream.push({
 					type: "done",
-					reason: providerTurns <= 3 ? "toolUse" : "stop",
+					reason: providerTurns <= 4 ? "toolUse" : "stop",
 					message:
-						providerTurns <= 3
+						providerTurns <= 4
 							? assistantMessage(
 									[
 										{
@@ -238,11 +241,11 @@ describe("mandatory tool failure recovery protocol", () => {
 		);
 
 		expect(executions).toBe(1);
-		expect(providerTurns).toBe(4);
-		expect(providerContexts[3]?.tools).toEqual([]);
-		expect(providerContexts[3]?.systemPrompt).toContain("MANDATORY TOOL FAILURE DELIVERY v1");
-		expect(providerContexts[3]?.systemPrompt).toContain('"diagnostic":"Trello credentials not found."');
-		expect(providerContexts[3]?.systemPrompt).toContain('"required_action":');
+		expect(providerTurns).toBe(5);
+		expect(providerContexts[4]?.tools).toEqual([]);
+		expect(providerContexts[4]?.systemPrompt).toContain("MANDATORY TOOL FAILURE DELIVERY v1");
+		expect(providerContexts[4]?.systemPrompt).toContain('"diagnostic":"Trello credentials not found."');
+		expect(providerContexts[4]?.systemPrompt).toContain('"required_action":');
 		expect(
 			events.some(
 				(event) =>
@@ -251,6 +254,115 @@ describe("mandatory tool failure recovery protocol", () => {
 					event.message.content.some(
 						(block) =>
 							block.type === "text" && block.text.includes("blocked until its credentials are connected"),
+					),
+			),
+		).toBe(true);
+	});
+
+	it("keeps unrelated tools available when one exact operation exhausts recovery", async () => {
+		const trelloSchema = Type.Object({ action: Type.String(), project: Type.String() });
+		const readSchema = Type.Object({ path: Type.String() });
+		let trelloExecutions = 0;
+		let readExecutions = 0;
+		const trelloTool: AgentTool<typeof trelloSchema> = {
+			name: "trello",
+			label: "Trello",
+			description: "Resolve project scope",
+			parameters: trelloSchema,
+			async execute() {
+				trelloExecutions++;
+				throw new Error("Trello credentials not found.");
+			},
+		};
+		const readTool: AgentTool<typeof readSchema> = {
+			name: "read_repo",
+			label: "Read repository",
+			description: "Read repository evidence",
+			parameters: readSchema,
+			async execute() {
+				readExecutions++;
+				return { content: [{ type: "text", text: "repository evidence" }], details: {} };
+			},
+		};
+		const providerContexts: Context[] = [];
+		let providerTurns = 0;
+		const streamFn = (_model: unknown, context: Context) => {
+			providerContexts.push(context);
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				if (providerTurns <= 3) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `trello-${providerTurns}`,
+									name: "trello",
+									arguments: { action: "resolve_project_scope", project: "GrimDex" },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				if (providerTurns === 4) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: "repo-read",
+									name: "read_repo",
+									arguments: { path: "AGENTS.md" },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "continued with repository evidence" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "Audit GrimDex without requiring Trello", timestamp: 1 }],
+				{ systemPrompt: "base", messages: [], tools: [trelloTool, readTool] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(trelloExecutions).toBe(1);
+		expect(readExecutions).toBe(1);
+		expect(providerTurns).toBe(5);
+		expect(providerContexts[3]?.tools?.map((tool) => tool.name)).toEqual(["trello", "read_repo"]);
+		expect(providerContexts[3]?.systemPrompt).not.toContain("MANDATORY TOOL FAILURE DELIVERY");
+		expect(providerContexts[3]?.systemPrompt).toContain("OPERATION CLOSED");
+		expect(providerContexts[3]?.systemPrompt).toContain("not harness failure");
+		expect(providerContexts[3]?.systemPrompt).not.toContain("Stop retrying tools in this run");
+		expect(
+			events.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "toolResult" &&
+					event.message.toolCallId === "trello-3" &&
+					event.message.content.some(
+						(block) =>
+							block.type === "text" && block.text.includes('"failure_code":"operation_recovery_exhausted"'),
 					),
 			),
 		).toBe(true);
@@ -282,7 +394,7 @@ describe("mandatory tool failure recovery protocol", () => {
 						[
 							{
 								type: "toolCall",
-								id: providerTurns === 4 ? "delivery-violation" : `probe-${providerTurns}`,
+								id: providerTurns === 5 ? "delivery-violation" : `probe-${providerTurns}`,
 								name: "probe",
 								arguments: { value: "same" },
 							},
@@ -312,7 +424,7 @@ describe("mandatory tool failure recovery protocol", () => {
 			),
 		);
 
-		expect(providerTurns).toBe(4);
+		expect(providerTurns).toBe(5);
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
 		expect(

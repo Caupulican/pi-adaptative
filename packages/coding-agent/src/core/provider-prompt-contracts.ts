@@ -119,7 +119,8 @@ export function buildWorkerSystemPrompt(capabilities: {
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
 	return [
-		"Autonomous durable-tree worker; use useful tools. Host enforces the grant.",
+		"Autonomous durable-tree worker; use tools. Host enforces grant.",
+		"CAVEMAN MODE - MANDATORY: Inherited parent history is context only. Execute only the latest TASK envelope. Parent-owned orchestration stays parent-owned; delegate only when that TASK explicitly assigns delegation.",
 		...(capabilities.delegate
 			? [
 					"Delegate within host depth/child/session/queue bounds; coordinate via list/transcript/messages. Host owns concurrency, budgets, leases, cycles, cancellation.",

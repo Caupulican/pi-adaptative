@@ -6,6 +6,7 @@ import {
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	ORCHESTRATION_THINKING_LEVELS,
 } from "../orchestration/contracts.ts";
+import { createRiskBudgetSchema } from "../orchestration/risk-budget.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -61,19 +62,7 @@ export function createDelegateProfileParameterSchemas() {
 				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
 			}),
 		),
-		budget: Type.Optional(
-			Type.Object(
-				{
-					maxTokens: Type.Optional(Type.Number({ minimum: 0 })),
-					maxWallClockMs: Type.Optional(Type.Number({ minimum: 0 })),
-					maxCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
-					maxAttempts: Type.Optional(Type.Number({ minimum: 0 })),
-					maxToolCalls: Type.Optional(Type.Number({ minimum: 0 })),
-					requireApprovalAboveCostUsd: Type.Optional(Type.Number({ minimum: 0 })),
-				},
-				{ additionalProperties: false },
-			),
-		),
+		budget: Type.Optional(createRiskBudgetSchema()),
 	};
 }
 

@@ -49,7 +49,14 @@ export type ToolFailureRecoveryGateEffect =
 
 export type ToolFailureRecoveryAdmission =
 	| { kind: "allowed"; reservation?: ToolFailureExecutionReservation }
-	| { kind: "blocked"; record: ToolFailureMemoryRecord; exhausted: boolean; diagnostic?: string };
+	| { kind: "blocked"; record: ToolFailureMemoryRecord; exhausted: false; diagnostic?: string }
+	| {
+			kind: "blocked";
+			record: ToolFailureMemoryRecord;
+			exhausted: true;
+			scope: "operation" | "run";
+			diagnostic?: string;
+	  };
 
 interface FailureRecoveryState {
 	record: ToolFailureMemoryRecord;
@@ -60,6 +67,7 @@ interface FailureRecoveryState {
 	recoveryProbes: number;
 	blockedReplays: number;
 	recoveryAvailable: boolean;
+	operationCircuitOpen: boolean;
 }
 
 interface AvailableRecoveryAction {
@@ -122,6 +130,7 @@ export class ToolFailureRecoveryGate {
 				kind: "blocked",
 				record: stateCapacityHalt.record,
 				exhausted: true,
+				scope: "run",
 				diagnostic: stateCapacityHalt.diagnostic,
 			};
 		}
@@ -136,12 +145,26 @@ export class ToolFailureRecoveryGate {
 				kind: "blocked",
 				record: this.halted.record,
 				exhausted: true,
+				scope: "run",
 				diagnostic: this.halted.diagnostic,
 			};
 		}
 		if (!state) return { kind: "allowed" };
 
 		if (record) state.record = record;
+		if (state.operationCircuitOpen) {
+			if (state.recoveryAvailable && state.recoveryProbes < MAX_RECOVERY_PROBES_PER_OPERATION) {
+				state.operationCircuitOpen = false;
+				state.recoveryAvailable = false;
+				state.recoveryProbes++;
+				state.reservedExecutions++;
+				state.blockedReplays = 0;
+				return { kind: "allowed", reservation: { executionKey } };
+			}
+			const diagnostic = `Run recovery circuit opened after replay of an operation whose local circuit was already open for ${state.record.failureCode}.`;
+			this.halted = { record: state.record, diagnostic };
+			return { kind: "blocked", record: state.record, exhausted: true, scope: "run", diagnostic };
+		}
 		const automaticExecutionLimit =
 			BASE_FAILURE_EXECUTIONS_PER_OPERATION + getToolExecutionUnchangedRetryLimit(state.record.failureCode);
 		if (state.reservedExecutions < automaticExecutionLimit) {
@@ -159,9 +182,9 @@ export class ToolFailureRecoveryGate {
 
 		state.blockedReplays++;
 		if (state.blockedReplays >= MAX_BLOCKED_REPLAYS_PER_FAILURE) {
-			const diagnostic = `Recovery circuit opened after ${state.blockedReplays} blocked replays of ${state.record.failureCode}.`;
-			this.halted = { record: state.record, diagnostic };
-			return { kind: "blocked", record: state.record, exhausted: true, diagnostic };
+			state.operationCircuitOpen = true;
+			const diagnostic = `Operation recovery circuit opened after ${state.blockedReplays} blocked replays of ${state.record.failureCode}.`;
+			return { kind: "blocked", record: state.record, exhausted: true, scope: "operation", diagnostic };
 		}
 		return { kind: "blocked", record: state.record, exhausted: false };
 	}
@@ -216,6 +239,7 @@ export class ToolFailureRecoveryGate {
 			recoveryProbes: 0,
 			blockedReplays: 0,
 			recoveryAvailable: false,
+			operationCircuitOpen: false,
 		};
 		if (this.statesByExecutionKey.size >= MAX_RECOVERY_STATES) {
 			this.halted = {

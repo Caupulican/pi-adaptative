@@ -134,7 +134,7 @@ describe("provider tool projection", () => {
 
 		const projected = projectToolSchemaForProvider(schema) as typeof schema;
 
-		expect(projected.properties.action).toEqual({ type: "string", enum: ["inspect", "apply"] });
+		expect(projected.properties.action).toEqual({ enum: ["inspect", "apply"] });
 		expect(projected.properties.payload.anyOf).toHaveLength(2);
 		expect(projected.properties.payload.anyOf[0]).toMatchObject({ required: ["value"] });
 		expect(projected.properties.payload.anyOf[1]).toMatchObject({ required: ["count"] });

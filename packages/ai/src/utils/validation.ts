@@ -216,7 +216,7 @@ function formatFailureShape(
 		const value = receivedValueAtPath(args, pathSegments);
 		const entry = {
 			path,
-			expectedType: expectedTypeOf(expectedSchema),
+			expectedType: error.keyword === "additionalProperties" ? "forbidden" : expectedTypeOf(expectedSchema),
 			receivedType: receivedTypeOf(value),
 			keyword: error.keyword,
 		};

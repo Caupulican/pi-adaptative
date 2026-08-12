@@ -136,6 +136,9 @@ export const REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE = {
 		"Use prior successful result; continue. Task complete: answer user. Otherwise call different required tool. Never retry unchanged.",
 } as const;
 
+/** Stable marker for a tool-owned guard that rejects one operation before external execution. */
+export const TOOL_OPERATION_REJECTED_MARKER = "PI_TOOL_OPERATION_REJECTED";
+
 interface ToolExecutionErrorCatalogueEntry {
 	name: string;
 	phase: ToolFailurePhase;
@@ -149,6 +152,18 @@ interface ToolExecutionErrorCatalogueEntry {
 }
 
 export const TOOL_EXECUTION_ERROR_CATALOGUE = [
+	{
+		name: "operationRejected",
+		phase: "policy",
+		failureCode: "operation_rejected",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance:
+			"Operation rejected before execution. Follow the diagnostic: correct or narrow the call, or continue independent work. The runtime remains available.",
+		matches(message: string): boolean {
+			return message.includes(TOOL_OPERATION_REJECTED_MARKER);
+		},
+	},
 	{
 		name: "provisioningFailed",
 		phase: "provisioning",

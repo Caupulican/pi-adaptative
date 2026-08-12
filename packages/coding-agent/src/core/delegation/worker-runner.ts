@@ -425,7 +425,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 					summary,
 					...(blocked ? { blockers: completionBlockers } : {}),
 				},
-				laneStatus: blocked ? "failed" : "succeeded",
+				laneStatus: blocked ? "blocked" : "succeeded",
 				reasonCode: blocked
 					? "worker_blocked"
 					: completion.stopReason === "stop"
@@ -554,7 +554,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			request: options.request,
 			cwd: options.cwd,
 			claim,
-			laneStatus: "failed",
+			laneStatus: "blocked",
 			reasonCode: "worker_blocked",
 			costUsd,
 		});

@@ -14,6 +14,8 @@ describe("worker delegation settings", () => {
 
 		const resolved = settingsManager.getWorkerDelegationSettings();
 
+		expect(DEFAULT_WORKER_DELEGATION_MAX_USD).toBe(0);
+		expect(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS).toBe(0);
 		expect(resolved.enabled).toBe(true);
 		expect(resolved.orchestrationProfile).toBeUndefined();
 		expect(resolved.maxUsd).toBe(DEFAULT_WORKER_DELEGATION_MAX_USD);

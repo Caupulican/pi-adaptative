@@ -200,6 +200,57 @@ describe("validateToolArguments", () => {
 		);
 	});
 
+	it("identifies the exact forbidden nested property in validation diagnostics", () => {
+		const tool: Tool = {
+			name: "delegate",
+			description: "Delegate",
+			parameters: Type.Object(
+				{
+					authority: Type.Object(
+						{
+							model: Type.Object(
+								{ provider: Type.String(), modelId: Type.String() },
+								{ additionalProperties: false },
+							),
+							thinkingLevel: Type.Optional(Type.String()),
+						},
+						{ additionalProperties: false },
+					),
+				},
+				{ additionalProperties: false },
+			),
+		};
+		const events: unknown[] = [];
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-nested-extra",
+			name: "delegate",
+			arguments: {
+				authority: {
+					model: { provider: "provider", modelId: "model", thinkingLevel: "high" },
+				},
+			},
+		};
+
+		expect(() => validateToolArguments(tool, toolCall, { telemetry: (event) => events.push(event) })).toThrow(
+			/authority\.model\.thinkingLevel: must not have additional properties/,
+		);
+		expect(events).toMatchObject([
+			{
+				outcome: "bounced",
+				failureShape: [
+					{
+						path: "authority.model.thinkingLevel",
+						expectedType: "forbidden",
+						receivedType: "string",
+						keyword: "additionalProperties",
+					},
+				],
+				errorKeywords: ["additionalProperties"],
+			},
+		]);
+	});
+
 	it("caps oversized expected schema fragments without dropping failing paths", () => {
 		const tool: Tool = {
 			name: "select",

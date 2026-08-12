@@ -15,6 +15,8 @@ export function isManagedWorkerAttempt(attempt: AttemptRuntimeState): boolean {
 function terminalStatus(attempt: AttemptRuntimeState): LaneTerminalStatus {
 	if (attempt.status === "completed") return "succeeded";
 	if (attempt.status === "cancelled") return "canceled";
+	if (attempt.result?.status === "partial") return "partial";
+	if (attempt.result?.status === "blocked") return "blocked";
 	const reasonCode = attempt.result?.reasonCode ?? attempt.reasonCode ?? "";
 	if (reasonCode.includes("budget")) return "budget_exhausted";
 	if (reasonCode.includes("timeout")) return "timeout";

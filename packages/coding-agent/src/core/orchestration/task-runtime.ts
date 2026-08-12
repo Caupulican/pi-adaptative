@@ -69,6 +69,7 @@ import {
 	assertAttemptCheckpointTransition,
 	assertAttemptFinishTransition,
 	assertAttemptGrantTransition,
+	assertAttemptLeaseRenewalTransition,
 	assertAttemptLeaseTransition,
 	assertAttemptStartTransition,
 	assertNotificationTarget,
@@ -635,6 +636,36 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ attemptId, leaseId, fencingToken }),
 		});
 		return structuredClone(this.state.attempts[attemptId]!);
+	}
+
+	renewAttemptLease(attemptId: string, leaseId: string, fencingToken: number, ttlMs: number): AttemptLease {
+		this.refresh();
+		const attempt = this.requireLiveLease(attemptId, leaseId, fencingToken);
+		if (attempt.status !== "leased" && attempt.status !== "running") {
+			throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot renew from '${attempt.status}'.`);
+		}
+		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new DurableTaskRuntimeError("Lease TTL must be positive.");
+		const renewedAtMs = this.now();
+		const expiresAtMs = renewedAtMs + Math.min(ttlMs, MAX_DATE_EPOCH_MS - renewedAtMs);
+		if (expiresAtMs <= Date.parse(attempt.lease!.expiresAt)) return structuredClone(attempt.lease!);
+		const expiresAt = new Date(expiresAtMs).toISOString();
+		assertAttemptLeaseRenewalTransition(
+			this.state,
+			attemptId,
+			attemptId,
+			leaseId,
+			fencingToken,
+			expiresAt,
+			this.nowIso(),
+		);
+		this.commit({
+			type: "attempt.lease_renewed",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-lease-renewed:${leaseId}:${expiresAt}`,
+			payload: toJsonObject({ attemptId, leaseId, fencingToken, expiresAt }),
+		});
+		return structuredClone(this.state.attempts[attemptId]!.lease!);
 	}
 
 	checkpointAttempt(args: {

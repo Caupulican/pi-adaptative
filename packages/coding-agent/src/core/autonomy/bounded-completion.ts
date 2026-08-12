@@ -12,7 +12,23 @@ export interface BoundedCompletion {
 	stopReason: string;
 }
 
-export type BoundedCompletionFailureStatus = "canceled" | "timeout" | "failed";
+export type BoundedCompletionFailureStatus = "canceled" | "timeout" | "failed" | "budget_exhausted";
+
+/**
+ * Typed failure crossing the executor boundary. Policy owners use this instead of forcing the
+ * completion envelope to infer a bounded denial from human-readable error text.
+ */
+export class BoundedCompletionFailureError extends Error {
+	readonly status: BoundedCompletionFailureStatus;
+	readonly reasonCode: string;
+
+	constructor(status: BoundedCompletionFailureStatus, reasonCode: string, message: string) {
+		super(message);
+		this.name = "BoundedCompletionFailureError";
+		this.status = status;
+		this.reasonCode = reasonCode;
+	}
+}
 
 export interface BoundedCompletionOutcome {
 	/** Present when the executor settled; may coexist with `failure` when an abort raced the result. */
@@ -42,6 +58,18 @@ function abortFailure(args: {
 	if (args.externalSignal?.aborted) return { status: "canceled", reasonCode: "external_abort" };
 	if (args.timeoutSignal.aborted) return { status: "timeout", reasonCode: "wall_clock_exceeded" };
 	return { status: "failed", reasonCode: "completion_error" };
+}
+
+function executorFailure(error: unknown): BoundedCompletionOutcome["failure"] {
+	const detail = boundedFailureDetail(error);
+	if (error instanceof BoundedCompletionFailureError) {
+		return {
+			status: error.status,
+			reasonCode: error.reasonCode,
+			...(detail ? { detail } : {}),
+		};
+	}
+	return { status: "failed", reasonCode: "completion_error", ...(detail ? { detail } : {}) };
 }
 
 export async function runBoundedCompletion(args: {
@@ -113,12 +141,11 @@ export async function runBoundedCompletion(args: {
 		}
 
 		if (winner.kind === "error") {
-			const detail = boundedFailureDetail(winner.error);
 			return {
 				failure:
 					args.signal?.aborted || timeoutController.signal.aborted
 						? abortFailure({ externalSignal: args.signal, timeoutSignal: timeoutController.signal })
-						: { status: "failed", reasonCode: "completion_error", ...(detail ? { detail } : {}) },
+						: executorFailure(winner.error),
 			};
 		}
 

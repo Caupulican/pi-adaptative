@@ -207,7 +207,7 @@ function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
 	if (!(settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED)) return "disabled";
 	const maxUsd = settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD;
-	return `enabled ($${maxUsd}/tree)`;
+	return maxUsd > 0 ? `enabled ($${maxUsd}/tree)` : "enabled (unbounded)";
 }
 
 function autoLearnSummary(settings: AutoLearnSettings): string {

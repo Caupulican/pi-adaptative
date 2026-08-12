@@ -24,6 +24,7 @@ describe("orchestration panel", () => {
 				rows: [
 					{ status: "running", label: "implementer", section: "Agents", meta: ["profile fast-worker"] },
 					{ status: "queued", label: "verifier", section: "Agents" },
+					{ status: "partial", label: "review pending", section: "Agents" },
 				],
 				notices: [{ status: "warning", text: "1 mutation awaiting parent review." }],
 			},
@@ -36,6 +37,7 @@ describe("orchestration panel", () => {
 		expect(text).toContain("Agents");
 		expect(text).toContain("● implementer");
 		expect(text).toContain("◌ verifier");
+		expect(text).toContain("! review pending");
 		expect(text).toContain("awaiting parent review");
 	});
 

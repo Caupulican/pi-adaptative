@@ -22,6 +22,7 @@ import {
 	clearToolFailure,
 	createRepeatedToolFailureResult,
 	createToolFailureMemoryTracker,
+	createToolFailureOperationExhaustedResult,
 	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	getUnresolvedToolFailure,
@@ -1080,12 +1081,21 @@ async function prepareToolCall(
 		const unresolvedRecord = getUnresolvedToolFailure(toolFailureMemory, toolCall.name, validatedArgs);
 		const admission = toolFailureRecoveryGate.admit(tool, validatedArgs, unresolvedRecord);
 		if (admission.kind === "blocked") {
-			const failureCode = admission.exhausted ? "recovery_exhausted" : "repeated_failed_operation";
+			const failureCode = admission.exhausted
+				? admission.scope === "operation"
+					? "operation_recovery_exhausted"
+					: "recovery_exhausted"
+				: "repeated_failed_operation";
 			const result = admission.exhausted
-				? createToolFailureRecoveryExhaustedResult(
-						admission.record,
-						admission.diagnostic ?? "Tool failure recovery budget exhausted.",
-					)
+				? admission.scope === "operation"
+					? createToolFailureOperationExhaustedResult(
+							admission.record,
+							admission.diagnostic ?? "Tool operation recovery budget exhausted.",
+						)
+					: createToolFailureRecoveryExhaustedResult(
+							admission.record,
+							admission.diagnostic ?? "Tool failure recovery budget exhausted.",
+						)
 				: createRepeatedToolFailureResult(admission.record);
 			const memoryRecord = result.details.piToolFailureMemory;
 			toolFailureMemory.set(admission.record.failureKey, memoryRecord);

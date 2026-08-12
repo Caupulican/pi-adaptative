@@ -116,9 +116,8 @@ describe("delegate tool capability description", () => {
 		expect(definition.description).toContain("host scheduler manages bounded depth");
 		expect(definition.description).toContain("Workers are persistent specialists");
 		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
-		expect(definition.description).toContain(
-			"when inherited parent context would mislead the task, also set forkTurns to none",
-		);
+		expect(definition.description).toContain("Nested workers default to their self-contained instructions only");
+		expect(definition.description).toContain("explicitly set forkTurns to all");
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
@@ -136,7 +135,14 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
 		expect(parameters.properties?.profileId?.description).toContain("profile preset");
 		expect(parameters.properties?.authority).toBeDefined();
-		expect((definition.promptGuidelines ?? []).join("\n")).toContain("authority selects model");
+		const promptGuidelines = (definition.promptGuidelines ?? []).join("\n");
+		expect(promptGuidelines).toContain("authority selects model");
+		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: fresh=no agentId");
+		expect(promptGuidelines).toContain("reuse=returned agentId");
+		expect(promptGuidelines).toContain("task=instructions");
+		expect(promptGuidelines).toContain("budget=authority.budget");
+		expect(promptGuidelines).toContain("queued=admitted");
+		expect(promptGuidelines).toContain("parallel read-only=no write/edit");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 

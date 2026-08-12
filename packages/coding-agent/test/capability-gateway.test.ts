@@ -107,6 +107,7 @@ describe("CapabilityGateway", () => {
 
 		await expect(gateway.execute(readManifest, "read", { path: fixture.outside }, invoke)).rejects.toMatchObject({
 			reasonCode: "path_outside_scope",
+			status: "failed",
 		});
 		expect(invoke).not.toHaveBeenCalled();
 	});
@@ -173,6 +174,7 @@ describe("CapabilityGateway", () => {
 
 		await expect(gateway.execute(readManifest, "read", { path: "src/file.ts" }, () => "no")).rejects.toMatchObject({
 			reasonCode: "token_budget_exhausted",
+			status: "budget_exhausted",
 		});
 	});
 

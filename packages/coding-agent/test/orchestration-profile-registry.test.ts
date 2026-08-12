@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+	MAX_ORCHESTRATION_AGENT_DEPTH,
+	MAX_ORCHESTRATION_DIRECT_CHILDREN,
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationProfile,
 	type TaskContract,
@@ -10,6 +12,7 @@ import {
 	OrchestrationProfileError,
 	OrchestrationProfileRegistry,
 	parseOrchestrationDispatchRequest,
+	parseOrchestrationProfile,
 	planProfileDispatch,
 	resolveProfileModel,
 	validateOrchestrationProfile,
@@ -148,6 +151,51 @@ describe("OrchestrationProfileRegistry", () => {
 				},
 			}),
 		).toThrow("executionPolicy is invalid");
+	});
+
+	it("parses bounded recursive delegation authority and rejects host-ceiling expansion", () => {
+		const bounded = profile({
+			delegationLimits: { maxDepth: 2, maxChildrenPerAgent: 3, maxNestedAgentsPerSession: 4 },
+		});
+		expect(parseOrchestrationProfile(bounded).delegationLimits).toEqual({
+			maxDepth: 2,
+			maxChildrenPerAgent: 3,
+			maxNestedAgentsPerSession: 4,
+		});
+		expect(() =>
+			validateOrchestrationProfile(
+				profile({
+					delegationLimits: {
+						maxDepth: MAX_ORCHESTRATION_AGENT_DEPTH + 1,
+						maxChildrenPerAgent: 1,
+					},
+				}),
+			),
+		).toThrow("delegationLimits are invalid");
+		expect(() =>
+			validateOrchestrationProfile(
+				profile({
+					delegationLimits: {
+						maxDepth: 1,
+						maxChildrenPerAgent: MAX_ORCHESTRATION_DIRECT_CHILDREN + 1,
+					},
+				}),
+			),
+		).toThrow("delegationLimits are invalid");
+		expect(() =>
+			validateOrchestrationProfile(profile({ delegationLimits: { maxDepth: 0, maxChildrenPerAgent: 0 } })),
+		).not.toThrow();
+		expect(() =>
+			validateOrchestrationProfile(
+				profile({
+					delegationLimits: {
+						maxDepth: 1,
+						maxChildrenPerAgent: 1,
+						maxNestedAgentsPerSession: 257,
+					},
+				}),
+			),
+		).toThrow("delegationLimits are invalid");
 	});
 
 	it("rejects unknown, duplicated, and capability-unbound profile tools", () => {

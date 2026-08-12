@@ -192,6 +192,43 @@ describe("verifySummary", () => {
 		expect(report.failures.some((failure) => failure.check === "active-task-containment")).toBe(true);
 	});
 
+	it("replaces a reworded conditional task instead of preserving invented intent", () => {
+		const activeTaskSource =
+			"Work for up to one hour, but stop and report immediately if the harness loops, stalls, loses worker state, or misses completion.";
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource,
+		};
+		const reworded = `## Active Task
+Stop and report immediately because the harness failed.
+
+### Mandatory Rules
+(none)
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(reworded, facts);
+
+		expect(filled.verification).toEqual({ ok: true, failures: [] });
+		expect(filled.summary).toContain(`## Active Task\nUser: ${activeTaskSource}\n\n### Mandatory Rules`);
+		expect(filled.summary).not.toContain("because the harness failed");
+	});
+
 	it("weights open-error operation and failure identity independently", () => {
 		const facts: CompactionFacts = {
 			...baseFacts,
@@ -345,24 +382,27 @@ Continue
 
 	it("diff-guards verification thresholds against weakening", () => {
 		expect(FILES_READ_RECALL_THRESHOLD).toBe(0.8);
-		expect(ACTIVE_TASK_CONTAINMENT_THRESHOLD).toBe(0.9);
+		expect(ACTIVE_TASK_CONTAINMENT_THRESHOLD).toBe(1);
 		expect(MANDATORY_RULES_RECALL_THRESHOLD).toBe(0.7);
 		expect(CANCELLED_WORK_DROPPED_THRESHOLD).toBe(0.1);
 		expect(ACTIONS_RECALL_THRESHOLD).toBe(0.6);
 		expect(OPEN_ERRORS_RECALL_THRESHOLD).toBe(0.7);
 	});
 
-	it("short-circuits empty facts to ok", () => {
-		expect(
-			verifySummary("", {
-				files: [],
-				workingSet: [],
-				actions: [],
-				errorFacts: [],
-				prohibitions: [],
-				cancelledText: "",
-				activeTaskSource: "",
-			}),
-		).toEqual({ ok: true, failures: [] });
+	it("still rejects an unparseable checkpoint when deterministic facts are empty", () => {
+		const report = verifySummary("", {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		});
+
+		expect(report.ok).toBe(false);
+		expect(report.failures).toEqual([
+			expect.objectContaining({ check: "summary-structure", comparator: "minimum", score: 0, threshold: 1 }),
+		]);
 	});
 });

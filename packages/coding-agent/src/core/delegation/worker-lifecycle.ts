@@ -226,6 +226,17 @@ export class WorkerLifecycle {
 		return this.ledger.start(attempt.attemptId, leaseTtlMs, ownerId, agentId);
 	}
 
+	renewLease(laneId: string, leaseTtlMs: number) {
+		const attempt = this.requireActiveAttempt(laneId);
+		if (!attempt.lease) throw new Error(`Durable worker '${laneId}' has no live lease.`);
+		return this.ledger.runtime.renewAttemptLease(
+			attempt.attemptId,
+			attempt.lease.leaseId,
+			attempt.lease.fencingToken,
+			leaseTtlMs,
+		);
+	}
+
 	checkpoint(
 		laneId: string,
 		input: {

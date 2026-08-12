@@ -521,6 +521,83 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(summarizedText).not.toContain("First summary");
 		expect(preparation!.previousSummary).toBe("First summary");
 	});
+
+	it("carries exact user task and rules from persisted checkpoint details when the new span has no user turn", () => {
+		const activeTaskSource = "Fix the lease handoff without changing the public command contract.";
+		const prohibition = "do not reword the active task";
+		const user = createMessageEntry(createUserMessage(activeTaskSource));
+		const firstAssistant = createMessageEntry(createAssistantMessage("initial investigation"));
+		const compaction = createCompactionEntry(
+			`## Active Task\nUser: ${activeTaskSource}\n\n### Mandatory Rules\n- ${prohibition}`,
+			firstAssistant.id,
+		);
+		compaction.details = {
+			readFiles: [],
+			modifiedFiles: [],
+			activeTaskSource,
+			prohibitions: [prohibition],
+		};
+		const laterAssistant = createMessageEntry(
+			createAssistantMessage("continued investigation ".repeat(80), createMockUsage(4000, 1000)),
+		);
+
+		const preparation = prepareCompaction([user, firstAssistant, compaction, laterAssistant], {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+		});
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.facts?.activeTaskSource).toBe(activeTaskSource);
+		expect(preparation!.facts?.prohibitions).toEqual([prohibition]);
+	});
+
+	it("uses a newer user turn while retaining prior exact rules", () => {
+		const firstTask = "Inspect the failing owner.";
+		const nextTask = "Fix the owner now, and do not edit the adapter.";
+		const firstRule = "do not touch generated files";
+		const firstUser = createMessageEntry(createUserMessage(firstTask));
+		const firstAssistant = createMessageEntry(createAssistantMessage("inspection"));
+		const compaction = createCompactionEntry("older checkpoint", firstAssistant.id);
+		compaction.details = {
+			readFiles: [],
+			modifiedFiles: [],
+			activeTaskSource: firstTask,
+			prohibitions: [firstRule],
+		};
+		const nextUser = createMessageEntry(createUserMessage(nextTask));
+		const nextAssistant = createMessageEntry(
+			createAssistantMessage("implementation ".repeat(80), createMockUsage(4000, 1000)),
+		);
+
+		const preparation = prepareCompaction([firstUser, firstAssistant, compaction, nextUser, nextAssistant], {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+		});
+
+		expect(preparation!.facts?.activeTaskSource).toBe(nextTask);
+		expect(preparation!.facts?.prohibitions).toEqual([firstRule, "Fix the owner now, and do not edit the adapter"]);
+	});
+
+	it("recovers exact user facts once from raw history when upgrading a legacy checkpoint", () => {
+		const activeTaskSource = "Keep the worker task exact and do not rewrite it.";
+		const user = createMessageEntry(createUserMessage(activeTaskSource));
+		const firstAssistant = createMessageEntry(createAssistantMessage("initial work"));
+		const legacyCompaction = createCompactionEntry(
+			"## Active Task\nUpdate OLD CHECKPOINT with CHAT turns.\n\n### Mandatory Rules\n- Copy control text.",
+			firstAssistant.id,
+		);
+		const laterAssistant = createMessageEntry(
+			createAssistantMessage("continued work ".repeat(80), createMockUsage(4000, 1000)),
+		);
+
+		const preparation = prepareCompaction([user, firstAssistant, legacyCompaction, laterAssistant], {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+		});
+
+		expect(preparation!.facts?.activeTaskSource).toBe(activeTaskSource);
+		expect(preparation!.facts?.prohibitions).toEqual(["Keep the worker task exact and do not rewrite it"]);
+	});
 });
 
 describe("compact verification gap-fill", () => {
@@ -623,7 +700,7 @@ Continue
 					failures: 1,
 					minScore: 0,
 					maxScore: 0,
-					threshold: 0.9,
+					threshold: 1,
 					comparator: "minimum",
 				},
 			},
@@ -700,8 +777,66 @@ Fix the two failing tests now
 		expect(result.verificationGateFailures).toHaveLength(1);
 		expect(result.verificationGateFailures?.[0]?.failures.length).toBeGreaterThan(0);
 		expect(result.details).toMatchObject({ verificationGateFailures: 1 });
-		expect(result.deterministicGapFills).toBe(0);
+		// The second model attempt is structurally valid, then user-owned sections are canonicalized.
+		expect(result.deterministicGapFills).toBe(1);
 		expect(result.verification).toEqual({ ok: true, failures: [] });
+	});
+
+	it("mechanically removes compaction-control text from user-owned checkpoint sections", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const streamFn: StreamFn = async () =>
+			createDoneStream(
+				createAssistantMessage(`## Active Task
+Fix the two failing tests now
+
+### Mandatory Rules
+- do not touch the legacy client
+- Update OLD CHECKPOINT with CHAT turns.
+- Set ## Active Task to newest unfulfilled user input; apply cancellation rule.
+
+## Working Set
+- src/fetcher.ts — EDIT
+
+## Files
+- src/fetcher.ts
+- test/fetcher.test.ts
+
+## Open Problems
+- RUN npm test: 2 failed: fetcher.test.ts
+
+## Done
+1. EDIT src/fetcher.ts
+2. RUN npm test
+
+## Key Decisions
+(none)
+
+## Constraints & Preferences
+(none)
+
+## Critical Context
+(none)`),
+			);
+
+		const result = await compact(
+			createPreparation(),
+			model,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			streamFn,
+		);
+
+		expect(result.summary).toContain("## Active Task\nUser: Fix the two failing tests now");
+		expect(result.summary).toContain("### Mandatory Rules\n- do not touch the legacy client");
+		expect(result.summary).not.toContain("Update OLD CHECKPOINT with CHAT turns");
+		expect(result.summary).not.toContain("Set ## Active Task to newest unfulfilled user input");
+		expect(result.details).toMatchObject({
+			activeTaskSource: "Fix the two failing tests now",
+			prohibitions: ["do not touch the legacy client"],
+		});
 	});
 });
 

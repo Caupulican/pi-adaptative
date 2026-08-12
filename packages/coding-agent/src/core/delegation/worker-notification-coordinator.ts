@@ -1,6 +1,7 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 
 const HANDOFF_TIMEOUT_MS = 1_800_000;
+const FAILED_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["failed", "timeout", "budget_exhausted"]);
 
 export interface WorkerTerminalHandoffRecord {
 	laneId: string;
@@ -120,7 +121,7 @@ export class WorkerNotificationCoordinator {
 			queued,
 			running,
 			completedSinceFlush: terminalSinceFlush.filter((record) => record.status === "succeeded").length,
-			failedSinceFlush: terminalSinceFlush.filter((record) => record.status !== "succeeded").length,
+			failedSinceFlush: terminalSinceFlush.filter((record) => FAILED_TERMINAL_STATUSES.has(record.status)).length,
 			terminalSinceFlush,
 		};
 		try {

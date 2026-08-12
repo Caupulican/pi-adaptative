@@ -75,8 +75,11 @@ import {
 import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
+	intersectWorkerDelegationLimits,
 	pendingVerifierSubjectTaskIds,
+	resolveWorkerFleetLimits,
 } from "./worker-fleet-limits.ts";
+import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
@@ -91,7 +94,10 @@ import {
 	type WorkerTerminalHandoffDelivery,
 } from "./worker-terminal-handoff-coordinator.ts";
 import { collectWorkerTreeBudgetSeeds, WorkerTreeBudgetCoordinator } from "./worker-tree-budget-coordinator.ts";
-import { WorkerWriteReservationCoordinator } from "./worker-write-reservation-coordinator.ts";
+import {
+	WorkerWriteReservationCoordinator,
+	type WorkerWriteReservationWaitYield,
+} from "./worker-write-reservation-coordinator.ts";
 
 export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
 	if (model.provider === "ollama" || model.provider === "transformers" || model.provider === "llama-cpp") {
@@ -217,6 +223,7 @@ export class WorkerDelegationController {
 	private readonly agentControl: WorkerAgentControlCoordinator;
 	private readonly publishedTerminalAttemptIds = new Set<string>();
 	private readonly yieldedCapacityAttemptIds = new Map<string, number>();
+	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
 	private readonly contextForks: WorkerContextForkStore;
 	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
@@ -299,7 +306,9 @@ export class WorkerDelegationController {
 					? this.workerProjectionHeadroomSkipReason(contract)
 					: "orchestration_execution_contract_missing";
 			},
-			yieldCapacity: (callerAgentId, targetAgentId) => this.yieldWorkerCapacity(callerAgentId, targetAgentId),
+			waitBlockedByCaller: (callerAgentId, targetAgentIds) =>
+				this.waitTargetsBlockedByCaller(callerAgentId, targetAgentIds),
+			yieldCallerForWait: (callerAgentId) => this.yieldWorkerForWait(callerAgentId),
 			warn: (message) => this.safeWarn(message),
 		});
 		this.terminalHandoffs = new WorkerTerminalHandoffCoordinator({
@@ -317,7 +326,9 @@ export class WorkerDelegationController {
 			getParentSessionId: () => this.deps.getSessionId(),
 			ownerId: this.agentControl.getProcessOwnerId(),
 			drainQueuedWorkers: () => {
-				if (!this.deps.isDisposed()) this.scheduler.drain(true);
+				if (this.deps.isDisposed()) return;
+				this.scheduler.drain(true);
+				this.agentControl.signalStateChanged();
 			},
 			warn: (message) => this.safeWarn(message),
 		});
@@ -635,9 +646,10 @@ export class WorkerDelegationController {
 	}
 
 	/**
-	 * A descendant may select a different routing profile, but that preset cannot introduce context
-	 * its ancestor never admitted. Pointer ids alone are insufficient authority: retain only pointers
-	 * whose complete immutable metadata matches the ancestral contract, and require exact soul text.
+	 * A descendant may select a different routing profile, but that preset cannot introduce context or
+	 * recursive authority its ancestor never admitted. Pointer ids alone are insufficient authority:
+	 * retain only pointers whose complete immutable metadata matches the ancestral contract, require
+	 * exact soul text, and intersect durable delegation limits.
 	 */
 	private narrowWorkerShipmentContext(
 		shipment: ResolvedWorkerProfile,
@@ -655,10 +667,18 @@ export class WorkerDelegationController {
 		if (shipment.soul !== undefined && shipment.soul !== boundary.soul) {
 			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
 		}
+		const delegationLimits = intersectWorkerDelegationLimits(
+			shipment.profile.delegationLimits,
+			boundary.profile.delegationLimits,
+		);
 		return {
 			ok: true,
 			shipment: {
 				...shipment,
+				profile: {
+					...shipment.profile,
+					...(delegationLimits ? { delegationLimits } : {}),
+				},
 				resourcePointers,
 				...(shipment.soul ? { soul: shipment.soul } : {}),
 			},
@@ -686,10 +706,16 @@ export class WorkerDelegationController {
 
 	/** Reject a new logical identity before creating its task, transcript, agent, or queue entry. */
 	private newWorkerFleetSkipReason(request: WorkerDelegationRequest, requiredAgentSlots = 1): string | undefined {
+		const parentAttempt = request.parentAgentId
+			? this.lifecycle.getLatestAgentAttempt(request.parentAgentId)
+			: undefined;
+		const limits = resolveWorkerFleetLimits(
+			parentAttempt?.dispatch.executionContract?.worker.profile.delegationLimits,
+		);
 		const decision = evaluateNewWorkerAdmission(
 			this.lifecycle.getTaskRuntimeSnapshot().agents,
 			request.parentAgentId,
-			DEFAULT_WORKER_FLEET_LIMITS,
+			limits,
 			requiredAgentSlots,
 		);
 		return decision.ok ? undefined : decision.reasonCode;
@@ -1040,35 +1066,94 @@ export class WorkerDelegationController {
 		for (const attemptId of this.yieldedCapacityAttemptIds.keys()) {
 			const status = snapshot.attempts[attemptId]?.status;
 			if (status === "leased" || status === "running") yielded += 1;
-			else this.yieldedCapacityAttemptIds.delete(attemptId);
+			else {
+				this.yieldedCapacityAttemptIds.delete(attemptId);
+				this.yieldedWriteReservations.delete(attemptId);
+			}
 		}
 		return Math.max(0, this.getWorkerLifecycle().getRunningCount() - yielded) < settings.maxConcurrent;
 	}
 
-	private yieldWorkerCapacity(callerAgentId: string, targetAgentId: string): () => void {
+	private waitTargetsBlockedByCaller(callerAgentId: string, targetAgentIds: readonly string[]): string[] {
 		const caller = this.lifecycle.getAgent(callerAgentId);
-		const target = this.lifecycle.getAgent(targetAgentId);
-		if (!caller || !target || caller.rootAgentId !== target.rootAgentId) return () => undefined;
+		const callerAttempt = caller ? this.lifecycle.getLatestAgentAttempt(caller.agentId) : undefined;
+		if (!callerAttempt || (callerAttempt.status !== "leased" && callerAttempt.status !== "running")) return [];
+		const blockedAgentIds: string[] = [];
+		for (const targetAgentId of targetAgentIds) {
+			const target = this.lifecycle.getAgent(targetAgentId);
+			const targetAttempt = target ? this.lifecycle.getLatestAgentAttempt(target.agentId) : undefined;
+			if (
+				targetAttempt?.status === "queued" &&
+				this.writeReservations.isBlockedBy(targetAttempt.taskId, callerAttempt.taskId)
+			) {
+				blockedAgentIds.push(targetAgentId);
+			}
+		}
+		return blockedAgentIds;
+	}
+
+	private yieldWorkerForWait(callerAgentId: string): () => boolean {
+		const caller = this.lifecycle.getAgent(callerAgentId);
+		if (!caller) return () => true;
 		const attempt = this.lifecycle.getLatestAgentAttempt(caller.agentId);
-		if (!attempt || (attempt.status !== "leased" && attempt.status !== "running")) return () => undefined;
-		this.yieldedCapacityAttemptIds.set(
-			attempt.attemptId,
-			(this.yieldedCapacityAttemptIds.get(attempt.attemptId) ?? 0) + 1,
-		);
-		this.scheduler.drain();
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
+		if (!attempt || (attempt.status !== "leased" && attempt.status !== "running")) return () => true;
+		const existingYields = this.yieldedCapacityAttemptIds.get(attempt.attemptId) ?? 0;
+		if (existingYields === 0 && attempt.lease) {
+			const yieldedReservation = this.writeReservations.yieldForWait(
+				attempt.taskId,
+				attempt.attemptId,
+				attempt.lease.fencingToken,
+			);
+			if (yieldedReservation) this.yieldedWriteReservations.set(attempt.attemptId, yieldedReservation);
+		}
+		this.yieldedCapacityAttemptIds.set(attempt.attemptId, existingYields + 1);
+		let restored = false;
+		const restore = (): boolean => {
+			if (restored) return true;
 			const leases = this.yieldedCapacityAttemptIds.get(attempt.attemptId);
-			if (leases === undefined) return;
+			if (leases === undefined) {
+				restored = true;
+				return true;
+			}
 			if (leases > 1) {
 				this.yieldedCapacityAttemptIds.set(attempt.attemptId, leases - 1);
-				return;
+				restored = true;
+				return true;
+			}
+			const current = this.lifecycle.getLatestAgentAttempt(caller.agentId);
+			if (
+				!this.deps.isDisposed() &&
+				current?.attemptId === attempt.attemptId &&
+				(current.status === "leased" || current.status === "running")
+			) {
+				const yieldedReservation = this.yieldedWriteReservations.get(attempt.attemptId);
+				if (yieldedReservation) {
+					const reservation = this.writeReservations.restoreAfterWait(yieldedReservation);
+					if (reservation.kind === "blocked") return false;
+					if (reservation.kind === "denied") {
+						this.laneAbortControllers.get(attempt.taskId)?.abort(reservation.reasonCode);
+						throw new Error(`Worker wait could not restore its write reservation: ${reservation.reasonCode}.`);
+					}
+				}
 			}
 			this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
-			if (!this.deps.isDisposed()) this.scheduler.drain();
+			this.yieldedWriteReservations.delete(attempt.attemptId);
+			restored = true;
+			if (!this.deps.isDisposed()) this.scheduler.drain(true);
+			return true;
 		};
+		try {
+			this.scheduler.drain(true);
+		} catch (error) {
+			if (!restore()) {
+				throw new AggregateError(
+					[error],
+					"Worker wait dispatch failed before its write reservation could be restored.",
+				);
+			}
+			throw error;
+		}
+		return restore;
 	}
 
 	private workerDispatchAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerDispatchAdmission {
@@ -1154,13 +1239,14 @@ export class WorkerDelegationController {
 		contract: WorkerExecutionContract,
 	): ReturnType<typeof resolveWorkerContextInheritanceMode> {
 		if (request.verificationOfTaskId) return { kind: "none" };
+		const mode = request.forkTurns ?? (request.parentAgentId ? "none" : undefined);
 		return resolveWorkerContextInheritanceMode({
 			parent: this.workerContextParentModel(request),
 			worker: {
 				provider: contract.worker.modelBinding.provider,
 				model: contract.worker.modelBinding.modelId,
 			},
-			...(request.forkTurns !== undefined ? { mode: request.forkTurns } : {}),
+			...(mode !== undefined ? { mode } : {}),
 		});
 	}
 
@@ -1805,6 +1891,16 @@ export class WorkerDelegationController {
 		const laneAbortController = new AbortController();
 		this.laneAbortControllers.set(startedRecord.laneId, laneAbortController);
 		const workerSignal = AbortSignal.any([this.workerAbort.signal, laneAbortController.signal]);
+		const leaseHeartbeat = new WorkerLeaseHeartbeat({
+			leaseTtlMs: immutableProfile.leaseTtlMs,
+			renew: () => {
+				lifecycle.renewLease(startedRecord.laneId, immutableProfile.leaseTtlMs);
+			},
+			onFailure: (error) => {
+				this.safeWarn(`Worker ${startedRecord.laneId} lease renewal failed: ${error.message}`);
+				laneAbortController.abort(error);
+			},
+		});
 
 		// Registered for the lane's full run so the reload gate waits it out; deregistered in the
 		// finally below no matter how this lane terminates (success, disposal, or a thrown error).
@@ -1863,7 +1959,9 @@ export class WorkerDelegationController {
 				request: workerRequest,
 				handle: durableHandle,
 			});
+			leaseHeartbeat.start();
 			const executionResult = await executor.run();
+			leaseHeartbeat.assertHealthy();
 			const rawOutcome = executionResult.rawOutcome;
 			// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
 			// terminalizing, resuming from the persisted transcript under a fresh fence.
@@ -2053,7 +2151,10 @@ export class WorkerDelegationController {
 			this.deps.emit({ type: "warning", message: `Worker delegation failed: ${message}` });
 			return { started: true, record };
 		} finally {
+			leaseHeartbeat.stop();
 			this.writeReservations.release(startedRecord.laneId, durableHandle.attemptId, durableHandle.fencingToken);
+			this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
+			this.yieldedWriteReservations.delete(durableHandle.attemptId);
 			this.inFlightLedgers.delete(startedRecord.laneId);
 			this.laneAbortControllers.delete(startedRecord.laneId);
 			try {

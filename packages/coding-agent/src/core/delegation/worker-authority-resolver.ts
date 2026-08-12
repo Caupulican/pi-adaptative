@@ -13,6 +13,7 @@ import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
 import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
+import { LEAN_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
 /**
@@ -25,7 +26,17 @@ import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
  */
 export const MIN_VIABLE_WORKER_TOKEN_BUDGET = 5_000;
 
-const DEFAULT_TOOL_NAMES = ["read", "grep", "find", "ls", "write", "edit", "memory", STABLE_SHELL_TOOL_NAME] as const;
+const DEFAULT_TOOL_NAMES = [
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"write",
+	"edit",
+	"memory",
+	STABLE_SHELL_TOOL_NAME,
+	"delegate",
+] as const;
 const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set([...CLASSIFIED_LANE_TOOL_NAMES, "delegate"]);
 const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"filesystem.read",
@@ -99,9 +110,18 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
 	if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };
 
-	const requestedToolNames = mapToolNamesForPlatform(
+	const configuredToolNames = mapToolNamesForPlatform(
 		input.authority?.toolNames ?? input.base?.profile.toolNames ?? DEFAULT_TOOL_NAMES,
 	);
+	const inheritsDelegation =
+		input.authority?.capabilities === undefined &&
+		(input.base === undefined ||
+			(input.base.profile.toolNames.includes("delegate") &&
+				input.base.profile.capabilityCeiling.includes("workflow.delegate")));
+	const requestedToolNames =
+		inheritsDelegation && !configuredToolNames.includes("delegate")
+			? [...configuredToolNames, "delegate"]
+			: configuredToolNames;
 	const uniqueToolNames = [...new Set(requestedToolNames)];
 	const unavailableTools = uniqueToolNames.filter((toolName) => !AVAILABLE_TOOL_NAMES.has(toolName));
 	if (unavailableTools.length > 0) {
@@ -110,7 +130,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const capabilities = new Set<HarnessCapability>(
 		input.authority?.capabilities ?? input.base?.profile.capabilityCeiling ?? DEFAULT_CAPABILITIES,
 	);
-	if (uniqueToolNames.includes("delegate")) {
+	if (uniqueToolNames.includes("delegate") && inheritsDelegation) {
 		capabilities.add("workflow.delegate");
 	}
 	const toolNames: string[] = [];
@@ -129,6 +149,9 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const floorFailure = tokenBudgetFloorFailure(budget.maxTokens);
 	if (floorFailure) return { ok: false, reason: floorFailure };
 	const role = input.authority?.role ?? input.base?.profile.role ?? "orchestrator";
+	const delegationLimits = input.base
+		? input.base.profile.delegationLimits
+		: structuredClone(LEAN_WORKER_DELEGATION_LIMITS);
 	const now = new Date().toISOString();
 	const descriptor = {
 		role,
@@ -136,6 +159,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		capabilities: [...capabilities],
 		toolNames,
 		budget,
+		delegationLimits: delegationLimits ?? null,
 		resourceProfileNames: input.base?.profile.resourceProfileNames ?? [],
 	};
 	const maxWallClockMs = budget.maxWallClockMs ?? 0;
@@ -152,6 +176,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		resourceProfileNames: [...(input.base?.profile.resourceProfileNames ?? [])],
 		dispatchProfileIds: [],
 		...(input.base?.profile.executionPolicy ? { executionPolicy: input.base.profile.executionPolicy } : {}),
+		...(delegationLimits ? { delegationLimits: structuredClone(delegationLimits) } : {}),
 		budget,
 		maxConcurrent: Number.MAX_SAFE_INTEGER,
 		leaseTtlMs: Math.max(input.base?.profile.leaseTtlMs ?? 0, wallClockLeaseTtlMs, 90_000),

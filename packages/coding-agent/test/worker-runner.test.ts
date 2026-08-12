@@ -15,6 +15,8 @@ import {
 	type WorkerCompletion,
 	type WorkerRunnerOptions,
 } from "../src/core/delegation/worker-runner.ts";
+import { WorkerTreeBudgetExceededError } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
+import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 
 function workerRequest(overrides: Partial<WorkerRequest> = {}): WorkerRequest {
 	return {
@@ -143,6 +145,15 @@ describe("buildWorkerUserPrompt", () => {
 });
 
 describe("buildWorkerSystemPrompt", () => {
+	it("keeps inherited parent orchestration outside the worker task owner", () => {
+		const prompt = buildWorkerSystemPrompt({ write: false, process: false, delegate: true });
+		expect(prompt).toContain("CAVEMAN MODE - MANDATORY");
+		expect(prompt).toContain("Inherited parent history is context only");
+		expect(prompt).toContain("Execute only the latest TASK envelope");
+		expect(prompt).toContain("Parent-owned orchestration stays parent-owned");
+		expect(prompt).toContain("delegate only when that TASK explicitly assigns delegation");
+	});
+
 	it("describes combined write and process grants without denying either capability", () => {
 		const prompt = buildWorkerSystemPrompt({ write: true, process: true });
 		expect(prompt).toContain("Write/edit tools");
@@ -192,7 +203,7 @@ describe("runWorker", () => {
 		expect(outcome.claim.status).toBe("blocked");
 		expect(outcome.accepted).toBe(false);
 		expect(outcome.acceptance.outcome).toBe("block");
-		expect(outcome.laneStatus).toBe("failed");
+		expect(outcome.laneStatus).toBe("blocked");
 		expect(outcome.reasonCode).toBe("worker_blocked");
 	});
 
@@ -276,7 +287,7 @@ describe("runWorker", () => {
 		expect(outcome.claim.status).toBe("blocked");
 		expect(outcome.claim.blockers).toEqual(["read failed during isolated execution"]);
 		expect(outcome.accepted).toBe(false);
-		expect(outcome.laneStatus).toBe("failed");
+		expect(outcome.laneStatus).toBe("blocked");
 		expect(outcome.reasonCode).toBe("worker_blocked");
 	});
 
@@ -328,6 +339,43 @@ describe("runWorker", () => {
 		expect(outcome.laneStatus).toBe("budget_exhausted");
 		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
 	});
+
+	it.each([
+		[
+			"attempt token",
+			new CapabilityGatewayDeniedError("token_budget_exhausted", "Token budget exhausted."),
+			"token_budget_exhausted",
+			"Token budget exhausted.",
+		],
+		[
+			"worker-tree token",
+			new WorkerTreeBudgetExceededError("maxTokens", "provider completion"),
+			"worker_tree_token_budget_exhausted",
+			"Worker orchestration tree budget 'maxTokens' is exhausted before provider completion.",
+		],
+	] as const)(
+		"preserves an explicit %s denial as bounded exhaustion instead of a completion error",
+		async (_label, error, reasonCode, detail) => {
+			const outcome = await runWorker(
+				runnerOptions({
+					complete: async () => {
+						throw error;
+					},
+				}),
+			);
+
+			expect(outcome).toMatchObject({
+				claim: {
+					status: "failed",
+					summary: `Worker did not complete: ${reasonCode} — ${detail}`,
+				},
+				accepted: false,
+				laneStatus: "budget_exhausted",
+				reasonCode,
+				reasonDetail: detail,
+			});
+		},
+	);
 
 	it("cancels on external abort and times out on wall clock breach", async () => {
 		const controller = new AbortController();

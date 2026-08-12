@@ -12,8 +12,11 @@ import type {
 } from "./contracts.ts";
 import {
 	HARNESS_CAPABILITIES,
+	MAX_ORCHESTRATION_AGENT_BINDINGS,
+	MAX_ORCHESTRATION_AGENT_DEPTH,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DESCRIPTION_LENGTH,
+	MAX_ORCHESTRATION_DIRECT_CHILDREN,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
@@ -210,6 +213,21 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	if (!Number.isSafeInteger(profile.leaseTtlMs) || profile.leaseTtlMs <= 0) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' leaseTtlMs must be positive.`);
 	}
+	if (
+		profile.delegationLimits &&
+		(!Number.isSafeInteger(profile.delegationLimits.maxDepth) ||
+			profile.delegationLimits.maxDepth < 0 ||
+			profile.delegationLimits.maxDepth > MAX_ORCHESTRATION_AGENT_DEPTH ||
+			!Number.isSafeInteger(profile.delegationLimits.maxChildrenPerAgent) ||
+			profile.delegationLimits.maxChildrenPerAgent < 0 ||
+			profile.delegationLimits.maxChildrenPerAgent > MAX_ORCHESTRATION_DIRECT_CHILDREN ||
+			(profile.delegationLimits.maxNestedAgentsPerSession !== undefined &&
+				(!Number.isSafeInteger(profile.delegationLimits.maxNestedAgentsPerSession) ||
+					profile.delegationLimits.maxNestedAgentsPerSession < 0 ||
+					profile.delegationLimits.maxNestedAgentsPerSession > MAX_ORCHESTRATION_AGENT_BINDINGS)))
+	) {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' delegationLimits are invalid.`);
+	}
 	try {
 		validateRiskBudget(profile.budget, `Profile '${profile.profileId}' budget`);
 	} catch (error) {
@@ -298,6 +316,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"resourceProfileNames",
 			"dispatchProfileIds",
 			"executionPolicy",
+			"delegationLimits",
 			"budget",
 			"maxConcurrent",
 			"leaseTtlMs",
@@ -313,6 +332,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 	const rawBudget = value.budget;
 	let budget: RiskBudget;
 	const executionPolicy = value.executionPolicy;
+	const delegationLimits = value.delegationLimits;
 	if (
 		!isPlainRecord(modelPolicy) ||
 		!hasOnlyKeys(modelPolicy, ["mode", "candidates"]) ||
@@ -337,6 +357,17 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			!Number.isSafeInteger(executionPolicy.maxOutputBytes))
 	) {
 		throw new OrchestrationProfileError("Orchestration profile executionPolicy is invalid.");
+	}
+	if (
+		delegationLimits !== undefined &&
+		(!isPlainRecord(delegationLimits) ||
+			!hasOnlyKeys(delegationLimits, ["maxDepth", "maxChildrenPerAgent", "maxNestedAgentsPerSession"]) ||
+			!Number.isSafeInteger(delegationLimits.maxDepth) ||
+			!Number.isSafeInteger(delegationLimits.maxChildrenPerAgent) ||
+			(delegationLimits.maxNestedAgentsPerSession !== undefined &&
+				!Number.isSafeInteger(delegationLimits.maxNestedAgentsPerSession)))
+	) {
+		throw new OrchestrationProfileError("Orchestration profile delegationLimits are invalid.");
 	}
 	const candidates = modelPolicy.candidates.map((candidate) => {
 		if (!isPlainRecord(candidate) || !hasOnlyKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
@@ -418,6 +449,17 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 					},
 				}
 			: {}),
+		...(isPlainRecord(delegationLimits)
+			? {
+					delegationLimits: {
+						maxDepth: Number(delegationLimits.maxDepth),
+						maxChildrenPerAgent: Number(delegationLimits.maxChildrenPerAgent),
+						...(delegationLimits.maxNestedAgentsPerSession !== undefined
+							? { maxNestedAgentsPerSession: Number(delegationLimits.maxNestedAgentsPerSession) }
+							: {}),
+					},
+				}
+			: {}),
 		budget,
 		maxConcurrent: Number(value.maxConcurrent),
 		leaseTtlMs: Number(value.leaseTtlMs),
@@ -447,6 +489,7 @@ function freezeProfile(profile: OrchestrationProfile): OrchestrationProfile {
 		Object.freeze(clone.executionPolicy.allowedEnvironmentVariables);
 		Object.freeze(clone.executionPolicy);
 	}
+	if (clone.delegationLimits) Object.freeze(clone.delegationLimits);
 	Object.freeze(clone.budget);
 	return Object.freeze(clone);
 }

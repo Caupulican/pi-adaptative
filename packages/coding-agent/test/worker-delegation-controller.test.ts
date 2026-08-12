@@ -16,6 +16,8 @@ function controllerWithRunningCaller(): WorkerDelegationController {
 		},
 		scheduler: { drain: vi.fn() },
 		yieldedCapacityAttemptIds: new Map<string, number>(),
+		yieldedWriteReservations: new Map(),
+		writeReservations: { yieldForWait: vi.fn(() => undefined) },
 	}) as unknown as WorkerDelegationController;
 }
 
@@ -49,16 +51,13 @@ describe("WorkerDelegationController integration invariants", () => {
 
 	it("retains a caller capacity yield until every independent wait lease releases it", () => {
 		const controller = controllerWithRunningCaller();
-		const yieldCapacity = Reflect.get(controller, "yieldWorkerCapacity") as (
-			callerAgentId: string,
-			targetAgentId: string,
-		) => () => void;
+		const yieldCapacity = Reflect.get(controller, "yieldWorkerForWait") as (callerAgentId: string) => () => boolean;
 		const hasCapacity = Reflect.get(controller, "hasWorkerCapacity") as (settings: {
 			maxConcurrent: number;
 		}) => boolean;
 
-		const releaseFirst = yieldCapacity.call(controller, "caller", "target-a");
-		const releaseSecond = yieldCapacity.call(controller, "caller", "target-b");
+		const releaseFirst = yieldCapacity.call(controller, "caller");
+		const releaseSecond = yieldCapacity.call(controller, "caller");
 		expect(hasCapacity.call(controller, { maxConcurrent: 1 })).toBe(true);
 
 		releaseFirst();
@@ -68,6 +67,45 @@ describe("WorkerDelegationController integration invariants", () => {
 
 		releaseSecond();
 		expect(hasCapacity.call(controller, { maxConcurrent: 1 })).toBe(false);
+	});
+
+	it("keeps the caller yielded until its exact write reservation is restored", () => {
+		const yieldedReservation = { laneId: "caller-task", lease: { attemptId: "attempt-caller" } };
+		const yieldForWait = vi.fn(() => yieldedReservation);
+		const restoreAfterWait = vi
+			.fn()
+			.mockReturnValueOnce({ kind: "blocked" })
+			.mockReturnValueOnce({ kind: "granted" });
+		const drain = vi.fn();
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			deps: { isDisposed: () => false },
+			lifecycle: {
+				getAgent: () => ({ agentId: "caller", rootAgentId: "root" }),
+				getLatestAgentAttempt: () => ({
+					attemptId: "attempt-caller",
+					taskId: "caller-task",
+					status: "running",
+					lease: { fencingToken: 7 },
+				}),
+			},
+			scheduler: { drain },
+			laneAbortControllers: new Map(),
+			yieldedCapacityAttemptIds: new Map<string, number>(),
+			yieldedWriteReservations: new Map(),
+			writeReservations: { yieldForWait, restoreAfterWait },
+		}) as unknown as WorkerDelegationController;
+		const yieldCaller = Reflect.get(controller, "yieldWorkerForWait") as (callerAgentId: string) => () => boolean;
+
+		const restore = yieldCaller.call(controller, "caller");
+		expect(yieldForWait).toHaveBeenCalledWith("caller-task", "attempt-caller", 7);
+		expect(drain).toHaveBeenCalledWith(true);
+
+		expect(restore()).toBe(false);
+		expect(Reflect.get(controller, "yieldedCapacityAttemptIds")).toEqual(new Map([["attempt-caller", 1]]));
+		expect(restore()).toBe(true);
+		expect(restoreAfterWait).toHaveBeenCalledTimes(2);
+		expect(Reflect.get(controller, "yieldedCapacityAttemptIds")).toEqual(new Map());
+		expect(Reflect.get(controller, "yieldedWriteReservations")).toEqual(new Map());
 	});
 
 	it("bounds mandatory-verifier instructions while retaining omission disclosure", () => {

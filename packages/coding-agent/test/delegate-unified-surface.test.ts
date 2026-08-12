@@ -1,3 +1,4 @@
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { getDefaultActiveToolNames } from "../src/core/default-tool-surface.ts";
 import type { WorkerAgentControlPort } from "../src/core/delegation/worker-agent-control.ts";
@@ -14,6 +15,7 @@ function actionEnum(tool: ToolDefinition): string[] {
 }
 
 function createUnifiedDelegate() {
+	const runWorkerDelegation = vi.fn(() => Promise.resolve({ started: false as const, skipReason: "unused" }));
 	const acknowledgeWorkerReview = vi.fn(() => ({
 		ok: true as const,
 		requestId: "worker-1",
@@ -27,7 +29,7 @@ function createUnifiedDelegate() {
 	}));
 	const tool = createDelegateToolDefinition({
 		caller: { kind: "session_root" },
-		runWorkerDelegation: () => Promise.resolve({ started: false, skipReason: "unused" }),
+		runWorkerDelegation,
 		status: {
 			getLaneRecords: () => [{ laneId: "worker-1", type: "worker", status: "succeeded" }],
 			getWorkerClaimSnapshots: () => [
@@ -50,7 +52,7 @@ function createUnifiedDelegate() {
 			createTaskProfile,
 		},
 	});
-	return { acknowledgeWorkerReview, createTaskProfile, tool };
+	return { acknowledgeWorkerReview, createTaskProfile, runWorkerDelegation, tool };
 }
 
 describe("unified delegate model surface", () => {
@@ -122,6 +124,147 @@ describe("unified delegate model surface", () => {
 		);
 		expect(reviewed.details).toMatchObject({ started: true, action: "review", reviewed: true });
 		expect(acknowledgeWorkerReview).toHaveBeenCalledWith("worker-1");
+	});
+
+	it("rejects laneId on start instead of silently creating an anonymous worker", async () => {
+		const { runWorkerDelegation, tool } = createUnifiedDelegate();
+		const result = await tool.execute(
+			"start-with-lane-id",
+			{ action: "start", instructions: "Inspect GrimDex", laneId: "grim-auditor" } as never,
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "text", text: expect.stringContaining("laneId") }),
+		]);
+		expect(result.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "action_field_forbidden",
+		});
+		expect(runWorkerDelegation).not.toHaveBeenCalled();
+	});
+
+	it("rejects a start task alias instead of silently dropping the child objective", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation,
+			runWorkerDelegation: () => Promise.resolve({ started: false, skipReason: "unused" }),
+		});
+		const providerArguments = Object.freeze({
+			action: "start" as const,
+			task: "Inspect the assigned boundary and return exact evidence.",
+			instructions: "No edits, commits, or test execution.",
+		});
+		const persistedArguments = { ...providerArguments };
+
+		const result = await tool.execute("start-with-task", providerArguments as never, undefined, undefined, context);
+
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "text",
+				text: expect.stringMatching(/CAVEMAN MODE - MANDATORY.*task.*instructions/s),
+			}),
+		]);
+		expect(result.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "action_field_forbidden",
+		});
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(providerArguments).toEqual(persistedArguments);
+	});
+
+	it("rejects a top-level start budget instead of silently making bounded work unbudgeted", async () => {
+		const { runWorkerDelegation, tool } = createUnifiedDelegate();
+		const result = await tool.execute(
+			"start-with-top-level-budget",
+			{
+				action: "start",
+				instructions: "Run the bounded verification.",
+				budget: { maxTokens: 4_000, maxToolCalls: 8 },
+			} as never,
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "text",
+				text: expect.stringMatching(/CAVEMAN MODE - MANDATORY.*budget.*authority\.budget/s),
+			}),
+		]);
+		expect(result.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "action_field_forbidden",
+		});
+		expect(runWorkerDelegation).not.toHaveBeenCalled();
+	});
+
+	it("keeps fresh-start defaults lean while admitting explicit authority ceilings", () => {
+		const { tool } = createUnifiedDelegate();
+		expect(Value.Check(tool.parameters, { action: "start", instructions: "Inspect the repository" })).toBe(true);
+		expect(
+			Value.Check(tool.parameters, {
+				action: "start",
+				instructions: "Attempt an ad-hoc task ceiling",
+				authority: { budget: { maxTokens: 8_000, maxToolCalls: 12 } },
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(tool.parameters, {
+				action: "start",
+				instructions: "Attempt a runtime-owned verifier dispatch",
+				authority: { role: "verifier" },
+			}),
+		).toBe(false);
+	});
+
+	it("preserves an explicit authority budget without adding one to the omitted baseline", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation,
+			runWorkerDelegation: () => Promise.resolve({ started: false, skipReason: "unused" }),
+		});
+
+		await tool.execute(
+			"explicit-budget",
+			{
+				action: "start",
+				instructions: "Run a bounded verification",
+				authority: { budget: { maxTokens: 8_000, maxWallClockMs: 60_000, maxToolCalls: 12 } },
+			} as never,
+			undefined,
+			undefined,
+			context,
+		);
+		await tool.execute(
+			"lean-baseline",
+			{ action: "start", instructions: "Run an unbudgeted verification" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(startWorkerDelegation).toHaveBeenNthCalledWith(1, {
+			instructions: "Run a bounded verification",
+			authority: { budget: { maxTokens: 8_000, maxWallClockMs: 60_000, maxToolCalls: 12 } },
+		});
+		expect(startWorkerDelegation).toHaveBeenNthCalledWith(2, {
+			instructions: "Run an unbudgeted verification",
+		});
 	});
 
 	it("inspects and creates task profiles through delegate", async () => {

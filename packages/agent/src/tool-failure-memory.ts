@@ -25,6 +25,10 @@ const MAX_TRACKED_FAILURES = 64;
 const REPAIRABLE_REJECTION_CODES = new Set(["invalid_arguments", "malformed_call", "unknown_tool"]);
 const LEGACY_GENERIC_EXECUTION_CORRECTION =
 	"Change the arguments or approach before retrying; do not resend the unchanged operation.";
+const BLOCKED_REPLAY_CAVEMAN_CORRECTION =
+	"CAVEMAN MODE - MANDATORY. SAME OPERATION BLOCKED. Do not repeat an unchanged operation. NEVER call it again with the same arguments in this run. This is not a harness loop or failure.";
+const CLOSED_OPERATION_CAVEMAN_CORRECTION =
+	"CAVEMAN MODE - MANDATORY: OPERATION CLOSED; not executed. Do not repeat an unchanged operation. NEVER call it again with the same arguments in this run. Use a different operation/tool or continue independent work. The recovery guard prevented a loop; this is not harness failure.";
 
 export type ToolFailureState = "failed" | "rejected";
 
@@ -384,11 +388,17 @@ function boundedFailureCode(value: string): string {
 	return truncate(normalized || "tool_error", MAX_FAILURE_CODE_CHARS);
 }
 
+function processExitFailureCode(message: string): string | undefined {
+	const exitCode = /\b(?:exit(?:ed)?(?: with)?(?: code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i.exec(message)?.[1];
+	return exitCode === undefined ? undefined : boundedFailureCode(`exit_${exitCode}`);
+}
+
 export function classifyToolFailure(message: string, errorClass?: string): string {
+	// A tool-owned terminal status is authoritative; stdout may contain arbitrary all-caps identifiers.
+	const exitFailureCode = processExitFailureCode(message);
+	if (exitFailureCode) return exitFailureCode;
 	const errno = /\b(E[A-Z][A-Z0-9_]{2,})\b/.exec(message)?.[1];
 	if (errno) return boundedFailureCode(errno);
-	const exitCode = /\b(?:exit(?:ed)?(?: with)?(?: code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i.exec(message)?.[1];
-	if (exitCode) return boundedFailureCode(`exit_${exitCode}`);
 	return boundedFailureCode(errorClass ?? "tool_error");
 }
 
@@ -448,10 +458,29 @@ export function toolFailureCorrection(
 		: fallbackFailureGuidance(state, message.trim().length > 0, phase);
 }
 
-function extractFailureDiagnostic(message: string, allowUnclassifiedFallback: boolean): string | undefined {
-	const lines = sanitizeBinaryOutput(message)
-		.replaceAll("\r\n", "\n")
-		.split("\n")
+function extractFailureDiagnostic(
+	message: string,
+	allowUnclassifiedFallback: boolean,
+	requireStrongSignal = false,
+): string | undefined {
+	const rawLines = sanitizeBinaryOutput(message).replaceAll("\r\n", "\n").split("\n");
+	const strongDiagnosticPattern =
+		/^(?:(?:error(?:\[[^\]]+\])?|fatal(?: error)?|panic|fail(?:ed|ure)?|invalid|unknown|unsupported|not found|no such|cannot|can't|missing|denied|refused|usage)(?:\b|:)|[a-z][a-z0-9_.]*error(?::|$)|thread .+ panicked at\b|--- fail:|\[fail(?:ed)?\]|not ok\b|[×✗]\s|.{1,160}:\s+(?:error(?:\[[^\]]+\])?|fatal(?: error)?)(?:\b|:))/i;
+	const stderrMarkerIndex = rawLines.findLastIndex((line) => /^stderr:\s*$/i.test(line.trim()));
+	if (stderrMarkerIndex >= 0) {
+		const stderrLines = rawLines
+			.slice(stderrMarkerIndex + 1)
+			.map((line) => line.trim())
+			.filter(
+				(line) =>
+					line.length > 0 && !/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line),
+			);
+		if (stderrLines.length > 0) {
+			const classified = stderrLines.find((line) => strongDiagnosticPattern.test(line));
+			return truncateMiddle(classified ?? stderrLines.slice(-4).join(" | "), MAX_DIAGNOSTIC_CHARS);
+		}
+	}
+	const lines = rawLines
 		.map((line) => line.trim())
 		.filter(
 			(line) =>
@@ -462,9 +491,12 @@ function extractFailureDiagnostic(message: string, allowUnclassifiedFallback: bo
 				!/^(?:stdout|stderr):(?:\s*\(empty\))?$/i.test(line),
 		);
 	if (lines.length === 0) return undefined;
-	const diagnosticPattern =
-		/(?:^|\b)(?:error|fatal|fail(?:ed|ure)?|invalid|unknown|unsupported|not found|no such|cannot|can't|missing|denied|refused|usage)(?:\b|:)/i;
-	const classified = [...lines].reverse().find((line) => diagnosticPattern.test(line));
+	const diagnosticPattern = requireStrongSignal
+		? strongDiagnosticPattern
+		: /(?:^|\b)(?:error|fatal|fail(?:ed|ure)?|invalid|unknown|unsupported|not found|no such|cannot|can't|missing|denied|refused|usage)(?:\b|:)/i;
+	const classified = requireStrongSignal
+		? lines.find((line) => diagnosticPattern.test(line))
+		: [...lines].reverse().find((line) => diagnosticPattern.test(line));
 	const diagnostic = classified ?? (allowUnclassifiedFallback ? lines.at(-1) : undefined);
 	return diagnostic ? truncateMiddle(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
 }
@@ -483,9 +515,15 @@ export function assessToolFailure(
 	errorClass?: string,
 ): ToolFailureAssessment {
 	const policy = getToolExecutionErrorPolicy(message);
+	const exitFailureCode = processExitFailureCode(message);
+	const retainPolicyDiagnostic = policy?.retainDiagnostic === true;
 	const diagnostic =
 		state === "failed" && (!policy || policy.retainDiagnostic)
-			? extractFailureDiagnostic(message, errorClass !== undefined || policy?.retainDiagnostic === true)
+			? extractFailureDiagnostic(
+					message,
+					exitFailureCode === undefined && (errorClass !== undefined || retainPolicyDiagnostic),
+					exitFailureCode !== undefined && !retainPolicyDiagnostic,
+				)
 			: undefined;
 	const failureCode = policy?.failureCode ?? classifyToolFailure(message, errorClass);
 	return {
@@ -924,9 +962,12 @@ export function createToolFailureResult(
 export function createRepeatedToolFailureResult(
 	record: ToolFailureMemoryRecord,
 ): AgentToolResult<ToolFailureMemoryDetails> {
-	const retainedRecord = retainBlockedToolFailure(record);
+	const retainedRecord = {
+		...retainBlockedToolFailure(record),
+		correction: BLOCKED_REPLAY_CAVEMAN_CORRECTION,
+	};
 	const diagnostic = truncateMiddle(
-		`Unchanged replay blocked after ${record.failureCode}${record.diagnostic ? `: ${record.diagnostic}` : ""}`,
+		`The unchanged operation was not executed. Unchanged replay blocked after ${record.failureCode}`,
 		MAX_DIAGNOSTIC_CHARS,
 	);
 	const blockedResult = createToolFailureResult({
@@ -934,7 +975,7 @@ export function createRepeatedToolFailureResult(
 		state: "rejected",
 		failureCode: "repeated_failed_operation",
 		diagnostic,
-		correction: truncate(`The unchanged operation was not executed. ${record.correction}`, MAX_CORRECTION_CHARS),
+		correction: retainedRecord.correction,
 	});
 	return {
 		...blockedResult,
@@ -959,6 +1000,29 @@ export function createToolFailureRecoveryExhaustedResult(
 				"Stop retrying tools in this run. Report the unresolved failure and the user or environment action required to continue.",
 		},
 		true,
+	);
+	return {
+		...exhaustedResult,
+		details: { piToolFailureMemory: retainedRecord },
+	};
+}
+
+export function createToolFailureOperationExhaustedResult(
+	record: ToolFailureMemoryRecord,
+	diagnostic: string,
+): AgentToolResult<ToolFailureMemoryDetails> {
+	const retainedRecord = {
+		...retainBlockedToolFailure(record),
+		correction: CLOSED_OPERATION_CAVEMAN_CORRECTION,
+	};
+	const exhaustedResult = createToolFailureResult(
+		{
+			...retainedRecord,
+			state: "rejected",
+			failureCode: "operation_recovery_exhausted",
+			diagnostic: truncateMiddle(diagnostic, MAX_DIAGNOSTIC_CHARS),
+		},
+		false,
 	);
 	return {
 		...exhaustedResult,

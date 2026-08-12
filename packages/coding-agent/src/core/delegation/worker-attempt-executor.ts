@@ -74,7 +74,11 @@ export async function runProviderCompletionWithBackoff(args: {
 }): Promise<IsolatedCompletionResult> {
 	for (let attempt = 1; ; attempt++) {
 		try {
-			return await args.attempt();
+			const completion = await args.attempt();
+			if (completion.stopReason !== "error") return completion;
+			throw new Error(
+				completion.errorMessage?.trim() || "Provider completion stopped with an error without diagnostic detail.",
+			);
 		} catch (error) {
 			args.onAttemptFailure();
 			if (args.signal?.aborted) throw error;
@@ -202,7 +206,8 @@ function callbackEvidencedCompletion(
 	if (
 		result.text !== text ||
 		result.stopReason !== finalMessage.stopReason ||
-		!isDeepStrictEqual(result.usage, usage)
+		!isDeepStrictEqual(result.usage, usage) ||
+		result.errorMessage !== finalMessage.errorMessage
 	) {
 		throw new WorkerCompletionProtocolError(
 			"Worker completion result disagrees with its durable callback-evidenced terminal assistant.",
@@ -214,6 +219,7 @@ function callbackEvidencedCompletion(
 			text,
 			usage,
 			stopReason: finalMessage.stopReason,
+			...(finalMessage.errorMessage ? { errorMessage: finalMessage.errorMessage } : {}),
 		},
 	};
 }

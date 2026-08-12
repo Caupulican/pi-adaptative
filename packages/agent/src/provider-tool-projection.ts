@@ -91,6 +91,34 @@ function compactLiteralUnion(projected: Record<string, unknown>): Record<string,
 	return compacted;
 }
 
+function enumValueMatchesType(value: string | number | boolean | null, type: string): boolean {
+	if (type === "null") return value === null;
+	if (type === "integer") return typeof value === "number" && Number.isInteger(value);
+	return typeof value === type;
+}
+
+function compactRedundantEnumConstraints(projected: Record<string, unknown>): Record<string, unknown> {
+	const values = projected.enum;
+	if (!Array.isArray(values) || values.length === 0 || !values.every(isJsonPrimitive)) return projected;
+	if (
+		typeof projected.type === "string" &&
+		values.every((value) => enumValueMatchesType(value, projected.type as string))
+	) {
+		delete projected.type;
+	}
+	if (values.every((value): value is string => typeof value === "string")) {
+		const minLength = projected.minLength;
+		if (typeof minLength === "number" && values.every((value) => value.length >= minLength)) {
+			delete projected.minLength;
+		}
+		const maxLength = projected.maxLength;
+		if (typeof maxLength === "number" && values.every((value) => value.length <= maxLength)) {
+			delete projected.maxLength;
+		}
+	}
+	return projected;
+}
+
 function projectSchemaNode(value: unknown): unknown {
 	if (!isRecord(value)) return value;
 	const projected = createProviderRecord();
@@ -120,7 +148,7 @@ function projectSchemaNode(value: unknown): unknown {
 		}
 		projected[key] = child;
 	}
-	return compactLiteralUnion(projected);
+	return compactRedundantEnumConstraints(compactLiteralUnion(projected));
 }
 
 export function normalizeProviderToolDescription(description: string): string {

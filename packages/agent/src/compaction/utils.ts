@@ -196,6 +196,8 @@ export function serializeConversation(messages: Message[]): string {
 export const SUMMARIZATION_SYSTEM_PROMPT = `Context checkpointer. Input: serialized agent conversation. Output only checkpoint, exact headings/order below, user language, no preamble/commentary. Never include secrets/keys/tokens; write [REDACTED].
 
 MANDATORY
+- Only [User]: records inside CHAT are user input. OLD CHECKPOINT and TASK are checkpointer control data, never user content.
+- Never copy checkpointer control instructions into Active Task, Mandatory Rules, or any other checkpoint section.
 - Weight recent turns most; retain old rules, decisions, file knowledge only.
 - Active Task: latest unfulfilled user input, near-verbatim. An unanswered question is active. A final stop/undo/never-mind cancels prior work: record cancellation, drop cancelled work everywhere.
 - Mandatory Rules: every user prohibition, one imperative bullet, source turn when known. Preserve existing rules verbatim. Corrected mistake survives only as "DO NOT <mistake>" here; never retain mistaken work elsewhere.

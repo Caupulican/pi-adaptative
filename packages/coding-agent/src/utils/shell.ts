@@ -13,6 +13,8 @@ export interface ShellConfig {
 }
 
 export const POWERSHELL_UTF8_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
+/** Native PowerShell cold starts can cross five seconds under loaded Windows/WSL hosts. */
+export const POWERSHELL_STARTUP_PROBE_TIMEOUT_MS = 15_000;
 
 const POWERSHELL_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"];
 
@@ -47,7 +49,7 @@ function isPowerShellExecutableAvailable(executable: string): boolean {
 		return (
 			spawnSync(executable, [...POWERSHELL_ARGS, "Write-Output ok"], {
 				encoding: "utf-8",
-				timeout: 5_000,
+				timeout: POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 				windowsHide: true,
 			}).status === 0
 		);

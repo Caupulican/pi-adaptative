@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import {
@@ -194,6 +194,73 @@ describe("WorkerLifecycle", () => {
 			status: "running",
 			lease: { fencingToken: resumed.fencingToken },
 		});
+	});
+
+	it("renews a live attempt lease without changing its ownership fence", () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-08-11T12:00:00.000Z"));
+			const lifecycle = new WorkerLifecycle({
+				agentDir: root(),
+				sessionId: "session-lease-renewal",
+				now: () => Date.now(),
+			});
+			const profile = createTestWorkerOrchestrationProfile({
+				profileId: "lease-renewal",
+				model: { provider: "test", id: "model" },
+			});
+			const prepared = lifecycle.prepare({
+				instructions: "run a long tool call",
+				executionContract: executionContract(profile),
+				requiredCapabilities: [],
+			});
+			const handle = startWithGrant(lifecycle, prepared.record.laneId, 1_000);
+			const originalExpiresAt = handle.expiresAt;
+
+			vi.advanceTimersByTime(750);
+			const renewed = lifecycle.renewLease(prepared.record.laneId, 1_000);
+
+			expect(renewed).toMatchObject({
+				leaseId: handle.leaseId,
+				fencingToken: handle.fencingToken,
+				ownerId: lifecycle.getActiveAttempt(prepared.record.laneId)?.lease?.ownerId,
+			});
+			expect(Date.parse(renewed.expiresAt)).toBe(Date.now() + 1_000);
+			expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(originalExpiresAt));
+
+			vi.advanceTimersByTime(500);
+			expect(() => lifecycle.checkpoint(prepared.record.laneId, { summary: "long call completed" })).not.toThrow();
+			expect(() => lifecycle.finish(resultFor(handle))).not.toThrow();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("refuses to revive an already-expired attempt lease", () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-08-11T12:00:00.000Z"));
+			const lifecycle = new WorkerLifecycle({
+				agentDir: root(),
+				sessionId: "session-expired-lease-renewal",
+				now: () => Date.now(),
+			});
+			const profile = createTestWorkerOrchestrationProfile({
+				profileId: "expired-lease-renewal",
+				model: { provider: "test", id: "model" },
+			});
+			const prepared = lifecycle.prepare({
+				instructions: "expire",
+				executionContract: executionContract(profile),
+				requiredCapabilities: [],
+			});
+			startWithGrant(lifecycle, prepared.record.laneId, 1_000);
+
+			vi.advanceTimersByTime(1_000);
+			expect(() => lifecycle.renewLease(prepared.record.laneId, 1_000)).toThrow("lease expired");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("refuses recovery that would steal a still-live agent owner", () => {
@@ -515,6 +582,67 @@ describe("WorkerLifecycle", () => {
 
 		const reopened = new WorkerLifecycle({ agentDir, sessionId: "session-1" });
 		expect(reopened.getPendingTerminalNotifications()).toEqual([]);
+	});
+
+	it("preserves a worker-authored blocker as blocked through the lane and terminal notification projections", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "blocked-worker",
+			model: { provider: "test", id: "model" },
+		});
+		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-blocked-worker" });
+		const prepared = lifecycle.prepare({
+			instructions: "inspect a project-level blocker",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
+		const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
+
+		expect(
+			lifecycle.finish(
+				resultFor(handle, {
+					status: "blocked",
+					reasonCode: "worker_blocked",
+					summary: "Focused verification cannot compile.",
+				}),
+			),
+		).toMatchObject({ status: "blocked", reasonCode: "worker_blocked" });
+		expect(lifecycle.getPendingTerminalNotifications()).toMatchObject([
+			{ record: { laneId: prepared.record.laneId, status: "blocked", reasonCode: "worker_blocked" } },
+		]);
+		expect(Object.values(lifecycle.getTaskRuntimeSnapshot().notifications)).toMatchObject([
+			{ message: `Worker ${prepared.record.laneId} reached blocked.` },
+		]);
+	});
+
+	it("preserves a completed mutation awaiting parent review as partial instead of failed", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "review-worker",
+			model: { provider: "test", id: "model" },
+		});
+		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-review-worker" });
+		const prepared = lifecycle.prepare({
+			instructions: "implement a reviewed change",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
+		const handle = startWithGrant(lifecycle, prepared.record.laneId, profile.leaseTtlMs);
+
+		expect(
+			lifecycle.finish(
+				resultFor(handle, {
+					status: "partial",
+					reasonCode: "worker_completed",
+					summary: "Implementation completed and awaits parent review.",
+					nextAction: "parent_review",
+				}),
+			),
+		).toMatchObject({ status: "partial", reasonCode: "worker_completed" });
+		expect(lifecycle.getPendingTerminalNotifications()).toMatchObject([
+			{ record: { laneId: prepared.record.laneId, status: "partial", reasonCode: "worker_completed" } },
+		]);
+		expect(Object.values(lifecycle.getTaskRuntimeSnapshot().notifications)).toMatchObject([
+			{ message: `Worker ${prepared.record.laneId} reached partial.` },
+		]);
 	});
 
 	it("preserves cancellation reasons in the canonical projection", () => {

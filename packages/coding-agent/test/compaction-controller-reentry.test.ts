@@ -51,6 +51,7 @@ function createFixture(options: {
 	measureLiveContextTokens: () => number;
 	createResult(attempt: number, entryIds: string[]): Promise<CompactionResult>;
 	settings?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number; triggerPercent: number };
+	estimatedContextTokens?: number;
 }) {
 	const sessionManager = SessionManager.inMemory();
 	const messages: AgentMessage[] = [];
@@ -117,7 +118,7 @@ function createFixture(options: {
 		reconnectAgent: () => {},
 		abortForeground: async () => {},
 		emit: (event) => events.push(event as unknown as Record<string, unknown>),
-		estimateCurrentContextTokens: () => 3_000,
+		estimateCurrentContextTokens: () => options.estimatedContextTokens ?? 3_000,
 		buildPreDigest: () => undefined,
 		getMemoryPreCompressInsight: async () => "",
 		refreshAfterCompaction: () => {},
@@ -239,6 +240,31 @@ describe("CompactionController auto-compaction re-entry", () => {
 		});
 
 		await controller.check(assistantWithUsage(2_501, Date.now() + 1_000));
+
+		expect(runAutoCompaction).not.toHaveBeenCalled();
+		expect(compactWithRetry).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(2);
+		expect(events.at(-1)).toMatchObject({
+			type: "compaction_end",
+			result: undefined,
+			skipReason: expect.stringContaining("waiting for materially new compactable history"),
+		});
+	});
+
+	it("does not re-enter an ineffective threshold frontier when the next estimate drifts lower", async () => {
+		const { compactWithRetry, controller, events, runAutoCompaction, sessionManager } = createFixture({
+			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500]),
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			estimatedContextTokens: 2_499,
+		});
+		await controller.runAuto("threshold", false);
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "measurement drift" }],
+			timestamp: Date.now() + 100,
+		});
+
+		await controller.check(assistantWithUsage(2_499, Date.now() + 1_000));
 
 		expect(runAutoCompaction).not.toHaveBeenCalled();
 		expect(compactWithRetry).toHaveBeenCalledTimes(1);

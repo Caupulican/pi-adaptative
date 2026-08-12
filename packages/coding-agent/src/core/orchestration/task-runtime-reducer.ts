@@ -739,6 +739,35 @@ export function assertAttemptStartTransition(
 	return attempt;
 }
 
+export function assertAttemptLeaseRenewalTransition(
+	state: TaskRuntimeProjection,
+	aggregateId: string,
+	attemptId: string,
+	leaseId: string,
+	fencingToken: number,
+	expiresAt: string,
+	occurredAt: string,
+): AttemptRuntimeState {
+	if (aggregateId !== attemptId) {
+		throw new DurableTaskRuntimeError(`Renewed attempt '${attemptId}' does not match its aggregate.`);
+	}
+	const attempt = state.attempts[attemptId];
+	if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+	if (attempt.status !== "leased" && attempt.status !== "running") {
+		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' cannot renew from '${attempt.status}'.`);
+	}
+	if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
+		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
+	}
+	assertLeaseLiveAt(attempt.lease, occurredAt, `Attempt '${attemptId}'`);
+	const expiresAtMs = Date.parse(expiresAt);
+	if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.parse(attempt.lease.expiresAt)) {
+		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' renewed lease must extend its expiration.`);
+	}
+	requireActiveObjectiveForAttemptInProjection(state, attempt);
+	return attempt;
+}
+
 export function assertAttemptCheckpointTransition(
 	state: TaskRuntimeProjection,
 	aggregateId: string,
@@ -1280,6 +1309,27 @@ export function reduceOrchestrationEvent(
 				event.occurredAt,
 			);
 			attempts[attemptId] = { ...attempt, status: "running", updatedAt: event.occurredAt };
+			break;
+		}
+		case "attempt.lease_renewed": {
+			const attemptId = string(event.payload.attemptId, "attempt.lease_renewed.attemptId");
+			const leaseId = string(event.payload.leaseId, "attempt.lease_renewed.leaseId");
+			const fencingToken = number(event.payload.fencingToken, "attempt.lease_renewed.fencingToken");
+			const expiresAt = string(event.payload.expiresAt, "attempt.lease_renewed.expiresAt");
+			const attempt = assertAttemptLeaseRenewalTransition(
+				state,
+				event.aggregateId,
+				attemptId,
+				leaseId,
+				fencingToken,
+				expiresAt,
+				event.occurredAt,
+			);
+			attempts[attemptId] = {
+				...attempt,
+				lease: { ...attempt.lease!, expiresAt },
+				updatedAt: event.occurredAt,
+			};
 			break;
 		}
 		case "attempt.checkpointed": {

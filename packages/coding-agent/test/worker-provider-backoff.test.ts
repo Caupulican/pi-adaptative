@@ -1,3 +1,4 @@
+import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import { runProviderCompletionWithBackoff } from "../src/core/delegation/worker-attempt-executor.ts";
@@ -42,6 +43,40 @@ describe("worker provider backoff", () => {
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain("network");
 		expect(warnings[0]).toContain("attempt 2/3");
+	});
+
+	it("retries a returned overloaded provider completion and then succeeds", async () => {
+		vi.useFakeTimers();
+		const overloaded = {
+			text: "",
+			stopReason: "error",
+			errorMessage: "Provider service overloaded; try again later",
+			messages: [
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Provider service overloaded; try again later",
+				}),
+			],
+		} as IsolatedCompletionResult;
+		const attempt = vi
+			.fn<() => Promise<IsolatedCompletionResult>>()
+			.mockResolvedValueOnce(overloaded)
+			.mockResolvedValueOnce(COMPLETION);
+		const warnings: string[] = [];
+		const run = runProviderCompletionWithBackoff({
+			attempt,
+			onAttemptFailure: vi.fn(),
+			provider: "faux",
+			laneId: "lane-1",
+			warn: (message) => warnings.push(message),
+		});
+
+		await vi.advanceTimersByTimeAsync(3_000);
+
+		await expect(run).resolves.toBe(COMPLETION);
+		expect(attempt).toHaveBeenCalledTimes(2);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("overloaded");
 	});
 
 	it("rethrows non-retryable failures immediately without sleeping", async () => {

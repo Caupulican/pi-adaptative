@@ -128,9 +128,12 @@ process-tree termination contract. The platform shell is real host process autho
 isolation or a path-scoped substitute for `write`/`edit`.
 
 Birth context is selected once, before a new logical agent is admitted, with `forkTurns: "none"`,
-`"all"`, or a positive turn count such as `"3"`. Omission means `all` only when parent and child use
-the exact same provider and model; crossing either boundary defaults to `none`, and an explicit
-non-`none` cross-boundary request is rejected. The content-addressed snapshot contains bounded whole
+`"all"`, or a positive turn count such as `"3"`. Omitted top-level starts mean `all` only when the
+foreground and worker use the exact same provider and model. Omitted nested starts mean `none`, so a
+self-contained child task cannot inherit and mistake parent-level orchestration intent for child
+ownership; explicit nested inheritance remains available inside the exact provider/model boundary.
+Crossing either provider or model defaults to `none`, and an explicit non-`none` cross-boundary
+request is rejected. The content-addressed snapshot contains bounded whole
 user turns and complete text-only assistant answers. It excludes system/developer/custom messages,
 reasoning and commentary, tool calls/results, mailbox controls, non-text attachments, and incomplete
 assistant output. A compacted prefix can enter only as its bounded checkpoint attached to the next

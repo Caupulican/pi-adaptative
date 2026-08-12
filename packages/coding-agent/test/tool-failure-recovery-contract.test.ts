@@ -1,13 +1,15 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { createBashTool } from "../src/core/tools/bash.ts";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import {
 	createFileFailureRecoveryAuthority,
 	EDIT_RETARGET_RECOVERY_TARGET_KIND,
 	FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND,
 	FILE_EXISTS_RECOVERY_TARGET_KIND,
+	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 	WRITE_RETARGET_RECOVERY_TARGET_KIND,
 } from "../src/core/tools/file-failure-recovery.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
@@ -28,6 +30,61 @@ afterEach(async () => {
 });
 
 describe("tool-owned failure recovery contracts", () => {
+	it("reopens one exact shell probe only after a successful mutation in the same workspace", async () => {
+		const cwd = await createTemporaryRoot("pi-shell-mutation-recovery-");
+		const otherCwd = await createTemporaryRoot("pi-shell-mutation-other-");
+		await writeFile(join(cwd, "subject.txt"), "before\n", "utf8");
+		await writeFile(join(otherCwd, "subject.txt"), "before\n", "utf8");
+		const bash = createBashTool(cwd);
+		const target = bash.failureRecovery?.getFailureTargets?.(
+			{ command: "cargo test -p subject --lib focused_case -- --exact" },
+			{ failureCode: "exit_101" },
+		)?.[0];
+
+		expect(target).toMatchObject({ kind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, scope: cwd });
+		expect(
+			bash.failureRecovery?.getFailureTargets?.(
+				{ command: "cargo test -p subject --lib focused_case -- --exact" },
+				{ failureCode: "operation_rejected" },
+			),
+		).toEqual([]);
+
+		const input = { path: "subject.txt", edits: [{ oldText: "before", newText: "after" }] };
+		const edit = createEditTool(cwd);
+		const result = await edit.execute("edit-workspace-recovery", input);
+		const action = edit.failureRecovery?.actions?.find(
+			(candidate) => candidate.kind === "repair" && candidate.targetKind === WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
+		);
+		if (!target || !action || action.kind !== "repair") {
+			throw new Error("Expected matching shell/edit workspace-mutation recovery contracts");
+		}
+		expect(action.authority).toBe(target.authority);
+		expect(action.getEvidence(input, result)).toEqual([target.scope]);
+
+		const writeInput = { path: "created.txt", content: "created\n" };
+		const write = createWriteTool(cwd);
+		const writeResult = await write.execute("write-workspace-recovery", writeInput);
+		const writeAction = write.failureRecovery?.actions?.find(
+			(candidate) => candidate.kind === "repair" && candidate.targetKind === WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
+		);
+		if (!writeAction || writeAction.kind !== "repair") {
+			throw new Error("Expected matching shell/write workspace-mutation recovery contracts");
+		}
+		expect(writeAction.authority).toBe(target.authority);
+		expect(writeAction.getEvidence(writeInput, writeResult)).toEqual([target.scope]);
+
+		const otherInput = { path: "subject.txt", edits: [{ oldText: "before", newText: "after" }] };
+		const otherEdit = createEditTool(otherCwd);
+		const otherResult = await otherEdit.execute("edit-other-workspace", otherInput);
+		const otherAction = otherEdit.failureRecovery?.actions?.find(
+			(candidate) => candidate.kind === "repair" && candidate.targetKind === WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
+		);
+		if (!otherAction || otherAction.kind !== "repair") {
+			throw new Error("Expected other workspace mutation recovery contract");
+		}
+		expect(otherAction.getEvidence(otherInput, otherResult)).not.toContain(target.scope);
+	});
+
 	it("lets read declare an exact missing-file target without interpreting argument text", async () => {
 		const cwd = await createTemporaryRoot("pi-read-recovery-contract-");
 		const read = createReadTool(cwd);
@@ -122,6 +179,11 @@ describe("tool-owned failure recovery contracts", () => {
 				readdir: async () => [],
 			},
 		});
+		const bash = createBashTool(cwd, {
+			operations: {
+				exec: async () => ({ exitCode: 1 }),
+			},
+		});
 
 		expect(
 			read.failureRecovery?.getFailureTargets?.({ path: "remote.txt" }, { failureCode: "file_not_found" }),
@@ -147,6 +209,9 @@ describe("tool-owned failure recovery contracts", () => {
 				(action) => action.kind === "correct" && action.targetKind === FILE_EXISTS_RECOVERY_TARGET_KIND,
 			),
 		).toBeUndefined();
+		expect(bash.failureRecovery?.getFailureTargets?.({ command: "test-command" }, { failureCode: "exit_1" })).toEqual(
+			[],
+		);
 	});
 
 	it("matches only custom tools that share one explicit backend authority", async () => {
@@ -167,6 +232,12 @@ describe("tool-owned failure recovery contracts", () => {
 			intentController: new FileMutationIntentController(),
 			failureRecoveryAuthority: authority,
 		});
+		const bash = createBashTool(cwd, {
+			operations: {
+				exec: async () => ({ exitCode: 1 }),
+			},
+			failureRecoveryAuthority: authority,
+		});
 		const target = read.failureRecovery?.getFailureTargets?.(
 			{ path: "remote.txt" },
 			{ failureCode: "file_not_found" },
@@ -183,5 +254,11 @@ describe("tool-owned failure recovery contracts", () => {
 				{ content: [{ type: "text", text: "written" }], details: { phase: "written" } },
 			),
 		).toEqual([target.scope]);
+		const shellTarget = bash.failureRecovery?.getFailureTargets?.(
+			{ command: "test-command" },
+			{ failureCode: "exit_1" },
+		)?.[0];
+		expect(shellTarget).toMatchObject({ kind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, scope: `remote:${cwd}` });
+		expect(shellTarget?.authority).toBe(target.authority);
 	});
 });

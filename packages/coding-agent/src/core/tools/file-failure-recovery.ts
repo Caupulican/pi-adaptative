@@ -9,6 +9,7 @@ import { resolveToCwd } from "./path-utils.ts";
 
 export const FILE_EXISTS_RECOVERY_TARGET_KIND = "filesystem.file.exists";
 export const FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND = "filesystem.file.current-text";
+export const WORKSPACE_MUTATED_RECOVERY_TARGET_KIND = "filesystem.workspace.mutated";
 export const WRITE_RETARGET_RECOVERY_TARGET_KIND = "filesystem.write.retarget";
 export const EDIT_RETARGET_RECOVERY_TARGET_KIND = "filesystem.edit.retarget";
 
@@ -64,5 +65,21 @@ export function fileRecoveryTarget(
 		authority: authority.contractAuthority,
 		kind,
 		scope: fileRecoveryScope(authority, path, cwd),
+	};
+}
+
+export function workspaceRecoveryScope(authority: FileFailureRecoveryAuthority, cwd: string): string {
+	return authority.getScope(resolve(cwd));
+}
+
+export function workspaceRecoveryTarget(
+	authority: FileFailureRecoveryAuthority,
+	kind: string,
+	cwd: string,
+): AgentToolFailureRecoveryTarget {
+	return {
+		authority: authority.contractAuthority,
+		kind,
+		scope: workspaceRecoveryScope(authority, cwd),
 	};
 }

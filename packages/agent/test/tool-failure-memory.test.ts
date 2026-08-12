@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	assessToolFailure,
 	createRepeatedToolFailureResult,
+	createToolFailureOperationExhaustedResult,
 	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	normalizeToolSignature,
@@ -311,6 +312,31 @@ describe("tool failure memory", () => {
 		);
 	});
 
+	it("keeps an explicit process exit authoritative over identifier-like stdout", () => {
+		const assessment = assessToolFailure(
+			[
+				"let label = generated::EXPORTED_ACTION_LABEL.0;",
+				"// A stopped runtime cannot process background work.",
+				"Command exited with code 2",
+			].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_2");
+		expect(assessment.phase).toBe("execution");
+		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.guidance).toContain("No diagnostic output");
+	});
+
+	it("still classifies a standalone operating-system errno without an exit trailer", () => {
+		const assessment = assessToolFailure("EPIPE: broken pipe", "failed", "Error");
+
+		expect(assessment.failureCode).toBe("epipe");
+		expect(assessment.phase).toBe("execution");
+		expect(assessment.diagnostic).toBe("EPIPE: broken pipe");
+	});
+
 	it("uses bounded stdout evidence when a structured process failure has empty stderr", () => {
 		const assessment = assessToolFailure(
 			["outcome: failed", "exitCode: 1", "stdout:", "configdelphi: unknown option --auto", "stderr: (empty)"].join(
@@ -360,13 +386,13 @@ describe("tool failure memory", () => {
 		expect(retainedAfterFirst).toMatchObject({
 			failureCode: "invalid_option",
 			diagnostic: original.diagnostic,
-			correction: original.correction,
+			correction: expect.stringContaining("SAME OPERATION BLOCKED"),
 			occurrence: 2,
 		});
 		expect(retainedAfterSecond).toMatchObject({
 			failureCode: "invalid_option",
 			diagnostic: original.diagnostic,
-			correction: original.correction,
+			correction: expect.stringContaining("SAME OPERATION BLOCKED"),
 			occurrence: 3,
 		});
 		expect(secondText).toContain('"failure_code":"repeated_failed_operation"');
@@ -375,7 +401,93 @@ describe("tool failure memory", () => {
 		expect(secondText.match(/The unchanged operation was not executed\./g)).toHaveLength(1);
 	});
 
-	it("terminates an exhausted recovery circuit without replacing its root evidence", () => {
+	it("replaces spent recovery permission with one retained caveman no-replay directive", () => {
+		const original = {
+			...record("failed", "exit_101"),
+			diagnostic: "error[E0433]: cannot find `windows` in `os`",
+			correction: "Loaded actions: edit repair. Exact matching repair evidence grants 1 probe.",
+		};
+		const blocked = createRepeatedToolFailureResult(original);
+		const retained = blocked.details.piToolFailureMemory;
+		const text = blocked.content[0]?.type === "text" ? blocked.content[0].text : "";
+
+		expect(retained).toMatchObject({
+			failureCode: "exit_101",
+			diagnostic: original.diagnostic,
+			correction: expect.stringContaining("CAVEMAN MODE - MANDATORY"),
+		});
+		expect(retained.correction).toContain("SAME OPERATION BLOCKED");
+		expect(retained.correction).toContain("NEVER call it again with the same arguments in this run");
+		expect(retained.correction).toContain("not a harness loop or failure");
+		expect(retained.correction).not.toContain("grants 1 probe");
+		expect(text).toContain(retained.correction);
+
+		const nextRequest = sanitizeToolFailureContext(
+			[
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "blocked-call", name: "shell", arguments: { command: "cargo test" } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "blocked-call",
+					toolName: "shell",
+					content: blocked.content,
+					details: blocked.details,
+					isError: true,
+					timestamp: 2,
+				},
+			],
+			"base",
+		);
+
+		expect(nextRequest.systemPrompt).toContain(retained.correction);
+		expect(nextRequest.systemPrompt).not.toContain("grants 1 probe");
+	});
+
+	it("keeps a local exhausted operation blocked while directing independent work", () => {
+		const original = {
+			...record("failed", "credentials_missing"),
+			diagnostic: "Credential profile is unavailable.",
+			correction: "Connect the required credential profile.",
+		};
+
+		const exhausted = createToolFailureOperationExhaustedResult(
+			original,
+			"Operation recovery circuit opened after two blocked replays.",
+		);
+		const text = exhausted.content[0]?.type === "text" ? exhausted.content[0].text : "";
+
+		expect(exhausted.terminate).toBe(false);
+		expect(text).toContain('"failure_code":"operation_recovery_exhausted"');
+		expect(text).toContain("CAVEMAN MODE - MANDATORY");
+		expect(text).toContain("OPERATION CLOSED");
+		expect(text).toContain("NEVER call it again with the same arguments in this run");
+		expect(text).toContain("The recovery guard prevented a loop; this is not harness failure");
+		expect(text).toContain("Use a different operation/tool or continue independent work");
+		expect(text).not.toContain("Stop retrying tools in this run");
+		expect(exhausted.details.piToolFailureMemory).toMatchObject({
+			failureCode: "credentials_missing",
+			diagnostic: original.diagnostic,
+			correction: expect.stringContaining("OPERATION CLOSED"),
+			occurrence: 2,
+		});
+	});
+
+	it("terminates a run-wide exhausted recovery circuit without replacing its root evidence", () => {
 		const original = {
 			...record("failed", "file_not_found"),
 			diagnostic: "ENOENT: missing.txt",

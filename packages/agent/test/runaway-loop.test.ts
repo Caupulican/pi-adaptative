@@ -512,7 +512,7 @@ describe("runaway-loop backstop", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-			maxStallTurns: 3,
+			maxStallTurns: 0,
 			onRunawayStop: (info) => stalls.push(info),
 		};
 
@@ -529,8 +529,10 @@ describe("runaway-loop backstop", () => {
 			);
 
 		expect(executions).toBe(1);
-		expect(toolEndMessages).toHaveLength(3);
+		expect(toolEndMessages).toHaveLength(4);
 		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
+		expect(toolEndMessages[2]).toContain('"failure_code":"operation_recovery_exhausted"');
+		expect(toolEndMessages[3]).toContain('"failure_code":"recovery_exhausted"');
 		expect(stalls).toHaveLength(0);
 		expect(deliveryTurns).toBe(1);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
@@ -653,7 +655,7 @@ describe("runaway-loop backstop", () => {
 				{
 					model: createModel(),
 					convertToLlm: identityConverter,
-					maxStallTurns: 3,
+					maxStallTurns: 0,
 					beforeToolCall: async () => {
 						beforeCalls++;
 						return undefined;
@@ -677,12 +679,18 @@ describe("runaway-loop backstop", () => {
 			(event) =>
 				event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
 		);
+		const operationExhausted = events.filter(
+			(event) =>
+				event.type === "tool_execution_end" &&
+				resultContainsFailureCode(event.result, "operation_recovery_exhausted"),
+		);
 
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
 		expect(deliveryTurns).toBe(1);
-		expect(toolResultIds).toEqual(["refresh-1", "refresh-2", "refresh-3"]);
+		expect(toolResultIds).toEqual(["refresh-1", "refresh-2", "refresh-3", "refresh-4"]);
 		expect(blocked).toHaveLength(1);
+		expect(operationExhausted).toHaveLength(1);
 		expect(exhausted).toHaveLength(1);
 	});
 
@@ -810,8 +818,8 @@ describe("runaway-loop backstop", () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				turn++;
-				if (turn <= 5) {
-					const recoveryTurn = turn === 3;
+				if (turn <= 6) {
+					const recoveryTurn = turn === 4;
 					stream.push({
 						type: "done",
 						reason: "toolUse",
@@ -864,13 +872,20 @@ describe("runaway-loop backstop", () => {
 			),
 		).toHaveLength(1);
 		expect(
-			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-4"),
+			events.filter(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					resultContainsFailureCode(event.result, "operation_recovery_exhausted"),
+			),
+		).toHaveLength(1);
+		expect(
+			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-5"),
 		).toMatchObject({
 			type: "tool_execution_end",
 			isError: false,
 		});
 		expect(
-			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-5"),
+			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-6"),
 		).toMatchObject({
 			type: "tool_execution_end",
 			isError: false,
@@ -1432,7 +1447,7 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(turns).toBe(3);
+		expect(turns).toBe(4);
 		expect(deliveryTurns).toBe(1);
 		expect(executions).toBe(1);
 		expect(

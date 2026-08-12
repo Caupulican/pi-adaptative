@@ -5,7 +5,11 @@ import {
 	createDeterministicCompaction,
 	prepareCompaction,
 } from "../../src/compaction/compaction.ts";
-import { extractCompactionFacts, renderFactsBlock } from "../../src/compaction/extraction.ts";
+import {
+	extractCompactionFacts,
+	mergePersistentCompactionUserFacts,
+	renderFactsBlock,
+} from "../../src/compaction/extraction.ts";
 import { verifySummary } from "../../src/compaction/verification.ts";
 import type { CustomEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 
@@ -274,6 +278,28 @@ describe("extractCompactionFacts", () => {
 		expect(facts.activeTaskSource).toBe("second");
 	});
 
+	it("bounds and deduplicates persisted user rules while current task state wins", () => {
+		const current = extractCompactionFacts(
+			[createMessageEntry(createUserMessage("new task; do not touch current"))],
+			0,
+			1,
+		);
+		const merged = mergePersistentCompactionUserFacts(current, {
+			activeTaskSource: "old task",
+			prohibitions: [
+				...Array.from({ length: 10 }, (_, index) => `do not touch old-${index}`),
+				`do not expose ${"x".repeat(500)}`,
+				"NEW TASK; DO NOT TOUCH CURRENT",
+			],
+		});
+
+		expect(merged.activeTaskSource).toBe("new task; do not touch current");
+		expect(merged.prohibitions).toHaveLength(8);
+		expect(merged.prohibitions.at(-1)).toBe("new task; do not touch current");
+		expect(merged.prohibitions.every((rule) => rule.length <= 160)).toBe(true);
+		expect(merged.prohibitions.filter((rule) => rule.toLowerCase().includes("touch current"))).toHaveLength(1);
+	});
+
 	it("dedupes actions before applying the 15-action cap, keeping the most recent occurrence", () => {
 		resetEntryCounter();
 		const entries: SessionMessageEntry[] = [];
@@ -512,6 +538,61 @@ describe("extractCompactionFacts", () => {
 		expect(facts.workingSet).toEqual([]);
 		expect(facts.actions).toEqual([]);
 		expect(facts.errorFacts).toEqual([]);
+	});
+
+	it("does not promote one-turn rejected operations into durable action or open-error facts", () => {
+		resetEntryCounter();
+		const rejectedSearchCall = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-search", name: "bash", arguments: { command: "find . -type f" } },
+			]),
+		);
+		const rejectedSearchResult = createMessageEntry(
+			createToolResult(
+				"tc-search",
+				"bash",
+				"PI_TOOL_OPERATION_REJECTED: broad search blocked before execution",
+				{
+					piToolFailureDirective: {
+						version: 1,
+						state: "failed",
+						phase: "policy",
+						failureCode: "operation_rejected",
+						diagnostic: "broad search blocked before execution",
+						nextAction: "Narrow the search.",
+					},
+				},
+				true,
+			),
+		);
+
+		const facts = extractCompactionFacts([rejectedSearchCall, rejectedSearchResult], 0, 2);
+
+		expect(facts.actions).toEqual([]);
+		expect(facts.errorFacts).toEqual([]);
+	});
+
+	it("keeps failed operations when directive-shaped details are malformed", () => {
+		resetEntryCounter();
+		const failedCall = createMessageEntry(
+			createAssistantMessage([
+				{ type: "toolCall", id: "tc-failed", name: "bash", arguments: { command: "npm run check" } },
+			]),
+		);
+		const failedResult = createMessageEntry(
+			createToolResult(
+				"tc-failed",
+				"bash",
+				"FAIL typecheck",
+				{ piToolFailureDirective: { version: 1, state: "failed" } },
+				true,
+			),
+		);
+
+		const facts = extractCompactionFacts([failedCall, failedResult], 0, 2);
+
+		expect(facts.actions).toEqual(["RUN npm run check"]);
+		expect(facts.errorFacts).toEqual([{ operation: "RUN npm run check", error: "FAIL typecheck" }]);
 	});
 
 	it("orders the working set by last touch and caps it to recent files", () => {

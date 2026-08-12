@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Classified tool-owned pre-execution policy rejections as one-turn `operation_rejected` feedback so corrected or independent work can continue without retaining a false runtime failure.
+- Reported the exact forbidden nested-property path and `forbidden` expected type for closed-schema tool arguments instead of mislabeling the valid parent object as the wrong type.
+
 ## [0.90.2] - 2026-08-11
 
 ## [0.90.1] - 2026-08-11

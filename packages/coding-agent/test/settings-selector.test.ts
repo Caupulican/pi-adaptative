@@ -156,6 +156,16 @@ describe("settings selector", () => {
 		expect(output).toContain("unbounded turns, stall 20, auto on");
 	});
 
+	it("labels the default worker tree as unbounded instead of a zero-dollar budget", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ workerDelegation: {} }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("worker delegation");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("enabled (unbounded)");
+		expect(output).not.toContain("$0/tree");
+	});
+
 	it("presents delegation as a recursive tree and does not clamp scheduler concurrency to three", () => {
 		const onWorkerDelegationChange = vi.fn();
 		const selector = new SettingsSelectorComponent(

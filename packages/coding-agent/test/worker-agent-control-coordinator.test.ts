@@ -173,6 +173,10 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(coordinator.listWorkerAgents()).toEqual([
 			expect.objectContaining({ agentId: agent.agentId, activity: "active" }),
 		]);
+		await expect(coordinator.waitForWorkerAgent(agent.agentId, 1)).resolves.toEqual({
+			status: "active",
+			timedOut: true,
+		});
 		await expect(coordinator.waitForWorkerAgents([agent.agentId], "all", 1)).resolves.toMatchObject({
 			statuses: [{ agentId: agent.agentId, status: "active" }],
 			timedOut: true,
@@ -264,7 +268,7 @@ describe("WorkerAgentControlCoordinator", () => {
 		const waiting = coordinator.waitForWorkerAgent("agent-1", 10_000);
 		agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "suspended" });
 		coordinator.signalStateChanged();
-		await expect(waiting).resolves.toEqual({ status: "suspended" });
+		await expect(waiting).resolves.toEqual({ status: "suspended", timedOut: false });
 
 		attempt = activeAttempt("suspended");
 		enqueue.mockClear();
@@ -1642,16 +1646,16 @@ describe("WorkerAgentControlCoordinator", () => {
 			statusChanged: vi.fn(),
 			abortLane: vi.fn(),
 			cancelLane: vi.fn(),
-			yieldCapacity,
+			yieldCallerForWait: yieldCapacity,
 		});
 
 		const waiting = coordinator.waitForWorkerAgent("peer", 10_000, { callerAgentId: "caller" });
 		expect(yieldCapacity).toHaveBeenCalledOnce();
-		expect(yieldCapacity).toHaveBeenCalledWith("caller", "caller");
+		expect(yieldCapacity).toHaveBeenCalledWith("caller");
 		peerAttempt = { ...peerAttempt, status: "completed" };
 		coordinator.signalStateChanged();
 
-		await expect(waiting).resolves.toEqual({ status: "idle" });
+		await expect(waiting).resolves.toEqual({ status: "idle", timedOut: false });
 		expect(releaseYield).toHaveBeenCalledOnce();
 	});
 
@@ -1717,7 +1721,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			statusChanged: vi.fn(),
 			abortLane: vi.fn(),
 			cancelLane: vi.fn(),
-			yieldCapacity,
+			yieldCallerForWait: yieldCapacity,
 		});
 		const subscribe = vi.spyOn(WorkerAgentMailbox.prototype, "subscribe");
 
@@ -1727,7 +1731,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			});
 			expect(subscribe).not.toHaveBeenCalled();
 			expect(yieldCapacity).toHaveBeenCalledOnce();
-			expect(yieldCapacity).toHaveBeenCalledWith("caller", "caller");
+			expect(yieldCapacity).toHaveBeenCalledWith("caller");
 			peerBAttempt = { ...peerBAttempt, status: "completed" };
 			const snapshotsBeforeStateEvent = getTaskRuntimeSnapshot.mock.calls.length;
 			coordinator.signalStateChanged();
@@ -1780,7 +1784,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			statusChanged: vi.fn(),
 			abortLane: vi.fn(),
 			cancelLane: vi.fn(),
-			yieldCapacity: () => {
+			yieldCallerForWait: () => {
 				observedListenerCount = stateListeners.size;
 				throw new Error("synthetic yield failure");
 			},
@@ -1841,7 +1845,7 @@ describe("WorkerAgentControlCoordinator", () => {
 				statusChanged: vi.fn(),
 				abortLane: vi.fn(),
 				cancelLane: vi.fn(),
-				yieldCapacity,
+				yieldCallerForWait: yieldCapacity,
 			});
 
 			let resolved = false;
@@ -1997,7 +2001,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			statusChanged: vi.fn(),
 			abortLane: vi.fn(),
 			cancelLane: vi.fn(),
-			yieldCapacity,
+			yieldCallerForWait: yieldCapacity,
 		});
 
 		expect(coordinator.getWorkerAgentActivity("agent-1")).toBe("idle");

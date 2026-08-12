@@ -9,6 +9,7 @@ import {
 	type TruncationResult,
 } from "@caupulican/pi-agent-core/truncate";
 import type { AgentTool } from "@caupulican/pi-agent-core/types";
+import { TOOL_OPERATION_REJECTED_MARKER } from "@caupulican/pi-ai/tool-repair-registry";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
@@ -26,6 +27,12 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import {
+	type FileFailureRecoveryAuthority,
+	selectFileFailureRecoveryAuthority,
+	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
+	workspaceRecoveryTarget,
+} from "./file-failure-recovery.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
@@ -76,7 +83,8 @@ const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(
 		Type.Number({
-			description: `Wall-clock timeout in seconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS}; positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
+			maximum: MAX_COMMAND_TIMEOUT_SECONDS,
+			description: `Wall-clock timeout in SECONDS, not milliseconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS}; positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
 		}),
 	),
 	broadSearch: Type.Optional(
@@ -304,6 +312,8 @@ export interface BashToolOptions {
 	platform?: NodeJS.Platform;
 	/** Custom operations for command execution. Default: local platform shell */
 	operations?: BashOperations;
+	/** Shared backend identity for exact cross-tool recovery with custom operations. */
+	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Command prefix prepended to every command (for example shell setup commands) */
 	commandPrefix?: string;
 	/** Optional explicit shell path from settings */
@@ -445,6 +455,10 @@ function createShellToolDefinition(
 		(backendShell === "powershell"
 			? createLocalPowerShellOperations({ shellPath: options?.shellPath, sessionKey })
 			: createLocalBashOperations({ shellPath: options?.shellPath, sessionKey }));
+	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
+		options?.operations !== undefined,
+		options?.failureRecoveryAuthority,
+	);
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
 	const hasExecutionOverrides = Boolean(options?.operations || options?.shellPath || commandPrefix || spawnHook);
@@ -471,12 +485,20 @@ function createShellToolDefinition(
 					"Arithmetic outside for, job control, process substitution, heredocs, nested shells fail closed.",
 					"cd/export/unset state persists across bash calls and PowerShell/Python tiers.",
 					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
+					`Bash timeout values are seconds, not milliseconds; omit timeout to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
 					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
 				]
 			: [
+					`Bash timeout values are seconds, not milliseconds; omit timeout to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
 					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
 				],
 		parameters: bashSchema,
+		failureRecovery: {
+			getFailureTargets: (_params, failure) =>
+				failureRecoveryAuthority && /^exit_-?[1-9]\d*$/.test(failure.failureCode)
+					? [workspaceRecoveryTarget(failureRecoveryAuthority, WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, cwd)]
+					: [],
+		},
 		async execute(
 			_toolCallId,
 			{
@@ -491,7 +513,7 @@ function createShellToolDefinition(
 			const searchScope = assessShellSearchScope(command, cwd);
 			if (searchScope.kind === "broad" && broadSearch !== BROAD_SEARCH_OUTPUT_ROUTE) {
 				throw new Error(
-					`Broad search blocked before execution: ${searchScope.reason}. Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.`,
+					`${TOOL_OPERATION_REJECTED_MARKER}: Broad search blocked before execution: ${searchScope.reason}. Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.`,
 				);
 			}
 			const routeBroadSearchOutput = searchScope.kind === "broad";

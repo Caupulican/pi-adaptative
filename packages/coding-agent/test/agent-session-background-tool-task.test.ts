@@ -348,7 +348,7 @@ describe("AgentSession background tool tasks", () => {
 		);
 		appendGoalStateSnapshot(sessionManager, goal);
 
-		const responses = Array.from({ length: 3 }, (_, index) => ({
+		const responses = Array.from({ length: 4 }, (_, index) => ({
 			toolCalls: [
 				{
 					id: `wait-call-${index + 1}`,
@@ -367,7 +367,7 @@ describe("AgentSession background tool tasks", () => {
 		try {
 			await harness.session.prompt("inspect the failed task", { autoContinueGoal: false });
 
-			expect(harness.faux.callCount).toBe(4);
+			expect(harness.faux.callCount).toBe(5);
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 				goalId: "goal-task-wait",
 				status: "blocked",

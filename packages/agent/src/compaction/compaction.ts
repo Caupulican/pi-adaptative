@@ -16,8 +16,14 @@ import {
 } from "../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
-import { addUsage, combineUsage, createEmptyUsage } from "../usage.ts";
-import { type CompactionFacts, extractCompactionFacts, renderFactsBlock } from "./extraction.ts";
+import { addUsage, createEmptyUsage } from "../usage.ts";
+import {
+	ACTIVE_TASK_SOURCE_MAX_CHARS,
+	type CompactionFacts,
+	extractCompactionFacts,
+	mergePersistentCompactionUserFacts,
+	renderFactsBlock,
+} from "./extraction.ts";
 import {
 	addPersistedFileOperations,
 	computeFileLists,
@@ -53,9 +59,26 @@ export interface CompactionVerificationCheckStats {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	/** Exact user-owned state carried across iterative compactions. */
+	activeTaskSource: string;
+	prohibitions: string[];
 	verificationGateFailures?: number;
 	verificationGateChecks?: Record<string, CompactionVerificationCheckStats>;
 	deterministicGapFills?: number;
+}
+
+function readPersistedCompactionUserFacts(
+	details: unknown,
+): Pick<CompactionFacts, "activeTaskSource" | "prohibitions"> | undefined {
+	if (!isPlainRecord(details)) return undefined;
+	if (typeof details.activeTaskSource !== "string") return undefined;
+	if (!Array.isArray(details.prohibitions) || !details.prohibitions.every((rule) => typeof rule === "string")) {
+		return undefined;
+	}
+	return {
+		activeTaskSource: details.activeTaskSource.slice(0, ACTIVE_TASK_SOURCE_MAX_CHARS),
+		prohibitions: [...details.prohibitions],
+	};
 }
 
 /**
@@ -1134,10 +1157,12 @@ export function prepareCompaction(
 	}
 
 	let previousSummary: string | undefined;
+	let previousUserFacts: Pick<CompactionFacts, "activeTaskSource" | "prohibitions"> | undefined;
 	let boundaryStart = 0;
 	if (prevCompactionIndex >= 0) {
 		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
 		previousSummary = prevCompaction.summary;
+		previousUserFacts = readPersistedCompactionUserFacts(prevCompaction.details);
 		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
 		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
 	}
@@ -1185,7 +1210,13 @@ export function prepareCompaction(
 		}
 	}
 
-	const facts = extractCompactionFacts(pathEntries, boundaryStart, boundaryEnd);
+	let facts = extractCompactionFacts(pathEntries, boundaryStart, boundaryEnd);
+	if (prevCompactionIndex >= 0) {
+		// Older checkpoints did not persist these exact facts. Pay one linear migration scan, then
+		// persist the result below so later compactions stay incremental instead of becoming quadratic.
+		const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd);
+		facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
+	}
 
 	return {
 		firstKeptEntryId,
@@ -1203,19 +1234,6 @@ export function prepareCompaction(
 // ============================================================================
 // Main compaction function
 // ============================================================================
-
-const TURN_PREFIX_SUMMARIZATION_PROMPT = `Summarize discarded early part of split turn; recent suffix remains.
-
-## Original Request
-[User request]
-
-## Early Progress
-- [Decisions/work]
-
-## Context for Suffix
-- [Facts needed by retained work]
-
-Only facts needed to understand suffix.`;
 
 interface VerifiedSummaryResult {
 	summary: string;
@@ -1272,12 +1290,8 @@ async function generateVerifiedSummary(options: {
 		addUsage(usage, generated.usage);
 		const summary = generated.text;
 		const verification = verifySummary(summary, options.facts);
-		if (verification.ok) {
-			return { summary, usage, verification, verificationGateFailures, deterministicGapFills: 0 };
-		}
-
-		verificationGateFailures.push(verification);
 		if (!isCompactionSummaryStructurallyUsable(summary)) {
+			verificationGateFailures.push(verification);
 			if (attempt >= 1) throw new CompactionVerificationError(verificationGateFailures);
 			retryInstructions = buildRetryPrompt(verification, summary);
 			continue;
@@ -1285,6 +1299,7 @@ async function generateVerifiedSummary(options: {
 
 		const filled = deterministicallyFillSummaryGaps(summary, options.facts);
 		if (filled.verification.ok) {
+			if (!verification.ok) verificationGateFailures.push(verification);
 			return {
 				summary: filled.summary,
 				usage,
@@ -1294,6 +1309,7 @@ async function generateVerifiedSummary(options: {
 			};
 		}
 
+		verificationGateFailures.push(verification);
 		throw new CompactionVerificationError(verificationGateFailures);
 	}
 
@@ -1342,43 +1358,28 @@ export async function compact(
 		delegatedWorkerFacts: [],
 	};
 	const factsBlock = renderFactsBlock(facts);
-	const verified =
-		isSplitTurn && messagesToSummarize.length === 0
-			? undefined
-			: await generateVerifiedSummary({
-					messages: messagesToSummarize,
-					model,
-					reserveTokens: settings.reserveTokens,
-					apiKey,
-					headers,
-					signal,
-					customInstructions,
-					previousSummary,
-					thinkingLevel,
-					streamFn,
-					completion: executionOptions?.completion,
-					preDigest,
-					facts,
-					factsBlock,
-					chunked: executionOptions?.chunked ?? false,
-				});
+	const verified = await generateVerifiedSummary({
+		messages: isSplitTurn && messagesToSummarize.length === 0 ? turnPrefixMessages : messagesToSummarize,
+		model,
+		reserveTokens: settings.reserveTokens,
+		apiKey,
+		headers,
+		signal,
+		customInstructions,
+		previousSummary,
+		thinkingLevel,
+		streamFn,
+		completion: executionOptions?.completion,
+		preDigest,
+		facts,
+		factsBlock,
+		chunked: executionOptions?.chunked ?? false,
+	});
 
-	let summary = verified?.summary ?? "No prior history.";
-	let summaryUsage = verified?.usage;
+	let summary = verified.summary;
+	const summaryUsage = verified.usage;
 	if (isSplitTurn) {
-		const turnPrefix = await generateTurnPrefixSummary(
-			turnPrefixMessages,
-			model,
-			settings.reserveTokens,
-			apiKey,
-			headers,
-			signal,
-			thinkingLevel,
-			streamFn,
-			executionOptions?.completion,
-		);
-		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefix.text}`;
-		summaryUsage = combineUsage(summaryUsage, turnPrefix.usage);
+		summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${createTurnPrefixSummary(turnPrefixMessages)}`;
 	}
 
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
@@ -1396,14 +1397,16 @@ export async function compact(
 			details: {
 				readFiles,
 				modifiedFiles,
+				activeTaskSource: facts.activeTaskSource,
+				prohibitions: [...facts.prohibitions],
 				verificationGateFailures: 0,
-				deterministicGapFills: verified?.deterministicGapFills ?? 0,
+				deterministicGapFills: verified.deterministicGapFills,
 			} as CompactionDetails,
-			verification: verified?.verification,
+			verification: verified.verification,
 			verificationGateFailures: [],
-			deterministicGapFills: verified?.deterministicGapFills ?? 0,
+			deterministicGapFills: verified.deterministicGapFills,
 		},
-		verified?.verificationGateFailures ?? [],
+		verified.verificationGateFailures,
 	);
 }
 
@@ -1483,50 +1486,41 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles, verificationGateFailures: 0, deterministicGapFills: 0 } as CompactionDetails,
+		details: {
+			readFiles,
+			modifiedFiles,
+			activeTaskSource: facts?.activeTaskSource ?? "",
+			prohibitions: [...(facts?.prohibitions ?? [])],
+			verificationGateFailures: 0,
+			deterministicGapFills: 0,
+		} as CompactionDetails,
 	};
 }
 
-/**
- * Generate a summary for a turn prefix (when splitting a turn).
- */
-async function generateTurnPrefixSummary(
-	messages: AgentMessage[],
-	model: Model<any>,
-	reserveTokens: number,
-	apiKey: string | undefined,
-	headers?: Record<string, string>,
-	signal?: AbortSignal,
-	thinkingLevel?: ThinkingLevel,
-	streamFn?: StreamFn,
-	completion?: CompactionCompletion,
-): Promise<{ text: string; usage: Usage }> {
-	const maxTokens = Math.min(
-		Math.floor(0.5 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	); // Smaller budget for turn prefix
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
-	const promptText = `CHAT\n${conversationText}\n\nTASK\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-	const response = await completeSummarizationPrompt(
-		promptText,
-		model,
-		maxTokens,
-		apiKey,
-		headers,
-		signal,
-		thinkingLevel,
-		streamFn,
-		completion,
-		undefined,
-		"Turn prefix summarization",
-	);
-
-	return {
-		text: response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("\n"),
-		usage: response.usage,
-	};
+/** Split-turn context is intentionally mechanical: user intent is copied, never summarized. */
+function createTurnPrefixSummary(messages: AgentMessage[]): string {
+	let originalRequest = "";
+	for (const message of messages) {
+		if (message.role !== "user") continue;
+		if (typeof message.content === "string") {
+			originalRequest = message.content;
+		} else {
+			originalRequest = message.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text")
+				.map((block) => block.text)
+				.join("");
+		}
+		break;
+	}
+	const boundedRequest = originalRequest.slice(0, ACTIVE_TASK_SOURCE_MAX_CHARS) || "(none)";
+	return [
+		"## Original Request",
+		boundedRequest,
+		"",
+		"## Early Progress",
+		`- ${messages.length} earlier message(s) compacted; durable facts are in the main checkpoint.`,
+		"",
+		"## Context for Suffix",
+		"- Retained messages continue the original request.",
+	].join("\n");
 }

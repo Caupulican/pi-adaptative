@@ -1033,7 +1033,7 @@ describe("AgentSession worker delegation", () => {
 
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Do the impossible" });
 
-			expect(run.record?.status).toBe("failed");
+			expect(run.record?.status).toBe("blocked");
 			expect(run.record?.reasonCode).toBe("worker_blocked");
 			expect(run.outcome?.accepted).toBe(false);
 			expect(run.outcome?.acceptance.outcome).toBe("block");
@@ -2126,7 +2126,7 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("omits delegate tool and workflow.delegate capability from default leaf worker surface", () => {
+	it("defaults to bounded recursive authority while explicit empty capabilities remain a leaf", () => {
 		const modelRegistry = {
 			find: () => ({ id: "m1", provider: "faux" }),
 			hasConfiguredAuth: () => true,
@@ -2140,8 +2140,20 @@ describe("AgentSession worker delegation", () => {
 		});
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).not.toContain("delegate");
-		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
+		expect(resolution.shipment.profile.toolNames).toContain("delegate");
+		expect(resolution.shipment.profile.capabilityCeiling).toContain("workflow.delegate");
+
+		const leaf = resolveWorkerAuthority({
+			authority: { capabilities: [] },
+			base: undefined,
+			foregroundModel: { id: "m1", provider: "faux" } as any,
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(leaf.ok).toBe(true);
+		if (!leaf.ok) return;
+		expect(leaf.shipment.profile.toolNames).not.toContain("delegate");
+		expect(leaf.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
 	});
 
 	it("rejects non-viable token grants at admission instead of starving the worker mid-flight", () => {

@@ -28,6 +28,8 @@ import {
 	type FileFailureRecoveryAuthority,
 	fileRecoveryTarget,
 	selectFileFailureRecoveryAuthority,
+	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
+	workspaceRecoveryScope,
 } from "./file-failure-recovery.ts";
 import {
 	FileMutationIntentController,
@@ -450,6 +452,21 @@ export function createEditToolDefinition(
 					instruction:
 						"Use edit with the retained payloadRef and a corrected path naming the intended existing file.",
 				},
+				...(failureRecoveryAuthority
+					? [
+							{
+								kind: "repair" as const,
+								authority: failureRecoveryAuthority.contractAuthority,
+								targetKind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
+								instruction:
+									"When a command failed because workspace contents need repair, edit the existing file and rerun that exact command once.",
+								getEvidence: (_params: EditToolInput, result: { details?: EditToolDetails }) =>
+									result.details?.phase === "edited"
+										? [workspaceRecoveryScope(failureRecoveryAuthority, cwd)]
+										: [],
+							},
+						]
+					: []),
 			],
 		},
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {

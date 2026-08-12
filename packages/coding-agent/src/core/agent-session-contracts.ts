@@ -272,6 +272,8 @@ export interface IsolatedCompletionResult {
 	text: string;
 	usage: Usage;
 	stopReason: StopReason;
+	/** Provider diagnostic for an error stop; lane owners classify it without parsing transcript history. */
+	errorMessage?: string;
 	/** Complete child-owned conversation; isolated calls never expose foreground history. */
 	messages?: Message[];
 }

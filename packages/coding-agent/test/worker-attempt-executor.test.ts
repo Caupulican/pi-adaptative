@@ -437,6 +437,7 @@ describe("worker attempt executor", () => {
 				text: assistantText,
 				usage: ZERO_USAGE,
 				stopReason: "error",
+				errorMessage: assistant.errorMessage,
 				messages: [...(options.history ?? []), assistant],
 			};
 		});
@@ -466,8 +467,9 @@ describe("worker attempt executor", () => {
 		expect(JSON.stringify(persistedAssistant?.diagnostics)).not.toContain("provider.ts");
 		expect(persistedAssistant?.content).toEqual([{ type: "text", text: assistantText }]);
 		expect(result.rawOutcome).toMatchObject({
-			reasonCode: "model_error",
-			claim: { status: "failed", summary: "Worker model call failed." },
+			reasonCode: "completion_error",
+			reasonDetail: persistedAssistant?.errorMessage,
+			claim: { status: "failed" },
 		});
 		expect(JSON.stringify(result.rawOutcome)).not.toContain(secret);
 	});
@@ -1188,6 +1190,98 @@ describe("worker attempt executor", () => {
 					.map((message) => message.content),
 			).toEqual([partial.content, finalAssistant.content]);
 			abortTranscriptCommit.mockRestore();
+		} finally {
+			random.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("retries a returned overloaded completion from its durable error suffix", async () => {
+		vi.useFakeTimers();
+		const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+		let providerCalls = 0;
+		try {
+			const overloaded = fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "Provider service overloaded; try again later",
+			}) as AssistantMessage;
+			const recovered = fauxAssistantMessage(
+				'{"summary":"overload retry complete","status":"completed"}',
+			) as AssistantMessage;
+			const harness = createExecutorHarness(async (options) => {
+				providerCalls += 1;
+				const assistant = providerCalls === 1 ? overloaded : recovered;
+				if (providerCalls === 2) {
+					expect(options.history?.map((message) => message.role)).toEqual(["user", "assistant"]);
+				}
+				await options.onMessage?.(assistant);
+				return {
+					text: providerCalls === 1 ? "" : '{"summary":"overload retry complete","status":"completed"}',
+					usage: ZERO_USAGE,
+					stopReason: assistant.stopReason,
+					...(assistant.errorMessage ? { errorMessage: assistant.errorMessage } : {}),
+					messages: [...(options.history ?? []), assistant],
+				};
+			});
+
+			const execution = harness.executor.run();
+			for (let tick = 0; tick < 20 && providerCalls === 0; tick += 1) await Promise.resolve();
+			expect(providerCalls).toBe(1);
+			await vi.advanceTimersByTimeAsync(2_500);
+			const result = await execution;
+
+			expect(result.rawOutcome).toMatchObject({ accepted: true, reasonCode: "worker_completed" });
+			expect(providerCalls).toBe(2);
+			expect(harness.events.some((event) => event.includes("provider request failed (overloaded)"))).toBe(true);
+			expect(
+				harness.conversation
+					.getRawTranscript()
+					.filter((message): message is AssistantMessage => message.role === "assistant")
+					.map((message) => ({ stopReason: message.stopReason, errorMessage: message.errorMessage })),
+			).toEqual([
+				{
+					stopReason: "error",
+					errorMessage: "Provider service overloaded; try again later",
+				},
+				{ stopReason: "stop", errorMessage: undefined },
+			]);
+		} finally {
+			random.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("surfaces exhausted returned provider failures as durable retry evidence", async () => {
+		vi.useFakeTimers();
+		const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+		let providerCalls = 0;
+		try {
+			const errorMessage = "Provider service overloaded; try again later";
+			const harness = createExecutorHarness(async (options) => {
+				providerCalls += 1;
+				const assistant = fauxAssistantMessage("", { stopReason: "error", errorMessage }) as AssistantMessage;
+				await options.onMessage?.(assistant);
+				return {
+					text: "",
+					usage: ZERO_USAGE,
+					stopReason: "error",
+					errorMessage,
+					messages: [...(options.history ?? []), assistant],
+				};
+			});
+
+			const execution = harness.executor.run();
+			for (let tick = 0; tick < 20 && providerCalls === 0; tick += 1) await Promise.resolve();
+			await vi.advanceTimersByTimeAsync(60_000);
+			const result = await execution;
+
+			expect(providerCalls).toBe(3);
+			expect(result.rawOutcome).toMatchObject({
+				accepted: false,
+				laneStatus: "failed",
+				reasonCode: "completion_error",
+				reasonDetail: errorMessage,
+			});
 		} finally {
 			random.mockRestore();
 			vi.useRealTimers();

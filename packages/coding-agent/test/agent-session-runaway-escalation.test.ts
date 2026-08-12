@@ -121,7 +121,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			harness.session.saveGoalStateSnapshot(state);
 			harness.session.agent.maxStallTurns = 0;
 			harness.setResponses([
-				...Array.from({ length: 3 }, () =>
+				...Array.from({ length: 4 }, () =>
 					fauxAssistantMessage(fauxToolCall("failing_tool", { value: "same" }), { stopReason: "toolUse" }),
 				),
 				fauxAssistantMessage("The tool failure requires owner action."),

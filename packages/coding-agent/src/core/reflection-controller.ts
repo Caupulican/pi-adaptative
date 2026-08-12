@@ -458,6 +458,7 @@ export class ReflectionController {
 					text,
 					usage,
 					stopReason: finalAssistant.stopReason,
+					...(finalAssistant.errorMessage ? { errorMessage: finalAssistant.errorMessage } : {}),
 					messages: [...history, ...(messages as Message[])],
 				};
 			}
@@ -478,7 +479,13 @@ export class ReflectionController {
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			return { text, usage, stopReason: result.stopReason, messages: [...history, ...opts.messages, result] };
+			return {
+				text,
+				usage,
+				stopReason: result.stopReason,
+				...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+				messages: [...history, ...opts.messages, result],
+			};
 		} finally {
 			deregisterInFlight();
 		}

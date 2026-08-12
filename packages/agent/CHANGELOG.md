@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Fixed
+
+- Scoped exhausted tool-operation recovery circuits to the failed operation so unrelated tools and independent work remain available, while repeated open-circuit calls and run-wide failure bounds still terminate safely.
+- Replaced spent tool-recovery probe permission with one retained mandatory caveman no-replay directive, keeping visible and persisted recovery guidance consistent and preventing blocked operations from being mistaken for harness failure.
+- Made compaction keep the active user task verbatim and build split-turn context mechanically, preventing tool output from rewriting a conditional request into new user intent while removing the redundant second summarizer call.
+- Persisted user-owned compaction task/rule facts across iterative checkpoints and canonicalized those sections on every summary, preventing checkpoint-control prompts from becoming worker instructions.
+- Excluded validated one-turn tool-failure directives from durable compaction actions and open problems.
+- Made explicit process exit statuses outrank identifier-like stdout during tool-failure classification, retained bounded explicit compiler/test errors and structured stderr as repair evidence, and stopped uncatalogued stdout from being fabricated as a diagnostic.
+- Compacted exact provider enum schemas by removing type and length constraints already proven by their literal values, while retaining the full execution-time validation contract.
+
 ## [0.90.2] - 2026-08-11
 
 ### Fixed

@@ -144,7 +144,7 @@ describe("AgentSession compaction characterization", () => {
 		seedCompactableSession(harness);
 		const summary = [
 			"## Active Task",
-			"message to compact",
+			"User: message to compact",
 			"",
 			"### Mandatory Rules",
 			"(none)",
@@ -159,6 +159,15 @@ describe("AgentSession compaction characterization", () => {
 			"(none)",
 			"",
 			"## Done",
+			"(none)",
+			"",
+			"## Key Decisions",
+			"(none)",
+			"",
+			"## Constraints & Preferences",
+			"(none)",
+			"",
+			"## Critical Context",
 			"(none)",
 		].join("\n");
 		const getStreamCallCount = useSummaryStreamFn(harness, summary);
@@ -188,7 +197,7 @@ describe("AgentSession compaction characterization", () => {
 					failures: 6,
 					minScore: 0,
 					maxScore: 0,
-					threshold: 0.9,
+					threshold: 1,
 					comparator: "minimum",
 				},
 			},

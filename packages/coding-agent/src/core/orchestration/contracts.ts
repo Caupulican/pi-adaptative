@@ -36,6 +36,10 @@ export const MAX_ORCHESTRATION_NOTIFICATIONS = 512;
 export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE = 512;
 export const MAX_ORCHESTRATION_EVIDENCE = 4_096;
 export const MAX_ORCHESTRATION_CHECKPOINT_SUMMARY_LENGTH = 4 * 1024;
+/** Absolute durable lineage bound enforced even when a profile requests broader recursion. */
+export const MAX_ORCHESTRATION_AGENT_DEPTH = 8;
+/** Retained direct-child identity bound enforced even when a profile requests broader fan-out. */
+export const MAX_ORCHESTRATION_DIRECT_CHILDREN = 64;
 /** One changed retained map value; aggregate projection accounting remains the authoritative ceiling. */
 export const MAX_ORCHESTRATION_RETAINED_RECORD_BYTES = 1024 * 1024;
 /** Leaves room for bounded idempotency evidence and the snapshot envelope below the on-disk ceiling. */
@@ -87,6 +91,16 @@ export interface OrchestrationExecutionPolicy {
 	allowedExecutables: readonly string[];
 	allowedEnvironmentVariables: readonly string[];
 	maxOutputBytes: number;
+}
+
+/** Outbound recursive delegation authority retained with an immutable worker profile snapshot. */
+export interface OrchestrationDelegationLimits {
+	/** Greatest absolute AgentBindingContract.depth that this worker may create. */
+	maxDepth: number;
+	/** Greatest number of retained direct child identities that this worker may create. */
+	maxChildrenPerAgent: number;
+	/** Greatest number of retained non-root identities across this durable session. */
+	maxNestedAgentsPerSession?: number;
 }
 
 export const OBJECTIVE_STATUSES = ["active", "paused", "completed", "cancelled"] as const;
@@ -255,6 +269,8 @@ export interface OrchestrationProfile {
 	/** Optional preset-routing metadata retained for authored profiles; never an admission allowlist. */
 	dispatchProfileIds: readonly string[];
 	executionPolicy?: OrchestrationExecutionPolicy;
+	/** Omitted authored profiles use the host ceiling; adaptive profiles carry a lean explicit limit. */
+	delegationLimits?: OrchestrationDelegationLimits;
 	budget: RiskBudget;
 	/** Authored scheduling hint retained in the snapshot; the global scheduler owns actual concurrency. */
 	maxConcurrent: number;
@@ -508,6 +524,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"attempt.grant_bound",
 	"attempt.leased",
 	"attempt.started",
+	"attempt.lease_renewed",
 	"attempt.checkpointed",
 	"attempt.suspended",
 	"attempt.resumed",

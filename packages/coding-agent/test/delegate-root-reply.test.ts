@@ -31,7 +31,7 @@ function workerAgentControl(overrides: Record<string, unknown> = {}): WorkerAgen
 		interruptWorkerAgent: () => ({ interrupted: false }),
 		resumeWorkerAgent: () => ({ started: false }),
 		cancelWorkerAgent: () => undefined,
-		waitForWorkerAgent: async () => ({ status: "unknown" }),
+		waitForWorkerAgent: async () => ({ status: "unknown", timedOut: false }),
 		sendSessionRootWorkerAgentMessage: () => ({ messageId: "root-send", queued: true }),
 		followUpSessionRootWorkerAgent: () => ({
 			started: false,
@@ -158,6 +158,80 @@ describe("delegate session-root reply routing", () => {
 		expect(first.details).toMatchObject({ messageId: "root-send", queued: true });
 		expect(followed.details).toMatchObject({ messageId: "root-follow-up" });
 		expect(toolText(first)).toContain("root-send");
+	});
+
+	it("routes follow-up completion away from explicit-reply inbox waits", async () => {
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: () => ({ sessionId: "session-1", branchId: "leaf-1" }),
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({
+				followUpSessionRootWorkerAgent: () => ({
+					started: true,
+					steering: false,
+					messageId: "root-follow-up",
+				}),
+			}),
+		});
+
+		const followed = await tool.execute(
+			"call-follow-up",
+			{ action: "follow_up", agentId: "worker-1", message: "continue" },
+			undefined,
+			undefined,
+			context(),
+		);
+		const text = toolText(followed);
+
+		expect(text).toContain("CAVEMAN MODE - MANDATORY");
+		expect(text).toContain("Worker completion uses delegate wait/wait_many");
+		expect(text).toContain("owning parent terminal handoff");
+		expect(text).toContain("Never use inbox_wait for completion");
+		expect(text).toContain("inbox_wait observes explicit replies only");
+		expect(followed.details).toMatchObject({
+			started: true,
+			action: "follow_up",
+			agentId: "worker-1",
+			messageId: "root-follow-up",
+		});
+	});
+
+	it("classifies a suspended worker wait as durable nonterminal state", async () => {
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({
+				waitForWorkerAgent: async () => ({ status: "suspended", timedOut: false }),
+			}),
+		});
+
+		const result = await tool.execute(
+			"call-suspended-wait",
+			{ action: "wait", agentId: "worker-1", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context(),
+		);
+		const payload = JSON.parse(toolText(result)) as Record<string, unknown>;
+
+		expect(payload).toMatchObject({
+			status: "suspended",
+			timedOut: false,
+			waitState: "nonterminal",
+			workerStallProven: false,
+			workerCompletionMissed: false,
+			reasonCode: "worker_suspended",
+		});
+		expect(payload.cavemanDirective).toContain("suspended is durable nonterminal state");
+		expect(payload.cavemanDirective).toContain("not missed completion or harness failure");
+		expect(payload.cavemanDirective).toContain("explicitly interrupted");
+		expect(payload.cavemanDirective).toContain("host-owned transient retry resumes automatically");
+		expect(result.details).toMatchObject({
+			started: true,
+			action: "wait",
+			agentId: "worker-1",
+			timedOut: false,
+		});
 	});
 
 	it("binds worker sends to the host caller and rejects reply metadata on generic sends", async () => {
@@ -503,6 +577,35 @@ describe("delegate session-root reply routing", () => {
 		});
 		expect(acknowledgeSessionRootReply).not.toHaveBeenCalled();
 		expect(JSON.parse(toolText(result))).toMatchObject({ replies: [reply], timedOut: false, omittedCount: 0 });
+	});
+
+	it("marks a bounded inbox timeout as reply-only and nonterminal instead of stall evidence", async () => {
+		const waitForSessionRootReplies = vi.fn(async () => ({ replies: [], timedOut: true }));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForSessionRootReplies }),
+		});
+
+		const result = await tool.execute(
+			"call-timeout",
+			{ action: "inbox_wait", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context(),
+		);
+		const payload = JSON.parse(toolText(result)) as Record<string, unknown>;
+
+		expect(payload).toMatchObject({
+			timedOut: true,
+			waitState: "nonterminal",
+			observes: "explicit_replies_only",
+			workerStallProven: false,
+			reasonCode: "bounded_wait_elapsed",
+		});
+		expect(payload.nextAction).toContain("wait/wait_many");
+		expect(payload.nextAction).toContain("Never interrupt solely");
+		expect(result.details).toMatchObject({ action: "inbox_wait", timedOut: true });
 	});
 
 	it("acknowledges one exact inbox token only from the root caller", async () => {

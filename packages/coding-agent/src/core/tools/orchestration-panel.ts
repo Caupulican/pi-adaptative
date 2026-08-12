@@ -11,6 +11,7 @@ export type OrchestrationRowStatus =
 	| "in_progress"
 	| "completed"
 	| "succeeded"
+	| "partial"
 	| "blocked"
 	| "failed"
 	| "timeout"
@@ -58,6 +59,7 @@ const ROW_STYLES: Record<OrchestrationRowStatus, RowStyle> = {
 	in_progress: { icon: "●", color: "accent", bold: true },
 	completed: { icon: "✓", color: "success", strike: true },
 	succeeded: { icon: "✓", color: "success" },
+	partial: { icon: "!", color: "warning" },
 	blocked: { icon: "!", color: "warning", bold: true },
 	failed: { icon: "×", color: "error", bold: true },
 	timeout: { icon: "×", color: "warning" },

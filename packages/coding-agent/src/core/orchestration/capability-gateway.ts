@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import { extractPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
 import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
@@ -102,11 +103,18 @@ export function budgetedTokens(usage: {
 	return detailed + unattributed + Math.ceil(usage.cacheReadTokens * CACHE_READ_BUDGET_WEIGHT);
 }
 
-export class CapabilityGatewayDeniedError extends Error {
+const BUDGET_EXHAUSTION_DECISION_CODES: ReadonlySet<GatewayDecisionCode> = new Set([
+	"tool_call_budget_exhausted",
+	"token_budget_exhausted",
+	"cost_budget_exhausted",
+	"wall_clock_budget_exhausted",
+]);
+
+export class CapabilityGatewayDeniedError extends BoundedCompletionFailureError {
 	readonly reasonCode: GatewayDecisionCode;
 
 	constructor(reasonCode: GatewayDecisionCode, message: string) {
-		super(message);
+		super(BUDGET_EXHAUSTION_DECISION_CODES.has(reasonCode) ? "budget_exhausted" : "failed", reasonCode, message);
 		this.name = "CapabilityGatewayDeniedError";
 		this.reasonCode = reasonCode;
 	}

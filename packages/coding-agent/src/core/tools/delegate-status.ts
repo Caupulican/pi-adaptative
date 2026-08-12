@@ -1,8 +1,12 @@
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "../delegation/worker-terminal-handoff-coordinator.ts";
 import type { OrchestrationPanelModel, OrchestrationPanelRow } from "./orchestration-panel.ts";
 
 const MAX_WORKER_CONTROL_ID_CHARS = 512;
+
+export const WORKER_QUEUED_CAVEMAN_GUIDANCE =
+	"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or safety reservations clear. Never poll, interrupt, or cancel a healthy running worker to force the queue. For genuine parallel read-only work, start a fresh worker whose authority.toolNames omits write and edit; write-capable workers may serialize. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
 
 export const DELEGATE_STATUS_ACTIONS = ["status", "review"] as const;
 
@@ -62,8 +66,26 @@ function isDelegatedWorkerLane(record: LaneRecord): boolean {
 	return record.type === "worker" || record.type === "tmux-worker";
 }
 
+function formattedRecordStatus(record: LaneRecord): string {
+	const retryReason =
+		record.status === "running" && record.reasonCode?.startsWith("retry_scheduled:")
+			? record.reasonCode.slice("retry_scheduled:".length)
+			: undefined;
+	if (retryReason) {
+		return `retrying after transient ${retryReason} (nonterminal; durable state preserved; terminal handoff pending)`;
+	}
+	return `${record.status}${record.reasonCode ? ` (${record.reasonCode})` : ""}`;
+}
+
 function formatRecord(record: LaneRecord, claim: WorkerClaim | undefined): string {
-	const lines = [`${record.laneId}: ${record.status}${record.reasonCode ? ` (${record.reasonCode})` : ""}`];
+	const lines = [`${record.laneId}: ${formattedRecordStatus(record)}`];
+	if (record.status === "queued") lines.push(WORKER_QUEUED_CAVEMAN_GUIDANCE);
+	if (record.reasonCode === "worker_blocked") {
+		lines.push(
+			"CAVEMAN MODE - MANDATORY: worker_blocked is a delivered task claim with blockers, not harness failure or lost state. Verify the claim, then continue or replan the parent task.",
+		);
+	}
+	if (record.reasonCode === "completion_error") lines.push(WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE);
 	if (!claim) return lines.join("\n");
 	lines.push(`usageReportId: ${claim.usageReportId ?? "none"}`);
 	if (isUnreviewed(claim)) {

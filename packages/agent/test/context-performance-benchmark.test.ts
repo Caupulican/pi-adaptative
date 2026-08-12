@@ -124,6 +124,15 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 	});
 
 	describe("50k to 1 Million Token Scale Benchmarks (Hard Latency & Memory Gate)", () => {
+		const median = (values: number[]) =>
+			values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
+		const measureCpuMicros = (operation: () => void) => {
+			const start = process.cpuUsage();
+			operation();
+			const elapsed = process.cpuUsage(start);
+			return elapsed.user + elapsed.system;
+		};
+
 		it("processes a 50k token context trajectory efficiently", () => {
 			const messageCount = 500; // ~50k tokens of synthetic history
 			const payloadBlock = "X".repeat(500); // 500 chars per result
@@ -144,7 +153,7 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			expect(sanitized.messages.length).toBeLessThan(messages.length);
 		});
 
-		it("processes a 1 Million token context trajectory under 50ms with linear O(N) scaling", () => {
+		it("processes a 1 Million token context trajectory under 75ms CPU time with linear O(N) scaling", () => {
 			const turnCount = 2000; // ~1,000,000 tokens of heavy tool calls & payloads
 			const heavyPayload = "Y".repeat(2000); // 2KB payload per turn
 			const messages: AgentMessage[] = [];
@@ -156,12 +165,20 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 				messages.push(...buildSyntheticTurn(`call_1m_${i}`, "read_file", { id: i % 50 }, text, isErr, i * 2));
 			}
 
-			const start = performance.now();
-			const sanitized = sanitizeToolFailureContext(messages, "Base prompt");
-			const elapsed = performance.now() - start;
+			let sanitized = sanitizeToolFailureContext(messages, "Base prompt");
+			const durations: number[] = [];
+			for (let sample = 0; sample < 5; sample++) {
+				durations.push(
+					measureCpuMicros(() => {
+						sanitized = sanitizeToolFailureContext(messages, "Base prompt");
+					}),
+				);
+			}
+			const elapsedMs = median(durations) / 1_000;
 
-			// HARD LATENCY GATE: 1,000,000 token context sanitized in < 75ms (under parallel test runner CPU load)
-			expect(elapsed).toBeLessThan(75);
+			// HARD LATENCY GATE: 1,000,000 token context consumes < 75ms CPU. Median CPU time
+			// retains GC and algorithm cost without charging unrelated sibling-worker scheduling pauses.
+			expect(elapsedMs).toBeLessThan(75);
 			expect(sanitized.messages.length).toBeLessThan(messages.length);
 		});
 
@@ -180,28 +197,24 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			const smallSuite = generateTrajectory(500); // N = 500
 			const largeSuite = generateTrajectory(2000); // N = 2000 (4x)
 
-			const measureCpuMicros = (messages: AgentMessage[]) => {
-				const start = process.cpuUsage();
-				for (let pass = 0; pass < 4; pass++) sanitizeToolFailureContext(messages, "base");
-				const elapsed = process.cpuUsage(start);
-				return elapsed.user + elapsed.system;
-			};
-			const median = (values: number[]) =>
-				values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
+			const measureBatchCpuMicros = (messages: AgentMessage[]) =>
+				measureCpuMicros(() => {
+					for (let pass = 0; pass < 4; pass++) sanitizeToolFailureContext(messages, "base");
+				});
 
 			// Absolute latency is gated above. Measure batched process CPU here so shared-runner
 			// scheduling pauses cannot turn one transient wall-clock sample into a false complexity verdict.
-			measureCpuMicros(smallSuite);
-			measureCpuMicros(largeSuite);
+			measureBatchCpuMicros(smallSuite);
+			measureBatchCpuMicros(largeSuite);
 			const smallDurations: number[] = [];
 			const largeDurations: number[] = [];
 			for (let sample = 0; sample < 7; sample++) {
 				if (sample % 2 === 0) {
-					smallDurations.push(measureCpuMicros(smallSuite));
-					largeDurations.push(measureCpuMicros(largeSuite));
+					smallDurations.push(measureBatchCpuMicros(smallSuite));
+					largeDurations.push(measureBatchCpuMicros(largeSuite));
 				} else {
-					largeDurations.push(measureCpuMicros(largeSuite));
-					smallDurations.push(measureCpuMicros(smallSuite));
+					largeDurations.push(measureBatchCpuMicros(largeSuite));
+					smallDurations.push(measureBatchCpuMicros(smallSuite));
 				}
 			}
 			const durationSmall = median(smallDurations);

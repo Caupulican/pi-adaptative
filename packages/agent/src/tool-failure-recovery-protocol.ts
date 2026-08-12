@@ -13,12 +13,12 @@ export function mandatoryToolFailureRecoveryMetadata(): {
 export const MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT = [
 	`MANDATORY TOOL FAILURE RECOVERY v${TOOL_FAILURE_RECOVERY_PROTOCOL_VERSION}`,
 	MANDATORY_TOOL_FAILURE_RECOVERY_RULE,
+	"CAVEMAN MODE - MANDATORY: blocked/rejected means not executed; never repeat the same call.",
 	"Harness contract:",
-	"- Failure record binds execution. MUST:true: repair; if impossible, perform next_action; never retry first.",
-	"- Do not repeat an unchanged operation. Irrelevant argument changes never recover it.",
-	"- A blocked call preserves tool-result pairing but runs no hook/tool code.",
-	"- Unchanged execution needs explicit record permission or successful loaded-tool evidence matching backend authority, target kind, and exact scope; that grants one probe.",
-	"- If no declared action can run, report the diagnostic/blocker. Exhaustion disables tools and requires one concise delivery.",
+	"- MUST:true: obey repair or next_action before another tool call.",
+	"- Unchanged execution needs permission or successful loaded-tool evidence matching backend authority, target kind, and exact scope; one probe.",
+	"- Irrelevant argument changes never recover it; blocked call preserves tool-result pairing but runs no hook/tool code.",
+	"- Operation exhaustion closes that operation; use different tools/work. Replaying it or run exhaustion disables tools for final delivery.",
 ].join("\n");
 
 const MANDATORY_TOOL_FAILURE_DELIVERY_INSTRUCTIONS = [

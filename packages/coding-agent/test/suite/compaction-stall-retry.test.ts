@@ -43,7 +43,7 @@ describe("compaction stall retry", () => {
 
 		const recoveredSummary = [
 			"## Active Task",
-			"two",
+			"User: two",
 			"",
 			"### Mandatory Rules",
 			"(none)",
@@ -58,6 +58,15 @@ describe("compaction stall retry", () => {
 			"(none)",
 			"",
 			"## Done",
+			"(none)",
+			"",
+			"## Key Decisions",
+			"(none)",
+			"",
+			"## Constraints & Preferences",
+			"(none)",
+			"",
+			"## Critical Context",
 			"(none)",
 		].join("\n");
 		// Queue for the compaction's summarization calls: first stalls, second recovers.
@@ -79,7 +88,7 @@ describe("compaction stall retry", () => {
 
 		const recoveredSummary = [
 			"## Active Task",
-			"two",
+			"User: two",
 			"",
 			"### Mandatory Rules",
 			"(none)",
@@ -94,6 +103,15 @@ describe("compaction stall retry", () => {
 			"(none)",
 			"",
 			"## Done",
+			"(none)",
+			"",
+			"## Key Decisions",
+			"(none)",
+			"",
+			"## Constraints & Preferences",
+			"(none)",
+			"",
+			"## Critical Context",
 			"(none)",
 		].join("\n");
 		const transient = fauxAssistantMessage("", {

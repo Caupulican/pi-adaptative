@@ -1,3 +1,4 @@
+import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import {
 	attemptUsageFromGatewayUsage,
 	EMPTY_ATTEMPT_USAGE,
@@ -12,11 +13,25 @@ import {
 import type { AttemptUsageSnapshot, RiskBudget } from "../orchestration/contracts.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
 
-export class WorkerTreeBudgetExceededError extends Error {
-	readonly field: "maxTokens" | "maxCostUsd" | "maxToolCalls" | "maxWallClockMs" | "maxAttempts";
+export type WorkerTreeBudgetField = "maxTokens" | "maxCostUsd" | "maxToolCalls" | "maxWallClockMs" | "maxAttempts";
+
+const WORKER_TREE_BUDGET_REASON_CODES: Readonly<Record<WorkerTreeBudgetField, string>> = {
+	maxTokens: "worker_tree_token_budget_exhausted",
+	maxCostUsd: "worker_tree_cost_budget_exhausted",
+	maxToolCalls: "worker_tree_tool_call_budget_exhausted",
+	maxWallClockMs: "worker_tree_wall_clock_budget_exhausted",
+	maxAttempts: "worker_tree_attempt_budget_exhausted",
+};
+
+export class WorkerTreeBudgetExceededError extends BoundedCompletionFailureError {
+	readonly field: WorkerTreeBudgetField;
 
 	constructor(field: WorkerTreeBudgetExceededError["field"], subject: string) {
-		super(`Worker orchestration tree budget '${field}' is exhausted before ${subject}.`);
+		super(
+			"budget_exhausted",
+			WORKER_TREE_BUDGET_REASON_CODES[field],
+			`Worker orchestration tree budget '${field}' is exhausted before ${subject}.`,
+		);
 		this.name = "WorkerTreeBudgetExceededError";
 		this.field = field;
 	}

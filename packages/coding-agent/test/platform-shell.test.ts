@@ -14,6 +14,7 @@ import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-
 import {
 	getPlatformShellToolName,
 	getShellConfig,
+	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 	POWERSHELL_UTF8_PREFIX,
 	prefixPowerShellCommand,
 } from "../src/utils/shell.ts";
@@ -55,6 +56,7 @@ describe("automatic platform shell contract", () => {
 		const executable = process.platform === "win32" ? "pwsh.exe" : "pwsh";
 		const probe = spawnSync(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Write-Output ok"], {
 			encoding: "utf-8",
+			timeout: POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 			windowsHide: true,
 		});
 		if (probe.status !== 0) return;

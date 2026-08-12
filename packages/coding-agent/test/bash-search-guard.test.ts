@@ -2,7 +2,13 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type BashOperations, type BashToolDetails, createBashTool } from "../src/core/tools/bash.ts";
+import {
+	type BashOperations,
+	type BashToolDetails,
+	createBashTool,
+	createBashToolDefinition,
+	MAX_COMMAND_TIMEOUT_SECONDS,
+} from "../src/core/tools/bash.ts";
 import { assessShellSearchScope, parseShellSearchInvocationScope } from "../src/core/tools/search-command-guard.ts";
 
 describe("shared shell search invocation scope", () => {
@@ -45,6 +51,8 @@ describe("shell search scope assessment", () => {
 		["cd packages && rg needle", "rg"],
 		["cd packages&&rg needle", "rg"],
 		["grep -R needle .", "grep"],
+		["grep -R needle ../../", "grep"],
+		['grep -R "def powershell" -n qa/demodriver ../../ 2>/dev/null | head -30', "grep"],
 		["grep -R needle / --include '*.ts'", "grep"],
 		["printf needle | grep -R needle /", "grep"],
 		["find . -type f", "find"],
@@ -62,6 +70,7 @@ describe("shell search scope assessment", () => {
 		"rg --files packages/agent/src",
 		"rg -e needle packages/agent/src",
 		"grep -R needle packages/agent/src",
+		"grep -R needle ../sibling-package/src",
 		"find . -name '*.ts'",
 		"fd '*.ts' packages",
 		"echo rg needle",
@@ -102,9 +111,17 @@ describe("bash broad-search guard", () => {
 		const tool = createBashTool("/repo", { operations, outputDirectory, platform: "linux" });
 
 		await expect(tool.execute("search-1", { command: "rg needle" })).rejects.toThrow(
-			/narrow.*path.*glob.*broadSearch="route-to-file"/is,
+			/PI_TOOL_OPERATION_REJECTED.*narrow.*path.*glob.*broadSearch="route-to-file"/is,
 		);
 		expect(executedCommands).toEqual([]);
+	});
+
+	it("publishes the existing timeout ceiling in the tool schema", () => {
+		const definition = createBashToolDefinition("/repo", { operations, outputDirectory, platform: "linux" });
+
+		expect(definition.parameters.properties.timeout).toMatchObject({
+			maximum: MAX_COMMAND_TIMEOUT_SECONDS,
+		});
 	});
 
 	it("executes an explicit broad override while routing all output to a file", async () => {

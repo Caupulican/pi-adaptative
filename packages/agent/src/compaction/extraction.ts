@@ -41,6 +41,7 @@ interface ToolCallFact {
 	verb: string;
 	resolved: boolean;
 	failed: boolean;
+	discardedFailure: boolean;
 }
 
 const PROHIBITION_PATTERN = /\b(do not|don't|never|stop (?:doing|using|changing)|no more)\b/i;
@@ -54,6 +55,7 @@ const REVERSAL_PATTERN =
 const PROHIBITION_SOURCE_MAX_CHARS = 1_500;
 /** Upper bound on gate-demanded rules; most recent win (same bounding rationale as Done carry-over). */
 const MAX_PROHIBITIONS = 8;
+const PROHIBITION_MAX_CHARS = 160;
 /** Upper bound on gate-demanded actions; mirrors the prompt's "15 most recent Done items" rule. */
 const MAX_ACTIONS = 15;
 const MAX_WORKING_SET_FILES = 8;
@@ -341,6 +343,19 @@ function isFailureToolResult(message: AgentMessage, text: string): boolean {
 	return typeof toolName === "string" && isOutcomeBearingTool(toolName) && failureSignalLine(text) !== undefined;
 }
 
+function hasOneTurnFailureDirective(message: AgentMessage): boolean {
+	if (message.role !== "toolResult") return false;
+	const details = (message as { details?: unknown }).details;
+	if (!isPlainRecord(details) || !isPlainRecord(details.piToolFailureDirective)) return false;
+	const directive = details.piToolFailureDirective;
+	return (
+		directive.version === 1 &&
+		(directive.state === "failed" || directive.state === "rejected") &&
+		typeof directive.failureCode === "string" &&
+		typeof directive.nextAction === "string"
+	);
+}
+
 export function extractCompactionFacts(entries: SessionEntry[], start: number, end: number): CompactionFacts {
 	const rangeStart = Math.max(0, start);
 	const rangeEnd = Math.min(entries.length, Math.max(rangeStart, end));
@@ -398,7 +413,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 						if (!PROHIBITION_PATTERN.test(sentence)) {
 							continue;
 						}
-						const normalized = clampText(sentence, 160);
+						const normalized = clampText(sentence, PROHIBITION_MAX_CHARS);
 						const dedupeKey = normalized.toLowerCase();
 						if (!seenProhibitions.has(dedupeKey)) {
 							seenProhibitions.add(dedupeKey);
@@ -435,6 +450,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 					verb,
 					resolved: false,
 					failed: false,
+					discardedFailure: false,
 				};
 				actionFacts.push(fact);
 				const index = actionFacts.length - 1;
@@ -476,8 +492,10 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 				const fact = actionFacts[matchedIndex];
 				const resultText = messageToText(message);
 				const failed = isFailureToolResult(message, resultText);
+				const discardedFailure = failed && hasOneTurnFailureDirective(message);
 				fact.resolved = true;
 				fact.failed = failed;
+				fact.discardedFailure = discardedFailure;
 				if (!failed && fact.baseKind === "modified" && appearsCreated(message)) {
 					fact.finalKind = "created";
 				}
@@ -497,7 +515,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 				}
 
 				const key = operationKey(fact.name, fact.path);
-				if (failed && isOpenProblemTool(fact.name)) {
+				if (failed && !discardedFailure && isOpenProblemTool(fact.name)) {
 					openErrors.set(key, {
 						operation: operationLabel(fact.name, fact.path),
 						error: firstErrorLine(resultText),
@@ -529,6 +547,9 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 
 	for (const action of actionFacts) {
 		if (isHarnessPlumbingTarget(action.path)) {
+			continue;
+		}
+		if (action.discardedFailure) {
 			continue;
 		}
 		if (action.resolved && action.failed && action.name !== "bash") {
@@ -586,6 +607,37 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 		cancelledText: cancelledParts.join("\n"),
 		activeTaskSource,
 		delegatedWorkerFacts,
+	};
+}
+
+/**
+ * Carry user-owned checkpoint facts across an iterative compaction without rescanning the discarded
+ * session prefix. Facts from the current span win; only the most recent bounded rules survive.
+ */
+export function mergePersistentCompactionUserFacts(
+	current: CompactionFacts,
+	previous: Pick<CompactionFacts, "activeTaskSource" | "prohibitions">,
+): CompactionFacts {
+	const seen = new Set<string>();
+	const prohibitions: string[] = [];
+	for (let i = previous.prohibitions.length + current.prohibitions.length - 1; i >= 0; i--) {
+		const rule =
+			i >= previous.prohibitions.length
+				? current.prohibitions[i - previous.prohibitions.length]
+				: previous.prohibitions[i];
+		const boundedRule = clampText(rule, PROHIBITION_MAX_CHARS);
+		const key = boundedRule.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		prohibitions.push(boundedRule);
+		if (prohibitions.length === MAX_PROHIBITIONS) break;
+	}
+	prohibitions.reverse();
+
+	return {
+		...current,
+		activeTaskSource: current.activeTaskSource || clampText(previous.activeTaskSource, ACTIVE_TASK_SOURCE_MAX_CHARS),
+		prohibitions,
 	};
 }
 

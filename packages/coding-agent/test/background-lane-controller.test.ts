@@ -207,7 +207,7 @@ describe("worker runtime construction", () => {
 			steering: false as const,
 			messageId: "worker-message-1",
 		}));
-		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const, timedOut: false }));
 		const waitForWorkerAgents = vi.fn(async () => ({
 			statuses: [{ agentId: "child", status: "idle" as const }],
 			updatedAgentIds: [],

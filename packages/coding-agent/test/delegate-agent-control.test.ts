@@ -68,7 +68,7 @@ function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerA
 		interruptWorkerAgent: () => ({ interrupted: false }),
 		resumeWorkerAgent: () => ({ started: false }),
 		cancelWorkerAgent: () => undefined,
-		waitForWorkerAgent: async () => ({ status: "unknown" }),
+		waitForWorkerAgent: async () => ({ status: "unknown", timedOut: false }),
 		waitForWorkerAgents: async () => ({ statuses: [], updatedAgentIds: [], timedOut: false }),
 		broadcastWorkerAgentMessage: () => ({ results: [] }),
 		retireWorkerAgent: (agentId) => ({
@@ -279,6 +279,40 @@ describe("delegate logical-agent controls", () => {
 		);
 		expect(forbidden.details).toMatchObject({ started: true, action: "tasks" });
 		expect(getWorkerTaskSessionView).toHaveBeenCalledTimes(2);
+	});
+
+	it("projects queued tasks as admitted nonterminal work", async () => {
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({
+				getWorkerTaskSessionView: () => ({
+					totalTasks: 1,
+					omittedTaskCount: 0,
+					tasks: [
+						{
+							taskId: "task-queued",
+							title: "Inspect",
+							role: "explorer",
+							status: "ready",
+							dependsOn: [],
+							latestAttempt: { agentId: "worker-queued", status: "queued" },
+						},
+					],
+				}),
+			}),
+		});
+
+		const result = await tool.execute("tasks-queued", { action: "tasks" }, undefined, undefined, context);
+		const payload = JSON.parse(delegateText(result)) as Record<string, unknown>;
+		expect(payload).toMatchObject({
+			queueState: "admitted_nonterminal",
+			workerStallProven: false,
+			workerHarnessFailureProven: false,
+		});
+		expect(payload.cavemanDirective).toContain(
+			"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state",
+		);
 	});
 
 	it.each([
@@ -530,7 +564,7 @@ describe("delegate logical-agent controls", () => {
 	});
 
 	it("routes public wait and wait_many actions through their event-driven control primitives", async () => {
-		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const, timedOut: false }));
 		const waitForWorkerAgents = vi.fn(async () => ({
 			statuses: [
 				{ agentId: "agent-a", status: "active" as const },
@@ -574,6 +608,173 @@ describe("delegate logical-agent controls", () => {
 		});
 		expect(JSON.stringify(tool.parameters)).toContain("wait_many");
 		expect(JSON.stringify(tool.parameters)).toContain("agentIds");
+	});
+
+	it("retains bounded worker-wait timeouts as nonterminal evidence without implying a stall", async () => {
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "active" as const, timedOut: true }));
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: [
+				{ agentId: "agent-a", status: "active" as const },
+				{ agentId: "agent-b", status: "active" as const },
+			],
+			updatedAgentIds: [],
+			timedOut: true,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgent, waitForWorkerAgents }),
+		});
+
+		const one = await tool.execute(
+			"wait-one-timeout",
+			{ action: "wait", agentId: "agent-a", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+		const many = await tool.execute(
+			"wait-many-timeout",
+			{ action: "wait_many", agentIds: ["agent-a", "agent-b"], mode: "all", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+		const onePayload = JSON.parse(delegateText(one)) as Record<string, unknown>;
+		const manyPayload = JSON.parse(delegateText(many)) as Record<string, unknown>;
+
+		for (const payload of [onePayload, manyPayload]) {
+			expect(payload).toMatchObject({
+				timedOut: true,
+				waitState: "nonterminal",
+				workerStallProven: false,
+				reasonCode: "bounded_wait_elapsed",
+			});
+			expect(payload.nextAction).toContain("Never interrupt solely");
+			expect(payload.cavemanDirective).toBe(
+				"CAVEMAN MODE - MANDATORY: timeout is not failure. idle means finished/reusable; read transcript. active means continue or wait again. inbox never reports completion. Never claim stall, lost state, or missed completion from this result.",
+			);
+		}
+		expect(one.details).toMatchObject({ action: "wait", timedOut: true });
+		expect(many.details).toMatchObject({ action: "wait_many", timedOut: true });
+	});
+
+	it("reports an idle worker as completed after the deadline instead of still active", async () => {
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const, timedOut: true }));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgent }),
+		});
+
+		const result = await tool.execute(
+			"wait-idle-after-timeout",
+			{ action: "wait", agentId: "agent-a", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+		const payload = JSON.parse(delegateText(result)) as Record<string, unknown>;
+
+		expect(payload).toMatchObject({
+			status: "idle",
+			timedOut: true,
+			waitState: "completed_after_timeout",
+			workerStallProven: false,
+			reasonCode: "bounded_wait_elapsed",
+		});
+		expect(payload.nextAction).toContain("now idle");
+		expect(payload.nextAction).not.toContain("still running");
+		expect(payload.cavemanDirective).toContain("idle means finished/reusable");
+	});
+
+	it("projects a non-timeout idle wait as terminal activity with mandatory claim retrieval", async () => {
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const, timedOut: false }));
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: [
+				{ agentId: "agent-a", status: "idle" as const },
+				{ agentId: "agent-b", status: "idle" as const },
+			],
+			updatedAgentIds: ["agent-a", "agent-b"],
+			timedOut: false,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgent, waitForWorkerAgents }),
+		});
+
+		const one = await tool.execute(
+			"wait-idle",
+			{ action: "wait", agentId: "agent-a", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+		const many = await tool.execute(
+			"wait-many-idle",
+			{ action: "wait_many", agentIds: ["agent-a", "agent-b"], mode: "all", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+
+		for (const result of [one, many]) {
+			const payload = JSON.parse(delegateText(result)) as Record<string, unknown>;
+			expect(payload).toMatchObject({
+				timedOut: false,
+				waitState: "completed",
+				workerStallProven: false,
+				workerCompletionMissed: false,
+				workerHarnessFailureProven: false,
+				reasonCode: "worker_idle",
+			});
+			expect(payload.nextAction).toContain("every bounded transcript page");
+			expect(payload.nextAction).toContain("delegate status");
+			expect(payload.cavemanDirective).toContain("idle means task terminal and worker reusable");
+			expect(payload.cavemanDirective).toContain("idle is activity, not the task outcome");
+			expect(payload.cavemanDirective).toContain("status/transcript");
+			expect(payload.cavemanDirective).toContain("not inbox");
+			expect(payload.cavemanDirective).toContain(
+				"Never claim missing completion, lost state, or harness failure from idle",
+			);
+		}
+	});
+
+	it("makes a mixed idle/active timeout impossible to promote into missed-completion evidence", async () => {
+		const waitForWorkerAgents = vi.fn(async () => ({
+			statuses: [
+				{ agentId: "agent-a", status: "idle" as const },
+				{ agentId: "agent-b", status: "active" as const },
+			],
+			updatedAgentIds: ["agent-a"],
+			timedOut: true,
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ waitForWorkerAgents }),
+		});
+
+		const result = await tool.execute(
+			"wait-mixed-timeout",
+			{ action: "wait_many", agentIds: ["agent-a", "agent-b"], mode: "all", timeoutMs: 300_000 },
+			undefined,
+			undefined,
+			context,
+		);
+		const payload = JSON.parse(delegateText(result)) as Record<string, unknown>;
+
+		expect(payload).toMatchObject({
+			timedOut: true,
+			waitState: "nonterminal",
+			workerStallProven: false,
+			updatedAgentIds: ["agent-a"],
+		});
+		expect(payload.cavemanDirective).toContain("idle means finished/reusable");
+		expect(payload.cavemanDirective).toContain("active means continue or wait again");
+		expect(payload.cavemanDirective).toContain("inbox never reports completion");
+		expect(payload.cavemanDirective).toContain("Never claim stall, lost state, or missed completion");
 	});
 
 	it("bounds wait_many detail identities with explicit omission disclosure", async () => {
@@ -933,7 +1134,7 @@ describe("delegate logical-agent controls", () => {
 
 describe("delegate wait and status", () => {
 	it("requires a logical agent id and waits through the event-driven callback without polling", async () => {
-		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const, timedOut: false }));
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
@@ -958,7 +1159,7 @@ describe("delegate wait and status", () => {
 	});
 
 	it("rejects oversized control identities before waiting or rendering them", async () => {
-		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const }));
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "idle" as const, timedOut: false }));
 		const acknowledgeWorkerReview = vi.fn(() => ({
 			ok: true as const,
 			requestId: "unused",
@@ -1288,19 +1489,27 @@ describe("delegate persistent worker reuse", () => {
 	});
 
 	it("rejects reuse of a busy or unknown worker with an explicit reason", async () => {
-		const startWorkerAgentTask = vi.fn();
+		let reuseCalls = 0;
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "fresh", type: "worker" as const, status: "queued" as const },
+		}));
 		const makeTool = (status: "active" | "suspended" | "unknown") =>
 			createDelegateToolDefinition({
 				caller: { kind: "session_root" },
 				resolveMessageReplayScope: fixedReplayScope,
+				startWorkerDelegation,
 				runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 				workerAgentControl: workerAgentControl({
-					startWorkerAgentTask: () => ({
-						started: false,
-						steering: false,
-						messageId: "",
-						skipReason: status === "unknown" ? "unknown_agent" : `worker_${status}`,
-					}),
+					startWorkerAgentTask: () => {
+						reuseCalls += 1;
+						return {
+							started: false,
+							steering: false,
+							messageId: "",
+							skipReason: status === "unknown" ? "unknown_agent" : `worker_${status}`,
+						};
+					},
 				}),
 			});
 
@@ -1321,7 +1530,17 @@ describe("delegate persistent worker reuse", () => {
 			context,
 		);
 		expect(unknown.details).toMatchObject({ started: false, skipReason: "unknown_agent" });
-		expect(startWorkerAgentTask).not.toHaveBeenCalled();
+		const unknownText = delegateText(unknown);
+		expect(unknownText).toContain("CAVEMAN MODE - MANDATORY");
+		expect(unknownText).toContain("unknown_agent means no reusable worker was found");
+		expect(unknownText).toContain("not lost worker state or harness failure");
+		expect(unknownText).toContain("No worker started; nothing was dropped");
+		expect(unknownText).toContain("Retry once now without agentId");
+		expect(unknownText).toContain("keep instructions unchanged");
+		expect(unknownText).toContain("authority/profileId only on that fresh start");
+		expect(unknownText).toContain("use an exact returned agentId; never invent one");
+		expect(reuseCalls).toBe(2);
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
 	});
 
 	it("atomically admits only one of two concurrent starts for the same idle agent", async () => {
@@ -1386,10 +1605,20 @@ describe("delegate persistent worker reuse", () => {
 			context,
 		);
 		expect(result.details).toMatchObject({ started: false, skipReason: "reuse_keeps_admitted_authority" });
+		const text = delegateText(result);
+		expect(text).toContain("CAVEMAN MODE - MANDATORY");
+		expect(text).toContain("agentId means reuse only");
+		expect(text).toContain("exact returned agentId");
+		expect(text).toContain("omit authority and profileId");
+		expect(text).toContain("fresh worker");
+		expect(text).toContain("omit agentId");
+		expect(text).toContain("instructions, authority, and profileId unchanged");
+		expect(text).toContain("expected API correction, not harness failure");
+		expect(text).toContain("No worker started; nothing was dropped");
 	});
 
 	it("reports live activity per agent in list so idle workers are discoverable", async () => {
-		const waitForWorkerAgent = vi.fn(async () => ({ status: "active" as const }));
+		const waitForWorkerAgent = vi.fn(async () => ({ status: "active" as const, timedOut: false }));
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),

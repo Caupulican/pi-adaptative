@@ -109,7 +109,15 @@ describe("LaneTracker", () => {
 
 	it("accepts every terminal status", () => {
 		const { tracker } = createTracker();
-		const statuses: LaneTerminalStatus[] = ["succeeded", "failed", "canceled", "timeout", "budget_exhausted"];
+		const statuses: LaneTerminalStatus[] = [
+			"succeeded",
+			"partial",
+			"blocked",
+			"failed",
+			"canceled",
+			"timeout",
+			"budget_exhausted",
+		];
 
 		for (const status of statuses) {
 			const record = tracker.start({ type: "research" });
@@ -158,6 +166,8 @@ describe("LaneTracker memory bounds", () => {
 describe("isLaneTerminalStatus", () => {
 	it("accepts terminal statuses and rejects live or unknown ones", () => {
 		expect(isLaneTerminalStatus("succeeded")).toBe(true);
+		expect(isLaneTerminalStatus("partial")).toBe(true);
+		expect(isLaneTerminalStatus("blocked")).toBe(true);
 		expect(isLaneTerminalStatus("budget_exhausted")).toBe(true);
 		expect(isLaneTerminalStatus("running")).toBe(false);
 		expect(isLaneTerminalStatus("queued")).toBe(false);

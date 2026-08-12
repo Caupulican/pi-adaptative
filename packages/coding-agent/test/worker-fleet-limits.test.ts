@@ -6,7 +6,10 @@ import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
 	evaluateReusableWorkerTaskAdmission,
+	intersectWorkerDelegationLimits,
+	LEAN_WORKER_DELEGATION_LIMITS,
 	pendingVerifierSubjectTaskIds,
+	resolveWorkerFleetLimits,
 	workerQueueHasCapacity,
 } from "../src/core/delegation/worker-fleet-limits.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -65,6 +68,22 @@ function binding(
 }
 
 describe("worker fleet admission limits", () => {
+	it("materializes the lean adaptive limit without changing session or queue safety ceilings", () => {
+		expect(resolveWorkerFleetLimits(LEAN_WORKER_DELEGATION_LIMITS)).toEqual({
+			...DEFAULT_WORKER_FLEET_LIMITS,
+			maxDepth: 1,
+			maxChildrenPerAgent: 1,
+			maxNestedAgentsPerSession: 1,
+		});
+	});
+
+	it("intersects descendant recursion with its ancestor instead of permitting escalation", () => {
+		expect(
+			intersectWorkerDelegationLimits({ maxDepth: 8, maxChildrenPerAgent: 8 }, LEAN_WORKER_DELEGATION_LIMITS),
+		).toEqual({ maxDepth: 1, maxChildrenPerAgent: 1, maxNestedAgentsPerSession: 1 });
+		expect(intersectWorkerDelegationLimits(undefined, undefined)).toBeUndefined();
+	});
+
 	it("admits a child below every durable fleet boundary", () => {
 		const root = binding("root");
 		const child = binding("child", { parentAgentId: "root", rootAgentId: "root", depth: 1 });
@@ -99,6 +118,43 @@ describe("worker fleet admission limits", () => {
 			ok: false,
 			reasonCode: "worker_agent_child_limit_reached",
 		});
+	});
+
+	it("rejects a second nested identity across separate lean root workers", () => {
+		const firstRoot = binding("first-root");
+		const secondRoot = binding("second-root");
+		const firstChild = binding("first-child", {
+			parentAgentId: firstRoot.agentId,
+			rootAgentId: firstRoot.agentId,
+			depth: 1,
+		});
+		const limits = resolveWorkerFleetLimits(LEAN_WORKER_DELEGATION_LIMITS);
+
+		expect(
+			evaluateNewWorkerAdmission(
+				{
+					[firstRoot.agentId]: firstRoot,
+					[secondRoot.agentId]: secondRoot,
+					[firstChild.agentId]: firstChild,
+				},
+				secondRoot.agentId,
+				limits,
+			),
+		).toEqual({
+			ok: false,
+			reasonCode: "worker_agent_nested_session_limit_reached",
+		});
+		expect(
+			evaluateNewWorkerAdmission(
+				{
+					[firstRoot.agentId]: firstRoot,
+					[secondRoot.agentId]: secondRoot,
+					[firstChild.agentId]: firstChild,
+				},
+				secondRoot.agentId,
+				{ ...limits, maxNestedAgentsPerSession: 2 },
+			),
+		).toEqual({ ok: true, depth: 1 });
 	});
 
 	it("counts retired identities toward the persistent session ceiling", () => {

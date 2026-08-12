@@ -36,7 +36,7 @@ export interface DeterministicGapFillResult {
 }
 
 export const FILES_READ_RECALL_THRESHOLD = 0.8;
-export const ACTIVE_TASK_CONTAINMENT_THRESHOLD = 0.9;
+export const ACTIVE_TASK_CONTAINMENT_THRESHOLD = 1;
 export const MANDATORY_RULES_RECALL_THRESHOLD = 0.7;
 export const CANCELLED_WORK_DROPPED_THRESHOLD = 0.1;
 export const ACTIONS_RECALL_THRESHOLD = 0.6;
@@ -72,12 +72,21 @@ const REQUIRED_SUMMARY_SECTIONS: Array<{ heading: string; normalized: string; le
 ];
 
 export function verifySummary(summary: string, facts: CompactionFacts): VerificationReport {
+	const failures: VerificationFailure[] = [];
+	if (!isCompactionSummaryStructurallyUsable(summary)) {
+		failures.push({
+			check: "summary-structure",
+			detail: "Checkpoint must contain at least one recognized checkpoint section",
+			score: 0,
+			threshold: 1,
+			comparator: "minimum",
+		});
+	}
 	if (factsAreEmpty(facts)) {
-		return { ok: true, failures: [] };
+		return { ok: failures.length === 0, failures };
 	}
 
 	const sections = extractSections(summary);
-	const failures: VerificationFailure[] = [];
 	const filesSection = sections[SECTION_FILES] ?? "";
 	const workingSetSection = sections[SECTION_WORKING_SET] ?? "";
 	const openProblemsSection = sections[SECTION_OPEN_PROBLEMS] ?? "";
@@ -138,14 +147,12 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 	}
 
 	if (facts.activeTaskSource) {
-		const score = containment(
-			tokenSet(facts.activeTaskSource.slice(0, ACTIVE_TASK_SOURCE_MAX_CHARS)),
-			tokenSet(activeTaskSection),
-		);
+		const source = facts.activeTaskSource.slice(0, ACTIVE_TASK_SOURCE_MAX_CHARS);
+		const score = activeTaskMatchesVerbatim(activeTaskSection, source) ? 1 : 0;
 		if (score < ACTIVE_TASK_CONTAINMENT_THRESHOLD) {
 			failures.push({
 				check: "active-task-containment",
-				detail: `Active task containment ${formatScore(score)} below ${ACTIVE_TASK_CONTAINMENT_THRESHOLD}`,
+				detail: "Active task must copy the latest user request verbatim without added intent",
 				score,
 				threshold: ACTIVE_TASK_CONTAINMENT_THRESHOLD,
 				comparator: "minimum",
@@ -268,22 +275,11 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 
 	removeCancelledWorkLines(sectionByName, facts);
 
-	if (facts.activeTaskSource) {
-		const activeTask = sectionByName.get(SECTION_ACTIVE_TASK)!;
-		if (
-			containment(tokenSet(facts.activeTaskSource), tokenSetFromLines(activeTask.lines)) <
-			ACTIVE_TASK_CONTAINMENT_THRESHOLD
-		) {
-			appendContentLine(activeTask.lines, `User: ${facts.activeTaskSource}`);
-		}
-	}
+	const activeTask = sectionByName.get(SECTION_ACTIVE_TASK)!;
+	activeTask.lines = facts.activeTaskSource ? [`User: ${facts.activeTaskSource}`] : ["(none)"];
 
 	const mandatoryRules = sectionByName.get(SECTION_MANDATORY_RULES)!;
-	for (const rule of facts.prohibitions) {
-		if (containment(tokenSet(rule), tokenSetFromLines(mandatoryRules.lines)) < MANDATORY_RULES_RECALL_THRESHOLD) {
-			appendContentLine(mandatoryRules.lines, `- ${rule}`);
-		}
-	}
+	mandatoryRules.lines = facts.prohibitions.length > 0 ? facts.prohibitions.map((rule) => `- ${rule}`) : ["(none)"];
 
 	const workingSet = sectionByName.get(SECTION_WORKING_SET)!;
 	for (const file of facts.workingSet) {
@@ -564,6 +560,12 @@ function removeSection(summary: string, heading: string): string {
 
 function normalizeHeading(heading: string): string {
 	return heading.trim().toLowerCase();
+}
+
+function activeTaskMatchesVerbatim(section: string, source: string): boolean {
+	const normalizedSection = section.replaceAll("\r\n", "\n").trim();
+	const normalizedSource = source.replaceAll("\r\n", "\n").trim();
+	return normalizedSection === normalizedSource || normalizedSection === `User: ${normalizedSource}`;
 }
 
 function formatScore(score: number): string {

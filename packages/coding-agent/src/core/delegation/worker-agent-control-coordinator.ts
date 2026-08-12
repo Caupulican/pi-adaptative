@@ -49,6 +49,7 @@ import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
+import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./worker-terminal-handoff-coordinator.ts";
 
 export interface WorkerAgentControlCoordinatorOptions {
 	agentDir: string;
@@ -65,13 +66,43 @@ export interface WorkerAgentControlCoordinatorOptions {
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
 	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
-	yieldCapacity?(callerAgentId: string, capacityOwnerAgentId: string): () => void;
+	waitBlockedByCaller?(callerAgentId: string, targetAgentIds: readonly string[]): readonly string[];
+	/** Yield caller-owned scheduler and mutation resources until the returned restorer succeeds. */
+	yieldCallerForWait?(callerAgentId: string): () => boolean | undefined;
 	warn?(message: string): void;
 }
 
 type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
 
 const MAX_BROADCAST_ERROR_CHARS = 512;
+
+export function buildWorkerTerminalHandoffContent(args: {
+	childAgentId: string;
+	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode">;
+}): string {
+	return [
+		"Worker terminal handoff",
+		`childAgentId=${args.childAgentId}`,
+		`laneId=${args.record.laneId}`,
+		`status=${args.record.status}`,
+		...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
+		"CAVEMAN MODE - MANDATORY: terminal handoff means worker state was retained. Read the full transcript, verify the claim, then continue or replan within the admitted grant. Do not call this lost state or harness failure.",
+		"MANDATORY: read every transcript page before judging this result.",
+		`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
+		"Entries complete only after pagination ends. omittedMessages means whole entries were left out of that page. While nextCursor exists, call transcript again with cursor=nextCursor. Stop only when nextCursor is absent.",
+		...(args.record.reasonCode === "worker_blocked"
+			? [
+					"worker_blocked means the durable claim has blockers; it does not mean worker state or transcript was lost.",
+				]
+			: []),
+		...(args.record.status === "budget_exhausted"
+			? [
+					"CAVEMAN MODE - MANDATORY: budget_exhausted means an admitted limit ended work, not harness failure. Terminal reasonCode is authoritative; never replace it with earlier transcript errors. Read evidence, then replan only within remaining authority.",
+				]
+			: []),
+		...(args.record.reasonCode === "completion_error" ? [WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE] : []),
+	].join("\n");
+}
 
 type TaskBearingReconciliation = {
 	started: boolean;
@@ -1099,9 +1130,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agentId: string,
 		timeoutMs = 30_000,
 		scope: WorkerAgentControlScope = {},
-	): Promise<{ status: WorkerAgentActivity }> {
+	): Promise<{ status: WorkerAgentActivity; timedOut: boolean }> {
 		return this.waitForWorkerAgents([agentId], "all", timeoutMs, scope).then((result) => ({
 			status: result.statuses[0]?.status ?? "unknown",
+			timedOut: result.timedOut,
 		}));
 	}
 
@@ -1116,8 +1148,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (mode !== "any" && mode !== "all") throw new TypeError("Worker wait mode must be 'any' or 'all'.");
 		const canonicalAgentIds = this.canonicalAgentIdSet(agentIds, "Worker wait");
 		const baselineSnapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+		let callerAgentId: string | undefined;
 		if (scope.callerAgentId) {
-			const callerAgentId = scope.callerAgentId.trim();
+			callerAgentId = scope.callerAgentId.trim();
 			if (!callerAgentId || !baselineSnapshot.agents[callerAgentId]) {
 				throw new Error(`Unknown logical worker agent '${callerAgentId}'.`);
 			}
@@ -1157,49 +1190,94 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			timedOut,
 		});
 		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false));
-		return new Promise((resolve) => {
+		if (callerAgentId) {
+			const activeAgentIds = new Set(
+				baselineStatuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
+			);
+			if (activeAgentIds.has(callerAgentId)) {
+				throw new Error(
+					`Worker wait would deadlock: logical worker '${callerAgentId}' cannot wait for itself. Finish the caller task instead.`,
+				);
+			}
+		}
+		return new Promise((resolve, reject) => {
 			let settled = false;
-			let releaseYield: (() => void) | undefined;
+			let completionTimedOut: boolean | undefined;
+			let failure: unknown;
+			let hasFailure = false;
+			let yieldInitialized = callerAgentId === undefined;
+			let restoreYield: (() => boolean | undefined) | undefined;
 			let unsubscribeState = (): void => undefined;
 			let timeout: ReturnType<typeof setTimeout> | undefined;
 			const cleanup = () => {
 				unsubscribeState();
 				if (timeout) clearTimeout(timeout);
-				const release = releaseYield;
-				releaseYield = undefined;
-				release?.();
+			};
+			const restoreCaller = (): boolean => {
+				if (!restoreYield) return true;
+				const restored = restoreYield();
+				if (restored === false) return false;
+				restoreYield = undefined;
+				return true;
 			};
 			const settle = () => {
-				if (settled) return;
+				if (settled || !yieldInitialized) return;
 				const statuses = currentStatuses();
 				recordUpdates(statuses);
-				if (!waitSatisfied(statuses)) return;
+				if (!hasFailure && completionTimedOut === undefined) {
+					if (!waitSatisfied(statuses)) return;
+					completionTimedOut = false;
+					if (timeout) {
+						clearTimeout(timeout);
+						timeout = undefined;
+					}
+				}
+				try {
+					if (!restoreCaller()) return;
+				} catch (error) {
+					failure = error;
+					hasFailure = true;
+				}
 				settled = true;
 				cleanup();
-				resolve(result(statuses, false));
+				if (hasFailure) reject(failure);
+				else resolve(result(statuses, completionTimedOut ?? false));
 			};
 			unsubscribeState = this.subscribeStateChanges(settle);
 			timeout = setTimeout(() => {
 				if (settled) return;
-				settled = true;
-				const statuses = currentStatuses();
-				recordUpdates(statuses);
-				cleanup();
-				resolve(result(statuses, true));
+				timeout = undefined;
+				if (completionTimedOut === undefined) completionTimedOut = true;
+				settle();
 			}, boundedTimeoutMs);
 			if (typeof timeout === "object" && "unref" in timeout) timeout.unref();
-			if (scope.callerAgentId && this.options.yieldCapacity) {
-				// Capacity belongs to the waiting caller. Passing that identity through both slots keeps
-				// legacy controller adapters from treating an independent peer as the capacity owner.
-				try {
-					const yielded = this.options.yieldCapacity(scope.callerAgentId, scope.callerAgentId);
-					if (settled) yielded();
-					else releaseYield = yielded;
-				} catch (error) {
-					settled = true;
-					cleanup();
-					throw error;
+			try {
+				if (callerAgentId && this.options.yieldCallerForWait) {
+					restoreYield = this.options.yieldCallerForWait(callerAgentId);
 				}
+				yieldInitialized = true;
+				if (callerAgentId) {
+					const statuses = currentStatuses();
+					const activeAgentIds = new Set(
+						statuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
+					);
+					const blockedAgentIdSet = new Set(
+						this.options.waitBlockedByCaller?.(callerAgentId, canonicalAgentIds) ?? [],
+					);
+					const blockedAgentIds = canonicalAgentIds.filter(
+						(agentId) => activeAgentIds.has(agentId) && blockedAgentIdSet.has(agentId),
+					);
+					if (blockedAgentIds.length > 0) {
+						hasFailure = true;
+						failure = new Error(
+							`Worker wait would deadlock: ${blockedAgentIds.join(", ")} ${blockedAgentIds.length === 1 ? "is" : "are"} blocked by the caller's write reservation after caller resources were yielded.`,
+						);
+					}
+				}
+			} catch (error) {
+				yieldInitialized = true;
+				hasFailure = true;
+				failure = error;
 			}
 			settle();
 		});
@@ -1357,14 +1435,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const parent = this.requireKnownAgent(args.parentAgentId);
 		const latest = this.latestAgentAttempt(parent);
 		const active = latest?.status === "queued" || latest?.status === "leased" || latest?.status === "running";
-		const content = [
-			"Worker terminal handoff",
-			`childAgentId=${args.childAgentId}`,
-			`laneId=${args.record.laneId}`,
-			`status=${args.record.status}`,
-			...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
-			`Transcript: delegate action="transcript" agentId="${args.childAgentId}". Entries complete; omittedMessages marks whole omissions; empty page may continue via nextCursor.`,
-		].join("\n");
+		const content = buildWorkerTerminalHandoffContent(args);
 		const idempotencyKey = `terminal-handoff:${args.terminalAttemptId}`;
 		const transcriptInput: MandatoryTranscriptControlInput = {
 			idempotencyKey,

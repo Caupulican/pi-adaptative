@@ -8,7 +8,14 @@
 
 export type LaneType = "research" | "worker" | "learning" | "tmux-worker";
 
-export type LaneTerminalStatus = "succeeded" | "failed" | "canceled" | "timeout" | "budget_exhausted";
+export type LaneTerminalStatus =
+	| "succeeded"
+	| "partial"
+	| "blocked"
+	| "failed"
+	| "canceled"
+	| "timeout"
+	| "budget_exhausted";
 
 export type LaneStatus = "queued" | "running" | LaneTerminalStatus;
 
@@ -36,7 +43,15 @@ export interface LaneRecord {
 }
 
 const LANE_TYPES: readonly string[] = ["research", "worker", "learning", "tmux-worker"];
-const TERMINAL_STATUSES: readonly string[] = ["succeeded", "failed", "canceled", "timeout", "budget_exhausted"];
+const TERMINAL_STATUSES: readonly string[] = [
+	"succeeded",
+	"partial",
+	"blocked",
+	"failed",
+	"canceled",
+	"timeout",
+	"budget_exhausted",
+];
 const LANE_STATUSES: readonly string[] = ["queued", "running", ...TERMINAL_STATUSES];
 
 export function isLaneTerminalStatus(value: unknown): value is LaneTerminalStatus {
