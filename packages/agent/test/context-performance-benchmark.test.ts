@@ -13,9 +13,9 @@ const MIN_STABLE_CPU_SAMPLE_MICROS = 100_000;
 const MAX_CPU_SAMPLE_REPETITIONS = 4096;
 const median = (values: number[]) => values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)];
 const measureCpuMicros: CpuSampler = (operation) => {
-	const start = process.cpuUsage();
+	const start = process.threadCpuUsage();
 	operation();
-	const elapsed = process.cpuUsage(start);
+	const elapsed = process.threadCpuUsage(start);
 	return elapsed.user + elapsed.system;
 };
 const measureStableCpuMicros = (operation: () => void, sampleCpu: CpuSampler = measureCpuMicros) => {
@@ -182,7 +182,7 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 	});
 
 	describe("50k to 1 Million Token Scale Benchmarks (Hard Latency & Memory Gate)", () => {
-		it("processes a 50k token context trajectory efficiently", () => {
+		it("processes a 50k token context trajectory under 50ms current-thread CPU time", () => {
 			const messageCount = 500; // ~50k tokens of synthetic history
 			const payloadBlock = "X".repeat(500); // 500 chars per result
 			const messages: AgentMessage[] = [];
@@ -194,15 +194,18 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 				messages.push(...buildSyntheticTurn(`call_${i}`, "read_file", { id: i % 20 }, text, isErr, i * 2));
 			}
 
-			const start = performance.now();
-			const sanitized = sanitizeToolFailureContext(messages, "Base prompt");
-			const elapsed = performance.now() - start;
+			let sanitized = sanitizeToolFailureContext(messages, "Base prompt");
+			const elapsedMs =
+				measureStableCpuMicros(() => {
+					sanitized = sanitizeToolFailureContext(messages, "Base prompt");
+				}) / 1_000;
 
-			expect(elapsed).toBeLessThan(50); // Must process 50k tokens in < 50ms (CI runner headroom)
+			// Current-thread CPU isolates sanitizer work from sibling scheduling and V8 background threads.
+			expect(elapsedMs).toBeLessThan(50);
 			expect(sanitized.messages.length).toBeLessThan(messages.length);
 		});
 
-		it("processes a 1 Million token context trajectory under 75ms CPU time with linear O(N) scaling", () => {
+		it("processes a 1 Million token context trajectory under 75ms current-thread CPU time", () => {
 			const turnCount = 2000; // ~1,000,000 tokens of heavy tool calls & payloads
 			const heavyPayload = "Y".repeat(2000); // 2KB payload per turn
 			const messages: AgentMessage[] = [];
@@ -225,8 +228,8 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			}
 			const elapsedMs = median(durations) / 1_000;
 
-			// HARD LATENCY GATE: 1,000,000 token context consumes < 75ms CPU. Median CPU time
-			// retains GC and algorithm cost without charging unrelated sibling-worker scheduling pauses.
+			// HARD LATENCY GATE: 1,000,000 token context consumes < 75ms current-thread CPU.
+			// Allocation work on the sanitizer thread remains charged; unrelated process threads do not.
 			expect(elapsedMs).toBeLessThan(75);
 			expect(sanitized.messages.length).toBeLessThan(messages.length);
 		});
