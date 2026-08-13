@@ -193,7 +193,8 @@ jobs:
           mkdir -p "${WORK_DIR}"
           awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > "${NOTES_FILE}"
           if [ ! -s "${NOTES_FILE}" ]; then
-            echo "Release ${VERSION}" > "${NOTES_FILE}"
+            echo "::error::No changelog entry found for ${VERSION} in packages/coding-agent/CHANGELOG.md; refusing to publish a release with placeholder notes." >&2
+            exit 1
           fi
 
       - name: Create GitHub Release and upload verified binaries
@@ -225,7 +226,11 @@ jobs:
     runs-on: ubuntu-latest
     # The binary build is a mandatory release gate: packages publish to npm only
     # after the cross-platform binaries build successfully, so a broken build
-    # never ships a release. This job also runs its own build/check/test below.
+    # never ships a release. quality-gate (ci.yml) already ran check+test on this
+    # exact ref, so this job only rebuilds the npm publish artifacts (dist/, which
+    # is gitignored and not shared between jobs) and verifies their integrity -
+    # it does not re-run lint/typecheck/tests, so a flake there can no longer
+    # leave a public GitHub release with no matching npm packages.
     needs: release
     # Override the top-level contents:write — this job only needs to read the
     # repo and mint an OIDC token for npm provenance attestations.
@@ -264,22 +269,19 @@ jobs:
           node node_modules/vite/bin/vite.js --version
 
       - name: Build
-        # Deterministic CI: use the COMMITTED model catalogs instead of refetching live pricing
-        # that can drift between the release commit and this run (drift fails the artifact
-        # verification and aborts the npm publish).
-        env:
-          PI_SKIP_MODEL_FETCH: "1"
+        # Deterministic CI: builds are hermetic by default (see
+        # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
+        # catalogs instead of refetching live pricing that can drift between the release commit
+        # and this run (drift would otherwise fail the artifact verification below and abort the
+        # npm publish). Live refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which
+        # this job never does.
         run: npm run build
 
-      - name: Check
-        run: npm run check
-
-      - name: Test
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-        run: npm test
-
       - name: Verify release artifacts are committed
+        # Artifact-integrity check: the build above must be a pure function of the checked-out
+        # release commit. Any tracked file it touches (e.g. a generated catalog) that doesn't
+        # match what's committed means the tagged release and the published npm packages would
+        # diverge from source control - fail before publishing rather than after.
         run: git diff --exit-code
 
       - name: Publish npm packages

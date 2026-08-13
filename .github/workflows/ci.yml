@@ -62,11 +62,11 @@ jobs:
           node node_modules/vite/bin/vite.js --version
 
       - name: Build
-        # Deterministic CI: use the COMMITTED model catalogs instead of refetching live pricing
-        # that can drift between the release commit and this run (drift fails the artifact
-        # verification and aborts the npm publish).
-        env:
-          PI_SKIP_MODEL_FETCH: "1"
+        # Deterministic CI: builds are hermetic by default (see
+        # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
+        # catalogs instead of refetching live pricing that can drift between the release commit
+        # and this run (drift fails the artifact verification and aborts the npm publish). Live
+        # refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which this job never does.
         run: npm run build
 
       - name: Check

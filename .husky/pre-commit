@@ -13,8 +13,16 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# Run the check script (formatting, linting, and type checking)
-echo "Running formatting, linting, and type checking..."
+# Auto-fix formatting/lint issues first (mutates the working tree; restaged below).
+echo "Running formatting..."
+npm run format
+if [ $? -ne 0 ]; then
+  echo "❌ Formatting failed. Please fix the errors before committing."
+  exit 1
+fi
+
+# Verify-only: linting, type checking, and the release/harness/catalog guards. Never mutates.
+echo "Running checks..."
 npm run check
 if [ $? -ne 0 ]; then
   echo "❌ Checks failed. Please fix the errors before committing."

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import type { ImagesModel } from "../src/types.ts";
 import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts";
@@ -9,6 +9,11 @@ import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts"
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
+// Overridable so the drift checker (check:model-catalog) can generate into a scratch path
+// without touching the committed file it diffs against.
+const imageModelCatalogOutputPath = process.env.PI_MODEL_CATALOG_OUTPUT_PATH
+	? resolve(process.env.PI_MODEL_CATALOG_OUTPUT_PATH)
+	: join(packageRoot, "src", "image-models.generated.ts");
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 interface OpenRouterModelRecord {
@@ -134,15 +139,14 @@ ${providerEntries}
 async function main(): Promise<void> {
 	const models = await fetchOpenRouterImageModels();
 	const output = generateImageModelsFile(models);
-	const outputPath = join(packageRoot, "src", "image-models.generated.ts");
-	writeFileSync(outputPath, output, "utf-8");
-	console.log(`Generated ${outputPath}`);
+	writeFileSync(imageModelCatalogOutputPath, output, "utf-8");
+	console.log(`Generated ${imageModelCatalogOutputPath}`);
 }
 
-// Same deterministic-build escape hatch as generate-models.ts: CI verifies the committed
-// catalog rather than refetching live data that can drift and abort the publish.
+// Same hermetic-by-default policy as generate-models.ts: a plain build never fetches live data
+// or dirties the committed catalog. Set PI_FETCH_MODELS=1 to explicitly refresh.
 await runModelCatalogGeneration({
-	catalogPath: join(packageRoot, "src", "image-models.generated.ts"),
-	skipFetch: process.env.PI_SKIP_MODEL_FETCH,
+	catalogPath: imageModelCatalogOutputPath,
+	fetchRequested: process.env.PI_FETCH_MODELS,
 	generate: main,
 });

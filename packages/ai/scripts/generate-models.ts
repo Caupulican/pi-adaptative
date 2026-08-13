@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { writeFileSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -23,6 +23,11 @@ import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts"
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
+// Overridable so the drift checker (check:model-catalog) can generate into a scratch path
+// without touching the committed file it diffs against.
+const modelCatalogOutputPath = process.env.PI_MODEL_CATALOG_OUTPUT_PATH
+	? resolve(process.env.PI_MODEL_CATALOG_OUTPUT_PATH)
+	: join(packageRoot, "src", "models.generated.ts");
 
 interface ModelsDevModel {
 	id: string;
@@ -2390,8 +2395,8 @@ export const MODELS = {
 `;
 
 	// Write file
-	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
-	console.log("Generated src/models.generated.ts");
+	writeFileSync(modelCatalogOutputPath, output);
+	console.log(`Generated ${modelCatalogOutputPath}`);
 
 	// Print statistics
 	const totalModels = allModels.length;
@@ -2406,13 +2411,12 @@ export const MODELS = {
 	}
 }
 
-// Deterministic-build escape hatch: CI must verify the COMMITTED catalog, not refetch live
-// pricing that can drift between the release commit and the CI run (a provider repricing in
-// that window fails `git diff --exit-code` and aborts the npm publish). Explicit refreshes omit
-// this flag; deterministic test and CI builds retain the reviewed committed catalog.
-const committedCatalog = join(packageRoot, "src", "models.generated.ts");
+// Hermetic by default: a plain build never fetches live pricing and never dirties the committed
+// catalog (a provider repricing between the release commit and a later build would otherwise
+// fail `git diff --exit-code` and abort the npm publish). Set PI_FETCH_MODELS=1 to explicitly
+// refresh from live data; the resulting diff is reviewed and committed like any other change.
 await runModelCatalogGeneration({
-	catalogPath: committedCatalog,
-	skipFetch: process.env.PI_SKIP_MODEL_FETCH,
+	catalogPath: modelCatalogOutputPath,
+	fetchRequested: process.env.PI_FETCH_MODELS,
 	generate: generateModels,
 });

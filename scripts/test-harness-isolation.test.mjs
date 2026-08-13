@@ -82,7 +82,6 @@ const capturedVariables = [
 	"PATH",
 	"PI_ADAPTATIVE_CODING_AGENT_DIR",
 	"PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR",
-	"PI_SKIP_MODEL_FETCH",
 	"PI_NO_LOCAL_LLM",
 	"USERPROFILE",
 	"APPDATA",
@@ -175,7 +174,6 @@ function runHarness(fixture, { emulateWindows = false, fail = false } = {}) {
 		NPM_CONFIG_NODE_OPTIONS: nodeOptionsRequire(fixture),
 		PI_ADAPTATIVE_CODING_AGENT_DIR: join(fixture.root, "must-not-use-agent"),
 		PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR: join(fixture.root, "must-not-use-sessions"),
-		PI_SKIP_MODEL_FETCH: "must-be-overridden",
 		PI_TEST_HARNESS_CAPTURE: fixture.capture,
 		TMPDIR: fixture.harnessTmp,
 		XDG_CACHE_HOME: join(fixture.home, ".cache"),
@@ -223,15 +221,26 @@ function assertUserStateUnchanged(fixture) {
 	assert.equal(existsSync(join(fixture.userAgentDir, "auth.json.bak")), false);
 }
 
+function escapeRegExp(value) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// A bare `assert.match(source, /needle/)` also matches inside a comment, so commenting out the
+// line it's meant to guard silently keeps the assertion green. Anchor to a real, non-commented
+// line instead (mirrors the executable-line anchoring already used for the full-suite call below).
+function assertActiveLine(source, needle, label = needle) {
+	const pattern = new RegExp(`^(?!\\s*#).*${escapeRegExp(needle)}`, "m");
+	assert.match(source, pattern, `${label} must be an active (uncommented) line, not commented out`);
+}
+
 test("the mandatory root check owns the isolated release-test harness contract", () => {
 	const source = readFileSync(harnessPath, "utf8");
 	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
 
-	assert.match(source, /mktemp -d/);
-	assert.match(source, /export PI_ADAPTATIVE_CODING_AGENT_DIR=/);
-	assert.match(source, /export PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR=/);
-	assert.match(source, /export PI_SKIP_MODEL_FETCH=1/);
-	assert.match(source, /export HOME="\$TEST_RUN_ROOT\/home"/);
+	assertActiveLine(source, "mktemp -d");
+	assertActiveLine(source, "export PI_ADAPTATIVE_CODING_AGENT_DIR=");
+	assertActiveLine(source, "export PI_ADAPTATIVE_CODING_AGENT_SESSION_DIR=");
+	assertActiveLine(source, 'export HOME="$TEST_RUN_ROOT/home"');
 	for (const name of [
 		"USERPROFILE",
 		"APPDATA",
@@ -243,7 +252,7 @@ test("the mandatory root check owns the isolated release-test harness contract",
 		"XDG_CACHE_HOME",
 		"XDG_DATA_HOME",
 	]) {
-		assert.match(source, new RegExp(`export ${name}=`), name);
+		assertActiveLine(source, `export ${name}=`, name);
 	}
 	const shellClearedVariables = [...source.matchAll(/^unset ([A-Za-z0-9_]+)$/gm)].map((match) => match[1]);
 	assert.deepEqual(shellClearedVariables, [...clearedVariables, ...nodeOptionInjectionVariables]);
@@ -259,6 +268,7 @@ test("the mandatory root check owns the isolated release-test harness contract",
 
 test("the release command runs the full isolated suite before version mutation", () => {
 	const source = readFileSync(releasePath, "utf8");
+	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
 	const fullSuiteCall = 'run("./test.sh");';
 	const executableFullSuiteCall = /^\s*run\("\.\/test\.sh"\);\s*$/m;
 	const cleanWorktreeCheck = 'const status = run("git status --porcelain", { silent: true });';
@@ -269,7 +279,116 @@ test("the release command runs the full isolated suite before version mutation",
 	const fullSuiteCallIndex = source.search(executableFullSuiteCall);
 	assert.ok(source.indexOf(cleanWorktreeCheck) < fullSuiteCallIndex, "cleanliness must be checked first");
 	assert.ok(fullSuiteCallIndex < source.indexOf(versionMutation), "tests must precede version mutation");
+
+	// Lexical pins: these fast checks are a backstop alongside the execution-proof test below,
+	// which is what actually defeats remapping/wrapper/run()-weakening bypasses of this gate.
+	assert.equal(packageJson.scripts["release:patch"], "node scripts/release.mjs patch");
+	assert.equal(packageJson.scripts["release:minor"], "node scripts/release.mjs minor");
+	assert.equal(packageJson.scripts["release:major"], "node scripts/release.mjs major");
+	assert.equal(packageJson.scripts["release:promote"], "node scripts/release.mjs promote");
 });
+
+function createReleaseExecutionProofFixture(context) {
+	const root = mkdtempSync(join(tmpdir(), "pi-release-exec-proof-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+
+	const originDir = join(root, "origin.git");
+	const workDir = join(root, "work");
+	mkdirSync(originDir, { recursive: true });
+	mkdirSync(workDir, { recursive: true });
+
+	const gitEnv = {
+		...process.env,
+		GIT_AUTHOR_NAME: "pi-release-test",
+		GIT_AUTHOR_EMAIL: "pi-release-test@example.com",
+		GIT_COMMITTER_NAME: "pi-release-test",
+		GIT_COMMITTER_EMAIL: "pi-release-test@example.com",
+	};
+
+	function git(args, options = {}) {
+		const result = spawnSync("git", args, { cwd: workDir, encoding: "utf8", env: gitEnv, ...options });
+		if (result.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed:\n${result.stdout}\n${result.stderr}`);
+		}
+		return result.stdout;
+	}
+
+	spawnSync("git", ["init", "--bare", "--initial-branch=main", originDir], { encoding: "utf8" });
+
+	mkdirSync(join(workDir, "packages", "ai"), { recursive: true });
+	writeFileSync(
+		join(workDir, "packages", "ai", "package.json"),
+		`${JSON.stringify({ name: "@caupulican/pi-ai", version: "1.0.0" }, null, "\t")}\n`,
+	);
+	writeFileSync(
+		join(workDir, "package.json"),
+		`${JSON.stringify({ name: "fixture", private: true, version: "0.0.0", scripts: {} }, null, "\t")}\n`,
+	);
+	const testShPath = join(workDir, "test.sh");
+	writeFileSync(testShPath, "#!/usr/bin/env bash\nexit 1\n");
+	chmodSync(testShPath, 0o755);
+
+	git(["init", "--initial-branch=main"]);
+	git(["add", "-A"]);
+	git(["commit", "-m", "initial fixture commit"]);
+	git(["remote", "add", "origin", originDir]);
+	git(["push", "-u", "origin", "main"]);
+
+	return { root, workDir, originDir, git, gitEnv };
+}
+
+test(
+	"release.mjs aborts before any mutation when the test gate fails (execution proof)",
+	{ skip: process.platform === "win32" },
+	(context) => {
+		// This is the backstop the lexical asserts above cannot provide: it does not care how
+		// release.mjs is implemented internally (conditional wrappers, a weakened run() helper, a
+		// remapped package.json entry are all still exercised here) - it only observes real,
+		// externally verifiable outcomes of actually running the script end to end. The fixture's
+		// own test.sh (not a PATH shim) plays the role of "PATH-shimmed ./test.sh that exits 1":
+		// release.mjs always resolves "./test.sh" relative to its cwd, so placing the failing
+		// script there is an equivalent, simpler way to force the same failure.
+		const fixture = createReleaseExecutionProofFixture(context);
+		const aiPackagePath = join(fixture.workDir, "packages", "ai", "package.json");
+		const versionBefore = JSON.parse(readFileSync(aiPackagePath, "utf8")).version;
+
+		const result = spawnSync(process.execPath, [releasePath, "patch"], {
+			cwd: fixture.workDir,
+			encoding: "utf8",
+			env: fixture.gitEnv,
+		});
+
+		assert.notEqual(
+			result.status,
+			0,
+			`release.mjs must exit non-zero when the test gate fails:\n${result.stdout}\n${result.stderr}`,
+		);
+
+		const localTags = fixture.git(["tag", "-l"]).trim();
+		assert.equal(localTags, "", "no tag may be created locally when the test gate fails");
+
+		const originTags = spawnSync("git", ["tag", "-l"], {
+			cwd: fixture.originDir,
+			encoding: "utf8",
+			env: fixture.gitEnv,
+		}).stdout.trim();
+		assert.equal(originTags, "", "no tag may be pushed to origin when the test gate fails");
+
+		const originLog = spawnSync("git", ["log", "--oneline", "main"], {
+			cwd: fixture.originDir,
+			encoding: "utf8",
+			env: fixture.gitEnv,
+		}).stdout.trim();
+		assert.equal(
+			originLog.split("\n").length,
+			1,
+			"origin/main must not receive a release commit when the test gate fails",
+		);
+
+		const versionAfter = JSON.parse(readFileSync(aiPackagePath, "utf8")).version;
+		assert.equal(versionAfter, versionBefore, "version must not be bumped when the test gate fails");
+	},
+);
 
 test(
 	"test.sh hides user state behind an isolated home/profile without dropping PATH or Windows system variables",
@@ -307,7 +426,6 @@ test(
 			assert.equal(record.env.PATH, expectedPath);
 			assert.equal(record.env.SystemRoot, expectedSystemRoot);
 			assert.equal(record.env.ComSpec, expectedComSpec);
-			assert.equal(record.env.PI_SKIP_MODEL_FETCH, "1");
 			assert.equal(record.env.PI_NO_LOCAL_LLM, "1");
 			for (const name of clearedVariables) assert.equal(record.env[name], null, name);
 			for (const name of nodeOptionInjectionVariables) assert.equal(record.env[name], null, name);

@@ -1,0 +1,42 @@
+name: Model catalog drift check
+
+# Builds are hermetic by default (packages/ai/scripts/model-catalog-generation-policy.ts): they
+# never fetch live pricing, so the committed model catalogs can silently fall behind upstream.
+# This workflow is the governance loop for that data - it runs on a schedule (not on every push
+# or PR) because it needs network access to upstream pricing sources and its only job is to
+# surface drift for a human to review, never to gate ordinary CI.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # weekly, Monday 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check-model-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check model catalog for drift against live pricing data
+        run: npm run check:model-catalog
