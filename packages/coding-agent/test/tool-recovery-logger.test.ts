@@ -174,6 +174,29 @@ describe("ToolRecoveryLogger", () => {
 		await logger.shutdown(10);
 	});
 
+	it("drains delayed worker acknowledgments without a production flush timeout", async () => {
+		const dir = makeTempDir();
+		const workerPath = join(dir, "delayed-ack-worker.mjs");
+		writeFileSync(
+			workerPath,
+			`import { parentPort } from "node:worker_threads";
+parentPort.on("message", (message) => {
+  if (message?.type === "records") {
+    setTimeout(() => parentPort.postMessage({ type: "ack", batchId: message.batchId, written: message.records.length, failed: 0 }), 300);
+  }
+});
+`,
+			"utf-8",
+		);
+		const logger = createLogger(dir, { workerSpecifier: pathToFileURL(workerPath) });
+		logger.recordToolArgumentValidation(createEvent("repaired"));
+
+		await logger.drain();
+
+		expect(logger.getStats()).toMatchObject({ queued: 0, inFlight: 0 });
+		await logger.shutdown(10);
+	});
+
 	it("ignores a crashed worker's later exit and protects the replacement batch", async () => {
 		const dir = makeTempDir();
 		const workerPath = join(dir, "crash-once-worker.mjs");

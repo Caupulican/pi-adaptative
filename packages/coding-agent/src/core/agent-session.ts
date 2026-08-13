@@ -1540,8 +1540,8 @@ export class AgentSession {
 		].join("\n\n");
 	}
 
-	async flushToolRecoveryLogsForTests(timeoutMs = 1000): Promise<void> {
-		await this._toolRecoveryLogger.flush(timeoutMs);
+	async flushToolRecoveryLogsForTests(): Promise<void> {
+		await this._toolRecoveryLogger.drain();
 	}
 
 	removeToolRepairRule(model: string, mode: string): boolean {

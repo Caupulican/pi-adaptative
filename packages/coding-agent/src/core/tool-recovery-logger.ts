@@ -157,11 +157,24 @@ export class ToolRecoveryLogger {
 	}
 
 	flush(timeoutMs: number = DEFAULT_FLUSH_TIMEOUT_MS): Promise<void> {
+		return this.waitForIdle(timeoutMs);
+	}
+
+	drain(): Promise<void> {
+		return this.waitForIdle();
+	}
+
+	private waitForIdle(timeoutMs?: number): Promise<void> {
 		if (!this.enabled || (!this.worker && this.queue.length === 0 && this.inFlight.length === 0)) {
 			return Promise.resolve();
 		}
 		this.pump();
 		return new Promise((resolve) => {
+			if (timeoutMs === undefined) {
+				this.flushWaiters.push(resolve);
+				this.resolveFlushWaitersIfIdle();
+				return;
+			}
 			let settled = false;
 			let timeout: NodeJS.Timeout;
 			const finish = (): void => {
