@@ -143,6 +143,8 @@ export interface PromptOptions {
 	autoContinueGoal?: boolean;
 	/** Hidden internal turn persisted as a typed context marker. */
 	internalContextType?: string;
+	/** Active goal whose autonomous foreground execution owns this internal turn's provider usage. */
+	goalExecutionId?: string;
 }
 
 export interface ModelCycleResult {

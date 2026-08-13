@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseExplicitChatGoal } from "../src/core/goals/natural-language-goal.ts";
+import { parseExplicitChatGoal, parseExplicitGoalStartAuthority } from "../src/core/goals/natural-language-goal.ts";
 
 describe("natural-language persistent goal admission", () => {
 	it.each([
@@ -37,5 +37,20 @@ describe("natural-language persistent goal admission", () => {
 	it("rejects empty and oversized objectives", () => {
 		expect(parseExplicitChatGoal("Set a persistent goal:   ")).toBeUndefined();
 		expect(parseExplicitChatGoal(`Set a persistent goal: ${"x".repeat(4001)}`)).toBeUndefined();
+	});
+
+	it("reads an explicit numeric token ceiling without inventing one", () => {
+		expect(parseExplicitChatGoal("Set a persistent goal: fix the harness with a 40k token budget.")).toEqual({
+			objective: "fix the harness with a 40k token budget.",
+			tokenBudget: 40_000,
+		});
+		expect(parseExplicitGoalStartAuthority("this is a goal")).toEqual({});
+		expect(parseExplicitGoalStartAuthority("this is a goal with a 40k token budget")).toEqual({
+			tokenBudget: 40_000,
+		});
+		expect(parseExplicitGoalStartAuthority("Investigate and fix the bug")).toBeUndefined();
+		expect(parseExplicitChatGoal("Set a persistent goal: process 40k tokens of archived logs.")).toEqual({
+			objective: "process 40k tokens of archived logs.",
+		});
 	});
 });

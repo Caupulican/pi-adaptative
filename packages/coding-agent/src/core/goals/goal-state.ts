@@ -39,9 +39,9 @@ export interface GoalState {
 	revision?: number;
 	/** Monotonic meaningful-progress revision used by the continuation stall gate. */
 	progressRevision?: number;
-	/** Optional owner-requested token ceiling. Charged usage is uncached input plus output. */
+	/** Optional owner-requested ceiling using the shared cache-discounted token-budget accounting. */
 	tokenBudget?: number;
-	/** Exact usage attributed to submitted goal-continuation turns. */
+	/** Budget-counted usage attributed to all goal-owned foreground execution. */
 	tokensUsed?: number;
 	requirements: readonly Requirement[];
 	evidence: readonly GoalEvidenceRef[];
@@ -66,9 +66,8 @@ export interface GoalState {
 	 */
 	continuationWallClockMs?: number;
 	/**
-	 * Observed cumulative USD attributed to this goal's own continuation passes from assistant messages
-	 * appended within each pass's captured branch interval. Deliberately excludes worker/subagent spend,
-	 * which is reported separately. Same backward-compat note.
+	 * Observed cumulative USD attributed to this goal's own foreground provider responses. Deliberately
+	 * excludes worker/subagent spend, which is reported separately. Same backward-compat note.
 	 */
 	continuationSpendUsd?: number;
 	/**
@@ -165,9 +164,9 @@ export type GoalEvent =
 			turns: number;
 			/** This pass's own active wall-clock duration, in milliseconds. */
 			wallClockMs: number;
-			/** Exact uncached input + output tokens produced after this pass's session-entry cursor. */
+			/** Budget-counted provider usage; cache reads use the shared lean-budget weight. */
 			tokens: number;
-			/** Exact model spend produced after this pass's session-entry cursor. */
+			/** Exact model spend attributed to the goal-owned execution. */
 			spendUsd: number;
 			now: string;
 	  }

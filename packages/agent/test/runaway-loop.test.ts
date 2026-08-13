@@ -1,6 +1,7 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, type Message } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { Agent } from "../src/agent.ts";
 import { agentLoop } from "../src/agent-loop.ts";
 import type {
 	AgentContext,
@@ -9,6 +10,7 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolResult,
+	StreamFn,
 } from "../src/types.ts";
 import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 
@@ -118,6 +120,117 @@ function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode
 }
 
 describe("runaway-loop backstop", () => {
+	it("retains the runaway window across a host continuation after compaction", async () => {
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		let providerCalls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerCalls++;
+				if (providerCalls === 3 || providerCalls === 6) {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "compaction boundary" }], "stop"),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `t${providerCalls}`, name: "echo", arguments: { value: "stuck" } }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const agent = new Agent({
+			streamFn,
+			initialState: {
+				model: createModel(),
+				systemPrompt: "",
+				tools: [echoTool],
+			},
+		});
+		agent.maxStallTurns = 4;
+		agent.onRunawayStop = (info) => stalls.push(info);
+
+		await agent.prompt("start");
+		agent.state.messages.push({
+			role: "custom",
+			customType: "compactionSummary",
+			content: "continue after compaction",
+			display: false,
+			timestamp: Date.now(),
+		});
+		await agent.continue();
+
+		expect(stalls).toEqual([expect.objectContaining({ repeats: 4 })]);
+		expect(providerCalls).toBe(5);
+	});
+
+	it("retains varied failure-family recovery accounting across a host continuation", async () => {
+		let providerCalls = 0;
+		let sawMandatoryToollessDelivery = false;
+		const failingTool = createEchoTool(() => {
+			throw new Error("unsupported option");
+		});
+		const streamFn: StreamFn = (_model, context) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerCalls++;
+				if (context.tools?.length === 0) {
+					sawMandatoryToollessDelivery = true;
+					completeMandatoryDelivery(stream, context);
+					return;
+				}
+				if (providerCalls === 3 || providerCalls === 6) {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "boundary" }], "stop"),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[
+							{
+								type: "toolCall",
+								id: `failure-${providerCalls}`,
+								name: "echo",
+								arguments: { value: `variant-${providerCalls}` },
+							},
+						],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const agent = new Agent({
+			streamFn,
+			initialState: { model: createModel(), systemPrompt: "", tools: [failingTool] },
+		});
+
+		await agent.prompt("start");
+		agent.state.messages.push({
+			role: "custom",
+			customType: "compactionSummary",
+			content: "continue after compaction",
+			display: false,
+			timestamp: Date.now(),
+		});
+		await agent.continue();
+
+		expect(sawMandatoryToollessDelivery).toBe(true);
+		expect(providerCalls).toBe(6);
+	});
+
 	it("stops a loop that repeats the identical tool call, firing onRunawayStop", async () => {
 		let executions = 0;
 		const context: AgentContext = {

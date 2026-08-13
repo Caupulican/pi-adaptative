@@ -39,6 +39,7 @@ import {
 	type ToolFailureRecoveryHalt,
 } from "./tool-failure-recovery-gate.ts";
 import { appendMandatoryToolFailureDeliveryPrompt } from "./tool-failure-recovery-protocol.ts";
+import { rejectNativeToolProtocolResidue } from "./tool-protocol-residue.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -56,6 +57,16 @@ import { createEmptyUsage } from "./usage.ts";
 export { resolveRequestPreflightMaxTokens } from "./provider-request-planner.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+/** Bounded no-progress state retained across host-owned continuations of one logical prompt. */
+export interface AgentLoopContinuationState {
+	stallWindow: string[];
+	toolFailureRecoveryGate: ToolFailureRecoveryGate;
+}
+
+export function createAgentLoopContinuationState(): AgentLoopContinuationState {
+	return { stallWindow: [], toolFailureRecoveryGate: new ToolFailureRecoveryGate() };
+}
 
 /**
  * Start an agent loop with a new prompt message.
@@ -118,6 +129,7 @@ export async function runAgentLoop(
 	emit: AgentEventSink,
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
+	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [...prompts];
 	const currentContext: AgentContext = {
@@ -132,7 +144,7 @@ export async function runAgentLoop(
 		await emit({ type: "message_end", message: prompt });
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn, continuationState);
 	return newMessages;
 }
 
@@ -142,6 +154,7 @@ export async function runAgentLoopContinue(
 	emit: AgentEventSink,
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
+	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
 ): Promise<AgentMessage[]> {
 	assertContinuableContext(context);
 
@@ -151,7 +164,7 @@ export async function runAgentLoopContinue(
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn, continuationState);
 	return newMessages;
 }
 
@@ -274,6 +287,7 @@ async function runLoop(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
+	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
 ): Promise<void> {
 	let currentContext = initialContext;
 	let config = initialConfig;
@@ -288,11 +302,11 @@ async function runLoop(
 	// window slides past it. Counts only turns that issued tool calls, so varied/long work never trips
 	// it. `0` disables.
 	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
-	const stallWindow: string[] = [];
+	const stallWindow = continuationState.stallWindow;
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
-	const toolFailureRecoveryGate = new ToolFailureRecoveryGate();
+	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
 	let mandatoryRecoveryDeliveryPending = false;
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
@@ -524,7 +538,7 @@ async function streamAssistantResponse(
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
-	for await (const event of response) {
+	responseEvents: for await (const event of response) {
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
@@ -554,23 +568,16 @@ async function streamAssistantResponse(
 				break;
 
 			case "done":
-			case "error": {
-				const finalMessage = await response.result();
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
-				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
-			}
+			case "error":
+				break responseEvents;
 		}
 	}
 
-	const finalMessage = await response.result();
+	const finalMessage = rejectNativeToolProtocolResidue(
+		await response.result(),
+		context.tools ?? [],
+		Boolean(config.textToolCallProtocol),
+	);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {

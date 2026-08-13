@@ -13,7 +13,7 @@ import type {
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
-import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -83,7 +83,7 @@ import {
 } from "./worker-fleet-limits.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
-import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
+import type { WorkerNotificationCoordinator, WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
 import {
 	type ResolvedWorkerProfile,
@@ -155,9 +155,7 @@ export interface WorkerDelegationControllerDeps {
 	isDelegateToolActive(): boolean;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	emit(event: AgentSessionEvent): void;
-	notifyWorkerTerminalHandoff(
-		records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
-	): Promise<void>;
+	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;

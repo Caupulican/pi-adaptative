@@ -114,7 +114,7 @@ import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { createFindTool } from "./tools/find.ts";
-import { createGoalToolDefinition } from "./tools/goal.ts";
+import { createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
@@ -309,6 +309,8 @@ export interface RuntimeBuilderDeps {
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
+	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
+	authorizeGoalStartFromTool?(input: Pick<GoalToolInput, "userGoal" | "tokenBudget">): string | undefined;
 	/** Native task-step state accessors. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
 	saveTaskStepsStateSnapshot(state: TaskStepsState): string;
@@ -921,6 +923,10 @@ export class RuntimeBuilder {
 			if (toolAccess.allows("goal")) {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					authorizeStart: (input) =>
+						this.deps.authorizeGoalStartFromTool
+							? this.deps.authorizeGoalStartFromTool(input)
+							: "goal start requires explicit owner authorization in the current prompt.",
 					saveGoalState: (state, expected) => {
 						this.deps.saveGoalStateSnapshot(state, expected);
 					},

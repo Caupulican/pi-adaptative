@@ -45,6 +45,42 @@ describe("background lane history", () => {
 });
 
 describe("worker terminal handoffs", () => {
+	it("retains goal ownership through the asynchronous terminal outbox", async () => {
+		let resolveHandoff!: () => void;
+		const handoff = new Promise<void>((resolve) => {
+			resolveHandoff = resolve;
+		});
+		const notifyWorkerTerminalHandoff = vi.fn(async () => {
+			resolveHandoff();
+		});
+		const controller = new BackgroundLaneController({
+			emit: () => {},
+			notifyWorkerTerminalHandoff,
+		} as never);
+		const recordTerminal = (
+			controller as unknown as {
+				_recordWorkerTerminal(record: {
+					laneId: string;
+					type: "worker";
+					status: "succeeded";
+					goalId: string;
+				}): void;
+			}
+		)._recordWorkerTerminal.bind(controller);
+
+		recordTerminal({ laneId: "worker-late", type: "worker", status: "succeeded", goalId: "goal-runaway" });
+		await handoff;
+
+		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledWith([
+			{
+				laneId: "worker-late",
+				status: "succeeded",
+				goalId: "goal-runaway",
+			},
+		]);
+		controller.abortInFlightLanes();
+	});
+
 	it("batches same-tick terminal events into one event-driven parent wake", async () => {
 		const emitted: unknown[] = [];
 		let resolveHandoff!: () => void;
@@ -63,15 +99,11 @@ describe("worker terminal handoffs", () => {
 				_recordWorkerTerminal(record: { laneId: string; type: "worker"; status: "succeeded" | "failed" }): void;
 			}
 		)._recordWorkerTerminal.bind(controller);
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-
 		recordTerminal({ laneId: "worker-1", type: "worker", status: "succeeded" });
 		recordTerminal({ laneId: "worker-2", type: "worker", status: "failed" });
 		expect(notifyWorkerTerminalHandoff).not.toHaveBeenCalled();
 		await handoff;
 
-		expect(timeoutSpy).toHaveBeenCalledTimes(1);
-		expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1_800_000);
 		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1);
 		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledWith([
 			{ laneId: "worker-1", status: "succeeded" },
@@ -85,18 +117,20 @@ describe("worker terminal handoffs", () => {
 			}),
 		);
 		controller.abortInFlightLanes();
-		timeoutSpy.mockRestore();
 	});
 
-	it("bounds a stuck handoff so the next terminal batch is not starved", async () => {
+	it("serializes later terminal batches behind one unresolved durable handoff", async () => {
 		vi.useFakeTimers();
 		try {
 			const emitted: unknown[] = [];
-			let notificationCalls = 0;
-			const notifyWorkerTerminalHandoff = vi.fn(() => {
-				notificationCalls++;
-				return notificationCalls === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+			let resolveFirst!: () => void;
+			const firstHandoff = new Promise<void>((resolve) => {
+				resolveFirst = resolve;
 			});
+			const notifyWorkerTerminalHandoff = vi
+				.fn<() => Promise<void>>()
+				.mockReturnValueOnce(firstHandoff)
+				.mockResolvedValue(undefined);
 			const controller = new BackgroundLaneController({
 				emit: (event: unknown) => emitted.push(event),
 				notifyWorkerTerminalHandoff,
@@ -112,17 +146,14 @@ describe("worker terminal handoffs", () => {
 			await Promise.resolve();
 			expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1);
 
-			await vi.advanceTimersByTimeAsync(1_800_000);
 			recordTerminal({ laneId: "worker-2", type: "worker", status: "failed" });
 			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
 
+			expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1);
+			resolveFirst();
+			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
 			expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(2);
-			expect(emitted).toContainEqual(
-				expect.objectContaining({
-					type: "warning",
-					message: expect.stringContaining("worker terminal handoff timed out"),
-				}),
-			);
+			expect(emitted).toContainEqual(expect.objectContaining({ type: "delegate_workers", failedSinceFlush: 1 }));
 			controller.abortInFlightLanes();
 		} finally {
 			vi.useRealTimers();

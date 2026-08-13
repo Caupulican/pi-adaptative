@@ -7,6 +7,7 @@ export interface ProviderRequestRuntimeControllerDeps {
 	agent: Agent;
 	compaction: Pick<CompactionController, "admitProviderRequest">;
 	context: ProviderRequestContextController;
+	admitGoalRequest(): number | undefined;
 }
 
 /** Installs and owns the one provider planning/admission hook generation on an Agent. */
@@ -68,8 +69,9 @@ export class ProviderRequestRuntimeController {
 			}
 		};
 		this.installedAdmission = async (request, signal) => {
+			const requestTokens = estimateProviderRequestTokens(request.context);
 			const decision = await this.deps.compaction.admitProviderRequest({
-				requestTokens: estimateProviderRequestTokens(request.context),
+				requestTokens,
 				nonCompactableTokens: estimateProviderRequestTokens(request.nonCompactableContext),
 				attempt: request.attempt,
 			});
@@ -79,7 +81,16 @@ export class ProviderRequestRuntimeController {
 					context: { ...request.sourceContext, messages: agent.state.messages.slice() },
 				};
 			}
-			return (await previousAdmission?.(request, signal)) ?? { action: "send" };
+			const previous = (await previousAdmission?.(request, signal)) ?? { action: "send" as const };
+			if (previous.action === "replan") return previous;
+			const goalMaxTokens = this.deps.admitGoalRequest();
+			const maxTokens = [previous.maxTokens, goalMaxTokens]
+				.filter((value): value is number => value !== undefined)
+				.reduce<number | undefined>(
+					(minimum, value) => (minimum === undefined ? value : Math.min(minimum, value)),
+					undefined,
+				);
+			return maxTokens === undefined ? previous : { action: "send", maxTokens };
 		};
 
 		agent.planContext = this.installedPlanContext;

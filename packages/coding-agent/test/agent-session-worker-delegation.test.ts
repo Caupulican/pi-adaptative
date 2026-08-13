@@ -1552,15 +1552,23 @@ describe("AgentSession worker delegation", () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		let resolveWorker: (message: AssistantMessage) => void = () => {};
 		let resolveForeground: (message: AssistantMessage) => void = () => {};
+		let resolveWake: (message: AssistantMessage) => void = () => {};
 		const workerResponse = new Promise<AssistantMessage>((resolve) => {
 			resolveWorker = resolve;
 		});
 		const foregroundResponse = new Promise<AssistantMessage>((resolve) => {
 			resolveForeground = resolve;
 		});
+		const wakeResponse = new Promise<AssistantMessage>((resolve) => {
+			resolveWake = resolve;
+		});
 		let signalForegroundStarted!: () => void;
 		const foregroundStarted = new Promise<void>((resolve) => {
 			signalForegroundStarted = resolve;
+		});
+		let signalWakeStarted!: () => void;
+		const wakeStarted = new Promise<void>((resolve) => {
+			signalWakeStarted = resolve;
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
 			context.systemPrompt?.includes("Autonomous orchestration-tree agent")
@@ -1569,6 +1577,10 @@ describe("AgentSession worker delegation", () => {
 		const heldForegroundResponse: FauxResponseFactory = () => {
 			signalForegroundStarted();
 			return foregroundResponse;
+		};
+		const heldWakeResponse: FauxResponseFactory = () => {
+			signalWakeStarted();
+			return wakeResponse;
 		};
 		let signalTerminal!: () => void;
 		let signalWakeReply!: () => void;
@@ -1601,7 +1613,7 @@ describe("AgentSession worker delegation", () => {
 				routeResponse,
 				routeResponse,
 				heldForegroundResponse,
-				fauxAssistantMessage("Durable handoff acknowledged."),
+				heldWakeResponse,
 			]);
 
 			await harness.session.prompt("Start one durable background worker", { autoContinueGoal: false });
@@ -1625,7 +1637,7 @@ describe("AgentSession worker delegation", () => {
 
 			resolveForeground(fauxAssistantMessage("Foreground released."));
 			await foregroundRun;
-			await wakeReply;
+			await wakeStarted;
 			await vi.waitFor(() => {
 				expect(eventStore.readAll().some((event) => event.type === "notification.delivered")).toBe(true);
 			});
@@ -1634,10 +1646,22 @@ describe("AgentSession worker delegation", () => {
 					.getEntries()
 					.some((entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion"),
 			).toBe(true);
+
+			resolveWake(fauxAssistantMessage("Durable handoff acknowledged."));
+			await wakeReply;
+			expect(eventStore.readAll().filter((event) => event.type === "notification.delivered")).toHaveLength(1);
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.filter(
+						(entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion",
+					),
+			).toHaveLength(1);
 		} finally {
 			unsubscribe();
 			resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));
 			resolveForeground(fauxAssistantMessage("Test cleanup."));
+			resolveWake(fauxAssistantMessage("Test cleanup."));
 			harness.cleanup();
 		}
 	});

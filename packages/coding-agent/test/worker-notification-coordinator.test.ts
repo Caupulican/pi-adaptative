@@ -7,6 +7,75 @@ afterEach(() => {
 });
 
 describe("WorkerNotificationCoordinator", () => {
+	it("does not redispatch one in-flight terminal handoff after the former timeout boundary", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-long-foreground",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		let resolveNotify!: () => void;
+		const notifyPending = new Promise<void>((resolve) => {
+			resolveNotify = resolve;
+		});
+		const notify = vi.fn(() => notifyPending);
+		const markDurableDelivered = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered,
+		});
+
+		coordinator.recordTerminal(record, "notification-long-foreground");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(notify).toHaveBeenCalledOnce();
+
+		await vi.advanceTimersByTimeAsync(1_800_001);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(notify).toHaveBeenCalledOnce();
+		expect(markDurableDelivered).not.toHaveBeenCalled();
+
+		resolveNotify();
+		await vi.runAllTimersAsync();
+		expect(markDurableDelivered).toHaveBeenCalledOnce();
+		expect(markDurableDelivered).toHaveBeenCalledWith(["notification-long-foreground"]);
+		coordinator.dispose();
+	});
+
+	it("retains goal ownership on a durable terminal notification", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-goal-terminal",
+			type: "worker",
+			status: "succeeded",
+			goalId: "goal-runaway",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const notify = vi.fn(async () => undefined);
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.recordTerminal(record, "notification-goal-terminal");
+		await vi.runAllTimersAsync();
+
+		expect(notify).toHaveBeenCalledWith([
+			{
+				laneId: "worker-goal-terminal",
+				status: "succeeded",
+				goalId: "goal-runaway",
+			},
+		]);
+		coordinator.dispose();
+	});
+
 	it("retries a lone transient terminal notification failure without an unrelated state event", async () => {
 		vi.useFakeTimers();
 		const record: LaneRecord = {

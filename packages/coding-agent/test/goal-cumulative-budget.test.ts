@@ -75,7 +75,7 @@ describe("per-goal cumulative continuation budget", () => {
 			expect(state.continuationSpendUsd).toBeCloseTo(0.04, 10);
 		});
 
-		it("counts the first pass from its exact append-only interval", () => {
+		it("counts the first goal-owned provider response", () => {
 			let state = createGoalState({ goalId: "g1", userGoal: "Goal", now: "T0" });
 			state = applyGoalEvent(state, {
 				type: "record_continuation_budget",
@@ -89,7 +89,7 @@ describe("per-goal cumulative continuation budget", () => {
 			expect(state.tokensUsed).toBe(250);
 		});
 
-		it("sums exact per-pass spend without a whole-session checkpoint", () => {
+		it("sums exact goal-owned response spend without a whole-session checkpoint", () => {
 			let state = createGoalState({ goalId: "g1", userGoal: "Goal", now: "T0" });
 			state = applyGoalEvent(state, {
 				type: "record_continuation_budget",
@@ -263,9 +263,7 @@ describe("per-goal cumulative continuation budget", () => {
 
 		it("recordGoalContinuationPass is a no-op when no goal state exists", () => {
 			const { session } = createTestSession();
-			expect(() =>
-				session.recordGoalContinuationPass({ turns: 1, wallClockMs: 10, usageCursor: null }),
-			).not.toThrow();
+			expect(() => session.recordGoalContinuationPass({ turns: 1, wallClockMs: 10 })).not.toThrow();
 			expect(session.getGoalStateSnapshot()).toBeUndefined();
 		});
 	});

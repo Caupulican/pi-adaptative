@@ -7,9 +7,9 @@
  * owns no state; the goal state lives in the session log and is read fresh every pass. Termination is
  * gated only by real terminal conditions and limits the owner explicitly supplied: an optional
  * per-invocation turn cap, an optional per-invocation wall-clock cap, and an optional durable token
- * budget on the goal. Each submitted pass still reports exact token/wall-clock/spend contribution
- * for observability. Progress is inferred from real work and terminal goal updates; telemetry never
- * becomes an implicit execution limit.
+ * budget on the goal. Each submitted pass still reports turn/wall-clock telemetry; provider usage
+ * and spend are attributed at the response boundary. Progress is inferred from real work and
+ * terminal goal updates; telemetry never becomes an implicit execution limit.
  */
 
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
@@ -58,15 +58,12 @@ export interface GoalLoopControllerDeps {
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	/** Submit a continuation prompt through the session's own prompt path. */
 	prompt(text: string, options?: PromptOptions): Promise<void>;
-	/** Capture the append-only branch cursor immediately before a continuation prompt. */
-	captureUsageCursor(): string | null;
 	/**
-	 * Persist one submitted pass's contribution to the active goal's durable cumulative accounting
-	 * (turns + active wall-clock; USD is attributed by the implementation from the session's own
-	 * spend, not passed in here — see `AgentSession.recordGoalContinuationPass`). Called once per
+	 * Persist one submitted pass's turn and active-wall-clock contribution. Provider usage is charged
+	 * at each assistant response before another request can be admitted. Called once per
 	 * pass actually SUBMITTED (never for a no-op `continueGoalOnce` call).
 	 */
-	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number; usageCursor: string | null }): void;
+	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void;
 	/** Persist an exhausted/non-retryable continuation failure as a stopped goal state. */
 	recordGoalContinuationFailure(error: unknown): void;
 	/** Persist a reason-specific budget terminal state before returning control. */
@@ -93,6 +90,7 @@ export class GoalLoopController {
 			processSlashCommands: false,
 			autoContinueGoal: false,
 			internalContextType: GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+			goalExecutionId: snapshot.goalState?.goalId,
 		});
 
 		return { submitted: true, snapshot, prompt };
@@ -132,7 +130,6 @@ export class GoalLoopController {
 			}
 
 			const passStartedAt = now();
-			const usageCursor = this.deps.captureUsageCursor();
 			let result: GoalContinuationOnceResult;
 			try {
 				result = await this.continueGoalOnce(options);
@@ -141,13 +138,13 @@ export class GoalLoopController {
 				// coordination, not a consumed goal turn and not evidence that the goal is blocked.
 				if (error instanceof AgentBusyError) throw error;
 				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt, usageCursor });
+				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt });
 				this.deps.recordGoalContinuationFailure(error);
 				throw error;
 			}
 			if (result.submitted) {
 				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt, usageCursor });
+				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt });
 			}
 
 			if (hasReachedWallClockBudget()) {
@@ -155,6 +152,9 @@ export class GoalLoopController {
 			}
 
 			let afterSnapshot = snapshot();
+			if (afterSnapshot.goalState?.status === "budget_limited") {
+				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: afterSnapshot };
+			}
 			const afterBudgetExhaustion = getExplicitGoalBudgetExhaustion(afterSnapshot.goalState);
 			if (afterBudgetExhaustion) {
 				this.deps.markGoalBudgetLimited(afterBudgetExhaustion);

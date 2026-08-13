@@ -1,12 +1,13 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 
-const HANDOFF_TIMEOUT_MS = 1_800_000;
 const FAILED_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["failed", "timeout", "budget_exhausted"]);
 
 export interface WorkerTerminalHandoffRecord {
 	laneId: string;
 	status: LaneTerminalStatus;
 	reasonCode?: string;
+	/** Goal ownership retained until delivery so a stopped goal cannot be resurrected by a late terminal. */
+	goalId?: string;
 }
 
 export interface WorkerNotificationStatus {
@@ -55,6 +56,7 @@ export class WorkerNotificationCoordinator {
 				laneId: record.laneId,
 				status: record.status,
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+				...(record.goalId ? { goalId: record.goalId } : {}),
 			},
 			...(durableNotificationId ? { durableNotificationId } : {}),
 		});
@@ -134,26 +136,15 @@ export class WorkerNotificationCoordinator {
 		if (batch.length === 0) return;
 		const delivery = this.deliveryTail.then(async () => {
 			if (this.disposed) return;
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-			try {
-				await Promise.race([
-					this.options.notify(terminalSinceFlush),
-					new Promise<never>((_resolve, reject) => {
-						timeout = setTimeout(
-							() => reject(new Error(`worker terminal handoff timed out after ${HANDOFF_TIMEOUT_MS}ms`)),
-							HANDOFF_TIMEOUT_MS,
-						);
-						if (typeof timeout === "object" && timeout && "unref" in timeout) timeout.unref();
-					}),
-				]);
-				this.retryCount = 0;
-				const durableIds = batch.flatMap((notification) =>
-					notification.durableNotificationId ? [notification.durableNotificationId] : [],
-				);
-				if (durableIds.length > 0) this.options.markDurableDelivered(durableIds);
-			} finally {
-				if (timeout) clearTimeout(timeout);
-			}
+			// A foreground lease wait is an in-flight side effect, not a failed attempt. Re-dispatching it
+			// on a wall-clock timer creates concurrent consumers that later persist the same handoff.
+			// Explicit rejection remains retryable; process restart replays the durable pending record.
+			await this.options.notify(terminalSinceFlush);
+			this.retryCount = 0;
+			const durableIds = batch.flatMap((notification) =>
+				notification.durableNotificationId ? [notification.durableNotificationId] : [],
+			);
+			if (durableIds.length > 0) this.options.markDurableDelivered(durableIds);
 		});
 		this.deliveryTail = delivery.catch((error: unknown) => {
 			for (const notification of batch) this.pending.set(notification.key, notification);

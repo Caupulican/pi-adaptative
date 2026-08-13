@@ -9,7 +9,12 @@ import type {
 	Transport,
 } from "@caupulican/pi-ai/types";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import {
+	type AgentLoopContinuationState,
+	createAgentLoopContinuationState,
+	runAgentLoop,
+	runAgentLoopContinue,
+} from "./agent-loop.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -224,6 +229,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	/** No-progress gates shared only by host continuations of the current logical prompt. */
+	private loopContinuationState: AgentLoopContinuationState | undefined;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -372,6 +379,7 @@ export class Agent {
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
 		this._state.errorMessage = undefined;
+		this.loopContinuationState = undefined;
 		this.clearFollowUpQueue();
 		this.clearSteeringQueue();
 	}
@@ -442,6 +450,8 @@ export class Agent {
 		messages: AgentMessage[],
 		options: { skipInitialSteeringPoll?: boolean } = {},
 	): Promise<void> {
+		const continuationState = createAgentLoopContinuationState();
+		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
 				messages,
@@ -450,11 +460,14 @@ export class Agent {
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFn,
+				continuationState,
 			);
 		});
 	}
 
 	private async runContinuation(): Promise<void> {
+		const continuationState = this.loopContinuationState ?? createAgentLoopContinuationState();
+		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
 				this.createContextSnapshot(),
@@ -462,6 +475,7 @@ export class Agent {
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFn,
+				continuationState,
 			);
 		});
 	}

@@ -188,6 +188,8 @@ export interface GoalToolDependencies {
 	 * task state itself; this is the only place that supplies it.
 	 */
 	getOpenTaskSteps?: () => readonly OpenTaskStepRef[];
+	/** Model-facing start authority for the current foreground turn. Omitted by direct owner/test callers. */
+	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | undefined;
 }
 
 function allowsNativeTmuxFallback(reason: string | undefined): boolean {
@@ -398,6 +400,15 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 					content: [{ type: "text", text: summarizeGoalState(state) }],
 					details: { action: "get", applied: false, state },
 				};
+			}
+			if (input.action === "start" && deps.authorizeStart) {
+				const error = deps.authorizeStart(input);
+				if (error) {
+					return {
+						content: [{ type: "text", text: `goal start failed: ${error}` }],
+						details: { action: "start", applied: false, error },
+					};
+				}
 			}
 			const mapped = toGoalAction(input);
 			if ("error" in mapped) {

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved runaway and tool-failure recovery gates across host continuations such as compaction and retry boundaries.
+- Rejected escaped native tool-call markup rendered as assistant text without executing it.
+
 ## [0.90.6] - 2026-08-12
 
 ## [0.90.5] - 2026-08-12

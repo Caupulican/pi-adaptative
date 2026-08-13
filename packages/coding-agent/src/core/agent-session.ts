@@ -85,6 +85,7 @@ import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
 import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import type {
 	CompactOptions,
 	ContextUsage,
@@ -115,6 +116,7 @@ import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
@@ -319,6 +321,7 @@ export class AgentSession {
 	/** Session-local ownership of tool calls transferred after the foreground latency budget. */
 	private readonly _backgroundToolTasks: BackgroundToolTaskController;
 	private readonly _terminalHandoffs: ForegroundTerminalHandoffController;
+	private readonly _durableCustomMessageTurns: DurableCustomMessageTurnController;
 	private readonly _humanInput: HumanInputController;
 	/** Plug-and-play memory subsystem (see memory-controller.ts); owns the OKF retrieval provider, the
 	 * latest retrieval/prompt-inclusion reports, the reload-safe MemoryManager, the recall
@@ -729,6 +732,7 @@ export class AgentSession {
 			agent: this.agent,
 			compaction: this._compaction,
 			context: providerRequestContext,
+			admitGoalRequest: () => this._goals.admitProviderRequest(),
 		});
 		this._toolRecoveryLogger = new ToolRecoveryLogger({
 			enabled: toolRepairSettings.logging,
@@ -754,12 +758,20 @@ export class AgentSession {
 				await this._drainQueuedExtensionCommands();
 			},
 		});
+		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
+			foreground: this._foregroundRecovery,
+			goals: this._goals,
+		});
 		this._terminalHandoffs = new ForegroundTerminalHandoffController({
 			foreground: this._foregroundRecovery,
 			isDisposed: () => this._disposed,
+			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			workerInputsWillWakeParent: (workerRequestIds) =>
 				this._humanInput.workerInputsWillWakeParent(workerRequestIds),
+			startCustomMessageTurn: (message, lease, goalId) =>
+				this._durableCustomMessageTurns.start(message, lease, goalId),
 			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),
+			warn: (message) => this._emit({ type: "warning", message }),
 		});
 		this._modelRouter = new ModelRouterController({
 			getAgent: () => this.agent,
@@ -894,6 +906,7 @@ export class AgentSession {
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
+			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
@@ -1801,6 +1814,7 @@ export class AgentSession {
 					event.message.display,
 					event.message.details,
 				);
+				this._durableCustomMessageTurns.notePersisted(event.message);
 				messagePersisted = true;
 			} else if (
 				event.message.role === "user" ||
@@ -1816,8 +1830,12 @@ export class AgentSession {
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
+				this._goals.recordExecutionUsage(assistantMsg);
 				if (messagePersisted) {
 					this._pipeline.observeProviderUsage(this.agent.state.messages, assistantMsg);
+				}
+				if (assistantMsg.errorMessage?.startsWith("native_tool_protocol_residue:")) {
+					this._goals.markProtocolFailureBlocked(assistantMsg.errorMessage);
 				}
 				this._foregroundRecovery.observeAssistant(assistantMsg);
 			}
@@ -2458,6 +2476,8 @@ export class AgentSession {
 		// response, whether the agent actually used the recalled context.
 		let injectedRecall = "";
 		let recallQuery = "";
+		let admittedGoalId = options?.goalExecutionId;
+		let goalToolStartAuthority: ExplicitGoalStartAuthority | undefined;
 
 		try {
 			// Handle extension commands first. Programmatic extension messages may opt
@@ -2508,7 +2528,9 @@ export class AgentSession {
 			}
 
 			if (!options?.internalContextType) {
+				goalToolStartAuthority = parseExplicitGoalStartAuthority(expandedText);
 				const admission = this._goals.admitExplicitChatGoal(expandedText);
+				if (admission.status === "started") admittedGoalId = admission.state.goalId;
 				if (admission.status === "unfinished_goal_exists") {
 					this._emit({
 						type: "warning",
@@ -2736,11 +2758,18 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
+		const goalExecutionLease = this._goals.beginExecution(admittedGoalId, {
+			adoptNewGoal: goalToolStartAuthority !== undefined,
+			provisionalTokenBudget: goalToolStartAuthority?.tokenBudget,
+		});
+		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
 			await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
 			this._toolProtocol.recordParseOutcomeFromLastAssistant();
 		} finally {
+			this._goals.setStartAuthority(undefined);
+			this._goals.endExecution(goalExecutionLease);
 			// Normally consumed by the authoritative message_start. If execution failed before that
 			// event, do not retain the early-painted message identity indefinitely.
 			if (userMessage) this._earlyDisplayedUserMessages.delete(userMessage);
@@ -3685,16 +3714,11 @@ export class AgentSession {
 	}
 
 	/**
-	 * Persist one submitted continuation pass's exact turn/wall-clock/token/spend contribution onto the active
-	 * goal's durable cumulative accounting (see `GoalState.continuationTurnsUsed` et al.). This is the
-	 * "persistence dep" `GoalLoopController` calls once per pass actually submitted — it, not the
-	 * loop controller, is where usage gets attributed: it scans only assistant messages appended on
-	 * the active branch after the pass's captured cursor. Compaction cannot erase or reattribute that
-	 * append-only interval, and unrelated foreground turns outside the interval are excluded.
-	 * A no-op when no goal state exists (defensive — in practice this is only ever called right
-	 * after a pass the loop already confirmed was submitted against an active goal).
+	 * Persist one submitted continuation pass's turn and active-wall-clock telemetry. Provider usage
+	 * is charged separately at every assistant-response boundary under an identity-bound goal lease.
+	 * A no-op when no goal state exists.
 	 */
-	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number; usageCursor: string | null }): void {
+	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void {
 		this._goals.recordContinuationPass(pass);
 	}
 

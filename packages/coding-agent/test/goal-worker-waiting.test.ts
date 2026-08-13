@@ -266,13 +266,12 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 
 	it("returns immediately with stopReason:'worker_in_flight' and submits zero hollow passes while waiting", async () => {
 		const promptCalls: string[] = [];
-		const recorded: Array<{ turns: number; wallClockMs: number; usageCursor: string | null }> = [];
+		const recorded: Array<{ turns: number; wallClockMs: number }> = [];
 		const controller = new GoalLoopController({
 			getGoalRuntimeSnapshot: () => makeSnapshot("waiting", "worker_in_flight"),
 			prompt: async (text) => {
 				promptCalls.push(text);
 			},
-			captureUsageCursor: () => null,
 			recordGoalContinuationPass: (pass) => recorded.push(pass),
 			recordGoalContinuationFailure: () => {},
 			markGoalBudgetLimited: () => {},
@@ -295,7 +294,6 @@ describe("GoalLoopController neither stalls nor races while a bound worker is in
 			prompt: async (text) => {
 				promptCalls.push(text);
 			},
-			captureUsageCursor: () => null,
 			recordGoalContinuationPass: () => {},
 			recordGoalContinuationFailure: () => {},
 			markGoalBudgetLimited: () => {},
@@ -338,7 +336,6 @@ describe("worker-spend accounting stays advisory (goal-loop-controller)", () => 
 			prompt: async (text) => {
 				promptCalls.push(text);
 			},
-			captureUsageCursor: () => null,
 			recordGoalContinuationPass: () => {},
 			recordGoalContinuationFailure: () => {},
 			markGoalBudgetLimited: () => {},
@@ -369,7 +366,6 @@ describe("worker-spend accounting stays advisory (goal-loop-controller)", () => 
 				},
 			}),
 			prompt: async () => {},
-			captureUsageCursor: () => null,
 			recordGoalContinuationPass: () => {},
 			recordGoalContinuationFailure: () => {},
 			markGoalBudgetLimited: () => {},

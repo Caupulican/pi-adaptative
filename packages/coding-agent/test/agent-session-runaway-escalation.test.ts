@@ -1,6 +1,7 @@
 import type { AgentTool, ToolValidationEscalationEvent } from "@caupulican/pi-agent-core";
 import type { CustomEntry } from "@caupulican/pi-agent-core/node";
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -96,6 +97,101 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			expect(result.snapshot.continuation.action).toBe("ask-user");
 			expect(prompt).not.toHaveBeenCalled();
 		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("persists a late worker terminal without waking a goal blocked by runaway detection", async () => {
+		const harness = await createHarness();
+		let resolveForeground: (message: AssistantMessage) => void = () => {};
+		let foregroundResolved = false;
+		const foregroundResponse = new Promise<AssistantMessage>((resolve) => {
+			resolveForeground = (message) => {
+				foregroundResolved = true;
+				resolve(message);
+			};
+		});
+		let signalForegroundStarted!: () => void;
+		let signalWorkerTerminal!: () => void;
+		let signalHandoff!: () => void;
+		const foregroundStarted = new Promise<void>((resolve) => {
+			signalForegroundStarted = resolve;
+		});
+		const workerTerminal = new Promise<void>((resolve) => {
+			signalWorkerTerminal = resolve;
+		});
+		const handoff = new Promise<void>((resolve) => {
+			signalHandoff = resolve;
+		});
+		const heldForegroundResponse: FauxResponseFactory = () => {
+			signalForegroundStarted();
+			return foregroundResponse;
+		};
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type === "delegate_workers" &&
+				event.terminalSinceFlush.some((record) => record.laneId === "worker-late")
+			) {
+				signalWorkerTerminal();
+			}
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "background-worker-completion"
+			) {
+				signalHandoff();
+			}
+		});
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-runaway-worker", userGoal: "Finish delegated work", now: "T0" }),
+				{ type: "add_requirement", id: "delegated", text: "Review delegated evidence", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			harness.setResponses([heldForegroundResponse, fauxAssistantMessage("LATE HANDOFF RESURRECTED")]);
+			const foregroundRun = harness.session.prompt("Keep foreground occupied", { autoContinueGoal: false });
+			await foregroundStarted;
+			const backgroundLanes = (
+				harness.session as unknown as {
+					_backgroundLanes: {
+						_recordWorkerTerminal(record: {
+							laneId: string;
+							type: "worker";
+							status: "succeeded";
+							goalId: string;
+						}): void;
+					};
+				}
+			)._backgroundLanes;
+			backgroundLanes._recordWorkerTerminal({
+				laneId: "worker-late",
+				type: "worker",
+				status: "succeeded",
+				goalId: "goal-runaway-worker",
+			});
+			await workerTerminal;
+			harness.session.agent.onRunawayStop?.({ signature: "read:loop", repeats: 12 });
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-runaway-worker",
+				status: "blocked",
+			});
+
+			resolveForeground(fauxAssistantMessage("Foreground released after runaway stop."));
+			await foregroundRun;
+			await handoff;
+
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(JSON.stringify(harness.session.messages)).not.toContain("LATE HANDOFF RESURRECTED");
+			const completion = harness.sessionManager
+				.getEntries()
+				.find((entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion");
+			expect(completion).toMatchObject({
+				type: "custom_message",
+				content: expect.stringContaining("do not continue or replan automatically"),
+			});
+		} finally {
+			unsubscribe();
+			if (!foregroundResolved) resolveForeground(fauxAssistantMessage("Test cleanup."));
 			harness.cleanup();
 		}
 	});

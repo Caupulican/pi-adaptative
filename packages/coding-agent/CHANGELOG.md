@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Acknowledged worker terminal notifications at durable message acceptance without redispatching an in-flight handoff, and prevented late goal-bound terminals from restarting a stopped parent.
+- Required current owner authorization for model-created goals and exact owner authorization for token ceilings.
+- Charged every goal-owned provider response with the shared cache-discounted token rule and bounded each subsequent provider output by the remaining explicit budget.
+
 ## [0.90.6] - 2026-08-12
 
 ### Fixed
