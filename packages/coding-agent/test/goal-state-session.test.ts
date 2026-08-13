@@ -190,7 +190,7 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		expect(retrieved?.goalId).toBe("g1");
 	});
 
-	it("registers the goal tool as active and drives continuation end to end", async () => {
+	it("registers the goal tool, denies an unauthorized start, and drives owner-created state end to end", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.inMemory();
 		const model = getModel("anthropic", "claude-sonnet-4-5");
@@ -219,13 +219,19 @@ describe("Phase 9A: Goal State Session Persistence", () => {
 		const before = session.getGoalRuntimeSnapshot({ maxStallTurns: 20 });
 		expect(before.continuation.reasonCode).toBe("missing_goal_state");
 
-		await goalTool.execute(
+		const deniedStart = await goalTool.execute(
 			"call-1",
 			{ action: "start", goalId: "g1", userGoal: "Ship feature" },
 			undefined,
 			undefined,
 			undefined as never,
 		);
+		expect(deniedStart.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining("explicit owner authorization") }),
+		]);
+		expect(session.getGoalStateSnapshot()).toBeUndefined();
+
+		session.saveGoalStateSnapshot(createGoalState({ goalId: "g1", userGoal: "Ship feature", now: "T0" }));
 		await goalTool.execute(
 			"call-2",
 			{ action: "add_requirement", requirementId: "r1", text: "Implement X" },

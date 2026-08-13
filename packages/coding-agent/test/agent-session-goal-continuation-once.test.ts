@@ -111,6 +111,7 @@ describe("Phase 10D: AgentSession Goal Continuation Once", () => {
 			processSlashCommands: false,
 			autoContinueGoal: false,
 			internalContextType: "goal_continuation_trigger",
+			goalExecutionId: "g1",
 		});
 	});
 });
