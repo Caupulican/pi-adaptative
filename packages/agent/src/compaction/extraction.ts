@@ -223,7 +223,7 @@ function appearsCreated(message: AgentMessage): boolean {
 	return false;
 }
 
-function splitSentenceLines(text: string): string[] {
+export function splitSentenceLines(text: string): string[] {
 	return text
 		.split(/(?<=[.!?])\s+|\n+/)
 		.map((line) => line.trim().replace(/[.!?]+$/, ""))

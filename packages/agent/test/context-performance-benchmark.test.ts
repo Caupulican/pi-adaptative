@@ -182,7 +182,7 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 	});
 
 	describe("50k to 1 Million Token Scale Benchmarks (Hard Latency & Memory Gate)", () => {
-		it("processes a 50k token context trajectory under 50ms current-thread CPU time", () => {
+		it("processes a 50k token context trajectory under 50ms current-thread CPU time and 200ms wall-clock latency", () => {
 			const messageCount = 500; // ~50k tokens of synthetic history
 			const payloadBlock = "X".repeat(500); // 500 chars per result
 			const messages: AgentMessage[] = [];
@@ -200,12 +200,27 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 					sanitized = sanitizeToolFailureContext(messages, "Base prompt");
 				}) / 1_000;
 
-			// Current-thread CPU isolates sanitizer work from sibling scheduling and V8 background threads.
+			// CPU BUDGET GATE: current-thread CPU isolates sanitizer compute cost from sibling
+			// scheduling and V8 background threads. This alone cannot see time lost to blocking
+			// (a thread waiting on I/O or a lock burns ~0 CPU), which is what the wall-clock gate below is for.
 			expect(elapsedMs).toBeLessThan(50);
+
+			// HARD LATENCY GATE: wall-clock time the caller actually waits, independent of CPU
+			// accounting. Exists to catch order-of-magnitude blocking regressions (accidental sync
+			// I/O, lock contention) that the CPU gate is structurally blind to — not micro-variance.
+			// Bound derivation: local runs (60 samples, WSL2) topped out at ~18.6ms wall-clock for
+			// this input size; 200ms is ~10x that observed ceiling, giving headroom for CI/Windows
+			// scheduler jitter (see f1c121407, 693b65e36) while still tripping on a true order-of-
+			// magnitude stall.
+			const wallStart = performance.now();
+			sanitizeToolFailureContext(messages, "Base prompt");
+			const wallElapsedMs = performance.now() - wallStart;
+			expect(wallElapsedMs).toBeLessThan(200);
+
 			expect(sanitized.messages.length).toBeLessThan(messages.length);
 		});
 
-		it("processes a 1 Million token context trajectory under 75ms current-thread CPU time", () => {
+		it("processes a 1 Million token context trajectory under 75ms current-thread CPU time and 300ms wall-clock latency", () => {
 			const turnCount = 2000; // ~1,000,000 tokens of heavy tool calls & payloads
 			const heavyPayload = "Y".repeat(2000); // 2KB payload per turn
 			const messages: AgentMessage[] = [];
@@ -228,9 +243,24 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 			}
 			const elapsedMs = median(durations) / 1_000;
 
-			// HARD LATENCY GATE: 1,000,000 token context consumes < 75ms current-thread CPU.
-			// Allocation work on the sanitizer thread remains charged; unrelated process threads do not.
+			// CPU BUDGET GATE: 1,000,000 token context consumes < 75ms current-thread CPU. Allocation
+			// work on the sanitizer thread remains charged; unrelated process threads do not. This is a
+			// compute-cost bound, not a latency bound — see the wall-clock gate below for that.
 			expect(elapsedMs).toBeLessThan(75);
+
+			// HARD LATENCY GATE: wall-clock time the caller actually waits, independent of CPU
+			// accounting. Exists to catch order-of-magnitude blocking regressions (accidental sync
+			// I/O, lock contention) that current-thread CPU sampling is structurally blind to (a
+			// blocked thread burns ~0 CPU) — not to police micro-variance.
+			// Bound derivation: local runs (45 samples, WSL2) topped out at ~30ms wall-clock for this
+			// input size; 300ms is ~10x that observed ceiling, giving headroom for CI/Windows scheduler
+			// jitter (see f1c121407, 693b65e36 — the reason CPU-only gates were adopted here) while
+			// still tripping on a true order-of-magnitude stall.
+			const wallStart = performance.now();
+			sanitizeToolFailureContext(messages, "Base prompt");
+			const wallElapsedMs = performance.now() - wallStart;
+			expect(wallElapsedMs).toBeLessThan(300);
+
 			expect(sanitized.messages.length).toBeLessThan(messages.length);
 		});
 
@@ -274,7 +304,12 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 
 			// O(N) scaling check: the median of seven batched samples at 4x input must stay below 5.5x.
 			// A quadratic implementation remains near 16x and fails without relying on a timing outlier.
-			const scalingFactor = durationLarge / Math.max(durationSmall, 0.1);
+			// Divide-by-near-zero guard: durationSmall is in microseconds (measureBatchCpuMicros / median
+			// return raw µs, never divided to ms), so the floor must be µs-scale too. 0.1 predates the
+			// ms->µs switch and is a no-op at this magnitude (typical durationSmall is ~5,000µs); 100µs
+			// mirrors the original 0.1ms floor's intent in the unit actually in use.
+			const durationSmallFloorMicros = 100;
+			const scalingFactor = durationLarge / Math.max(durationSmall, durationSmallFloorMicros);
 			expect(scalingFactor).toBeLessThan(5.5);
 		});
 	});
@@ -307,20 +342,30 @@ describe("Red Team & 1M Token Context Performance Gates", () => {
 				messages.push(...buildSyntheticTurn(`gc_call_${i}`, "read_file", { id: i % 10 }, payload, i % 7 === 0, i));
 			}
 
-			// Garbage Collector memory stability pass
-			if (globalThis.gc) globalThis.gc();
+			// Garbage Collector memory stability pass. This package's vitest config passes --expose-gc
+			// (see vitest.config.ts execArgv), so globalThis.gc is a real forced collection here on both
+			// sides of the measured region — the delta below is retained allocation, not GC-timing luck.
+			// Fail loudly if that ever regresses instead of silently degrading back into a noisy no-op.
+			expect(typeof globalThis.gc).toBe("function");
+			globalThis.gc?.();
 			const initialMemory = process.memoryUsage().heapUsed;
 
 			for (let pass = 0; pass < 1000; pass++) {
 				sanitizeToolFailureContext(messages, "Base prompt");
 			}
 
-			if (globalThis.gc) globalThis.gc();
+			globalThis.gc?.();
 			const finalMemory = process.memoryUsage().heapUsed;
 			const memoryDeltaMB = (finalMemory - initialMemory) / (1024 * 1024);
 
-			// Heap growth must remain bounded under < 15MB across 1,000 iterations (CI runner headroom)
-			expect(memoryDeltaMB).toBeLessThan(15);
+			// Bound derivation: with forced GC on both reads, this measures real retained growth across
+			// 1,000 transformation passes, not whichever side of V8's next automatic GC cycle the two
+			// heapUsed reads happen to land on (that unforced noise ranged from -0.34MB to 8.28MB across
+			// 25 runs before --expose-gc was wired in). With forced GC, 5 local runs land tight at
+			// ~0.44-0.46MB with no growth trend. 2MB (~4.4x that observed ceiling) is CI-runner headroom
+			// against sampling variance, not a concession to leak-sized slack — a real leak growing by
+			// megabytes per 1,000 passes still trips this.
+			expect(memoryDeltaMB).toBeLessThan(2);
 		});
 	});
 });

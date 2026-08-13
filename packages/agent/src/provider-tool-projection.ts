@@ -91,21 +91,13 @@ function compactLiteralUnion(projected: Record<string, unknown>): Record<string,
 	return compacted;
 }
 
-function enumValueMatchesType(value: string | number | boolean | null, type: string): boolean {
-	if (type === "null") return value === null;
-	if (type === "integer") return typeof value === "number" && Number.isInteger(value);
-	return typeof value === type;
-}
-
 function compactRedundantEnumConstraints(projected: Record<string, unknown>): Record<string, unknown> {
 	const values = projected.enum;
 	if (!Array.isArray(values) || values.length === 0 || !values.every(isJsonPrimitive)) return projected;
-	if (
-		typeof projected.type === "string" &&
-		values.every((value) => enumValueMatchesType(value, projected.type as string))
-	) {
-		delete projected.type;
-	}
+	// `type` is never dropped here even though every enum value satisfies it: providers whose
+	// function-declaration schema requires `type` per property (e.g. Google's OpenAPI subset)
+	// reject the entire tool list with a 400 if it is missing. minLength/maxLength stay safe to
+	// drop because they constrain the value's shape, not its provider-required schema kind.
 	if (values.every((value): value is string => typeof value === "string")) {
 		const minLength = projected.minLength;
 		if (typeof minLength === "number" && values.every((value) => value.length >= minLength)) {

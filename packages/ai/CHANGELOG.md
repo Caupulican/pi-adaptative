@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Matched the operation-rejected repair classification against the tool-owned marker at line start instead of any substring of tool output, so embedded mentions in stdout no longer discard real failures.
+
+### Changed
+
+- Made model catalog generation hermetic by default: live pricing fetch requires PI_FETCH_MODELS=1, and a check:model-catalog script (run on a weekly schedule) fails on drift or removal of repo-referenced model ids.
+
 ## [0.90.7] - 2026-08-13
 
 ## [0.90.6] - 2026-08-12

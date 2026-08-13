@@ -155,4 +155,26 @@ describe("tool execution error catalogue", () => {
 	it("does not confuse an ordinary sentence containing time with a timeout", () => {
 		expect(getToolExecutionErrorGuidance("The report includes timeout configuration examples")).toBeUndefined();
 	});
+
+	it("does not classify a marker echoed inside captured stdout as an operation rejection", () => {
+		// e.g. `grep -rn PI_TOOL_OPERATION_REJECTED packages/` failing for an unrelated reason must
+		// never have its own failure masked by a marker that only appears because it was grep'd.
+		const message = [
+			"stdout:",
+			"packages/ai/src/utils/tool-repair/registry.ts:  return message.includes(TOOL_OPERATION_REJECTED_MARKER); // PI_TOOL_OPERATION_REJECTED",
+			"stderr:",
+			"grep: packages/does-not-exist: No such file or directory",
+			"Command exited with code 2",
+		].join("\n");
+
+		expect(getToolExecutionErrorPolicy(message)?.name).not.toBe("operationRejected");
+	});
+
+	it("classifies the marker only at its tool-owned position, the start of bash.ts's thrown message", () => {
+		expect(
+			getToolExecutionErrorPolicy(
+				`PI_TOOL_OPERATION_REJECTED: Broad search blocked before execution: reason. Narrow the call.`,
+			),
+		).toMatchObject({ name: "operationRejected", failureCode: "operation_rejected" });
+	});
 });

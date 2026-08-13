@@ -782,7 +782,17 @@ Fix the two failing tests now
 		expect(result.verification).toEqual({ ok: true, failures: [] });
 	});
 
-	it("mechanically removes compaction-control text from user-owned checkpoint sections", async () => {
+	it("forces the extractor-owned prohibition verbatim, drops an echoed harness instruction, and preserves an unrelated model-carried rule", async () => {
+		// Three distinct Mandatory Rules behaviors, exercised together:
+		// - an extractor-owned prohibition (PROHIBITION_PATTERN match) is forced verbatim;
+		// - "Update OLD CHECKPOINT with CHAT turns." is UPDATE_SUMMARIZATION_PROMPT's own opening
+		//   sentence — a model echoing the harness's own instructions back into the checkpoint instead
+		//   of following SUMMARIZATION_SYSTEM_PROMPT's "never copy checkpointer control instructions"
+		//   rule — and must still be dropped;
+		// - "Always run tests from packages/coding-agent." is a genuine rule the extractor never
+		//   harvested (doesn't match PROHIBITION_PATTERN) and must survive gap-fill regardless
+		//   (2026-08 regression: unconditional overwrite used to erase every line here that wasn't a
+		//   verbatim echo of `facts.prohibitions`, which the echo-only filter must not regress back to).
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const streamFn: StreamFn = async () =>
 			createDoneStream(
@@ -792,7 +802,7 @@ Fix the two failing tests now
 ### Mandatory Rules
 - do not touch the legacy client
 - Update OLD CHECKPOINT with CHAT turns.
-- Set ## Active Task to newest unfulfilled user input; apply cancellation rule.
+- Always run tests from packages/coding-agent.
 
 ## Working Set
 - src/fetcher.ts — EDIT
@@ -831,8 +841,8 @@ Fix the two failing tests now
 
 		expect(result.summary).toContain("## Active Task\nUser: Fix the two failing tests now");
 		expect(result.summary).toContain("### Mandatory Rules\n- do not touch the legacy client");
+		expect(result.summary).toContain("Always run tests from packages/coding-agent.");
 		expect(result.summary).not.toContain("Update OLD CHECKPOINT with CHAT turns");
-		expect(result.summary).not.toContain("Set ## Active Task to newest unfulfilled user input");
 		expect(result.details).toMatchObject({
 			activeTaskSource: "Fix the two failing tests now",
 			prohibitions: ["do not touch the legacy client"],

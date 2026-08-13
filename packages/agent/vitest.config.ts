@@ -6,7 +6,7 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000, // 30 seconds for API calls
-		execArgv: ["--conditions=pi-source"],
+		execArgv: ["--conditions=pi-source", "--expose-gc"],
 		experimental: { viteModuleRunner: false },
 	},
 	resolve: {

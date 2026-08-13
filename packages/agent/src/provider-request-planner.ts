@@ -23,7 +23,14 @@ function nextStalePlanCount(count: number): number {
 	return next;
 }
 
-function narrowRequestMaxTokens(
+/**
+ * Narrow an owner-selected output cap by one more requested ceiling and the model's own limit,
+ * validating each supplied value is a positive safe integer. Exported so hosts computing their own
+ * ceiling (e.g. a goal's remaining token budget) can route it through the SAME validated narrowing
+ * this module applies just before transport, instead of hand-rolling an unvalidated min-merge that
+ * only fails loudly here, several layers away from where the degenerate value was actually computed.
+ */
+export function narrowRequestMaxTokens(
 	ownerMaxTokens: number | undefined,
 	requestedMaxTokens: number | undefined,
 	modelMaxTokens: number,

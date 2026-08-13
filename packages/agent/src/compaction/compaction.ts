@@ -31,8 +31,10 @@ import {
 	extractFileOpsFromMessage,
 	type FileOperations,
 	isPlainRecord,
+	SUMMARIZATION_PROMPT,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
+	UPDATE_SUMMARIZATION_PROMPT,
 } from "./utils.ts";
 import {
 	buildRetryPrompt,
@@ -635,41 +637,6 @@ export function findCutPoint(
 // ============================================================================
 // Summarization
 // ============================================================================
-
-const SUMMARIZATION_PROMPT = `Create checkpoint. Exact heading order:
-## Active Task
-### Mandatory Rules
-## Working Set
-## Files
-## Open Problems
-## Done
-## Key Decisions
-## Constraints & Preferences
-## Critical Context
-
-NEVER carry resolved/transient errors, replaced approaches, file bodies. Record paths/intent.
-
-MANDATORY VERIFICATION:
-{FACTS_BLOCK}
-
-Budget ~{BUDGET} tokens. Concrete facts first.`;
-
-const UPDATE_SUMMARIZATION_PROMPT = `Update OLD CHECKPOINT with CHAT turns.
-MANDATORY:
-- Copy every existing ### Mandatory Rules bullet verbatim; append new.
-- Continue ## Done numbering. Keep newest 15 items verbatim. Replace all older items with first line: "1. (earlier work compressed) <one line>". Bound growth.
-- Set ## Active Task to newest unfulfilled user input; apply cancellation rule.
-- Keep ## Files current: add new, retain relevant, drop obsolete.
-- Drop resolved ## Open Problems.
-- Drop ## Working Set files untouched since OLD CHECKPOINT unless active task names them.
-- Keep exact paths/commands/errors.
-- NEVER carry resolved/transient errors, replaced approaches, file bodies. Record paths/intent.
-
-Keep required heading order.
-MANDATORY VERIFICATION:
-{FACTS_BLOCK}
-
-Budget ~{BUDGET} tokens.`;
 
 function createSummarizationOptions(
 	model: Model<any>,

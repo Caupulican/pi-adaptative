@@ -388,9 +388,24 @@ function boundedFailureCode(value: string): string {
 	return truncate(normalized || "tool_error", MAX_FAILURE_CODE_CHARS);
 }
 
+/**
+ * bash.ts's own trailer (`appendStatus`) always ends the message with a line like "Command
+ * exited with code 1"; a structured result (e.g. run_process) instead puts "exitCode: 1" on its
+ * own line near the top. Both are anchored to the START of their own line, with at most one
+ * leading tool-name token ("Command"/"Python"/...) — ordinary stdout/stderr prose is never
+ * anchored that way, so a captured line like "container will exit 0 on SIGTERM" can never be
+ * read as the process exit status. Scan from the end of the message so the tool's own trailer —
+ * always the last line it appends — outranks any earlier, non-authoritative line that matches.
+ */
+const EXIT_STATUS_LINE_PATTERN = /^(?:\S+\s+)?(?:exit(?:ed)?(?:\s+with)?(?:\s+code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i;
+
 function processExitFailureCode(message: string): string | undefined {
-	const exitCode = /\b(?:exit(?:ed)?(?: with)?(?: code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i.exec(message)?.[1];
-	return exitCode === undefined ? undefined : boundedFailureCode(`exit_${exitCode}`);
+	const lines = message.split(/\r\n|\n/);
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const match = EXIT_STATUS_LINE_PATTERN.exec(lines[index].trim());
+		if (match) return boundedFailureCode(`exit_${match[1]}`);
+	}
+	return undefined;
 }
 
 export function classifyToolFailure(message: string, errorClass?: string): string {
@@ -477,7 +492,15 @@ function extractFailureDiagnostic(
 			);
 		if (stderrLines.length > 0) {
 			const classified = stderrLines.find((line) => strongDiagnosticPattern.test(line));
-			return truncateMiddle(classified ?? stderrLines.slice(-4).join(" | "), MAX_DIAGNOSTIC_CHARS);
+			if (classified) return truncateMiddle(classified, MAX_DIAGNOSTIC_CHARS);
+			// No stderr line carries a strong signal. Under requireStrongSignal, the caller has
+			// already decided uncatalogued output must never be fabricated into a diagnostic (see
+			// assessToolFailure) — falling back to the last raw stderr lines here would defeat that
+			// guarantee for the common bash case, so fall through to the same allowUnclassifiedFallback
+			// gate the no-stderr path below applies.
+			if (!requireStrongSignal) {
+				return truncateMiddle(stderrLines.slice(-4).join(" | "), MAX_DIAGNOSTIC_CHARS);
+			}
 		}
 	}
 	const lines = rawLines

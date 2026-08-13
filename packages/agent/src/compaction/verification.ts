@@ -1,4 +1,10 @@
-import { ACTIVE_TASK_SOURCE_MAX_CHARS, type CompactionFacts } from "./extraction.ts";
+import { ACTIVE_TASK_SOURCE_MAX_CHARS, type CompactionFacts, splitSentenceLines } from "./extraction.ts";
+import {
+	COMPACTION_WORKED_EXAMPLE_SENTINEL,
+	SUMMARIZATION_PROMPT,
+	SUMMARIZATION_SYSTEM_PROMPT,
+	UPDATE_SUMMARIZATION_PROMPT,
+} from "./utils.ts";
 
 export interface VerificationFailure {
 	check: string;
@@ -77,6 +83,19 @@ export function verifySummary(summary: string, facts: CompactionFacts): Verifica
 		failures.push({
 			check: "summary-structure",
 			detail: "Checkpoint must contain at least one recognized checkpoint section",
+			score: 0,
+			threshold: 1,
+			comparator: "minimum",
+		});
+	}
+	// Mandatory Rules is the one section the deterministic fill unconditionally scrubs of the
+	// sentinel (reconcileMandatoryRules), so its presence there is self-healing, not a failure. Any
+	// OTHER section is contamination the fill never touches and cannot safely repair — fail loudly
+	// rather than silently persist harness instruction/example text as if it were real content.
+	if (textContainsCompactionSentinel(removeSection(summary, SECTION_MANDATORY_RULES))) {
+		failures.push({
+			check: "compaction-control-sentinel",
+			detail: `Checkpoint must never carry the harness's own worked-example sentinel "${COMPACTION_WORKED_EXAMPLE_SENTINEL}" outside ### Mandatory Rules — the model echoed instruction/example text into a persisted section`,
 			score: 0,
 			threshold: 1,
 			comparator: "minimum",
@@ -276,10 +295,10 @@ export function deterministicallyFillSummaryGaps(summary: string, facts: Compact
 	removeCancelledWorkLines(sectionByName, facts);
 
 	const activeTask = sectionByName.get(SECTION_ACTIVE_TASK)!;
-	activeTask.lines = facts.activeTaskSource ? [`User: ${facts.activeTaskSource}`] : ["(none)"];
+	activeTask.lines = facts.activeTaskSource ? buildActiveTaskLines(facts.activeTaskSource) : ["(none)"];
 
 	const mandatoryRules = sectionByName.get(SECTION_MANDATORY_RULES)!;
-	mandatoryRules.lines = facts.prohibitions.length > 0 ? facts.prohibitions.map((rule) => `- ${rule}`) : ["(none)"];
+	mandatoryRules.lines = reconcileMandatoryRules(mandatoryRules.lines, facts.prohibitions);
 
 	const workingSet = sectionByName.get(SECTION_WORKING_SET)!;
 	for (const file of facts.workingSet) {
@@ -427,6 +446,136 @@ function appendContentLine(lines: string[], line: string): void {
 	lines.push(...normalized);
 }
 
+/**
+ * The exact instruction sentences the harness itself injects into the summarization prompts —
+ * SUMMARIZATION_SYSTEM_PROMPT, SUMMARIZATION_PROMPT, and UPDATE_SUMMARIZATION_PROMPT. All three
+ * sources single-sourced from utils.ts so this never drifts from what was actually sent; not a
+ * heuristic guess at what "looks like" an instruction. Sentences below a minimum length are
+ * dropped — a lone heading fragment like "## Files" would otherwise sit in the set as a
+ * near-universal 1-2 token match.
+ *
+ * SUMMARIZATION_SYSTEM_PROMPT was previously excluded here: its worked example used to read
+ * `Mandatory Rules contains "DO NOT touch legacy client"`, generic enough to false-positive-match a
+ * real extractor-owned prohibition about a "legacy client". The example's subject is now the
+ * synthetic COMPACTION_WORKED_EXAMPLE_SENTINEL token instead (see utils.ts), so that specific
+ * collision is gone; the isCompactionControlEcho regression tests below (including the canonical "do
+ * not touch the legacy client" fixture used throughout this file) are the evidence that re-including
+ * it is safe.
+ */
+const COMPACTION_CONTROL_ECHO_MIN_SENTENCE_TOKENS = 4;
+/** A line must share at least this many tokens with a single control sentence, not spread thinly
+ * across several, before it is treated as an echo — mirrors lineShouldBeDroppedAsCancelledWork's
+ * "overlap >= N and overlap ratio >= threshold" dual guard below. */
+const COMPACTION_CONTROL_ECHO_MIN_OVERLAP = 3;
+/** Stricter than MANDATORY_RULES_RECALL_THRESHOLD on purpose: dropping model content is destructive,
+ * so the bar for "this line basically IS the harness's own sentence" is set high. */
+const COMPACTION_CONTROL_ECHO_THRESHOLD = 0.8;
+
+const COMPACTION_CONTROL_SENTENCE_TOKEN_SETS: readonly Set<string>[] = [
+	SUMMARIZATION_SYSTEM_PROMPT,
+	SUMMARIZATION_PROMPT,
+	UPDATE_SUMMARIZATION_PROMPT,
+]
+	.flatMap((prompt) => splitSentenceLines(prompt))
+	.map((sentence) => tokenSet(sentence))
+	.filter((tokens) => tokens.size >= COMPACTION_CONTROL_ECHO_MIN_SENTENCE_TOKENS);
+
+/** True when `line` is substantially reconstructed from a single harness-injected instruction
+ * sentence — i.e. the model echoed the prompt back instead of writing a checkpoint fact. Direction
+ * matters: containment is measured with the LINE as the needle and one sentence as the haystack, so
+ * a short prompt fragment can never "explain away" a longer, mostly-unrelated user rule that merely
+ * shares a couple of words with it. This is the fuzzy backstop for paraphrased echoes; a line
+ * carrying COMPACTION_WORKED_EXAMPLE_SENTINEL is a separate, unconditional (non-heuristic) drop —
+ * see textContainsCompactionSentinel below. */
+function isCompactionControlEcho(line: string): boolean {
+	const lineTokens = tokenSet(line);
+	if (lineTokens.size === 0) return false;
+	for (const sentenceTokens of COMPACTION_CONTROL_SENTENCE_TOKEN_SETS) {
+		let hits = 0;
+		for (const token of lineTokens) {
+			if (sentenceTokens.has(token)) hits++;
+		}
+		if (hits >= COMPACTION_CONTROL_ECHO_MIN_OVERLAP && hits / lineTokens.size >= COMPACTION_CONTROL_ECHO_THRESHOLD) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** True when `text` carries the harness's worked-example sentinel — deterministic, not
+ * model-dependent: no containment threshold, no token overlap, just a literal substring check
+ * against a token no real content could plausibly contain. */
+function textContainsCompactionSentinel(text: string): boolean {
+	return text.includes(COMPACTION_WORKED_EXAMPLE_SENTINEL);
+}
+
+/**
+ * Force each extractor-owned prohibition to appear verbatim (anti-paraphrase), while preserving every
+ * model-carried line the extractor does not own. A rule replaces the first existing line that already
+ * paraphrases it (by the same recall threshold the gate uses); otherwise it is appended. The harness owns
+ * only the facts it extracted — it must never delete model content it never extracted, and it must never
+ * stamp "(none)" over a non-empty section (2026-08 incident: unconditional overwrite silently dropped
+ * user rules that don't match PROHIBITION_PATTERN, e.g. positive instructions like "always run tests from
+ * packages/coding-agent", permanently across every later checkpoint). Two things it MUST still drop:
+ * a line that echoes the harness's own injected instructions (isCompactionControlEcho), and a line
+ * carrying the worked-example sentinel by definition (textContainsCompactionSentinel) — the latter is
+ * exact and unconditional, since that token can only ever have come from the harness's own prompt.
+ */
+function reconcileMandatoryRules(lines: readonly string[], prohibitions: readonly string[]): string[] {
+	const result = lines.filter(
+		(line) =>
+			line.trim() !== "(none)" &&
+			line.trim() !== "" &&
+			!isCompactionControlEcho(line) &&
+			!textContainsCompactionSentinel(line),
+	);
+	for (const rule of prohibitions) {
+		const canonical = `- ${rule}`;
+		const ruleTokens = tokenSet(rule);
+		let bestIndex = -1;
+		let bestScore = 0;
+		for (let i = 0; i < result.length; i++) {
+			const score = containment(ruleTokens, tokenSet(result[i]));
+			if (score > bestScore) {
+				bestScore = score;
+				bestIndex = i;
+			}
+		}
+		if (bestIndex >= 0 && bestScore >= MANDATORY_RULES_RECALL_THRESHOLD) {
+			result[bestIndex] = canonical;
+		} else {
+			result.push(canonical);
+		}
+	}
+	return result.length > 0 ? result : ["(none)"];
+}
+
+/** Markdown-style escape: a line starting with `##`/`###` gains one leading backslash so the harness's
+ * own heading parser (`^(?:##|###)\s`) can never re-split the Active Task section on it. Lines that
+ * already start with a backslash before the heading marker gain one more, so decode (below) always
+ * strips exactly one and the transform is a bijection — no other line is touched. */
+const ACTIVE_TASK_HEADING_LIKE = /^\\*(?:##|###)\s/;
+const ACTIVE_TASK_ESCAPED_HEADING = /^\\(?:\\*(?:##|###)\s)/;
+
+function escapeActiveTaskHeadingLine(line: string): string {
+	return ACTIVE_TASK_HEADING_LIKE.test(line) ? `\\${line}` : line;
+}
+
+function unescapeActiveTaskHeadingLine(line: string): string {
+	return ACTIVE_TASK_ESCAPED_HEADING.test(line) ? line.slice(1) : line;
+}
+
+/**
+ * Render the Active Task body so it survives being re-parsed by extractSections/parseSummarySections:
+ * a user request that itself contains a `##`/`###` line (e.g. a pasted "## Steps" list) must not be
+ * mistaken for a checkpoint heading, or the section gets truncated and verbatim verification can never
+ * pass (2026-08 incident: permanently broken compaction for any conversation whose request had a
+ * markdown heading). Only offending lines are touched, so plain requests render exactly as before.
+ */
+function buildActiveTaskLines(source: string): string[] {
+	return `User: ${source}`.replaceAll("\r\n", "\n").split("\n").map(escapeActiveTaskHeadingLine);
+}
+
 function findNextDoneNumber(lines: string[]): number {
 	let max = 0;
 	for (const line of lines) {
@@ -562,10 +711,24 @@ function normalizeHeading(heading: string): string {
 	return heading.trim().toLowerCase();
 }
 
+/** Trailing whitespace per line and leading/trailing blank lines are lost in the render pipeline
+ * (normalizeSectionLines trims both); normalize both sides identically so the comparison is a fixed
+ * point regardless of that lossy step, while leading whitespace on interior lines is preserved. */
+function normalizeActiveTaskText(text: string): string {
+	return text
+		.replaceAll("\r\n", "\n")
+		.split("\n")
+		.map((line) => line.trimEnd())
+		.join("\n")
+		.trim();
+}
+
 function activeTaskMatchesVerbatim(section: string, source: string): boolean {
-	const normalizedSection = section.replaceAll("\r\n", "\n").trim();
-	const normalizedSource = source.replaceAll("\r\n", "\n").trim();
-	return normalizedSection === normalizedSource || normalizedSection === `User: ${normalizedSource}`;
+	const decodedSection = section.replaceAll("\r\n", "\n").split("\n").map(unescapeActiveTaskHeadingLine).join("\n");
+	const normalizedSection = normalizeActiveTaskText(decodedSection);
+	const normalizedSource = normalizeActiveTaskText(source);
+	const normalizedWithPrefix = normalizeActiveTaskText(`User: ${source}`);
+	return normalizedSection === normalizedSource || normalizedSection === normalizedWithPrefix;
 }
 
 function formatScore(score: number): string {

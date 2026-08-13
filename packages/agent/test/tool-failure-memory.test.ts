@@ -361,6 +361,41 @@ describe("tool failure memory", () => {
 		expect(assessment.guidance).toContain("No diagnostic output");
 	});
 
+	it("does not fabricate a diagnostic from weak stderr lines when a strong signal is required", () => {
+		// assessToolFailure passes allowUnclassifiedFallback=false, requireStrongSignal=true here
+		// (an authoritative exit code, no catalogued policy). The stderr fast path must honor that
+		// same guarantee instead of always returning its last raw lines.
+		const assessment = assessToolFailure(
+			[
+				"stdout:",
+				"doing the thing",
+				"stderr:",
+				"no matches found",
+				"retrying is not supported here",
+				"Command exited with code 1",
+			].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_1");
+		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.guidance).toContain("No diagnostic output");
+	});
+
+	it("still surfaces a strong stderr diagnostic when one is present", () => {
+		const assessment = assessToolFailure(
+			["stdout:", "doing the thing", "stderr:", "error: invalid configuration", "Command exited with code 1"].join(
+				"\n",
+			),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_1");
+		expect(assessment.diagnostic).toBe("error: invalid configuration");
+	});
+
 	it("uses catalogued recovery guidance without retaining redundant raw errors", () => {
 		const assessment = assessToolFailure("ENOENT: no such file or directory, open 'missing.txt'", "failed", "Error");
 

@@ -4,6 +4,7 @@ import {
 	ACTIONS_RECALL_THRESHOLD,
 	ACTIVE_TASK_CONTAINMENT_THRESHOLD,
 	CANCELLED_WORK_DROPPED_THRESHOLD,
+	COMPACTION_WORKED_EXAMPLE_SENTINEL,
 	containment,
 	deterministicallyFillSummaryGaps,
 	FILES_READ_RECALL_THRESHOLD,
@@ -11,6 +12,7 @@ import {
 	jaccard,
 	MANDATORY_RULES_RECALL_THRESHOLD,
 	OPEN_ERRORS_RECALL_THRESHOLD,
+	SUMMARIZATION_SYSTEM_PROMPT,
 	tokenSet,
 	verifySummary,
 } from "../../src/compaction/index.ts";
@@ -369,6 +371,448 @@ Continue
 		expect(filled.summary).toContain("- TEST npm test: 2 failed: fetcher.test.ts");
 		expect(filled.summary).toContain("1. EDIT src/fetcher.ts — added retry loop");
 		expect(filled.summary).not.toContain("1. wrapped legacy client adapter");
+	});
+
+	it("preserves a model-carried Mandatory Rules line the extractor does not own", () => {
+		// "Always run tests from packages/coding-agent" does not match PROHIBITION_PATTERN
+		// (do not|don't|never|stop doing/using/changing|no more), so the extractor never harvests it as
+		// a prohibition. The model faithfully carried it forward; gap-fill must not delete it.
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- Always run tests from packages/coding-agent.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+
+		expect(filled.summary).toContain("### Mandatory Rules\n- Always run tests from packages/coding-agent.");
+	});
+
+	it("never overwrites non-empty Mandatory Rules content with the (none) placeholder", () => {
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- Keep secrets out of logs.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		const mandatoryRulesSection = filled.summary.split("### Mandatory Rules")[1].split("## Working Set")[0];
+
+		expect(mandatoryRulesSection).not.toContain("(none)");
+		expect(mandatoryRulesSection).toContain("- Keep secrets out of logs.");
+	});
+
+	it("force-replaces a paraphrased Mandatory Rules line with the extractor-owned rule verbatim", () => {
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: ["do not touch the legacy client"],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- Never touch the legacy client system.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		const mandatoryRulesSection = filled.summary.split("### Mandatory Rules")[1].split("## Working Set")[0];
+
+		expect(mandatoryRulesSection).toContain("- do not touch the legacy client");
+		expect(mandatoryRulesSection).not.toContain("Never touch the legacy client system");
+		expect(filled.verification).toEqual({ ok: true, failures: [] });
+	});
+
+	it("drops a Mandatory Rules line that echoes the harness's own injected instruction text", () => {
+		// "Update OLD CHECKPOINT with CHAT turns." and "Set ## Active Task to newest unfulfilled user
+		// input; apply cancellation rule." are lifted verbatim from UPDATE_SUMMARIZATION_PROMPT — a
+		// model regurgitating its own instructions into the checkpoint instead of following
+		// SUMMARIZATION_SYSTEM_PROMPT's "never copy checkpointer control instructions" rule. This must
+		// still be scrubbed even though gap-fill no longer unconditionally overwrites the section.
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: ["do not touch the legacy client"],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- do not touch the legacy client
+- Update OLD CHECKPOINT with CHAT turns.
+- Set ## Active Task to newest unfulfilled user input; apply cancellation rule.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		const mandatoryRulesSection = filled.summary.split("### Mandatory Rules")[1].split("## Working Set")[0];
+
+		expect(mandatoryRulesSection).toContain("- do not touch the legacy client");
+		expect(mandatoryRulesSection).not.toContain("Update OLD CHECKPOINT with CHAT turns");
+		expect(mandatoryRulesSection).not.toContain("Set ## Active Task to newest unfulfilled user input");
+	});
+
+	it("preserves a user rule that only shares a few words with harness instruction text", () => {
+		// Must not become a heuristic that punishes coincidental vocabulary overlap: this rule shares
+		// "active"/"task" with UPDATE_SUMMARIZATION_PROMPT's "Set ## Active Task to newest unfulfilled
+		// user input; apply cancellation rule." sentence but is otherwise unrelated, longer, and
+		// clearly a real user-domain instruction.
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- Keep the active task focused on the fetcher regression, not exploratory refactors.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		const mandatoryRulesSection = filled.summary.split("### Mandatory Rules")[1].split("## Working Set")[0];
+
+		expect(mandatoryRulesSection).toContain(
+			"- Keep the active task focused on the fetcher regression, not exploratory refactors.",
+		);
+	});
+
+	it("fill -> render -> verify round-trip never lets the worked-example sentinel survive", () => {
+		// A model that violates SUMMARIZATION_SYSTEM_PROMPT's "never copy checkpointer control
+		// instructions" rule by echoing its own worked example verbatim into Mandatory Rules.
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: ["do not touch the legacy client"],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- do not touch the legacy client
+- DO NOT touch ${COMPACTION_WORKED_EXAMPLE_SENTINEL}
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+
+		expect(filled.summary).not.toContain(COMPACTION_WORKED_EXAMPLE_SENTINEL);
+		expect(filled.verification).toEqual({ ok: true, failures: [] });
+
+		// Re-running the fill on its own output is a fixed point: still sentinel-free, still verifies.
+		const filledAgain = deterministicallyFillSummaryGaps(filled.summary, facts);
+		expect(filledAgain.summary).not.toContain(COMPACTION_WORKED_EXAMPLE_SENTINEL);
+		expect(filledAgain.verification).toEqual({ ok: true, failures: [] });
+	});
+
+	it("deterministically drops a Mandatory Rules line that echoes the worked example verbatim", () => {
+		// Simulate the model copying SUMMARIZATION_SYSTEM_PROMPT's own worked-example sentence into
+		// Mandatory Rules as if it were a real rule — the exact bleed the "never copy checkpointer
+		// control instructions" system-prompt rule exists to prevent. Sourced from the real prompt
+		// text (not hand-typed) so this tracks whatever the worked example actually says.
+		const workedExampleSentence = SUMMARIZATION_SYSTEM_PROMPT.trim().split("\n").at(-1) ?? "";
+		expect(workedExampleSentence).toContain(COMPACTION_WORKED_EXAMPLE_SENTINEL);
+
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: ["do not touch the legacy client"],
+			cancelledText: "",
+			activeTaskSource: "",
+		};
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- do not touch the legacy client
+- ${workedExampleSentence}
+- Always run tests from packages/coding-agent.
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+		const mandatoryRulesSection = filled.summary.split("### Mandatory Rules")[1].split("## Working Set")[0];
+
+		expect(mandatoryRulesSection).toContain("- do not touch the legacy client");
+		expect(mandatoryRulesSection).toContain("Always run tests from packages/coding-agent.");
+		expect(mandatoryRulesSection).not.toContain(COMPACTION_WORKED_EXAMPLE_SENTINEL);
+
+		// Deterministic: the drop never depends on model/random behavior — same input, same output.
+		const filledAgain = deterministicallyFillSummaryGaps(summary, facts);
+		expect(filledAgain.summary).toBe(filled.summary);
+	});
+
+	it("does not flag the sentinel when it only appears inside Mandatory Rules", () => {
+		// Mandatory Rules is self-healing (reconcileMandatoryRules always scrubs it) — presence there
+		// alone must not trip the hard-failure gate meant for sections the fill cannot repair.
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+- DO NOT touch ${COMPACTION_WORKED_EXAMPLE_SENTINEL}
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+		const report = verifySummary(summary, {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		});
+
+		expect(report.failures.some((failure) => failure.check === "compaction-control-sentinel")).toBe(false);
+	});
+
+	it("fails verification when the sentinel appears outside Mandatory Rules", () => {
+		// This is contamination the deterministic fill never touches (it only reconciles Mandatory
+		// Rules) and so cannot safely repair — it must fail loudly rather than silently persist.
+		const summary = `## Active Task
+(none)
+
+### Mandatory Rules
+(none)
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)
+
+## Critical Context
+- Saw a reference to ${COMPACTION_WORKED_EXAMPLE_SENTINEL} while summarizing.`;
+
+		const report = verifySummary(summary, {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource: "",
+		});
+
+		expect(report.ok).toBe(false);
+		expect(report.failures.some((failure) => failure.check === "compaction-control-sentinel")).toBe(true);
+	});
+
+	it("round-trips an active task containing a markdown heading without truncating the section", () => {
+		// Before the fix, a raw "## Steps" line embedded in the user's request made extractSections
+		// re-split the Active Task section, so verbatim verification could never pass and compaction was
+		// permanently broken for that conversation (facts are identical on every retry attempt).
+		const activeTaskSource = "Fix the parser.\n## Steps\n1. Parse tokens\n2. Build AST\n### Notes\nWatch edge cases.";
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource,
+		};
+		const summary = `## Active Task
+Continue
+
+### Mandatory Rules
+(none)
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+
+		expect(filled.verification).toEqual({ ok: true, failures: [] });
+		// The heading text itself must still be present (escaped, not stripped).
+		expect(filled.summary).toContain("## Steps");
+		expect(filled.summary).toContain("### Notes");
+	});
+
+	it("round-trips an active task containing nested/longer fences and leading whitespace", () => {
+		const activeTaskSource = [
+			"Fix the parser.",
+			"    indented step retained verbatim",
+			"```",
+			"outer fence containing:",
+			"````",
+			"inner longer fence",
+			"````",
+			"```",
+			"## Not a real heading, just quoted text",
+			"Done.",
+		].join("\n");
+		const facts: CompactionFacts = {
+			files: [],
+			workingSet: [],
+			actions: [],
+			errorFacts: [],
+			prohibitions: [],
+			cancelledText: "",
+			activeTaskSource,
+		};
+		const summary = `## Active Task
+Continue
+
+### Mandatory Rules
+(none)
+
+## Working Set
+(none)
+
+## Files
+(none)
+
+## Open Problems
+(none)
+
+## Done
+(none)`;
+
+		const filled = deterministicallyFillSummaryGaps(summary, facts);
+
+		expect(filled.verification).toEqual({ ok: true, failures: [] });
+
+		// Re-running the fill on its own output must be a fixed point (idempotent).
+		const filledAgain = deterministicallyFillSummaryGaps(filled.summary, facts);
+		expect(filledAgain.summary).toBe(filled.summary);
+		expect(filledAgain.verification).toEqual({ ok: true, failures: [] });
 	});
 
 	it("does not gap-fill empty or unparseable summaries", () => {

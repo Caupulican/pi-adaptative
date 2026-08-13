@@ -16,6 +16,8 @@ export * from "./reliability/index.ts";
 export * from "./session/message-retention.ts";
 // Provider-neutral failed tool-call context boundary
 export * from "./tool-failure-memory.ts";
+// Native tool-call markup that escaped as assistant text
+export * from "./tool-protocol-residue.ts";
 // Types
 export * from "./types.ts";
 export * from "./usage.ts";

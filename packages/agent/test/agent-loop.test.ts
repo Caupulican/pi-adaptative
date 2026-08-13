@@ -855,8 +855,13 @@ describe("agentLoop with AgentMessage", () => {
 					return {
 						content: [
 							{
+								// The stderr line must carry a strong diagnostic signal (e.g. an
+								// "error:" prefix): assessToolFailure requires one once an
+								// authoritative exit code is present (requireStrongSignal), so
+								// captured output that merely echoes bare uncatalogued text is never
+								// fabricated into a diagnostic.
 								type: "text",
-								text: "outcome: failed\nexitCode: 3\nstdout: (empty)\nstderr:\nrepair marker",
+								text: "outcome: failed\nexitCode: 3\nstdout: (empty)\nstderr:\nerror: repair marker",
 							},
 						],
 						details: { exitCode: 3 },
@@ -939,9 +944,9 @@ describe("agentLoop with AgentMessage", () => {
 			text: expect.stringContaining('"failure_code":"exit_3"'),
 		});
 		expect(JSON.stringify(toolResults[0])).not.toContain("stdout: (empty)");
-		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"repair marker"');
+		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"error: repair marker"');
 		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
-		expect(providerContexts[2]?.systemPrompt).toContain('"diagnostic":"repair marker"');
+		expect(providerContexts[2]?.systemPrompt).toContain('"diagnostic":"error: repair marker"');
 		expect(providerContexts[3]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
 		expect(toolResults[1]).toMatchObject({ isError: false, usage });
 		expect(toolResults[2]).toMatchObject({ isError: false, usage });

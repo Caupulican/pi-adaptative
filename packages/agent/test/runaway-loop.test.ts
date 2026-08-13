@@ -625,7 +625,7 @@ describe("runaway-loop backstop", () => {
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-			maxStallTurns: 0,
+			maxStallTurns: 4,
 			onRunawayStop: (info) => stalls.push(info),
 		};
 
@@ -768,7 +768,7 @@ describe("runaway-loop backstop", () => {
 				{
 					model: createModel(),
 					convertToLlm: identityConverter,
-					maxStallTurns: 0,
+					maxStallTurns: 4,
 					beforeToolCall: async () => {
 						beforeCalls++;
 						return undefined;

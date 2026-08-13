@@ -54,7 +54,7 @@ import type {
 import { DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 
-export { resolveRequestPreflightMaxTokens } from "./provider-request-planner.ts";
+export { narrowRequestMaxTokens, resolveRequestPreflightMaxTokens } from "./provider-request-planner.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 

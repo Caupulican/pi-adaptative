@@ -3,27 +3,66 @@ import type { AgentTool } from "./types.ts";
 
 export const NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR = "native_tool_protocol_residue";
 
-function findRenderedToolMarker(text: string, toolNames: ReadonlySet<string>): string | undefined {
-	const lines = text.split(/\r?\n/);
-	let fence: "```" | "~~~" | undefined;
+/**
+ * Marks which lines fall inside a genuinely closed ```/~~~ fence (open and matching close both
+ * present). A fence that never closes does not suppress anything: it is not treated as covering
+ * the rest of the message, so real residue after malformed/truncated fencing is still scanned.
+ */
+function computeFencedLines(lines: readonly string[]): boolean[] {
+	const fenced = new Array<boolean>(lines.length).fill(false);
+	let openMarker: "```" | "~~~" | undefined;
+	let openIndex = -1;
 	for (let index = 0; index < lines.length; index++) {
 		const trimmed = lines[index].trim();
-		if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
-			const marker = trimmed.slice(0, 3) as "```" | "~~~";
-			if (!fence) fence = marker;
-			else if (fence === marker) fence = undefined;
-			continue;
+		if (!(trimmed.startsWith("```") || trimmed.startsWith("~~~"))) continue;
+		const marker = trimmed.slice(0, 3) as "```" | "~~~";
+		if (!openMarker) {
+			openMarker = marker;
+			openIndex = index;
+		} else if (openMarker === marker) {
+			for (let i = openIndex; i <= index; i++) fenced[i] = true;
+			openMarker = undefined;
+			openIndex = -1;
 		}
-		if (fence) continue;
+	}
+	return fenced;
+}
+
+function isJsonPayload(text: string): boolean {
+	try {
+		JSON.parse(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function findRenderedToolMarker(text: string, toolNames: ReadonlySet<string>): string | undefined {
+	const lines = text.split(/\r?\n/);
+	const fenced = computeFencedLines(lines);
+	for (let index = 0; index < lines.length; index++) {
+		if (fenced[index]) continue;
+		const trimmed = lines[index].trim();
+		if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) continue;
 		const match = /^to=functions\.([A-Za-z][A-Za-z0-9_-]{0,63})\s+code$/.exec(trimmed);
 		const toolName = match?.[1];
 		if (!toolName || !toolNames.has(toolName)) continue;
-		for (let payloadIndex = index + 1; payloadIndex < lines.length; payloadIndex++) {
-			const payload = lines[payloadIndex].trim();
-			if (!payload) continue;
-			if (payload.startsWith("{") || payload.startsWith("[")) return toolName;
-			break;
-		}
+
+		let payloadIndex = index + 1;
+		while (payloadIndex < lines.length && lines[payloadIndex].trim() === "") payloadIndex++;
+		const payload = lines[payloadIndex]?.trim();
+		if (!payload || !(payload.startsWith("{") || payload.startsWith("["))) continue;
+		if (!isJsonPayload(payload)) continue;
+
+		// Genuine residue is the terminal content of the turn: a provider that rendered a real tool
+		// call as plain text stops right there. Prose that merely quotes the marker syntax (this repo's
+		// own docs/tests discuss it) keeps explaining afterward, so trailing content after the payload
+		// is what tells a documentation example apart from an actual escaped tool call.
+		let trailingIndex = payloadIndex + 1;
+		while (trailingIndex < lines.length && lines[trailingIndex].trim() === "") trailingIndex++;
+		if (trailingIndex < lines.length) continue;
+
+		return toolName;
 	}
 	return undefined;
 }

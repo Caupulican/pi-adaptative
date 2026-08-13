@@ -134,11 +134,27 @@ describe("provider tool projection", () => {
 
 		const projected = projectToolSchemaForProvider(schema) as typeof schema;
 
-		expect(projected.properties.action).toEqual({ enum: ["inspect", "apply"] });
+		expect(projected.properties.action).toEqual({ type: "string", enum: ["inspect", "apply"] });
 		expect(projected.properties.payload.anyOf).toHaveLength(2);
 		expect(projected.properties.payload.anyOf[0]).toMatchObject({ required: ["value"] });
 		expect(projected.properties.payload.anyOf[1]).toMatchObject({ required: ["count"] });
 		expect(projected.properties.mixed.anyOf).toHaveLength(2);
+	});
+
+	it("keeps `type` on an enum-bearing property even though every enum value already satisfies it", () => {
+		// Providers whose function-declaration schema requires `type` per property (Google's
+		// OpenAPI subset) reject the entire tool list with a 400 if `type` is dropped just because
+		// it is redundant given a closed enum. minLength/maxLength stay safe to drop.
+		const schema = {
+			type: "object",
+			properties: {
+				mode: { type: "string", enum: ["inspect", "apply"], minLength: 1, maxLength: 20 },
+			},
+		};
+
+		const projected = projectToolSchemaForProvider(schema) as typeof schema;
+
+		expect(projected.properties.mode).toEqual({ type: "string", enum: ["inspect", "apply"] });
 	});
 
 	it("keeps exact full-schema teaching on the cold validation path", () => {

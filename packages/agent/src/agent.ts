@@ -123,6 +123,7 @@ export interface AgentOptions {
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	shouldStopAfterTurn?: (signal?: AbortSignal) => boolean | Promise<boolean>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -228,6 +229,7 @@ export class Agent {
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	public shouldStopAfterTurn?: (signal?: AbortSignal) => boolean | Promise<boolean>;
 	private activeRun?: ActiveRun;
 	/** No-progress gates shared only by host continuations of the current logical prompt. */
 	private loopContinuationState: AgentLoopContinuationState | undefined;
@@ -269,6 +271,7 @@ export class Agent {
 		this.toolValidationEscalationThreshold = options.toolValidationEscalationThreshold;
 		this.onToolValidationEscalation = options.onToolValidationEscalation;
 		this.prepareNextTurn = options.prepareNextTurn;
+		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
 		this.sessionId = options.sessionId;
@@ -515,6 +518,9 @@ export class Agent {
 			handoffToolCall: this.handoffToolCall,
 			subscribeToolCallHandoffRequest: this.subscribeToolCallHandoffRequest,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+			shouldStopAfterTurn: this.shouldStopAfterTurn
+				? async () => (await this.shouldStopAfterTurn?.(this.signal)) ?? false
+				: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			planContext: this.planContext,

@@ -144,6 +144,13 @@ export const REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE = {
 
 /** Stable marker for a tool-owned guard that rejects one operation before external execution. */
 export const TOOL_OPERATION_REJECTED_MARKER = "PI_TOOL_OPERATION_REJECTED";
+/**
+ * bash.ts is the only emitter (`${TOOL_OPERATION_REJECTED_MARKER}: ...`) and always places the
+ * marker at the very start of the thrown error's message, never mid-sentence. Anchor to a line
+ * start so captured stdout/stderr that merely echoes the marker (e.g. a `grep` of this file)
+ * cannot masquerade as a tool-owned rejection.
+ */
+const TOOL_OPERATION_REJECTED_LINE_PATTERN = new RegExp(`^${TOOL_OPERATION_REJECTED_MARKER}:`, "m");
 
 interface ToolExecutionErrorCatalogueEntry {
 	name: string;
@@ -167,7 +174,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		guidance:
 			"Operation rejected before execution. Follow the diagnostic: correct or narrow the call, or continue independent work. The runtime remains available.",
 		matches(message: string): boolean {
-			return message.includes(TOOL_OPERATION_REJECTED_MARKER);
+			return TOOL_OPERATION_REJECTED_LINE_PATTERN.test(message);
 		},
 	},
 	{

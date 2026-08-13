@@ -193,6 +193,17 @@ export function serializeConversation(messages: Message[]): string {
 // Summarization System Prompt
 // ============================================================================
 
+/**
+ * Unmistakable, regex-trivial marker embedded in SUMMARIZATION_SYSTEM_PROMPT's worked example below.
+ * The example teaches checkpoint FORMAT (cancellation semantics), not a realistic rule — its subject
+ * must never be mistaken for genuine content, and this exact token is how verification.ts recognizes
+ * that a persisted checkpoint contains the harness's own instruction/example text rather than real
+ * user or extracted content. Deliberately unlike anything a real file path, prohibition, or task would
+ * ever contain (no natural language would produce this exact hyphenated all-caps token), so a literal
+ * substring match is sufficient — no fuzzy/heuristic matching needed for this specific case.
+ */
+export const COMPACTION_WORKED_EXAMPLE_SENTINEL = "EXAMPLE-RULE-X9";
+
 export const SUMMARIZATION_SYSTEM_PROMPT = `Context checkpointer. Input: serialized agent conversation. Output only checkpoint, exact headings/order below, user language, no preamble/commentary. Never include secrets/keys/tokens; write [REDACTED].
 
 MANDATORY
@@ -219,4 +230,44 @@ FORMAT
 ## Constraints & Preferences
 ## Critical Context
 
-Cancellation example: user forbids legacy-client edits, later catches one, requests test fixes. Active Task contains test fixes; Mandatory Rules contains "DO NOT touch legacy client"; cancelled edit appears nowhere; Done keeps only completed valid work.`;
+Cancellation example: user forbids ${COMPACTION_WORKED_EXAMPLE_SENTINEL} edits, later catches one, requests test fixes. Active Task contains test fixes; Mandatory Rules contains "DO NOT touch ${COMPACTION_WORKED_EXAMPLE_SENTINEL}"; cancelled edit appears nowhere; Done keeps only completed valid work.`;
+
+// Task-level prompts (as opposed to the system prompt above). Kept here, not in compaction.ts, so
+// verification.ts can single-source the literal text the harness injects — it needs the exact
+// sentences to recognize when a model echoes them back into a checkpoint section instead of
+// following the system prompt's "never copy checkpointer control instructions" rule. compaction.ts
+// imports these rather than defining its own copies, so there is exactly one source of truth.
+export const SUMMARIZATION_PROMPT = `Create checkpoint. Exact heading order:
+## Active Task
+### Mandatory Rules
+## Working Set
+## Files
+## Open Problems
+## Done
+## Key Decisions
+## Constraints & Preferences
+## Critical Context
+
+NEVER carry resolved/transient errors, replaced approaches, file bodies. Record paths/intent.
+
+MANDATORY VERIFICATION:
+{FACTS_BLOCK}
+
+Budget ~{BUDGET} tokens. Concrete facts first.`;
+
+export const UPDATE_SUMMARIZATION_PROMPT = `Update OLD CHECKPOINT with CHAT turns.
+MANDATORY:
+- Copy every existing ### Mandatory Rules bullet verbatim; append new.
+- Continue ## Done numbering. Keep newest 15 items verbatim. Replace all older items with first line: "1. (earlier work compressed) <one line>". Bound growth.
+- Set ## Active Task to newest unfulfilled user input; apply cancellation rule.
+- Keep ## Files current: add new, retain relevant, drop obsolete.
+- Drop resolved ## Open Problems.
+- Drop ## Working Set files untouched since OLD CHECKPOINT unless active task names them.
+- Keep exact paths/commands/errors.
+- NEVER carry resolved/transient errors, replaced approaches, file bodies. Record paths/intent.
+
+Keep required heading order.
+MANDATORY VERIFICATION:
+{FACTS_BLOCK}
+
+Budget ~{BUDGET} tokens.`;

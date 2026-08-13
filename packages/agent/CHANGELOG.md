@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved model-carried Mandatory Rules the extractor does not own during compaction gap-fill, dropped only echoes of the harness's own instruction text, and never overwrote content with "(none)".
+- Round-tripped Active Task sections containing markdown headings through compaction verification via symmetric per-line escaping instead of failing permanently.
+- Parsed exit codes from the tool-owned status line (last authoritative match) instead of the first exit-shaped substring anywhere in program output, and stopped weak stderr text from fabricating failure diagnostics when a strong signal is required.
+- Retained `type` on enum-bearing tool schema properties for providers whose schema subset requires it.
+- Required native tool-protocol residue to be a standalone, parsable payload so assistant prose quoting the marker is no longer voided; residue after an unclosed fence is now detected.
+
+### Changed
+
+- Replaced the summarization prompt's worked example with synthetic sentinel-marked content, scrubbed sentinel echoes from Mandatory Rules deterministically, and failed verification on sentinel bleed-through outside the self-healing section.
+
 ## [0.90.7] - 2026-08-13
 
 ### Fixed

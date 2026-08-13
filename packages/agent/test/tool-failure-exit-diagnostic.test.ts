@@ -37,4 +37,16 @@ describe("process-exit failure diagnostics", () => {
 		expect(assessment.failureCode).toBe("exit_2");
 		expect(assessment.diagnostic).toBeUndefined();
 	});
+
+	it("keeps the tool-owned trailer authoritative over an unrelated 'exit N' phrase in captured stdout", () => {
+		const assessment = assessToolFailure(
+			["Stopping container gracefully.", "container will exit 0 on SIGTERM", "Command exited with code 1"].join(
+				"\n",
+			),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_1");
+	});
 });
