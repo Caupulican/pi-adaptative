@@ -10,6 +10,7 @@ export const TOOL_REPAIR_MODE_NAMES = [
 	"boolFromString",
 	"enumCaseNormalize",
 	"propertyCaseNormalize",
+	"propertyAliasNormalize",
 	"singleElementUnwrap",
 	"stringifiedNumberInArray",
 	"bashCommandArgvJoin",
@@ -80,6 +81,11 @@ export const TOOL_REPAIR_REGISTRY: readonly ToolRepairRegistryEntry[] = [
 		name: "propertyCaseNormalize",
 		noteTemplate: "`{path}` used wrong key case; use schema case",
 		standingRule: "Argument property: exact schema name/case.",
+	},
+	{
+		name: "propertyAliasNormalize",
+		noteTemplate: "`{path}` used property alias; mapped to schema property",
+		standingRule: "Argument property: exact schema property name.",
 	},
 	{
 		name: "singleElementUnwrap",

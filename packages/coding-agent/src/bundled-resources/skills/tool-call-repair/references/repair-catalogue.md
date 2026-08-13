@@ -30,6 +30,7 @@ Registry mode names currently in force:
 - `boolFromString`
 - `enumCaseNormalize`
 - `propertyCaseNormalize`
+- `propertyAliasNormalize`
 - `singleElementUnwrap`
 - `stringifiedNumberInArray`
 - `bashCommandArgvJoin`

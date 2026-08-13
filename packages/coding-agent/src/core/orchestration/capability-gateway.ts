@@ -13,6 +13,7 @@ export type GatewayDecisionCode =
 	| "capability_not_granted"
 	| "path_argument_required"
 	| "path_outside_scope"
+	| "scope_denied"
 	| "tool_call_budget_exhausted"
 	| "token_budget_exhausted"
 	| "cost_budget_exhausted"
@@ -356,16 +357,16 @@ export class CapabilityGateway {
 		this.sharedBudget?.assertBudgetAvailable(toolName);
 
 		if (manifest.capabilities.some((capability) => PATH_CAPABILITIES.has(capability))) {
-			const allowedPaths = manifest.capabilities.some((capability) => WRITE_CAPABILITIES.has(capability))
-				? this.grant.writePaths
-				: this.grant.readPaths;
+			const isWrite = manifest.capabilities.some((capability) => WRITE_CAPABILITIES.has(capability));
+			const allowedPaths = isWrite ? this.grant.writePaths : this.grant.readPaths;
 			const paths = extractPathArguments(params);
 			if (paths.length === 0) {
 				this.deny(toolName, "path_argument_required", `Tool '${toolName}' requires an explicit path argument.`);
 			}
 			for (const rawPath of paths) {
 				if (!this.pathAllowed(rawPath, allowedPaths)) {
-					this.deny(toolName, "path_outside_scope", `Path '${rawPath}' is outside grant '${this.grant.grantId}'.`);
+					const reasonCode = isWrite ? "scope_denied" : "path_outside_scope";
+					this.deny(toolName, reasonCode, `Path '${rawPath}' is outside grant '${this.grant.grantId}'.`);
 				}
 			}
 		}

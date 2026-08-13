@@ -78,6 +78,7 @@ The repair registry currently names these deterministic modes:
 - `boolFromString`
 - `enumCaseNormalize`
 - `propertyCaseNormalize`
+- `propertyAliasNormalize`
 - `singleElementUnwrap`
 - `stringifiedNumberInArray`
 - `bashCommandArgvJoin`

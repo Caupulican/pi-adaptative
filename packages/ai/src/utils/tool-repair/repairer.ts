@@ -306,6 +306,47 @@ function refreshIssueValue(candidate: Record<string, unknown>, issue: ToolRepair
 	return { ...issue, value: getValueAtPath(candidate, issue.path) };
 }
 
+const PROPERTY_ALIAS_GROUPS: readonly (readonly string[])[] = [
+	["replacementContent", "newText", "replacement_content", "new_text"],
+	["targetContent", "targetText", "oldText", "target_content", "target_text", "old_text"],
+	["startLine", "start_line"],
+	["endLine", "end_line"],
+	["path", "file_path", "filePath", "filename", "file"],
+	["edits", "changes", "replacements"],
+];
+
+function collectSchemaProperties(schema: JsonSchemaObject): Record<string, JsonSchemaObject> {
+	const properties: Record<string, JsonSchemaObject> = {};
+	if (schema.properties) {
+		for (const [key, prop] of Object.entries(schema.properties)) {
+			if (isJsonSchemaObject(prop)) properties[key] = prop;
+		}
+	}
+	for (const sub of [schema.allOf, schema.anyOf, schema.oneOf]) {
+		if (Array.isArray(sub)) {
+			for (const item of sub) {
+				if (isJsonSchemaObject(item)) {
+					Object.assign(properties, collectSchemaProperties(item));
+				}
+			}
+		}
+	}
+	return properties;
+}
+
+function findAliasCanonicalKey(key: string, schemaKeys: Set<string>): string | undefined {
+	for (const group of PROPERTY_ALIAS_GROUPS) {
+		if (group.includes(key)) {
+			for (const targetKey of group) {
+				if (targetKey !== key && schemaKeys.has(targetKey)) {
+					return targetKey;
+				}
+			}
+		}
+	}
+	return undefined;
+}
+
 function normalizePropertyCaseAtPath(
 	value: unknown,
 	schema: JsonSchemaObject,
@@ -319,23 +360,41 @@ function normalizePropertyCaseAtPath(
 		}
 		return;
 	}
-	if (!isRecord(value) || !schema.properties) return;
+	if (!isRecord(value)) return;
+
+	const schemaProps = collectSchemaProperties(schema);
+	const schemaKeys = new Set(Object.keys(schemaProps));
+	if (schemaKeys.size === 0) return;
 
 	const canonicalByLower = new Map<string, string[]>();
-	for (const key of Object.keys(schema.properties)) {
+	for (const key of schemaKeys) {
 		const lower = key.toLowerCase();
 		canonicalByLower.set(lower, [...(canonicalByLower.get(lower) ?? []), key]);
 	}
+
 	for (const key of Object.keys(value)) {
-		const matches = canonicalByLower.get(key.toLowerCase()) ?? [];
-		const canonical = matches.length === 1 ? matches[0] : undefined;
-		if (!canonical || canonical === key || canonical in value) continue;
-		value[canonical] = value[key];
-		delete value[key];
-		repairs.push({ name: "propertyCaseNormalize", path: formatRepairPath([...path, canonical]) });
+		if (key in schemaProps) continue;
+
+		const lower = key.toLowerCase();
+		const stripped = lower.replace(/_/g, "");
+		const canonical = (canonicalByLower.get(lower) ?? [])[0] ?? (canonicalByLower.get(stripped) ?? [])[0];
+
+		if (canonical && !(canonical in value)) {
+			value[canonical] = value[key];
+			delete value[key];
+			repairs.push({ name: "propertyCaseNormalize", path: formatRepairPath([...path, canonical]) });
+			continue;
+		}
+
+		const aliasCanonical = findAliasCanonicalKey(key, schemaKeys);
+		if (aliasCanonical && !(aliasCanonical in value)) {
+			value[aliasCanonical] = value[key];
+			delete value[key];
+			repairs.push({ name: "propertyAliasNormalize", path: formatRepairPath([...path, aliasCanonical]) });
+		}
 	}
 
-	for (const [key, propertySchema] of Object.entries(schema.properties)) {
+	for (const [key, propertySchema] of Object.entries(schemaProps)) {
 		if (!(key in value)) continue;
 		normalizePropertyCaseAtPath(value[key], propertySchema, [...path, key], repairs);
 	}

@@ -110,6 +110,12 @@ const repairFixtures: readonly RepairFixture[] = [
 	},
 	{ mode: "propertyCaseNormalize", tool: readTool, args: { Path: "README.md" }, expected: { path: "README.md" } },
 	{
+		mode: "propertyAliasNormalize",
+		tool: readTool,
+		args: { file_path: "README.md" },
+		expected: { path: "README.md" },
+	},
+	{
 		mode: "singleElementUnwrap",
 		tool: searchTool,
 		args: { limit: 1, ignoreCase: false, filter: "minimal", count: [2], numbers: [1] },
@@ -141,6 +147,7 @@ const bounceFixtures: readonly BounceFixture[] = [
 		args: { limit: 1, ignoreCase: false, filter: "maximal", count: 2, numbers: [1] },
 	},
 	{ mode: "propertyCaseNormalize", tool: readTool, args: { path: 3, Path: "README.md" } },
+	{ mode: "propertyAliasNormalize", tool: readTool, args: { path: 3, file_path: "README.md" } },
 	{
 		mode: "singleElementUnwrap",
 		tool: searchTool,
@@ -366,6 +373,7 @@ describe("tool argument repair", () => {
 			"boolFromString",
 			"enumCaseNormalize",
 			"propertyCaseNormalize",
+			"propertyAliasNormalize",
 			"singleElementUnwrap",
 			"stringifiedNumberInArray",
 			"bashCommandArgvJoin",

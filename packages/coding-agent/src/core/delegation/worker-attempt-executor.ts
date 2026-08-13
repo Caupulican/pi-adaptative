@@ -12,10 +12,10 @@ import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/type
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
+import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
-import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import type { ModelCapabilityProfile } from "../model-capability.ts";
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
@@ -30,6 +30,7 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
 import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
+import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
 import { WorkerTreeBudgetExceededError } from "./worker-tree-budget-coordinator.ts";
 
 export interface RecoveredWorkerTerminalCompletion {
@@ -86,7 +87,8 @@ export async function runProviderCompletionWithBackoff(args: {
 				error instanceof WorkerCompletionProtocolError ||
 				error instanceof WorkerConversationOwnershipError ||
 				error instanceof CapabilityGatewayDeniedError ||
-				error instanceof WorkerTreeBudgetExceededError
+				error instanceof WorkerTreeBudgetExceededError ||
+				error instanceof BoundedCompletionFailureError
 			) {
 				throw error;
 			}
@@ -94,7 +96,10 @@ export async function runProviderCompletionWithBackoff(args: {
 				message: error instanceof Error ? error.message : String(error),
 				provider: args.provider,
 			});
-			if (!classified.retryable || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) throw error;
+			if (!classified.retryable || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new BoundedCompletionFailureError("failed", "completion_error", message);
+			}
 			const delayMs = computeRetryDelayMs(WORKER_PROVIDER_RETRY_POLICY, attempt, {
 				...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
 			});
@@ -525,11 +530,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							let result: IsolatedCompletionResult;
 							try {
 								result = await options.runIsolatedCompletion({
-									systemPrompt: composeSubagentSystemPrompt({
+									systemPrompt: buildWorkerSystemPrompt({
 										soul: options.soul,
-										rolePrompt: [systemPrompt, options.workerResourceSystemPrompt]
-											.filter(Boolean)
-											.join("\n\n"),
+										rolePrompt: systemPrompt,
+										workerResourceSystemPrompt: options.workerResourceSystemPrompt,
+										agentDir: options.agentDir,
+										model: options.model,
 									}),
 									history,
 									messages: [],
