@@ -156,6 +156,8 @@ An agent may set `authority` on `delegate` to choose its child's role label, aut
 
 Pin precedence is deliberately different from ordinary deep-merged settings: global role, global default, trusted local role, trusted local default, then adaptive routing. A global default therefore wins over every project role. Within trusted local settings, the user-level directory overlay wins over the project file at the same role/default tier. Untrusted project settings are ignored. Every binding must contain an exact `provider`, `modelId`, and supported `thinkingLevel`. Malformed pin configuration blocks fresh worker admission with `worker_model_pins_invalid`; an unavailable applicable pin blocks with `worker_model_pin_unavailable:<role>`. Neither condition falls back to another model. Configure pins directly in JSON; `/settings` does not edit them.
 
+A `roles`-only configuration (no `default` in any scope) leaves every role not listed under `roles` entirely unpinned: a delegation using an unlisted role plus an explicit `authority.model` is not blocked, since there is no applicable pin to enforce, and it uses the caller-requested model exactly as ordinary adaptive routing would. This is expected, not an admission bug, but it is easy to configure by accident. The host surfaces it two ways so it stays observable: a settings diagnostic lists the unpinned roles whenever a `roles`-only policy compiles with no `default`, and a delegation that hits this gap (an active pin policy, no pin for the effective role, and an explicit requested model) reports `modelPinBypass: <role>` on its `delegate start` result. Add a `default` to close the gap for every role, or pin every role explicitly under `roles` if adaptive routing is never intended.
+
 ```json
 {
   "workerDelegation": {
@@ -236,8 +238,8 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 |---------|------|---------|-------------|
 | `workerDelegation.enabled` | boolean | `true` | Enable autonomous recursive agent trees; explicit `false` is a hard off-switch |
 | `workerDelegation.orchestrationProfile` | string | - | Optional default execution preset; agents may replace its defaults within inherited authority |
-| `workerDelegation.maxUsd` | number | `0` | Optional cumulative USD ceiling for one root tree; `0` leaves this settings-level ceiling unbounded |
-| `workerDelegation.maxWallClockMs` | number | `0` | Optional cumulative active wall-clock ceiling for one root tree; `0` leaves this settings-level ceiling unbounded |
+| `workerDelegation.maxUsd` | number | `0.5` | Cumulative USD ceiling for one root tree; explicit `0` opts into an unbounded settings-level ceiling |
+| `workerDelegation.maxWallClockMs` | number | `120000` | Cumulative active wall-clock ceiling for one root tree; explicit `0` opts into an unbounded settings-level ceiling |
 | `workerDelegation.maxConcurrent` | number | `20` | Global running-agent concurrency inside the fixed fleet and queue bounds |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.writePaths` | string[] | `["."]` | Global envelope for direct child writes; an explicit empty array revokes direct `write`/`edit` |

@@ -263,6 +263,65 @@ describe("WorkerLifecycle", () => {
 		}
 	});
 
+	it("rejects a renewal fenced to a superseded attempt fence, even though laneId-based renewLease would silently renew the new one", () => {
+		// Regression for worker-delegation-controller.ts's lease heartbeat: it must renew with the
+		// exact attemptId/leaseId/fencingToken captured at heartbeat start, via
+		// lifecycle.ledger.runtime.renewAttemptLease directly — never lifecycle.renewLease(laneId,
+		// ttl), which re-resolves "whatever attempt is active for this lane right now" and so cannot
+		// detect that the caller's own captured fence has been superseded (e.g. by a resume/retry).
+		// A stale heartbeat calling the laneId-based path would happily extend a lease it does not
+		// own, defeating lease expiry as the abandonment signal for the attempt that actually owns it.
+		const lifecycle = new WorkerLifecycle({ agentDir: root(), sessionId: "session-stale-heartbeat-fence" });
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "stale-heartbeat-fence",
+			model: { provider: "test", id: "model" },
+			role: "explorer",
+		});
+		const prepared = lifecycle.prepare({
+			instructions: "run then recover under a fresh fence",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
+		const task = lifecycle.getTask(prepared.attempt.taskId);
+		if (!task) throw new Error("Expected durable task");
+		lifecycle.bindGrant(
+			prepared.attempt.attemptId,
+			createTestExecutionGrant({
+				objectiveId: task.task.objectiveId,
+				taskId: task.task.taskId,
+				attemptId: prepared.attempt.attemptId,
+				role: "explorer",
+			}),
+		);
+		const resumeContext: AgentResumeContext = {
+			provider: "pi",
+			sessionId: "session-file",
+			cwd: process.cwd(),
+			resourceProfileNames: [],
+			contextPointers: [],
+		};
+		const agent = lifecycle.ensureAgent({ agentId: "stale-agent", role: "explorer", resumeContext });
+		const first = lifecycle.startAgent(prepared.record.laneId, agent.agentId, 60_000);
+
+		// The lane recovers under a fresh fence on the SAME attemptId — exactly what a stale
+		// heartbeat from `first` would not know about.
+		expect(lifecycle.suspendBoundInProcessAttemptsForRestart(agent.agentId)).toEqual([first.attemptId]);
+		const resumed = lifecycle.resumeAgent(prepared.record.laneId, agent.agentId, 60_000);
+		expect(resumed.attemptId).toBe(first.attemptId);
+		expect(resumed.fencingToken).not.toBe(first.fencingToken);
+		expect(resumed.leaseId).not.toBe(first.leaseId);
+
+		// Fixed path: fenced to the stale, captured values -- rejected.
+		expect(() =>
+			lifecycle.ledger.runtime.renewAttemptLease(first.attemptId, first.leaseId, first.fencingToken, 60_000),
+		).toThrow();
+
+		// The bug this guards against: the OLD laneId-based path ignores the caller's own identity
+		// entirely and would silently renew whatever is CURRENTLY active for the lane -- the new,
+		// unrelated attempt -- even though the caller (`first`) no longer owns anything.
+		expect(() => lifecycle.renewLease(prepared.record.laneId, 60_000)).not.toThrow();
+	});
+
 	it("refuses recovery that would steal a still-live agent owner", () => {
 		const lifecycle = new WorkerLifecycle({
 			agentDir: root(),

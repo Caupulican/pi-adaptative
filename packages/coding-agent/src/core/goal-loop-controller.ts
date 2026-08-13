@@ -25,8 +25,9 @@ import {
 	buildGoalContinuationPrompt,
 	GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
 } from "./goals/goal-continuation-prompt.ts";
+import { GoalBudgetExhaustedError } from "./goals/goal-execution-errors.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
-import type { GoalState } from "./goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 
 /**
  * Resolve an owner-supplied durable goal budget. Wall-clock and spend counters are deliberately
@@ -34,7 +35,7 @@ import type { GoalState } from "./goals/goal-state.ts";
  * Execution limits are policy inputs, not hidden runtime defaults.
  */
 function getExplicitGoalBudgetExhaustion(state: GoalState | undefined): string | undefined {
-	if (!state || state.status !== "active") return undefined;
+	if (!state || !isGoalExecutionActive(state.status)) return undefined;
 	if (state.tokenBudget !== undefined && (state.tokensUsed ?? 0) >= state.tokenBudget) {
 		return `token budget exhausted (${state.tokensUsed ?? 0}/${state.tokenBudget})`;
 	}
@@ -139,6 +140,13 @@ export class GoalLoopController {
 				if (error instanceof AgentBusyError) throw error;
 				turnsSubmitted++;
 				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt });
+				if (error instanceof GoalBudgetExhaustedError) {
+					// The goal already stopped itself durably (markBudgetLimited ran synchronously before
+					// this signal was thrown) — surface the existing clean stop instead of reclassifying an
+					// intentional, already-recorded stop as a generic continuation failure and rejecting
+					// the whole loop promise.
+					return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: snapshot() };
+				}
 				this.deps.recordGoalContinuationFailure(error);
 				throw error;
 			}

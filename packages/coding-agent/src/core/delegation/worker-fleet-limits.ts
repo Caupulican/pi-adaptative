@@ -194,7 +194,11 @@ export function evaluateNewWorkerAdmission(
 	}
 	let nestedAgents = 0;
 	for (const agent of Object.values(agents)) {
-		if (agent.parentAgentId) nestedAgents += 1;
+		// A retired agent's durable identity slot is still reserved (evaluateWorkerIdentityHeadroom
+		// above already bounds total agent count), but it no longer occupies a live nested-fleet
+		// slot. Counting it here permanently blocks all future nested delegation once any nested
+		// child has ever finished — with LEAN_WORKER_DELEGATION_LIMITS (=1), a single retired child.
+		if (agent.parentAgentId && agent.status !== "retired") nestedAgents += 1;
 	}
 	if (nestedAgents >= limits.maxNestedAgentsPerSession) {
 		return { ok: false, reasonCode: "worker_agent_nested_session_limit_reached" };

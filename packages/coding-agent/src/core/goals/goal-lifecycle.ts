@@ -1,6 +1,7 @@
 import {
 	applyGoalEvent,
 	type GoalState,
+	isGoalExecutionActive,
 	isGoalResumableStatus,
 	isGoalUnfinishedStatus,
 	MAX_GOAL_OBJECTIVE_LENGTH,
@@ -39,7 +40,7 @@ function persistResult(
 
 export function pauseGoal(current: GoalState | undefined, now: string): GoalActionResult {
 	if (!current) return missingGoal("pause");
-	if (current.status !== "active") {
+	if (!isGoalExecutionActive(current.status)) {
 		return { ok: false, error: `Goal '${current.goalId}' is ${current.status}; only active goals can be paused.` };
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) };
@@ -101,7 +102,7 @@ export function stopGoalFromSystem(
 	now: string,
 ): GoalActionResult {
 	if (!current) return missingGoal("stop");
-	if (current.status !== "active") {
+	if (!isGoalExecutionActive(current.status)) {
 		return { ok: false, error: `Goal '${current.goalId}' is ${current.status}; no system stop is needed.` };
 	}
 	const reason = args.reason.trim();

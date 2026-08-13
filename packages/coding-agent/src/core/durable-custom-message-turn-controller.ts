@@ -56,9 +56,19 @@ export class DurableCustomMessageTurnController {
 			this.pending.delete(appMessage);
 			throw error;
 		}
-		const completion = this.deps.foreground
-			.runAgentPrompt(appMessage, submissionLease)
-			.finally(() => this.deps.goals.endExecution(goalExecutionLease));
+		let completion: Promise<void>;
+		try {
+			completion = this.deps.foreground
+				.runAgentPrompt(appMessage, submissionLease)
+				.finally(() => this.deps.goals.endExecution(goalExecutionLease));
+		} catch (error) {
+			// runAgentPrompt is expected to report failure through its returned promise, but if it
+			// throws SYNCHRONOUSLY instead, the .finally() above never attaches and the goal
+			// execution lease acquired above leaks forever. Every exit path must release it.
+			this.deps.goals.endExecution(goalExecutionLease);
+			this.pending.delete(appMessage);
+			throw error;
+		}
 		void completion.then(
 			() => {
 				if (!this.pending.delete(appMessage)) return;

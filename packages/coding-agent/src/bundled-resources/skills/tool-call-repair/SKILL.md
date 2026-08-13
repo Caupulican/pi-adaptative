@@ -122,10 +122,11 @@ as code (not prose):
 | 9 | boolFromString | `"true"`/`"false"` where bool expected | exact map (never truthiness) |
 | 10 | enumCaseNormalize | case/space enum variant | match to the one member, else bounce |
 | 11 | propertyCaseNormalize | root argument key casing differs from schema casing | rename to the schema key when unique |
-| 12 | singleElementUnwrap | `[v]` where scalar expected | unwrap if 1 elem and checks |
-| 13 | stringifiedNumberInArray | `["1","2"]` where number[] expected | map Number if all finite |
-| 14 | bashCommandArgvJoin | bash `command` sent as an argv list | join string values with spaces |
-| 15 | bashCommandUnwrap | bash `command` sent as a single-key object wrapper | unwrap the string-valued wrapper |
+| 12 | propertyAliasNormalize | root argument key is a known alias (e.g. `newText`/`oldText`/`file_path`) for a differently-named schema property | rename to the schema's alias-group member, only when it is absent |
+| 13 | singleElementUnwrap | `[v]` where scalar expected | unwrap if 1 elem and checks |
+| 14 | stringifiedNumberInArray | `["1","2"]` where number[] expected | map Number if all finite |
+| 15 | bashCommandArgvJoin | bash `command` sent as an argv list | join string values with spaces |
+| 16 | bashCommandUnwrap | bash `command` sent as a single-key object wrapper | unwrap the string-valued wrapper |
 
 Every entry is a NAMED registry entry
 `{name, errorSignature, transform, guard, noteTemplate}` — one table powers

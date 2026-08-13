@@ -1,6 +1,23 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 
 const FAILED_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["failed", "timeout", "budget_exhausted"]);
+/**
+ * "partial", "blocked", and "canceled" are neither an outright infra failure nor a clean success —
+ * each needs the parent's attention (review a partial/blocked claim, or simply note an explicit
+ * stop), but folding them into `failedSinceFlush` would misclassify them as harness failures (the
+ * exact bug 78a2158dd fixed in the other direction). Leaving them out of every tally instead made
+ * them invisible: a blocked worker previously reported completedSinceFlush:0, failedSinceFlush:0 —
+ * counted nowhere. Every LaneTerminalStatus must land in exactly one of the three tallies below.
+ */
+const ATTENTION_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["partial", "blocked", "canceled"]);
+
+/**
+ * Reuses the former handoff-timeout boundary, now purely as an observation threshold: a re-dispatch
+ * on this timer used to create a duplicate consumer of the same handoff, so it was removed. Without
+ * any signal in its place, a notify() call that never settles would block deliveryTail (and every
+ * subsequent worker terminal) forever with zero visibility. This watchdog only ever warns.
+ */
+const HANDOFF_WATCHDOG_MS = 1_800_000;
 
 export interface WorkerTerminalHandoffRecord {
 	laneId: string;
@@ -16,6 +33,8 @@ export interface WorkerNotificationStatus {
 	running: number;
 	completedSinceFlush: number;
 	failedSinceFlush: number;
+	/** partial, blocked, and canceled terminals — needs parent review, not a harness failure. */
+	attentionSinceFlush: number;
 	terminalSinceFlush: readonly WorkerTerminalHandoffRecord[];
 }
 
@@ -37,6 +56,16 @@ export interface WorkerNotificationCoordinatorOptions {
 export class WorkerNotificationCoordinator {
 	private readonly options: WorkerNotificationCoordinatorOptions;
 	private readonly pending = new Map<string, PendingWorkerNotification>();
+	/**
+	 * Notifications currently being attempted by notify() — moved here from `pending` the instant
+	 * delivery starts, never cleared until notify() is CONFIRMED to have settled (success or
+	 * failure). If notify() never settles, this remains the durable, externally-visible record of
+	 * what's stuck: a batch must never be reachable ONLY through the one promise closure that may
+	 * never resolve (that closure is what previously starved every worker queued behind it, with
+	 * no trace of the lost batch anywhere). getOutstandingRecords() exposes `pending ∪ inFlight` so
+	 * an owning caller can durably persist and replay them across a process restart.
+	 */
+	private readonly inFlight = new Map<string, PendingWorkerNotification>();
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
@@ -45,6 +74,11 @@ export class WorkerNotificationCoordinator {
 
 	constructor(options: WorkerNotificationCoordinatorOptions) {
 		this.options = options;
+	}
+
+	/** Every notification recorded but not yet confirmed delivered, for durable cross-restart replay. */
+	getOutstandingRecords(): readonly WorkerTerminalHandoffRecord[] {
+		return [...this.pending.values(), ...this.inFlight.values()].map((notification) => notification.record);
 	}
 
 	recordTerminal(record: LaneRecord, durableNotificationId?: string): void {
@@ -67,12 +101,14 @@ export class WorkerNotificationCoordinator {
 		this.schedule();
 	}
 
+	/** Callers that want to durably persist outstanding work must read getOutstandingRecords() first. */
 	dispose(): void {
 		this.disposed = true;
 		this.scheduled = false;
 		if (this.retryTimer) clearTimeout(this.retryTimer);
 		this.retryTimer = undefined;
 		this.pending.clear();
+		this.inFlight.clear();
 	}
 
 	private schedule(): void {
@@ -102,6 +138,21 @@ export class WorkerNotificationCoordinator {
 		}
 	}
 
+	/**
+	 * Observe-only: warns once if the in-flight notify() call has not settled after
+	 * HANDOFF_WATCHDOG_MS. Never re-dispatches and never creates a second notify() consumer —
+	 * callers must clear() it once the awaited notify() settles, success or failure.
+	 */
+	private startHandoffWatchdog(laneIds: readonly string[]): { clear(): void } {
+		const timer = setTimeout(() => {
+			this.warnBestEffort(
+				`Background worker handoff has not settled after ${HANDOFF_WATCHDOG_MS}ms for lane(s): ${laneIds.join(", ")}. Observation only; no redispatch will occur.`,
+			);
+		}, HANDOFF_WATCHDOG_MS);
+		if (typeof timer === "object" && "unref" in timer) timer.unref();
+		return { clear: () => clearTimeout(timer) };
+	}
+
 	private flush(): void {
 		this.scheduled = false;
 		if (this.disposed) return;
@@ -124,6 +175,8 @@ export class WorkerNotificationCoordinator {
 			running,
 			completedSinceFlush: terminalSinceFlush.filter((record) => record.status === "succeeded").length,
 			failedSinceFlush: terminalSinceFlush.filter((record) => FAILED_TERMINAL_STATUSES.has(record.status)).length,
+			attentionSinceFlush: terminalSinceFlush.filter((record) => ATTENTION_TERMINAL_STATUSES.has(record.status))
+				.length,
 			terminalSinceFlush,
 		};
 		try {
@@ -134,12 +187,23 @@ export class WorkerNotificationCoordinator {
 			);
 		}
 		if (batch.length === 0) return;
+		// Moved into `inFlight`, not merely captured by the closure below: if notify() never
+		// settles, this batch stays durably visible via getOutstandingRecords() instead of being
+		// reachable ONLY through this one promise, which is exactly what previously starved every
+		// worker queued behind it with no trace of the lost batch anywhere.
+		for (const notification of batch) this.inFlight.set(notification.key, notification);
 		const delivery = this.deliveryTail.then(async () => {
 			if (this.disposed) return;
 			// A foreground lease wait is an in-flight side effect, not a failed attempt. Re-dispatching it
 			// on a wall-clock timer creates concurrent consumers that later persist the same handoff.
 			// Explicit rejection remains retryable; process restart replays the durable pending record.
-			await this.options.notify(terminalSinceFlush);
+			const watchdog = this.startHandoffWatchdog(terminalSinceFlush.map((record) => record.laneId));
+			try {
+				await this.options.notify(terminalSinceFlush);
+			} finally {
+				watchdog.clear();
+			}
+			for (const notification of batch) this.inFlight.delete(notification.key);
 			this.retryCount = 0;
 			const durableIds = batch.flatMap((notification) =>
 				notification.durableNotificationId ? [notification.durableNotificationId] : [],
@@ -147,7 +211,10 @@ export class WorkerNotificationCoordinator {
 			if (durableIds.length > 0) this.options.markDurableDelivered(durableIds);
 		});
 		this.deliveryTail = delivery.catch((error: unknown) => {
-			for (const notification of batch) this.pending.set(notification.key, notification);
+			for (const notification of batch) {
+				this.inFlight.delete(notification.key);
+				this.pending.set(notification.key, notification);
+			}
 			this.warnBestEffort(
 				`Background worker handoff failed: ${error instanceof Error ? error.message : String(error)}`,
 			);

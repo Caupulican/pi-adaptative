@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+### Fixed
+
+- Rejected provider requests from goal-owned foreground executions after their authoritative goal becomes paused, blocked, usage-limited, completed, cancelled, budget-limited, replaced, or cleared, without mislabeling generic stopped goals as token exhaustion.
+- Parsed natural-language goal token budgets with spelled-out units and separator grouping ("5 million", "500 k", "1.000.000"), failed closed on unparseable explicit ceilings, and scoped budget parsing to text outside the goal objective so subject-matter numbers are never adopted as ceilings.
+- Stopped goal executions cleanly before the next provider call when the token budget crosses mid-turn, instead of truncating output at a tiny cap or surfacing a synthetic error message; wrap-up turns after a mid-turn goal stop drain gracefully while dead goals still cannot restart.
+- Recorded buffered goal usage loudly (warning plus continuation failure) when execution state vanishes instead of silently discarding spend.
+- Projected budget-exhausted worker attempts that finish with partial claims as budget-exhausted, and tallied blocked/partial/canceled workers in a new attention count so terminal statuses always partition.
+- Bounded a hung worker wait when a blocked write-reservation restore left it with no deadline, evaluated the deadlock guard before the yield erases its evidence, and cleared yield bookkeeping on denied restores so concurrency is not over-admitted.
+- Stopped worker lease heartbeats at run completion and fenced renewals with the lease captured at start, so stale runs cannot extend foreign leases and successful workers are not converted to failures during finalization.
+- Restored bounded default worker-tree ceilings ($0.50 / 120s); unbounded trees are an explicit opt-in only.
+- Excluded retired agents from nested-session delegation limits.
+- Kept a stuck worker terminal handoff observable and recoverable: an observe-only watchdog warns, the undelivered batch is preserved for restore, and durable identity is ensured at flush time so restarts replay it without redispatching in-flight work.
+- Ordered mandatory delegate directives ahead of optional profile listings in the provider guideline budget, dropped overflowing guidelines whole with a visible diagnostic instead of truncating mid-word, and surfaced worker model pin gaps (roles-only configs list unpinned roles; delegations bypassing pins via an unpinned role are flagged).
+- Released write-reservation leases on coordinator dispose and stopped leaking the goal execution lease on a synchronous prompt failure.
+- Centralized goal-active checks behind isGoalExecutionActive with a boundary rule banning inline goal-status comparisons outside core/goals.
+
+### Changed
+
+- Split releases into prepare and promote: the tag is created only after CI is green on the exact release commit, staging uses an explicit allowlist, the gate guard is an execution proof, and changelog or release-note gaps abort loudly.
+- Made model catalog generation hermetic by default (live fetch only with PI_FETCH_MODELS=1) with a scheduled drift check that fails on removal of repo-referenced models.
+- Extracted extension runtime binding from AgentSession into ExtensionBindingController and ratcheted the session line ceiling down (4000 to 3900).
+- Documented the propertyAliasNormalize repair mode in the bundled tool-call-repair skill and reference grammar.
+
 ## [0.90.7] - 2026-08-13
 
 ### Fixed

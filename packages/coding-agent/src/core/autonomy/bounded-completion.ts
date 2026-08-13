@@ -22,8 +22,14 @@ export class BoundedCompletionFailureError extends Error {
 	readonly status: BoundedCompletionFailureStatus;
 	readonly reasonCode: string;
 
-	constructor(status: BoundedCompletionFailureStatus, reasonCode: string, message: string) {
-		super(message);
+	/**
+	 * `cause`, when the error wraps an upstream failure (e.g. an exhausted provider retry ladder),
+	 * preserves the original error's identity/type/stack for callers that need to inspect it —
+	 * wrapping otherwise launders it down to a message string, which the redacted `detail` extracted
+	 * by {@link boundedFailureDetail} intentionally is not a substitute for.
+	 */
+	constructor(status: BoundedCompletionFailureStatus, reasonCode: string, message: string, cause?: unknown) {
+		super(message, cause !== undefined ? { cause } : undefined);
 		this.name = "BoundedCompletionFailureError";
 		this.status = status;
 		this.reasonCode = reasonCode;

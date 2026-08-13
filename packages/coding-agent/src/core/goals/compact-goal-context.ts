@@ -3,7 +3,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { TextContent } from "@caupulican/pi-ai";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import { projectGoalRecord } from "./goal-record.ts";
-import type { GoalState } from "./goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "./goal-state.ts";
 
 export const ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE = "active_goal_context";
 const LEGACY_GOAL_CONTINUATION_PREFIX = "Goal continuation context\n=========================";
@@ -62,7 +62,7 @@ export function injectCompactGoalContext(messages: AgentMessage[], state: GoalSt
 			messageText(message).startsWith(LEGACY_GOAL_CONTINUATION_PREFIX),
 	);
 	const filtered = messages.filter((message) => !isGoalContextMessage(message));
-	if (!state || state.status !== "active") return filtered;
+	if (!state || !isGoalExecutionActive(state.status)) return filtered;
 	return [
 		...filtered,
 		createCustomMessage(

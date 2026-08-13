@@ -42,7 +42,6 @@ describe("AgentSession natural-language goal admission", () => {
 			harness.setResponses([
 				fauxAssistantMessage("initial turn settled"),
 				fauxAssistantMessage([fauxToolCall("goal", { action: "complete" })], { stopReason: "toolUse" }),
-				fauxAssistantMessage("goal completed"),
 			]);
 
 			await harness.session.prompt("Keep working until this is complete: prove chat goal continuation.");
@@ -55,6 +54,7 @@ describe("AgentSession natural-language goal admission", () => {
 			});
 			// The constant continuation trigger is custom/hidden and never becomes fake user history.
 			expect(getUserTexts(harness)).toEqual(["Keep working until this is complete: prove chat goal continuation."]);
+			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			harness.cleanup();
 		}

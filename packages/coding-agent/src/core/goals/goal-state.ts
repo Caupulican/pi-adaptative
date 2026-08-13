@@ -429,7 +429,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			) {
 				newState.status = "active";
 			}
-			if (newState.status === "active") newState.blockedReason = undefined;
+			if (isGoalExecutionActive(newState.status)) newState.blockedReason = undefined;
 			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}

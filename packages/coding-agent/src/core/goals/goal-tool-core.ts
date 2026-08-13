@@ -7,6 +7,7 @@ import {
 	type GoalEvent,
 	type GoalEvidenceKind,
 	type GoalState,
+	isGoalExecutionActive,
 	isGoalUnfinishedStatus,
 	MAX_GOAL_OBJECTIVE_LENGTH,
 } from "./goal-state.ts";
@@ -135,7 +136,7 @@ export function applyGoalAction(
 		return { ok: false, error: "No active goal. Use action 'start' before recording goal updates." };
 	}
 
-	if (current.status !== "active") {
+	if (!isGoalExecutionActive(current.status)) {
 		return {
 			ok: false,
 			error: `Goal '${current.goalId}' is ${current.status}. Lifecycle changes are owner/system controlled; use the /goal controls.`,

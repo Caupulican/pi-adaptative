@@ -26,6 +26,13 @@ export type WorkerModelPinPolicy =
 	| {
 			status: "active";
 			byRole: Readonly<Partial<Record<WorkerRole, ResolvedWorkerModelPin>>>;
+			/**
+			 * Non-blocking configuration observations (e.g. role entries with no `default`, which
+			 * leaves every unlisted role unpinned and admits any caller-requested model for it).
+			 * Never gates admission — see resolveWorkerModelPin and the delegation-time
+			 * `modelPinBypass` diagnostic in worker-delegation-controller.ts.
+			 */
+			diagnostics?: readonly string[];
 	  };
 
 export interface WorkerModelPinPolicyLayers {
@@ -200,7 +207,26 @@ export function compileWorkerModelPinPolicy(layers: WorkerModelPinPolicyLayers):
 		const pin = pinFromLayer(globalLayer, role) ?? pinFromLocalLayers(directoryLayer, projectLayer, role);
 		if (pin) byRole[role] = pin;
 	}
-	return Object.keys(byRole).length > 0 ? { status: "active", byRole } : { status: "absent" };
+	if (Object.keys(byRole).length === 0) return { status: "absent" };
+
+	// A roles-only config (no `default` in any layer) leaves every unlisted role unpinned: a caller
+	// can delegate with an unlisted role plus an explicit model and admission never sees a pin to
+	// enforce. That's not a blocking error (the owner may intend it), but it must be observable.
+	const hasDefault = Boolean(
+		globalLayer?.settings.default ?? projectLayer?.settings.default ?? directoryLayer?.settings.default,
+	);
+	const unpinnedRoles = WORKER_ROLES.filter((role) => !(role in byRole));
+	const policyDiagnostics =
+		!hasDefault && unpinnedRoles.length > 0
+			? [
+					`workerDelegation.modelPins configures role entries but no default: ${unpinnedRoles.join(", ")} remain unpinned and admit any caller-requested model. Add a default to close the gap.`,
+				]
+			: [];
+	return {
+		status: "active",
+		byRole,
+		...(policyDiagnostics.length > 0 ? { diagnostics: policyDiagnostics } : {}),
+	};
 }
 
 export function resolveWorkerModelPin(

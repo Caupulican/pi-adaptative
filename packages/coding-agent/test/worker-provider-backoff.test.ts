@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
+import { BoundedCompletionFailureError } from "../src/core/autonomy/bounded-completion.ts";
 import { runProviderCompletionWithBackoff } from "../src/core/delegation/worker-attempt-executor.ts";
 import { WorkerConversationOwnershipError } from "../src/core/delegation/worker-conversation-revision.ts";
 import { WorkerTreeBudgetExceededError } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
@@ -79,10 +80,17 @@ describe("worker provider backoff", () => {
 		expect(warnings[0]).toContain("overloaded");
 	});
 
-	it("rethrows non-retryable failures immediately without sleeping", async () => {
+	it("rethrows non-retryable failures immediately without sleeping, wrapped with the original error preserved as cause", async () => {
 		const failure = new Error("401 unauthorized: invalid api key");
 		const { run, warnings, released, calls } = harness([failure]);
-		await expect(run).rejects.toBe(failure);
+		const caught = await run.catch((error: unknown) => error);
+		expect(caught).toBeInstanceOf(BoundedCompletionFailureError);
+		const wrapped = caught as BoundedCompletionFailureError;
+		expect(wrapped.name).toBe("BoundedCompletionFailureError");
+		expect(wrapped.status).toBe("failed");
+		expect(wrapped.reasonCode).toBe("completion_error");
+		expect(wrapped.message).toBe(failure.message);
+		expect(wrapped.cause).toBe(failure);
 		expect(calls()).toBe(1);
 		expect(released).toEqual([1]);
 		expect(warnings).toHaveLength(0);
@@ -111,13 +119,20 @@ describe("worker provider backoff", () => {
 		}
 	});
 
-	it("gives up after the attempt ceiling and rethrows the final failure", async () => {
+	it("gives up after the attempt ceiling and rethrows the final failure, wrapped with the original error preserved as cause", async () => {
 		vi.useFakeTimers();
 		const failures = [new Error("fetch failed"), new Error("fetch failed"), new Error("socket hang up")];
 		const { run, warnings, calls } = harness(failures);
-		const settled = expect(run).rejects.toBe(failures[2]);
+		const settled = run.catch((error: unknown) => error);
 		await vi.advanceTimersByTimeAsync(60_000);
-		await settled;
+		const caught = await settled;
+		expect(caught).toBeInstanceOf(BoundedCompletionFailureError);
+		const wrapped = caught as BoundedCompletionFailureError;
+		expect(wrapped.name).toBe("BoundedCompletionFailureError");
+		expect(wrapped.status).toBe("failed");
+		expect(wrapped.reasonCode).toBe("completion_error");
+		expect(wrapped.message).toBe(failures[2].message);
+		expect(wrapped.cause).toBe(failures[2]);
 		expect(calls()).toBe(3);
 		expect(warnings).toHaveLength(2);
 	});

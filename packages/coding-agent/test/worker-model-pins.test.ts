@@ -94,6 +94,31 @@ describe("worker model pin policy", () => {
 		expect(resolveWorkerModelPin(policy, "planner")).toEqual({ binding: luna, source: "directoryProfile" });
 	});
 
+	it("flags a roles-only policy with no default as leaving other roles unpinned", () => {
+		const policy = compileWorkerModelPinPolicy({
+			global: { roles: { implementer: luna } },
+		});
+
+		expect(policy.status).toBe("active");
+		if (policy.status !== "active") return;
+		expect(policy.diagnostics).toBeDefined();
+		expect(policy.diagnostics?.[0]).toContain("no default");
+		expect(policy.diagnostics?.[0]).not.toContain("implementer");
+		for (const role of ["explorer", "verifier", "orchestrator"]) {
+			expect(policy.diagnostics?.[0]).toContain(role);
+		}
+	});
+
+	it("emits no unpinned-role diagnostic once a default closes the gap", () => {
+		const policy = compileWorkerModelPinPolicy({
+			global: { default: luna, roles: { implementer: terra } },
+		});
+
+		expect(policy.status).toBe("active");
+		if (policy.status !== "active") return;
+		expect(policy.diagnostics).toBeUndefined();
+	});
+
 	it("marks malformed configured policy invalid instead of silently adapting", () => {
 		const policy = compileWorkerModelPinPolicy({
 			global: { roles: { implementer: { provider: "faux", modelId: "pinned" } } },
@@ -392,6 +417,39 @@ describe("worker model pin lifecycle", () => {
 
 			expect(run).toEqual({ started: false, skipReason: "worker_model_pin_unavailable:implementer" });
 			expect(harness.getPendingResponseCount()).toBe(1);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("records a modelPinBypass diagnostic when a roles-only policy leaves the caller's role unpinned and it requests an explicit model", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "requested", contextWindow: 128_000, reasoning: true },
+				{ id: "pinned", contextWindow: 128_000, reasoning: true },
+			],
+			settings: {
+				// Roles-only: no `default`, so "explorer" below has no pin at all.
+				workerDelegation: { modelPins: { roles: { implementer: luna } } },
+			},
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage('{"summary":"bypass observed","status":"completed"}')]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Use an unpinned role plus an explicit model.",
+				authority: {
+					role: "explorer",
+					model: { provider: "faux", modelId: "requested" },
+				},
+			});
+
+			// Chosen remediation is diagnostics, not blocking: the delegation still starts and the
+			// caller's explicit model is still honored (there is no pin to enforce for this role).
+			expect(run.started).toBe(true);
+			expect(run.record).toMatchObject({ modelRef: "faux/requested" });
+			expect(run.outcome?.modelPinBypass).toBe("explorer");
 		} finally {
 			await harness.cleanup();
 		}

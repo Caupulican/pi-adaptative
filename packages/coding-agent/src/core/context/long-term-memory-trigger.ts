@@ -1,4 +1,4 @@
-import type { GoalState } from "../goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { MemoryPromptBudget } from "./memory-prompt-budget.ts";
 import { hasSecretLikeMemoryText } from "./memory-provider-contract.ts";
 
@@ -50,7 +50,8 @@ export function shouldQueryLongTermMemory(input: LongTermMemoryTriggerInput): Lo
 	if (DURABLE_ID_RE.test(text)) return { shouldQuery: true, reason: "durable_identifier" };
 	if (MISSING_BACKGROUND_RE.test(text)) return { shouldQuery: true, reason: "missing_background" };
 
-	const activeGoal = input.goalState?.status === "active" ? input.goalState : undefined;
+	const activeGoal =
+		input.goalState !== undefined && isGoalExecutionActive(input.goalState.status) ? input.goalState : undefined;
 	if (
 		activeGoal !== undefined &&
 		text.length === 0 &&

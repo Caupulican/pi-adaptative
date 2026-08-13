@@ -188,6 +188,11 @@ export class WorkerWriteReservationCoordinator {
 	dispose(): void {
 		this.watchDispose?.();
 		this.watchDispose = undefined;
+		// Release every held lease through the same path release() uses (best-effort store release,
+		// warn on failure, forgetLease bookkeeping) — dispose() previously dropped this coordinator's
+		// in-memory map of them without ever releasing the underlying durable reservations, leaking
+		// them until an unrelated recoverProvenStale() pass eventually proved the owner dead.
+		for (const laneId of [...this.leases.keys()]) this.release(laneId);
 		this.blockedByLocalLaneIds.clear();
 	}
 

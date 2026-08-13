@@ -175,6 +175,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._workerNotifications ??= new WorkerNotificationCoordinator({
 			getWorkerRecords: () => this._workerLifecycle?.getAllRecords() ?? [],
 			emitStatus: (status) => {
+				// Runs once per flush, with the EXACT batch about to be handed to notify() -- the
+				// natural checkpoint to backfill durability before that batch can get stuck behind
+				// an unsettled notify() call with no durable trace. (getOutstandingRecords() is not
+				// usable here: the coordinator emits status BEFORE moving this same batch from
+				// `pending` into `inFlight`, so at this exact moment it would report nothing
+				// outstanding — status.terminalSinceFlush is the batch, directly, no timing gap.)
+				this._ensureDurableNotifications(status.terminalSinceFlush);
 				try {
 					this.deps.emit({
 						type: "delegate_workers",
@@ -190,6 +197,32 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			markDurableDelivered: (notificationIds) => this._workerLifecycle?.markNotificationsDelivered(notificationIds),
 		});
 		return this._workerNotifications;
+	}
+
+	/**
+	 * Backfills a durable notification for every record about to be flushed, through the SAME
+	 * durable notification store `_getWorkerLifecycle()` already replays from on construction
+	 * (`getPendingTerminalNotifications()` / `markNotificationsDelivered()`) -- not a new
+	 * persistence subsystem. `WorkerLifecycle.getTerminalNotification()` is idempotent (it reuses
+	 * an existing durable entry for the same laneId/attemptId or creates exactly one), so calling
+	 * it for a record that already has a durable notification is a safe no-op. Without this, a
+	 * "transient:<laneId>:<completedAt>" record (recorded without a durableNotificationId — e.g.
+	 * because no attempt was resolvable at record time) has no trace in the durable ledger at all:
+	 * if it's still stuck behind an unresolved notify() when the process restarts, the replay on
+	 * the next construction can only find what was durably enqueued, so it would be lost instead of
+	 * replayed.
+	 */
+	private _ensureDurableNotifications(records: readonly Pick<LaneRecord, "laneId">[]): void {
+		if (!this._workerLifecycle) return;
+		for (const record of records) {
+			try {
+				this._workerLifecycle.getTerminalNotification(record.laneId);
+			} catch (error) {
+				this._safeWarn(
+					`Failed to durably back the worker terminal notification for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 	}
 
 	private _getManagedLaneController(): ManagedLaneController {

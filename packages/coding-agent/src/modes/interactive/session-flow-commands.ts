@@ -35,7 +35,7 @@ import {
 	resumeGoal,
 	resumePersistedGoal,
 } from "../../core/goals/goal-lifecycle.ts";
-import type { GoalState } from "../../core/goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "../../core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import {
@@ -722,7 +722,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showError(edited.error);
 			return;
 		}
-		if (edited.state.status === "active") host.session.restoreGoalRuntimeAfterResume();
+		if (isGoalExecutionActive(edited.state.status)) host.session.restoreGoalRuntimeAfterResume();
 		host.showStatus("Goal updated.");
 		host.refreshAutonomyFooterStatus();
 		return;
@@ -796,7 +796,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			return;
 		}
 		host.session.saveGoalStateSnapshot(reopened.state, getGoalStateRevision(current));
-		if (reopened.state.status === "active") host.session.restoreGoalRuntimeAfterResume();
+		if (isGoalExecutionActive(reopened.state.status)) host.session.restoreGoalRuntimeAfterResume();
 		host.showStatus(
 			`Requirement '${requirementId}' reopened${current.status === "blocked" ? " and goal resumed" : ""}.`,
 		);

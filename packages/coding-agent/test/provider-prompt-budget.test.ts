@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	CAPACITY_PROBE_SYSTEM_PROMPT,
 	CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT,
@@ -91,14 +91,36 @@ describe("recurring provider prompt budgets", () => {
 		const [boundedGuideline] = normalizeProviderPromptGuidelines(["x".repeat(MAX_PROVIDER_TOOL_GUIDELINE_CHARS + 1)]);
 		expect(boundedGuideline).toBe(`${"x".repeat(MAX_PROVIDER_TOOL_GUIDELINE_CHARS - 1)}…`);
 
-		const boundedGuidelines = normalizeProviderPromptGuidelines(
-			Array.from({ length: 10 }, (_, index) =>
-				`${index}:`.padEnd(Math.ceil(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / 10) + 1, "x"),
-			),
+		// A guideline that does not fit the remaining budget is dropped WHOLE, never truncated
+		// mid-word: a half-sentence directive silently missing its second half is a worse defect
+		// than the directive being absent (the whole point of ordering mandatory guidelines first).
+		const oversizedInput = Array.from({ length: 10 }, (_, index) =>
+			`${index}:`.padEnd(Math.ceil(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / 10) + 1, "x"),
 		);
-		expect(boundedGuidelines.reduce((total, guideline) => total + guideline.length, 0)).toBe(
-			MAX_PROVIDER_TOOL_GUIDELINES_CHARS,
+		const dropped: string[] = [];
+		const boundedGuidelines = normalizeProviderPromptGuidelines(oversizedInput, (message) => dropped.push(message));
+		expect(boundedGuidelines).toHaveLength(9);
+		expect(boundedGuidelines.reduce((total, guideline) => total + guideline.length, 0)).toBe(9 * 121);
+		for (const guideline of boundedGuidelines) expect(guideline).not.toMatch(/…$/);
+		expect(dropped).toHaveLength(1);
+		expect(dropped[0]).toMatch(/dropped/);
+	});
+
+	it("never truncates a guideline mid-word to fit the remaining budget, and never emits a bare ellipsis", () => {
+		// Reproduces the pins-active overflow: a MANDATORY directive must survive budget pressure by
+		// being ordered first (delegate.ts), and provider-tool-text.ts must never silently mangle a
+		// guideline it cannot fully fit — it must drop the whole guideline instead.
+		const mandatory =
+			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; queued=admitted; no interrupt; parallel read-only=no write/edit.";
+		const fillers = Array.from({ length: 10 }, (_, index) =>
+			`filler-${index}:`.padEnd(MAX_PROVIDER_TOOL_GUIDELINE_CHARS, "x"),
 		);
-		expect(boundedGuidelines.at(-1)).toMatch(/…$/);
+		const onBounded = vi.fn();
+		const bounded = normalizeProviderPromptGuidelines([mandatory, ...fillers], onBounded);
+
+		expect(bounded[0]).toBe(mandatory);
+		for (const guideline of bounded) expect(guideline).not.toBe("…");
+		expect(onBounded).toHaveBeenCalled();
+		for (const call of onBounded.mock.calls) expect(call[0]).toMatch(/dropped|truncated/);
 	});
 });

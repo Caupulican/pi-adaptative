@@ -6,6 +6,7 @@ import {
 	projectEvidenceFindings,
 } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import type { WorkerRole } from "../orchestration/contracts.ts";
 import {
 	buildVerifierSystemPrompt,
 	buildWorkerSystemPrompt,
@@ -98,6 +99,12 @@ export interface WorkerRunOutcome {
 	/** Underlying executor error for bounded failures; drives the in-process retry decision. */
 	reasonDetail?: string;
 	costUsd: number;
+	/**
+	 * Set by the caller (worker-delegation-controller.ts admission), never by runWorker itself, when
+	 * a pin policy is active, the effective role has no pin, and the caller requested an explicit
+	 * model — i.e. the owner's model pin was evaded, not merely inapplicable. Diagnostics only.
+	 */
+	modelPinBypass?: WorkerRole;
 }
 
 export function buildWorkerUserPrompt(request: WorkerRequest): string {

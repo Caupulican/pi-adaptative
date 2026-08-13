@@ -17,7 +17,7 @@ import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
-import type { GoalState } from "../goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
@@ -95,6 +95,7 @@ import {
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
+import type { WorkerRunOutcome } from "./worker-runner.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 import {
 	type WorkerTerminalHandoff,
@@ -181,6 +182,13 @@ type WorkerAdmission =
 			resourcePointerIds: readonly string[];
 			executionContract: WorkerExecutionContract;
 			executionPlan: WorkerExecutionPlan;
+			/**
+			 * Set when a pin policy is active, the effective role has no pin (a roles-only config
+			 * with no `default` leaves it unpinned), and the caller requested an explicit model —
+			 * i.e. the owner's pin was evaded, not just inapplicable. Diagnostics only: admission is
+			 * never blocked on this. Value is the effective role that bypassed the policy.
+			 */
+			modelPinBypass?: WorkerRole;
 	  }
 	| { ok: false; skipReason: string };
 
@@ -197,7 +205,9 @@ interface PreparedWorkerAgent {
 	resourceSystemPrompt: string;
 }
 
-type QueuedWorkerAttemptOutcome = { started: false; skipReason: string } | { started: true; record: LaneRecord };
+type QueuedWorkerAttemptOutcome =
+	| { started: false; skipReason: string }
+	| { started: true; record: LaneRecord; modelPinBypass?: WorkerRole };
 
 interface WorkerContextForkSource {
 	model: { provider: string; model: string };
@@ -571,7 +581,7 @@ export class WorkerDelegationController {
 	/** Reconcile the session goal into an already-loaded worker runtime without defeating lazy UAC. */
 	synchronizeGoalState(goal: GoalState): void {
 		this.publishGoalTerminalRecords(this.lifecycle.synchronizeGoalState(goal));
-		if (goal.status === "active" && !this.deps.isDisposed()) this.scheduler.drain();
+		if (isGoalExecutionActive(goal.status) && !this.deps.isDisposed()) this.scheduler.drain();
 	}
 
 	private publishGoalTerminalRecords(records: readonly LaneRecord[]): void {
@@ -804,6 +814,12 @@ export class WorkerDelegationController {
 		const effectiveRole: WorkerRole =
 			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? "orchestrator";
 		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole);
+		// The model itself is authority?.model, not `role` — role selects which pin applies, but a
+		// roles-only policy (no `default`) leaves an unlisted role with no pin at all, so a caller
+		// can name that role plus an explicit model and admission never sees anything to enforce.
+		// Not blocked (the owner may intend adaptive roles); recorded so the evasion is observable.
+		const modelPinBypass: WorkerRole | undefined =
+			modelPinPolicy.status === "active" && !modelPin && authority?.model ? effectiveRole : undefined;
 		if (basePreset) {
 			const bound = this.getWorkerProfileResolver().bindPreset(basePreset, modelPin?.binding);
 			if (!bound.ok) {
@@ -924,6 +940,7 @@ export class WorkerDelegationController {
 			resourcePointerIds: selectedResources.pointers.map((pointer) => pointer.id),
 			executionContract,
 			executionPlan,
+			...(modelPinBypass ? { modelPinBypass } : {}),
 		};
 	}
 
@@ -1165,27 +1182,42 @@ export class WorkerDelegationController {
 				restored = true;
 				return true;
 			}
-			const current = this.lifecycle.getLatestAgentAttempt(caller.agentId);
-			if (
-				!this.deps.isDisposed() &&
-				current?.attemptId === attempt.attemptId &&
-				(current.status === "leased" || current.status === "running")
-			) {
-				const yieldedReservation = this.yieldedWriteReservations.get(attempt.attemptId);
-				if (yieldedReservation) {
-					const reservation = this.writeReservations.restoreAfterWait(yieldedReservation);
-					if (reservation.kind === "blocked") return false;
-					if (reservation.kind === "denied") {
-						this.laneAbortControllers.get(attempt.taskId)?.abort(reservation.reasonCode);
-						throw new Error(`Worker wait could not restore its write reservation: ${reservation.reasonCode}.`);
+			// "blocked" is the only nonterminal outcome here: the caller is still legitimately
+			// yielded and must retry restore() later, so its bookkeeping must survive. Every other
+			// exit — granted, no reservation to restore, or "denied" below — is terminal and must
+			// always release the yield bookkeeping, even when "denied" throws. An entry left behind
+			// on that throw path permanently over-counts virtual headroom in hasWorkerCapacity()
+			// for the rest of this attempt's life, silently admitting maxConcurrent+1 workers.
+			let stillBlocked = false;
+			try {
+				const current = this.lifecycle.getLatestAgentAttempt(caller.agentId);
+				if (
+					!this.deps.isDisposed() &&
+					current?.attemptId === attempt.attemptId &&
+					(current.status === "leased" || current.status === "running")
+				) {
+					const yieldedReservation = this.yieldedWriteReservations.get(attempt.attemptId);
+					if (yieldedReservation) {
+						const reservation = this.writeReservations.restoreAfterWait(yieldedReservation);
+						if (reservation.kind === "blocked") {
+							stillBlocked = true;
+							return false;
+						}
+						if (reservation.kind === "denied") {
+							this.laneAbortControllers.get(attempt.taskId)?.abort(reservation.reasonCode);
+							throw new Error(`Worker wait could not restore its write reservation: ${reservation.reasonCode}.`);
+						}
 					}
 				}
+				if (!this.deps.isDisposed()) this.scheduler.drain(true);
+				return true;
+			} finally {
+				if (!stillBlocked) {
+					this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
+					this.yieldedWriteReservations.delete(attempt.attemptId);
+					restored = true;
+				}
 			}
-			this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
-			this.yieldedWriteReservations.delete(attempt.attemptId);
-			restored = true;
-			if (!this.deps.isDisposed()) this.scheduler.drain(true);
-			return true;
 		};
 		try {
 			this.scheduler.drain(true);
@@ -1556,7 +1588,11 @@ export class WorkerDelegationController {
 		this.notifications.statusChanged();
 		options.onStarted?.(prepared.record);
 		if (options.drain) this.scheduler.drain();
-		return { started: true, record: prepared.record };
+		return {
+			started: true,
+			record: prepared.record,
+			...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
+		};
 	}
 
 	private ensurePreparedAgent(
@@ -1616,14 +1652,14 @@ export class WorkerDelegationController {
 
 	start(
 		request: WorkerDelegationRequest,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
+	): { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: WorkerRole } {
 		return this.startInternal(request);
 	}
 
 	private startInternal(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
-	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {
+	): { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: WorkerRole } {
 		const admission = this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { settings, shipment } = admission;
@@ -1673,7 +1709,11 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: "worker_not_started" };
 		}
 		this.scheduler.track(startedRecord.laneId, promise);
-		return { started: true, record: startedRecord };
+		return {
+			started: true,
+			record: startedRecord,
+			...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
+		};
 	}
 
 	async runOnce(
@@ -1851,6 +1891,7 @@ export class WorkerDelegationController {
 				workerModelPinPolicy: this.deps.getSettingsManager().getWorkerModelPinPolicy(),
 				workerAgentControl: this.agentControl,
 				caller: { kind: "worker", agentId },
+				warn: (message) => this.safeWarn(message),
 				resolveMessageReplayScope: () => ({
 					sessionId: this.deps.getSessionId(),
 					branchId: durableHandle.attemptId,
@@ -1937,10 +1978,24 @@ export class WorkerDelegationController {
 		const laneAbortController = new AbortController();
 		this.laneAbortControllers.set(startedRecord.laneId, laneAbortController);
 		const workerSignal = AbortSignal.any([this.workerAbort.signal, laneAbortController.signal]);
+		// Fenced to the exact attemptId/leaseId/fencingToken captured here, at heartbeat start —
+		// never re-resolved by laneId. `lifecycle.renewLease(laneId, ...)` looks up whatever attempt
+		// is CURRENTLY active for that lane, so a heartbeat left running past its own attempt's life
+		// (e.g. after a retry replaced it under a fresh fence) would trivially "renew" a lease it
+		// does not own, defeating lease expiry as the abandonment signal for the attempt that
+		// actually owns it.
+		const heartbeatAttemptId = durableHandle.attemptId;
+		const heartbeatLeaseId = durableHandle.leaseId;
+		const heartbeatFencingToken = durableHandle.fencingToken;
 		const leaseHeartbeat = new WorkerLeaseHeartbeat({
 			leaseTtlMs: immutableProfile.leaseTtlMs,
 			renew: () => {
-				lifecycle.renewLease(startedRecord.laneId, immutableProfile.leaseTtlMs);
+				lifecycle.ledger.runtime.renewAttemptLease(
+					heartbeatAttemptId,
+					heartbeatLeaseId,
+					heartbeatFencingToken,
+					immutableProfile.leaseTtlMs,
+				);
 			},
 			onFailure: (error) => {
 				this.safeWarn(`Worker ${startedRecord.laneId} lease renewal failed: ${error.message}`);
@@ -2007,6 +2062,12 @@ export class WorkerDelegationController {
 			});
 			leaseHeartbeat.start();
 			const executionResult = await executor.run();
+			// Stop the instant the run returns, before any post-run finalization (finalizeWorkerClaim,
+			// verifier dispatch, handoff persistence —~190 lines) can run: a tick landing in that
+			// window renews an attempt that has already reached a terminal status, throws, and would
+			// otherwise abort a lane whose work already succeeded. The `finally` below still calls
+			// stop() too (idempotent) to cover every other exit path (thrown errors, early returns).
+			leaseHeartbeat.stop();
 			leaseHeartbeat.assertHealthy();
 			const rawOutcome = executionResult.rawOutcome;
 			// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
@@ -2030,27 +2091,30 @@ export class WorkerDelegationController {
 				orchestrationProfile.requireIndependentVerification &&
 				orchestrationProfile.role !== "verifier" &&
 				rawOutcome.claim.status === "completed";
-			const outcome = verificationRequired
-				? {
-						...rawOutcome,
-						accepted: false,
-						reasonCode: "independent_verification_required",
-						acceptance: {
-							outcome: "ask-user" as const,
-							gate: "independent_verification",
+			const outcome: WorkerRunOutcome = {
+				...(verificationRequired
+					? {
+							...rawOutcome,
+							accepted: false,
 							reasonCode: "independent_verification_required",
-							message: "The owner-authored profile requires an independent verifier before acceptance.",
-						},
-						claim: {
-							...rawOutcome.claim,
-							parentReviewRequired: true,
-							blockers: [
-								...(rawOutcome.claim.blockers ?? []),
-								"independent verification is required before acceptance",
-							],
-						},
-					}
-				: rawOutcome;
+							acceptance: {
+								outcome: "ask-user" as const,
+								gate: "independent_verification",
+								reasonCode: "independent_verification_required",
+								message: "The owner-authored profile requires an independent verifier before acceptance.",
+							},
+							claim: {
+								...rawOutcome.claim,
+								parentReviewRequired: true,
+								blockers: [
+									...(rawOutcome.claim.blockers ?? []),
+									"independent verification is required before acceptance",
+								],
+							},
+						}
+					: rawOutcome),
+				...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
+			};
 
 			// Never persist against a disposed session. When disposal raced this
 			// await, `abortInFlightLanes()`'s synchronous cutoff already completed this lane, persisted

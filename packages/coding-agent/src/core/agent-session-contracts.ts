@@ -75,6 +75,8 @@ export type AgentSessionEvent =
 			running: number;
 			completedSinceFlush: number;
 			failedSinceFlush: number;
+			/** partial, blocked, and canceled terminals — needs parent review, not a harness failure. */
+			attentionSinceFlush: number;
 			terminalSinceFlush: Array<{ laneId: string; status: LaneTerminalStatus; reasonCode?: string }>;
 	  };
 

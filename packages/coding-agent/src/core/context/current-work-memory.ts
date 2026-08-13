@@ -1,4 +1,4 @@
-import type { GoalState, Requirement } from "../goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive, type Requirement } from "../goals/goal-state.ts";
 import type { MemoryTierCandidate } from "./memory-tier-composer.ts";
 
 export interface CurrentWorkMemoryInput {
@@ -40,7 +40,7 @@ function requirementSummary(requirements: readonly Requirement[]): string {
 
 export function collectCurrentWorkMemory(input: CurrentWorkMemoryInput): MemoryTierCandidate[] {
 	const candidates: MemoryTierCandidate[] = [];
-	if (input.goalState?.status === "active") {
+	if (input.goalState !== undefined && isGoalExecutionActive(input.goalState.status)) {
 		const requirementText = requirementSummary(input.goalState.requirements);
 		const goalSummary = shortText(input.goalState.userGoal, 96);
 		const suffix = requirementText.length > 0 ? `; ${requirementText}` : "";

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { basename, dirname } from "node:path";
-import { projectToolsForProvider } from "@caupulican/pi-agent-core";
+import { basename } from "node:path";
+import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR, projectToolsForProvider } from "@caupulican/pi-agent-core";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
@@ -90,6 +90,7 @@ import {
 } from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
+import { ExtensionBindingController } from "./extension-binding-controller.ts";
 import type {
 	CompactOptions,
 	ContextUsage,
@@ -168,7 +169,7 @@ import {
 	getLatestEvidenceBundleSnapshot,
 } from "./research/session-evidence-bundle.ts";
 import { collectWorkspaceSources } from "./research/workspace-collector.ts";
-import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import type { ResourceLoader } from "./resource-loader.ts";
 import { RuntimeBuilder } from "./runtime-builder.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
@@ -177,7 +178,6 @@ import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
-import type { SlashCommandInfo } from "./slash-commands.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
@@ -286,6 +286,8 @@ export class AgentSession {
 	private _requestedActiveToolNames: string[] | undefined;
 
 	private _unboundToolGrantWarnings: string[] = [];
+	/** Delegate provider-prompt-guideline bounding diagnostics (root-session delegate tool only). */
+	private _delegatePromptGuidelineWarnings: string[] = [];
 
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
@@ -386,10 +388,8 @@ export class AgentSession {
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionContext["mode"] = "print";
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
-	private _extensionAbortHandler?: () => void;
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
-	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRegistry: ModelRegistry;
 
@@ -397,6 +397,12 @@ export class AgentSession {
 	 * owns the base/wrapped tool definitions, the live tool registry, and the per-tool prompt
 	 * snippet/guideline maps. The reload snapshot spans host/agent state reached through its deps. */
 	private readonly _runtimeBuilder: RuntimeBuilder;
+
+	/** Extension⇄session binding boundary (see extension-binding-controller.ts): `bindExtensions()`,
+	 * extension resource discovery, and `bindExtensionCore`'s translation of session identity into
+	 * the ExtensionRunner's core API. Owns the abort-handler/error-unsubscriber fields no other
+	 * collaborator reads. */
+	private readonly _extensionBinding: ExtensionBindingController;
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn.
 	// The paired _baseSystemPromptOptions and their construction live in SystemPromptBuilder.
@@ -737,6 +743,7 @@ export class AgentSession {
 			compaction: this._compaction,
 			context: providerRequestContext,
 			admitGoalRequest: () => this._goals.admitProviderRequest(),
+			shouldStopGoalExecutionAfterTurn: () => this._goals.hasExecutionLeaseCrossedBudgetLimit(),
 		});
 		this._toolRecoveryLogger = new ToolRecoveryLogger({
 			enabled: toolRepairSettings.logging,
@@ -890,15 +897,18 @@ export class AgentSession {
 				this._unboundToolGrantWarnings = warnings;
 			},
 			getUnboundToolGrantWarnings: () => this._unboundToolGrantWarnings,
+			setDelegatePromptGuidelineWarnings: (warnings) => {
+				this._delegatePromptGuidelineWarnings = warnings;
+			},
 			createProfileFilterReloadSnapshot: () => this._profileFilter.createReloadSnapshot(),
 			restoreProfileFilterReloadSnapshot: (snapshot) => this._profileFilter.restoreReloadSnapshot(snapshot),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			setActiveToolsByName: (toolNames) => this.setActiveToolsByName(toolNames),
 			normalizePromptSnippet: (text) => this._normalizePromptSnippet(text),
 			normalizePromptGuidelines: (guidelines) => this._normalizePromptGuidelines(guidelines),
-			bindExtensionCore: (runner) => this._bindExtensionCore(runner),
-			applyExtensionBindings: (runner) => this._applyExtensionBindings(runner),
-			extendResourcesFromExtensions: (reason) => this.extendResourcesFromExtensions(reason),
+			bindExtensionCore: (runner) => this._extensionBinding.bindExtensionCore(runner),
+			applyExtensionBindings: (runner) => this._extensionBinding.applyExtensionBindings(runner),
+			extendResourcesFromExtensions: (reason) => this._extensionBinding.extendResourcesFromExtensions(reason),
 			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
@@ -939,6 +949,67 @@ export class AgentSession {
 			// Stop any pi-spawned local runtime the just-committed reload no longer routes to.
 			reconcileLocalRuntimes: () => {
 				this._localRuntimeController.reconcile(this._collectEligibleLocalModelsForReconcile());
+			},
+		});
+		this._extensionBinding = new ExtensionBindingController({
+			getAgent: () => this.agent,
+			getExtensionRunner: () => this._extensionRunner,
+			getSessionStartEvent: () => this._sessionStartEvent,
+			getCwd: () => this._cwd,
+			getResourceLoader: () => this._resourceLoader,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getModelRegistry: () => this._modelRegistry,
+			getModel: () => this.model,
+			getActiveToolNames: () => this.getActiveToolNames(),
+			getAllTools: () => this.getAllTools(),
+			setActiveToolsByName: (toolNames) => this.setActiveToolsByName(toolNames),
+			refreshToolRegistry: () => this._refreshToolRegistry(),
+			rebuildSystemPrompt: (toolNames) => this._rebuildSystemPrompt(toolNames),
+			setBaseSystemPrompt: (prompt) => {
+				this._baseSystemPrompt = prompt;
+			},
+			getPromptTemplates: () => this.promptTemplates,
+			getThinkingLevel: () => this.thinkingLevel,
+			setThinkingLevel: (level) => this.setThinkingLevel(level),
+			setModel: (model) => this.setModel(model),
+			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
+			sendUserMessage: (content, options) => this.sendUserMessage(content, options),
+			setSessionName: (name) => this.setSessionName(name),
+			registerMemoryProvider: (provider) => this.registerMemoryProvider(provider),
+			registerContextMemoryProvider: (provider) => this.registerContextMemoryProvider(provider),
+			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
+			recordManagedLane: (event) => this._backgroundLanes.recordManagedLane(event),
+			isForegroundBusy: () => this._foregroundRecovery.isBusy,
+			getPendingMessageCount: () => this.pendingMessageCount,
+			isStreaming: () => this.isStreaming,
+			isCompacting: () => this.isCompacting,
+			getContextUsage: () => this.getContextUsage(),
+			compactForExtension: (options) => this.compactForExtension(options),
+			reload: () => this.reload(),
+			abort: () => this.abort(),
+			getSystemPrompt: () => this.systemPrompt,
+			getExtensionCommandContextActions: () => this._extensionCommandContextActions,
+			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
+			initializeMemory: () => this._memory.initialize(),
+			getExtensionUIContext: () => this._extensionUIContext,
+			setExtensionUIContext: (uiContext) => {
+				this._extensionUIContext = uiContext;
+			},
+			getExtensionMode: () => this._extensionMode,
+			setExtensionMode: (mode) => {
+				this._extensionMode = mode;
+			},
+			setExtensionCommandContextActions: (actions) => {
+				this._extensionCommandContextActions = actions;
+			},
+			getExtensionShutdownHandler: () => this._extensionShutdownHandler,
+			setExtensionShutdownHandler: (handler) => {
+				this._extensionShutdownHandler = handler;
+			},
+			getExtensionErrorListener: () => this._extensionErrorListener,
+			setExtensionErrorListener: (listener) => {
+				this._extensionErrorListener = listener;
 			},
 		});
 		this._analytics = new SessionAnalytics({
@@ -1515,6 +1586,7 @@ export class AgentSession {
 				...this._profileFilter.profileDeniedResourceObservations(),
 				...this._profileFilter.getInertExtensionWarnings(),
 				...this._unboundToolGrantWarnings,
+				...this._delegatePromptGuidelineWarnings,
 				// Auto-built per-turn foreground envelope (observe-only; not enforced). Falls back to a
 				// live preview when no turn has run yet so /context always shows the current scope.
 				formatForegroundEnvelopeObservation(
@@ -1840,7 +1912,7 @@ export class AgentSession {
 				if (messagePersisted) {
 					this._pipeline.observeProviderUsage(this.agent.state.messages, assistantMsg);
 				}
-				if (assistantMsg.errorMessage?.startsWith("native_tool_protocol_residue:")) {
+				if (assistantMsg.errorMessage?.startsWith(`${NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR}:`)) {
 					this._goals.markProtocolFailureBlocked(assistantMsg.errorMessage);
 				}
 				this._foregroundRecovery.observeAssistant(assistantMsg);
@@ -3279,95 +3351,9 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
+	/** Public entry point delegating to {@link ExtensionBindingController.bindExtensions}. */
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
-		if (bindings.uiContext !== undefined) {
-			this._extensionUIContext = bindings.uiContext;
-		}
-		if (bindings.mode !== undefined) {
-			this._extensionMode = bindings.mode;
-		}
-		if (bindings.commandContextActions !== undefined) {
-			this._extensionCommandContextActions = bindings.commandContextActions;
-		}
-		if (bindings.abortHandler !== undefined) {
-			this._extensionAbortHandler = bindings.abortHandler;
-		}
-		if (bindings.shutdownHandler !== undefined) {
-			this._extensionShutdownHandler = bindings.shutdownHandler;
-		}
-		if (bindings.onError !== undefined) {
-			this._extensionErrorListener = bindings.onError;
-		}
-
-		this._applyExtensionBindings(this._extensionRunner);
-		await this._extensionRunner.emit(this._sessionStartEvent);
-		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
-		// Initialize the memory subsystem after extensions have had a chance to register providers.
-		await this._memory.initialize();
-	}
-
-	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
-		if (!this._extensionRunner.hasHandlers("resources_discover")) {
-			return;
-		}
-
-		const { skillPaths, promptPaths, themePaths } = await this._extensionRunner.emitResourcesDiscover(
-			this._cwd,
-			reason,
-		);
-
-		if (skillPaths.length === 0 && promptPaths.length === 0 && themePaths.length === 0) {
-			return;
-		}
-
-		const extensionPaths: ResourceExtensionPaths = {
-			skillPaths: this.buildExtensionResourcePaths(skillPaths),
-			promptPaths: this.buildExtensionResourcePaths(promptPaths),
-			themePaths: this.buildExtensionResourcePaths(themePaths),
-		};
-
-		this._resourceLoader.extendResources(extensionPaths);
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
-	}
-
-	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
-		path: string;
-		metadata: { source: string; scope: "temporary"; origin: "top-level"; baseDir?: string };
-	}> {
-		return entries.map((entry) => {
-			const source = this.getExtensionSourceLabel(entry.extensionPath);
-			const baseDir = entry.extensionPath.startsWith("<") ? undefined : dirname(entry.extensionPath);
-			return {
-				path: entry.path,
-				metadata: {
-					source,
-					scope: "temporary",
-					origin: "top-level",
-					baseDir,
-				},
-			};
-		});
-	}
-
-	private getExtensionSourceLabel(extensionPath: string): string {
-		if (extensionPath.startsWith("<")) {
-			return `extension:${extensionPath.replace(/[<>]/g, "")}`;
-		}
-		const base = basename(extensionPath);
-		const name = base.replace(/\.(ts|js)$/, "");
-		return `extension:${name}`;
-	}
-
-	private _applyExtensionBindings(runner: ExtensionRunner): void {
-		runner.setUIContext(this._extensionUIContext);
-		runner.setMode(this._extensionMode);
-		runner.bindCommandContext(this._extensionCommandContextActions);
-
-		this._extensionErrorUnsubscriber?.();
-		this._extensionErrorUnsubscriber = this._extensionErrorListener
-			? runner.onError(this._extensionErrorListener)
-			: undefined;
+		return this._extensionBinding.bindExtensions(bindings);
 	}
 
 	private _refreshCurrentModelFromRegistry(): void {
@@ -3382,139 +3368,6 @@ export class AgentSession {
 		}
 
 		this.agent.state.model = refreshedModel;
-	}
-
-	private _bindExtensionCore(runner: ExtensionRunner): void {
-		const getCommands = (): SlashCommandInfo[] => {
-			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
-				name: command.invocationName,
-				description: command.description,
-				source: "extension",
-				sourceInfo: command.sourceInfo,
-			}));
-
-			const templates: SlashCommandInfo[] = this.promptTemplates.map((template) => ({
-				name: template.name,
-				description: template.description,
-				source: "prompt",
-				sourceInfo: template.sourceInfo,
-			}));
-
-			const skills: SlashCommandInfo[] = this._resourceLoader.getActiveSkills().map((skill) => ({
-				name: `skill:${skill.name}`,
-				description: skill.description,
-				source: "skill",
-				sourceInfo: skill.sourceInfo,
-			}));
-
-			return [...extensionCommands, ...templates, ...skills];
-		};
-
-		runner.bindCore(
-			{
-				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				sendUserMessage: (content, options) => {
-					this.sendUserMessage(content, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_user_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				appendEntry: (customType, data) => {
-					this.sessionManager.appendCustomEntry(customType, data);
-				},
-				setSessionName: (name) => {
-					this.setSessionName(name);
-				},
-				getSessionName: () => {
-					return this.sessionManager.getSessionName();
-				},
-				setLabel: (entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
-				},
-				getActiveTools: () => this.getActiveToolNames(),
-				getAllTools: () => this.getAllTools(),
-				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
-				refreshTools: () => this._refreshToolRegistry(),
-				getCommands,
-				setModel: async (model) => {
-					if (!this.modelRegistry.hasConfiguredAuth(model)) return false;
-					await this.setModel(model);
-					return true;
-				},
-				getThinkingLevel: () => this.thinkingLevel,
-				setThinkingLevel: (level) => this.setThinkingLevel(level),
-				getExternalResourceRoots: () => this.settingsManager.getEffectiveExternalResourceRoots(),
-				registerMemoryProvider: (provider) => this.registerMemoryProvider(provider),
-				registerContextMemoryProvider: (provider) => this.registerContextMemoryProvider(provider),
-				reportSpawnedUsage: (usage, opts) => {
-					this.addSpawnedUsage(usage, opts);
-				},
-				reportManagedLane: (event) => {
-					this._backgroundLanes.recordManagedLane(event);
-				},
-			},
-			{
-				getModel: () => this.model,
-				isIdle: () => !this._foregroundRecovery.isBusy,
-				getSignal: () => this.agent.signal,
-				abort: () => {
-					if (this._extensionAbortHandler) {
-						this._extensionAbortHandler();
-						return;
-					}
-					void this.abort();
-				},
-				hasPendingMessages: () => this.pendingMessageCount > 0,
-				shutdown: () => {
-					this._extensionShutdownHandler?.();
-				},
-				getContextUsage: () => this.getContextUsage(),
-				compact: (options) => this.compactForExtension(options),
-				reload: () => {
-					if (this.isStreaming) {
-						return Promise.reject(
-							new Error(
-								"ctx.reload() cannot run while the agent is streaming or a tool call is active. Wait for ctx.isIdle(), queue a follow-up /reload, or use an idle command/event handler so hot reload cannot destabilize the UI.",
-							),
-						);
-					}
-					if (this.isCompacting) {
-						return Promise.reject(
-							new Error(
-								"ctx.reload() cannot run during context compaction or branch summarization. Let compaction finish before reloading so the session tree and UI remain stable.",
-							),
-						);
-					}
-					const actions = this._extensionCommandContextActions;
-					if (!actions) {
-						return this.reload();
-					}
-					return actions.reload();
-				},
-				getSystemPrompt: () => this.systemPrompt,
-			},
-			{
-				registerProvider: (name, config) => {
-					this._modelRegistry.registerProvider(name, config);
-					this._refreshCurrentModelFromRegistry();
-				},
-				unregisterProvider: (name) => {
-					this._modelRegistry.unregisterProvider(name);
-					this._refreshCurrentModelFromRegistry();
-				},
-			},
-		);
 	}
 
 	/** Register a memory provider contributed by an extension; applied on the next memory (re)init. */

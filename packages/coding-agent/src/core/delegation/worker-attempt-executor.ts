@@ -98,7 +98,7 @@ export async function runProviderCompletionWithBackoff(args: {
 			});
 			if (!classified.retryable || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) {
 				const message = error instanceof Error ? error.message : String(error);
-				throw new BoundedCompletionFailureError("failed", "completion_error", message);
+				throw new BoundedCompletionFailureError("failed", "completion_error", message, error);
 			}
 			const delayMs = computeRetryDelayMs(WORKER_PROVIDER_RETRY_POLICY, attempt, {
 				...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),

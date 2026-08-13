@@ -1540,7 +1540,9 @@ describe("AgentSession worker delegation", () => {
 			const serialized = JSON.stringify(harness.session.messages);
 			expect(serialized).toContain("Background worker terminal handoff:");
 			expect(serialized).toContain("Background handoff acknowledged.");
-			expect(serialized).not.toContain("background result arrived");
+			// Terminal handoffs are deliberately hydrated with the worker's claim (commit 78a2158dd,
+			// "hydrate handoffs with claims"): the raw summary is expected content now, not a leak.
+			expect(serialized).toContain("Claim Summary: background result arrived");
 		} finally {
 			unsubscribe();
 			if (!workerResolved) resolveWorker(fauxAssistantMessage('{"summary":"test cleanup"}'));

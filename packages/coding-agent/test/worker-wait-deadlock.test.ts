@@ -113,21 +113,41 @@ describe("worker wait deadlock prevention", () => {
 		).rejects.toThrow("cannot wait for itself");
 	});
 
-	it("yields the caller before checking a queued target blocked by its write reservation", async () => {
+	it("evaluates the deadlock condition before yielding, so a genuinely blocked target rejects and never yields", async () => {
+		// Root-cause regression: yieldCallerForWait releases the caller's write reservation
+		// (WorkerWriteReservationCoordinator.forgetLease), which erases the exact
+		// blockedByLocalLaneIds entries waitBlockedByCaller inspects. Checking after yielding
+		// always finds nothing blocked (the block was just released), so the deadlock guard could
+		// never fire. The check must run on the PRE-yield state, before any yielding happens.
 		vi.useFakeTimers();
 		try {
-			let blocked = true;
-			const waitBlockedByCaller = vi.fn(() => (blocked ? ["child"] : []));
+			const waitBlockedByCaller = vi.fn(() => ["child"]);
 			const restore = vi.fn(() => true);
-			const yieldCallerForWait = vi.fn(() => {
-				blocked = false;
-				return restore;
-			});
+			const yieldCallerForWait = vi.fn(() => restore);
 			const coordinator = waitCoordinator(waitBlockedByCaller, yieldCallerForWait);
 
 			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
-			expect(yieldCallerForWait).toHaveBeenCalledWith("caller");
+
 			expect(waitBlockedByCaller).toHaveBeenCalledWith("caller", ["child"]);
+			expect(yieldCallerForWait).not.toHaveBeenCalled();
+			await expect(waiting).rejects.toThrow("Worker wait would deadlock");
+			expect(restore).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("yields and waits normally once the pre-yield deadlock check finds no blocked target", async () => {
+		vi.useFakeTimers();
+		try {
+			const waitBlockedByCaller = vi.fn(() => []);
+			const restore = vi.fn(() => true);
+			const yieldCallerForWait = vi.fn(() => restore);
+			const coordinator = waitCoordinator(waitBlockedByCaller, yieldCallerForWait);
+
+			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
+			expect(waitBlockedByCaller).toHaveBeenCalledWith("caller", ["child"]);
+			expect(yieldCallerForWait).toHaveBeenCalledWith("caller");
 			await vi.advanceTimersByTimeAsync(1);
 
 			await expect(waiting).resolves.toMatchObject({ timedOut: true });
@@ -155,6 +175,61 @@ describe("worker wait deadlock prevention", () => {
 			coordinator.signalStateChanged();
 			await expect(waiting).resolves.toMatchObject({ timedOut: true });
 			expect(restore).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("settles a timed-out wait from its own bounded retry alone, with zero signalStateChanged events", async () => {
+		// Root-cause regression for the hang: subscribeStateChanges is not a guaranteed wakeup for a
+		// write-reservation release (a separate subsystem), so a wait stuck on a blocked restore must
+		// still resolve on its own bounded retry poll — never relying on an external event that may
+		// never arrive.
+		vi.useFakeTimers();
+		try {
+			const restore = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(true);
+			const coordinator = waitCoordinator(undefined, () => restore);
+			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
+
+			// The wait's own 1ms timeout fires and hits the first blocked restore.
+			await vi.advanceTimersByTimeAsync(1);
+			expect(restore).toHaveBeenCalledOnce();
+
+			// No signalStateChanged() anywhere in this test: only the bounded retry poll can drive
+			// this forward. Two retry intervals cover the two remaining mocked restore attempts.
+			await vi.advanceTimersByTimeAsync(2_000);
+
+			await expect(waiting).resolves.toMatchObject({ timedOut: true });
+			expect(restore).toHaveBeenCalledTimes(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("rejects instead of hanging forever when a blocked restore never clears within its retry bound", async () => {
+		vi.useFakeTimers();
+		try {
+			const restore = vi.fn(() => false); // never restores
+			const coordinator = waitCoordinator(undefined, () => restore);
+			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
+			let settledState: "pending" | "resolved" | "rejected" = "pending";
+			void waiting.then(
+				() => {
+					settledState = "resolved";
+				},
+				() => {
+					settledState = "rejected";
+				},
+			);
+
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settledState).toBe("pending");
+
+			// Well past the retry bound; still no signalStateChanged() call anywhere.
+			await vi.advanceTimersByTimeAsync(310_000);
+
+			expect(settledState).toBe("rejected");
+			await expect(waiting).rejects.toThrow(/could not restore the caller's write reservation/);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -257,6 +332,52 @@ describe("worker wait deadlock prevention", () => {
 		});
 		coordinator.release("caller-task");
 		coordinator.dispose();
+	});
+
+	it("releases every held lease on dispose() instead of only forgetting them in memory", () => {
+		// Root-cause regression: dispose() dropped this coordinator's in-memory `leases` map without
+		// ever releasing the underlying durable reservations -- a competitor blocked by one of them
+		// stayed blocked forever (until an unrelated recoverProvenStale() pass eventually proved the
+		// owner dead), even though this process had already explicitly disposed the coordinator.
+		const root = mkdtempSync(join(tmpdir(), "pi-worker-wait-reservation-dispose-"));
+		temporaryDirectories.push(root);
+		const workspace = join(root, "workspace");
+		const source = join(workspace, "src");
+		mkdirSync(source, { recursive: true });
+		const agentDir = join(root, "agent");
+		const coordinator = new WorkerWriteReservationCoordinator({
+			agentDir,
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-reservation-dispose",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: vi.fn(),
+			warn: vi.fn(),
+		});
+		const plan = { writeEnabled: true, writePaths: [source] };
+
+		expect(coordinator.acquire("caller-task", { attemptId: "caller-attempt" }, plan)).toEqual({
+			kind: "granted",
+		});
+		expect(coordinator.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan)).toEqual({
+			kind: "blocked",
+		});
+
+		coordinator.dispose();
+
+		// A fresh coordinator instance (simulating the durable store surviving a process restart)
+		// must see the reservation as released, not still held by the disposed owner.
+		const afterDispose = new WorkerWriteReservationCoordinator({
+			agentDir,
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-reservation-dispose",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: vi.fn(),
+			warn: vi.fn(),
+		});
+		expect(afterDispose.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan)).toEqual({
+			kind: "granted",
+		});
+		afterDispose.dispose();
 	});
 
 	it("maps logical wait targets to the exact blocked task lanes", () => {

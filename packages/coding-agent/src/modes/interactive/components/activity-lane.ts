@@ -1,7 +1,7 @@
 import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
-import { type GoalState, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
 import type { TaskStep, TaskStepsState } from "../../../core/tasks/task-state.ts";
 import type { Theme, ThemeColor } from "../theme/theme.ts";
 
@@ -104,14 +104,15 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 	const satisfied = state.requirements.filter((requirement) => requirement.status === "satisfied").length;
 	const progress = state.requirements.length > 0 ? ` ${satisfied}/${state.requirements.length}` : "";
 	if (isGoalUnfinishedStatus(state.status)) {
-		const stopped = state.status === "active" ? "" : ` ${state.status.replace("_", " ")}`;
+		const goalActive = isGoalExecutionActive(state.status);
+		const stopped = goalActive ? "" : ` ${state.status.replace("_", " ")}`;
 		return {
 			active: [
 				{
 					id: `goal:${state.goalId}`,
 					kind: "goal",
 					label: boundedLabel(`Goal${stopped}${progress} · ${state.userGoal}`),
-					status: state.status === "active" ? "active" : "waiting",
+					status: goalActive ? "active" : "waiting",
 				},
 			],
 			terminal: [],

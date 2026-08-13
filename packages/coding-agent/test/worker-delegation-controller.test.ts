@@ -108,6 +108,47 @@ describe("WorkerDelegationController integration invariants", () => {
 		expect(Reflect.get(controller, "yieldedWriteReservations")).toEqual(new Map());
 	});
 
+	it("releases the caller's yield bookkeeping even when its write reservation restore is denied", () => {
+		// Root-cause regression: a "denied" restore used to throw before ever reaching the
+		// yieldedCapacityAttemptIds/yieldedWriteReservations cleanup, leaving a permanent stale
+		// entry that over-counts virtual headroom in hasWorkerCapacity() for the rest of the
+		// attempt's life -- silently admitting maxConcurrent+1 workers.
+		const yieldedReservation = { laneId: "caller-task", lease: { attemptId: "attempt-caller" } };
+		const yieldForWait = vi.fn(() => yieldedReservation);
+		const restoreAfterWait = vi.fn(() => ({ kind: "denied", reasonCode: "write_reservation_unavailable" }));
+		const abort = vi.fn();
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			deps: { isDisposed: () => false },
+			lifecycle: {
+				getAgent: () => ({ agentId: "caller", rootAgentId: "root" }),
+				getLatestAgentAttempt: () => ({
+					attemptId: "attempt-caller",
+					taskId: "caller-task",
+					status: "running",
+					lease: { fencingToken: 7 },
+				}),
+			},
+			scheduler: { drain: vi.fn() },
+			laneAbortControllers: new Map([["caller-task", { abort }]]),
+			yieldedCapacityAttemptIds: new Map<string, number>(),
+			yieldedWriteReservations: new Map(),
+			writeReservations: { yieldForWait, restoreAfterWait },
+		}) as unknown as WorkerDelegationController;
+		const yieldCaller = Reflect.get(controller, "yieldWorkerForWait") as (callerAgentId: string) => () => boolean;
+
+		const restore = yieldCaller.call(controller, "caller");
+		expect(Reflect.get(controller, "yieldedCapacityAttemptIds")).toEqual(new Map([["attempt-caller", 1]]));
+
+		expect(() => restore()).toThrow("Worker wait could not restore its write reservation");
+		expect(abort).toHaveBeenCalledWith("write_reservation_unavailable");
+		expect(Reflect.get(controller, "yieldedCapacityAttemptIds")).toEqual(new Map());
+		expect(Reflect.get(controller, "yieldedWriteReservations")).toEqual(new Map());
+
+		// Idempotent: calling the same restore closure again must not re-throw or re-abort.
+		expect(restore()).toBe(true);
+		expect(abort).toHaveBeenCalledOnce();
+	});
+
 	it("bounds mandatory-verifier instructions while retaining omission disclosure", () => {
 		const controller = Object.create(WorkerDelegationController.prototype) as WorkerDelegationController;
 		const buildVerifierRequest = Reflect.get(controller, "buildVerifierRequest") as (args: {

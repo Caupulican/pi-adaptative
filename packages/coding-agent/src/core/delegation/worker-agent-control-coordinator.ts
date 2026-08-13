@@ -78,6 +78,22 @@ type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
 
 const MAX_BROADCAST_ERROR_CHARS = 512;
 
+/**
+ * Poll interval for retrying a blocked write-reservation restore inside waitForWorkerAgents. A
+ * blocked restore means another lane still holds the caller's write reservation; subscribeStateChanges
+ * is not a guaranteed wakeup for its release, so this bounded poll is what keeps the wait from
+ * hanging past its own deadline.
+ */
+const WORKER_WAIT_RESTORE_RETRY_MS = 1_000;
+/**
+ * Independent bound on how long a blocked restore keeps retrying, deliberately NOT derived from the
+ * caller's own (possibly very short, e.g. test-only 1ms) wait timeoutMs: the original wait already
+ * finished (satisfied or timed out) by the time restoration starts retrying, so this is a separate
+ * concern with its own budget. Mirrors the documented 300s absolute ceiling used elsewhere in this
+ * method.
+ */
+const WORKER_WAIT_RESTORE_MAX_MS = 300_000;
+
 export function buildWorkerTerminalHandoffContent(args: {
 	childAgentId: string;
 	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode">;
@@ -1226,9 +1242,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			let restoreYield: (() => boolean | undefined) | undefined;
 			let unsubscribeState = (): void => undefined;
 			let timeout: ReturnType<typeof setTimeout> | undefined;
+			// A blocked restore (another lane still holds the caller's write reservation) is a
+			// live-lock, not a terminal failure or success — subscribeStateChanges is not a
+			// guaranteed wakeup for it (a reservation release is a separate subsystem and may never
+			// fire that event), so this promise must not depend on it alone to ever settle again.
+			let restoreRetryTimer: ReturnType<typeof setTimeout> | undefined;
+			let restoreRetryDeadline: number | undefined;
 			const cleanup = () => {
 				unsubscribeState();
 				if (timeout) clearTimeout(timeout);
+				if (restoreRetryTimer) clearTimeout(restoreRetryTimer);
 			};
 			const restoreCaller = (): boolean => {
 				if (!restoreYield) return true;
@@ -1250,7 +1273,24 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					}
 				}
 				try {
-					if (!restoreCaller()) return;
+					if (!restoreCaller()) {
+						// Bounded retry of this same idempotent settle() path — never a second
+						// consumer, never a second restore attempt in flight at once (any earlier
+						// retry timer is always cleared before a new one is scheduled).
+						restoreRetryDeadline ??= Date.now() + WORKER_WAIT_RESTORE_MAX_MS;
+						if (Date.now() < restoreRetryDeadline) {
+							if (restoreRetryTimer) clearTimeout(restoreRetryTimer);
+							restoreRetryTimer = setTimeout(settle, WORKER_WAIT_RESTORE_RETRY_MS);
+							if (typeof restoreRetryTimer === "object" && "unref" in restoreRetryTimer) {
+								restoreRetryTimer.unref();
+							}
+							return;
+						}
+						failure = new Error(
+							"Worker wait completed but could not restore the caller's write reservation within the retry bound; another lane continues to hold it.",
+						);
+						hasFailure = true;
+					}
 				} catch (error) {
 					failure = error;
 					hasFailure = true;
@@ -1269,10 +1309,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			}, boundedTimeoutMs);
 			if (typeof timeout === "object" && "unref" in timeout) timeout.unref();
 			try {
-				if (callerAgentId && this.options.yieldCallerForWait) {
-					restoreYield = this.options.yieldCallerForWait(callerAgentId);
-				}
-				yieldInitialized = true;
+				// The deadlock check must run BEFORE yieldCallerForWait, not after: yielding releases
+				// the caller's write reservation (WorkerWriteReservationCoordinator.forgetLease), which
+				// erases the exact blockedByLocalLaneIds entries this check inspects. Checking after
+				// yielding always finds nothing blocked (the block was just released), so the intended
+				// "Worker wait would deadlock" rejection could never fire.
 				if (callerAgentId) {
 					const statuses = currentStatuses();
 					const activeAgentIds = new Set(
@@ -1287,10 +1328,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					if (blockedAgentIds.length > 0) {
 						hasFailure = true;
 						failure = new Error(
-							`Worker wait would deadlock: ${blockedAgentIds.join(", ")} ${blockedAgentIds.length === 1 ? "is" : "are"} blocked by the caller's write reservation after caller resources were yielded.`,
+							`Worker wait would deadlock: ${blockedAgentIds.join(", ")} ${blockedAgentIds.length === 1 ? "is" : "are"} blocked by the caller's write reservation.`,
 						);
 					}
 				}
+				if (!hasFailure && callerAgentId && this.options.yieldCallerForWait) {
+					restoreYield = this.options.yieldCallerForWait(callerAgentId);
+				}
+				yieldInitialized = true;
 			} catch (error) {
 				yieldInitialized = true;
 				hasFailure = true;

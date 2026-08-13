@@ -197,17 +197,9 @@ describe("delegate tool description varies by wiring mode", () => {
 			.filter((content) => content.type === "text")
 			.map((content) => content.text)
 			.join("\n");
-		expect(text).toContain(
-			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff",
+		expect(text).toBe(
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages\nCAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or safety reservations clear. Never poll, interrupt, or cancel a healthy running worker to force the queue. For genuine parallel read-only work, start a fresh worker whose authority.toolNames omits write and edit; write-capable workers may serialize. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.",
 		);
-		expect(text).toContain("CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state");
-		expect(text).toContain("not stall or harness failure");
-		expect(text).toContain("Never poll, interrupt, or cancel a healthy running worker to force the queue");
-		expect(text).toContain("authority.toolNames omits write and edit");
-		expect(text).toContain(
-			"If you start a fresh narrower replacement, cancel this queued agent after the replacement starts",
-		);
-		expect(text).toContain("otherwise both tasks will run");
 		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
 	});
 

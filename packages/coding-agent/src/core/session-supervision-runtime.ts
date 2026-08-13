@@ -1,5 +1,6 @@
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeResource } from "./agent-session-runtime.ts";
+import { isGoalExecutionActive } from "./goals/goal-state.ts";
 import { createAgentIdentity } from "./orchestration/agent-resume.ts";
 import type { ResumablePayload } from "./process-matrix/codes.ts";
 import {
@@ -108,7 +109,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					agent,
 					...(taskRef ? { taskRef } : {}),
 					taskSummary: goal?.userGoal,
-					allowAutomaticRecovery: goal === undefined || goal.status === "active",
+					allowAutomaticRecovery: goal === undefined || isGoalExecutionActive(goal.status),
 					resumeWorker: (payload) => this.options.resumeWorker(payload, sessionId),
 					hasUI: this.options.hasUI,
 					settings: session.settingsManager.getProcessMatrixSettings(),

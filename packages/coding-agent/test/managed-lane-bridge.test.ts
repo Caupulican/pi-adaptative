@@ -696,11 +696,14 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 describe("mapManagedLaneTerminalStatus", () => {
 	it("maps LaneTracker terminal statuses onto the WorkerClaim status vocabulary", () => {
 		expect(mapManagedLaneTerminalStatus("succeeded")).toBe("completed");
-		expect(mapManagedLaneTerminalStatus("partial")).toBe("completed");
+		// partial and budget_exhausted both deliberately map to "partial" (commit 78a2158dd,
+		// "unblock partial DAGs"): folding either into "completed"/"failed" was itself the
+		// partial-reported-as-done masking bug that shipped in v0.90.3-v0.90.7.
+		expect(mapManagedLaneTerminalStatus("partial")).toBe("partial");
+		expect(mapManagedLaneTerminalStatus("budget_exhausted")).toBe("partial");
 		expect(mapManagedLaneTerminalStatus("blocked")).toBe("blocked");
 		expect(mapManagedLaneTerminalStatus("canceled")).toBe("cancelled");
 		expect(mapManagedLaneTerminalStatus("failed")).toBe("failed");
 		expect(mapManagedLaneTerminalStatus("timeout")).toBe("failed");
-		expect(mapManagedLaneTerminalStatus("budget_exhausted")).toBe("failed");
 	});
 });

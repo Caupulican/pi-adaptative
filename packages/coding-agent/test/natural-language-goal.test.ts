@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseExplicitChatGoal, parseExplicitGoalStartAuthority } from "../src/core/goals/natural-language-goal.ts";
+import {
+	GoalTokenBudgetParseError,
+	parseExplicitChatGoal,
+	parseExplicitGoalStartAuthority,
+	parseRequestedTokenBudget,
+} from "../src/core/goals/natural-language-goal.ts";
 
 describe("natural-language persistent goal admission", () => {
 	it.each([
@@ -51,6 +56,37 @@ describe("natural-language persistent goal admission", () => {
 		expect(parseExplicitGoalStartAuthority("Investigate and fix the bug")).toBeUndefined();
 		expect(parseExplicitChatGoal("Set a persistent goal: process 40k tokens of archived logs.")).toEqual({
 			objective: "process 40k tokens of archived logs.",
+		});
+	});
+
+	it.each([
+		["Token budget of 5 million.", 5_000_000],
+		["Token budget of 2 M.", 2_000_000],
+		["Token budget of 500 k.", 500_000],
+		["Token budget of 1.000.000.", 1_000_000],
+	])("parses %s into an exact token ceiling instead of the truncated legacy result", (text, expected) => {
+		// Previously: the unit suffix regex was glued to the digits with no whitespace and only knew
+		// single letters k/m, so "5 million." parsed as 5, "2 M." as 2, "500 k." as 500, and the dotted
+		// thousands separator "1.000.000" produced NaN (silently unbounded, undefined).
+		expect(parseRequestedTokenBudget(text)).toBe(expected);
+	});
+
+	it("fails closed instead of silently going unbounded when a token budget is clearly stated but unparseable", () => {
+		expect(() => parseRequestedTokenBudget("Token budget of 12,34,567.")).toThrow(GoalTokenBudgetParseError);
+	});
+
+	it("scopes token-budget parsing to text outside the captured objective, never the objective's own subject matter", () => {
+		// The objective describes raising a CODE constant named "token budget" from 4096 to 8192; that
+		// is the task's subject matter, not a directive about the agent's own execution ceiling, so no
+		// tokenBudget must be adopted from it.
+		expect(parseExplicitChatGoal("Set a goal: raise the model token budget of 4096 in config.ts to 8192")).toEqual({
+			objective: "raise the model token budget of 4096 in config.ts to 8192",
+		});
+		// A budget phrase that is the objective's own TRAILING clause (nothing else follows it) is
+		// still a real directive and must keep working (regression guard for the case above).
+		expect(parseExplicitChatGoal("Set a persistent goal: fix the harness with a 40k token budget.")).toEqual({
+			objective: "fix the harness with a 40k token budget.",
+			tokenBudget: 40_000,
 		});
 	});
 });

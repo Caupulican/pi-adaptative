@@ -15,11 +15,14 @@ export function isManagedWorkerAttempt(attempt: AttemptRuntimeState): boolean {
 function terminalStatus(attempt: AttemptRuntimeState): LaneTerminalStatus {
 	if (attempt.status === "completed") return "succeeded";
 	if (attempt.status === "cancelled") return "canceled";
-	if (attempt.result?.status === "partial") return "partial";
-	if (attempt.result?.status === "blocked") return "blocked";
+	// Budget/timeout reasonCodes take priority over the claim-level result.status: a worker can
+	// finish its claim as "partial" (or "blocked") on the same attempt where it also blew the cost
+	// or wall-clock budget, and that resource-exhaustion signal must not be shadowed.
 	const reasonCode = attempt.result?.reasonCode ?? attempt.reasonCode ?? "";
 	if (reasonCode.includes("budget")) return "budget_exhausted";
 	if (reasonCode.includes("timeout")) return "timeout";
+	if (attempt.result?.status === "partial") return "partial";
+	if (attempt.result?.status === "blocked") return "blocked";
 	return "failed";
 }
 

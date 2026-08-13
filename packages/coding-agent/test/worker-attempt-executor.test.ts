@@ -501,7 +501,15 @@ describe("worker attempt executor", () => {
 		const result = await harness.executor.run();
 
 		expect(providerRequests).toBe(1);
-		expect(result.rawOutcome).toMatchObject({ accepted: false, claim: { status: "failed" } });
+		// A blocked second request is a budget-exhaustion denial (CapabilityGatewayDeniedError,
+		// status "budget_exhausted"), and worker-runner.ts deliberately projects that as a "partial"
+		// claim, not "failed" (commit 78a2158dd, "unblock partial DAGs") — a budget-exhausted worker
+		// made real progress and should not permanently block DAG dependents like a hard failure would.
+		expect(result.rawOutcome).toMatchObject({
+			accepted: false,
+			reasonCode: "token_budget_exhausted",
+			claim: { status: "partial" },
+		});
 	});
 
 	it("retains provider usage when persisting a tool request fails before tool execution", async () => {

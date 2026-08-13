@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	collectWorkerTreeBudgetSeeds,
 	WorkerTreeBudgetCoordinator,
@@ -178,6 +178,41 @@ describe("WorkerTreeBudgetCoordinator", () => {
 		const weightedReservation = await second.reserveProviderBudget(100, "weighted provider request");
 		expect(weightedReservation.maxTokens).toBe(83);
 		weightedReservation.release();
+	});
+
+	it("re-checks parked waiters after recordAttemptUsage, not only after an explicit release()", async () => {
+		// Root-cause regression: recordAttemptUsage shrinks a reservation (frees tree headroom) the
+		// same way release() does, but only release() used to call drainWaiters() — a waiter parked
+		// on an earlier availableTokens<=0 check stayed parked until some UNRELATED event (a new
+		// reserveProviderBudget call, or a different attempt's release()) happened to re-check it.
+		// This pins the mechanical fix: drainWaiters() must fire from inside recordAttemptUsage too.
+		const drainWaitersSpy = vi.spyOn(
+			WorkerTreeBudgetCoordinator.prototype as unknown as { drainWaiters(...args: unknown[]): void },
+			"drainWaiters",
+		);
+		const coordinator = new WorkerTreeBudgetCoordinator();
+		const port = coordinator.createPort({
+			rootAgentId: "root-recheck",
+			attemptId: "attempt-recheck",
+			budget: { maxTokens: 100 },
+			seeds: [],
+			initialUsage: usage(),
+		});
+		const callsBeforeUsage = drainWaitersSpy.mock.calls.length;
+
+		port.recordAttemptUsage({
+			toolCalls: 0,
+			inputTokens: 10,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			totalTokens: 10,
+			costUsd: 0,
+			wallClockMs: 0,
+		});
+
+		expect(drainWaitersSpy.mock.calls.length).toBeGreaterThan(callsBeforeUsage);
+		drainWaitersSpy.mockRestore();
 	});
 
 	it("rejects a descendant reservation after durable root usage exhausts the tree token budget", async () => {

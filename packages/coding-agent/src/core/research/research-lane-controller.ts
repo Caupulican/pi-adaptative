@@ -14,7 +14,7 @@ import type { LaneTracker } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
-import type { GoalState } from "../goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -265,7 +265,7 @@ export class ResearchLaneController {
 
 	private buildDemand(): { query: string; context: string; goalId: string } | undefined {
 		const goal = this.deps.getGoalStateSnapshot();
-		if (!goal || goal.status !== "active") {
+		if (!goal || !isGoalExecutionActive(goal.status)) {
 			this._lastSkipReason = "no_active_goal";
 			return undefined;
 		}

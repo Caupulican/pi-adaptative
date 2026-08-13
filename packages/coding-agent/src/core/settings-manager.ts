@@ -271,8 +271,13 @@ export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "
 	Pick<ResearchLaneSettings, "model" | "profile" | "systemPrompt">;
 
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
-export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;
-export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
+// Restored (1b1afb16f zeroed these to stop trees hard-failing on an implicit ceiling; that was a
+// workaround for the ungraceful termination, not evidence the $0.50/120s values themselves were
+// wrong — 78a2158dd fixed the real cause by making budget exhaustion a "partial" claim requiring
+// review instead of a hard failure, so the default ceiling is now safe to restore. Unbounded stays
+// available as an explicit owner opt-in: set workerDelegation.maxUsd/maxWallClockMs to 0.
+export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
+export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 120_000;
 export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 20;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_WRITE_PATHS = ["."] as const;
@@ -283,8 +288,8 @@ export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
 	orchestrationProfile?: string; // optional execution preset; agents may replace its defaults within inherited authority
-	maxUsd?: number; // default: 0 (unbounded); a positive value sets one settings-level tree ceiling
-	maxWallClockMs?: number; // default: 0 (unbounded); a positive value bounds cumulative active time across one tree
+	maxUsd?: number; // default: 0.50 shared by one recursive agent tree; 0 disables this settings-level ceiling
+	maxWallClockMs?: number; // default: 120000 cumulative active time across one tree; 0 disables the budget
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	writePaths?: string[]; // default: ["."]; explicit empty array revokes direct write/edit tools
 	maxConcurrent?: number; // default: 20; running-worker concurrency; fixed fleet safety ceilings separately bound depth, children, identities, and queued dispatches

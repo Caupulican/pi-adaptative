@@ -25,6 +25,7 @@ import {
 import { createRiskBudgetSchema } from "../orchestration/risk-budget.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { normalizeProviderPromptGuidelines } from "../provider-tool-text.ts";
 import {
 	DELEGATE_STATUS_ACTIONS,
 	type DelegateStatusDependencies,
@@ -378,6 +379,16 @@ export interface DelegateRunOutcome {
 	outcome?: WorkerRunOutcome;
 }
 
+/**
+ * Root of the `modelPinBypass: <role>` evasion diagnostic: reads it off whichever result shape
+ * carried it (the async start() result puts it at the top level; the sync run() result nests it
+ * inside `outcome`, since WorkerRunOutcome is what threads through that path — see
+ * worker-delegation-controller.ts and worker-runner.ts).
+ */
+function modelPinBypassFrom(source: { modelPinBypass?: string; outcome?: WorkerRunOutcome }): string | undefined {
+	return source.modelPinBypass ?? source.outcome?.modelPinBypass;
+}
+
 export interface DelegateDispatchToolDetails {
 	started: boolean;
 	action?: DelegateAction;
@@ -402,6 +413,12 @@ export interface DelegateDispatchToolDetails {
 	broadcastResultsOmitted?: number;
 	timedOut?: boolean;
 	replayed?: boolean;
+	/**
+	 * Set when a pin policy is active, the effective role had no pin, and this delegation requested
+	 * an explicit model — the owner's model pin was evaded, not merely inapplicable. Diagnostics
+	 * only: admission was never blocked on this. Value is the effective role that bypassed the pin.
+	 */
+	modelPinBypass?: string;
 }
 
 type DelegateDispatchDetailProjection = Partial<
@@ -429,7 +446,7 @@ export type DelegateCaller = { kind: "session_root" } | { kind: "worker"; agentI
 export interface DelegateToolDependencies {
 	startWorkerDelegation?: (
 		args: WorkerDelegationRequest,
-	) => { started: false; skipReason: string } | { started: true; record: LaneRecord };
+	) => { started: false; skipReason: string } | { started: true; record: LaneRecord; modelPinBypass?: string };
 	runWorkerDelegation: (args: WorkerDelegationRequest) => Promise<DelegateRunOutcome>;
 	orchestrationProfiles?: readonly { profileId: string; role: string; description: string }[];
 	/** Active owner settings only; omitted/absent preserves the existing lean prompt verbatim. */
@@ -443,6 +460,12 @@ export interface DelegateToolDependencies {
 	caller: DelegateCaller;
 	/** Host-owned durable turn identity used only by actions that can mutate worker mailboxes. */
 	resolveMessageReplayScope?: () => { sessionId: string; branchId: string };
+	/**
+	 * The session's existing warning channel (e.g. WorkerDelegationController.safeWarn), if the
+	 * caller has one wired. Used only to surface prompt-guideline bounding diagnostics (a guideline
+	 * dropped or truncated to fit the provider prompt budget) — never required for correct operation.
+	 */
+	warn?: (message: string) => void;
 }
 
 const DELEGATE_DESCRIPTION_CORE =
@@ -855,6 +878,13 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 				guideline.startsWith("authority selects model/") ? modelPinAuthorityGuideline : guideline,
 			)
 		: basePromptGuidelines;
+	// Mandatory CAVEMAN directives (promptGuidelines) must be ordered before the optional,
+	// owner-catalog-sized profile listing: when the combined list overflows the provider prompt
+	// guidelines budget, normalizeProviderPromptGuidelines drops whichever guideline runs out of
+	// room first, and it must be the optional profile listing, never a MANDATORY directive.
+	const boundedGuidelines = normalizeProviderPromptGuidelines([...promptGuidelines, ...profileGuidelines], (message) =>
+		deps.warn?.(message),
+	);
 	const availableActions = availableDelegateActions(caller, deps);
 	const unifiedActionDescription = [
 		availableActions.includes("status") ? "status inspects bounded claims; review acknowledges mutations" : undefined,
@@ -869,7 +899,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		label: "delegate",
 		description: `${isAsyncWiring ? ASYNC_DELEGATE_DESCRIPTION : SYNCHRONOUS_DELEGATE_DESCRIPTION}${unifiedActionDescription ? ` ${unifiedActionDescription}.` : ""}`,
 		promptSnippet: "Coordinate persistent workers with bounded authority.",
-		promptGuidelines: [...profileGuidelines, ...promptGuidelines],
+		promptGuidelines: boundedGuidelines,
 		parameters: createDelegateSchema(availableActions),
 		renderShell: "self",
 		renderCall() {
@@ -1741,6 +1771,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							status: started.record.status,
 							modelRef: started.record.modelRef,
 							thinkingLevel: started.record.thinkingLevel,
+							...(modelPinBypassFrom(started) ? { modelPinBypass: modelPinBypassFrom(started) } : {}),
 						},
 					};
 				}
@@ -1800,6 +1831,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						costUsd: outcome?.costUsd,
 						summary: outcome?.claim.summary.slice(0, 8_000),
 						blockers: outcome?.claim.blockers?.slice(0, 16),
+						...(modelPinBypassFrom(run) ? { modelPinBypass: modelPinBypassFrom(run) } : {}),
 					},
 				};
 			} catch (error) {

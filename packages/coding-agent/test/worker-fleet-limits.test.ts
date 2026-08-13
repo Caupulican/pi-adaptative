@@ -157,6 +157,35 @@ describe("worker fleet admission limits", () => {
 		).toEqual({ ok: true, depth: 1 });
 	});
 
+	it("does not count a retired nested child against the live nested-fleet ceiling", () => {
+		// Root-cause regression: a retired agent's durable identity slot stays reserved
+		// (evaluateWorkerIdentityHeadroom / maxAgentsPerSession still bounds total agent count
+		// separately, per the sibling test above), but it no longer occupies a live nested-fleet
+		// slot. With LEAN_WORKER_DELEGATION_LIMITS (maxNestedAgentsPerSession=1), one finished
+		// child must not permanently block all future nested delegation.
+		const firstRoot = binding("first-root");
+		const secondRoot = binding("second-root");
+		const retiredChild = binding("retired-child", {
+			parentAgentId: firstRoot.agentId,
+			rootAgentId: firstRoot.agentId,
+			depth: 1,
+			status: "retired",
+		});
+		const limits = resolveWorkerFleetLimits(LEAN_WORKER_DELEGATION_LIMITS);
+
+		expect(
+			evaluateNewWorkerAdmission(
+				{
+					[firstRoot.agentId]: firstRoot,
+					[secondRoot.agentId]: secondRoot,
+					[retiredChild.agentId]: retiredChild,
+				},
+				secondRoot.agentId,
+				limits,
+			),
+		).toEqual({ ok: true, depth: 1 });
+	});
+
 	it("counts retired identities toward the persistent session ceiling", () => {
 		const agents: Record<string, AgentBindingContract> = {};
 		for (let index = 0; index < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession; index += 1) {

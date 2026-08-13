@@ -31,7 +31,6 @@ describe("AgentSession goal idle autosteer", () => {
 				fauxAssistantMessage([fauxToolCall("goal", { action: "block_goal", reason: "owner input required" })], {
 					stopReason: "toolUse",
 				}),
-				fauxAssistantMessage("blocked after real escalation"),
 			);
 			harness.setResponses(responses);
 

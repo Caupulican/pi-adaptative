@@ -9,14 +9,44 @@ import {
 	clampLaneMaxUsd,
 	isLocalExecutionModel,
 } from "../src/core/background-lane-controller.ts";
+import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
+import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
+import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import { getInFlightWorkUnits, resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { ResearchLaneController } from "../src/core/research/research-lane-controller.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import {
+	createTestExecutionGrant,
+	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
 import { createTestResourceLoader } from "./utilities.ts";
+
+function resultFor(
+	handle: StartedDelegationAttempt,
+	overrides: Partial<Pick<WorkerResultContract, "status" | "reasonCode" | "summary">> = {},
+): WorkerResultContract {
+	return {
+		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+		resultId: `result-${handle.attemptId}`,
+		objectiveId: handle.objectiveId,
+		taskId: handle.taskId,
+		attemptId: handle.attemptId,
+		leaseId: handle.leaseId,
+		fencingToken: handle.fencingToken,
+		status: "completed",
+		reasonCode: "worker_completed",
+		summary: "done",
+		artifacts: [],
+		evidence: [],
+		errors: [],
+		usage: { costUsd: 0, wallClockMs: 10, toolCalls: 1 },
+		createdAt: new Date().toISOString(),
+		...overrides,
+	};
+}
 
 describe("background lane budgets", () => {
 	it("clamps research lane spend to the foreground envelope cap", () => {
@@ -157,6 +187,93 @@ describe("worker terminal handoffs", () => {
 			controller.abortInFlightLanes();
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+
+	it("backfills a durable notification for a transient record the moment it flushes, not only whenever a later WorkerLifecycle construction happens to sweep for it", async () => {
+		// getOutstandingRecords() with zero callers isn't durability by itself. What THIS fix adds:
+		// WorkerLifecycle.getPendingTerminalNotifications() already sweeps and backfills every
+		// terminal durable task's notification as a side effect of ensureTerminalNotifications() --
+		// so a naive test that reads getPendingTerminalNotifications() (or constructs a SECOND
+		// WorkerLifecycle, which replays via the same call) to check "is this durable yet?"
+		// self-fulfills its own answer and can't distinguish this fix from that pre-existing sweep.
+		// The real, isolated contribution is TIMING: without this fix, a transient record's durable
+		// notification only exists once something happens to trigger that sweep (e.g. a restart's
+		// WorkerLifecycle construction) -- nothing guarantees that happens before the process
+		// actually goes away. With this fix, it exists immediately on the flush that records it.
+		// Isolated here by materializing the controller's OWN lifecycle (a real construction-time
+		// sweep, but over an EMPTY ledger, so it finds nothing) BEFORE the task is ever prepared, so
+		// the only thing left that can create the notification during this test is the flush itself.
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-background-lane-restart-replay-"));
+		try {
+			const sessionId = "session-restart-replay";
+			// Never resolves -- strands the batch behind an in-flight notify(), exactly like the
+			// scenario the wave-1 watchdog observes but cannot itself fix.
+			const notifyWorkerTerminalHandoff = vi.fn(() => new Promise<void>(() => {}));
+			const controller = new BackgroundLaneController({
+				getAgentDir: () => agentDir,
+				getSessionId: () => sessionId,
+				emit: () => {},
+				notifyWorkerTerminalHandoff,
+			} as never);
+			const controllerInternals = controller as unknown as {
+				_getWorkerLifecycle(): WorkerLifecycle;
+				_recordWorkerTerminal(record: { laneId: string; type: "worker"; status: "succeeded" }): void;
+			};
+			// Materialized over an empty ledger (no durable tasks exist yet), so its own
+			// construction-time sweep finds nothing -- it cannot be what backfills the notification
+			// created below.
+			const lifecycle = controllerInternals._getWorkerLifecycle();
+
+			// One real durable worker attempt, finished WITHOUT its automatic notification (`notify:
+			// false`) -- the exact precondition for a "transient" record: terminal, but with no
+			// durable notification backing it yet. Uses the SAME lifecycle instance the controller
+			// already owns, so it shares the coordinator's `getWorkerRecords`/`markDurableDelivered`
+			// wiring exactly as it would in production.
+			const profile = createTestWorkerOrchestrationProfile({
+				profileId: "restart-replay",
+				model: { provider: "test", id: "model" },
+			});
+			const authority = createTestWorkerExecutionAuthority(profile);
+			const prepared = lifecycle.prepare({
+				instructions: "stranded",
+				executionContract: createWorkerExecutionContract({
+					worker: { profile, modelBinding: profile.modelPolicy.candidates[0]!, authority },
+				}),
+				requiredCapabilities: [],
+			});
+			const task = lifecycle.getTask(prepared.attempt.taskId);
+			if (!task) throw new Error("Expected durable task");
+			lifecycle.bindGrant(
+				prepared.attempt.attemptId,
+				createTestExecutionGrant({
+					objectiveId: task.task.objectiveId,
+					taskId: task.task.taskId,
+					attemptId: prepared.attempt.attemptId,
+					role: "implementer",
+				}),
+			);
+			const handle = lifecycle.start(prepared.record.laneId, 60_000);
+			lifecycle.finish(resultFor(handle), { notify: false });
+			const laneId = prepared.record.laneId;
+			const notificationId = `worker-terminal:${prepared.attempt.attemptId}`;
+
+			// Raw read, deliberately bypassing getPendingTerminalNotifications()/its own sweep.
+			expect(notificationId in lifecycle.ledger.runtime.getSnapshot().notifications).toBe(false);
+
+			// Recorded WITHOUT a durableNotificationId -- the exact transient case.
+			controllerInternals._recordWorkerTerminal({ laneId, type: "worker", status: "succeeded" });
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(notifyWorkerTerminalHandoff).toHaveBeenCalledOnce();
+
+			// Same raw read as above, same lifecycle instance -- no NEW WorkerLifecycle construction
+			// (and therefore no NEW sweep) happens between the two reads.
+			expect(notificationId in lifecycle.ledger.runtime.getSnapshot().notifications).toBe(true);
+
+			controller.abortInFlightLanes();
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
 });

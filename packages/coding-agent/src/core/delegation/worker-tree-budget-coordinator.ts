@@ -151,6 +151,10 @@ export class WorkerTreeBudgetCoordinator {
 				reservation.maxTokens - Math.max(0, budgetedTokens(merged) - budgetedTokens(previous)),
 			);
 		}
+		// Shrinking a reservation to match actual (rather than speculatively requested) usage frees
+		// tree token headroom the same way release() does — waiters parked on an earlier
+		// availableTokens<=0 check must see it too, or they stay parked despite available budget.
+		this.drainWaiters(state);
 	}
 
 	private reserveProviderBudget(

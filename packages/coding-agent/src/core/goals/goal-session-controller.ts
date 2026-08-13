@@ -13,13 +13,14 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { GoalBudgetExhaustedError } from "./goal-execution-errors.ts";
 import { type GoalStateRevision, getGoalStateRevision, stopGoalFromSystem } from "./goal-lifecycle.ts";
 import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goal-runtime-snapshot.ts";
-import { applyGoalEvent, type GoalState, isGoalUnfinishedStatus } from "./goal-state.ts";
+import { applyGoalEvent, type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "./goal-state.ts";
 import { applyGoalAction } from "./goal-tool-core.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitChatGoal } from "./natural-language-goal.ts";
 import {
@@ -44,6 +45,19 @@ export type ChatGoalAdmission =
 	| { status: "started"; state: GoalState }
 	| { status: "unfinished_goal_exists"; state: GoalState };
 
+/**
+ * Smallest remaining goal budget worth handing to the provider as one more request's OUTPUT cap.
+ * `admitProviderRequest` returns the goal's remaining TOTAL budget (input+output, cache-weighted) as
+ * that cap — correct only because it also narrows further downstream against the model's real output
+ * limit. When remaining drops below this floor (e.g. 200k budget, 199.4k used → 600 remaining), handing
+ * 600 to the provider as maxTokens produces a request that pays the FULL input cost of the turn only to
+ * get cut off mid-generation (`stopReason: "length"`) — a doomed, wasted turn. Below the floor, stop
+ * the goal cleanly BEFORE sending instead of gambling on a truncated one. Above it, the remaining-total
+ * value is a generous (imprecise but safe) protective ceiling — a modest final-turn overrun is
+ * acceptable; a truncated turn is not.
+ */
+const MIN_VIABLE_GOAL_TURN_OUTPUT_TOKENS = 1_000;
+
 const goalExecutionLeaseMarker: unique symbol = Symbol("goalExecutionLease");
 
 /** Identity-bound attribution for one goal-owned foreground execution. */
@@ -59,6 +73,11 @@ interface MutableGoalExecutionLease extends GoalExecutionLease {
 	provisionalTokenBudget?: number;
 	pendingTokens: number;
 	pendingSpendUsd: number;
+	/** Set once this lease has admitted a provider request while its goal was still active. Lets a
+	 * later admission on the SAME still-held lease recognize "the goal ended mid-turn" (drain the
+	 * in-flight turn's wrap-up response) instead of "a new turn is starting against a dead goal"
+	 * (which stays denied). */
+	admittedWhileActive: boolean;
 }
 
 /**
@@ -173,7 +192,7 @@ export class GoalSessionController {
 		if (!goalId && !options.adoptNewGoal) return undefined;
 		if (this.executionLease) throw new Error("Goal execution attribution is already active");
 		const state = this.getState();
-		if (goalId && (!state || state.goalId !== goalId || state.status !== "active")) return undefined;
+		if (goalId && (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status))) return undefined;
 		const lease: MutableGoalExecutionLease = {
 			...(goalId ? { goalId } : {}),
 			[goalExecutionLeaseMarker]: true,
@@ -184,6 +203,7 @@ export class GoalSessionController {
 				: {}),
 			pendingTokens: 0,
 			pendingSpendUsd: 0,
+			admittedWhileActive: false,
 		};
 		this.executionLease = lease;
 		return lease;
@@ -236,7 +256,7 @@ export class GoalSessionController {
 		lease.pendingTokens = 0;
 		lease.pendingSpendUsd = 0;
 		if (
-			updated.status === "active" &&
+			isGoalExecutionActive(updated.status) &&
 			updated.tokenBudget !== undefined &&
 			(updated.tokensUsed ?? 0) >= updated.tokenBudget
 		) {
@@ -250,7 +270,7 @@ export class GoalSessionController {
 		const lease = this.executionLease;
 		if (!lease) return false;
 		const state = this.resolveExecutionState(lease);
-		if (!state || state.status !== "active") return false;
+		if (!state || !isGoalExecutionActive(state.status)) return false;
 		const stopped = stopGoalFromSystem(
 			state,
 			{ status: "blocked", reason: errorMessage.slice(0, 500) },
@@ -277,25 +297,64 @@ export class GoalSessionController {
 		return undefined;
 	}
 
+	/**
+	 * True once the currently held execution lease's goal has crossed into `budget_limited` — set
+	 * synchronously by `chargeExecutionUsage` as soon as a just-charged response crosses the ceiling.
+	 * Wired to the agent's `shouldStopAfterTurn` hook so a mid-turn budget stop ends the loop
+	 * gracefully BEFORE the next provider request is even planned, instead of only being caught by
+	 * `admitProviderRequest`'s throw — which still exists as the backstop for a fresh turn or an
+	 * external admission starting against an already budget_limited goal, but would otherwise also
+	 * fire for a request this same lease was already mid-flight for, surfacing a synthetic error
+	 * message where a clean turn end belongs.
+	 */
+	hasExecutionLeaseCrossedBudgetLimit(): boolean {
+		const lease = this.executionLease;
+		if (!lease) return false;
+		return this.resolveExecutionState(lease)?.status === "budget_limited";
+	}
+
 	/** Reserve only remaining output capacity; actual provider usage is charged on response. */
 	admitProviderRequest(): number | undefined {
 		const lease = this.executionLease;
 		if (!lease) return undefined;
 		this.flushPendingExecutionUsage(lease);
 		const state = this.resolveExecutionState(lease);
+		if (state?.status === "budget_limited") {
+			throw new GoalBudgetExhaustedError(`goal_token_budget_exhausted: ${state.blockedReason ?? lease.goalId}`);
+		}
+		if (state && !isGoalExecutionActive(state.status)) {
+			if (!lease.admittedWhileActive) {
+				// A fresh turn/continuation is being started against a goal that is already done —
+				// keep this denied so a dead goal cannot restart itself.
+				throw new Error(`goal_execution_not_active: ${state.goalId} is ${state.status}`);
+			}
+			// This lease already admitted at least one request while the goal was active, so the
+			// goal ended mid-turn (e.g. the model itself just called `goal complete`/`block`). Let
+			// the already-in-flight turn drain to its closing response instead of throwing an error
+			// at the user right after a successful stop.
+			return undefined;
+		}
+		if (!state && lease.goalId !== undefined) {
+			throw new Error(`goal_execution_not_active: ${lease.goalId} no longer exists`);
+		}
+		lease.admittedWhileActive = true;
 		const tokenBudget = state?.tokenBudget ?? lease.provisionalTokenBudget;
 		if (tokenBudget === undefined) return undefined;
-		if (state?.status === "budget_limited") {
-			throw new Error(`goal_token_budget_exhausted: ${state.blockedReason ?? lease.goalId}`);
-		}
-		if (state && state.status !== "active") return undefined;
 		const tokensUsed = state?.tokensUsed ?? lease.pendingTokens;
 		const remaining = Math.max(0, tokenBudget - tokensUsed);
-		if (remaining === 0) {
+		if (remaining < MIN_VIABLE_GOAL_TURN_OUTPUT_TOKENS) {
+			// Below the floor, remaining is too small to hand to the provider as an output cap without
+			// dooming the turn to a mid-generation truncation that still burns the full input cost.
+			// Stop cleanly now instead of sending a request that cannot possibly complete.
 			if (state) {
-				this.markBudgetLimited(`token budget exhausted (${tokensUsed}/${tokenBudget}) before provider request`);
+				this.markBudgetLimited(
+					`token budget nearly exhausted (${tokensUsed}/${tokenBudget}, ${remaining} remaining is below the ` +
+						`${MIN_VIABLE_GOAL_TURN_OUTPUT_TOKENS}-token minimum viable turn) before provider request`,
+				);
 			}
-			throw new Error(`goal_token_budget_exhausted: no tokens remain for provider output`);
+			throw new GoalBudgetExhaustedError(
+				`goal_token_budget_exhausted: ${remaining} tokens remain, below the ${MIN_VIABLE_GOAL_TURN_OUTPUT_TOKENS}-token minimum viable turn`,
+			);
 		}
 		return remaining;
 	}
@@ -313,7 +372,22 @@ export class GoalSessionController {
 	private flushPendingExecutionUsage(lease: MutableGoalExecutionLease): void {
 		if (lease.pendingTokens === 0 && lease.pendingSpendUsd === 0) return;
 		const state = this.resolveExecutionState(lease);
-		if (!state) return;
+		if (!state) {
+			// A speculative adopt-new-goal lease (lease.goalId still undefined) that never actually
+			// adopted a goal this turn has nowhere to attribute usage — that is normal, not a loss.
+			// A lease that WAS bound to a real goal but can no longer resolve it is a genuine loss of
+			// buffered spend; fail loudly instead of silently discarding it (matches the cursor-based
+			// accounting this replaced, which stopped the goal on `goal_usage_cursor_lost`).
+			if (lease.goalId !== undefined) {
+				this.deps.emitWarning(
+					`Goal usage cursor is no longer resolvable for '${lease.goalId}'; ${lease.pendingTokens} pending tokens and $${lease.pendingSpendUsd.toFixed(6)} pending spend could not be attributed and were dropped.`,
+				);
+				this.recordContinuationFailure(new Error("goal_usage_cursor_lost"));
+			}
+			lease.pendingTokens = 0;
+			lease.pendingSpendUsd = 0;
+			return;
+		}
 		this.chargeExecutionUsage(lease, state, lease.pendingTokens, lease.pendingSpendUsd);
 	}
 
@@ -361,7 +435,7 @@ export class GoalSessionController {
 
 	private recordContinuationFailure(error: unknown): void {
 		const state = this.getState();
-		if (!state || state.status !== "active") return;
+		if (!state || !isGoalExecutionActive(state.status)) return;
 		const message = error instanceof Error ? error.message : String(error);
 		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";

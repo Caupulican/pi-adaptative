@@ -26,7 +26,8 @@ is in its parent's `required`; `def(P)` = P has a schema `default`.
 | 6 | numberFromString | expect number/integer at P, got string | `"42"`, numeric | `Number(s)` | finite (and integer if integer(P)) | "sent `P` as a quoted number → send a bare number" |
 | 7 | boolFromString | expect boolean at P, got string | `"true"`/`"false"` | `s === "true"` | exact match only (never truthiness) | "sent `P` as a quoted boolean → send bare true/false" |
 | 8 | enumCaseNormalize | expect enum at P, got string not in set | case/space variant | match case-insensitively/trimmed to one enum member | exactly one member matches | "`P` must be one of `a|b|c` → matched `<value>`" |
-| 9 | propertyCaseNormalize | root object has key K whose casing differs from a declared schema property | e.g. `Path` for `path` | rename K to the schema key | exactly one declared root property matches case-insensitively and the canonical key is absent | "sent `P` with different property-key casing → use the schema key casing" |
+| 9 | propertyCaseNormalize | root object has key K whose casing differs from a declared schema property | e.g. `Path` for `path`, or `file_path` for `filePath` | rename K to the schema key | a declared root property matches case-insensitively, or — tried second — matches after stripping underscores from K; the canonical key is absent | "sent `P` with different property-key casing → use the schema key casing" |
+| 9b | propertyAliasNormalize | root object has key K, not itself a declared property, belonging to a known alias group (e.g. `newText`/`oldText`/`file_path`) whose canonical member IS a declared schema property | e.g. `newText` for `replacementContent` | rename K to the alias group's declared member | K matches case-insensitively/underscore-insensitively to no declared property first (else 9 applies), exactly one alias-group member is declared, and that canonical key is absent | "sent `P` under a property alias → use the schema's exact property name" |
 | 10 | singleElementUnwrap | expect scalar at P, got 1-elem array | `[v]` | `v` | `v` passes expect(P) AND `length===1` | "sent `P` as a 1-item list where a single value was expected → send the value" |
 | 11 | stringifiedNumberInArray | expect number[] at P, got string[] | `["1","2"]` | map `Number` | all finite | "list `P` holds quoted numbers → send bare numbers" |
 
@@ -39,8 +40,10 @@ Rules that keep this deterministic and safe:
 - **Order within one path:** 2 (strict/quote-normalized parse) → 2b (declared-property salvage) → 8/6/7 (coerce scalar) → 3/4/11 (wrap)
   → 10 (unwrap) → 5 (placeholder-drop) → 1 (null-drop). Parse before wrap so a
   stringified array becomes an array, not a wrapped string. Across paths:
-  instance-path order. Root property-key casing repair runs before these per-path
-  transforms because required-property validator errors do not carry the misspelled key path.
+  instance-path order. Root property-key casing repair (9) runs before these per-path
+  transforms because required-property validator errors do not carry the misspelled key path;
+  alias repair (9b) is tried for the same key immediately after 9 declines (no
+  case-insensitive or underscore-stripped match), never both on one key.
 - **Bounded multi-pass.** After all per-path transforms, Check the whole args
   once. Pass → return repaired. Fail → repeat the walk-transform-Check cycle,
   up to `MAX_REPAIR_PASSES` (3, `repairer.ts`) whole-args re-Checks total;

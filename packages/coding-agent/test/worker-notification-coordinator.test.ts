@@ -21,11 +21,12 @@ describe("WorkerNotificationCoordinator", () => {
 		});
 		const notify = vi.fn(() => notifyPending);
 		const markDurableDelivered = vi.fn();
+		const warn = vi.fn();
 		const coordinator = new WorkerNotificationCoordinator({
 			getWorkerRecords: () => [record],
 			emitStatus: vi.fn(),
 			notify,
-			warn: vi.fn(),
+			warn,
 			markDurableDelivered,
 		});
 
@@ -37,11 +38,103 @@ describe("WorkerNotificationCoordinator", () => {
 		await vi.advanceTimersByTimeAsync(5_000);
 		expect(notify).toHaveBeenCalledOnce();
 		expect(markDurableDelivered).not.toHaveBeenCalled();
+		// The unsettled handoff crossed the observation threshold: the watchdog must warn (visible
+		// signal) but must never call notify again or create a second consumer of the handoff.
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("worker-long-foreground"));
+		expect(notify).toHaveBeenCalledOnce();
 
 		resolveNotify();
 		await vi.runAllTimersAsync();
 		expect(markDurableDelivered).toHaveBeenCalledOnce();
 		expect(markDurableDelivered).toHaveBeenCalledWith(["notification-long-foreground"]);
+		coordinator.dispose();
+	});
+
+	it("keeps a batch stuck behind a never-settling notify() durably visible instead of losing it inside the closure", async () => {
+		// Root-cause regression: flush() used to pending.clear() before notify() settled, so a
+		// never-settling notify stranded that batch inside the closure with no trace anywhere —
+		// every worker terminal queued behind it (workers 2..N) was silently lost from view, not
+		// merely delayed. getOutstandingRecords() must always report pending ∪ in-flight.
+		vi.useFakeTimers();
+		const first: LaneRecord = {
+			laneId: "worker-1",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const second: LaneRecord = {
+			laneId: "worker-2",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:01:00.000Z",
+		};
+		let resolveNotify!: () => void;
+		const notifyPending = new Promise<void>((resolve) => {
+			resolveNotify = resolve;
+		});
+		const notify = vi.fn(() => notifyPending);
+		const markDurableDelivered = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [first, second],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered,
+		});
+
+		coordinator.recordTerminal(first, "notification-1");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(notify).toHaveBeenCalledOnce();
+		expect(notify).toHaveBeenCalledWith([expect.objectContaining({ laneId: "worker-1" })]);
+
+		// A second worker terminates while the first notify() is still stuck. It must queue behind
+		// the frozen deliveryTail (never a second concurrent notify() consumer)...
+		coordinator.recordTerminal(second, "notification-2");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(notify).toHaveBeenCalledOnce();
+
+		// ...but it must NOT vanish: both records remain durably discoverable while stuck.
+		expect(coordinator.getOutstandingRecords()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ laneId: "worker-1" }),
+				expect.objectContaining({ laneId: "worker-2" }),
+			]),
+		);
+		expect(coordinator.getOutstandingRecords()).toHaveLength(2);
+
+		resolveNotify();
+		await vi.runAllTimersAsync();
+		expect(markDurableDelivered).toHaveBeenCalledWith(["notification-1"]);
+		expect(coordinator.getOutstandingRecords()).toEqual([]);
+		coordinator.dispose();
+	});
+
+	it("clears the handoff watchdog once notify settles, emitting no warning for a normal delivery", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-fast-handoff",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const notify = vi.fn(async () => undefined);
+		const warn = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify,
+			warn,
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.recordTerminal(record, "notification-fast-handoff");
+		await vi.runAllTimersAsync();
+		expect(notify).toHaveBeenCalledOnce();
+
+		// Advancing well past the observation threshold after settlement must not warn: the watchdog
+		// was cleared when notify() resolved.
+		await vi.advanceTimersByTimeAsync(1_800_001);
+		expect(warn).not.toHaveBeenCalled();
 		coordinator.dispose();
 	});
 
@@ -173,11 +266,15 @@ describe("WorkerNotificationCoordinator", () => {
 		coordinator.dispose();
 	});
 
-	it("keeps partial and blocked handoffs out of the actual failure counter", async () => {
+	it("keeps partial, blocked, and canceled handoffs out of the actual failure counter, tallied instead as needing attention", async () => {
+		// Root-cause regression: partial/blocked/canceled used to be excluded from BOTH
+		// completedSinceFlush and failedSinceFlush, landing in neither tally -- counted nowhere, not
+		// merely "not counted as failed". Every LaneTerminalStatus must land in exactly one bucket.
 		vi.useFakeTimers();
 		const records: LaneRecord[] = [
 			{ laneId: "worker-partial", type: "worker", status: "partial" },
 			{ laneId: "worker-blocked", type: "worker", status: "blocked" },
+			{ laneId: "worker-canceled", type: "worker", status: "canceled" },
 		];
 		const emitStatus = vi.fn();
 		const coordinator = new WorkerNotificationCoordinator({
@@ -195,12 +292,52 @@ describe("WorkerNotificationCoordinator", () => {
 			expect.objectContaining({
 				completedSinceFlush: 0,
 				failedSinceFlush: 0,
+				attentionSinceFlush: 3,
 				terminalSinceFlush: [
 					expect.objectContaining({ status: "partial" }),
 					expect.objectContaining({ status: "blocked" }),
+					expect.objectContaining({ status: "canceled" }),
 				],
 			}),
 		);
+		coordinator.dispose();
+	});
+
+	it("partitions every terminal status into exactly one of completed, failed, or attention", async () => {
+		vi.useFakeTimers();
+		const statuses: LaneRecord["status"][] = [
+			"succeeded",
+			"partial",
+			"blocked",
+			"failed",
+			"canceled",
+			"timeout",
+			"budget_exhausted",
+		];
+		const records: LaneRecord[] = statuses.map((status, index) => ({
+			laneId: `worker-${index}-${status}`,
+			type: "worker",
+			status,
+		}));
+		const emitStatus = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => records,
+			emitStatus,
+			notify: async () => undefined,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		for (const record of records) coordinator.recordTerminal(record);
+		await vi.runAllTimersAsync();
+
+		const call = emitStatus.mock.calls.at(-1)?.[0] as {
+			completedSinceFlush: number;
+			failedSinceFlush: number;
+			attentionSinceFlush: number;
+		};
+		expect(call.completedSinceFlush + call.failedSinceFlush + call.attentionSinceFlush).toBe(records.length);
+		expect(call).toMatchObject({ completedSinceFlush: 1, failedSinceFlush: 3, attentionSinceFlush: 3 });
 		coordinator.dispose();
 	});
 });

@@ -139,10 +139,16 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"write",
 				].sort(),
 			);
-			expect(report.toolSchemaTokens).toBeLessThanOrEqual(2_900);
+			// Ceilings are bloat guards, recalibrated (not loosened for slack) after
+			// provider-tool-projection.ts stopped deleting `type` from enum-bearing schema
+			// properties (providers whose function-declaration schema requires `type` per property,
+			// e.g. Google's OpenAPI subset, reject the whole tool list with a 400 otherwise — see
+			// compactRedundantEnumConstraints). That correctness fix grew the real projected schema;
+			// measured stable values: toolSchemaTokens 2935, delegate 844 (enum-heavy actions).
+			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_000);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
-			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(825);
+			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(430);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(250);
