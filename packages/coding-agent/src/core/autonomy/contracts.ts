@@ -124,7 +124,7 @@ export interface WorkerRequest {
 	createdAt?: string;
 }
 
-export type WorkerClaimStatus = "completed" | "blocked" | "failed" | "cancelled";
+export type WorkerClaimStatus = "completed" | "partial" | "blocked" | "failed" | "cancelled";
 
 export type WorkerClaimOutputFormat = "structured" | "plain_text";
 

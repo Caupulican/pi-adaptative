@@ -18,6 +18,7 @@ import {
 	sessionRootAddress,
 	sessionRootReplyMessageId,
 } from "./session-root-mailbox.ts";
+import type { WorkerClaimSnapshotPayload } from "./session-worker-claim.ts";
 import {
 	normalizeWorkerAgentDependencyTaskIds,
 	type SessionRootWorkerAgentMessageOptions,
@@ -63,6 +64,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	run(request: WorkerDelegationRequest, record: LaneRecord): Promise<WorkerDelegationRunOutcome>;
 	scheduler: Pick<WorkerDispatchScheduler, "enqueue" | "track" | "drain" | "dropQueued">;
 	statusChanged(): void;
+	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
 	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
@@ -79,13 +81,28 @@ const MAX_BROADCAST_ERROR_CHARS = 512;
 export function buildWorkerTerminalHandoffContent(args: {
 	childAgentId: string;
 	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode">;
+	claim?: {
+		summary?: string;
+		status?: string;
+		changedFiles?: readonly string[];
+		blockers?: readonly string[];
+	};
 }): string {
+	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 	return [
 		"Worker terminal handoff",
 		`childAgentId=${args.childAgentId}`,
 		`laneId=${args.record.laneId}`,
 		`status=${args.record.status}`,
 		...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
+		...(args.claim?.summary ? [`claimStatus=${args.claim.status || args.record.status}`] : []),
+		...(args.claim?.summary ? [`claimSummary=${sanitize(args.claim.summary)}`] : []),
+		...(args.claim?.changedFiles && args.claim.changedFiles.length > 0
+			? [`changedFiles=${args.claim.changedFiles.join(", ")}`]
+			: []),
+		...(args.claim?.blockers && args.claim.blockers.length > 0
+			? [`blockers=${args.claim.blockers.map((b) => sanitize(b)).join("; ")}`]
+			: []),
 		"CAVEMAN MODE - MANDATORY: terminal handoff means worker state was retained. Read the full transcript, verify the claim, then continue or replan within the admitted grant. Do not call this lost state or harness failure.",
 		"MANDATORY: read every transcript page before judging this result.",
 		`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
@@ -1435,7 +1452,20 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const parent = this.requireKnownAgent(args.parentAgentId);
 		const latest = this.latestAgentAttempt(parent);
 		const active = latest?.status === "queued" || latest?.status === "leased" || latest?.status === "running";
-		const content = buildWorkerTerminalHandoffContent(args);
+		const snapshot = this.options.getWorkerClaimSnapshot?.(args.record.laneId);
+		const content = buildWorkerTerminalHandoffContent({
+			...args,
+			...(snapshot?.claim
+				? {
+						claim: {
+							summary: snapshot.claim.summary,
+							status: snapshot.claim.status,
+							changedFiles: snapshot.claim.changedFiles,
+							blockers: snapshot.claim.blockers,
+						},
+					}
+				: {}),
+		});
 		const idempotencyKey = `terminal-handoff:${args.terminalAttemptId}`;
 		const transcriptInput: MandatoryTranscriptControlInput = {
 			idempotencyKey,

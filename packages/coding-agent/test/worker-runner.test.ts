@@ -324,7 +324,7 @@ describe("runWorker", () => {
 		const outcome = await runWorker(
 			runnerOptions({ complete: async () => completionOf('{"summary":"pricey","status":"completed"}', 1.5) }),
 		);
-		expect(outcome.claim.status).toBe("completed");
+		expect(outcome.claim.status).toBe("partial");
 		expect(outcome.laneStatus).toBe("budget_exhausted");
 		expect(outcome.reasonCode).toBe("cost_budget_exceeded");
 	});
@@ -366,8 +366,8 @@ describe("runWorker", () => {
 
 			expect(outcome).toMatchObject({
 				claim: {
-					status: "failed",
-					summary: `Worker did not complete: ${reasonCode} — ${detail}`,
+					status: "partial",
+					summary: `Worker paused at budget limit (${reasonCode}): ${detail}`,
 				},
 				accepted: false,
 				laneStatus: "budget_exhausted",

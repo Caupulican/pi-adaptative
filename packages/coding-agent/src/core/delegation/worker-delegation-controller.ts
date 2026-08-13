@@ -48,11 +48,13 @@ import {
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
+import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
 import { createDelegateToolDefinition } from "../tools/delegate.ts";
 import { disposePersistentShellSession } from "../tools/shell-session.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
+import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import type { WorkerAgentControlPort } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -295,6 +297,8 @@ export class WorkerDelegationController {
 				this.terminalHandoffs.signal();
 				this.notifications.statusChanged();
 			},
+			getWorkerClaimSnapshot: (laneId) =>
+				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.deps.getSessionManager()), laneId),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			cancelLane: (laneId, reasonCode) => {
 				this.scheduler.dropQueued(laneId);

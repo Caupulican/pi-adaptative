@@ -83,7 +83,11 @@ import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
-import { appendWorkerClaimSnapshot, getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
+import {
+	appendWorkerClaimSnapshot,
+	getLatestWorkerClaimSnapshot,
+	getWorkerClaimSnapshots,
+} from "./delegation/session-worker-claim.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import type {
@@ -768,6 +772,8 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			workerInputsWillWakeParent: (workerRequestIds) =>
 				this._humanInput.workerInputsWillWakeParent(workerRequestIds),
+			getWorkerClaimSnapshot: (laneId) =>
+				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.sessionManager), laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),

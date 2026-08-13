@@ -139,7 +139,13 @@ export function boundedWorkerClaimChangedFiles(values: readonly string[]): strin
 export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 	const claim = ownWorkerClaimDataRecord(value, "claim");
 	const status = claim.status;
-	if (status !== "completed" && status !== "blocked" && status !== "failed" && status !== "cancelled") {
+	if (
+		status !== "completed" &&
+		status !== "partial" &&
+		status !== "blocked" &&
+		status !== "failed" &&
+		status !== "cancelled"
+	) {
 		invalidWorkerClaim("claim.status is invalid.");
 	}
 	if (claim.outputFormat !== undefined && claim.outputFormat !== "structured" && claim.outputFormat !== "plain_text") {
@@ -311,6 +317,16 @@ export function validateWorkerClaim(args: {
 			gate: "worker_claim",
 			reasonCode: "request_id_mismatch",
 			message: `Claim requestId '${claim.requestId}' does not match request id '${request.id}'.`,
+		};
+	}
+
+	if (claim.status === "partial") {
+		return {
+			outcome: "ask-user",
+			gate: "worker_claim",
+			reasonCode: "parent_review_required",
+			message: `Worker finished with partial claim status '${claim.status}'.`,
+			details: claim.blockers && claim.blockers.length > 0 ? { blockers: [...claim.blockers] } : undefined,
 		};
 	}
 

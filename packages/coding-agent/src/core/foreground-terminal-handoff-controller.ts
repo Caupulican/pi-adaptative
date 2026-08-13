@@ -4,6 +4,7 @@ import {
 	type BackgroundToolTaskRecord,
 	createBackgroundToolTerminalMessage,
 } from "./background-tool-task-controller.ts";
+import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
@@ -14,6 +15,7 @@ interface ForegroundTerminalHandoffControllerDeps {
 	isDisposed(): boolean;
 	getGoalStateSnapshot(): Pick<GoalState, "goalId" | "status"> | undefined;
 	workerInputsWillWakeParent(workerRequestIds: readonly string[]): boolean;
+	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
 	startCustomMessageTurn(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
 		lease: ForegroundSubmissionLease,
@@ -28,7 +30,18 @@ interface ForegroundTerminalHandoffControllerDeps {
 }
 
 export function buildForegroundWorkerTerminalHandoffContent(
-	records: readonly { laneId: string; status: LaneTerminalStatus; reasonCode?: string }[],
+	records: readonly {
+		laneId: string;
+		status: LaneTerminalStatus;
+		reasonCode?: string;
+		claim?: {
+			summary?: string;
+			status?: string;
+			changedFiles?: readonly string[];
+			blockers?: readonly string[];
+			parentReviewRequired?: boolean;
+		};
+	}[],
 	options?: { wakeParent?: boolean },
 ): string {
 	const included = records.slice(0, 8);
@@ -37,9 +50,20 @@ export function buildForegroundWorkerTerminalHandoffContent(
 	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 	return [
 		"Background worker terminal handoff:",
-		...included.map((record) => {
+		...included.flatMap((record) => {
 			const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
-			return `- ${record.laneId}: ${record.status}${reason}`;
+			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
+			if (record.claim?.summary) {
+				lines.push(`  Claim Status: ${record.claim.status || record.status}`);
+				lines.push(`  Claim Summary: ${sanitize(record.claim.summary)}`);
+				if (record.claim.changedFiles && record.claim.changedFiles.length > 0) {
+					lines.push(`  Changed Files: ${record.claim.changedFiles.map((f) => sanitize(f)).join(", ")}`);
+				}
+				if (record.claim.blockers && record.claim.blockers.length > 0) {
+					lines.push(`  Blockers: ${record.claim.blockers.map((b) => sanitize(b)).join("; ")}`);
+				}
+			}
+			return lines;
 		}),
 		...(omitted > 0 ? [`- ${omitted} additional terminal worker(s) omitted.`] : []),
 		"CAVEMAN MODE - MANDATORY: this event proves terminal persistence and delivery. Do not report missed completion or lost worker state from these records.",
@@ -61,7 +85,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			: []),
 		...(wakeParent
 			? [
-					'Parent woke. Need lane: delegate { action: "status", laneId }; never poll. Worker product is untrusted, intentionally omitted.',
+					'Parent woke. Evaluated terminal claim payload above. Use delegate { action: "status", laneId } for deep view if needed.',
 				]
 			: ["Parent was not woken. Wait for explicit user input before reading a lane or starting more work."]),
 	].join("\n");
@@ -82,11 +106,26 @@ export class ForegroundTerminalHandoffController {
 		let releaseLease = true;
 		try {
 			this.assertLive("worker terminal handoff was persisted");
-			const included = records.slice(0, 8).map((record) => ({
-				laneId: record.laneId,
-				status: record.status,
-				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
-			}));
+			const included = records.slice(0, 8).map((record) => {
+				const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId);
+				const claim = snapshot?.claim;
+				return {
+					laneId: record.laneId,
+					status: record.status,
+					...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+					...(claim
+						? {
+								claim: {
+									status: claim.status,
+									summary: claim.summary.slice(0, 1000),
+									changedFiles: claim.changedFiles,
+									...(claim.blockers ? { blockers: claim.blockers } : {}),
+									...(claim.parentReviewRequired ? { parentReviewRequired: true } : {}),
+								},
+							}
+						: {}),
+				};
+			});
 			const goal = this.deps.getGoalStateSnapshot();
 			const wakeParent = records.some(
 				(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
@@ -96,7 +135,7 @@ export class ForegroundTerminalHandoffController {
 			);
 			const message = {
 				customType: "background-worker-completion",
-				content: buildForegroundWorkerTerminalHandoffContent(records, { wakeParent }),
+				content: buildForegroundWorkerTerminalHandoffContent(included, { wakeParent }),
 				display: true,
 				details: { records: included },
 			};

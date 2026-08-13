@@ -44,14 +44,14 @@ export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): Worker
 		case "succeeded":
 			return "completed";
 		case "partial":
-			return "completed";
+		case "budget_exhausted":
+			return "partial";
 		case "blocked":
 			return "blocked";
 		case "canceled":
 			return "cancelled";
 		case "failed":
 		case "timeout":
-		case "budget_exhausted":
 			return "failed";
 	}
 }

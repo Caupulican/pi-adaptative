@@ -183,10 +183,9 @@ describe("delegate logical-agent controls", () => {
 
 		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "inherit one", forkTurns: "1" });
 		expect(reuse.details).toMatchObject({
-			started: false,
-			skipReason: "reuse_fork_turns_forbidden",
+			started: true,
+			agentId: "worker-1",
 		});
-		expect(startWorkerAgentTask).not.toHaveBeenCalled();
 	});
 
 	it("lets Codex-valid fork turn spellings reach the context policy parser while zero still rejects", async () => {
@@ -1586,11 +1585,19 @@ describe("delegate persistent worker reuse", () => {
 		expect(startWorkerAgentTask).toHaveBeenCalledTimes(2);
 	});
 
-	it("rejects reuse that tries to replace the worker's admitted authority", async () => {
+	it("auto-sanitizes redundant authority/profileId parameters on delegate start with agentId reuse", async () => {
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
-			workerAgentControl: workerAgentControl({}),
+			workerAgentControl: workerAgentControl({
+				startWorkerAgentTask: () => ({
+					started: true,
+					steering: false,
+					messageId: "msg",
+					record: { laneId: "lane", type: "worker", status: "queued" },
+				}),
+			}),
 		});
 		const result = await tool.execute(
 			"call",
@@ -1604,17 +1611,7 @@ describe("delegate persistent worker reuse", () => {
 			undefined,
 			context,
 		);
-		expect(result.details).toMatchObject({ started: false, skipReason: "reuse_keeps_admitted_authority" });
-		const text = delegateText(result);
-		expect(text).toContain("CAVEMAN MODE - MANDATORY");
-		expect(text).toContain("agentId means reuse only");
-		expect(text).toContain("exact returned agentId");
-		expect(text).toContain("omit authority and profileId");
-		expect(text).toContain("fresh worker");
-		expect(text).toContain("omit agentId");
-		expect(text).toContain("instructions, authority, and profileId unchanged");
-		expect(text).toContain("expected API correction, not harness failure");
-		expect(text).toContain("No worker started; nothing was dropped");
+		expect(result.details).toMatchObject({ started: true, agentId: "worker-1" });
 	});
 
 	it("reports live activity per agent in list so idle workers are discoverable", async () => {

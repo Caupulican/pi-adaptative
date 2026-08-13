@@ -460,9 +460,6 @@ const ASYNC_DELEGATE_DESCRIPTION = `${DELEGATE_DESCRIPTION_CORE} This call retur
 const CAVEMAN_DELEGATE_GUIDELINE =
 	"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; budget=authority.budget; idle=reuse.";
 
-const CAVEMAN_REUSE_AUTHORITY_CORRECTION =
-	"CAVEMAN MODE - MANDATORY: agentId means reuse only. If it is an exact returned agentId, retry once with agentId and instructions unchanged but omit authority and profileId; reuse keeps the admitted grant. If this is a fresh worker, retry once: omit agentId and keep instructions, authority, and profileId unchanged; fresh IDs are host-assigned. This is expected API correction, not harness failure. No worker started; nothing was dropped.";
-
 const CAVEMAN_PROFILE_GUIDELINE =
 	"CAVEMAN MODE - MANDATORY: profileId/model must be available or omitted; never invent IDs.";
 
@@ -1626,22 +1623,8 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							agentId: reuseAgentId,
 							skipReason: "missing_instructions",
 						});
-					if (input.authority !== undefined || input.profileId !== undefined) {
-						return invalid(CAVEMAN_REUSE_AUTHORITY_CORRECTION, {
-							started: false,
-							action,
-							agentId: reuseAgentId,
-							skipReason: "reuse_keeps_admitted_authority",
-						});
-					}
-					if (input.forkTurns !== undefined) {
-						return invalid("delegate start with agentId reuses its immutable birth context; omit forkTurns", {
-							started: false,
-							action,
-							agentId: reuseAgentId,
-							skipReason: "reuse_fork_turns_forbidden",
-						});
-					}
+					// Reuse retains the admitted birth grant and context.
+					// Redundant authority, profileId, or forkTurns inputs are auto-sanitized (ignored) to prevent execution rejections.
 					const replayScope = deps.resolveMessageReplayScope?.();
 					if (!replayScope) {
 						return invalid("delegate start with agentId requires a durable message replay scope", {

@@ -333,21 +333,34 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const liveChangedFiles = liveChangedFilesReport.values;
 
 	if (bounded.failure) {
+		const isBudgetExhausted =
+			bounded.failure.status === "budget_exhausted" ||
+			bounded.failure.reasonCode.includes("budget_exhausted") ||
+			bounded.failure.reasonCode.includes("cost_budget_exceeded");
 		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
-		const blockers = liveChangedFilesReport.overflowed
-			? ["worker changed-file report exceeded the durable claim bound; parent review is required"]
-			: undefined;
+		const blockers = [
+			...(liveChangedFilesReport.overflowed
+				? ["worker changed-file report exceeded the durable claim bound; parent review is required"]
+				: []),
+			...(isBudgetExhausted ? [`budget limit reached: ${bounded.failure.reasonCode}`] : []),
+		];
+		const status = isBudgetExhausted ? "partial" : cancelled ? "cancelled" : "failed";
+		const summary = isBudgetExhausted
+			? `Worker paused at budget limit (${bounded.failure.reasonCode})${
+					bounded.failure.detail ? `: ${bounded.failure.detail}` : "."
+				}`
+			: `Worker did not complete: ${bounded.failure.reasonCode}${
+					bounded.failure.detail ? ` — ${bounded.failure.detail}` : ""
+				}`;
 		return finishOutcome({
 			request: options.request,
 			cwd: options.cwd,
 			claim: {
 				...baseClaim,
 				changedFiles: liveChangedFiles,
-				status: cancelled ? "cancelled" : "failed",
-				summary: `Worker did not complete: ${bounded.failure.reasonCode}${
-					bounded.failure.detail ? ` — ${bounded.failure.detail}` : ""
-				}`,
-				...(blockers ? { blockers } : {}),
+				status,
+				summary,
+				...(blockers.length > 0 ? { blockers } : {}),
 			},
 			laneStatus: bounded.failure.status,
 			reasonCode: bounded.failure.reasonCode,
@@ -561,10 +574,17 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	}
 
 	const overBudget = options.maxUsd !== undefined && costUsd > options.maxUsd;
+	const finalClaim: WorkerClaim = overBudget
+		? {
+				...claim,
+				status: "partial",
+				blockers: [...(claim.blockers ?? []), "cost_budget_exceeded"],
+			}
+		: claim;
 	return finishOutcome({
 		request: options.request,
 		cwd: options.cwd,
-		claim,
+		claim: finalClaim,
 		laneStatus: overBudget ? "budget_exhausted" : "succeeded",
 		reasonCode: overBudget
 			? "cost_budget_exceeded"

@@ -327,7 +327,7 @@ function taskDependencyReadiness(
 				`Task dependency '${dependencyId}' is not in objective '${task.task.objectiveId}'.`,
 			);
 		}
-		if (dependency.task.status === "completed") continue;
+		if (dependency.task.status === "completed" || dependency.task.status === "blocked") continue;
 		dependencyTaskIds.push(dependencyId);
 		if (dependency.task.status === "failed") failedDependencyTaskIds.push(dependencyId);
 		if (dependency.task.status === "cancelled") cancelledDependencyTaskIds.push(dependencyId);
