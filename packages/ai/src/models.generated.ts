@@ -15270,7 +15270,7 @@ export const MODELS = {
 				cacheRead: 0.19999999999999998,
 				cacheWrite: 0,
 			},
-			contextWindow: 262144,
+			contextWindow: 1000000,
 			maxTokens: 52429,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.8-max": {
