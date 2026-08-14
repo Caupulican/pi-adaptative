@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -15,7 +24,7 @@ import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-tool-recovery-"));
+	const dir = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-tool-recovery-"));
 	tempDirs.push(dir);
 	return dir;
 }

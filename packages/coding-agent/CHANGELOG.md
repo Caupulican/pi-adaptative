@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Anchored Windows tool/recovery/package-command fixtures to `realpathSync.native(tmpdir())` and gave the leftover module-level bash tool a disposable session, so release-gate load no longer hangs `exit 1` or `rmSync` on 8.3 short paths.
+
 ## [0.90.10] - 2026-08-14
 
 ## [0.90.9] - 2026-08-14
