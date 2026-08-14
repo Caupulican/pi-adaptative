@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -68,9 +68,13 @@ describe("built-in all-active profile", () => {
 describe("built-in all-active profile activation", () => {
 	let tempDir: string;
 	let agentDir: string;
+	const loadedSuiteMs = windowsLoadedSuiteTimeout(10_000) ?? 10_000;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `pi-profile-all-active-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDir = join(
+			realpathSync.native(tmpdir()),
+			`pi-profile-all-active-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		vi.stubEnv(ENV_AGENT_DIR, agentDir);
@@ -79,7 +83,7 @@ describe("built-in all-active profile activation", () => {
 	afterEach(() => {
 		vi.unstubAllEnvs();
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
-	});
+	}, loadedSuiteMs);
 
 	async function sessionActiveTools(runtimeProfiles?: string[]) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
@@ -100,6 +104,16 @@ describe("built-in all-active profile activation", () => {
 			await session.disposeAndWait();
 		}
 	}
+
+	it("disposeAndWait releases the resource-loader extension generation", async () => {
+		const dispose = vi.spyOn(DefaultResourceLoader.prototype, "dispose");
+		try {
+			await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
+			expect(dispose).toHaveBeenCalled();
+		} finally {
+			dispose.mockRestore();
+		}
+	});
 
 	it(
 		"imposes no restriction: a strict superset of the no-active-profile baseline",

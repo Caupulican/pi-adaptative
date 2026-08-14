@@ -90,6 +90,8 @@ export interface ResourceLoader {
 	reload(options?: ResourceReloadOptions): Promise<void>;
 	commitReload?(): void | Promise<void>;
 	rollbackReload?(): void | Promise<void>;
+	/** Release the current (and any deferred) extension generation. Session dispose must call this. */
+	dispose?(): void | Promise<void>;
 	/** Get all discoverable extension paths (enabled and disabled) */
 	getDiscoverableExtensionPaths(): Promise<string[]>;
 }
@@ -734,6 +736,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 		await disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
 		this.restoreSnapshot(this.pendingReloadSnapshot);
 		this.pendingReloadSnapshot = undefined;
+	}
+
+	async dispose(): Promise<void> {
+		if (this.pendingReloadSnapshot) {
+			await disposeExtensionEventSubscriptions(this.pendingReloadSnapshot.extensionsResult.extensions);
+			this.pendingReloadSnapshot = undefined;
+		}
+		await disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
+		this.extensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 	}
 
 	async reload(options: ResourceReloadOptions = {}): Promise<void> {

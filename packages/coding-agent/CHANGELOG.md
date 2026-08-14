@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Disposed the session resource-loader extension generation on shutdown so Windows can remove the session tree instead of hanging `rmSync` after an all-active profile load.
+
 ## [0.90.8] - 2026-08-14
 
 ### Fixed

@@ -2159,6 +2159,7 @@ export class AgentSession {
 			this.agent.subscribeToolCallHandoffRequest = undefined;
 		});
 		safely(() => this._extensionRunner.invalidate());
+		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
 		// Let an aborted in-flight reflection reach its terminal state, then flush session-owned write
