@@ -21,7 +21,7 @@
 		"check:model-catalog": "node packages/ai/scripts/check-model-catalog.mjs",
 		"check:pinned-deps": "node scripts/check-pinned-deps.mjs",
 		"check:shrinkwrap": "node scripts/generate-coding-agent-shrinkwrap.mjs --check",
-		"check:test-harness-isolation": "node --test scripts/test-harness-isolation.test.mjs",
+		"check:test-harness-isolation": "node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs",
 		"check:typescript-toolchain": "node --test scripts/typescript-toolchain.test.mjs",
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",

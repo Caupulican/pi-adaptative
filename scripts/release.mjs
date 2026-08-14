@@ -33,6 +33,7 @@
 import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
+import { partitionReleaseChanges } from "./release-staging.mjs";
 
 const RELEASE_TARGET = process.argv[2];
 const BUMP_TYPES = new Set(["major", "minor", "patch"]);
@@ -106,49 +107,10 @@ function getRepoSlug() {
 	return match[1];
 }
 
-function computeReleaseAllowlist() {
-	const allowlist = new Set(["package.json", "package-lock.json"]);
-	const packageDirs = readdirSync("packages", { withFileTypes: true })
-		.filter((entry) => entry.isDirectory())
-		.map((entry) => entry.name);
-
-	for (const pkg of packageDirs) {
-		const packageJsonPath = join("packages", pkg, "package.json");
-		if (existsSync(packageJsonPath)) allowlist.add(packageJsonPath);
-		const changelogPath = join("packages", pkg, "CHANGELOG.md");
-		if (existsSync(changelogPath)) allowlist.add(changelogPath);
-	}
-
-	const aiSrcDir = join("packages", "ai", "src");
-	if (existsSync(aiSrcDir)) {
-		for (const file of readdirSync(aiSrcDir)) {
-			if (file.endsWith(".generated.ts")) allowlist.add(join(aiSrcDir, file));
-		}
-	}
-
-	const shrinkwrapPath = join("packages", "coding-agent", "npm-shrinkwrap.json");
-	if (existsSync(shrinkwrapPath)) allowlist.add(shrinkwrapPath);
-
-	return allowlist;
-}
-
-function parsePorcelainPath(line) {
-	const path = line.slice(3);
-	const arrowIndex = path.indexOf(" -> ");
-	const finalPath = arrowIndex === -1 ? path : path.slice(arrowIndex + 4);
-	return finalPath.replace(/^"/, "").replace(/"$/, "");
-}
-
 function stageChangedFiles() {
-	const allowlist = computeReleaseAllowlist();
 	const statusOutput = run("git status --porcelain", { silent: true }) || "";
-	const changedPaths = statusOutput
-		.split("\n")
-		.map((line) => line.trim())
-		.filter(Boolean)
-		.map(parsePorcelainPath);
+	const { allowed, unexpected } = partitionReleaseChanges(statusOutput);
 
-	const unexpected = changedPaths.filter((path) => !allowlist.has(path));
 	if (unexpected.length > 0) {
 		throw new Error(
 			`Unexpected working-tree changes outside the release allowlist; refusing to stage them:\n${unexpected
@@ -157,11 +119,10 @@ function stageChangedFiles() {
 		);
 	}
 
-	const toStage = changedPaths.filter((path) => allowlist.has(path));
-	if (toStage.length === 0) {
+	if (allowed.length === 0) {
 		return;
 	}
-	run(`git add -- ${toStage.map(shellQuote).join(" ")}`);
+	run(`git add -- ${allowed.map(shellQuote).join(" ")}`);
 }
 
 function bumpOrSetVersion(target) {
