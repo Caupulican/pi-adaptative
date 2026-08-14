@@ -21,11 +21,18 @@ export default defineConfig({
 			viteModuleRunner: false,
 		},
 		include: ["test-destructive/**/*.test.ts"],
+		// Spawn targets (H1b child) are not tests. Keep them out of Vitest's load/transform graph.
+		exclude: ["test-destructive/**/h1b-child.ts", "**/node_modules/**"],
 		// Deterministic, one-scenario-at-a-time execution: crash sweeps construct many temp
-		// directories and chaos loops drive fake timers, neither of which should interleave across
-		// files. Passing with zero matching files is fine for now — stress/ and soak/ are empty until
-		// Phase 3 populates them (blueprint §6); an empty sub-selector must not hard-fail Phase 1.
+		// directories and chaos/soak loops drive fake timers, none of which should interleave across
+		// files. Passing with zero matching files stays allowed so a sub-selector for an empty
+		// directory cannot hard-fail a phase that has not populated it yet.
 		fileParallelism: false,
+		// One worker, one isolate: pay the native-source import graph once. Re-isolating each file
+		// re-transforms WorkerLifecycle/AgentSession/compaction for every crash file and makes
+		// load+transform the slow path. Tests already clean tmpdirs and fake timers in afterEach.
+		maxWorkers: 1,
+		isolate: false,
 		passWithNoTests: true,
 		server: {
 			deps: {

@@ -60,6 +60,7 @@ function waitCoordinator(
 	waitBlockedByCaller?: (callerAgentId: string, targetAgentIds: readonly string[]) => readonly string[],
 	yieldCallerForWait?: (callerAgentId: string) => () => boolean | undefined,
 	childStatus: () => AttemptRuntimeState["status"] = () => "queued",
+	subscribeReservationAvailability?: (listener: () => void) => () => void,
 ): WorkerAgentControlCoordinator {
 	const callerAttempt = attempt("caller", "caller-task", "running");
 	const childAttempt = attempt("child", "child-task", "queued");
@@ -99,6 +100,7 @@ function waitCoordinator(
 		cancelLane: vi.fn(),
 		...(waitBlockedByCaller ? { waitBlockedByCaller } : {}),
 		...(yieldCallerForWait ? { yieldCallerForWait } : {}),
+		...(subscribeReservationAvailability ? { subscribeReservationAvailability } : {}),
 	} as ConstructorParameters<typeof WorkerAgentControlCoordinator>[0]);
 }
 
@@ -180,27 +182,37 @@ describe("worker wait deadlock prevention", () => {
 		}
 	});
 
-	it("settles a timed-out wait from its own bounded retry alone, with zero signalStateChanged events", async () => {
-		// Root-cause regression for the hang: subscribeStateChanges is not a guaranteed wakeup for a
-		// write-reservation release (a separate subsystem), so a wait stuck on a blocked restore must
-		// still resolve on its own bounded retry poll — never relying on an external event that may
-		// never arrive.
+	it("settles a blocked restore from the reservation-availability event, not a 1s poll", async () => {
+		// subscribeStateChanges is not a wakeup for write-reservation release. The 1s poll that
+		// used to sit here was a workaround: reservation release already has an in-process event
+		// (notifyAvailability / subscribeAvailability). A swarm wait must resume on that event.
 		vi.useFakeTimers();
 		try {
-			const restore = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(true);
-			const coordinator = waitCoordinator(undefined, () => restore);
+			const restore = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+			const availabilityListeners = new Set<() => void>();
+			const coordinator = waitCoordinator(
+				undefined,
+				() => restore,
+				undefined,
+				(listener) => {
+					availabilityListeners.add(listener);
+					return () => {
+						availabilityListeners.delete(listener);
+					};
+				},
+			);
 			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
 
-			// The wait's own 1ms timeout fires and hits the first blocked restore.
 			await vi.advanceTimersByTimeAsync(1);
 			expect(restore).toHaveBeenCalledOnce();
 
-			// No signalStateChanged() anywhere in this test: only the bounded retry poll can drive
-			// this forward. Two retry intervals cover the two remaining mocked restore attempts.
+			// Two seconds of virtual time with no reservation event must not retry. The poll is gone.
 			await vi.advanceTimersByTimeAsync(2_000);
+			expect(restore).toHaveBeenCalledOnce();
 
+			for (const listener of availabilityListeners) listener();
 			await expect(waiting).resolves.toMatchObject({ timedOut: true });
-			expect(restore).toHaveBeenCalledTimes(3);
+			expect(restore).toHaveBeenCalledTimes(2);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -332,6 +344,55 @@ describe("worker wait deadlock prevention", () => {
 		});
 		coordinator.release("caller-task");
 		coordinator.dispose();
+	});
+
+	it("wakes a blocked wait restore from the real reservation release event", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worker-wait-reservation-event-"));
+		temporaryDirectories.push(root);
+		const workspace = join(root, "workspace");
+		const source = join(workspace, "src");
+		mkdirSync(source, { recursive: true });
+		const reservations = new WorkerWriteReservationCoordinator({
+			agentDir: join(root, "agent"),
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-reservation-event",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: vi.fn(),
+			warn: vi.fn(),
+		});
+		const plan = { writeEnabled: true, writePaths: [source] };
+		expect(reservations.acquire("caller-task", { attemptId: "caller-attempt" }, plan)).toEqual({
+			kind: "granted",
+		});
+		const yielded = reservations.yieldForWait("caller-task", "caller-attempt", 1);
+		expect(yielded).toBeDefined();
+		expect(reservations.acquire("child-task", { attemptId: "child-attempt" }, plan)).toEqual({ kind: "granted" });
+
+		vi.useFakeTimers();
+		try {
+			const coordinator = waitCoordinator(
+				undefined,
+				() => () => reservations.restoreAfterWait(yielded!).kind === "granted",
+				undefined,
+				(listener) => reservations.subscribeAvailability(listener),
+			);
+			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
+			await vi.advanceTimersByTimeAsync(1);
+			let settled = false;
+			void waiting.then(() => {
+				settled = true;
+			});
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(settled).toBe(false);
+
+			reservations.release("child-task");
+			await Promise.resolve();
+			await expect(waiting).resolves.toMatchObject({ timedOut: true });
+			expect(reservations.restoreAfterWait(yielded!)).toEqual({ kind: "granted" });
+		} finally {
+			vi.useRealTimers();
+			reservations.dispose();
+		}
 	});
 
 	it("releases every held lease on dispose() instead of only forgetting them in memory", () => {

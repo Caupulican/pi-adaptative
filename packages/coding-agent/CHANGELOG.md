@@ -8,6 +8,7 @@
 - Recorded buffered goal usage loudly (warning plus continuation failure) when execution state vanishes instead of silently discarding spend.
 - Projected budget-exhausted worker attempts that finish with partial claims as budget-exhausted, and tallied blocked/partial/canceled workers in a new attention count so terminal statuses always partition.
 - Bounded a hung worker wait when a blocked write-reservation restore left it with no deadline, evaluated the deadlock guard before the yield erases its evidence, and cleared yield bookkeeping on denied restores so concurrency is not over-admitted.
+- Woke a blocked worker-wait restore from the write-reservation availability event instead of a 1s poll, so swarm waits resume on the release that unblocked them; the 300s bound remains a watchdog, not a retry loop.
 - Stopped worker lease heartbeats at run completion and fenced renewals with the lease captured at start, so stale runs cannot extend foreign leases and successful workers are not converted to failures during finalization.
 - Restored bounded default worker-tree ceilings ($0.50 / 120s); unbounded trees are an explicit opt-in only.
 - Excluded retired agents from nested-session delegation limits.
@@ -28,6 +29,8 @@
 - Made model catalog generation hermetic by default (live fetch only with PI_FETCH_MODELS=1) with a scheduled drift check that fails on removal of repo-referenced models.
 - Extracted extension runtime binding from AgentSession into ExtensionBindingController and ratcheted the session line ceiling down (4000 to 3900).
 - Defaulted the xAI provider to grok-4.6; the native catalog is grok-4.5 and grok-4.6 on the subscription Responses path.
+- Added the full H1 crash sweep and executable invariant catalogue (`test:destructive`), plus a nightly/dispatch `destructive.yml` gate that `release:promote` requires before tagging.
+- Added H3 seeded interleave and H4 virtual-time soak to `test:destructive` (INV-W1/W2/W3/W5/B1 under shuffled worker ops; stall/worker-wait/budget and stuck-notify/heartbeat watchdogs).
 - Documented the propertyAliasNormalize repair mode in the bundled tool-call-repair skill and reference grammar.
 
 ## [0.90.7] - 2026-08-13

@@ -327,6 +327,7 @@ export class WorkerDelegationController {
 			waitBlockedByCaller: (callerAgentId, targetAgentIds) =>
 				this.waitTargetsBlockedByCaller(callerAgentId, targetAgentIds),
 			yieldCallerForWait: (callerAgentId) => this.yieldWorkerForWait(callerAgentId),
+			subscribeReservationAvailability: (listener) => this.writeReservations.subscribeAvailability(listener),
 			warn: (message) => this.safeWarn(message),
 		});
 		this.terminalHandoffs = new WorkerTerminalHandoffCoordinator({

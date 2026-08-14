@@ -36,6 +36,7 @@ export class WorkerWriteReservationCoordinator {
 	private readonly store: WorkerWriteReservationStore;
 	private readonly leases = new Map<string, WorkerWriteReservationLease>();
 	private readonly blockedByLocalLaneIds = new Map<string, Set<string>>();
+	private readonly availabilityListeners = new Set<() => void>();
 	private watchDispose: (() => void) | undefined;
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
@@ -82,6 +83,15 @@ export class WorkerWriteReservationCoordinator {
 
 	isBlockedBy(targetLaneId: string, blockerLaneId: string): boolean {
 		return this.blockedByLocalLaneIds.get(targetLaneId)?.has(blockerLaneId) === true;
+	}
+
+	/** Event-driven wakeup when a write reservation is released; same signal that drains the queue. */
+	subscribeAvailability(listener: () => void): () => void {
+		this.availabilityListeners.add(listener);
+		this.ensureWatch();
+		return () => {
+			this.availabilityListeners.delete(listener);
+		};
 	}
 
 	/** Release one exact live caller lane while its model turn is blocked inside a worker wait. */
@@ -188,6 +198,7 @@ export class WorkerWriteReservationCoordinator {
 	dispose(): void {
 		this.watchDispose?.();
 		this.watchDispose = undefined;
+		this.availabilityListeners.clear();
 		// Release every held lease through the same path release() uses (best-effort store release,
 		// warn on failure, forgetLease bookkeeping) — dispose() previously dropped this coordinator's
 		// in-memory map of them without ever releasing the underlying durable reservations, leaking
@@ -257,8 +268,19 @@ export class WorkerWriteReservationCoordinator {
 		}
 	}
 
+	private emitAvailability(): void {
+		this.options.drainQueuedWorkers();
+		for (const listener of this.availabilityListeners) {
+			try {
+				listener();
+			} catch {
+				// Waiters re-enter restore; a throwing observer cannot consume the release event.
+			}
+		}
+	}
+
 	private ensureWatch(): void {
 		if (this.watchDispose) return;
-		this.watchDispose = this.store.watchAvailability(this.workspace(), () => this.options.drainQueuedWorkers());
+		this.watchDispose = this.store.watchAvailability(this.workspace(), () => this.emitAvailability());
 	}
 }

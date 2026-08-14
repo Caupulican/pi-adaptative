@@ -23,7 +23,8 @@
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
  * 9. Locate the "Release vX.Y.Z" commit and poll GitHub Actions (workflow ci.yml) for its
  *    conclusion on that exact SHA.
- * 10. Only on success: create and push the vX.Y.Z tag, which triggers build-binaries.yml.
+ * 10. Poll destructive.yml on the same SHA (dispatch one if none exists).
+ * 11. Only on success of both: create and push the vX.Y.Z tag, which triggers build-binaries.yml.
  * On CI failure or timeout, no tag is created; rerun `npm run release:promote` to resume once
  * CI is fixed or rerun. Never rerun the prepare step (release:patch/minor/major) for the same
  * version once its release commit has been pushed.
@@ -44,6 +45,7 @@ if (RELEASE_TARGET !== "promote" && !isPrepareTarget) {
 }
 
 const CI_WORKFLOW = "ci.yml";
+const DESTRUCTIVE_WORKFLOW = "destructive.yml";
 const CI_POLL_INTERVAL_MS = 20_000;
 const CI_POLL_TIMEOUT_MS = 60 * 60_000; // ci.yml's own per-OS job timeout is 45m; leave headroom for runner queueing.
 
@@ -379,14 +381,15 @@ function findReleaseCommitSha(version) {
 	return undefined;
 }
 
-async function waitForCi(sha) {
+async function waitForWorkflow(sha, workflow, options = {}) {
 	const repo = getRepoSlug();
-	console.log(`  Waiting for CI (${CI_WORKFLOW}) on ${sha} in ${repo}...`);
+	console.log(`  Waiting for ${workflow} on ${sha} in ${repo}...`);
 	const deadline = Date.now() + CI_POLL_TIMEOUT_MS;
+	let dispatched = false;
 
 	while (Date.now() < deadline) {
 		const listing = run(
-			`gh run list -R ${shellQuote(repo)} --workflow=${CI_WORKFLOW} --json headSha,status,conclusion --limit 30`,
+			`gh run list -R ${shellQuote(repo)} --workflow=${workflow} --json headSha,status,conclusion --limit 30`,
 			{ silent: true, ignoreError: true },
 		);
 		if (listing) {
@@ -394,18 +397,30 @@ async function waitForCi(sha) {
 			const match = runs.find((r) => r.headSha === sha);
 			if (match) {
 				if (match.status === "completed") {
-					console.log(`  CI run for ${sha}: ${match.conclusion}`);
+					console.log(`  ${workflow} for ${sha}: ${match.conclusion}`);
 					return match.conclusion;
 				}
-				console.log(`  CI run for ${sha}: ${match.status}...`);
+				console.log(`  ${workflow} for ${sha}: ${match.status}...`);
+			} else if (options.dispatchIfMissing && !dispatched) {
+				console.log(`  No ${workflow} run on ${sha}; dispatching...`);
+				run(`gh workflow run ${workflow} --ref ${shellQuote(sha)}`, { ignoreError: true });
+				dispatched = true;
 			} else {
-				console.log("  CI run not registered yet...");
+				console.log(`  ${workflow} run not registered yet...`);
 			}
 		}
 		await sleep(CI_POLL_INTERVAL_MS);
 	}
 
-	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for CI on ${sha}.`);
+	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${workflow} on ${sha}.`);
+}
+
+async function waitForCi(sha) {
+	return waitForWorkflow(sha, CI_WORKFLOW);
+}
+
+async function waitForDestructive(sha) {
+	return waitForWorkflow(sha, DESTRUCTIVE_WORKFLOW, { dispatchIfMissing: true });
 }
 
 function ensureTagPushed(tag) {
@@ -446,6 +461,14 @@ async function promoteRelease(versionArg) {
 		throw new Error(
 			`CI did not succeed for release commit ${releaseSha} (conclusion: ${conclusion}). No tag was created. ` +
 				'Fix or rerun CI, then run "npm run release:promote" to resume.',
+		);
+	}
+
+	const destructive = await waitForDestructive(releaseSha);
+	if (destructive !== "success") {
+		throw new Error(
+			`Destructive suite did not succeed for release commit ${releaseSha} (conclusion: ${destructive}). ` +
+				"No tag was created. Fix or rerun destructive.yml, then run \"npm run release:promote\" to resume.",
 		);
 	}
 

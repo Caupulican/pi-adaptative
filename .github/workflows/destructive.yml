@@ -1,0 +1,43 @@
+name: Destructive suite
+
+# Separate from ci.yml: this suite breaks the system and asserts recovery. It is never part of
+# npm test / pre-commit. Nightly + dispatch; release:promote requires a green run on the
+# release SHA (or dispatches one and polls).
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  destructive:
+    name: test:destructive (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run destructive suite
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+          DESTRUCTIVE_NIGHTLY_SEED: ${{ github.run_id }}
+        run: npm run test:destructive
