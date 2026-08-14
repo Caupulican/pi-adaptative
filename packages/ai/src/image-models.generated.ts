@@ -80,6 +80,21 @@ export const IMAGE_MODELS = {
 				cacheWrite: 0,
 			},
 		} satisfies ImagesModel<"openrouter-images">,
+		"bytedance-seed/seedream-5-0-lite": {
+			id: "bytedance-seed/seedream-5-0-lite",
+			name: "ByteDance Seed: Seedream 5.0 Lite",
+			api: "openrouter-images",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			input: ["text", "image"],
+			output: ["image"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+		} satisfies ImagesModel<"openrouter-images">,
 		"bytedance-seed/seedream-5-0-pro": {
 			id: "bytedance-seed/seedream-5-0-pro",
 			name: "ByteDance Seed: Seedream 5.0 Pro",
