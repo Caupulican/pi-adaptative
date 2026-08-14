@@ -19,9 +19,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { promises as fsPromises, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { promises as fsPromises, mkdirSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import lockfile from "proper-lockfile";
+import { type FaultableFs, nodeFs } from "./faultable-fs.ts";
 
 /**
  * Bounded rename retry budget for the win32-only transient-rename handling below (see
@@ -54,10 +55,10 @@ function isTransientRenameErrorOnWin32(err: unknown): boolean {
 }
 
 /** Sync counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
-function renameSyncWithRetry(tmpPath: string, filePath: string): void {
+function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs): void {
 	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
 		try {
-			renameSync(tmpPath, filePath);
+			fs.renameSync(tmpPath, filePath);
 			return;
 		} catch (err) {
 			if (!isTransientRenameErrorOnWin32(err) || attempt === RENAME_RETRY_ATTEMPTS) throw err;
@@ -118,6 +119,12 @@ export interface AtomicFileLockOptions {
 export interface AtomicFileWriteOptions {
 	/** POSIX permission bits applied to the temporary file and inherited by the renamed destination. */
 	mode?: number;
+	/**
+	 * Injection seam for the mutating fs primitives this write issues (`mkdirSync`, `writeFileSync`,
+	 * `renameSync`). Defaults to real `node:fs` — omitting this option is a zero-behavior-change no-op.
+	 * Only the destructive-testing harness passes a fault-injecting implementation.
+	 */
+	fs?: FaultableFs;
 }
 
 const DEFAULT_RETRIES = 10;
@@ -359,13 +366,14 @@ async function removeTemporaryPath(tmpPath: string): Promise<void> {
 }
 
 export function writeFileAtomicSync(filePath: string, content: string, options?: AtomicFileWriteOptions): void {
-	mkdirSync(dirname(filePath), { recursive: true });
+	const fs = options?.fs ?? nodeFs;
+	fs.mkdirSync(dirname(filePath), { recursive: true });
 	const tmpPath = temporaryPath(filePath);
 	let renamed = false;
 	try {
 		// `wx` makes a nonce collision harmless: never truncate another writer's temporary file.
-		writeFileSync(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
-		renameSyncWithRetry(tmpPath, filePath);
+		fs.writeFileSync(tmpPath, content, { encoding: "utf-8", flag: "wx", mode: options?.mode });
+		renameSyncWithRetry(tmpPath, filePath, fs);
 		renamed = true;
 	} finally {
 		if (!renamed) removeTemporaryPathSync(tmpPath);

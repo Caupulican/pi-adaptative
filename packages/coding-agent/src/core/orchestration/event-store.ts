@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { type FaultableFs, nodeFs } from "../util/faultable-fs.ts";
 import {
 	type AppendOrchestrationEventInput,
 	isOrchestrationEvent,
@@ -119,6 +120,12 @@ export interface OrchestrationEventStoreOptions {
 	maxTailEvents?: number;
 	maxTailBytes?: number;
 	maxIdempotencyEvents?: number;
+	/**
+	 * Injection seam for this store's mutating fs primitives. Defaults to real `node:fs` — omitting
+	 * this option is a zero-behavior-change no-op. Only the destructive-testing harness passes a
+	 * fault-injecting implementation (see `src/core/util/faultable-fs.ts`).
+	 */
+	fs?: FaultableFs;
 }
 
 export interface AppendOrchestrationEventOptions {
@@ -396,6 +403,7 @@ export class OrchestrationEventStore {
 	private readonly maxTailEvents: number;
 	private readonly maxTailBytes: number;
 	private readonly maxIdempotencyEvents: number;
+	private readonly fs: FaultableFs;
 	private readonly listeners = new Set<(event: OrchestrationEvent) => void>();
 	private verifiedSnapshotBaseline: VerifiedSnapshotBaseline | undefined;
 	private synchronizedIndexes: SynchronizedIndexes | undefined;
@@ -409,6 +417,7 @@ export class OrchestrationEventStore {
 		this.baselinePath = join(this.rootDir, "projection-baseline.json");
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.createEventId = options.createEventId ?? randomUUID;
+		this.fs = options.fs ?? nodeFs;
 		this.maxTailEvents = positiveSafeInteger(
 			options.maxTailEvents,
 			DEFAULT_MAX_TAIL_EVENTS,
@@ -481,14 +490,14 @@ export class OrchestrationEventStore {
 				MAX_CURSOR_BYTES,
 				"Orchestration cursor",
 			);
-			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent);
+			writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent, { fs: this.fs });
 			indexes.lastOrdinal = ordinal;
 			indexes.tailBytes = nextTailBytes;
 			if (normalizedInput.idempotencyKey) indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
 			// The immutable event is authoritative. The cursor is only a corruption high-water mark,
 			// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
 			// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
-			writeFileSync(this.cursorPath, serializedCursor, "utf-8");
+			this.fs.writeFileSync(this.cursorPath, serializedCursor, "utf-8");
 			return { event: next, appended: true };
 		});
 
@@ -609,8 +618,8 @@ export class OrchestrationEventStore {
 				MAX_CURSOR_BYTES,
 				"Orchestration cursor",
 			);
-			writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot);
-			writeFileAtomicSync(this.baselinePath, serializedBaseline);
+			writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot, { fs: this.fs });
+			writeFileAtomicSync(this.baselinePath, serializedBaseline, { fs: this.fs });
 
 			for (const name of this.idempotencyFileNamesUnlocked()) {
 				this.unlinkManagedFile(join(this.idempotencyDir, name));
@@ -622,7 +631,7 @@ export class OrchestrationEventStore {
 			for (const name of this.snapshotFileNamesUnlocked()) {
 				if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
 			}
-			writeFileAtomicSync(this.cursorPath, serializedCursor);
+			writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
 			this.verifiedSnapshotBaseline = undefined;
 			this.synchronizedIndexes = {
 				baselineOrdinal: throughOrdinal,
@@ -893,7 +902,7 @@ export class OrchestrationEventStore {
 
 	private unlinkManagedFile(filePath: string): void {
 		try {
-			unlinkSync(filePath);
+			this.fs.unlinkSync(filePath);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}

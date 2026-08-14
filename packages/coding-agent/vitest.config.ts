@@ -34,6 +34,11 @@ const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url
 const defaultTestExcludes = [
 	...configDefaults.exclude,
 	...(process.env.PI_RUN_SCRATCH === "1" ? [] : ["**/scratch-*.test.ts"]),
+	// The destructive suite (test:destructive) is its own separate vitest config
+	// (vitest.destructive.config.ts) and must never run as part of the default `vitest --run` /
+	// `npm test` — see destructive-testing-blueprint.md §0.4. This exclusion is the only change this
+	// suite makes to the default project; it has no effect on any file the default suite already ran.
+	"test-destructive/**",
 ];
 
 // Vitest's native module runner cannot replace several ESM/CJS boundary modules used by these

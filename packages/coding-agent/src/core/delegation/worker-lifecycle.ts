@@ -18,6 +18,7 @@ import {
 	type PrepareManagedDelegationInput,
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
+import type { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import type {
 	AttemptDispatchReadiness,
 	AttemptRuntimeState,
@@ -67,6 +68,13 @@ export class WorkerLifecycle {
 		sessionId: string;
 		isProcessAlive?: (pid: number) => boolean;
 		now?: () => number;
+		/**
+		 * Pre-built durable event store, forwarded to `DelegationOrchestrationLedger`. Defaults to
+		 * `undefined`, which the ledger resolves to its own real `OrchestrationEventStore` — a
+		 * zero-behavior-change no-op for every existing caller. Only the destructive-testing harness
+		 * passes a store constructed over a fault-injecting `fs`.
+		 */
+		store?: OrchestrationEventStore;
 	}) {
 		this.ledger = new DelegationOrchestrationLedger(options);
 		this.isProcessAlive = options.isProcessAlive ?? isLocalProcessAlive;
