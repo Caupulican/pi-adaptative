@@ -1,6 +1,14 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+/** Git porcelain and allowlist keys are POSIX paths on every host. */
+function posixJoin(...parts) {
+	return parts
+		.filter((part) => part.length > 0)
+		.join("/")
+		.replace(/\\/g, "/");
+}
+
 /**
  * Git porcelain is a fixed 3-character prefix (`XY `). X or Y may themselves be
  * a space (unstaged-only is ` M path`). Never trim the line before slicing.
@@ -30,7 +38,7 @@ function workspacePackageRelDirs(repoRoot) {
 			const parentAbs = join(repoRoot, parentRel);
 			if (!existsSync(parentAbs)) continue;
 			for (const entry of readdirSync(parentAbs, { withFileTypes: true })) {
-				if (entry.isDirectory()) dirs.push(join(parentRel, entry.name));
+				if (entry.isDirectory()) dirs.push(posixJoin(parentRel, entry.name));
 			}
 			continue;
 		}
@@ -44,15 +52,15 @@ export function computeReleaseAllowlist(repoRoot = ".") {
 	const allowlist = new Set(["package.json", "package-lock.json"]);
 
 	for (const dir of workspacePackageRelDirs(repoRoot)) {
-		if (existsSync(join(repoRoot, dir, "package.json"))) allowlist.add(join(dir, "package.json"));
-		if (existsSync(join(repoRoot, dir, "package-lock.json"))) allowlist.add(join(dir, "package-lock.json"));
+		if (existsSync(join(repoRoot, dir, "package.json"))) allowlist.add(posixJoin(dir, "package.json"));
+		if (existsSync(join(repoRoot, dir, "package-lock.json"))) allowlist.add(posixJoin(dir, "package-lock.json"));
 	}
 
 	const packagesDir = join(repoRoot, "packages");
 	if (existsSync(packagesDir)) {
 		for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
 			if (!entry.isDirectory()) continue;
-			const changelogRel = join("packages", entry.name, "CHANGELOG.md");
+			const changelogRel = posixJoin("packages", entry.name, "CHANGELOG.md");
 			if (existsSync(join(repoRoot, changelogRel))) allowlist.add(changelogRel);
 		}
 	}
@@ -60,11 +68,11 @@ export function computeReleaseAllowlist(repoRoot = ".") {
 	const aiSrcDir = join(repoRoot, "packages", "ai", "src");
 	if (existsSync(aiSrcDir)) {
 		for (const file of readdirSync(aiSrcDir)) {
-			if (file.endsWith(".generated.ts")) allowlist.add(join("packages", "ai", "src", file));
+			if (file.endsWith(".generated.ts")) allowlist.add(posixJoin("packages", "ai", "src", file));
 		}
 	}
 
-	const shrinkwrapRel = join("packages", "coding-agent", "npm-shrinkwrap.json");
+	const shrinkwrapRel = posixJoin("packages", "coding-agent", "npm-shrinkwrap.json");
 	if (existsSync(join(repoRoot, shrinkwrapRel))) allowlist.add(shrinkwrapRel);
 
 	return allowlist;

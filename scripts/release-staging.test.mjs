@@ -30,8 +30,11 @@ test("collectChangedPaths does not trim the porcelain prefix", () => {
 test("lockstep workspace package files are on the release allowlist", () => {
 	const allowlist = computeReleaseAllowlist(repoRoot);
 	assert.ok(allowlist.has("package-lock.json"));
-	assert.ok(allowlist.has(join("packages", "agent", "CHANGELOG.md")));
-	assert.ok(allowlist.has(join("packages", "coding-agent", "examples", "extensions", "sandbox", "package.json")));
+	assert.ok(allowlist.has("packages/agent/CHANGELOG.md"));
+	assert.ok(allowlist.has("packages/coding-agent/examples/extensions/sandbox/package.json"));
+	for (const path of allowlist) {
+		assert.equal(path.includes("\\"), false, path);
+	}
 });
 
 test("partitionReleaseChanges accepts a typical unstaged version-bump tree", () => {
