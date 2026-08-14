@@ -70,6 +70,17 @@ export function computeReleaseAllowlist(repoRoot = ".") {
 	return allowlist;
 }
 
+/** Prefer a successful run for a SHA over an earlier cancelled/failed one. */
+export function pickWorkflowConclusion(runs, sha) {
+	const matches = runs.filter((run) => run.headSha === sha);
+	if (matches.some((run) => run.conclusion === "success")) return { state: "completed", conclusion: "success" };
+	const active = matches.find((run) => run.status !== "completed");
+	if (active) return { state: "pending", status: active.status };
+	const done = matches.find((run) => run.status === "completed");
+	if (done) return { state: "completed", conclusion: done.conclusion };
+	return { state: "missing" };
+}
+
 export function partitionReleaseChanges(statusOutput, repoRoot = ".") {
 	const allowlist = computeReleaseAllowlist(repoRoot);
 	const changedPaths = collectChangedPaths(statusOutput);

@@ -7,6 +7,7 @@ import {
 	computeReleaseAllowlist,
 	parsePorcelainPath,
 	partitionReleaseChanges,
+	pickWorkflowConclusion,
 } from "./release-staging.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,4 +44,22 @@ test("partitionReleaseChanges accepts a typical unstaged version-bump tree", () 
 	const { allowed, unexpected } = partitionReleaseChanges(status, repoRoot);
 	assert.equal(unexpected.length, 0);
 	assert.equal(allowed.length, 4);
+});
+
+test("pickWorkflowConclusion prefers success over a cancelled run on the same SHA", () => {
+	const sha = "abc";
+	assert.deepEqual(
+		pickWorkflowConclusion(
+			[
+				{ headSha: sha, status: "completed", conclusion: "cancelled" },
+				{ headSha: sha, status: "completed", conclusion: "success" },
+			],
+			sha,
+		),
+		{ state: "completed", conclusion: "success" },
+	);
+	assert.deepEqual(
+		pickWorkflowConclusion([{ headSha: sha, status: "in_progress", conclusion: null }], sha),
+		{ state: "pending", status: "in_progress" },
+	);
 });

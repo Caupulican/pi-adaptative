@@ -13,7 +13,10 @@ on:
         type: string
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # PR updates cancel the previous PR run. Pushes use the commit SHA so a later
+  # main commit (the post-release [Unreleased] section) cannot cancel CI on the
+  # Release vX.Y.Z commit that promote polls.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:

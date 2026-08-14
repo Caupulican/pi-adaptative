@@ -33,7 +33,7 @@
 import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
-import { partitionReleaseChanges } from "./release-staging.mjs";
+import { partitionReleaseChanges, pickWorkflowConclusion } from "./release-staging.mjs";
 
 const RELEASE_TARGET = process.argv[2];
 const BUMP_TYPES = new Set(["major", "minor", "patch"]);
@@ -355,12 +355,12 @@ async function waitForWorkflow(sha, workflow, options = {}) {
 		);
 		if (listing) {
 			const runs = JSON.parse(listing);
-			const match = runs.find((r) => r.headSha === sha);
-			if (match) {
-				if (match.status === "completed") {
-					console.log(`  ${workflow} for ${sha}: ${match.conclusion}`);
-					return match.conclusion;
-				}
+			const match = pickWorkflowConclusion(runs, sha);
+			if (match.state === "completed") {
+				console.log(`  ${workflow} for ${sha}: ${match.conclusion}`);
+				return match.conclusion;
+			}
+			if (match.state === "pending") {
 				console.log(`  ${workflow} for ${sha}: ${match.status}...`);
 			} else if (options.dispatchIfMissing && !dispatched) {
 				console.log(`  No ${workflow} run on ${sha}; dispatching...`);
