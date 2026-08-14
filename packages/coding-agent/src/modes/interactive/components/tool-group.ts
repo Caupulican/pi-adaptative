@@ -6,8 +6,41 @@ import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 const COLLAPSED_FILE_SNIPPET = 3;
 
+/** Human nouns for collapsed group headers. Keys are toolGroup ids, not raw tool names. */
+const GROUP_NOUNS: Record<string, { singular: string; plural: string }> = {
+	task_steps: { singular: "Task Step", plural: "Task Steps" },
+	skills: { singular: "Skill", plural: "Skills" },
+	delegate: { singular: "Worker", plural: "Workers" },
+	explore: { singular: "Search", plural: "Searches" },
+};
+
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
 	return `${count} ${count === 1 ? singular : pluralForm}`;
+}
+
+function humanizeGroupKey(raw: string): { singular: string; plural: string } {
+	const words = raw
+		.replace(/[_-]+/g, " ")
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean)
+		.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+	const last = words.at(-1) ?? "Tool";
+	const lastSingular = last.endsWith("s") && last.length > 1 ? last.slice(0, -1) : last;
+	const lastPlural = last.endsWith("s") ? last : `${last}s`;
+	return {
+		singular: [...words.slice(0, -1), lastSingular].join(" "),
+		plural: [...words.slice(0, -1), lastPlural].join(" "),
+	};
+}
+
+function groupNoun(groupKey: string, tools: readonly ToolExecutionComponent[]): { singular: string; plural: string } {
+	const mapped = GROUP_NOUNS[groupKey];
+	if (mapped) return mapped;
+	const labels = [...new Set(tools.map((tool) => tool.getDisplayLabel()).filter((label) => label.length > 0))];
+	if (labels.length === 1) return humanizeGroupKey(labels[0]);
+	if (groupKey) return humanizeGroupKey(groupKey);
+	return { singular: "Tool", plural: "Tools" };
 }
 
 export class ToolGroupComponent implements Component {
@@ -87,7 +120,10 @@ export class ToolGroupComponent implements Component {
 		const parts: string[] = [];
 		if (editCount > 0) parts.push(plural(editCount, "edit"));
 		if (writeCount > 0) parts.push(plural(writeCount, "write"));
-		if (parts.length === 0) parts.push(plural(this.tools.length, this.toolGroup || "tool"));
+		if (parts.length === 0) {
+			const noun = groupNoun(this.toolGroup, this.tools);
+			parts.push(plural(this.tools.length, noun.singular, noun.plural));
+		}
 		if (files.length > 0) parts.push(plural(files.length, "file"));
 		if (errorCount > 0) parts.push(plural(errorCount, "error"));
 		return theme.bold(parts.join(" · "));
@@ -106,7 +142,8 @@ export class ToolGroupComponent implements Component {
 		const last = [...this.tools].reverse().find((tool) => tool.isToolSuccess()) ?? this.tools[this.tools.length - 1];
 		if (!last) return [];
 		const path = last.getDisplayPath();
-		const label = path ? `${last.getToolName()} ${shortenPath(path)}` : last.getToolName();
+		const name = last.getDisplayLabel();
+		const label = path ? `${name} ${shortenPath(path)}` : name;
 		return [`${theme.fg("dim", "last: ")}${label}`];
 	}
 

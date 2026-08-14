@@ -39,7 +39,11 @@ describe("orchestration history collapse", () => {
 
 		expect(component.render(100)).toEqual([]);
 		const group = new ToolGroupComponent("task_steps", [component]);
-		expect(group.render(100)).toEqual([]);
+		const collapsed = stripAnsi(group.render(100).join("\n"));
+		expect(collapsed).toContain("1 Task Step");
+		expect(collapsed).not.toContain("task_steps");
+		expect(collapsed).not.toContain("[task steps] list");
+		expect(collapsed).not.toContain("No tracked steps.");
 
 		group.setExpanded(true);
 		expect(stripAnsi(group.render(100).join("\n"))).toContain("[task steps] list");

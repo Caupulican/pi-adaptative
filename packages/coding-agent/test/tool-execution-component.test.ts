@@ -762,6 +762,46 @@ describe("ToolExecutionComponent parity", () => {
 		expect(summary).not.toContain("hidden grouped result");
 	});
 
+	test("collapsed task and skill groups use human nouns instead of raw tool ids", () => {
+		const steps = new ToolExecutionComponent(
+			"task_steps",
+			"tool-steps-1",
+			{ action: "list" },
+			{},
+			{ ...createBaseToolDefinition("task_steps"), label: "Task Steps" },
+			createFakeTui(),
+			process.cwd(),
+		);
+		const skill = new ToolExecutionComponent(
+			"skill",
+			"tool-skill-1",
+			{ action: "status" },
+			{},
+			{ ...createBaseToolDefinition("skill"), label: "Skill", toolGroup: "skills" },
+			createFakeTui(),
+			process.cwd(),
+		);
+		const audit = new ToolExecutionComponent(
+			"skill_audit",
+			"tool-skill-2",
+			{ draftName: "x", draftDescription: "y", draftBody: "z" },
+			{},
+			createAllToolDefinitions(process.cwd()).skill_audit,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const stepText = stripAnsi(new ToolGroupComponent("task_steps", [steps]).render(100).join("\n"));
+		expect(stepText).toContain("1 Task Step");
+		expect(stepText).not.toContain("task_steps");
+
+		const skillText = stripAnsi(new ToolGroupComponent("skills", [skill, audit]).render(100).join("\n"));
+		expect(skillText).toContain("2 Skills");
+		expect(skillText).not.toContain("skill_audit");
+		expect(skill.toolGroup).toBe("skills");
+		expect(audit.toolGroup).toBe("skills");
+	});
+
 	test("collapsed file group shows counts, a short file list, and only the last success", () => {
 		const paths = ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"];
 		const components = paths.map((path, index) => {

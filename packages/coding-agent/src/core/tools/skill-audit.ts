@@ -185,7 +185,8 @@ export function createSkillAuditToolDefinition(
 ): ToolDefinition<typeof skillAuditSchema, SkillAuditReport> {
 	return {
 		name: "skill_audit",
-		label: "skill audit",
+		label: "Skill Audit",
+		toolGroup: "skills",
 		description:
 			"Check a draft/new skill for overlap with existing skills before creating it; flags near-duplicate triggers/descriptions via local Jaccard similarity. Read-only: does not write files.",
 		promptSnippet: "Audit skill for overlaps",

@@ -10,6 +10,7 @@
 - Packed tool output and truncated bash/python model previews now keep a head+tail window so first hits and terminal errors both survive. Live TUI preview stays tail-only. Full output is still saved to the artifact or managed file.
 - Repository `AGENTS.md` loading is opt-in per directory. Default is global `~/.pi/agent` files only. `/settings` → Project AGENTS.md enables listing this project's files or keeps global-only; save per directory, project, or all projects.
 - Collapsed file edits no longer dump the full diff. Consecutive edit/write calls group into a count, a 2–3 file snippet, and the last successful action; `Ctrl+O` expands the full list. Thinking blocks are hidden by default (`hideThinkingBlock`, `Ctrl+T` to show).
+- Collapsed tool groups use human nouns: Task Step(s), Skill(s), Worker(s). Skill, Skillify, and Skill Audit share one skills group.
 - Worker terminals that need parent review no longer interrupt the owner with Review now / Keep blocked. The parent agent wakes on the existing terminal handoff and decides via `delegate` status/review. The human stays on the edge: no blocking owner question is queued.
 - `Ctrl+O` only expands or collapses tool output. Deferred session history loads on `Ctrl+Shift+H` (`app.history.load`) so an expand never remounts the transcript.
 - Exported `loadProjectContextFiles()` now matches the live loader: default is global files only; `includeProject: true` lists project paths without injecting their bodies.

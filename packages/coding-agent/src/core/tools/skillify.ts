@@ -39,7 +39,8 @@ export function createSkillifyToolDefinition(
 ): ToolDefinition<typeof skillifySchema, SkillifyReport> {
 	return {
 		name: "skillify",
-		label: "skillify",
+		label: "Skillify",
+		toolGroup: "skills",
 		description:
 			"Validate a draft skill and audit for overlaps with existing skills. Pure analysis tool: generates a proposal with validation and audit report, but does NOT write files or activate the skill. Returns structured report with proposed install path.",
 		promptSnippet: "Validate and audit a draft skill",

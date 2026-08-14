@@ -129,11 +129,14 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"delegate",
 					"edit",
 					"goal",
+					"improvement_loop",
 					"python",
 					"read",
 					"run_toolkit_script",
 					"secret_store",
 					"skill",
+					"skill_audit",
+					"skillify",
 					"task_steps",
 					"tool_task",
 					"write",
@@ -143,9 +146,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// provider-tool-projection.ts stopped deleting `type` from enum-bearing schema
 			// properties (providers whose function-declaration schema requires `type` per property,
 			// e.g. Google's OpenAPI subset, reject the whole tool list with a 400 otherwise — see
-			// compactRedundantEnumConstraints). That correctness fix grew the real projected schema;
-			// measured stable values: toolSchemaTokens 2935, delegate 844 (enum-heavy actions).
-			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_000);
+			// compactRedundantEnumConstraints). Default surface now also includes skillify,
+			// skill_audit, and improvement_loop. Measured stable values: toolSchemaTokens 3406,
+			// delegate 844 (enum-heavy actions).
+			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_450);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);

@@ -13,7 +13,7 @@ export class SkillInvocationMessageComponent extends ExpandableMarkdownMessageCo
 	constructor(skillBlock: ParsedSkillBlock, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		super(
 			{
-				label: "skill",
+				label: "Skill",
 				expandedMarkdown: () => [`**${skillBlock.name}**\n\n`, skillBlock.content].join(""),
 				collapsedDetails: [
 					{ text: skillBlock.name, color: "customMessageText" },

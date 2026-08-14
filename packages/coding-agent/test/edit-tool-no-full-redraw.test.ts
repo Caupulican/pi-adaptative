@@ -8,6 +8,7 @@ import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 class FakeTerminal implements Terminal {
 	columns = 80;
@@ -124,9 +125,10 @@ describe("edit tool TUI rendering", () => {
 
 		const callOnlyRender = await waitForRenderedText(
 			() => component.render(80).join("\n"),
-			"10 blocks",
+			"blocks",
 			() => tui.requestRender(true),
 		);
+		expect(stripAnsi(callOnlyRender)).toMatch(/10\s+blocks/);
 		expect(callOnlyRender).toContain("edit");
 		expect(callOnlyRender).not.toContain("line 950 changed");
 		expect(
@@ -215,7 +217,7 @@ describe("edit tool TUI rendering", () => {
 		await waitForRender();
 
 		const collapsed = component.render(80).join("\n");
-		expect(collapsed).toContain("2 blocks");
+		expect(stripAnsi(collapsed)).toMatch(/2\s+blocks/);
 		expect(collapsed).not.toContain("line 150 changed");
 
 		component.setExpanded(true);

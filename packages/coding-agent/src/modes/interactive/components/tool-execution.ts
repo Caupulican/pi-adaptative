@@ -273,9 +273,9 @@ export class ToolExecutionComponent extends Container {
 		return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 	}
 
-	private getDisplayLabel(): string {
+	getDisplayLabel(): string {
 		const label = (this.toolDefinition?.label ?? this.builtInToolDefinition?.label)?.trim();
-		if (this.builtInToolDefinition) return label || this.toolName;
+		if (this.builtInToolDefinition) return label || this.humanizeToolName(this.toolName);
 		if (!label || label === this.toolName) return this.humanizeToolName(this.toolName);
 		return label;
 	}

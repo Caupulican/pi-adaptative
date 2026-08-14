@@ -36,7 +36,8 @@ function statusText(result: SkillVaultStatus): string {
 export function createSkillVaultToolDefinition(vault: SkillVaultController): ToolDefinition<typeof skillSchema> {
 	return {
 		name: "skill",
-		label: "skill",
+		label: "Skill",
+		toolGroup: "skills",
 		description:
 			"Skill vault. Specialist guidance useful: search, load exact name before work. Host injects body transiently, expires idle; unload optional.",
 		promptSnippet: "Search/load skill.",
