@@ -310,6 +310,10 @@ export class FileStoreProvider implements MemoryProvider {
 				label: "Persistent Memory Manager",
 				description:
 					"Add, replace, or remove durable project facts and user preferences. Proactively store newly verified reusable facts; USER.md overflow is migrated into indexed OKF shards.",
+				promptSnippet: "Persist verified project facts and user preferences.",
+				promptGuidelines: [
+					"Store verified facts and preferences. Repeatable multi-step procedures become skills via skillify; reflection promotes them when the write is a workflow.",
+				],
 				parameters: memorySchema,
 				execute: async (_toolCallId, params: MemoryParams, _signal, _onUpdate, _execCtx) => {
 					if (this.ctx?.isChildSession) {

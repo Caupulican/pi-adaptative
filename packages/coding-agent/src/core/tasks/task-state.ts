@@ -499,7 +499,12 @@ export function formatTaskStepsContext(
 	const limit = Math.max(1, Math.min(MAX_TASK_STEPS, Math.floor(maxItems)));
 	const lines = [
 		"TASK STEPS",
-		...open.slice(0, limit).map((step) => `- [${step.status}] ${step.activeForm || step.content}`),
+		...open.slice(0, limit).map((step) => {
+			const label = step.activeForm || step.content;
+			const requirementIds = step.requirementIds?.length ? ` requirements=${step.requirementIds.join(",")}` : "";
+			const evidence = step.evidence?.length ? ` evidence=${step.evidence.join(",")}` : "";
+			return `- [${step.status}] ${label}${requirementIds}${evidence}`;
+		}),
 	];
 	if (open.length > limit) lines.push(`- omitted=${open.length - limit}`);
 	const active = open.find((step) => step.status === "in_progress");

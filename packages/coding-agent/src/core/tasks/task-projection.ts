@@ -6,6 +6,8 @@ export interface OpenTaskStepProjection {
 	content: string;
 	/** Always populated by projectOpenTaskSteps; optional for hand-built/legacy projections. */
 	requirementIds?: readonly string[];
+	/** Evidence strings attached to the step (tool_task ids, toolCallIds, paths). */
+	evidence?: readonly string[];
 }
 
 export interface TaskRequirementReference {
@@ -40,6 +42,7 @@ export function projectOpenTaskSteps(state: TaskStepsState | undefined): OpenTas
 			status: step.status,
 			content: step.activeForm || step.content,
 			requirementIds: [...(step.requirementIds ?? [])],
+			evidence: [...(step.evidence ?? [])],
 		}));
 }
 

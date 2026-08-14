@@ -1,12 +1,15 @@
 /**
  * Context Files (AGENTS.md)
  *
- * Context files provide project-specific instructions injected into the startup prompt.
+ * Global ~/.pi/agent context files are injected at startup. Repository files are
+ * off until the directory/project opts in (`projectContextFiles: "on-demand"`),
+ * then listed by path and read on demand. Override the list to add virtual files
+ * or hide project ones.
  */
 
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
 
-// Disable context files entirely by returning an empty list in agentsFilesOverride.
+// Override the discovered list (global files plus on-demand project paths).
 const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),

@@ -1,7 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult } from "@caupulican/pi-agent-core/truncate";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	type TruncationResult,
+	truncateKnownHeadTail,
+} from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../../config.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 
@@ -86,6 +91,8 @@ export class OutputAccumulator {
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
+	private headLines: string[] = [];
+	private headStoredBytes = 0;
 	private tailLines: string[] = [];
 	private tailLineBytes: number[] = [];
 	private tailLineStoredBytes: number[] = [];
@@ -139,7 +146,7 @@ export class OutputAccumulator {
 	}
 
 	snapshot(options: { persistIfTruncated?: boolean; persistAlways?: boolean } = {}): OutputSnapshot {
-		const snapshot = this.buildSnapshot(this.maxLines, this.maxBytes);
+		const snapshot = this.buildModelSnapshot(this.maxLines, this.maxBytes);
 
 		if (options.persistAlways || (options.persistIfTruncated && snapshot.truncation.truncated)) {
 			this.tryEnsureTempFile();
@@ -266,6 +273,7 @@ export class OutputAccumulator {
 	private pushCompletedCurrentLine(): void {
 		this.completedLines++;
 		this.lastCompletedLineBytes = this.currentLineBytes;
+		this.recordHeadLine(this.currentLineText, this.currentLineStoredBytes);
 		this.tailLines.push(this.currentLineText);
 		this.tailLineBytes.push(this.currentLineBytes);
 		this.tailLineStoredBytes.push(this.currentLineStoredBytes);
@@ -275,6 +283,14 @@ export class OutputAccumulator {
 		this.currentLineStoredBytes = 0;
 		this.hasOpenLine = false;
 		this.trimStoredTail();
+	}
+
+	private recordHeadLine(text: string, storedBytes: number): void {
+		if (this.headLines.length >= this.maxLines) return;
+		const separatorBytes = this.headLines.length > 0 ? 1 : 0;
+		if (this.headStoredBytes + storedBytes + separatorBytes > this.maxBytes) return;
+		this.headLines.push(text);
+		this.headStoredBytes += storedBytes + separatorBytes;
 	}
 
 	private trimStoredTail(): void {
@@ -293,6 +309,32 @@ export class OutputAccumulator {
 
 	private completedTailLineCount(): number {
 		return this.tailLines.length - this.tailStart;
+	}
+
+	private retainedTailLines(): string[] {
+		const lines = this.tailLines.slice(this.tailStart);
+		if (this.hasOpenLine) lines.push(this.currentLineText);
+		return lines;
+	}
+
+	private buildModelSnapshot(maxLines: number, maxBytes: number): OutputSnapshot {
+		const tailSnapshot = this.buildSnapshot(maxLines, maxBytes);
+		if (!tailSnapshot.truncation.truncated || this.headLines.length === 0) {
+			return tailSnapshot;
+		}
+
+		const truncation = truncateKnownHeadTail(
+			this.headLines,
+			this.retainedTailLines(),
+			{ totalLines: this.totalLines, totalBytes: this.totalDecodedBytes },
+			{ maxLines, maxBytes },
+		);
+		return {
+			content: truncation.content,
+			truncation,
+			fullOutputPath: this.fullOutputPath(),
+			fullOutputError: this.tempFileError,
+		};
 	}
 
 	private buildSnapshot(maxLines: number, maxBytes: number): OutputSnapshot {

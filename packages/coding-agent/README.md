@@ -238,8 +238,9 @@ See `/hotkeys` for the full list. Customize via `~/.pi/agent/keybindings.json`. 
 | Ctrl+L | Open model selector |
 | Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
 | Shift+Tab | Cycle thinking level |
-| Ctrl+O | Collapse/expand tool output |
-| Ctrl+T | Collapse/expand thinking blocks |
+| Ctrl+O | Expand or collapse tool output (edits stay as a count + short file list until then) |
+| Ctrl+Shift+H | Load deferred session history into the chat |
+| Ctrl+T | Show or hide thinking blocks (hidden by default) |
 
 ### Message Queue
 
@@ -329,14 +330,11 @@ Runtime orchestration, recovery, and learning telemetry stays local. See [docs/t
 
 ## Context Files
 
-Pi Adaptative discovers `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` context files at startup from:
-- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` (global)
-- Parent directories (walking up from cwd)
-- Current directory
+Pi Adaptative discovers `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` context files from:
+- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` (global) — always loaded into the system prompt
+- Parent directories and the current directory — listed by path after opt-in (`/settings` → Project AGENTS.md), then read on demand, not injected at startup
 
-Use these files for project instructions, conventions, common commands, and safety rules. Their contents are injected into the startup system prompt so every session starts with the active project context.
-
-Disable context file discovery with `--no-context-files` (or `-nc`).
+Use the global file for standing instructions. A repo `AGENTS.md` is off until you opt in for that directory: `/settings` → **Project AGENTS.md**. Then the agent sees the path and can read it. Set Load to **global-only** to keep only `~/.pi/agent`. `--no-context-files` (`-nc`) skips project files for that session. The global file always loads.
 
 ### System Prompt
 
@@ -602,7 +600,7 @@ Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load theme (repeatable) |
 | `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable AGENTS.md, CLAUDE.md, and GEMINI.md context file discovery |
+| `--no-context-files`, `-nc` | Skip project `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`; global `~/.pi/agent` files still load |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings.json (e.g., `--no-extensions -e ./my-ext.ts`).
 

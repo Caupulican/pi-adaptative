@@ -49,6 +49,7 @@ type KeyHandlersHostThis = {
 	handleDebugCommand: () => void;
 	showModelSelector: (initialSearchInput?: string) => Promise<void>;
 	loadTuiHistoryOnDemand: () => void;
+	toggleToolOutputExpansion: () => void;
 	showTranscriptPager: () => void;
 	toggleAgentsOverlay: () => void;
 	toggleThinkingBlockVisibility: () => Promise<void>;
@@ -86,6 +87,7 @@ function makeFakeThis(overrides: Partial<KeyHandlersHostThis> = {}): KeyHandlers
 		handleDebugCommand: vi.fn(),
 		showModelSelector: vi.fn(async () => undefined),
 		loadTuiHistoryOnDemand: vi.fn(),
+		toggleToolOutputExpansion: vi.fn(),
 		showTranscriptPager: vi.fn(),
 		toggleAgentsOverlay: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(async () => undefined),

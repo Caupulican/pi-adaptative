@@ -92,6 +92,24 @@ describe("goal evidence ref verification", () => {
 		expect(getState()?.evidence.find((e) => e.id === "e1")?.verified).toBe(false);
 	});
 
+	it("kind 'tool' stays unverified while the cited background tool_task is still running", async () => {
+		const { run, getState } = createProducer({
+			hasToolCallId: () => true,
+			resolveToolEvidence: () => false,
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({
+			action: "add_evidence",
+			evidenceId: "e-running",
+			kind: "tool",
+			summary: "background handoff is not completion",
+			uri: "tool-task-1",
+		});
+
+		expect(getState()?.evidence.find((e) => e.id === "e-running")?.verified).toBe(false);
+	});
+
 	it("kind 'file' verifies true for a real file, false for a bogus path", async () => {
 		const dir = tempDir();
 		writeFileSync(join(dir, "real.txt"), "hello");

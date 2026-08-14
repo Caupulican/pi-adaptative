@@ -121,7 +121,7 @@ export default function (pi: ExtensionAPI) {
 		name: "bash",
 		label: "bash",
 		description:
-			"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first).",
+			"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to a head+tail preview within 2000 lines or 50KB (whichever is hit first).",
 		parameters: getBuiltInTools(process.cwd()).bash.parameters,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {

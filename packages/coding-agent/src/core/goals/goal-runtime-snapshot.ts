@@ -1,6 +1,7 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { EvidenceBundle, LearningDecision, WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { getWorkerClaimSnapshots } from "../delegation/session-worker-claim.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -129,6 +130,8 @@ export function buildGoalRuntimeSnapshot(args: {
 	worktreeLaneStatus?: readonly GoalRuntimeWorktreeLaneStatus[];
 	/** Durable worker DAG projection, supplied only when the delegate capability has been loaded. */
 	taskRuntime?: TaskRuntimeProjection;
+	/** Live background tool_task records for this session. */
+	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
 }): GoalRuntimeSnapshot {
 	const branchEntries = getActiveSessionBranchEntries(args.sessionManager);
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
@@ -139,7 +142,12 @@ export function buildGoalRuntimeSnapshot(args: {
 	// Reuses the SAME branch-scoped primitive as goal-state resolution (getLatestCustomEntryOnBranch),
 	// so the task-steps summary below can never leak a sibling branch's checklist either.
 	const taskStepsState = getLatestTaskStepsStateSnapshot(args.sessionManager);
-	const workState = projectSessionWorkState({ goalState, taskStepsState, taskRuntime: args.taskRuntime });
+	const workState = projectSessionWorkState({
+		goalState,
+		taskStepsState,
+		taskRuntime: args.taskRuntime,
+		backgroundToolTasks: args.backgroundToolTasks,
+	});
 	const openTaskSteps = workState.openTaskSteps;
 
 	let inFlightGoalLaneIds: ReadonlySet<string> | undefined;
@@ -201,6 +209,8 @@ export function buildGoalRuntimeSnapshot(args: {
 
 	const now = (args.now ?? (() => new Date().toISOString()))();
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
+	const inFlightToolTaskIds = new Set(workState.runningToolTaskIds);
+
 	const continuation = evaluateGoalContinuation({
 		state: goalState,
 		settings: { maxStallTurns: args.settings.maxStallTurns },
@@ -209,6 +219,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		maxWorkerWaitMs,
 		laneSyncConflictLaneKeys: laneSyncConflictLaneKeys.size > 0 ? laneSyncConflictLaneKeys : undefined,
 		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
+		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
 	});
 
 	return {

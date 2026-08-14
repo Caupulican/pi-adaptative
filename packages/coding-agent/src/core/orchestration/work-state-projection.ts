@@ -1,3 +1,4 @@
+import { type BackgroundToolTaskRef, collectCitedRunningToolTaskIds } from "../background-tool-task-controller.ts";
 import { getTrustedRequirementEvidence } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import {
@@ -27,6 +28,8 @@ export interface SessionWorkStateProjection {
 	unlinkedOpenTaskStepIds: readonly string[];
 	unknownRequirementIds: readonly string[];
 	unboundDelegatedTaskIds: readonly string[];
+	/** Background tool_task ids still running and cited by the goal or an open step. */
+	runningToolTaskIds: readonly string[];
 }
 
 export function goalObjectiveId(goalId: string): string {
@@ -110,8 +113,17 @@ export function projectSessionWorkState(args: {
 	goalState: GoalState | undefined;
 	taskStepsState: TaskStepsState | undefined;
 	taskRuntime?: TaskRuntimeProjection;
+	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
 }): SessionWorkStateProjection {
 	const openTaskSteps = projectOpenTaskSteps(args.taskStepsState);
+	const citedUris = [
+		...(args.goalState?.evidence.map((evidence) => evidence.uri).filter((uri): uri is string => Boolean(uri)) ?? []),
+		...openTaskSteps.flatMap((step) => step.evidence ?? []),
+	];
+	const runningToolTaskIds = collectCitedRunningToolTaskIds({
+		records: args.backgroundToolTasks ?? [],
+		uris: citedUris,
+	});
 	const goal = args.goalState;
 	if (!goal) {
 		return {
@@ -120,6 +132,7 @@ export function projectSessionWorkState(args: {
 			unlinkedOpenTaskStepIds: openTaskSteps.map((step) => step.id),
 			unknownRequirementIds: [...new Set(openTaskSteps.flatMap((step) => step.requirementIds ?? []))],
 			unboundDelegatedTaskIds: [],
+			runningToolTaskIds,
 		};
 	}
 
@@ -150,5 +163,6 @@ export function projectSessionWorkState(args: {
 		unlinkedOpenTaskStepIds,
 		unknownRequirementIds: [...unknownRequirementIds],
 		unboundDelegatedTaskIds,
+		runningToolTaskIds,
 	};
 }

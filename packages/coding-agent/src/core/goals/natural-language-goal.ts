@@ -19,8 +19,10 @@ const EXPLICIT_GOAL_PATTERNS = [
 ] as const;
 
 const STANDALONE_GOAL_AUTHORITY_PATTERNS = [
-	/^\s*(?:this|that)\s+is\s+(?:now\s+)?a\s+(?:persistent\s+)?goal(?:\s+(?:with|using)\s+.+)?[.!]?\s*$/is,
-	/^\s*(?:make|treat)\s+this\s+(?:as\s+)?(?:my\s+|a\s+)?(?:persistent\s+)?goal(?:\s+(?:with|using)\s+.+)?[.!]?\s*$/is,
+	// After "goal" require end, whitespace, or punctuation — not a hyphen — so
+	// "this is a goal, use it" authorizes while "this is a goal-oriented design" does not.
+	/^\s*(?:this|that)\s+is\s+(?:now\s+)?a\s+(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
+	/^\s*(?:make|treat)\s+this\s+(?:as\s+)?(?:my\s+|a\s+)?(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
 ] as const;
 
 /** Raised when text unambiguously states a token-budget directive but the amount cannot be resolved

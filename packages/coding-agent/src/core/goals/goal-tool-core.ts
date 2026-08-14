@@ -1,3 +1,4 @@
+import { type BackgroundToolTaskRef, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import { formatGoalRecord, projectGoalRecord } from "./goal-record.ts";
@@ -86,6 +87,13 @@ export interface ApplyGoalActionOptions {
 	 * completion ({@link completeGoalManually}) is never subject to this gate.
 	 */
 	requireVerifiedEvidenceForCompletion?: boolean;
+	/**
+	 * Open (non-terminal) task_steps on this branch. Agent-facing complete refuses while any of
+	 * these still reference a requirement of the goal being closed.
+	 */
+	openTaskSteps?: readonly OpenTaskStepRef[];
+	/** Live background tool_task records used to re-check kind:"tool" evidence at complete time. */
+	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
 }
 
 function requirementExists(state: GoalState, requirementId: string): boolean {
@@ -297,6 +305,20 @@ function toGoalEvent(
 				};
 			}
 			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
+			const linkedOpenSteps = findLinkedOpenTaskSteps(state, options?.openTaskSteps);
+			if (linkedOpenSteps.length > 0) {
+				return {
+					ok: false,
+					error: `Cannot complete goal: open task_steps still reference this goal (${linkedOpenSteps.join(", ")}). Update them via task_steps first.`,
+				};
+			}
+			const pendingToolTasks = findNonterminalCitedToolTasks(state, options?.backgroundToolTasks);
+			if (pendingToolTasks.length > 0) {
+				return {
+					ok: false,
+					error: `Cannot complete goal: cited tool_task(s) are not complete (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
+				};
+			}
 			const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
 			if (requireVerifiedEvidence && unprovenRequirementIds.length > 0) {
 				return {
@@ -372,6 +394,28 @@ export interface OpenTaskStepRef {
 	id: string;
 	content: string;
 	requirementIds?: readonly string[];
+	evidence?: readonly string[];
+}
+
+function findLinkedOpenTaskSteps(state: GoalState, openTaskSteps: readonly OpenTaskStepRef[] | undefined): string[] {
+	if (!openTaskSteps || openTaskSteps.length === 0) return [];
+	return openTaskSteps
+		.filter((step) => state.requirements.some((requirement) => taskStepReferencesRequirement(step, requirement)))
+		.map((step) => step.id);
+}
+
+function findNonterminalCitedToolTasks(
+	state: GoalState,
+	backgroundToolTasks: readonly BackgroundToolTaskRef[] | undefined,
+): string[] {
+	if (!backgroundToolTasks || backgroundToolTasks.length === 0) return [];
+	const pending = new Set<string>();
+	for (const evidence of state.evidence) {
+		if (evidence.kind !== "tool" || !evidence.uri) continue;
+		const task = findBackgroundToolTask(backgroundToolTasks, evidence.uri);
+		if (task && task.status !== "completed") pending.add(task.taskId);
+	}
+	return [...pending];
 }
 
 /**

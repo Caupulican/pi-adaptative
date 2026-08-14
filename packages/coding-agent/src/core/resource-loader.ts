@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME, getBundledExtensionsDir, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
@@ -88,6 +88,11 @@ export interface ResourceLoader {
 	loadIsolatedExtension?(path: string, cwd: string): Promise<{ extension: Extension | null; error: string | null }>;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceReloadOptions): Promise<void>;
+	/**
+	 * Re-scan skill files so a just-written or archived skill is selectable this session.
+	 * Full `/reload` is not required. Optional on custom loaders.
+	 */
+	refreshSkills?(): void;
 	commitReload?(): void | Promise<void>;
 	rollbackReload?(): void | Promise<void>;
 	/** Release the current (and any deferred) extension generation. Session dispose must call this. */
@@ -166,6 +171,18 @@ function sanitizeContextFileContent(filePath: string, content: string): string {
  * so a profile-DENIED file's content is never processed into the session — only its embedded
  * `<resource-profile>` blocks are read for discovery (see {@link loadRawProjectContextFiles}).
  */
+export function isGlobalAgentsFile(
+	filePath: string,
+	agentDir: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	const fileDir = canonicalizePath(dirname(filePath));
+	const resolvedAgentDir = canonicalizePath(agentDir);
+	return platform === "win32"
+		? fileDir.toLowerCase() === resolvedAgentDir.toLowerCase()
+		: fileDir === resolvedAgentDir;
+}
+
 function loadRawContextFilesFromDir(dir: string): Array<{ path: string; rawContent: string }> {
 	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD", "GEMINI.md", "GEMINI.MD"];
 	const files: Array<{ path: string; rawContent: string }> = [];
@@ -193,6 +210,8 @@ export function loadRawProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
 	projectTrusted?: boolean;
+	/** When true, walk cwd/ancestor context files. Default is global `agentDir` files only. */
+	includeProject?: boolean;
 	/** Testable filesystem case semantics; production defaults to the current platform. */
 	platform?: NodeJS.Platform;
 }): Array<{ path: string; rawContent: string }> {
@@ -214,7 +233,7 @@ export function loadRawProjectContextFiles(options: {
 		contextFiles.push(globalContext);
 	}
 
-	if (options.projectTrusted !== false) {
+	if (options.includeProject === true && options.projectTrusted !== false) {
 		const ancestorContextFiles: Array<{ path: string; rawContent: string }> = [];
 
 		let currentDir = resolvedCwd;
@@ -255,11 +274,21 @@ export function loadProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
 	projectTrusted?: boolean;
+	/** When true, list cwd/ancestor files as paths. Default is global `agentDir` files only. */
+	includeProject?: boolean;
+	platform?: NodeJS.Platform;
 }): Array<{ path: string; content?: string }> {
-	return loadRawProjectContextFiles(options).map((file) => ({
-		path: file.path,
-		content: sanitizeContextFileContent(file.path, file.rawContent),
-	}));
+	return loadRawProjectContextFiles({
+		cwd: options.cwd,
+		agentDir: options.agentDir,
+		projectTrusted: options.projectTrusted,
+		includeProject: options.includeProject === true,
+		platform: options.platform,
+	}).map((file) =>
+		isGlobalAgentsFile(file.path, options.agentDir, options.platform)
+			? { path: file.path, content: sanitizeContextFileContent(file.path, file.rawContent) }
+			: { path: file.path },
+	);
 }
 
 export interface DefaultResourceLoaderOptions {
@@ -429,6 +458,20 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const blocked = matchesResourceProfilePattern(s.filePath, filter.block, this.cwd);
 			return allowed && !blocked;
 		});
+	}
+
+	/**
+	 * Re-scan the user skills directory plus already-discovered skill paths so a newly written or
+	 * archived skill is visible to `skill` search/load without a full extension reload.
+	 */
+	refreshSkills(): void {
+		if (this.noSkills) return;
+		const userSkillsDir = resourceDir("skills", this.agentDir);
+		const nextPaths = existsSync(userSkillsDir)
+			? this.mergePaths(this.lastSkillPaths, [userSkillsDir])
+			: this.lastSkillPaths;
+		this.lastSkillPaths = nextPaths;
+		this.updateSkillsFromPaths(nextPaths);
 	}
 
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] } {
@@ -1047,15 +1090,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
-			// Read RAW content once. Sanitization/threat-scanning/exposure is deferred until AFTER the
-			// agents filter, so a profile-denied context file's content is never processed into the session.
-			const rawAgentsFiles = this.noContextFiles
-				? []
-				: loadRawProjectContextFiles({
-						cwd: this.cwd,
-						agentDir: this.agentDir,
-						projectTrusted: this.settingsManager.isProjectTrusted(),
-					});
+			// Global agent-dir files always load. Project/ancestor files are discovered only when
+			// this directory/project opts in (`projectContextFiles: "on-demand"`) and `-nc` is not set.
+			const rawAgentsFiles = loadRawProjectContextFiles({
+				cwd: this.cwd,
+				agentDir: this.agentDir,
+				projectTrusted: this.settingsManager.isProjectTrusted(),
+				includeProject: !this.noContextFiles && this.settingsManager.getProjectContextFiles() === "on-demand",
+			});
 			const agentEmbeddedProfiles: Record<string, ResourceProfileSettings> = {};
 			const activeProfileNames = this.settingsManager.getActiveResourceProfileNames();
 			// DISCOVERY read (metadata only, never loading): an embedded <resource-profile> block can live
@@ -1084,9 +1126,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 						const blocked = matchesResourceProfilePattern(file.path, agentProfileFilter.block, this.cwd);
 						return allowed && !blocked;
 					})
-					// Sanitize (strip profile blocks + scan threats) ONLY for allowed files — the denied
-					// files' raw content was used solely for profile-block discovery above.
-					.map((file) => ({ path: file.path, content: sanitizeContextFileContent(file.path, file.rawContent) })),
+					// Global files are sanitized and injected. Project files stay path-only so the
+					// model can read them on demand; denied files are dropped before this map.
+					.map((file) =>
+						isGlobalAgentsFile(file.path, this.agentDir)
+							? { path: file.path, content: sanitizeContextFileContent(file.path, file.rawContent) }
+							: { path: file.path },
+					),
 			};
 			// Strict UAC silently denying AGENTS.md/CLAUDE.md context is a sharp footgun for lean
 			// profiles — surface it loudly instead of letting instructions vanish without a trace.

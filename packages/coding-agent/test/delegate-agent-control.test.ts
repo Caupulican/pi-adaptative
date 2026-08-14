@@ -79,6 +79,7 @@ function workerAgentControl(overrides: Partial<WorkerAgentControlPort>): WorkerA
 				role: "explorer",
 				status: "retired",
 				activity: "idle",
+				controllable: true,
 				createdAt: "T0",
 				updatedAt: "T1",
 			},
@@ -334,6 +335,7 @@ describe("delegate logical-agent controls", () => {
 			context,
 		);
 		expect(result.details).toMatchObject({ started: false, skipReason: "dependency_ids_invalid" });
+		expect(result.isError).toBe(true);
 		expect(startWorkerDelegation).not.toHaveBeenCalled();
 	});
 
@@ -497,6 +499,7 @@ describe("delegate logical-agent controls", () => {
 				role: "explorer" as const,
 				status: "registered" as const,
 				activity: "idle" as const,
+				controllable: true,
 				createdAt: "2026-08-04T00:00:00.000Z",
 				updatedAt: "2026-08-04T00:00:00.000Z",
 			},
@@ -1030,6 +1033,7 @@ describe("delegate logical-agent controls", () => {
 				role: "explorer" as const,
 				status: "retired" as const,
 				activity: "idle" as const,
+				controllable: true,
 				createdAt: "T0",
 				updatedAt: "T1",
 			},
@@ -1628,6 +1632,7 @@ describe("delegate persistent worker reuse", () => {
 						role: "implementer",
 						status: "registered",
 						activity: "idle",
+						controllable: true,
 						createdAt: "T0",
 						updatedAt: "T0",
 					},
@@ -1638,6 +1643,7 @@ describe("delegate persistent worker reuse", () => {
 						role: "explorer",
 						status: "active",
 						activity: "active",
+						controllable: true,
 						createdAt: "T1",
 						updatedAt: "T1",
 					},
@@ -1669,6 +1675,7 @@ describe("delegate persistent worker reuse", () => {
 			role: "explorer" as const,
 			status: "registered" as const,
 			activity: "idle" as const,
+			controllable: true,
 			createdAt: `T${index}`,
 			updatedAt: `T${index}`,
 		}));

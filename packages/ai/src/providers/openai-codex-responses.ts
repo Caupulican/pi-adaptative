@@ -405,9 +405,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						}
 					}
 
-					if (options?.signal?.aborted) {
-						throw new Error("Request was aborted");
-					}
 					assertSuccessfulTerminalResponse(output);
 					stream.push({
 						type: "done",
@@ -542,10 +539,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 			await processStream(response, output, stream, model, context, options);
 			markSseSuccess(cacheSessionId);
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
 
 			assertSuccessfulTerminalResponse(output);
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });

@@ -218,6 +218,7 @@ describe("Library Manage UX - Increment 2", () => {
 					currentTheme: "dark",
 					availableThemes: ["dark"],
 					hideThinkingBlock: false,
+					projectContextFiles: "off",
 					collapseChangelog: false,
 					enableInstallTelemetry: false,
 					doubleEscapeAction: "none",

@@ -244,7 +244,7 @@ export class InteractiveMode {
 	private toolOutputExpanded = false;
 
 	// Thinking block visibility state
-	private hideThinkingBlock = false;
+	private hideThinkingBlock = true;
 
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
@@ -557,7 +557,8 @@ export class InteractiveMode {
 				hint("app.thinking.cycle", "to cycle thinking level"),
 				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
 				hint("app.model.select", "to select model"),
-				hint("app.tools.expand", "to load history / expand tools"),
+				hint("app.tools.expand", "to expand tools"),
+				hint("app.history.load", "to load session history"),
 				hint("app.agents.open", "to show live agents"),
 				hint("app.thinking.toggle", "to expand thinking"),
 				hint("app.editor.external", "for external editor"),
@@ -576,11 +577,11 @@ export class InteractiveMode {
 				rawKeyHint(`${keyText("app.clear")}/${keyText("app.exit")}`, "clear/exit"),
 				rawKeyHint("/", "commands"),
 				rawKeyHint("!", "bash"),
-				hint("app.tools.expand", "history/more"),
+				hint("app.tools.expand", "expand tools"),
 			].join(theme.fg("muted", " · "));
 			const compactOnboarding = theme.fg(
 				"dim",
-				`Press ${keyText("app.tools.expand")} to load session history or show full startup help and loaded resources.`,
+				`Press ${keyText("app.tools.expand")} for full startup help. Press ${keyText("app.history.load")} to load session history.`,
 			);
 			const onboarding = theme.fg(
 				"dim",
@@ -1341,6 +1342,7 @@ export class InteractiveMode {
 			handleDebugCommand: () => this.handleDebugCommand(),
 			showModelSelector: (input) => this.showModelSelector(input),
 			loadTuiHistoryOnDemand: () => this.loadTuiHistoryOnDemand(),
+			toggleToolOutputExpansion: () => this.toggleToolOutputExpansion(),
 			showTranscriptPager: () => this.showTranscriptPager(),
 			toggleAgentsOverlay: () => this.toggleAgentsOverlay(),
 			toggleThinkingBlockVisibility: () => this.toggleThinkingBlockVisibility(),
@@ -1790,7 +1792,7 @@ export class InteractiveMode {
 				new Text(
 					theme.fg(
 						"dim",
-						`History hidden for typing performance (${entryCount} entries). Press ${keyText("app.tools.expand")} to load session history on demand.`,
+						`History hidden for typing performance (${entryCount} entries). Press ${keyText("app.history.load")} to load session history.`,
 					),
 					1,
 					0,
@@ -1802,11 +1804,7 @@ export class InteractiveMode {
 	}
 
 	private loadTuiHistoryOnDemand(): void {
-		if (this.tuiHistoryLoadInProgress) return;
-		if (this.tuiHistoryLoaded || this.getSessionEntryCount() === 0) {
-			this.toggleToolOutputExpansion();
-			return;
-		}
+		if (this.tuiHistoryLoadInProgress || this.tuiHistoryLoaded || this.getSessionEntryCount() === 0) return;
 
 		this.tuiHistoryLoadInProgress = true;
 		void (async () => {

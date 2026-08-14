@@ -124,11 +124,11 @@ describe("edit tool TUI rendering", () => {
 
 		const callOnlyRender = await waitForRenderedText(
 			() => component.render(80).join("\n"),
-			"line 50 changed",
+			"10 blocks",
 			() => tui.requestRender(true),
 		);
 		expect(callOnlyRender).toContain("edit");
-		expect(callOnlyRender).toContain("line 950 changed");
+		expect(callOnlyRender).not.toContain("line 950 changed");
 		expect(
 			stringify.mock.calls.some(
 				([value]) =>
@@ -138,6 +138,15 @@ describe("edit tool TUI rendering", () => {
 					(value as { edits?: unknown }).edits === edits,
 			),
 		).toBe(false);
+
+		component.setExpanded(true);
+		tui.requestRender();
+		const expandedRender = await waitForRenderedText(
+			() => component.render(80).join("\n"),
+			"line 950 changed",
+			() => tui.requestRender(true),
+		);
+		expect(expandedRender).toContain("line 50 changed");
 
 		const redrawsBeforeResult = tui.fullRedraws;
 		const clearsBeforeResult = terminal.fullClearCount;
@@ -205,6 +214,11 @@ describe("edit tool TUI rendering", () => {
 		await waitForRender();
 		await waitForRender();
 
+		const collapsed = component.render(80).join("\n");
+		expect(collapsed).toContain("2 blocks");
+		expect(collapsed).not.toContain("line 150 changed");
+
+		component.setExpanded(true);
 		const rendered = component.render(80).join("\n");
 		expect(rendered).toContain("line 50 changed");
 		expect(rendered).toContain("line 150 changed");
@@ -240,7 +254,10 @@ describe("edit tool TUI rendering", () => {
 		await waitForRenderedText(
 			() => component.render(80).join("\n"),
 			"bounded_target = false",
-			() => tui.requestRender(true),
+			() => {
+				component.setExpanded(true);
+				tui.requestRender(true);
+			},
 		);
 
 		const result = await definition.execute("execute-plan", args, undefined, undefined, {} as ExtensionContext);
@@ -269,7 +286,10 @@ describe("edit tool TUI rendering", () => {
 		await waitForRenderedText(
 			() => component.render(80).join("\n"),
 			"TARGET",
-			() => tui.requestRender(true),
+			() => {
+				component.setExpanded(true);
+				tui.requestRender(true);
+			},
 		);
 
 		await writeFile(filePath, "aa\ntarget\nzzzzzz\n", "utf8");

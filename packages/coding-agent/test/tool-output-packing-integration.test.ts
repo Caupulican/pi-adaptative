@@ -145,7 +145,11 @@ describe("Slice B: artifact-backed tool output first capture (grep/find)", () =>
 			expect(record.content).toContain("needle occurrence number 2999");
 			expect(record.ref.toolName).toBe("grep");
 		}
-		expect(getTextOutput(result)).toContain(`artifact tool-output:${artifactId}`);
+		const preview = getTextOutput(result);
+		expect(preview).toContain(`artifact tool-output:${artifactId}`);
+		expect(preview).toContain("needle occurrence number 0");
+		expect(preview).toContain("needle occurrence number 2999");
+		expect(preview).toContain("middle omitted");
 	});
 
 	it("large find output becomes a digest + artifact handle; the artifact holds the exact raw payload", async () => {

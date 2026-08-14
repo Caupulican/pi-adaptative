@@ -44,7 +44,7 @@ function workerProfile(modelId: string): OrchestrationProfile {
 }
 
 describe("worker controller birth-context integration", () => {
-	it("captures bounded all, last-N, and none before persisting each fresh worker", async () => {
+	it("defaults omitted fork to none, and captures last-N and explicit none", async () => {
 		const run = async (instructions: string, forkTurns?: string) => {
 			const harness = await createHarness({ settings: { workerDelegation: { maxConcurrent: 1 } } });
 			let history: AgentMessage[] = [];
@@ -78,17 +78,11 @@ describe("worker controller birth-context integration", () => {
 		const results = await Promise.all([run("default child"), run("last child", "1"), run("none child", "none")]);
 
 		expect(results.map(({ history }) => history)).toEqual([
-			[
-				"older parent turn",
-				"older parent answer",
-				"latest parent turn",
-				"latest parent answer",
-				expect.stringContaining("default child"),
-			],
+			[expect.stringContaining("default child")],
 			["latest parent turn", "latest parent answer", expect.stringContaining("last child")],
 			[expect.stringContaining("none child")],
 		]);
-		expect(results.map(({ messageCount }) => messageCount)).toEqual([4, 2, 0]);
+		expect(results.map(({ messageCount }) => messageCount)).toEqual([0, 2, 0]);
 	});
 
 	it("defaults a cross-model child to none and rejects explicit context egress before durable admission", async () => {
@@ -147,6 +141,7 @@ describe("worker controller birth-context integration", () => {
 				]);
 				const parent = await harness.session.runWorkerDelegationOnce({
 					instructions: "Own the scoped implementation stream.",
+					forkTurns: "all",
 				});
 				if (!parent.record) throw new Error("Expected parent worker.");
 				const child = await harness.session.runWorkerDelegationOnce({

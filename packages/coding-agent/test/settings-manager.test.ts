@@ -1798,6 +1798,81 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("project context files opt-in", () => {
+		it("defaults to global-only until a settings layer opts in", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getProjectContextFiles()).toBe("off");
+			expect(manager.getProjectContextFilesScope()).toBeUndefined();
+		});
+
+		it("persists this-directory opt-in on the user overlay, not globally", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProjectContextFiles("on-demand", "directoryProfile");
+			await manager.flush();
+
+			const overlayPath = getDirectoryResourceProfileInfo(projectDir, agentDir).path;
+			expect(JSON.parse(readFileSync(overlayPath, "utf-8")).projectContextFiles).toBe("on-demand");
+			expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+
+			const fresh = SettingsManager.create(projectDir, agentDir);
+			expect(fresh.getProjectContextFiles()).toBe("on-demand");
+			expect(fresh.getProjectContextFilesScope()).toBe("directoryProfile");
+			expect(fresh.getGlobalSettings().projectContextFiles).toBeUndefined();
+		});
+
+		it("persists this-project opt-in in .pi/settings.json", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProjectContextFiles("on-demand", "project");
+			await manager.flush();
+
+			expect(JSON.parse(readFileSync(join(projectDir, ".pi", "settings.json"), "utf-8")).projectContextFiles).toBe(
+				"on-demand",
+			);
+
+			const fresh = SettingsManager.create(projectDir, agentDir);
+			expect(fresh.getProjectContextFiles()).toBe("on-demand");
+			expect(fresh.getProjectContextFilesScope()).toBe("project");
+		});
+
+		it("persists all-projects opt-in globally", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProjectContextFiles("on-demand", "global");
+			await manager.flush();
+
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).projectContextFiles).toBe(
+				"on-demand",
+			);
+
+			const fresh = SettingsManager.create(projectDir, agentDir);
+			expect(fresh.getProjectContextFiles()).toBe("on-demand");
+			expect(fresh.getProjectContextFilesScope()).toBe("global");
+		});
+
+		it("lets this directory stay global-only when all-projects is on-demand", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setProjectContextFiles("on-demand", "global");
+			manager.setProjectContextFiles("off", "directoryProfile");
+			await manager.flush();
+
+			expect(manager.getProjectContextFiles()).toBe("off");
+			expect(manager.getProjectContextFilesScope()).toBe("directoryProfile");
+
+			const fresh = SettingsManager.create(projectDir, agentDir);
+			expect(fresh.getProjectContextFiles()).toBe("off");
+			expect(fresh.getProjectContextFilesScope()).toBe("directoryProfile");
+			expect(fresh.getGlobalSettings().projectContextFiles).toBe("on-demand");
+		});
+
+		it("keeps an in-memory directory opt-in across reload", async () => {
+			const manager = SettingsManager.inMemory();
+			manager.setProjectContextFiles("on-demand", "directoryProfile");
+			await manager.reload();
+			expect(manager.getProjectContextFiles()).toBe("on-demand");
+			expect(manager.getProjectContextFilesScope()).toBe("directoryProfile");
+			expect(manager.getGlobalSettings().projectContextFiles).toBeUndefined();
+		});
+	});
+
 	describe("stream-stall settings", () => {
 		it("returns undefined fields when unset (defaults live at the wiring site)", () => {
 			const settings = SettingsManager.inMemory({});

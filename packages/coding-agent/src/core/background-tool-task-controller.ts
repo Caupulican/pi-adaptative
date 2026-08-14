@@ -36,6 +36,40 @@ const RECORD_KEYS = [
 
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
 
+export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "status">;
+
+/** Match a goal/task_steps evidence uri to a session background tool task by task id or toolCallId. */
+export function findBackgroundToolTask<T extends BackgroundToolTaskRef>(
+	records: readonly T[],
+	uri: string,
+): T | undefined {
+	const id = uri.trim();
+	if (!id) return undefined;
+	return records.find((record) => record.taskId === id || record.toolCallId === id);
+}
+
+/** True only when the cited background task finished successfully. Undefined when no task matches. */
+export function isCompletedBackgroundToolEvidence(
+	records: readonly BackgroundToolTaskRef[],
+	uri: string,
+): boolean | undefined {
+	const task = findBackgroundToolTask(records, uri);
+	if (!task) return undefined;
+	return task.status === "completed";
+}
+
+export function collectCitedRunningToolTaskIds(args: {
+	records: readonly BackgroundToolTaskRef[];
+	uris: readonly string[];
+}): string[] {
+	const running = new Set<string>();
+	for (const uri of args.uris) {
+		const task = findBackgroundToolTask(args.records, uri);
+		if (task?.status === "running") running.add(task.taskId);
+	}
+	return [...running];
+}
+
 export interface BackgroundToolTaskRecord {
 	sessionId: string;
 	taskId: string;

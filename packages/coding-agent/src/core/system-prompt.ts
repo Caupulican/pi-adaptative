@@ -25,7 +25,7 @@ export interface BuildSystemPromptOptions {
 	appendSystemPrompt?: string;
 	/** Working directory. */
 	cwd: string;
-	/** Eagerly loaded project/agent instruction files. */
+	/** Global instruction files (with content) plus on-demand project paths (path only). */
 	contextFiles?: Array<{ path: string; content?: string }>;
 	/** Discovered skills remain host-side; retained for extension/API construction compatibility. */
 	skills?: Skill[];
@@ -118,46 +118,55 @@ function formatContextFilesForPrompt(
 	if (contextFiles.length === 0) {
 		return "";
 	}
-	if (options.deferContents) {
+	const injected = options.deferContents ? [] : contextFiles.filter((file) => file.content !== undefined);
+	const deferred = options.deferContents ? contextFiles : contextFiles.filter((file) => file.content === undefined);
+	const parts: string[] = [];
+
+	if (injected.length > 0) {
+		const lines = ["\n\nPROJECT-SPECIFIC INSTRUCTIONS (apply in listed order)"];
+		const seen = new Set<string>();
+		for (const { path, content } of injected) {
+			const identity = `${path}\0${content ?? ""}`;
+			if (seen.has(identity)) continue;
+			seen.add(identity);
+			lines.push(`FILE ${JSON.stringify(path)} (${(content ?? "").length} chars)`);
+			lines.push(content ?? "");
+			lines.push("END FILE");
+		}
+		parts.push(lines.join("\n"));
+	}
+
+	if (deferred.length > 0) {
 		const lines = [
-			"\n\nPROJECT RULE PATHS — contents deferred for this capability profile.",
-			options.canRead
-				? "Before editing, writing, or running a mutating command, read each relevant listed file completely before any mutation. Follow its instructions; if a file cannot fit, ask for a scoped instruction digest."
-				: "No read tool is active. Ask the user for the relevant project instructions before giving project-specific guidance.",
+			"\n\nPROJECT RULE PATHS — contents not preloaded.",
+			options.deferContents
+				? options.canRead
+					? "Before editing, writing, or running a mutating command, read each relevant listed file completely before any mutation. Follow its instructions; if a file cannot fit, ask for a scoped instruction digest."
+					: "No read tool is active. Ask the user for the relevant project instructions before giving project-specific guidance."
+				: options.canRead
+					? "Read a listed file completely before following it. Do not assume its contents."
+					: "No read tool is active. Ask the user for the relevant project instructions before giving project-specific guidance.",
 		];
 		let pathChars = 0;
 		let included = 0;
-		for (const { path } of contextFiles) {
+		for (const { path } of deferred) {
 			const line = `- ${JSON.stringify(path)}`;
 			if (pathChars + line.length > DEFERRED_CONTEXT_PATH_BUDGET_CHARS) break;
 			lines.push(line);
 			pathChars += line.length + 1;
 			included++;
 		}
-		const omitted = contextFiles.length - included;
+		const omitted = deferred.length - included;
 		if (omitted > 0) {
 			lines.push(`- omitted=${omitted}`);
-		}
-		if (omitted > 0) {
 			lines.push(
 				"Do not mutate until the omitted instruction paths are supplied or a more capable profile is used.",
 			);
 		}
-		return lines.join("\n");
+		parts.push(lines.join("\n"));
 	}
 
-	const lines = ["\n\nPROJECT-SPECIFIC INSTRUCTIONS (apply in listed order)"];
-	const seen = new Set<string>();
-
-	for (const { path, content } of contextFiles) {
-		const identity = `${path}\0${content ?? ""}`;
-		if (seen.has(identity)) continue;
-		seen.add(identity);
-		lines.push(`FILE ${JSON.stringify(path)} (${(content ?? "").length} chars)`);
-		lines.push(content ?? "");
-		lines.push("END FILE");
-	}
-	return lines.join("\n");
+	return parts.join("");
 }
 
 function appendPromptResources(

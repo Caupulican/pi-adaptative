@@ -91,6 +91,8 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 					host.settingsManager.isResourceAllowedByProfile("themes", name),
 				),
 				hideThinkingBlock: host.hideThinkingBlock,
+				projectContextFiles: host.settingsManager.getProjectContextFiles(),
+				projectContextFilesScope: host.settingsManager.getProjectContextFilesScope(),
 				collapseChangelog: host.settingsManager.getCollapseChangelog(),
 				enableInstallTelemetry: host.settingsManager.getEnableInstallTelemetry(),
 				doubleEscapeAction: host.settingsManager.getDoubleEscapeAction(),
@@ -205,6 +207,17 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 						host.ui.invalidate();
 						host.ui.requestRender();
 					}
+				},
+				onProjectContextFilesChange: (mode, scope) => {
+					host.settingsManager.setProjectContextFiles(mode, scope);
+					const where =
+						scope === "directoryProfile"
+							? "this directory"
+							: scope === "project"
+								? "this project"
+								: "all projects";
+					const load = mode === "on-demand" ? "lists this project's AGENTS.md" : "global AGENTS.md only";
+					host.showStatus(`Project context files: ${load} (${where}). Run /reload to apply.`);
 				},
 				onHideThinkingBlockChange: (hidden) => {
 					host.hideThinkingBlock = hidden;

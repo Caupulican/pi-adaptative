@@ -356,16 +356,53 @@ function getEditHeaderBg(
 	return (text: string) => theme.bg("toolPendingBg", text);
 }
 
+const COLLAPSED_EDIT_SNIPPET_LINES = 2;
+
+function countEditBlocks(args: RenderableEditArgs | undefined): number | undefined {
+	return getRenderablePreviewInput(args)?.edits.length;
+}
+
+function snippetLines(text: string, maxLines: number): string {
+	return text
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.slice(0, maxLines)
+		.join("\n");
+}
+
 function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
 	theme: Theme,
 	cwd: string,
+	options?: { expanded?: boolean; toolGroupSummary?: boolean },
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
+	const header = formatEditCall(args, theme, cwd);
+	const blockCount = countEditBlocks(args);
+	const blockMeta =
+		blockCount === undefined ? "" : theme.fg("dim", ` · ${blockCount} block${blockCount === 1 ? "" : "s"}`);
 
+	if (options?.toolGroupSummary) {
+		component.addChild(new Text(header, 0, 0));
+		return component;
+	}
+
+	if (!options?.expanded) {
+		component.addChild(new Text(`${header}${blockMeta}`, 0, 0));
+		if (component.preview) {
+			const body =
+				"error" in component.preview
+					? theme.fg("error", component.preview.error)
+					: renderDiff(component.preview.diff);
+			const snippet = snippetLines(body, COLLAPSED_EDIT_SNIPPET_LINES);
+			if (snippet) component.addChild(new Text(snippet, 0, 0));
+		}
+		return component;
+	}
+
+	component.addChild(new Text(header, 0, 0));
 	if (!component.preview) {
 		return component;
 	}
@@ -410,6 +447,7 @@ export function createEditToolDefinition(
 	return {
 		name: "edit",
 		label: "edit",
+		toolGroup: "files",
 		description:
 			"Edit existing UTF-8 text in one call. Send path and all edits; after a path-only failure, reuse the returned payloadRef with only the corrected path. The harness preflights, revalidates, and stale-checks every exact replacement.",
 		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
@@ -598,9 +636,12 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme, context.cwd);
+			return buildEditCallComponent(component, args, theme, context.cwd, {
+				expanded: context.expanded,
+				toolGroupSummary: context.toolGroupSummary,
+			});
 		},
-		renderResult(result, _options, theme, context) {
+		renderResult(result, options, theme, context) {
 			const callComponent = context.state.callComponent;
 			const typedResult = result as EditToolResultLike;
 			const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
@@ -624,8 +665,18 @@ export function createEditToolDefinition(
 						context.args as RenderableEditArgs | undefined,
 						theme,
 						context.cwd,
+						{
+							expanded: context.expanded,
+							toolGroupSummary: context.toolGroupSummary,
+						},
 					);
 				}
+			}
+
+			if (!options.expanded && !context.isError) {
+				const hidden = (context.lastComponent as Container | undefined) ?? new Container();
+				hidden.clear();
+				return hidden;
 			}
 
 			const output = formatEditResult(context.args, callComponent?.preview, typedResult, theme, context.isError);

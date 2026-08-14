@@ -10,7 +10,7 @@
  * packing is opt-in per call site, not a global switch.
  */
 
-import { type TruncationOptions, type TruncationResult, truncateHead } from "@caupulican/pi-agent-core/truncate";
+import { type TruncationOptions, type TruncationResult, truncateMiddle } from "@caupulican/pi-agent-core/truncate";
 import type { ArtifactStore } from "./context-artifacts.ts";
 
 export interface PackToolOutputRequest {
@@ -31,7 +31,7 @@ export interface PackToolOutputRequest {
 
 export interface PackedToolOutput {
 	/**
-	 * Bounded preview content -- exactly what `truncateHead` alone would have produced.
+	 * Bounded preview content -- head and tail with a middle-omission marker.
 	 * No footer/notice text is appended here; callers already have their own per-tool
 	 * footer conventions (grep's vs. find's bracket ordering differ) and own formatting
 	 * the artifact notice into their own notice list via `formatArtifactNotice`.
@@ -52,7 +52,7 @@ export function formatArtifactNotice(artifactId: string): string {
  * Measure `request.rawContent`; if it fits within the caps, return it unchanged (small
  * output stays exactly as readable as before this module existed). If it's oversized and
  * an `ArtifactStore` is provided, capture the exact raw payload as an artifact first, then
- * return the same bounded preview `truncateHead` would have produced anyway.
+ * return a head+tail preview so first hits and terminal errors both survive.
  *
  * Fails closed: if the artifact write succeeds but registering `holderId` as a reference
  * fails (`addReference` returns false), the artifact is not claimed in the result at all --
@@ -64,7 +64,7 @@ export function packToolOutput(
 	artifactStore: ArtifactStore | undefined,
 	holderId: string,
 ): PackedToolOutput {
-	const truncation = truncateHead(request.rawContent, request.truncation);
+	const truncation = truncateMiddle(request.rawContent, request.truncation);
 
 	if (!truncation.truncated || !artifactStore) {
 		return { content: truncation.content, truncation, packed: false };

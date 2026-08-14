@@ -19,6 +19,15 @@ function completedResponsesSse(): Response {
 				id: "resp_xai_test",
 				status: "completed",
 				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+				output: [
+					{
+						id: "msg_xai_test",
+						type: "message",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "hello from xai", annotations: [] }],
+					},
+				],
 			},
 		})}\n\n`,
 		{ status: 200, headers: { "content-type": "text/event-stream" } },
@@ -55,6 +64,20 @@ async function captureResponsesRequest(
 }
 
 describe.each(["grok-4.5", "grok-4.6"] as const)("xAI Responses lane (%s)", (modelId) => {
+	it("materializes assistant text from a completed-only Responses body", async () => {
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async () => completedResponsesSse()) as typeof fetch;
+		try {
+			const result = await streamOpenAIResponses(getModel("xai", modelId), context, {
+				apiKey: "test-key-123",
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello from xai" })]);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
 	it("authenticates with a Bearer token derived from the API key", async () => {
 		const { url, headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
 		expect(url).toBe("https://api.x.ai/v1/responses");

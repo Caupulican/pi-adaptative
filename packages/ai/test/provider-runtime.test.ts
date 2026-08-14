@@ -3,6 +3,7 @@ import {
 	applyProviderPayloadHook,
 	beginAssistantResponseStream,
 	buildClampedSimpleOptions,
+	commitSuccessfulAssistantParse,
 	completeAssistantStream,
 	createAssistantMessage,
 	createProviderRetryOptions,
@@ -118,14 +119,48 @@ describe("provider runtime", () => {
 		expect(events).toEqual([{ type: "start", partial: output }]);
 	});
 
-	it("fails closed on aborted completion and strips streaming scratch fields on errors", async () => {
-		const aborted = createAssistantMessage(model);
+	it("delivers a successful completion even when the abort signal races the terminal push", async () => {
+		const output = createAssistantMessage(model);
+		output.content.push({ type: "text", text: "already finished" });
+		const stream = new AssistantMessageEventStream();
 		const controller = new AbortController();
 		controller.abort();
-		expect(() => completeAssistantStream(new AssistantMessageEventStream(), aborted, controller.signal)).toThrow(
-			"Request was aborted",
-		);
 
+		completeAssistantStream(stream, output, controller.signal);
+
+		expect(await stream.result()).toBe(output);
+		expect(output.stopReason).toBe("stop");
+	});
+
+	it("does not rewrite a committed successful parse when terminate sees a late abort", async () => {
+		const output = createAssistantMessage(model);
+		output.content.push({ type: "text", text: "already finished" });
+		const stream = new AssistantMessageEventStream();
+		const controller = new AbortController();
+		controller.abort();
+		commitSuccessfulAssistantParse(output);
+
+		terminateAssistantStreamWithError(stream, output, controller.signal, new Error("Request was aborted"), {
+			formatError: (error) => (error instanceof Error ? error.message : String(error)),
+		});
+
+		expect(await stream.result()).toBe(output);
+		expect(output.stopReason).toBe("stop");
+		expect(output.errorMessage).toBeUndefined();
+	});
+
+	it("still refuses to complete a stream that already stopped as aborted or error", () => {
+		const aborted = createAssistantMessage(model, { stopReason: "aborted" });
+		expect(() => completeAssistantStream(new AssistantMessageEventStream(), aborted)).toThrow(
+			"An unknown error occurred",
+		);
+		const errored = createAssistantMessage(model, { stopReason: "error", errorMessage: "provider failed" });
+		expect(() => completeAssistantStream(new AssistantMessageEventStream(), errored)).toThrow(
+			"An unknown error occurred",
+		);
+	});
+
+	it("strips streaming scratch fields on errors", async () => {
 		const output = createAssistantMessage(model);
 		output.content.push({
 			type: "toolCall",

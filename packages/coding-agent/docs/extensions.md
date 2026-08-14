@@ -530,7 +530,7 @@ pi.on("before_agent_start", async (event, ctx) => {
   //   .promptGuidelines - custom guideline bullets
   //   .appendSystemPrompt - text from --append-system-prompt flags
   //   .cwd - working directory
-  //   .contextFiles - eagerly loaded AGENTS.md/CLAUDE.md/GEMINI.md context files
+  //   .contextFiles - global AGENTS.md/CLAUDE.md/GEMINI.md contents plus on-demand project paths
   //   .skills - discovered frontmatter metadata, host-side; not rendered into the startup prompt
 
   return {
@@ -2073,8 +2073,9 @@ The built-in limit is **50KB** (~10k tokens) and **2000 lines**, whichever is hi
 
 ```typescript
 import {
-  truncateHead,      // Keep first N lines/bytes (good for file reads, search results)
-  truncateTail,      // Keep last N lines/bytes (good for logs, command output)
+  truncateHead,      // Keep first N lines/bytes (good for file reads)
+  truncateTail,      // Keep last N lines/bytes (good for live log tails)
+  truncateMiddle,    // Keep a head and a tail (good for packed search/command output)
   truncateLine,      // Truncate a single line to maxBytes with ellipsis
   formatSize,        // Human-readable size (e.g., "50KB", "1.5MB")
   DEFAULT_MAX_BYTES, // 50KB
@@ -2114,8 +2115,9 @@ async execute(toolCallId, params, signal, onUpdate, ctx) {
 ```
 
 **Key points:**
-- Use `truncateHead` for content where the beginning matters (search results, file reads)
-- Use `truncateTail` for content where the end matters (logs, command output)
+- Use `truncateHead` for content where only the beginning matters (file reads)
+- Use `truncateTail` for live log tails
+- Use `truncateMiddle` when first hits and terminal errors both matter (search results, finished command output)
 - Always inform the LLM when output is truncated and where to find the full version
 - Document the truncation limits in your tool's description
 

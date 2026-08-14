@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import type { WriteStream } from "node:fs";
 import { join } from "node:path";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
-import { DEFAULT_MAX_BYTES, truncateTail } from "@caupulican/pi-agent-core/truncate";
+import { DEFAULT_MAX_BYTES, truncateMiddle } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../config.ts";
 import { stripAnsi } from "../utils/ansi.ts";
 import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";
@@ -173,7 +173,7 @@ export async function executeBashWithOperations(
 		});
 
 		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateTail(fullOutput);
+		const truncationResult = truncateMiddle(fullOutput);
 		if (truncationResult.truncated) {
 			ensureTempFile();
 		}
@@ -195,7 +195,7 @@ export async function executeBashWithOperations(
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateTail(fullOutput);
+			const truncationResult = truncateMiddle(fullOutput);
 			if (truncationResult.truncated) {
 				ensureTempFile();
 			}

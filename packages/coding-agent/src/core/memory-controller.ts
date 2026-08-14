@@ -22,6 +22,7 @@ import type { AgentMessage, CustomMessage } from "@caupulican/pi-agent-core";
 import { configFile, okfMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
+import { createLocalGraphMemoryProvider } from "./context/local-graph-memory-provider.ts";
 import { shouldQueryLongTermMemory } from "./context/long-term-memory-trigger.ts";
 import {
 	defaultMemoryPromptInclusionReport,
@@ -119,6 +120,8 @@ export interface MemoryControllerReloadSnapshot {
 export class MemoryController {
 	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
 	private _fileStoreMemoryProvider: ContextMemoryProvider | undefined = undefined;
+	private _localGraphProvider: ContextMemoryProvider | undefined = undefined;
+	private _localGraphResolved = false;
 	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
 	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
@@ -203,6 +206,17 @@ export class MemoryController {
 		return this._fileStoreMemoryProvider;
 	}
 
+	private _getLocalGraphProvider(): ContextMemoryProvider | undefined {
+		if (!this._localGraphResolved) {
+			this._localGraphProvider = createLocalGraphMemoryProvider({
+				cwd: this.deps.getCwd(),
+				agentDir: this.deps.getAgentDir(),
+			});
+			this._localGraphResolved = true;
+		}
+		return this._localGraphProvider;
+	}
+
 	private _memoryBudget(configuredMaxResults: number) {
 		return resolveMemoryPromptBudget({
 			contextWindow: this.deps.getContextWindow(),
@@ -250,6 +264,8 @@ export class MemoryController {
 			const providers = this._shouldQueryFileStoreFallback(budget) ? [this._getFileStoreMemoryProvider()] : [];
 			if (longTermDecision.shouldQuery) {
 				providers.push(this._getMemoryOkfProvider(), ...this._pendingContextMemoryProviders);
+				const graph = this._getLocalGraphProvider();
+				if (graph) providers.push(graph);
 			}
 			const maxResults = budget.enabled ? Math.min(settings.maxResults, budget.maxResults) : settings.maxResults;
 			const report = await retrieveMemoryForContext(
@@ -504,6 +520,8 @@ export class MemoryController {
 			// Release the previous generation's providers (locks/handles) before recreating, so a
 			// reload does not orphan the old MemoryManager. No-op on first init / for file-store.
 			await this._memoryManager.shutdownAll().catch(() => {});
+			this._localGraphProvider = undefined;
+			this._localGraphResolved = false;
 			const manager = new MemoryManager();
 			manager.registerProvider(
 				new FileStoreProvider({

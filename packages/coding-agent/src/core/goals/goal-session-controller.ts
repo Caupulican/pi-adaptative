@@ -10,6 +10,7 @@ import type {
 	PromptOptions,
 } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -34,6 +35,7 @@ export interface GoalSessionControllerDeps {
 	getModelProvider(): string | undefined;
 	getLaneRecords(): readonly LaneRecord[];
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
+	getBackgroundToolTasks(): readonly BackgroundToolTaskRef[];
 	synchronizeGoalState(state: GoalState): void;
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
@@ -418,6 +420,7 @@ export class GoalSessionController {
 			settings,
 			laneRecords: this.deps.getLaneRecords(),
 			taskRuntime: this.deps.getTaskRuntimeSnapshot(),
+			backgroundToolTasks: this.deps.getBackgroundToolTasks(),
 		});
 	}
 

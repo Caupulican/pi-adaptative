@@ -1,7 +1,14 @@
 import { Box, type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { shortenPath } from "../../../core/tools/render-utils.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
+
+const COLLAPSED_FILE_SNIPPET = 3;
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+	return `${count} ${count === 1 ? singular : pluralForm}`;
+}
 
 export class ToolGroupComponent implements Component {
 	readonly toolGroup: string;
@@ -64,16 +71,57 @@ export class ToolGroupComponent implements Component {
 
 	private renderCollapsed(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const lines = this.tools.flatMap((tool) =>
-			tool.renderCallSummary(safeWidth).map((line) => line.replace(/[ \t]+$/g, "")),
+		const lines = [this.formatCountLine(), ...this.formatFileSnippet(), ...this.formatLastAction()].filter(
+			(line) => line.trim().length > 0,
 		);
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (lines[i]?.trim()) {
-				lines[i] = this.appendExpandHint(lines[i], safeWidth);
-				break;
-			}
-		}
+		if (lines.length === 0) return [];
+		lines[lines.length - 1] = this.appendExpandHint(lines[lines.length - 1], safeWidth);
 		return lines.map((line) => truncateToWidth(line, safeWidth, "..."));
+	}
+
+	private formatCountLine(): string {
+		const editCount = this.tools.filter((tool) => tool.getToolName() === "edit").length;
+		const writeCount = this.tools.filter((tool) => tool.getToolName() === "write").length;
+		const errorCount = this.tools.filter((tool) => tool.isToolError()).length;
+		const files = this.uniqueFiles();
+		const parts: string[] = [];
+		if (editCount > 0) parts.push(plural(editCount, "edit"));
+		if (writeCount > 0) parts.push(plural(writeCount, "write"));
+		if (parts.length === 0) parts.push(plural(this.tools.length, this.toolGroup || "tool"));
+		if (files.length > 0) parts.push(plural(files.length, "file"));
+		if (errorCount > 0) parts.push(plural(errorCount, "error"));
+		return theme.bold(parts.join(" · "));
+	}
+
+	private formatFileSnippet(): string[] {
+		const files = this.uniqueFiles();
+		if (files.length === 0) return [];
+		const shown = files.slice(0, COLLAPSED_FILE_SNIPPET);
+		const extra = files.length - shown.length;
+		const list = shown.join(", ") + (extra > 0 ? `, +${extra}` : "");
+		return [theme.fg("dim", list)];
+	}
+
+	private formatLastAction(): string[] {
+		const last = [...this.tools].reverse().find((tool) => tool.isToolSuccess()) ?? this.tools[this.tools.length - 1];
+		if (!last) return [];
+		const path = last.getDisplayPath();
+		const label = path ? `${last.getToolName()} ${shortenPath(path)}` : last.getToolName();
+		return [`${theme.fg("dim", "last: ")}${label}`];
+	}
+
+	private uniqueFiles(): string[] {
+		const seen = new Set<string>();
+		const files: string[] = [];
+		for (const tool of this.tools) {
+			const path = tool.getDisplayPath();
+			if (!path) continue;
+			const display = shortenPath(path);
+			if (seen.has(display)) continue;
+			seen.add(display);
+			files.push(display);
+		}
+		return files;
 	}
 
 	private appendExpandHint(line: string, width: number): string {

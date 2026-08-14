@@ -13,8 +13,9 @@ import type {
 	StreamOptions,
 	TextToolProtocolParseEvent,
 } from "./types.ts";
+import { createEmptyUsage } from "./usage.ts";
 import { combineAbortSignals } from "./utils/abort-signals.ts";
-import { AssistantMessageEventStream } from "./utils/event-stream.ts";
+import { AssistantMessageEventStream, STREAM_ENDED_WITHOUT_TERMINAL } from "./utils/event-stream.ts";
 import {
 	generateTextToolProtocolPrimer,
 	normalizeTextToolProtocolOptions,
@@ -320,8 +321,15 @@ function withTextToolProtocolResult(
 		let completedEnvelopeCount = 0;
 		let trailingProseLength = 0;
 		let completedProjection: TextToolProtocolMessageProjection | undefined;
+		let lastPartial: AssistantMessage | undefined;
+		let sawTerminal = false;
 		try {
 			for await (const event of stream) {
+				if (event.type === "done" || event.type === "error") {
+					sawTerminal = true;
+				} else if ("partial" in event) {
+					lastPartial = event.partial;
+				}
 				if (event.type !== "done") {
 					if (event.type === "text_delta" || event.type === "thinking_delta") {
 						if (completedProjection) trailingProseLength += event.delta.length;
@@ -387,6 +395,24 @@ function withTextToolProtocolResult(
 					textLength: projection.textLength,
 				});
 				wrapped.push({ type: "done", reason: "toolUse", message: projection.message });
+			}
+			if (!sawTerminal) {
+				const source = lastPartial;
+				wrapped.push({
+					type: "error",
+					reason: "error",
+					error: {
+						role: "assistant",
+						content: source?.content ?? [],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: source?.usage ?? createEmptyUsage(),
+						stopReason: "error",
+						errorMessage: source?.errorMessage ?? STREAM_ENDED_WITHOUT_TERMINAL,
+						timestamp: source?.timestamp ?? Date.now(),
+					},
+				});
 			}
 		} finally {
 			control?.cleanup();

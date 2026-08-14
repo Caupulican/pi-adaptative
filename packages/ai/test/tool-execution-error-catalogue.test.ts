@@ -33,6 +33,10 @@ describe("tool execution error catalogue", () => {
 			timedOut: "Command timed out after 30000ms",
 			cancelled: "Operation aborted",
 			provisioningFailed: "PI_TOOL_PROVISIONING_FAILED: fd: SHA-256 verification failed",
+			ownerAuthorizationRequired:
+				"goal start failed: goal start requires explicit owner authorization in the current prompt.",
+			exclusiveArguments: "Provide exactly one of code or scriptPath.",
+			skillNotEligible: 'skill load failed: No eligible skill named "emil-design-engineering".',
 		};
 
 		for (const entry of TOOL_EXECUTION_ERROR_CATALOGUE) {

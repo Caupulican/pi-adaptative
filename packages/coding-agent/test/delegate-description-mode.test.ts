@@ -308,12 +308,13 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(text).toContain("CAVEMAN MODE - MANDATORY");
 		expect(text).toContain(`${skipReason} is expected policy capacity`);
 		expect(text).toContain("not harness instability");
-		expect(text).toContain("reuse an eligible idle worker");
+		expect(text).toContain("Reuse only an idle descendant with controllable=true");
 		expect(text).toContain("return the constraint to the parent");
 		expect(result.details).toEqual({
 			started: false,
 			skipReason,
 		});
+		expect(result.isError).toBe(true);
 	});
 
 	it("treats an unknown optional profile as correctable routing policy, not harness failure", async () => {
@@ -345,6 +346,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			skipReason: "orchestration_profile_not_found",
 			profileId: "invented-preset",
 		});
+		expect(result.isError).toBe(true);
 	});
 
 	it("treats an unavailable optional model as correctable routing policy, not harness failure", async () => {

@@ -5,6 +5,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import type { LearningPolicySettings } from "../src/core/settings-manager.ts";
@@ -336,6 +337,30 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(session.getLearningAuditRecords().at(-1)?.action).toBe("apply");
 
 		session.dispose();
+	});
+
+	it("stock policy applies a clean promote_skill so a memory procedure becomes a durable skill", async () => {
+		const previousEnvAgentDir = process.env[ENV_AGENT_DIR];
+		process.env[ENV_AGENT_DIR] = agentDir;
+		try {
+			const session = await newSession();
+			scriptReflection(session, [
+				{ kind: "promote_skill", name: "release-flow", description: "How to release", body: "Run release:patch" },
+			]);
+
+			await runPass(session);
+
+			expect(existsSync(join(agentDir, "skills", "release-flow", "SKILL.md"))).toBe(true);
+			const decisions = session.getLearningDecisionSnapshots();
+			expect(decisions[0]?.kind).toBe("apply");
+			expect(decisions[0]?.reasonCode).toBe("additive_skill_promotion");
+			expect(session.getLearningAuditRecords()[0]?.action).toBe("apply");
+
+			session.dispose();
+		} finally {
+			if (previousEnvAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previousEnvAgentDir;
+		}
 	});
 
 	it("policy enabled, skill layer not allowed: promotion becomes a proposal, no skill is written", async () => {

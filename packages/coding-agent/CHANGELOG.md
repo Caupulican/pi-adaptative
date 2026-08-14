@@ -1,5 +1,33 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Omitted worker `forkTurns` now defaults to self-contained birth context (`none`) even for same-provider/model root workers. Set `forkTurns` to `all` or a positive turn count to inherit sanitized parent turns.
+- Repository `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` stay off until a settings layer sets `projectContextFiles` to `"on-demand"`, which lists paths only. They are not injected. Global `~/.pi/agent` context files remain mandatory. `--no-context-files` no longer disables the global file.
+
+### Changed
+
+- Packed tool output and truncated bash/python model previews now keep a head+tail window so first hits and terminal errors both survive. Live TUI preview stays tail-only. Full output is still saved to the artifact or managed file.
+- Repository `AGENTS.md` loading is opt-in per directory. Default is global `~/.pi/agent` files only. `/settings` → Project AGENTS.md enables listing this project's files or keeps global-only; save per directory, project, or all projects.
+- Collapsed file edits no longer dump the full diff. Consecutive edit/write calls group into a count, a 2–3 file snippet, and the last successful action; `Ctrl+O` expands the full list. Thinking blocks are hidden by default (`hideThinkingBlock`, `Ctrl+T` to show).
+- Worker terminals that need parent review no longer interrupt the owner with Review now / Keep blocked. The parent agent wakes on the existing terminal handoff and decides via `delegate` status/review. The human stays on the edge: no blocking owner question is queued.
+- `Ctrl+O` only expands or collapses tool output. Deferred session history loads on `Ctrl+Shift+H` (`app.history.load`) so an expand never remounts the transcript.
+- Exported `loadProjectContextFiles()` now matches the live loader: default is global files only; `includeProject: true` lists project paths without injecting their bodies.
+- Long-term memory retrieval now consults a local durable graph when one is present on disk, so graph recall happens automatically on the next turn.
+- Wired built-in `memory`, `skillify`, `skill_audit`, and `improvement_loop` onto the default capable-session tool surface so they activate when the model/session can use them. Session create now initializes the bundled memory providers, so SDK sessions that never bind extensions still get the `memory` tool when the grant allows it. A `memory` write of a repeatable procedure now triggers reflection, and a clean `promote_skill` lands as a loadable skill under stock policy. An owner who enabled auto-apply and omitted `skill` still keeps that ceiling. Workers still cannot take the write/self-adaptation tools.
+- Goal, `task_steps`, and `tool_task` now share a live join: a still-running background tool cannot verify goal evidence, agent complete refuses while linked checklist steps or cited tool tasks remain open, and continuation waits on those running tasks.
+- A just-written or archived skill refreshes the live catalog, so `skill` search/load can use it in the same session without `/reload`.
+
+### Fixed
+
+- Goal start authority now accepts owner speech such as `this is a goal, use it` while still rejecting `goal-oriented` compounds and ordinary task text.
+- Failed goal actions, including unauthorized start, now return `isError` so tool-failure recovery can block unchanged retries in the same turn.
+- Failed `delegate` validation, API-correction, and start-skip results now return `isError` so unchanged retries are blocked instead of burning another worker turn.
+- Worker `delegate list` now marks which session peers the caller can control. Nested-limit guidance tells the model to reuse only `controllable=true` descendants, not siblings.
+- Nested worker start is rejected at admission when the tree already holds its `maxAttempts` ceiling, instead of returning started and dying before the first provider token.
+- Corrected the `delegate` `forkTurns` parameter description so omitted starts document `none`, matching the runtime default.
+- A worker tool denial for an exhausted token/cost/wall/tool budget now terminals the lane instead of blocking one call and letting the model retry other paths.
+
 ## [0.90.12] - 2026-08-14
 
 ### Fixed

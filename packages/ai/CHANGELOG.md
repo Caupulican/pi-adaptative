@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Settled `EventStream.result()` when `end()` races a fast stream that never pushed `done`/`error`, so `complete()` cannot hang. A text-protocol wrapper that sees the inner iterator end without a terminal event now emits that same error.
+- Delivered a fully parsed assistant stream even when the caller abort signal races the terminal push or the iterator throws after a successful terminal event, so a completed-only or otherwise already-finished response is not rewritten as `aborted`.
+- Materialized assistant text, reasoning, and tool calls from Responses `response.output` and from `output_item.done` when incremental `added`/`delta` events were skipped, so fast or coalesced streams no longer land as empty turns.
+- Classified goal owner-authorization failures so recovery treats them as policy, not unknown tool errors.
+- Classified mutually exclusive tool arguments (`Provide exactly one of …`) as invalid arguments and ineligible skill loads as `skill_not_eligible`.
+
 ## [0.90.12] - 2026-08-14
 
 ## [0.90.11] - 2026-08-14

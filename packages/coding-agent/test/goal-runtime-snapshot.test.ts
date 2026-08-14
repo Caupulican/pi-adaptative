@@ -15,6 +15,8 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import { appendEvidenceBundleSnapshot } from "../src/core/research/session-evidence-bundle.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { appendTaskStepsStateSnapshot } from "../src/core/tasks/session-task-state.ts";
+import { addTaskStep, createTaskStepsState } from "../src/core/tasks/task-state.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 describe("Phase 10B: Goal Runtime Snapshot", () => {
@@ -433,5 +435,38 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 		const snapshot = session.getGoalRuntimeSnapshot({ maxStallTurns: 5 });
 		expect(snapshot.goalState?.userGoal).toBe("Agent Test");
 		expect(snapshot.continuation.maxStallTurns).toBe(5);
+	});
+
+	it("waits on a cited running tool_task through the runtime snapshot join", () => {
+		const sessionManager = SessionManager.inMemory();
+		let goal = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		goal = applyGoalEvent(goal, { type: "add_requirement", id: "req-1", text: "Implement routing", now: "T1" });
+		goal = applyGoalEvent(goal, {
+			type: "add_evidence",
+			id: "e1",
+			kind: "user",
+			summary: "owner confirmed",
+			now: "T2",
+		});
+		goal = applyGoalEvent(goal, { type: "satisfy_requirement", id: "req-1", evidenceIds: ["e1"], now: "T3" });
+		appendGoalStateSnapshot(sessionManager, goal);
+		appendTaskStepsStateSnapshot(
+			sessionManager,
+			addTaskStep(
+				createTaskStepsState("T0"),
+				{ content: "Wait for compile", requirementIds: ["req-1"], evidence: ["tool-task-1"] },
+				"T1",
+			),
+		);
+
+		const snapshot = buildGoalRuntimeSnapshot({
+			sessionManager,
+			settings: { maxStallTurns: 3 },
+			backgroundToolTasks: [{ taskId: "tool-task-1", toolCallId: "call-1", status: "running" }],
+		});
+
+		expect(snapshot.workState?.runningToolTaskIds).toEqual(["tool-task-1"]);
+		expect(snapshot.continuation.action).toBe("waiting");
+		expect(snapshot.continuation.reasonCode).toBe("tool_task_in_flight");
 	});
 });

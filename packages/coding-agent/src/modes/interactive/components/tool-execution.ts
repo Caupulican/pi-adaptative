@@ -448,6 +448,29 @@ export class ToolExecutionComponent extends Container {
 		return "toolSuccessBg";
 	}
 
+	getToolName(): string {
+		return this.toolName;
+	}
+
+	isToolPartial(): boolean {
+		return this.isPartial;
+	}
+
+	isToolError(): boolean {
+		return this.result?.isError === true;
+	}
+
+	isToolSuccess(): boolean {
+		return this.result !== undefined && !this.isPartial && this.result.isError !== true;
+	}
+
+	getDisplayPath(): string | undefined {
+		const raw = this.args?.path ?? this.args?.file_path;
+		if (typeof raw !== "string") return undefined;
+		const trimmed = raw.trim();
+		return trimmed.length > 0 ? trimmed : undefined;
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();

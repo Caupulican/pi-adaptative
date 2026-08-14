@@ -80,6 +80,7 @@ describe("session work-state projection", () => {
 		expect(projection.unknownRequirementIds).toEqual(["req-missing"]);
 		expect(projection.unlinkedOpenTaskStepIds).toEqual(["step-3", "step-4"]);
 		expect(projection.unboundDelegatedTaskIds).toEqual(["worker-unbound"]);
+		expect(projection.runningToolTaskIds).toEqual([]);
 	});
 
 	it("does not let explicit links fall back to conflicting free-text matches", () => {
@@ -94,5 +95,33 @@ describe("session work-state projection", () => {
 		const projection = projectSessionWorkState({ goalState: goal, taskStepsState: steps });
 		expect(projection.requirements[0].foregroundStepIds).toEqual([]);
 		expect(projection.requirements[1].foregroundStepIds).toEqual(["step-1"]);
+	});
+
+	it("joins cited running tool_task ids from goal evidence and open step evidence", () => {
+		let goal = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		goal = applyGoalEvent(goal, { type: "add_requirement", id: "req-1", text: "Implement routing", now: "T1" });
+		goal = applyGoalEvent(goal, {
+			type: "add_evidence",
+			id: "e1",
+			kind: "tool",
+			summary: "handoff",
+			uri: "tool-task-1",
+			now: "T2",
+		});
+		const steps = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "Wait for compile", requirementIds: ["req-1"], evidence: ["call-9"] },
+			"T1",
+		);
+		const projection = projectSessionWorkState({
+			goalState: goal,
+			taskStepsState: steps,
+			backgroundToolTasks: [
+				{ taskId: "tool-task-1", toolCallId: "call-1", status: "running" },
+				{ taskId: "tool-task-2", toolCallId: "call-9", status: "running" },
+				{ taskId: "tool-task-3", toolCallId: "call-3", status: "completed" },
+			],
+		});
+		expect(projection.runningToolTaskIds).toEqual(["tool-task-1", "tool-task-2"]);
 	});
 });

@@ -75,6 +75,12 @@ export interface WorkerTreeBudgetProjection {
 	checkpoints: Readonly<Record<string, { usage?: AttemptUsageSnapshot }>>;
 }
 
+/** True when one more tree attempt can still make a provider request under `maxAttempts`. */
+export function workerTreeCanAdmitAttempt(existingAttemptCount: number, maxAttempts: number | undefined): boolean {
+	if (maxAttempts === undefined) return true;
+	return existingAttemptCount < maxAttempts;
+}
+
 /** Rebuild every durable tree attempt, including attempts with no usage checkpoint yet. */
 export function collectWorkerTreeBudgetSeeds(
 	snapshot: WorkerTreeBudgetProjection,

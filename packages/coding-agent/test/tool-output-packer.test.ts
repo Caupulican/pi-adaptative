@@ -64,12 +64,15 @@ describe("packToolOutput: large output becomes digest + artifact handle", () => 
 });
 
 describe("packToolOutput: never silently drops or fabricates content", () => {
-	it("without a store, large output is truncated exactly as truncateHead alone would do (unchanged behavior)", () => {
+	it("without a store, large output is a head+tail preview so first and last lines survive", () => {
 		const rawContent = repeatLines(5000);
 		const result = packToolOutput({ toolName: "grep", rawContent }, undefined, "holder-1");
 		expect(result.packed).toBe(false);
 		expect(result.artifactId).toBeUndefined();
 		expect(result.truncation.truncated).toBe(true);
+		expect(result.content.startsWith("line 0\n")).toBe(true);
+		expect(result.content.endsWith("\nline 4999")).toBe(true);
+		expect(result.content).toContain("middle omitted");
 	});
 });
 

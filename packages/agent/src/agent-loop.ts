@@ -16,6 +16,13 @@ import {
 	type ToolArgumentValidationTelemetryEvent,
 	validateToolArguments,
 } from "@caupulican/pi-ai/validation";
+import {
+	assistantMessageText,
+	collapseDegenerateAssistantMessage,
+	isCollapsedDegenerateAssistantMessage,
+	isDegenerateRepeatedText,
+	shouldAbortDegenerateStream,
+} from "./degenerate-assistant-text.ts";
 import { startPlannedAgentProviderRequest } from "./provider-request-planner.ts";
 import {
 	assessToolFailure,
@@ -193,12 +200,10 @@ function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, abort
 }
 
 function mandatoryDeliveryReportsHalt(message: AssistantMessage, halt: ToolFailureRecoveryHalt): boolean {
-	const text = message.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("\n")
-		.toLowerCase();
-	if (!text.trim()) return false;
+	const raw = assistantMessageText(message);
+	if (!raw.trim()) return false;
+	if (isCollapsedDegenerateAssistantMessage(message) || isDegenerateRepeatedText(raw)) return false;
+	const text = raw.toLowerCase();
 	if (text.includes("recovery")) return true;
 	if (text.includes(halt.record.failureCode.toLowerCase())) return true;
 	const diagnostic = halt.record.diagnostic ?? halt.diagnostic;
@@ -547,10 +552,15 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
-	const response = await startAgentProviderRequest(context, config, signal, streamFn);
+	const degenerationAbort = new AbortController();
+	const onOuterAbort = (): void => degenerationAbort.abort();
+	if (signal?.aborted) degenerationAbort.abort();
+	else signal?.addEventListener("abort", onOuterAbort, { once: true });
+	const response = await startAgentProviderRequest(context, config, degenerationAbort.signal, streamFn);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+	let abortedForDegeneration = false;
 
 	responseEvents: for await (const event of response) {
 		switch (event.type) {
@@ -578,6 +588,15 @@ async function streamAssistantResponse(
 						assistantMessageEvent: event,
 						message: { ...partialMessage },
 					});
+					if (
+						!abortedForDegeneration &&
+						!signal?.aborted &&
+						!partialMessage.content.some((block) => block.type === "toolCall") &&
+						shouldAbortDegenerateStream(assistantMessageText(partialMessage))
+					) {
+						abortedForDegeneration = true;
+						degenerationAbort.abort();
+					}
 				}
 				break;
 
@@ -587,11 +606,17 @@ async function streamAssistantResponse(
 		}
 	}
 
-	const finalMessage = rejectNativeToolProtocolResidue(
+	signal?.removeEventListener("abort", onOuterAbort);
+	let finalMessage = rejectNativeToolProtocolResidue(
 		await response.result(),
 		context.tools ?? [],
 		Boolean(config.textToolCallProtocol),
 	);
+	if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
+		finalMessage = { ...finalMessage, stopReason: "stop" };
+		delete finalMessage.errorMessage;
+	}
+	finalMessage = collapseDegenerateAssistantMessage(finalMessage);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {

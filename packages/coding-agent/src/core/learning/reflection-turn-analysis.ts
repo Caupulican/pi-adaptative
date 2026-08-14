@@ -102,6 +102,12 @@ export function analyzeReflectionTurn(messages: AgentMessage[], complexTaskThres
 			toolResults += 1;
 			if (typeof raw.toolName === "string") toolNames.add(raw.toolName);
 			else if (role === "bashExecution") toolNames.add("bash");
+			// Memory writes are the durable facts reflection may promote to skills. Other tool
+			// payloads stay excluded so logs/secrets never enter the learning digest.
+			if (role === "toolResult" && raw.toolName === "memory") {
+				const text = messageText(message).trim();
+				if (text) semanticLines.push(`memory: ${boundReflectionSemanticText(text, 1_500)}`);
+			}
 		}
 	}
 
@@ -115,7 +121,10 @@ export function analyzeReflectionTurn(messages: AgentMessage[], complexTaskThres
 	const hasExplicitDurableSignal = userParts.some((part) => EXPLICIT_DURABLE_SIGNAL.test(part));
 	const explicitUserMemoryInstruction =
 		userParts.length > 0 && userParts.every((part) => EXPLICIT_DURABLE_SIGNAL.test(part));
-	const hasDurableSignal = hasExplicitDurableSignal || (toolCallCount > 0 && DURABLE_WORK_SIGNAL.test(assistantText));
+	const hasDurableSignal =
+		hasExplicitDurableSignal ||
+		toolNames.has("memory") ||
+		(toolCallCount > 0 && DURABLE_WORK_SIGNAL.test(assistantText));
 	const trigger: DemandSignals["trigger"] = hadCorrection
 		? "corrective"
 		: hasDurableSignal

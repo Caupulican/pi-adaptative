@@ -819,6 +819,34 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("rejects nested start at admission when the tree already holds maxAttempts", async () => {
+		const limited = workerProfile("faux-1");
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 128_000 }],
+			settings: { workerDelegation: { enabled: true, maxConcurrent: 2 } },
+			workerOrchestrationProfile: {
+				...limited,
+				maxConcurrent: 2,
+				budget: { ...limited.budget, maxAttempts: 1 },
+			},
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
+			const parent = await harness.session.runWorkerDelegationOnce({ instructions: "Establish the parent agent." });
+			expect(parent.started).toBe(true);
+			if (!parent.record) throw new Error("Expected a durable parent agent.");
+
+			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
+			const child = await harness.session.runWorkerDelegationOnce({
+				instructions: "Produce child terminal evidence.",
+				parentAgentId: parent.record.laneId,
+			});
+			expect(child).toMatchObject({ started: false, skipReason: "worker_tree_attempt_budget_exhausted" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("keeps follow-up turns owned by the controller so interrupt can fence them", async () => {
 		const harness = await createHarness();
 		let releaseFollowUp!: (message: AssistantMessage) => void;
@@ -1070,9 +1098,8 @@ describe("AgentSession worker delegation", () => {
 				outcome: "ask-user",
 				reasonCode: "parent_review_required",
 			});
-			expect(getWorkerHumanInputsRequiringDelivery(harness.sessionManager)).toMatchObject([
-				{ request: { source: "worker", workerRequestId: run.record?.laneId }, status: "pending" },
-			]);
+			// Parent agent decides; do not queue an owner Review now / Keep blocked interrupt.
+			expect(getWorkerHumanInputsRequiringDelivery(harness.sessionManager)).toEqual([]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
 			expect(request?.envelope.allowedTools).toEqual([
 				"read",

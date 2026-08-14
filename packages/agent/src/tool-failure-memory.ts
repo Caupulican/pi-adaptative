@@ -332,11 +332,54 @@ function boundedJsonPreview(value: unknown, maxChars: number): string {
  * Fingerprint a tool operation without materializing or retaining its serialized payload.
  * Volatile identifiers normalize before hashing; short numbers and ordinary paths remain significant.
  */
+/**
+ * Resource-envelope fields are not the operation. Changing `timeout` (or a sibling wait bound)
+ * must not mint a new execution identity — that is how a failed command is replayed forever.
+ */
+const OPERATION_ENVELOPE_KEYS = new Set([
+	"timeout",
+	"timeoutms",
+	"timeout_ms",
+	"timeoutsec",
+	"timeout_sec",
+	"timeoutseconds",
+	"timeout_seconds",
+	"maxwait",
+	"max_wait",
+	"maxwaitms",
+	"max_wait_ms",
+	"waitms",
+	"wait_ms",
+	"waitsec",
+	"wait_sec",
+	"waitseconds",
+	"wait_seconds",
+]);
+
+function omitOperationEnvelopeFields(value: unknown): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const record = value as Record<string, unknown>;
+	let changed = false;
+	const next: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(record)) {
+		if (OPERATION_ENVELOPE_KEYS.has(key.toLowerCase())) {
+			changed = true;
+			continue;
+		}
+		next[key] = entry;
+	}
+	return changed ? next : value;
+}
+
 export function normalizeToolSignature(pairs: Array<[string, unknown]>): string {
-	return structuredHash(pairs, true);
+	return structuredHash(
+		pairs.map(([name, args]) => [name, omitOperationEnvelopeFields(args)]),
+		true,
+	);
 }
 
 function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolean): string {
+	const identityArgs = omitOperationEnvelopeFields(args);
 	const boundedTool = truncate(tool, MAX_TOOL_NAME_CHARS);
 	const hash = createSignatureHash();
 	const updateHashString = normalizeVolatile ? updateNormalizedHashString : updateExactHashString;
@@ -344,7 +387,7 @@ function toolOperationKey(tool: string, args: unknown, normalizeVolatile: boolea
 	// Preserve the stable structured-hash wire identity without allocating the two synthetic arrays.
 	updateHashRange(hash, "array:1[array:2[");
 	updateStructuredHash(hash, tool, active, 2, updateHashString);
-	updateStructuredHash(hash, args, active, 2, updateHashString);
+	updateStructuredHash(hash, identityArgs, active, 2, updateHashString);
 	updateHashRange(hash, "];];");
 	const signature = renderSignatureHash(hash);
 	return `${boundedTool}:${signature}`;
@@ -390,6 +433,11 @@ export function readVisibleToolFailureCode(result: ToolResultMessage): string | 
 
 export function isClosedOperationFailureCode(code: string | undefined): boolean {
 	return code === "operation_recovery_exhausted" || code === "recovery_exhausted";
+}
+
+/** Failures that only a new owner prompt can clear. Do not restore their circuit across user turns. */
+export function isPromptScopedFailureCode(code: string | undefined): boolean {
+	return code === "owner_authorization_required";
 }
 
 export function restoreToolFailureRecord(
@@ -525,7 +573,13 @@ function inferToolFailurePhase(state: ToolFailureState, failureCode: string): To
 	if (failureCode === "malformed_call" || failureCode === "unknown_tool" || failureCode === "invalid_arguments") {
 		return "validation";
 	}
-	if (failureCode === "blocked" || failureCode === "permission_denied") return "policy";
+	if (
+		failureCode === "blocked" ||
+		failureCode === "permission_denied" ||
+		failureCode === "owner_authorization_required"
+	) {
+		return "policy";
+	}
 	if (failureCode === "preflight_error") return "preflight";
 	if (failureCode === "aborted" || failureCode === "cancelled") return "cancelled";
 	if (failureCode === "timeout" || failureCode === "etimedout") return "timeout";

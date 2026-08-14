@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Added `truncateMiddle`, `truncateKnownHeadTail`, and `formatMiddleOmissionMarker` so oversized tool output can keep a head and a tail instead of only the first or last window.
+
+### Fixed
+
+- Agent-loop `result()` now settles when a provider stream ends without a terminal event instead of hanging the turn.
+- Execution and runaway identity now ignore resource-envelope fields such as `timeout` and `timeoutSeconds`, so a failed command cannot be replayed by changing only the wait bound.
+- Collapsed consecutive repeated assistant text so a generation loop cannot persist into the next provider turn.
+- Collapsed a single-line sentence generation loop (the same sentence repeated inside one paragraph) and abort the provider stream once that run is already long, so a toolless recovery turn cannot spend minutes emitting one sentence hundreds of times. A collapsed generation loop is not treated as a mandatory-delivery halt report.
+- Prompt-scoped `owner_authorization_required` failures no longer restore an operation circuit across a new user turn.
+
 ## [0.90.12] - 2026-08-14
 
 ### Fixed

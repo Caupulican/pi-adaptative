@@ -5,6 +5,7 @@ import {
 	createToolFailureOperationExhaustedResult,
 	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
+	getToolExecutionKey,
 	normalizeToolSignature,
 	rememberToolFailure,
 	sanitizeToolFailureContext,
@@ -35,6 +36,24 @@ describe("tool failure memory", () => {
 		const signature1 = normalizeToolSignature([["read", { path: "foo.txt", offset: 10, limit: 100 }]]);
 		const signature2 = normalizeToolSignature([["read", { limit: 100, path: "foo.txt", offset: 10 }]]);
 		expect(signature1).toBe(signature2);
+	});
+
+	it("treats resource-envelope fields as outside execution identity", () => {
+		expect(getToolExecutionKey("bash", { command: "./test.sh foo.test.ts", timeout: 180 })).toBe(
+			getToolExecutionKey("bash", { command: "./test.sh foo.test.ts", timeout: 240 }),
+		);
+		expect(getToolExecutionKey("bash", { command: "./test.sh foo.test.ts", timeout: 180 })).not.toBe(
+			getToolExecutionKey("bash", { command: "./test.sh bar.test.ts", timeout: 180 }),
+		);
+		expect(normalizeToolSignature([["bash", { command: "./test.sh foo.test.ts", timeout: 30 }]])).toBe(
+			normalizeToolSignature([["bash", { command: "./test.sh foo.test.ts", timeout: 90 }]]),
+		);
+		expect(getToolExecutionKey("python", { code: "print(1)", timeoutSeconds: 30 })).toBe(
+			getToolExecutionKey("python", { code: "print(1)", timeoutSeconds: 90 }),
+		);
+		expect(getToolExecutionKey("python", { code: "print(1)", timeoutSeconds: 30 })).not.toBe(
+			getToolExecutionKey("python", { code: "print(2)", timeoutSeconds: 30 }),
+		);
 	});
 
 	it("deduplicates earlier successful tool calls for identical operations, retaining only the latest", () => {

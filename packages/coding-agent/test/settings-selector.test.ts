@@ -1,6 +1,7 @@
 import { setKeybindings } from "@caupulican/pi-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import {
 	type SettingsCallbacks,
 	type SettingsConfig,
@@ -25,6 +26,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 		currentTheme: "dark",
 		availableThemes: ["dark", "light"],
 		hideThinkingBlock: false,
+		projectContextFiles: "off",
 		collapseChangelog: false,
 		enableInstallTelemetry: true,
 		doubleEscapeAction: "tree",
@@ -79,6 +81,7 @@ function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCall
 		onThinkingLevelChange: vi.fn(),
 		onThemeChange: vi.fn(),
 		onHideThinkingBlockChange: vi.fn(),
+		onProjectContextFilesChange: vi.fn(),
 		onCollapseChangelogChange: vi.fn(),
 		onEnableInstallTelemetryChange: vi.fn(),
 		onDoubleEscapeActionChange: vi.fn(),
@@ -127,6 +130,80 @@ describe("settings selector", () => {
 
 		expect(output).toContain("Maximum reasoning depth for the hardest problems");
 		expect(output).toContain("Maximum reasoning with reinforced proactive delegation");
+	});
+
+	it("exposes project AGENTS.md opt-in in the searchable settings TUI", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ projectContextFiles: "off" }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("project agents");
+		const output = selector.render(140).join("\n");
+
+		expect(output).toContain("Project AGENTS.md");
+		expect(output).toContain("global only");
+		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "project-context")).toBe(false);
+	});
+
+	it("opts in to this directory's AGENTS.md from the Project AGENTS.md submenu", () => {
+		const onProjectContextFilesChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ projectContextFiles: "off" }),
+			makeCallbacks({ onProjectContextFilesChange }),
+		);
+
+		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onProjectContextFilesChange).toHaveBeenCalledWith("on-demand", "directoryProfile");
+	});
+
+	it("opts in to this project's AGENTS.md from the Project AGENTS.md submenu", () => {
+		const onProjectContextFilesChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ projectContextFiles: "off" }),
+			makeCallbacks({ onProjectContextFilesChange }),
+		);
+
+		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onProjectContextFilesChange).toHaveBeenCalledWith("on-demand", "project");
+	});
+
+	it("opts in for all projects from the Project AGENTS.md submenu", () => {
+		const onProjectContextFilesChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ projectContextFiles: "off" }),
+			makeCallbacks({ onProjectContextFilesChange }),
+		);
+
+		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onProjectContextFilesChange).toHaveBeenCalledWith("on-demand", "global");
+	});
+
+	it("returns this directory to global-only from the Project AGENTS.md submenu", () => {
+		const onProjectContextFilesChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ projectContextFiles: "on-demand", projectContextFilesScope: "directoryProfile" }),
+			makeCallbacks({ onProjectContextFilesChange }),
+		);
+
+		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onProjectContextFilesChange).toHaveBeenCalledWith("off", "directoryProfile");
 	});
 
 	it("exposes self modification settings in the searchable settings TUI", () => {

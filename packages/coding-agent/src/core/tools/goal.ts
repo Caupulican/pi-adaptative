@@ -2,6 +2,7 @@ import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
 import type { GoalEvidenceKind, GoalState } from "../goals/goal-state.ts";
@@ -188,8 +189,15 @@ export interface GoalToolDependencies {
 	 * task state itself; this is the only place that supplies it.
 	 */
 	getOpenTaskSteps?: () => readonly OpenTaskStepRef[];
+	/** Live background tool_task records for kind:"tool" evidence and complete-time re-check. */
+	getBackgroundToolTasks?: () => readonly BackgroundToolTaskRef[];
 	/** Model-facing start authority for the current foreground turn. Omitted by direct owner/test callers. */
 	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | undefined;
+	/**
+	 * Live tool-evidence check. When wired, kind:"tool" uses this instead of {@link hasToolCallId}
+	 * so a still-running background handoff cannot verify as done.
+	 */
+	resolveToolEvidence?: (uri: string) => boolean;
 }
 
 function allowsNativeTmuxFallback(reason: string | undefined): boolean {
@@ -209,6 +217,7 @@ async function resolveEvidenceVerified(
 	const trimmedUri = uri?.trim();
 	if (!trimmedUri) return undefined;
 	if (kind === "tool") {
+		if (deps.resolveToolEvidence) return deps.resolveToolEvidence(trimmedUri);
 		return deps.hasToolCallId ? deps.hasToolCallId(trimmedUri) : false;
 	}
 	if (kind === "file") {
@@ -365,8 +374,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		promptSnippet: "Read or update the durable goal.",
 		promptGuidelines: [
 			"Start only for explicit persistent chat/system goal. get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
-			"Plans: task_steps. Workers: delegate. Legacy actions only for legacy goals.",
-			"complete needs current authoritative evidence, no remaining work. block_goal needs same real impasse for 3 goal turns.",
+			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
+			"complete needs current authoritative evidence, no remaining work, no linked open task_steps, no running tool_task. block_goal needs same real impasse for 3 goal turns.",
 		],
 		parameters: goalSchema,
 		renderShell: "self",
@@ -387,6 +396,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		): Promise<{
 			content: Array<{ type: "text"; text: string }>;
 			details: GoalToolDetails;
+			isError?: boolean;
 		}> {
 			if (input.action === "get") {
 				const state = deps.getGoalState();
@@ -407,6 +417,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 					return {
 						content: [{ type: "text", text: `goal start failed: ${error}` }],
 						details: { action: "start", applied: false, error },
+						isError: true,
 					};
 				}
 			}
@@ -415,6 +426,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 				return {
 					content: [{ type: "text" as const, text: `goal ${input.action} failed: ${mapped.error}` }],
 					details: { action: input.action, applied: false, error: mapped.error },
+					isError: true,
 				};
 			}
 
@@ -519,11 +531,14 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			} else {
 				const result = applyGoalAction(current, action, now(), {
 					requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
+					openTaskSteps: deps.getOpenTaskSteps?.(),
+					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
 				});
 				if (!result.ok) {
 					return {
 						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
 						details: { action: input.action, applied: false, error: result.error, state: current },
+						isError: true,
 					};
 				}
 				deps.saveGoalState(result.state, current ? getGoalStateRevision(current) : undefined);

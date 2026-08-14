@@ -22,6 +22,18 @@ type ProviderRetrySource = Pick<StreamOptions | ImagesOptions, "signal" | "maxRe
 type AssistantMessageOverrides = Partial<Pick<AssistantMessage, "stopReason" | "errorMessage">>;
 type StreamingScratchField = "index" | "partialArgs" | "partialArgsComplete" | "partialJson" | "streamIndex";
 
+const committedSuccessfulParses = new WeakSet<AssistantMessage>();
+
+function isSuccessfulStopReason(stopReason: AssistantMessage["stopReason"]): boolean {
+	return stopReason !== "aborted" && stopReason !== "error";
+}
+
+/** Mark a fully parsed assistant message so a later iterator abort cannot rewrite it. */
+export function commitSuccessfulAssistantParse(output: AssistantMessage): void {
+	if (!isSuccessfulStopReason(output.stopReason)) return;
+	committedSuccessfulParses.add(output);
+}
+
 export function createAssistantMessage<TApi extends Api>(
 	model: Model<TApi>,
 	overrides: AssistantMessageOverrides = {},
@@ -103,12 +115,18 @@ export async function beginAssistantResponseStream<TModel>(
 	stream.push({ type: "start", partial: output });
 }
 
+/**
+ * Push the successful terminal event for a fully parsed assistant message.
+ *
+ * A late abort on `signal` must not discard that message: mid-stream abort is
+ * the transport's job and is already converted by {@link terminateAssistantStreamWithError}.
+ * Checking the signal here is a TOCTOU that drops completed-only / fast responses.
+ */
 export function completeAssistantStream(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
-	signal?: AbortSignal,
+	_signal?: AbortSignal,
 ): void {
-	if (signal?.aborted) throw new Error("Request was aborted");
 	if (output.stopReason === "aborted" || output.stopReason === "error") {
 		throw new Error("An unknown error occurred");
 	}
@@ -131,6 +149,10 @@ export function terminateAssistantStreamWithError(
 			const scratchBlock = block as typeof block & Partial<Record<StreamingScratchField, unknown>>;
 			for (const field of options.scratchFields) delete scratchBlock[field];
 		}
+	}
+	if (committedSuccessfulParses.has(output) && isSuccessfulStopReason(output.stopReason)) {
+		completeAssistantStream(stream, output);
+		return;
 	}
 	output.stopReason = signal?.aborted ? "aborted" : "error";
 	output.errorMessage = options.formatError(error);

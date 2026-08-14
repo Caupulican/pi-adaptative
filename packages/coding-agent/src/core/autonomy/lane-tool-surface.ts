@@ -279,6 +279,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					return undefined;
 				} catch (error) {
 					if (error instanceof CapabilityGatewayDeniedError) {
+						if (error.status === "budget_exhausted") throw error;
 						return { block: true, reason: `Lane tool blocked (${error.reasonCode}): ${error.message}` };
 					}
 					throw error;

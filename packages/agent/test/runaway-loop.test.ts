@@ -651,6 +651,73 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
+	it("treats the same command with a different timeout as the same failed operation", async () => {
+		const schema = Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number()) });
+		let executions = 0;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "bash",
+			parameters: schema,
+			async execute() {
+				executions++;
+				throw new Error("Command exited with code 1");
+			},
+		};
+		let calls = 0;
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
+				calls++;
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[
+							{
+								type: "toolCall",
+								id: `bash-${calls}`,
+								name: "bash",
+								arguments: {
+									command: "./test.sh packages/coding-agent/test/natural-language-goal.test.ts",
+									timeout: calls === 1 ? 240 : 180,
+								},
+							},
+						],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "run the targeted tests", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [failingTool] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 4 },
+				undefined,
+				streamFn,
+			),
+		);
+		const toolEndMessages = events
+			.filter((event) => event.type === "tool_execution_end")
+			.map(
+				(event) =>
+					(event as { result: { content: Array<{ type: string; text?: string }> } }).result.content.find(
+						(block: { type: string; text?: string }) => block.type === "text",
+					)?.text ?? "",
+			);
+
+		expect(executions).toBe(1);
+		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
+		expect(deliveryTurns).toBe(1);
+	});
+
 	it("does not treat changed volatile-looking arguments as an unchanged operation", async () => {
 		const schema = Type.Object({ path: Type.String() });
 		const firstPath = "missing-123e4567-e89b-12d3-a456-426614174000.txt";

@@ -365,6 +365,8 @@ export interface SettingsConfig {
 	currentTheme: string;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
+	projectContextFiles: "off" | "on-demand";
+	projectContextFilesScope?: SettingsScope;
 	collapseChangelog: boolean;
 	enableInstallTelemetry: boolean;
 	doubleEscapeAction: "fork" | "tree" | "none";
@@ -427,6 +429,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onProjectContextFilesChange: (mode: "off" | "on-demand", scope: SettingsScope) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onEnableInstallTelemetryChange: (enabled: boolean) => void;
 	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
@@ -607,6 +610,74 @@ class SettingsListSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.settingsList.handleInput(data);
+	}
+}
+
+const PROJECT_CONTEXT_SCOPE_VALUES = ["this-directory", "this-project", "all-projects"] as const;
+type ProjectContextScopeValue = (typeof PROJECT_CONTEXT_SCOPE_VALUES)[number];
+
+function projectContextScopeValue(scope: SettingsScope | undefined): ProjectContextScopeValue {
+	if (scope === "project") return "this-project";
+	if (scope === "global") return "all-projects";
+	return "this-directory";
+}
+
+function projectContextScopeFromValue(value: string): SettingsScope {
+	if (value === "this-project") return "project";
+	if (value === "all-projects") return "global";
+	return "directoryProfile";
+}
+
+function projectContextFilesSummary(mode: "off" | "on-demand", scope: SettingsScope | undefined): string {
+	if (mode !== "on-demand") return "global only";
+	if (scope === "project") return "this project";
+	if (scope === "global") return "all projects";
+	return "this directory";
+}
+
+class ProjectContextFilesSubmenu extends SettingsListSubmenu {
+	private mode: "off" | "on-demand";
+	private scope: SettingsScope;
+
+	constructor(
+		mode: "off" | "on-demand",
+		onChange: (mode: "off" | "on-demand", scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "directoryProfile",
+	) {
+		super();
+		this.mode = mode;
+		this.scope = scope;
+		this.mountSettingsList(
+			[
+				{
+					id: "project-context-scope",
+					label: "Save scope",
+					description:
+						"this-directory: this folder only (user overlay). this-project: .pi/settings.json. all-projects: every repo.",
+					currentValue: projectContextScopeValue(this.scope),
+					values: [...PROJECT_CONTEXT_SCOPE_VALUES],
+				},
+				{
+					id: "project-context-load",
+					label: "Load",
+					description:
+						"global-only uses ~/.pi/agent/AGENTS.md. on-demand also lists this project's AGENTS.md for the agent to read.",
+					currentValue: this.mode === "on-demand" ? "on-demand" : "global-only",
+					values: ["global-only", "on-demand"],
+				},
+			],
+			(id, newValue) => {
+				if (id === "project-context-scope") {
+					this.scope = projectContextScopeFromValue(newValue);
+					onChange(this.mode, this.scope);
+					return;
+				}
+				this.mode = newValue === "on-demand" ? "on-demand" : "off";
+				onChange(this.mode, this.scope);
+			},
+			onCancel,
+		);
 	}
 }
 
@@ -2210,6 +2281,24 @@ export class SettingsSelectorComponent extends Container {
 				description: "Hide thinking blocks in assistant responses",
 				currentValue: config.hideThinkingBlock ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "project-context-files",
+				label: "Project AGENTS.md",
+				description:
+					"Opt in to listing this directory's AGENTS.md/CLAUDE.md/GEMINI.md. Global ~/.pi/agent files always load.",
+				currentValue: projectContextFilesSummary(config.projectContextFiles, config.projectContextFilesScope),
+				submenu: (_currentValue, done) =>
+					new ProjectContextFilesSubmenu(
+						config.projectContextFiles,
+						(mode, scope) => {
+							config.projectContextFiles = mode;
+							config.projectContextFilesScope = scope;
+							callbacks.onProjectContextFilesChange(mode, scope);
+						},
+						() => done(projectContextFilesSummary(config.projectContextFiles, config.projectContextFilesScope)),
+						config.projectContextFilesScope ?? "directoryProfile",
+					),
 			},
 			{
 				id: "collapse-changelog",

@@ -1,11 +1,14 @@
 export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	formatMiddleOmissionMarker,
 	formatSize,
 	type TruncationOptions,
 	type TruncationResult,
 	truncateHead,
+	truncateKnownHeadTail,
 	truncateLine,
+	truncateMiddle,
 	truncateTail,
 } from "@caupulican/pi-agent-core/node";
 export {

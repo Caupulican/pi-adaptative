@@ -164,6 +164,46 @@ describe("tool-failure recovery restore", () => {
 		expect(admission.exhausted).toBe(true);
 	});
 
+	it("does not restore a prompt-scoped owner-authorization circuit across a new user turn", () => {
+		const args = { action: "start", userGoal: "evaluate the harness" };
+		const tracker = new Map();
+		const failed = rememberToolFailure(
+			tracker,
+			"goal",
+			args,
+			"failed",
+			"owner_authorization_required",
+			"Owner authorization is missing from the current prompt.",
+			"goal start requires explicit owner authorization in the current prompt.",
+			"policy",
+		);
+		const executed = createToolFailureResult(failed);
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "this is a goal, use it", timestamp: 1 },
+			assistantCall("goal-1", "goal", args),
+			toolResultMessage("goal-1", "goal", executed, true),
+		];
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(messages);
+		expect(gate.isEmpty()).toBe(true);
+
+		const tool: AgentTool = {
+			name: "goal",
+			label: "goal",
+			description: "goal",
+			parameters: Type.Object({ action: Type.String(), userGoal: Type.Optional(Type.String()) }),
+			async execute() {
+				throw new Error("execute must not run during admission");
+			},
+		};
+		const admission = gate.admit(
+			tool,
+			args,
+			getUnresolvedToolFailure(createToolFailureMemoryTracker(messages), "goal", args),
+		);
+		expect(admission.kind).toBe("allowed");
+	});
+
 	it("does not re-execute an exhausted list_lists after a new user turn", async () => {
 		let executions = 0;
 		const failingTool = createTrelloTool(() => {

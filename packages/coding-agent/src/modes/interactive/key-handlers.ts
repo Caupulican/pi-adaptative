@@ -33,6 +33,7 @@ export interface KeyHandlersHost {
 	handleDebugCommand(): void;
 	showModelSelector(initialSearchInput?: string): Promise<void>;
 	loadTuiHistoryOnDemand(): void;
+	toggleToolOutputExpansion(): void;
 	showTranscriptPager(): void;
 	toggleAgentsOverlay(): void;
 	toggleThinkingBlockVisibility(): Promise<void>;
@@ -86,7 +87,8 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	// Global debug handler on TUI (works regardless of focus)
 	host.ui.onDebug = () => host.handleDebugCommand();
 	host.defaultEditor.onAction("app.model.select", () => void host.showModelSelector());
-	host.defaultEditor.onAction("app.tools.expand", () => host.loadTuiHistoryOnDemand());
+	host.defaultEditor.onAction("app.tools.expand", () => host.toggleToolOutputExpansion());
+	host.defaultEditor.onAction("app.history.load", () => host.loadTuiHistoryOnDemand());
 	host.defaultEditor.onBackgroundTool = () => host.session.backgroundRunningToolCalls() > 0;
 	host.defaultEditor.onAction("app.transcript.open", () => host.showTranscriptPager());
 	host.defaultEditor.onAction("app.agents.open", () => host.toggleAgentsOverlay());

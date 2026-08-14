@@ -90,6 +90,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"find",
 			"goal",
 			"grep",
+			"improvement_loop",
 			"ls",
 			"memory",
 			"model_fitness",
@@ -139,8 +140,10 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			noTools: "builtin",
 		});
 
-		expect(session.getActiveToolNames()).toEqual([]);
-		expect(session.systemPrompt).toContain("Available tools:\n(none)");
+		expect(session.getActiveToolNames()).toEqual(["memory"]);
+		expect(session.getToolDefinition("memory")).toBeDefined();
+		expect(session.systemPrompt).toContain("- memory: Persist verified project facts and user preferences.");
+		expect(session.systemPrompt).not.toContain("Available tools:\n(none)");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
 	});

@@ -4,6 +4,7 @@ import {
 	getToolExecutionKey,
 	getToolFailureRecordExecutionKey,
 	isClosedOperationFailureCode,
+	isPromptScopedFailureCode,
 	readVisibleToolFailureCode,
 	restoreToolFailureRecord,
 	type ToolFailureMemoryRecord,
@@ -124,9 +125,13 @@ export class ToolFailureRecoveryGate {
 				if (existing) this.clearResolvedState(executionKey, existing);
 				return;
 			}
-			const state = this.ensureRestoredState(executionKey, restoreToolFailureRecord(result, tool, args));
-			if (!state) return false;
+			const restored = restoreToolFailureRecord(result, tool, args);
 			const visibleCode = readVisibleToolFailureCode(result);
+			if (isPromptScopedFailureCode(visibleCode) || isPromptScopedFailureCode(restored.failureCode)) {
+				return;
+			}
+			const state = this.ensureRestoredState(executionKey, restored);
+			if (!state) return false;
 			if (isClosedOperationFailureCode(visibleCode)) {
 				state.operationCircuitOpen = true;
 				state.blockedReplays = MAX_BLOCKED_REPLAYS_PER_FAILURE;

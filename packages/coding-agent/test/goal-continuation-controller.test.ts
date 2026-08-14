@@ -500,6 +500,29 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		});
 	});
 
+	it("waits on a cited running tool_task instead of asking to complete", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "add_evidence",
+			id: "e1",
+			kind: "user",
+			summary: "owner confirmed",
+			now: "T1",
+		});
+		state = applyGoalEvent(state, { type: "satisfy_requirement", id: "req-1", evidenceIds: ["e1"], now: "T2" });
+
+		const decision = evaluateGoalContinuation({
+			state,
+			settings: { maxStallTurns: 3 },
+			inFlightToolTaskIds: new Set(["tool-task-1"]),
+		});
+
+		expect(decision.action).toBe("waiting");
+		expect(decision.reasonCode).toBe("tool_task_in_flight");
+		expect(decision.message).toContain("tool-task-1");
+	});
+
 	it("helper does not mutate state or requirements", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });

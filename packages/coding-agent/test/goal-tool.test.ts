@@ -19,7 +19,7 @@ function createHarness() {
 	});
 	const run = async (input: GoalToolInput) => {
 		const result = await tool.execute("call-1", input, undefined, undefined, ctx);
-		return { content: result.content, details: result.details as GoalToolDetails };
+		return { content: result.content, details: result.details as GoalToolDetails, isError: result.isError };
 	};
 	return { tool, run, saves, getState: () => state };
 }
@@ -28,6 +28,29 @@ describe("goal tool", () => {
 	it("is named 'goal'", () => {
 		const { tool } = createHarness();
 		expect(tool.name).toBe("goal");
+	});
+
+	it("reports start authorization failure as a tool error", async () => {
+		const tool = createGoalToolDefinition({
+			getGoalState: () => undefined,
+			saveGoalState: () => {
+				throw new Error("must not persist");
+			},
+			authorizeStart: () => "goal start requires explicit owner authorization in the current prompt.",
+		});
+		const result = await tool.execute(
+			"call-1",
+			{ action: "start", goalId: "g1", userGoal: "Ship feature" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({
+			action: "start",
+			applied: false,
+			error: "goal start requires explicit owner authorization in the current prompt.",
+		});
 	});
 
 	it("starts a goal and persists state", async () => {
@@ -45,6 +68,7 @@ describe("goal tool", () => {
 	it("does not persist when an action fails validation", async () => {
 		const { run, saves } = createHarness();
 		const result = await run({ action: "progress" });
+		expect(result.isError).toBe(true);
 		expect(result.details.applied).toBe(false);
 		expect(result.details.error).toContain("No active goal");
 		expect(saves).toHaveLength(0);

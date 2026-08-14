@@ -91,6 +91,8 @@ export interface ReflectionControllerDeps {
 	getReflectionSignal(): AbortSignal;
 	/** Archive a promoted skill (rollback of a `promote_skill` write). */
 	archivePromotedSkill(name: string): boolean;
+	/** Make a just-written or archived skill visible to this session's skill vault. */
+	refreshLiveSkills?(): void;
 	/** G3/G8 autonomy telemetry sink for learning-gate outcomes and approval requests. */
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	/** Account the reflection pass's token spend into the cost roll-up (idempotent on reportId). */
@@ -579,40 +581,57 @@ export class ReflectionController {
 			const explicitUserMemoryWrite =
 				input.explicitUserMemoryInstruction === true &&
 				(write.kind === "memory_add" || write.kind === "memory_replace");
-			const decision: LearningDecision = explicitUserMemoryWrite
-				? {
-						kind: "apply",
-						reasonCode: "explicit_user_memory_instruction",
-						confidence: 100,
-						summary: proposal.summary,
-						requiresApproval: false,
-					}
-				: policy.enabled
-					? evaluateLearningDecision({
-							proposal,
-							confidence: policy.reflectionSourceConfidence,
-							observations,
-							// A replace/remove supersedes an existing durable fact — the reflection engine's
-							// confront-before-write conflict signal — so it routes through approval instead of
-							// silently overwriting prior memory. Additive writes contradict nothing.
-							contradictions: contradictionsForReflectionWrite(write),
-							settings: {
-								enabled: true,
-								autoApplyEnabled: policy.autoApplyEnabled,
-								confidenceThreshold: policy.confidenceThreshold,
-								minObservations: policy.minObservations,
-								allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
-								requireRollbackPlan: policy.requireRollbackPlan,
-								autoApplySupersessions: policy.autoApplySupersessions,
-							},
-						})
-					: {
-							kind: "apply",
-							reasonCode: "learning_policy_disabled_legacy_apply",
-							confidence: 0,
-							summary: proposal.summary,
-							requiresApproval: false,
-						};
+			// Additive skill promotion is the skill counterpart of a memory fact: a repeatable
+			// procedure should land as a loadable SKILL.md (overlap audit still holds the write).
+			// An owner who enabled auto-apply and omitted "skill" from the allow-list keeps that ceiling.
+			const ownerExcludedSkillLayer =
+				policy.enabled && policy.autoApplyEnabled && !policy.allowedAutoApplyLayers.includes("skill");
+			const additiveSkillPromotion = write.kind === "promote_skill" && !ownerExcludedSkillLayer;
+			let decision: LearningDecision;
+			if (explicitUserMemoryWrite) {
+				decision = {
+					kind: "apply",
+					reasonCode: "explicit_user_memory_instruction",
+					confidence: 100,
+					summary: proposal.summary,
+					requiresApproval: false,
+				};
+			} else if (additiveSkillPromotion) {
+				decision = {
+					kind: "apply",
+					reasonCode: "additive_skill_promotion",
+					confidence: policy.reflectionSourceConfidence,
+					summary: proposal.summary,
+					requiresApproval: false,
+				};
+			} else if (policy.enabled) {
+				decision = evaluateLearningDecision({
+					proposal,
+					confidence: policy.reflectionSourceConfidence,
+					observations,
+					// A replace/remove supersedes an existing durable fact — the reflection engine's
+					// confront-before-write conflict signal — so it routes through approval instead of
+					// silently overwriting prior memory. Additive writes contradict nothing.
+					contradictions: contradictionsForReflectionWrite(write),
+					settings: {
+						enabled: true,
+						autoApplyEnabled: policy.autoApplyEnabled,
+						confidenceThreshold: policy.confidenceThreshold,
+						minObservations: policy.minObservations,
+						allowedAutoApplyLayers: policy.allowedAutoApplyLayers,
+						requireRollbackPlan: policy.requireRollbackPlan,
+						autoApplySupersessions: policy.autoApplySupersessions,
+					},
+				});
+			} else {
+				decision = {
+					kind: "apply",
+					reasonCode: "learning_policy_disabled_legacy_apply",
+					confidence: 0,
+					summary: proposal.summary,
+					requiresApproval: false,
+				};
+			}
 
 			this.deps.saveLearningDecisionSnapshot(decision);
 			// G3: learning-gate outcome. Codes/numbers only — never the proposal summary/memory text.
@@ -754,6 +773,7 @@ export class ReflectionController {
 				if (!this.deps.archivePromotedSkill(rollback.target)) {
 					return { ok: false, reason: "skill_archive_failed" };
 				}
+				this.deps.refreshLiveSkills?.();
 				break;
 			}
 		}
@@ -783,7 +803,9 @@ export class ReflectionController {
 		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
 		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
 		if (write.kind === "promote_skill") {
-			return this._promoteReflectionSkill(write.name, write.description, write.body);
+			const promoted = this._promoteReflectionSkill(write.name, write.description, write.body);
+			if (promoted) this.deps.refreshLiveSkills?.();
+			return promoted;
 		}
 
 		type MemResult = { details?: { success?: boolean; error?: string } };

@@ -45,6 +45,12 @@ describe("SDK default tool surface", () => {
 		try {
 			expect(session.getActiveToolNames()).toEqual([...DEFAULT_ACTIVE_TOOL_NAMES, "artifact_retrieve"]);
 			expect(session.getActiveToolNames()).toContain("skill");
+			expect(session.getActiveToolNames()).toContain("skillify");
+			expect(session.getActiveToolNames()).toContain("skill_audit");
+			expect(session.getActiveToolNames()).toContain("memory");
+			expect(session.getToolDefinition("memory")).toBeDefined();
+			expect(session.getActiveToolNames()).toContain("improvement_loop");
+			expect(session.getToolDefinition("improvement_loop")).toBeDefined();
 			expect(session.getToolDefinition("skill")).toBeDefined();
 			expect(session.getActiveToolNames()).toContain("delegate");
 			expect(session.getActiveToolNames()).toContain("tool_task");

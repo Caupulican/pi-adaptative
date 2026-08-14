@@ -16,6 +16,7 @@ export type GoalContinuationReasonCode =
 	| "blocked_requirements_present"
 	| "missing_goal_state"
 	| "worker_in_flight"
+	| "tool_task_in_flight"
 	| "worker_wait_timeout"
 	| "lane_sync_conflict"
 	| "lane_sync_required";
@@ -85,6 +86,12 @@ export function evaluateGoalContinuation(args: {
 	 * compiling and behaving byte-identically when omitted or empty.
 	 */
 	syncRequiredLaneKeys?: ReadonlySet<string>;
+	/**
+	 * Background tool_task ids that are still running and cited by this goal's evidence or by
+	 * linked open task_steps. The loop must wait for those terminals the same way it waits on
+	 * a bound worker — a handoff stub is not completion.
+	 */
+	inFlightToolTaskIds?: ReadonlySet<string>;
 }): GoalContinuationDecision {
 	if (!args.state) {
 		return {
@@ -214,6 +221,14 @@ export function evaluateGoalContinuation(args: {
 				message: `Requirement(s) ${unprovenRequirementIds.join(", ")} still need trusted acceptance evidence.`,
 			};
 		}
+		if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
+			return {
+				...baseDecision,
+				action: "waiting",
+				reasonCode: "tool_task_in_flight",
+				message: `Background tool_task(s) ${[...args.inFlightToolTaskIds].join(", ")} are still running; wait once via tool_task before completing.`,
+			};
+		}
 		return {
 			...baseDecision,
 			action: "continue",
@@ -310,6 +325,15 @@ export function evaluateGoalContinuation(args: {
 			action: "waiting",
 			reasonCode: "worker_in_flight",
 			message: "A worker is dispatched against an open requirement; waiting for it to finish before continuing.",
+		};
+	}
+
+	if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
+		return {
+			...baseDecision,
+			action: "waiting",
+			reasonCode: "tool_task_in_flight",
+			message: `Background tool_task(s) ${[...args.inFlightToolTaskIds].join(", ")} are still running; wait once via tool_task before continuing or completing.`,
 		};
 	}
 

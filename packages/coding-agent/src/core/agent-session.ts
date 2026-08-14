@@ -563,22 +563,19 @@ export class AgentSession {
 		this._humanInput = new HumanInputController({
 			getSessionManager: () => this.sessionManager,
 			getUIContext: () => this._extensionUIContext,
-			getExtensionMode: () => this._extensionMode,
-			waitForIdle: () => this._foregroundRecovery.waitForIdle(),
 			isDisposed: () => this._disposed,
 			isStreaming: () => this.isStreaming,
 			getModel: () => this.model,
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getImageStore: () => this._getSessionImageStore(),
 			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages),
-			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
-			emitWarning: (message) => this._emit({ type: "warning", message }),
 		});
 		this._goals = new GoalSessionController({
 			getSessionManager: () => this.sessionManager,
 			getModelProvider: () => this.model?.provider,
 			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+			getBackgroundToolTasks: () => this._backgroundToolTasks.list(),
 			synchronizeGoalState: (state) => this._backgroundLanes.synchronizeGoalState(state),
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
@@ -610,7 +607,6 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
-			queueWorkerHumanInput: (request) => this._humanInput.queueWorkerInput(request),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -778,8 +774,6 @@ export class AgentSession {
 			foreground: this._foregroundRecovery,
 			isDisposed: () => this._disposed,
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
-			workerInputsWillWakeParent: (workerRequestIds) =>
-				this._humanInput.workerInputsWillWakeParent(workerRequestIds),
 			getWorkerClaimSnapshot: (laneId) =>
 				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.sessionManager), laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
@@ -826,6 +820,7 @@ export class AgentSession {
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			resolveTextToolCallProtocol: (model) => this._resolveModelToolProtocol(model).protocol,
 			archivePromotedSkill: (name) => this.archivePromotedSkill(name),
+			refreshLiveSkills: () => this._resourceLoader.refreshSkills?.(),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			ensureModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
@@ -1378,12 +1373,16 @@ export class AgentSession {
 
 	/** Archive a promoted skill into `skills/.archive/` (restorable, non-destructive). Returns true if moved. */
 	archivePromotedSkill(name: string): boolean {
-		return this._skillCurator.archiveSkill(name);
+		const archived = this._skillCurator.archiveSkill(name);
+		if (archived) this._resourceLoader.refreshSkills?.();
+		return archived;
 	}
 
 	/** Restore a previously-archived promoted skill. Returns true if moved back. */
 	restorePromotedSkill(name: string): boolean {
-		return this._skillCurator.restoreSkill(name);
+		const restored = this._skillCurator.restoreSkill(name);
+		if (restored) this._resourceLoader.refreshSkills?.();
+		return restored;
 	}
 
 	private _installAgentTurnRefresh(): void {
@@ -1925,7 +1924,6 @@ export class AgentSession {
 			// The shared projection excludes raw tool-result payloads and bounds both roles before any
 			// provider sees the turn. Synchronization is serialized in the background by MemoryController.
 			this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
-			this._humanInput.schedulePendingWorkerInputs();
 		}
 	};
 
@@ -2292,7 +2290,11 @@ export class AgentSession {
 		// own metadata. The unfiltered request is remembered so a later switch to a larger model
 		// restores it (the filter is re-applied on every model change).
 		this._requestedActiveToolNames = [...toolNames];
-		const capabilityFiltered = filterToolNamesForCapability(toolNames, this.getModelCapabilityProfile());
+		const requested = [...toolNames];
+		if (requested.includes("skill")) {
+			requested.push("skillify", "skill_audit");
+		}
+		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile());
 
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
@@ -3353,6 +3355,16 @@ export class AgentSession {
 	/** Whether auto-compaction is enabled */
 	get autoCompactionEnabled(): boolean {
 		return this.settingsManager.getCompactionEnabled();
+	}
+
+	/**
+	 * Activate bundled memory providers (file-store + transcript recall) so the `memory` tool can
+	 * register. SDK create calls this before returning; {@link bindExtensions} re-runs it after
+	 * extensions have registered additional providers. Profile and orchestration grants still decide
+	 * whether the tool activates.
+	 */
+	initializeMemory(): Promise<void> {
+		return this._memory.initialize();
 	}
 
 	/** Public entry point delegating to {@link ExtensionBindingController.bindExtensions}. */

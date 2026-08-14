@@ -116,8 +116,8 @@ describe("delegate tool capability description", () => {
 		expect(definition.description).toContain("host scheduler manages bounded depth");
 		expect(definition.description).toContain("Workers are persistent specialists");
 		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
-		expect(definition.description).toContain("Nested workers default to their self-contained instructions only");
-		expect(definition.description).toContain("explicitly set forkTurns to all");
+		expect(definition.description).toContain("New workers default to their self-contained instructions only");
+		expect(definition.description).toContain("Explicitly set forkTurns to all");
 
 		const parameters = definition.parameters as unknown as {
 			properties?: {
@@ -125,9 +125,12 @@ describe("delegate tool capability description", () => {
 				message?: { description?: string };
 				maxMessages?: { description?: string };
 				profileId?: { description?: string };
+				forkTurns?: { description?: string };
 				authority?: object;
 			};
 		};
+		expect(parameters.properties?.forkTurns?.description).toContain("Omitted starts use none");
+		expect(parameters.properties?.forkTurns?.description).not.toContain("inherit bounded all");
 		expect(parameters.properties?.instructions?.description).toContain("inherits the caller's admitted grant");
 		expect(parameters.properties?.instructions?.description).toContain("may recursively delegate");
 		expect(parameters.properties?.instructions?.description).toContain("bounds depth");

@@ -430,7 +430,9 @@ function rebuildBashResultRenderComponent(
 			warnings.push(`Full output unavailable: ${fullOutputError}`);
 		}
 		if (truncation?.truncated) {
-			if (truncation.truncatedBy === "lines") {
+			if (truncation.content.includes("...[middle omitted:")) {
+				warnings.push(`Truncated: head+tail preview of ${truncation.totalLines} lines`);
+			} else if (truncation.truncatedBy === "lines") {
 				warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
 			} else {
 				warnings.push(
@@ -474,7 +476,7 @@ function createShellToolDefinition(
 	return {
 		name: toolName,
 		label: toolName,
-		description: `${contractDescription} Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
+		description: `${contractDescription} Returns stdout and stderr. Output is truncated to a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
 		promptSnippet: routesWindowsContract
 			? "Run Bash-like commands; Pi routes Windows."
 			: "Execute Bash commands (ls, grep, find, etc.)",
@@ -686,14 +688,19 @@ function createShellToolDefinition(
 						fullOutputError: snapshot.fullOutputError,
 					};
 					if (!projection) {
-						const startLine = truncation.totalLines - truncation.outputLines + 1;
 						const endLine = truncation.totalLines;
 						if (truncation.lastLinePartial) {
 							const lastLineSize = formatSize(output.getLastLineBytes());
 							text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). ${fullOutputNotice}]`;
+						} else if (truncation.content.includes("...[middle omitted:")) {
+							const limitNote =
+								truncation.truncatedBy === "bytes" ? ` (${formatSize(DEFAULT_MAX_BYTES)} limit)` : "";
+							text += `\n\n[Showing head+tail preview of ${truncation.totalLines} lines${limitNote}. ${fullOutputNotice}]`;
 						} else if (truncation.truncatedBy === "lines") {
+							const startLine = truncation.totalLines - truncation.outputLines + 1;
 							text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. ${fullOutputNotice}]`;
 						} else {
+							const startLine = truncation.totalLines - truncation.outputLines + 1;
 							text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). ${fullOutputNotice}]`;
 						}
 					}

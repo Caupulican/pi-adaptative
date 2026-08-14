@@ -38,6 +38,7 @@ import { isAbsolute, join } from "node:path";
 import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { getShellEnv } from "../utils/shell.ts";
 import { managedSecretEnvDir, secretVaultFile } from "./agent-paths.ts";
 import type {
 	IsolatedCompletionOptions,
@@ -46,6 +47,7 @@ import type {
 } from "./agent-session-contracts.ts";
 import type { WorkerClaim } from "./autonomy/contracts.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
+import { isCompletedBackgroundToolEvidence } from "./background-tool-task-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
@@ -53,6 +55,7 @@ import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-to
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerAgentControlPort } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { execCommand } from "./exec.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
@@ -72,6 +75,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
+import { createImprovementLoopTool } from "./improvement-loop.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
 import type { LaneWorkerRefusal } from "./model-capability.ts";
@@ -129,6 +133,7 @@ import { dispatchTmuxWorker } from "./tools/tmux-dispatch.ts";
 import {
 	allToolNames,
 	createToolDefinitionWithRuntime,
+	type ToolDef,
 	type ToolDefinitionOptions,
 } from "./tools/tool-definition-factory.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -169,6 +174,7 @@ export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefine
 		id: step.id,
 		content: step.content,
 		...(step.requirementIds?.length ? { requirementIds: step.requirementIds } : {}),
+		...(step.evidence?.length ? { evidence: step.evidence } : {}),
 	}));
 }
 
@@ -940,6 +946,14 @@ export class RuntimeBuilder {
 					},
 					// kind:"tool" evidence refs verify against real session records.
 					hasToolCallId: (toolCallId) => hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), toolCallId),
+					resolveToolEvidence: (uri) => {
+						const completed = isCompletedBackgroundToolEvidence(
+							this.deps.getToolTaskDependencies?.().list() ?? [],
+							uri,
+						);
+						if (completed !== undefined) return completed;
+						return hasAnsweredToolCallOnBranch(this.deps.getSessionManager(), uri);
+					},
 					// kind:"worker" evidence refs verify against the SAME live lane/claim accessors the
 					// delegate action=status uses below -- live wiring (these were declared optional
 					// and read-defensive on the goal-tool deps type).
@@ -986,6 +1000,7 @@ export class RuntimeBuilder {
 					// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
 					// SessionManager access needed for the cross-visibility nudge.
 					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
+					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
 				});
 				this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
 			}
@@ -1063,6 +1078,17 @@ export class RuntimeBuilder {
 					runScout: (input) => this._runContextScout(input.query, input.maxTurns, toolArtifactStore),
 				});
 				this._baseToolDefinitions.set(contextScoutToolDefinition.name, contextScoutToolDefinition);
+			}
+			if (toolAccess.allows("improvement_loop")) {
+				const improvementLoopTool: ToolDef = createImprovementLoopTool(async (command, args, options) =>
+					execCommand(command, args, options?.cwd ?? this.deps.getCwd(), {
+						timeout: options?.timeout,
+						signal: options?.signal,
+						maxBuffer: options?.maxBuffer,
+						env: getShellEnv(),
+					}),
+				);
+				this._baseToolDefinitions.set("improvement_loop", improvementLoopTool);
 			}
 			if (toolAccess.allows("run_toolkit_script")) {
 				const runToolkitScriptToolDefinition = createRunToolkitScriptToolDefinition({

@@ -271,6 +271,18 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		expect(classifyFailure({ message: result.errorMessage ?? "" }).retryable).toBe(true);
 	});
 
+	it("delivers a done event that was already queued before the pump started", async () => {
+		const inner = createAssistantMessageEventStream();
+		const done = makeErrorAssistantMessage("stop", undefined);
+		inner.push(makeStartEvent());
+		inner.push({ type: "done", reason: "stop", message: done });
+		const wrapped = withStreamIdleWatchdog(() => inner, BOUNDS);
+		const stream = await wrapped({} as never, {} as never, {});
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+		expect(result).toBe(done);
+	});
+
 	it("disarms after clean completion — no late aborts", async () => {
 		const fake = makeFakeStreamFn();
 		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);

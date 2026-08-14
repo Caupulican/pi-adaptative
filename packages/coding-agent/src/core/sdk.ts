@@ -584,6 +584,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			throw error;
 		}
 	}
+	// File-store memory tools exist only after providers initialize. Do this here so an SDK session
+	// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
+	await session.initializeMemory();
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

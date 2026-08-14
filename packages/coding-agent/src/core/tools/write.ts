@@ -319,6 +319,7 @@ export function createWriteToolDefinition(
 	return {
 		name: "write",
 		label: "write",
+		toolGroup: "files",
 		description:
 			"Create a new file without overwriting. Send path and exactly one of content or contentRef. After a path-only collision, use the returned payloadRef with only a corrected path. The harness owns preflight, bounded payload retention, and atomic rechecks.",
 		promptSnippet: "Preflight new paths; never overwrite",

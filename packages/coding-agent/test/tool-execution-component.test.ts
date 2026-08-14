@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createAllToolDefinitions } from "../src/core/tools/index.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
@@ -452,8 +453,8 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered.match(/Full output:/g)?.length ?? 0).toBe(1);
 		expect(rendered).toMatch(/line-4000[^\n]*\n[^\S\n]*\n \[Full output:/);
 		expect(rendered).not.toMatch(/line-4000[^\n]*\n[^\S\n]*\n[^\S\n]*\n \[Full output:/);
-		expect(rendered).toContain("Truncated: showing 2000 of 4000 lines");
-		expect(rendered).not.toContain("[Showing lines 2001-4000 of 4000. Full output:");
+		expect(rendered).toContain("Truncated: head+tail preview of 4000 lines");
+		expect(rendered).not.toContain("[Showing head+tail preview of 4000 lines. Full output:");
 	});
 
 	test("does not duplicate built-in headers when passed the active built-in definition", () => {
@@ -759,6 +760,35 @@ describe("ToolExecutionComponent parity", () => {
 		const summary = stripAnsi(component.renderCallSummary(120).join("\n"));
 		expect(summary).toContain("Summary Tool");
 		expect(summary).not.toContain("hidden grouped result");
+	});
+
+	test("collapsed file group shows counts, a short file list, and only the last success", () => {
+		const paths = ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"];
+		const components = paths.map((path, index) => {
+			const component = new ToolExecutionComponent(
+				"edit",
+				`tool-files-${index}`,
+				{ path, edits: [{ oldText: "x", newText: "y" }] },
+				{},
+				createEditToolDefinition(process.cwd()),
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.updateResult({ content: [{ type: "text", text: "ok" }], details: {}, isError: false }, false);
+			return component;
+		});
+		const group = new ToolGroupComponent("files", components);
+		const text = stripAnsi(group.render(120).join("\n"));
+		const contentLines = text.split("\n").filter((line) => line.trim().length > 0);
+
+		expect(text).toContain("4 edits");
+		expect(text).toContain("4 files");
+		expect(text).toContain("src/a.ts, src/b.ts, src/c.ts, +1");
+		expect(text).toContain("last:");
+		expect(text).toContain("src/d.ts");
+		expect(text).toContain("to expand");
+		expect(contentLines.length).toBeLessThanOrEqual(4);
+		expect(text).not.toContain("ok");
 	});
 
 	test("keeps collapsed grouped bash summaries within render width when adding expand hint", () => {

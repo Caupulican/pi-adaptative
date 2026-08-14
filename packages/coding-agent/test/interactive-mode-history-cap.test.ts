@@ -139,6 +139,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(sessionManager.buildSessionContext).not.toHaveBeenCalled();
 		expect(ctx.chatContainer.render(120).join("\n")).toContain("Press");
 		expect(ctx.chatContainer.render(120).join("\n")).toContain("load session history");
+		expect(ctx.chatContainer.render(120).join("\n")).not.toMatch(/Press .* to expand tools and load history/i);
 		expect(ctx.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 

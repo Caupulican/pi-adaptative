@@ -32,9 +32,11 @@ describe("OutputAccumulator", () => {
 
 		const snapshot = output.snapshot();
 		expect(snapshot.truncation.totalLines).toBe(5000);
-		expect(snapshot.truncation.outputLines).toBe(2000);
-		expect(snapshot.content.startsWith("line-3000\n")).toBe(true);
+		expect(snapshot.truncation.truncated).toBe(true);
+		expect(snapshot.content.startsWith("line-0\n")).toBe(true);
 		expect(snapshot.content.endsWith("line-4999")).toBe(true);
+		expect(snapshot.content).toContain("middle omitted");
+		expect(snapshot.content).not.toContain("line-2500");
 	});
 
 	it("keeps preview bytes bounded for a huge unterminated line", () => {
@@ -56,8 +58,10 @@ describe("OutputAccumulator", () => {
 		const snapshot = output.snapshot();
 
 		expect(snapshot.truncation.totalLines).toBe(3);
-		expect(snapshot.truncation.outputLines).toBe(2);
-		expect(snapshot.content).toBe("b\nc");
+		expect(snapshot.truncation.truncated).toBe(true);
+		expect(snapshot.content.startsWith("a\n")).toBe(true);
+		expect(snapshot.content.endsWith("\nc")).toBe(true);
+		expect(snapshot.content).toContain("middle omitted");
 	});
 
 	it("decodes UTF-8 split across chunks", () => {

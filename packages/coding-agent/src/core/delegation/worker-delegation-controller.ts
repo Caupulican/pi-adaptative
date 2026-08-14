@@ -102,7 +102,11 @@ import {
 	WorkerTerminalHandoffCoordinator,
 	type WorkerTerminalHandoffDelivery,
 } from "./worker-terminal-handoff-coordinator.ts";
-import { collectWorkerTreeBudgetSeeds, WorkerTreeBudgetCoordinator } from "./worker-tree-budget-coordinator.ts";
+import {
+	collectWorkerTreeBudgetSeeds,
+	WorkerTreeBudgetCoordinator,
+	workerTreeCanAdmitAttempt,
+} from "./worker-tree-budget-coordinator.ts";
 import {
 	WorkerWriteReservationCoordinator,
 	type WorkerWriteReservationWaitYield,
@@ -162,7 +166,6 @@ export interface WorkerDelegationControllerDeps {
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
-	queueWorkerHumanInput(request: { workerRequestId: string; message: string; blockers: readonly string[] }): void;
 	readMemoryForLane(query: string): Promise<string>;
 	addSpawnedUsage(
 		usage: Usage,
@@ -1317,7 +1320,7 @@ export class WorkerDelegationController {
 		contract: WorkerExecutionContract,
 	): ReturnType<typeof resolveWorkerContextInheritanceMode> {
 		if (request.verificationOfTaskId) return { kind: "none" };
-		const mode = request.forkTurns ?? (request.parentAgentId ? "none" : undefined);
+		const mode = request.forkTurns ?? "none";
 		return resolveWorkerContextInheritanceMode({
 			parent: this.workerContextParentModel(request),
 			worker: {
@@ -1326,6 +1329,21 @@ export class WorkerDelegationController {
 			},
 			...(mode !== undefined ? { mode } : {}),
 		});
+	}
+
+	private workerTreeAttemptAdmissionSkipReason(request: WorkerDelegationRequest): string | undefined {
+		if (!request.parentAgentId) return undefined;
+		const parent = this.lifecycle.getAgent(request.parentAgentId);
+		if (!parent) return undefined;
+		const rootAttempt = this.lifecycle.getLatestAgentAttempt(parent.rootAgentId);
+		const maxAttempts = rootAttempt?.dispatch.executionContract?.worker.authority.budget.maxAttempts;
+		const existingAttempts = collectWorkerTreeBudgetSeeds(
+			this.lifecycle.getTaskRuntimeSnapshot(),
+			parent.rootAgentId,
+		).length;
+		return workerTreeCanAdmitAttempt(existingAttempts, maxAttempts)
+			? undefined
+			: "worker_tree_attempt_budget_exhausted";
 	}
 
 	private workerContextForkAdmissionSkipReason(
@@ -1395,6 +1413,8 @@ export class WorkerDelegationController {
 		if (goalDependencySkipReason) return { ok: false, skipReason: goalDependencySkipReason };
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request);
 		if (fleetSkipReason) return { ok: false, skipReason: fleetSkipReason };
+		const treeAttemptSkipReason = this.workerTreeAttemptAdmissionSkipReason(request);
+		if (treeAttemptSkipReason) return { ok: false, skipReason: treeAttemptSkipReason };
 		const admission = this.resolveWorkerAdmission(request, pinnedContract);
 		if (!admission.ok) return admission;
 		const contextForkSkipReason = this.workerContextForkAdmissionSkipReason(request, admission.executionContract);
@@ -2197,13 +2217,7 @@ export class WorkerDelegationController {
 					);
 				}
 			}
-			if (outcome.acceptance.outcome === "ask-user" && terminalRecords.length > 0) {
-				this.deps.queueWorkerHumanInput({
-					workerRequestId: startedRecord.laneId,
-					message: outcome.acceptance.message ?? "Worker output requires owner review.",
-					blockers: outcome.claim.blockers ?? [],
-				});
-			}
+			// parent_review_required is a parent-agent verdict via terminal handoff, not an owner UI interrupt.
 			for (const terminalRecord of terminalRecords) {
 				this.publishTerminalRecord(terminalRecord);
 			}

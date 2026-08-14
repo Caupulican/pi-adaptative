@@ -20,7 +20,7 @@ Edit directly or use `/settings` for common options.
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | model default | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, or `"ultra"` |
-| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
+| `hideThinkingBlock` | boolean | `true` | Hide thinking blocks in output. Press the thinking toggle (default Ctrl+T) to show them. |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
 #### thinkingBudgets
@@ -49,6 +49,20 @@ Edit directly or use `/settings` for common options.
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
 | `showHardwareCursor` | boolean | `false` | Show the terminal cursor while TUI positions it for IME support |
+
+### Context Files
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `projectContextFiles` | string | `"off"` | Opt-in for repository `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`. `"off"` (default) loads only `~/.pi/agent` files. `"on-demand"` lists this project's files for the agent to read. Save per directory, per project, or globally. |
+
+```json
+{
+  "projectContextFiles": "on-demand"
+}
+```
+
+Enable from `/settings` → **Project AGENTS.md**. Choose save scope (this directory, this project, or all projects) and Load (`global-only` or `on-demand`). `--no-context-files` (`-nc`) also skips project files for that session. Neither disables the global file. Restart or `/reload` after changing the setting.
 
 ### Telemetry and update checks
 
@@ -184,7 +198,7 @@ A `roles`-only configuration (no `default` in any scope) leaves every role not l
 }
 ```
 
-For a new logical agent, `forkTurns` chooses immutable sanitized birth context: `"none"`, `"all"`, or a positive user-turn count encoded as a string, such as `"3"`. When omitted, an exact same-provider/model top-level worker defaults to `"all"`, while a nested worker defaults to `"none"` so the parent's global orchestration request cannot replace the child's self-contained task. A worker that changes provider or model also defaults to `"none"`, and explicitly requesting inherited turns across that boundary is rejected. Explicit nested `"all"` or count inheritance remains available inside the exact provider/model boundary. The bounded snapshot keeps whole text-only user/complete-assistant turns and a valid compaction checkpoint when needed. It excludes system/developer/custom context, reasoning/commentary, tool protocol and results, mailbox controls, attachments, and incomplete assistant output. A reused `agentId` continues its existing transcript and cannot replace its birth context.
+For a new logical agent, `forkTurns` chooses immutable sanitized birth context: `"none"`, `"all"`, or a positive user-turn count encoded as a string, such as `"3"`. When omitted, the worker receives no parent transcript, so a self-contained task cannot inherit and mistake parent-level orchestration intent for child ownership. A worker that changes provider or model also defaults to `"none"`, and explicitly requesting inherited turns across that boundary is rejected. Explicit `"all"` or count inheritance remains available inside the exact provider/model boundary. The bounded snapshot keeps whole text-only user/complete-assistant turns and a valid compaction checkpoint when needed. It excludes system/developer/custom context, reasoning/commentary, tool protocol and results, mailbox controls, attachments, and incomplete assistant output. A reused `agentId` continues its existing transcript and cannot replace its birth context.
 
 ```json
 {

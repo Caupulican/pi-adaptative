@@ -184,7 +184,7 @@ export class SystemPromptBuilder {
 		if (autonomy.mode === "full") {
 			return `PI AUTONOMY full (standing): learners may use ${model} after long/corrective/complex sessions. Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Hard stop for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: learners may use ${model} after long sessions${reflection ? " or corrective/complex turns" : ""}, query memory, run bounded tools. Auto-apply only configured high-confidence memory; code/skill/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
+		return `PI AUTONOMY ${autonomy.mode}: learners may use ${model} after long sessions${reflection ? " or corrective/complex turns" : ""}, query memory, run bounded tools. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
 	}
 
 	private _buildUltraDelegationPrompt(delegateActive: boolean): string | undefined {

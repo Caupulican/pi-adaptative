@@ -110,6 +110,7 @@ describe("reflection skill promotion (R7)", () => {
 		expect(content).toContain("name: release-flow");
 		expect(content).toContain("How to cut a patch release");
 		expect(content).toContain("npm run release:patch");
+		expect(session.resourceLoader.getActiveSkills().map((skill) => skill.name)).toContain("release-flow");
 
 		session.dispose();
 	});

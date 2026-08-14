@@ -45,6 +45,7 @@ export function createSkillifyToolDefinition(
 		promptSnippet: "Validate and audit a draft skill",
 		promptGuidelines: [
 			"Use skillify to validate and audit draft skills before creating them.",
+			"When MEMORY.md holds a repeatable procedure, draft a skill from that procedure instead of leaving it as a fact.",
 			"Fix validation errors (name format, description length) and review audit findings before proceeding.",
 			"The tool returns a proposal only; persistent write and activation happen later.",
 		],

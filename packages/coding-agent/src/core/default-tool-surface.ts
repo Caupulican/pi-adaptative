@@ -14,6 +14,8 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 	return [
 		"read",
 		"skill",
+		"skillify",
+		"skill_audit",
 		STABLE_SHELL_TOOL_NAME,
 		"python",
 		"edit",
@@ -22,9 +24,11 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"task_steps",
 		"ask_question",
 		"secret_store",
+		"memory",
 		"delegate",
 		"tool_task",
 		"run_toolkit_script",
+		"improvement_loop",
 	];
 }
 

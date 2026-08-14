@@ -355,6 +355,38 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		},
 	},
 	{
+		name: "ownerAuthorizationRequired",
+		phase: "policy",
+		failureCode: "owner_authorization_required",
+		guidance:
+			"Owner authorization is missing from the current prompt. Do not retry start. Continue without a goal or wait for owner speech.",
+		matches(message: string): boolean {
+			return (
+				/goal start requires explicit owner authorization/i.test(message) ||
+				/tokenBudget requires an exact numeric token ceiling in the current owner prompt/i.test(message) ||
+				/tokenBudget must equal the owner-requested ceiling/i.test(message)
+			);
+		},
+	},
+	{
+		name: "exclusiveArguments",
+		phase: "validation",
+		failureCode: "invalid_arguments",
+		guidance: "Provide exactly one of the mutually exclusive fields. Do not send both, and do not omit both.",
+		matches(message: string): boolean {
+			return /Provide exactly one of /i.test(message);
+		},
+	},
+	{
+		name: "skillNotEligible",
+		phase: "policy",
+		failureCode: "skill_not_eligible",
+		guidance: "Skill name is not eligible. Search, then load an exact listed name. Do not retry the same name.",
+		matches(message: string): boolean {
+			return /No eligible skill named/i.test(message);
+		},
+	},
+	{
 		name: "cancelled",
 		phase: "cancelled",
 		failureCode: "cancelled",

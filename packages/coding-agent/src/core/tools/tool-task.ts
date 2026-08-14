@@ -60,8 +60,12 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 		name: "tool_task",
 		label: "tool_task",
 		description:
-			"List, wait for, or cancel this session's background tool calls. Continue other work; wait is event-driven, never poll.",
+			"List, wait for, or cancel this session's background tool calls. Continue other work; wait is event-driven, never poll. Cite a completed taskId as goal evidence or task_steps evidence.",
 		promptSnippet: "Event-driven background tool control; wait once, never poll.",
+		promptGuidelines: [
+			"Handoff is not completion. Need the result: wait once with taskId.",
+			"Cite the taskId on the matching task_steps step and as goal add_evidence kind=tool uri.",
+		],
 		parameters: schema,
 		async execute(_toolCallId, input: Input, signal) {
 			if (input.action === "list") {

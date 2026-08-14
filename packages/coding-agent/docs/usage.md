@@ -64,7 +64,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
-| `/settings` | Thinking level, theme, message delivery, transport |
+| `/settings` | Thinking level, theme, Project AGENTS.md, message delivery, transport |
 | `/secrets` | Connect Bitwarden; add, bind, activate, or remove project credential profiles |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
@@ -128,13 +128,12 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
 ## Context Files
 
-Pi discovers `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` context files at startup from:
+Pi discovers `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` context files from:
 
-- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions
-- parent directories, walking up from the current working directory
-- the current directory
+- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions (always injected)
+- parent directories and the current directory, only after that directory/project opts in
 
-Use context files for project conventions, commands, safety rules, and preferences. Their contents are injected into the startup system prompt so every session begins with the active project context. Pi scans these files for direct prompt-injection/exfiltration phrases before injection and replaces suspicious content with a blocked notice. Disable discovery with `--no-context-files` or `-nc`.
+Global files are scanned for prompt-injection/exfiltration phrases and injected into the system prompt. Repository files are off until you opt in (`/settings` → Project AGENTS.md). Opt-in lists their paths so the agent can read them; they are not injected at startup. Set Load to **global-only**, or pass `--no-context-files` (`-nc`), to keep only the global file.
 
 ### System Prompt Files
 
@@ -239,7 +238,7 @@ Built-in tools include `read`, `edit`, `write`, `grep`, `find`, `ls`, `ask_quest
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load a theme; repeatable |
 | `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` discovery |
+| `--no-context-files`, `-nc` | Skip project `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`; global `~/.pi/agent` files still load |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings. Example:
 

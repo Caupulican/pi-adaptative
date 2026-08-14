@@ -14,7 +14,6 @@ interface ForegroundTerminalHandoffControllerDeps {
 	foreground: ForegroundRecoveryController;
 	isDisposed(): boolean;
 	getGoalStateSnapshot(): Pick<GoalState, "goalId" | "status"> | undefined;
-	workerInputsWillWakeParent(workerRequestIds: readonly string[]): boolean;
 	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
 	startCustomMessageTurn(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
@@ -130,16 +129,13 @@ export class ForegroundTerminalHandoffController {
 			const wakeParent = records.some(
 				(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
 			);
-			const ownerQuestionWillWakeParent = this.deps.workerInputsWillWakeParent(
-				records.map((record) => record.laneId),
-			);
 			const message = {
 				customType: "background-worker-completion",
 				content: buildForegroundWorkerTerminalHandoffContent(included, { wakeParent }),
 				display: true,
 				details: { records: included },
 			};
-			if (wakeParent && !ownerQuestionWillWakeParent) {
+			if (wakeParent) {
 				const goalId = records.find((record) => record.goalId === goal?.goalId)?.goalId;
 				const started = await this.deps.startCustomMessageTurn(message, lease, goalId);
 				this.releaseAfterTurn(started.completion, lease, "worker terminal handoff turn");

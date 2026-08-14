@@ -50,10 +50,14 @@ describe("natural-language persistent goal admission", () => {
 			tokenBudget: 40_000,
 		});
 		expect(parseExplicitGoalStartAuthority("this is a goal")).toEqual({});
+		expect(parseExplicitGoalStartAuthority("this is a goal, use it")).toEqual({});
+		expect(parseExplicitGoalStartAuthority("this is a goal. implement it now")).toEqual({});
+		expect(parseExplicitGoalStartAuthority("make this a goal and implement it")).toEqual({});
 		expect(parseExplicitGoalStartAuthority("this is a goal with a 40k token budget")).toEqual({
 			tokenBudget: 40_000,
 		});
 		expect(parseExplicitGoalStartAuthority("Investigate and fix the bug")).toBeUndefined();
+		expect(parseExplicitGoalStartAuthority("this is a goal-oriented design")).toBeUndefined();
 		expect(parseExplicitChatGoal("Set a persistent goal: process 40k tokens of archived logs.")).toEqual({
 			objective: "process 40k tokens of archived logs.",
 		});

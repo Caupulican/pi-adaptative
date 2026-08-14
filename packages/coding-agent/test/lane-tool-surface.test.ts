@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
+import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 import {
 	type ExecutionGrant,
 	ORCHESTRATION_SCHEMA_VERSION,
@@ -300,5 +301,53 @@ describe("classified lane tool surface", () => {
 				},
 			}),
 		).toThrow("initial usage must contain finite non-negative values and safe-integer counts");
+	});
+
+	it("rethrows a token-budget denial so the worker loop terminals instead of retrying tools", async () => {
+		const grant: ExecutionGrant = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			grantId: "grant-exhausted",
+			objectiveId: "objective-exhausted",
+			taskId: "task-exhausted",
+			attemptId: "attempt-exhausted",
+			subjectId: "worker-exhausted",
+			role: "explorer",
+			capabilities: ["filesystem.read"],
+			allowedTools: ["read"],
+			resources: [],
+			readPaths: [cwd],
+			writePaths: [],
+			deniedPaths: [],
+			budget: { maxTokens: 5 },
+			policyVersion: "policy-1",
+			decisionTrace: [],
+			issuedAt: "2026-07-27T00:00:00.000Z",
+		};
+		const surface = createLaneToolSurface({
+			cwd,
+			grant,
+			toolManifests: [
+				{
+					toolName: "read",
+					moduleSpecifier: "./read.ts",
+					capabilities: ["filesystem.read"],
+					roles: ["explorer"],
+					enforcements: ["path-scope"],
+				},
+			],
+			initialUsage: {
+				toolCalls: 0,
+				inputTokens: 5,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalTokens: 5,
+				costUsd: 0,
+				activeWallClockMs: 0,
+			},
+		});
+		await expect(gate(surface, "read", { path: path.join(cwd, "AGENTS.md") })).rejects.toBeInstanceOf(
+			CapabilityGatewayDeniedError,
+		);
 	});
 });

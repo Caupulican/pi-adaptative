@@ -3,6 +3,7 @@ import {
 	collectWorkerTreeBudgetSeeds,
 	WorkerTreeBudgetCoordinator,
 	type WorkerTreeBudgetExceededError,
+	workerTreeCanAdmitAttempt,
 } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
 import type { AttemptUsageSnapshot } from "../src/core/orchestration/contracts.ts";
 
@@ -21,6 +22,13 @@ function usage(overrides: Partial<AttemptUsageSnapshot> = {}): AttemptUsageSnaps
 }
 
 describe("WorkerTreeBudgetCoordinator", () => {
+	it("refuses a new attempt when the tree already holds the maxAttempts ceiling", () => {
+		expect(workerTreeCanAdmitAttempt(0, undefined)).toBe(true);
+		expect(workerTreeCanAdmitAttempt(1, 1)).toBe(false);
+		expect(workerTreeCanAdmitAttempt(1, 2)).toBe(true);
+		expect(workerTreeCanAdmitAttempt(2, 2)).toBe(false);
+	});
+
 	it("reconstructs attempts that ended before their first durable usage checkpoint", () => {
 		expect(
 			collectWorkerTreeBudgetSeeds(

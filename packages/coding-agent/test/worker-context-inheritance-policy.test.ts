@@ -4,8 +4,8 @@ import { resolveWorkerContextInheritanceMode } from "../src/core/delegation/work
 const parent = { provider: "openai", model: "gpt-5.6" };
 
 describe("worker context inheritance egress policy", () => {
-	it("defaults omitted mode to all only for the exact same provider and model", () => {
-		expect(resolveWorkerContextInheritanceMode({ parent, worker: { ...parent } })).toEqual({ kind: "all" });
+	it("defaults omitted mode to none regardless of provider and model", () => {
+		expect(resolveWorkerContextInheritanceMode({ parent, worker: { ...parent } })).toEqual({ kind: "none" });
 		expect(
 			resolveWorkerContextInheritanceMode({
 				parent,

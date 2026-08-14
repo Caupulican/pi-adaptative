@@ -256,6 +256,57 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(summary).toContain("Goal 'g1'");
 		expect(summary).toContain("Legacy ledger: 1 requirements, 0 evidence; open: r1.");
 	});
+
+	it("refuses agent complete while linked open task_steps remain", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed" },
+				"T2",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T3"),
+		);
+		const blocked = applyGoalAction(state, { action: "complete" }, "T4", {
+			openTaskSteps: [{ id: "step-1", content: "Finish Do X", requirementIds: ["r1"] }],
+		});
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("open task_steps");
+		expect(blocked.error).toContain("step-1");
+	});
+
+	it("refuses agent complete while a cited tool_task is still running", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{
+					action: "add_evidence",
+					evidenceId: "e1",
+					kind: "tool",
+					summary: "handoff stub",
+					uri: "tool-task-1",
+					verified: true,
+				},
+				"T2",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T3"),
+		);
+		const blocked = applyGoalAction(state, { action: "complete" }, "T4", {
+			backgroundToolTasks: [{ taskId: "tool-task-1", toolCallId: "call-1", status: "running" }],
+		});
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("tool_task");
+		expect(blocked.error).toContain("tool-task-1");
+	});
 });
 
 function expectOk(result: ReturnType<typeof applyGoalAction>) {

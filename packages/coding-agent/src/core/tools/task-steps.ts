@@ -262,6 +262,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Use for complex/explicitly tracked work, not one-step work. Keep one in_progress step.",
 			"Batch transitions. Address first open step; record evidence/blocker. Never call only to narrate unchanged state.",
 			"intake preserves every supplied item; link steps to active goal requirementIds.",
+			"Attach completed tool_task taskIds as evidence. Goal complete refuses while linked steps stay open.",
 			"Before final: clear stale in_progress, discuss/defer remainder. Goal owns outcomes; delegate owns workers.",
 		],
 		parameters: taskStepsSchema,

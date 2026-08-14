@@ -47,6 +47,7 @@ import { detectOpenRouterCacheControlFormat } from "./openrouter-cache.ts";
 import {
 	applyProviderPayloadHook,
 	beginAssistantResponseStream,
+	commitSuccessfulAssistantParse,
 	createAssistantMessage,
 	createProviderRetryOptions,
 	createRetryFreeRequestOptions,
@@ -361,6 +362,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						output.errorMessage = finishReasonResult.errorMessage;
 					}
 					hasFinishReason = true;
+					if (output.stopReason !== "aborted" && output.stopReason !== "error") {
+						commitSuccessfulAssistantParse(output);
+					}
 				}
 
 				if (choice.delta) {
@@ -463,9 +467,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			for (const block of blocks) {
 				finishBlock(block);
-			}
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
 			}
 
 			if (output.stopReason === "aborted") {

@@ -41,6 +41,7 @@ describe("profile editor universe (discovery is profile-independent)", () => {
 
 	it("discovery getters keep the full universe while a restrictive profile narrows the loaded sets", async () => {
 		const settingsManager = SettingsManager.inMemory({
+			projectContextFiles: "on-demand",
 			resourceProfiles: { lean: { tools: { allow: ["read"] } } },
 			activeResourceProfiles: ["lean"],
 		});

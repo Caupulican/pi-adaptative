@@ -22,6 +22,7 @@ export interface AppKeybindings {
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
 	"app.tools.expand": true;
+	"app.history.load": true;
 	"app.tools.background": true;
 	"app.agents.open": true;
 	"app.agents.close": true;
@@ -111,6 +112,7 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
+	"app.history.load": { defaultKeys: "ctrl+shift+h", description: "Load deferred session history" },
 	"app.tools.background": { defaultKeys: "ctrl+b", description: "Move active tool calls to background" },
 	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle the live agents panel" },
 	"app.agents.close": { defaultKeys: "escape", description: "Close the live agents panel" },
@@ -304,6 +306,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	cycleModelBackward: "app.model.cycleBackward",
 	selectModel: "app.model.select",
 	expandTools: "app.tools.expand",
+	loadHistory: "app.history.load",
 	toggleThinking: "app.thinking.toggle",
 	toggleSessionNamedFilter: "app.session.toggleNamedFilter",
 	externalEditor: "app.editor.external",

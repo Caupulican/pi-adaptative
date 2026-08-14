@@ -120,6 +120,23 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain("<project_instructions");
 		});
 
+		test("lists on-demand project paths without injecting their contents", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [
+					{ path: "/home/user/.pi/agent/AGENTS.md", content: "GLOBAL RULES" },
+					{ path: "/repo/AGENTS.md" },
+				],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain('FILE "/home/user/.pi/agent/AGENTS.md"');
+			expect(prompt).toContain("GLOBAL RULES");
+			expect(prompt).toContain("PROJECT RULE PATHS — contents not preloaded.");
+			expect(prompt).toContain('"/repo/AGENTS.md"');
+			expect(prompt).not.toContain('FILE "/repo/AGENTS.md"');
+		});
+
 		test("keeps skill metadata out of the stable prompt and emits only the mandatory vault rule", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "skill"],

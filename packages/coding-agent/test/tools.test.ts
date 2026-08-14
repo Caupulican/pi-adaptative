@@ -583,7 +583,7 @@ describe("Coding Agent Tools", () => {
 				expect(error).toBeInstanceOf(Error);
 				const message = (error as Error).message;
 				expect(message).toContain(testCase.expected);
-				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
+				expect(message).toMatch(/\[Showing head\+tail preview of \d+ lines\. Full output: /);
 				expect(message).not.toContain("Full output: undefined");
 				const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
 				expect(fullOutputPath).toBeDefined();
@@ -727,10 +727,10 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(result.details?.truncation?.totalLines).toBe(4000);
-			expect(result.details?.truncation?.outputLines).toBe(2000);
-			expect(output).toContain("line-2001");
+			expect(output).toContain("line-0001");
 			expect(output).toContain("line-4000");
-			expect(output).toMatch(/\[Showing lines 2001-4000 of 4000\. Full output: /);
+			expect(output).toContain("middle omitted");
+			expect(output).toMatch(/\[Showing head\+tail preview of 4000 lines\. Full output: /);
 			expect(output).not.toContain("4001");
 		});
 
@@ -783,7 +783,7 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation?.truncated).toBe(true);
 			expect(result.details?.truncation?.truncatedBy).toBe("lines");
 			expect(fullOutputPath).toBeDefined();
-			expect(output).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
+			expect(output).toMatch(/\[Showing head\+tail preview of \d+ lines\. Full output: /);
 			expect(output).not.toContain("Full output: undefined");
 
 			// No poll/sleep: the temp file is written and closed before execute resolves, so it must be
@@ -891,7 +891,7 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation?.truncated).toBe(true);
 			expect(result.details?.fullOutputPath).toBeDefined();
 			expect(output).toContain("line-3000");
-			expect(output).toMatch(/\[Showing lines \d+-\d+ of 3000\. Full output: /);
+			expect(output).toMatch(/\[Showing head\+tail preview of 3000 lines\. Full output: /);
 		});
 
 		it("should not bypass custom operations for eligible simple commands", async () => {

@@ -85,7 +85,7 @@ Additional built-in read-only tools (`grep`, `find`, `ls`) are available through
 
 ## Give pi project instructions
 
-Pi discovers and injects context file contents at startup. Add an `AGENTS.md` file to tell it how to work in a project:
+Global instructions live in `~/.pi/agent/AGENTS.md` and are always injected. Add a repo `AGENTS.md` for project conventions; Pi lists that path and the agent reads it on demand:
 
 ```markdown
 # Project Instructions
@@ -97,10 +97,10 @@ Pi discovers and injects context file contents at startup. Add an `AGENTS.md` fi
 
 Pi discovers:
 
-- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions
-- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` from parent directories and the current directory
+- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions (always injected)
+- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` from parent directories and the current directory (paths only; read on demand)
 
-Restart pi, or run `/reload`, after changing context file contents or locations so the next prompt rebuild includes the latest instructions.
+Repo `AGENTS.md` is off until you opt in: `/settings` → **Project AGENTS.md**. Set Load to **global-only** to keep only `~/.pi/agent`. Restart pi, or run `/reload`, after changing the setting or global context file contents.
 
 ## Common things to try
 

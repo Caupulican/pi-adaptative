@@ -108,6 +108,43 @@ describe("agentLoop with AgentMessage", () => {
 		expect(events.at(-1)).toMatchObject({ type: "agent_end", messages });
 	});
 
+	it("settles when a fast provider stream ends without a terminal event", async () => {
+		const context: AgentContext = { systemPrompt: "You are helpful.", messages: [], tools: [] };
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			const partial = createAssistantMessage([{ type: "text", text: "partial" }]);
+			stream.push({ type: "start", partial });
+			stream.end();
+			return stream;
+		};
+		const loop = agentLoop(
+			[createUserMessage("hello")],
+			context,
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+			},
+			undefined,
+			streamFn,
+		);
+
+		const events: AgentEvent[] = [];
+		for await (const event of loop) events.push(event);
+
+		const result = await Promise.race([
+			loop.result(),
+			new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+		]);
+		expect(result).not.toBe("timeout");
+		const messages = result as AgentMessage[];
+		expect(messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "stream ended without a terminal result",
+		});
+		expect(events.at(-1)).toMatchObject({ type: "agent_end" });
+	});
+
 	it("should emit events with AgentMessage types", async () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",

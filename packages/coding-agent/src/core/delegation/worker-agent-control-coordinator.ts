@@ -196,7 +196,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return agents
 			.sort((left, right) => left.depth - right.depth || left.createdAt.localeCompare(right.createdAt))
 			.map((agent) =>
-				this.workerAgentView(agent, this.projectAgentActivity(agent, latestAttempts.get(agent.agentId))),
+				this.workerAgentView(
+					agent,
+					this.projectAgentActivity(agent, latestAttempts.get(agent.agentId)),
+					scope.callerAgentId,
+				),
 			);
 	}
 
@@ -1824,17 +1828,23 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return target;
 	}
 
-	private requireControllableAgent(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
-		const target = this.requireSessionPeer(agentId, scope);
-		if (!scope.callerAgentId) return target;
-		const caller = this.requireKnownAgent(scope.callerAgentId);
+	private agentIsInCallerSubtree(target: AgentBindingContract, callerAgentId: string): boolean {
+		const caller = this.options.getLifecycle().getAgent(callerAgentId);
+		if (!caller) return false;
 		let cursor: AgentBindingContract | undefined = target;
 		const visited = new Set<string>();
 		while (cursor && !visited.has(cursor.agentId)) {
-			if (cursor.agentId === caller.agentId) return target;
+			if (cursor.agentId === caller.agentId) return true;
 			visited.add(cursor.agentId);
 			cursor = cursor.parentAgentId ? this.options.getLifecycle().getAgent(cursor.parentAgentId) : undefined;
 		}
+		return false;
+	}
+
+	private requireControllableAgent(agentId: string, scope: WorkerAgentControlScope): AgentBindingContract {
+		const target = this.requireSessionPeer(agentId, scope);
+		if (!scope.callerAgentId) return target;
+		if (this.agentIsInCallerSubtree(target, scope.callerAgentId)) return target;
 		throw new Error(`Logical worker agent '${target.agentId}' is outside its control subtree.`);
 	}
 
@@ -1984,6 +1994,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private workerAgentView(
 		agent: AgentBindingContract,
 		activity: WorkerAgentActivity = this.activityForAgent(agent),
+		callerAgentId?: string,
 	): WorkerAgentView {
 		return {
 			agentId: agent.agentId,
@@ -1993,6 +2004,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			role: agent.role,
 			status: agent.status,
 			activity,
+			controllable: !callerAgentId || this.agentIsInCallerSubtree(agent, callerAgentId),
 			createdAt: agent.createdAt,
 			updatedAt: agent.updatedAt,
 		};

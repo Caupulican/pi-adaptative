@@ -516,6 +516,13 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
+	/**
+	 * How to treat repository AGENTS.md/CLAUDE.md/GEMINI.md files.
+	 * `"off"` (default): global `~/.pi/agent` files only; do not walk project files.
+	 * `"on-demand"`: opt in for this settings scope — list project paths, do not inject contents.
+	 * Persist per directory (directory overlay), per project (`.pi/settings.json`), or globally.
+	 */
+	projectContextFiles?: "on-demand" | "off";
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
@@ -1436,12 +1443,17 @@ export class SettingsManager {
 		error: Error | null;
 		info: DirectoryResourceProfileInfo | null;
 	} {
-		if (!(storage instanceof FileSettingsStorage)) {
-			return { settings: {}, error: null, info: null };
-		}
-		const info = storage.getDirectoryResourceProfileInfo();
+		const info = storage instanceof FileSettingsStorage ? storage.getDirectoryResourceProfileInfo() : null;
 		try {
-			const content = storage.readDirectoryResourceProfile();
+			let content: string | undefined;
+			if (storage instanceof FileSettingsStorage) {
+				content = storage.readDirectoryResourceProfile();
+			} else {
+				storage.withLock("directoryProfile", (current) => {
+					content = current;
+					return undefined;
+				});
+			}
 			if (!content) return { settings: {}, error: null, info };
 			const settings = JSON.parse(content);
 			return { settings: SettingsManager.migrateSettings(settings), error: null, info };
@@ -2018,10 +2030,6 @@ export class SettingsManager {
 		update(next);
 		this.directoryProfileSettings = next;
 		this.recomputeSettings();
-
-		if (!this.directoryProfileInfo) {
-			return;
-		}
 
 		this.enqueueWrite("directoryProfile", () => {
 			this.storage.withLock("directoryProfile", (current) => {
@@ -3044,7 +3052,7 @@ export class SettingsManager {
 	}
 
 	getHideThinkingBlock(): boolean {
-		return this.settings.hideThinkingBlock ?? false;
+		return this.settings.hideThinkingBlock ?? true;
 	}
 
 	setHideThinkingBlock(hide: boolean): void {
@@ -3065,6 +3073,37 @@ export class SettingsManager {
 
 	getQuietStartup(): boolean {
 		return this.settings.quietStartup ?? false;
+	}
+
+	/** Repository context files are off unless a settings layer opts in. Global agent-dir files always load. */
+	getProjectContextFiles(): "on-demand" | "off" {
+		return this.settings.projectContextFiles === "on-demand" ? "on-demand" : "off";
+	}
+
+	/** Which settings layer last set `projectContextFiles`, if any. */
+	getProjectContextFilesScope(): SettingsScope | undefined {
+		if (this.directoryProfileSettings.projectContextFiles !== undefined) return "directoryProfile";
+		if (this.projectSettings.projectContextFiles !== undefined) return "project";
+		if (this.globalSettings.projectContextFiles !== undefined) return "global";
+		return undefined;
+	}
+
+	setProjectContextFiles(mode: "on-demand" | "off", scope: SettingsScope = "directoryProfile"): void {
+		if (scope === "directoryProfile") {
+			this.persistDirectoryProfiles((settings) => {
+				settings.projectContextFiles = mode;
+			});
+			return;
+		}
+		if (scope === "project") {
+			this.updateProjectSettings("projectContextFiles", (settings) => {
+				settings.projectContextFiles = mode;
+			});
+			return;
+		}
+		this.globalSettings.projectContextFiles = mode;
+		this.markModified("projectContextFiles");
+		this.save();
 	}
 
 	setQuietStartup(quiet: boolean): void {

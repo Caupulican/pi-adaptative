@@ -19,6 +19,8 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual([
 				"read",
 				"skill",
+				"skillify",
+				"skill_audit",
 				"bash",
 				"python",
 				"edit",
@@ -30,6 +32,7 @@ describe("model capability auto-detection", () => {
 				"delegate",
 				"tool_task",
 				"run_toolkit_script",
+				"improvement_loop",
 				"artifact_retrieve",
 			]);
 		} finally {

@@ -234,6 +234,173 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 	return completedTruncationResult(measurement, outputLinesArr, truncatedBy, lastLinePartial);
 }
 
+/** Marker line used by {@link truncateMiddle} when the omitted span is known. */
+export function formatMiddleOmissionMarker(omittedLines: number, omittedBytes: number): string {
+	return `...[middle omitted: ${omittedLines} lines, ${formatSize(omittedBytes)}]`;
+}
+
+interface HeadTailBudgets {
+	headLineBudget: number;
+	tailLineBudget: number;
+	headByteBudget: number;
+	tailByteBudget: number;
+}
+
+function allocateHeadTailBudgets(
+	maxLines: number,
+	maxBytes: number,
+	totalLines: number,
+	totalBytes: number,
+): HeadTailBudgets {
+	const probeMarker = formatMiddleOmissionMarker(totalLines, totalBytes);
+	const markerBudget = Buffer.byteLength(probeMarker, "utf-8") + 1;
+	const usableBytes = Math.max(1, maxBytes - markerBudget);
+	const headLineBudget = Math.max(1, Math.floor((maxLines - 1) * 0.75));
+	const tailLineBudget = Math.max(1, maxLines - 1 - headLineBudget);
+	return {
+		headLineBudget,
+		tailLineBudget,
+		headByteBudget: Math.max(1, Math.floor(usableBytes * 0.75)),
+		tailByteBudget: Math.max(1, usableBytes - Math.max(1, Math.floor(usableBytes * 0.75))),
+	};
+}
+
+function takePrefixLines(lines: readonly string[], lineBudget: number, byteBudget: number): string[] {
+	const output: string[] = [];
+	let bytes = 0;
+	for (let index = 0; index < lines.length && output.length < lineBudget; index++) {
+		const lineBytes = Buffer.byteLength(lines[index], "utf-8") + (output.length > 0 ? 1 : 0);
+		if (bytes + lineBytes > byteBudget) break;
+		output.push(lines[index]);
+		bytes += lineBytes;
+	}
+	return output;
+}
+
+function takeSuffixLines(lines: readonly string[], lineBudget: number, byteBudget: number, minIndex: number): string[] {
+	const output: string[] = [];
+	let bytes = 0;
+	for (let index = lines.length - 1; index >= minIndex && output.length < lineBudget; index--) {
+		const lineBytes = Buffer.byteLength(lines[index], "utf-8") + (output.length > 0 ? 1 : 0);
+		if (bytes + lineBytes > byteBudget) break;
+		output.unshift(lines[index]);
+		bytes += lineBytes;
+	}
+	return output;
+}
+
+function firstLineExceedsResult(measurement: TruncationMeasurement): TruncationResult {
+	return buildTruncationResult(measurement, {
+		content: "",
+		truncated: true,
+		truncatedBy: "bytes",
+		outputLines: 0,
+		firstLineExceedsLimit: true,
+	});
+}
+
+function composeHeadTailResult(
+	measurement: TruncationMeasurement,
+	head: string[],
+	tail: string[],
+	omittedLines: number,
+	omittedBytes: number,
+): TruncationResult | undefined {
+	if (omittedLines <= 0 || head.length === 0 || tail.length === 0) return undefined;
+	const truncatedBy = measurement.totalBytes > measurement.maxBytes ? "bytes" : "lines";
+	return completedTruncationResult(
+		measurement,
+		[...head, formatMiddleOmissionMarker(omittedLines, omittedBytes), ...tail],
+		truncatedBy,
+	);
+}
+
+/**
+ * Truncate the middle (keep a head and a tail). Suitable for packed tool output where the
+ * start (invocation, first hits) and the end (errors, last hits, summaries) both matter.
+ *
+ * Never returns partial lines. If the first line exceeds the full byte limit, matches
+ * {@link truncateHead}: empty content with firstLineExceedsLimit.
+ */
+export function truncateMiddle(content: string, options: TruncationOptions = {}): TruncationResult {
+	const measurement = measureTruncation(content, options);
+	const unchanged = unchangedTruncationResult(content, measurement);
+	if (unchanged) return unchanged;
+
+	const { lines, maxBytes, maxLines } = measurement;
+	if (lines.length > 0 && Buffer.byteLength(lines[0], "utf-8") > maxBytes) {
+		return firstLineExceedsResult(measurement);
+	}
+
+	const budgets = allocateHeadTailBudgets(maxLines, maxBytes, measurement.totalLines, measurement.totalBytes);
+	const head = takePrefixLines(lines, budgets.headLineBudget, budgets.headByteBudget);
+	const tail = takeSuffixLines(lines, budgets.tailLineBudget, budgets.tailByteBudget, head.length);
+	const omittedStart = head.length;
+	const omittedEnd = lines.length - tail.length;
+	if (omittedStart >= omittedEnd) {
+		return truncateHead(content, options);
+	}
+
+	const omittedLines = omittedEnd - omittedStart;
+	const omittedBytes = Buffer.byteLength(lines.slice(omittedStart, omittedEnd).join("\n"), "utf-8");
+	return composeHeadTailResult(measurement, head, tail, omittedLines, omittedBytes) ?? truncateHead(content, options);
+}
+
+/**
+ * Head+tail preview when only the first and last retained windows are known (streaming
+ * accumulators that have already dropped the middle). If the two windows cover the whole
+ * payload, reconstructs and delegates to {@link truncateMiddle}.
+ */
+export function truncateKnownHeadTail(
+	headLines: readonly string[],
+	tailLines: readonly string[],
+	totals: { totalLines: number; totalBytes: number },
+	options: TruncationOptions = {},
+): TruncationResult {
+	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const measurement: TruncationMeasurement = {
+		lines: [],
+		maxLines,
+		maxBytes,
+		totalLines: totals.totalLines,
+		totalBytes: totals.totalBytes,
+	};
+
+	if (totals.totalLines <= maxLines && totals.totalBytes <= maxBytes) {
+		const content = (headLines.length >= totals.totalLines ? headLines : tailLines).join("\n");
+		return buildTruncationResult(measurement, {
+			content,
+			truncated: false,
+			truncatedBy: null,
+			outputLines: totals.totalLines,
+		});
+	}
+
+	if (headLines.length > 0 && Buffer.byteLength(headLines[0], "utf-8") > maxBytes) {
+		return firstLineExceedsResult(measurement);
+	}
+
+	if (headLines.length + tailLines.length >= totals.totalLines && totals.totalLines > 0) {
+		const overlap = Math.max(0, headLines.length + tailLines.length - totals.totalLines);
+		const unique = [...headLines, ...tailLines.slice(overlap)];
+		return truncateMiddle(unique.join("\n"), options);
+	}
+
+	const budgets = allocateHeadTailBudgets(maxLines, maxBytes, totals.totalLines, totals.totalBytes);
+	const head = takePrefixLines(headLines, budgets.headLineBudget, budgets.headByteBudget);
+	const tail = takeSuffixLines(tailLines, budgets.tailLineBudget, budgets.tailByteBudget, 0);
+	const omittedLines = Math.max(0, totals.totalLines - head.length - tail.length);
+	const omittedBytes = Math.max(
+		0,
+		totals.totalBytes - Buffer.byteLength(head.join("\n"), "utf-8") - Buffer.byteLength(tail.join("\n"), "utf-8"),
+	);
+	return (
+		composeHeadTailResult(measurement, head, tail, omittedLines, omittedBytes) ??
+		truncateHead([...headLines, ...tailLines].join("\n"), options)
+	);
+}
+
 /**
  * Truncate a string to fit within a byte limit (from the end).
  * Handles multi-byte UTF-8 characters correctly.

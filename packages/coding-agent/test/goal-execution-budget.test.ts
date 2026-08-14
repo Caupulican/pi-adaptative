@@ -33,9 +33,13 @@ describe("goal-owned execution budget", () => {
 			(message) => message.role === "toolResult" && message.toolName === "goal",
 		);
 		if (!result || result.role !== "toolResult") throw new Error("Expected goal tool result");
-		expect(result.content).toEqual([
-			expect.objectContaining({ text: expect.stringContaining("explicit owner authorization") }),
-		]);
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({
+			piToolFailureMemory: {
+				failureCode: "owner_authorization_required",
+				tool: "goal",
+			},
+		});
 	});
 
 	it("allows standalone explicit goal authority but only with the exact requested budget", async () => {
@@ -94,6 +98,7 @@ describe("goal-owned execution budget", () => {
 			getModelProvider: () => "faux",
 			getLaneRecords: () => [],
 			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
 			synchronizeGoalState: () => undefined,
 			scheduleGoalAutoContinueFromIdle: () => undefined,
 			prompt: async () => undefined,
@@ -147,6 +152,7 @@ describe("goal-owned execution budget", () => {
 			getModelProvider: () => "faux",
 			getLaneRecords: () => [],
 			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
 			synchronizeGoalState: () => undefined,
 			scheduleGoalAutoContinueFromIdle: () => undefined,
 			prompt: async () => undefined,
@@ -181,6 +187,7 @@ describe("goal-owned execution budget", () => {
 			getModelProvider: () => "faux",
 			getLaneRecords: () => [],
 			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
 			synchronizeGoalState: () => undefined,
 			scheduleGoalAutoContinueFromIdle: () => undefined,
 			prompt: async () => undefined,
@@ -212,6 +219,7 @@ describe("goal-owned execution budget", () => {
 			getModelProvider: () => "faux",
 			getLaneRecords: () => [],
 			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
 			synchronizeGoalState: () => undefined,
 			scheduleGoalAutoContinueFromIdle: () => undefined,
 			prompt: async () => undefined,
@@ -270,6 +278,7 @@ describe("goal-owned execution budget", () => {
 			getModelProvider: () => "faux",
 			getLaneRecords: () => [],
 			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
 			synchronizeGoalState: () => undefined,
 			scheduleGoalAutoContinueFromIdle: () => undefined,
 			prompt: async () => undefined,
@@ -351,6 +360,7 @@ describe("goal-owned execution budget", () => {
 				getModelProvider: () => "faux",
 				getLaneRecords: () => [],
 				getTaskRuntimeSnapshot: () => undefined,
+				getBackgroundToolTasks: () => [],
 				synchronizeGoalState: () => undefined,
 				scheduleGoalAutoContinueFromIdle: () => undefined,
 				prompt: async () => undefined,
@@ -385,6 +395,7 @@ describe("goal-owned execution budget", () => {
 			getModelProvider: () => "faux",
 			getLaneRecords: () => [],
 			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
 			synchronizeGoalState: () => undefined,
 			scheduleGoalAutoContinueFromIdle: () => undefined,
 			prompt: async () => undefined,

@@ -80,4 +80,27 @@ describe("reflection turn analysis", () => {
 		expect(analysis.recentTurnText.length).toBeLessThanOrEqual(12_000);
 		expect(analyzeReflectionTurn(messages, 12).digest).toBe(analysis.digest);
 	});
+
+	it("treats a memory tool write as a durable trigger and includes the bounded write text", () => {
+		const procedure = "When adding a worker: set task_steps, wait once via tool_task, then satisfy the goal.";
+		const analysis = analyzeReflectionTurn(
+			[
+				user("Store this workflow."),
+				assistant("Recording the procedure.", "memory"),
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "memory",
+					content: [{ type: "text", text: procedure }],
+					isError: false,
+					timestamp: 3,
+				},
+			],
+			12,
+		);
+
+		expect(analysis.trigger).toBe("durable");
+		expect(analysis.recentTurnText).toContain(procedure);
+		expect(analysis.recentTurnText).toContain("tools: memory");
+	});
 });

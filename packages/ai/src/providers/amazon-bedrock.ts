@@ -51,6 +51,7 @@ import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { getRecoverableBedrockSsoError } from "./bedrock-sso.ts";
 import {
 	applyProviderPayloadHook,
+	commitSuccessfulAssistantParse,
 	createAssistantMessage,
 	mapStandardThinkingEffort,
 	resolveCacheRetention,
@@ -240,6 +241,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 							const mapped = mapStopReason(item.messageStop.stopReason);
 							output.stopReason = mapped.stopReason;
 							if (mapped.errorMessage) output.errorMessage = mapped.errorMessage;
+							if (output.stopReason !== "error" && output.stopReason !== "aborted") {
+								commitSuccessfulAssistantParse(output);
+							}
 						} else if (item.metadata) {
 							handleMetadata(item.metadata, model, output);
 						} else if (item.internalServerException) {
@@ -253,10 +257,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 						} else if (item.serviceUnavailableException) {
 							throw item.serviceUnavailableException;
 						}
-					}
-
-					if (options.signal?.aborted) {
-						throw new Error("Request was aborted");
 					}
 
 					if (output.stopReason === "error" || output.stopReason === "aborted") {

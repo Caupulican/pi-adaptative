@@ -130,6 +130,24 @@ describe("task step state", () => {
 		expect(context).toContain("continue in_progress step");
 	});
 
+	it("surfaces goal requirement and tool_task evidence links on the injected checklist", () => {
+		const state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[
+				{
+					content: "Wait for compile",
+					status: "in_progress",
+					requirementIds: ["req-1"],
+					evidence: ["tool-task-1"],
+				},
+			],
+			"T1",
+		);
+		const context = formatTaskStepsContext(state);
+		expect(context).toContain("requirements=req-1");
+		expect(context).toContain("evidence=tool-task-1");
+	});
+
 	it("does not tell the model to continue an in_progress step after recovery exhaustion", () => {
 		const state = setTaskSteps(
 			createTaskStepsState("T0"),

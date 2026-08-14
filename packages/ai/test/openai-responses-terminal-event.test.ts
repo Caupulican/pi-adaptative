@@ -1,6 +1,7 @@
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
+import { completeAssistantStream } from "../src/providers/provider-runtime.ts";
 import type { AssistantMessage, AssistantMessageEvent, Model } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 
@@ -249,6 +250,127 @@ async function* createCapturedReasoningSummaryDelimiterEvents(): AsyncIterable<R
 	} as unknown as ResponseStreamEvent;
 }
 
+async function* createCompletedOnlyMessageEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_completed_only",
+			status: "completed",
+			usage: {
+				input_tokens: 8,
+				output_tokens: 4,
+				total_tokens: 12,
+				input_tokens_details: { cached_tokens: 0 },
+			},
+			output: [
+				{
+					id: "msg_fast",
+					type: "message",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "hello from a fast response", annotations: [] }],
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
+async function* createCompletedThenIteratorAbortEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield* createCompletedOnlyMessageEvents();
+	throw new Error("Request was aborted");
+}
+
+async function* createCompletedOnlyFunctionCallEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_completed_only_tool",
+			status: "completed",
+			output: [
+				{
+					type: "function_call",
+					id: "fc_fast",
+					call_id: "call_fast",
+					name: "read",
+					arguments: '{"path":"README.md"}',
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
+async function* createDoneWithoutAddedEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "msg_done",
+			type: "message",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "output_text", text: "done without added", annotations: [] }],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			type: "function_call",
+			id: "fc_done",
+			call_id: "call_done",
+			name: "bash",
+			arguments: '{"command":"pwd"}',
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: { id: "resp_done_without_added", status: "completed" },
+	} as unknown as ResponseStreamEvent;
+}
+
+async function* createOutputTextDeltasWithTerminalOutputEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: { id: "msg_text", type: "message", role: "assistant", status: "in_progress", content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_text.delta",
+		item_id: "msg_text",
+		content_index: 0,
+		delta: "Hello",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_text.delta",
+		item_id: "msg_text",
+		content_index: 0,
+		delta: " world",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "msg_text",
+			type: "message",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "output_text", text: "Hello world", annotations: [] }],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_text",
+			status: "completed",
+			output: [
+				{
+					id: "msg_text",
+					type: "message",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Hello world", annotations: [] }],
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
 async function* createTerminalReasoningSignatureEvents(): AsyncIterable<ResponseStreamEvent> {
 	yield {
 		type: "response.output_item.added",
@@ -425,5 +547,102 @@ describe("OpenAI Responses terminal events", () => {
 			id: "rs_terminal",
 			encrypted_content: "encrypted-terminal-reasoning",
 		});
+	});
+
+	it("materializes assistant text from a completed-only response.output payload", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(createCompletedOnlyMessageEvents(), output, stream, model);
+
+		expect(output.content).toHaveLength(1);
+		expect(output.content[0]).toMatchObject({ type: "text", text: "hello from a fast response" });
+		expect(output.stopReason).toBe("stop");
+		expect(output.responseId).toBe("resp_completed_only");
+	});
+
+	it("materializes a tool call from a completed-only response.output payload", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createCompletedOnlyFunctionCallEvents(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		expect(output.content).toHaveLength(1);
+		expect(output.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call_fast|fc_fast",
+			name: "read",
+			arguments: { path: "README.md" },
+		});
+		expect(output.stopReason).toBe("toolUse");
+	});
+
+	it("applies output_item.done message and function_call items when added/delta events were skipped", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(createDoneWithoutAddedEvents(), output, stream, model);
+
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "text", text: "done without added" }),
+			expect.objectContaining({
+				type: "toolCall",
+				id: "call_done|fc_done",
+				name: "bash",
+				arguments: { command: "pwd" },
+			}),
+		]);
+		expect(output.content[1]).not.toHaveProperty("partialJson");
+		expect(output.stopReason).toBe("toolUse");
+	});
+
+	it("keeps a completed-only payload when abort races the terminal push", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+		const controller = new AbortController();
+
+		await processResponsesStream(createCompletedOnlyMessageEvents(), output, stream, model);
+		controller.abort();
+		completeAssistantStream(stream, output, controller.signal);
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content[0]).toMatchObject({ type: "text", text: "hello from a fast response" });
+	});
+
+	it("keeps a completed-only payload when the iterator throws abort after the terminal event", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(createCompletedThenIteratorAbortEvents(), output, stream, model);
+		completeAssistantStream(stream, output);
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content[0]).toMatchObject({ type: "text", text: "hello from a fast response" });
+	});
+
+	it("does not duplicate blocks when incremental events already materialized response.output", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createOutputTextDeltasWithTerminalOutputEvents(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		expect(output.content).toHaveLength(1);
+		expect(output.content[0]).toMatchObject({ type: "text", text: "Hello world" });
 	});
 });

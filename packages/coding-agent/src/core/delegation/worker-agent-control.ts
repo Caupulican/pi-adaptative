@@ -228,6 +228,8 @@ export interface WorkerAgentView {
 	role: WorkerRole;
 	status: AgentBindingStatus;
 	activity: WorkerAgentActivity;
+	/** True when this caller may start/transcript/cancel the agent. Session-root lists are all true. */
+	controllable: boolean;
 	createdAt: string;
 	updatedAt: string;
 }

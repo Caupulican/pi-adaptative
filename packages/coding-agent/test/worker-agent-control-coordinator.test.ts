@@ -1178,6 +1178,7 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(Object.keys(views.find((agent) => agent.agentId === "foreign") ?? {}).sort()).toEqual([
 			"activity",
 			"agentId",
+			"controllable",
 			"createdAt",
 			"depth",
 			"role",
@@ -1185,6 +1186,9 @@ describe("WorkerAgentControlCoordinator", () => {
 			"status",
 			"updatedAt",
 		]);
+		expect(views.find((agent) => agent.agentId === "child")?.controllable).toBe(true);
+		expect(views.find((agent) => agent.agentId === "sibling")?.controllable).toBe(false);
+		expect(views.find((agent) => agent.agentId === "foreign")?.controllable).toBe(false);
 		expect(coordinator.readWorkerAgentTranscript("child", { callerAgentId: "child" })).toMatchObject({
 			agentId: "child",
 		});

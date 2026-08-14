@@ -348,7 +348,7 @@ const { session } = await createAgentSession({
   - `.pi/skills/`
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
 - Project prompts (`.pi/prompts/`)
-- Context files (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` walking up from cwd)
+- Context files (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` walking up from cwd after opt-in; path-only unless you override)
 - Session directory naming
 
 `agentDir` is used by `DefaultResourceLoader` for:
@@ -625,6 +625,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 > See [examples/sdk/04-skills.ts](../examples/sdk/04-skills.ts)
 
 ### Context Files
+
+Global `~/.pi/agent` files are always loaded. Repository `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` stay off until `projectContextFiles` is `"on-demand"` (per directory overlay, project `.pi/settings.json`, or global settings).
 
 ```typescript
 import { createAgentSession, DefaultResourceLoader } from "@caupulican/pi-adaptative";
