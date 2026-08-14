@@ -117,6 +117,85 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("isUsingSubscription", () => {
+		test("is true for an OAuth-authenticated xAI model (a real subscription)", () => {
+			authStorage.set("xai", {
+				type: "oauth",
+				access: "access-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 60_000,
+			});
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const xaiModel = getModelsForProvider(registry, "xai")[0];
+			expect(xaiModel).toBeDefined();
+
+			expect(registry.isUsingOAuth(xaiModel!)).toBe(true);
+			expect(registry.isUsingSubscription(xaiModel!)).toBe(true);
+		});
+
+		test("is false for an OAuth-authenticated OpenRouter model (a permanent API-key exchange, not a subscription)", () => {
+			authStorage.set("openrouter", {
+				type: "oauth",
+				access: "sk-or-test",
+				refresh: "",
+				expires: Number.MAX_SAFE_INTEGER,
+			});
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const openRouterModel = getModelsForProvider(registry, "openrouter")[0];
+			expect(openRouterModel).toBeDefined();
+
+			// OpenRouter's OAuth exchange mints a permanent API key; it must stay OAuth-authenticated
+			// (isUsingOAuth) without being labeled a subscription (isUsingSubscription).
+			expect(registry.isUsingOAuth(openRouterModel!)).toBe(true);
+			expect(registry.isUsingSubscription(openRouterModel!)).toBe(false);
+		});
+
+		test("is false for API-key auth even on a subscription-capable provider", () => {
+			authStorage.set("xai", { type: "api_key", key: "xai-api-key" });
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const xaiModel = getModelsForProvider(registry, "xai")[0];
+			expect(xaiModel).toBeDefined();
+
+			expect(registry.isUsingSubscription(xaiModel!)).toBe(false);
+		});
+
+		test("threads isSubscription through extension OAuth registration", () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			registry.registerProvider("ext-subscription-provider", {
+				baseUrl: "https://provider.test/v1",
+				api: "openai-completions",
+				oauth: {
+					name: "Extension Subscription Provider",
+					isSubscription: true,
+					login: async () => ({ access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+					refreshToken: async (credentials) => credentials,
+					getApiKey: (credentials) => credentials.access,
+				},
+				models: [
+					{
+						id: "demo-model",
+						name: "Demo Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 4096,
+					},
+				],
+			});
+			authStorage.set("ext-subscription-provider", {
+				type: "oauth",
+				access: "access",
+				refresh: "refresh",
+				expires: Date.now() + 60_000,
+			});
+
+			const model = getModelsForProvider(registry, "ext-subscription-provider")[0];
+			expect(model).toBeDefined();
+			expect(registry.isUsingSubscription(model!)).toBe(true);
+		});
+	});
+
 	describe("baseUrl override (no custom models)", () => {
 		test("overriding baseUrl keeps all built-in models", () => {
 			writeRawModelsJson({

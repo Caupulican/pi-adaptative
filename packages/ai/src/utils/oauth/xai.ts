@@ -22,6 +22,7 @@ type XaiDeviceCode = {
 	deviceCode: string;
 	userCode: string;
 	verificationUri: string;
+	verificationUriComplete?: string;
 	intervalSeconds?: number;
 	expiresInSeconds: number;
 };
@@ -93,10 +94,15 @@ function requestFailure(action: string, response: OAuthHttpResponse): Error {
 
 function parseDeviceCode(body: JsonObject): XaiDeviceCode {
 	const interval = body.interval;
+	const verificationUriComplete = body.verification_uri_complete;
 	return {
 		deviceCode: requiredString(body, "device_code"),
 		userCode: requiredString(body, "user_code"),
 		verificationUri: validateVerificationUri(requiredString(body, "verification_uri")),
+		verificationUriComplete:
+			typeof verificationUriComplete === "string" && verificationUriComplete.length > 0
+				? validateVerificationUri(verificationUriComplete)
+				: undefined,
 		intervalSeconds: typeof interval === "number" && Number.isFinite(interval) && interval > 0 ? interval : undefined,
 		expiresInSeconds: positiveNumber(body, "expires_in"),
 	};
@@ -131,6 +137,7 @@ async function pollForTokens(device: XaiDeviceCode, signal?: AbortSignal): Promi
 	return pollOAuthDeviceCodeFlow<OAuthCredentials>({
 		intervalSeconds: device.intervalSeconds,
 		expiresInSeconds: device.expiresInSeconds,
+		waitBeforeFirstPoll: true,
 		signal,
 		poll: async () => {
 			const response = await postForm(
@@ -146,7 +153,14 @@ async function pollForTokens(device: XaiDeviceCode, signal?: AbortSignal): Promi
 
 			const error = response.body.error;
 			if (error === "authorization_pending") return { status: "pending" };
-			if (error === "slow_down") return { status: "slow_down" };
+			if (error === "slow_down") {
+				const interval = response.body.interval;
+				return {
+					status: "slow_down",
+					intervalSeconds:
+						typeof interval === "number" && Number.isFinite(interval) && interval > 0 ? interval : undefined,
+				};
+			}
 			if (error === "access_denied" || error === "authorization_denied") {
 				return { status: "failed", message: "xAI device authorization was denied" };
 			}
@@ -160,7 +174,7 @@ export async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 	const device = await requestDeviceCode(callbacks.signal);
 	callbacks.onDeviceCode({
 		userCode: device.userCode,
-		verificationUri: device.verificationUri,
+		verificationUri: device.verificationUriComplete ?? device.verificationUri,
 		intervalSeconds: device.intervalSeconds,
 		expiresInSeconds: device.expiresInSeconds,
 	});
@@ -180,6 +194,8 @@ export async function refreshXaiToken(refreshToken: string): Promise<OAuthCreden
 export const xaiOAuthProvider: OAuthProviderInterface = {
 	id: "xai",
 	name: "xAI (Grok/X subscription)",
+	isSubscription: true,
+	loginLabel: "Sign in with SuperGrok or X Premium",
 	login: loginXai,
 	refreshToken: (credentials) => refreshXaiToken(credentials.refresh),
 	getApiKey: (credentials) => credentials.access,

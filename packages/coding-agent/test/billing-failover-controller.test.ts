@@ -42,7 +42,7 @@ function registry(subscription: boolean, includeFallback = true): ModelRegistry 
 					? fallback
 					: undefined,
 		hasConfiguredAuth: () => true,
-		isUsingOAuth: () => subscription,
+		isUsingSubscription: () => subscription,
 	} as unknown as ModelRegistry;
 }
 
@@ -75,6 +75,38 @@ describe("BillingFailoverController", () => {
 		});
 
 		await expect(controller.handleAssistantError(message("quota exceeded"))).resolves.toBe(true);
+		expect(agent.state.model.id).toBe("codex-spark");
+		expect(warnings[0]).toContain("switch models (/model), wait for the limit window, or re-send to retry");
+	});
+
+	it("does not hop OAuth-authenticated credentials that are not a real subscription (e.g. OpenRouter)", async () => {
+		const warnings: string[] = [];
+		const agent = { state: { model: failed } } as unknown as Agent;
+		// Simulates OpenRouter's shape: its OAuth flow mints a permanent API key rather than a
+		// metered/subscription credential, so isUsingOAuth is true while isUsingSubscription is
+		// false. billingClass must be driven by isUsingSubscription, not the bare OAuth flag.
+		const modelRegistry = {
+			find: (provider: string, id: string) =>
+				provider === "openai-codex" && id === "codex-spark"
+					? failed
+					: provider === "openai-codex" && id === "gpt-5.6-sol"
+						? fallback
+						: undefined,
+			hasConfiguredAuth: () => true,
+			isUsingOAuth: () => true,
+			isUsingSubscription: () => false,
+		} as unknown as ModelRegistry;
+		const controller = new BillingFailoverController({
+			agent,
+			modelRegistry,
+			exhausted: new ExhaustedProviderRegistry(),
+			emit: (event) => warnings.push(event.message),
+		});
+
+		await expect(
+			controller.handleAssistantError(message("You have hit your ChatGPT usage limit. Try again later.")),
+		).resolves.toBe(true);
+		// Classified as metered, not subscription: halts and asks instead of silently hopping models.
 		expect(agent.state.model.id).toBe("codex-spark");
 		expect(warnings[0]).toContain("switch models (/model), wait for the limit window, or re-send to retry");
 	});

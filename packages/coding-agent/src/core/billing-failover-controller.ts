@@ -79,7 +79,7 @@ export class BillingFailoverController {
 		const hop = defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined;
 		const action = decideBillingFailover({
 			failedModel: { provider: failedModel.provider, id: failedModel.id },
-			billingClass: this.deps.modelRegistry.isUsingOAuth(failedModel) ? "subscription" : "metered",
+			billingClass: this.deps.modelRegistry.isUsingSubscription(failedModel) ? "subscription" : "metered",
 			providerDefaultModelId: defaultModelId,
 			hopResolvesWithAuth: Boolean(hop && this.deps.modelRegistry.hasConfiguredAuth(hop)),
 			hopExhausted: hop ? this.deps.exhausted.isExhausted(`${hop.provider}/${hop.id}`) : false,

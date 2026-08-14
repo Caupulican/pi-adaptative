@@ -907,6 +907,16 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Check if a model is using OAuth credentials backed by an actual provider subscription
+	 * (as opposed to OAuth that merely mints a permanent API key, e.g. OpenRouter).
+	 */
+	isUsingSubscription(model: Model<Api>): boolean {
+		if (!this.isUsingOAuth(model)) return false;
+		const oauthProvider = this.authStorage.getOAuthProviders().find((p) => p.id === model.provider);
+		return oauthProvider?.isSubscription === true;
+	}
+
+	/**
 	 * Register a provider dynamically (from extensions).
 	 *
 	 * If provider has models: replaces all existing models for this provider.

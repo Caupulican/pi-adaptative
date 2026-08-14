@@ -193,6 +193,8 @@ export async function loginKimiCoding(callbacks: OAuthLoginCallbacks): Promise<O
 export const kimiCodingOAuthProvider: OAuthProviderInterface = {
 	id: "kimi-coding",
 	name: "Kimi Code (subscription)",
+	isSubscription: true,
+	loginLabel: "Sign in with Kimi Code",
 	login: loginKimiCoding,
 	refreshToken: (credentials) => refreshKimiToken(credentials.refresh),
 	getApiKey: (credentials) => credentials.access,

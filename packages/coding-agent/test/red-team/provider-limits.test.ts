@@ -62,6 +62,7 @@ function registry(subscription: boolean, extraModels: Model<Api>[] = []): ModelR
 		hasConfiguredAuth: () => true,
 		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: undefined }),
 		isUsingOAuth: (candidate: Model<Api>) => subscription && candidate.provider === "openai-codex",
+		isUsingSubscription: (candidate: Model<Api>) => subscription && candidate.provider === "openai-codex",
 	} as unknown as ModelRegistry;
 }
 

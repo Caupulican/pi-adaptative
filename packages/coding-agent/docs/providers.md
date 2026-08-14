@@ -18,6 +18,9 @@ Use `/login` in interactive mode, then select a provider, or pass one directly (
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- xAI (Grok/X subscription) — `/login xai`. Signs in with SuperGrok or X Premium via device-code OAuth; `XAI_API_KEY` remains available as an API key under [API Keys](#api-keys) for metered access instead.
+- Kimi Code (subscription) — `/login kimi-coding`.
+- OpenRouter — `/login openrouter`. This OAuth flow exchanges a browser sign-in for a permanent OpenRouter API key rather than a metered/subscription credential, so it does not get the subscription-hop failover behavior described below.
 
 Use `/logout` to clear credentials. Tokens are stored per provider in `~/.pi/agent/auth.json` and auto-refresh when expired.
 

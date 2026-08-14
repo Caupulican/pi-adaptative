@@ -66,6 +66,159 @@ describe("subscription OAuth providers", () => {
 		expect(await refreshXaiToken("refresh-1")).toMatchObject({ access: "access-2", refresh: "refresh-1" });
 	});
 
+	it("prefers xAI's verification_uri_complete so the login link opens prefilled", async () => {
+		let deviceCode: OAuthDeviceCodeInfo | undefined;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					verification_uri_complete: "https://auth.x.ai/activate?user_code=ABCD-EFGH",
+					interval: 1,
+					expires_in: 600,
+				});
+			}
+			return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+		});
+
+		await xaiOAuthProvider.login(
+			callbacks({
+				onDeviceCode: (info) => {
+					deviceCode = info;
+				},
+			}),
+		);
+		expect(deviceCode?.verificationUri).toBe("https://auth.x.ai/activate?user_code=ABCD-EFGH");
+	});
+
+	it("rejects a non-https verification_uri_complete", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					verification_uri_complete: "http://auth.x.ai/activate?user_code=ABCD-EFGH",
+					interval: 1,
+					expires_in: 600,
+				});
+			}
+			return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+		});
+
+		await expect(xaiOAuthProvider.login(callbacks())).rejects.toThrow(
+			"Untrusted verification URI in xAI OAuth response",
+		);
+	});
+
+	it("falls back to the poller default interval when the server sends interval: 0", async () => {
+		let deviceCode: OAuthDeviceCodeInfo | undefined;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					interval: 0,
+					expires_in: 600,
+				});
+			}
+			return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+		});
+
+		await xaiOAuthProvider.login(
+			callbacks({
+				onDeviceCode: (info) => {
+					deviceCode = info;
+				},
+			}),
+		);
+		// interval: 0 is not a usable poll interval; the device-code poller falls back to its own default.
+		expect(deviceCode?.intervalSeconds).toBeUndefined();
+	});
+
+	it("defaults token expiry to 3600s when the token response omits expires_in", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					interval: 1,
+					expires_in: 600,
+				});
+			}
+			return Response.json({ access_token: "access-1", refresh_token: "refresh-1" });
+		});
+
+		const before = Date.now();
+		const credentials = await xaiOAuthProvider.login(callbacks());
+		// expires = now + 3600s - REFRESH_SKEW_MS(5min); allow slack for test execution time.
+		const expectedExpires = before + 3600 * 1000 - 5 * 60 * 1000;
+		expect(credentials.expires).toBeGreaterThanOrEqual(expectedExpires - 1000);
+		expect(credentials.expires).toBeLessThanOrEqual(expectedExpires + 5000);
+	});
+
+	it("throws when the token response is missing required fields", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					interval: 1,
+					expires_in: 600,
+				});
+			}
+			// Missing refresh_token, and no previously stored refresh token to fall back to.
+			return Response.json({ access_token: "access-1", expires_in: 3600 });
+		});
+
+		await expect(xaiOAuthProvider.login(callbacks())).rejects.toThrow(
+			"Invalid xAI OAuth response field: refresh_token",
+		);
+	});
+
+	it("surfaces 'error: description' when a token refresh fails", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+			Response.json({ error: "invalid_grant", error_description: "Refresh token expired" }, { status: 400 }),
+		);
+
+		await expect(refreshXaiToken("stale-refresh")).rejects.toThrow(
+			"xAI OAuth token refresh failed (HTTP 400): invalid_grant: Refresh token expired",
+		);
+	});
+
+	it("cancels the login when aborted while waiting before the first poll", async () => {
+		const controller = new AbortController();
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					interval: 5,
+					expires_in: 600,
+				});
+			}
+			throw new Error("token endpoint should not be reached before abort");
+		});
+
+		const loginPromise = xaiOAuthProvider.login(callbacks({ signal: controller.signal }));
+		// Let the device-code fetch resolve and the poller enter its pre-first-poll wait
+		// (xai.ts sets waitBeforeFirstPoll: true) before aborting, well inside the 5s interval.
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		controller.abort();
+		await expect(loginPromise).rejects.toThrow("Login cancelled");
+	});
+
 	it("completes the Kimi Code device flow", async () => {
 		process.env.KIMI_CODE_OAUTH_HOST = "https://auth.kimi.test";
 		let deviceCode: OAuthDeviceCodeInfo | undefined;

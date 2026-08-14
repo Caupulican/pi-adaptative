@@ -15,12 +15,19 @@
 - Ordered mandatory delegate directives ahead of optional profile listings in the provider guideline budget, dropped overflowing guidelines whole with a visible diagnostic instead of truncating mid-word, and surfaced worker model pin gaps (roles-only configs list unpinned roles; delegations bypassing pins via an unpinned role are flagged).
 - Released write-reservation leases on coordinator dispose and stopped leaking the goal execution lease on a synchronous prompt failure.
 - Centralized goal-active checks behind isGoalExecutionActive with a boundary rule banning inline goal-status comparisons outside core/goals.
+- Stopped labeling OpenRouter's OAuth (a permanent API-key exchange, not a subscription) as "(sub)" in the footer/usage cost summary and stopped routing its billing failures through subscription-hop failover; both now key off the provider's `isSubscription` flag instead of bare OAuth-auth-type.
+
+### Added
+
+- Showed each OAuth provider's login label (e.g. "Sign in with SuperGrok or X Premium") as secondary text in the `/login` provider selector.
+- Documented xAI (Grok/X subscription), Kimi Code, and OpenRouter under docs/providers.md's Subscriptions list; added `grok`/`supergrok` CLI provider aliases for `xai`.
 
 ### Changed
 
 - Split releases into prepare and promote: the tag is created only after CI is green on the exact release commit, staging uses an explicit allowlist, the gate guard is an execution proof, and changelog or release-note gaps abort loudly.
 - Made model catalog generation hermetic by default (live fetch only with PI_FETCH_MODELS=1) with a scheduled drift check that fails on removal of repo-referenced models.
 - Extracted extension runtime binding from AgentSession into ExtensionBindingController and ratcheted the session line ceiling down (4000 to 3900).
+- Defaulted the xAI provider to grok-4.5 (was grok-4.20-0309-reasoning).
 - Documented the propertyAliasNormalize repair mode in the bundled tool-call-repair skill and reference grammar.
 
 ## [0.90.7] - 2026-08-13

@@ -117,6 +117,31 @@ describe("OAuthSelectorComponent", () => {
 		expect(output).not.toContain("unconfigured");
 	});
 
+	it("shows a provider's login label as secondary text", () => {
+		const authStorage = AuthStorage.inMemory();
+		const selector = new OAuthSelectorComponent(
+			"login",
+			authStorage,
+			[
+				{
+					id: "xai",
+					name: "xAI (Grok/X subscription)",
+					authType: "oauth",
+					loginLabel: "Sign in with SuperGrok or X Premium",
+				},
+				{ id: "openrouter", name: "OpenRouter OAuth", authType: "oauth" },
+			],
+			() => {},
+			() => {},
+		);
+
+		const output = stripAnsi(selector.render(120).join("\n"));
+
+		expect(output).toContain("xAI (Grok/X subscription)");
+		expect(output).toContain("Sign in with SuperGrok or X Premium");
+		expect(output).toContain("OpenRouter OAuth");
+	});
+
 	it("shows models.json command auth as configured", () => {
 		const authStorage = AuthStorage.inMemory();
 		const selector = new OAuthSelectorComponent(

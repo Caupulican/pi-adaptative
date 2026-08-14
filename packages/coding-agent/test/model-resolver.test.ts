@@ -550,6 +550,12 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("zai/glm-5.1");
 	});
 
+	test("xai default is grok-4.5 and belongs to the generated catalog", () => {
+		expect(defaultModelPerProvider.xai).toBe("grok-4.5");
+		const xaiModelIds = getModels("xai").map((model) => model.id);
+		expect(xaiModelIds).toContain(defaultModelPerProvider.xai);
+	});
+
 	test("findInitialModel accepts provider-only defaults", async () => {
 		const registry = {
 			getAll: () => allModels,

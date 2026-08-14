@@ -238,7 +238,7 @@ export class FooterComponent implements Component {
 		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
 		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		statsParts.push(...formatFooterCostParts(costSummary, 3, { subscription: usingSubscription }));
 
 		// Keep the warning-only guard proactive without duplicating the authoritative

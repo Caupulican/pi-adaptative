@@ -75,7 +75,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const autoLearn = host.getCurrentAutoLearnSettings();
 	const costGuard = host.session.getLastCostGuardDecision();
 	const activeModel = host.session.model;
-	const usingSubscription = activeModel ? host.session.modelRegistry.isUsingOAuth(activeModel) : false;
+	const usingSubscription = activeModel ? host.session.modelRegistry.isUsingSubscription(activeModel) : false;
 	const isChatGptSubscription = usingSubscription && activeModel?.provider === "openai-codex";
 
 	let info = `${theme.bold("Usage & Optimization")}\n\n`;

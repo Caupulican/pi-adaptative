@@ -173,6 +173,7 @@ export class AuthDialogsController {
 			id: provider.id,
 			name: provider.name,
 			authType: "oauth",
+			loginLabel: provider.loginLabel,
 		}));
 
 		const modelProviders = new Set(this.session.modelRegistry.getAll().map((model) => model.provider));

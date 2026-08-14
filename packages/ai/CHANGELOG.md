@@ -3,10 +3,18 @@
 ### Fixed
 
 - Matched the operation-rejected repair classification against the tool-owned marker at line start instead of any substring of tool output, so embedded mentions in stdout no longer discard real failures.
+- Preferred the xAI device-code response's `verification_uri_complete` (https-validated) so `/login xai` opens with the user code prefilled, mirroring the existing Kimi Code device flow.
+- Honored a device-code poller's server-provided `slow_down` interval instead of only applying the RFC 8628 +5s bump, and added an opt-in wait before the first poll so a device flow doesn't poll before the user has had a chance to open the verification link; xAI's OAuth login now uses both.
+- Set `reasoning.encrypted_content` on every xAI Responses request once reasoning is active, not only when a reasoning effort was explicitly requested, so grok-4.5 requests made with no explicit effort no longer silently drop encrypted reasoning across turns.
+
+### Added
+
+- Marked Anthropic, OpenAI Codex, GitHub Copilot, xAI, and Kimi Code OAuth providers as subscription-backed (`isSubscription`) and gave xAI and Kimi Code a login-selector label (e.g. "Sign in with SuperGrok or X Premium"), so subscription-only UI and billing logic can distinguish them from OpenRouter's OAuth flow, which exchanges for a permanent API key rather than a subscription.
 
 ### Changed
 
 - Made model catalog generation hermetic by default: live pricing fetch requires PI_FETCH_MODELS=1, and a check:model-catalog script (run on a weekly schedule) fails on drift or removal of repo-referenced model ids.
+- Removed the hardcoded grok-3 / grok-3-fast / grok-code-fast-1 re-seed from the model catalog generator now that the live feed carries current xAI models; defaulted the xAI Responses default model to grok-4.5.
 
 ## [0.90.7] - 2026-08-13
 

@@ -84,7 +84,7 @@ function createSession(options: {
 		getCostSummary: () => costSummary,
 		getLastCostGuardDecision: () => options.costGuardDecision,
 		modelRegistry: {
-			isUsingOAuth: () => options.subscription ?? false,
+			isUsingSubscription: () => options.subscription ?? false,
 		},
 	};
 

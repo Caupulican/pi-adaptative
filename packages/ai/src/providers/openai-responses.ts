@@ -242,6 +242,12 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
 			};
 		}
+		// xAI always returns encrypted reasoning items that must be echoed back on the next turn,
+		// even when no reasoning effort was requested (e.g. thinkingLevelMap.off === null skips the
+		// branch above entirely). Without this, encrypted reasoning silently drops across turns.
+		if (model.provider === "xai") {
+			params.include = ["reasoning.encrypted_content"];
+		}
 	}
 
 	return params;

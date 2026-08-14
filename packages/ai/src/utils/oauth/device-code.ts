@@ -12,7 +12,7 @@ const SLOW_DOWN_INTERVAL_INCREMENT_MS = 5000;
 
 type OAuthDeviceCodeIncompletePollResult =
 	| { status: "pending" }
-	| { status: "slow_down" }
+	| { status: "slow_down"; intervalSeconds?: number }
 	| { status: "failed"; message: string };
 
 export type OAuthDeviceCodePollResult<T> = OAuthDeviceCodeIncompletePollResult | { status: "complete"; value: T };
@@ -20,6 +20,8 @@ export type OAuthDeviceCodePollResult<T> = OAuthDeviceCodeIncompletePollResult |
 export type OAuthDeviceCodePollOptions<T> = {
 	intervalSeconds?: number;
 	expiresInSeconds?: number;
+	/** Sleep one interval before the first poll instead of polling immediately. */
+	waitBeforeFirstPoll?: boolean;
 	poll: () => Promise<OAuthDeviceCodePollResult<T>>;
 	signal?: AbortSignal;
 };
@@ -35,6 +37,13 @@ export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodePollOpt
 	);
 
 	let slowDownResponses = 0;
+	if (options.waitBeforeFirstPoll) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs > 0) {
+			await sleepWithAbortError(Math.min(intervalMs, remainingMs), options.signal, () => new Error(CANCEL_MESSAGE));
+		}
+	}
+
 	while (Date.now() < deadline) {
 		if (options.signal?.aborted) {
 			throw new Error(CANCEL_MESSAGE);
@@ -49,8 +58,15 @@ export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodePollOpt
 		}
 		if (result.status === "slow_down") {
 			slowDownResponses += 1;
-			// RFC 8628 section 3.5: apply this increase to this and all subsequent requests.
-			intervalMs = Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
+			// Prefer the server-provided interval when given (some providers report the new
+			// required minimum on slow_down); trusting only a client-tracked value risks polling
+			// early forever under WSL/VM clock drift. Otherwise apply RFC 8628 section 3.5: +5s.
+			intervalMs =
+				typeof result.intervalSeconds === "number" &&
+				Number.isFinite(result.intervalSeconds) &&
+				result.intervalSeconds > 0
+					? Math.max(MINIMUM_INTERVAL_MS, Math.floor(result.intervalSeconds * 1000))
+					: Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
 		}
 
 		const remainingMs = deadline - Date.now();

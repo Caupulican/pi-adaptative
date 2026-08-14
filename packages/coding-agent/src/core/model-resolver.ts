@@ -26,7 +26,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"github-copilot": "gpt-5.4",
 	openrouter: "moonshotai/kimi-k2.6",
 	"vercel-ai-gateway": "zai/glm-5.1",
-	xai: "grok-4.20-0309-reasoning",
+	xai: "grok-4.5",
 	groq: "openai/gpt-oss-120b",
 	cerebras: "zai-glm-4.7",
 	zai: "glm-5.2",
@@ -67,6 +67,8 @@ export const cliProviderAliases: Record<string, string> = {
 	claude: "anthropic",
 	"claude-pro": "anthropic",
 	"claude-max": "anthropic",
+	grok: "xai",
+	supergrok: "xai",
 };
 
 function buildProviderLookup(availableModels: Model<Api>[]): Map<string, string> {

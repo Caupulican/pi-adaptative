@@ -14,6 +14,8 @@ export type AuthSelectorProvider = {
 	id: string;
 	name: string;
 	authType: "oauth" | "api_key";
+	/** Secondary line shown under the provider name, e.g. "Sign in with SuperGrok or X Premium". */
+	loginLabel?: string;
 };
 
 /**
@@ -111,14 +113,15 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			const isSelected = i === this.selectedIndex;
 
 			const statusIndicator = this.formatStatusIndicator(provider);
+			const loginLabelSuffix = provider.loginLabel ? theme.fg("muted", ` — ${provider.loginLabel}`) : "";
 			let line = "";
 			if (isSelected) {
 				const prefix = theme.fg("accent", "→ ");
 				const text = theme.fg("accent", provider.name);
-				line = prefix + text + statusIndicator;
+				line = prefix + text + loginLabelSuffix + statusIndicator;
 			} else {
 				const text = `  ${theme.fg("text", provider.name)}`;
-				line = text + statusIndicator;
+				line = text + loginLabelSuffix + statusIndicator;
 			}
 
 			this.listContainer.addChild(new TruncatedText(line, 1, 0));

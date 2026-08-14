@@ -55,6 +55,12 @@ export interface OAuthProviderInterface {
 	readonly id: OAuthProviderId;
 	readonly name: string;
 
+	/** Whether access through this auth method is backed by a provider subscription. */
+	readonly isSubscription?: boolean;
+
+	/** Selector label for the OAuth login option, e.g. "Sign in with SuperGrok or X Premium". */
+	readonly loginLabel?: string;
+
 	/** Run the login flow, return credentials to persist */
 	login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
 

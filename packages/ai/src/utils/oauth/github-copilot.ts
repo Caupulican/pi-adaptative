@@ -333,6 +333,7 @@ export async function loginGitHubCopilot(options: {
 export const githubCopilotOAuthProvider: OAuthProviderInterface = {
 	id: "github-copilot",
 	name: "GitHub Copilot",
+	isSubscription: true,
 
 	async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 		return loginGitHubCopilot({
