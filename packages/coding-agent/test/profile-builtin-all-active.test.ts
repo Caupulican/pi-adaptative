@@ -105,25 +105,21 @@ describe("built-in all-active profile activation", () => {
 		}
 	}
 
-	it("disposeAndWait releases the resource-loader extension generation", async () => {
-		const dispose = vi.spyOn(DefaultResourceLoader.prototype, "dispose");
-		try {
-			await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
-			expect(dispose).toHaveBeenCalled();
-		} finally {
-			dispose.mockRestore();
-		}
-	});
-
 	it(
 		"imposes no restriction: a strict superset of the no-active-profile baseline",
 		async () => {
 			// No active profile still excludes externally-sourced extensions (see T5 in
 			// profile-diagnostics.test.ts), so the built-in profile must unlock strictly more, never less.
-			const baseline = await sessionActiveTools();
-			const withAllActive = await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
-			expect(withAllActive).toEqual(expect.arrayContaining(baseline));
-			expect(withAllActive.length).toBeGreaterThan(baseline.length);
+			const dispose = vi.spyOn(DefaultResourceLoader.prototype, "dispose");
+			try {
+				const baseline = await sessionActiveTools();
+				const withAllActive = await sessionActiveTools([ALL_ACTIVE_PROFILE_NAME]);
+				expect(withAllActive).toEqual(expect.arrayContaining(baseline));
+				expect(withAllActive.length).toBeGreaterThan(baseline.length);
+				expect(dispose).toHaveBeenCalled();
+			} finally {
+				dispose.mockRestore();
+			}
 		},
 		windowsLoadedSuiteTimeout(60_000),
 	);

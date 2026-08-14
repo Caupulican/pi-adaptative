@@ -512,27 +512,31 @@ Content`,
 			windowsLoadedSuiteTimeout(60_000),
 		);
 
-		it("dispose releases the loaded extension generation so session trees can be removed", async () => {
-			let disposed = false;
-			const settingsManager = SettingsManager.inMemory({
-				activeResourceProfile: "portable-tmux",
-				resourceProfiles: {
-					"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
-				},
-			});
-			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-			await loader.reload();
-			const extension = loader
-				.getExtensions()
-				.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
-			expect(extension).toBeDefined();
-			extension?.disposers.push(() => {
-				disposed = true;
-			});
-			await loader.dispose();
-			expect(disposed).toBe(true);
-			expect(loader.getExtensions().extensions).toEqual([]);
-		});
+		it(
+			"dispose releases the loaded extension generation so session trees can be removed",
+			async () => {
+				let disposed = false;
+				const settingsManager = SettingsManager.inMemory({
+					activeResourceProfile: "portable-tmux",
+					resourceProfiles: {
+						"portable-tmux": { extensions: { allow: ["tmux-agent-manager"] } },
+					},
+				});
+				const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+				await loader.reload();
+				const extension = loader
+					.getExtensions()
+					.extensions.find((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")));
+				expect(extension).toBeDefined();
+				extension?.disposers.push(() => {
+					disposed = true;
+				});
+				await loader.dispose();
+				expect(disposed).toBe(true);
+				expect(loader.getExtensions().extensions).toEqual([]);
+			},
+			windowsLoadedSuiteTimeout(60_000),
+		);
 
 		it("should suppress external root extensions at load time when no resource profile is active", async () => {
 			const root = join(tempDir, "catalog-no-profile");
