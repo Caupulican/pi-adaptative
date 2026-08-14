@@ -2672,6 +2672,7 @@ const highlighted = highlightCode(code, lang, theme);
 - Extension errors are logged, agent continues
 - `tool_call` errors block the tool (fail-safe)
 - Tool `execute` errors must be signaled by throwing; the thrown error is caught, reported to the LLM with `isError: true`, and execution continues
+- After a successful extension tool result, the harness retains identity fields that also exist on that extension's tool schema (`*Id`, `card`, `project`, `board`, including nested `board.id` → `boardId`). The next call from the same extension that omits those fields is filled before validation. Unresolved statuses (`needs_*`, `ambiguous*`) and builtin tools are not retained. An extension `prepareArguments` still runs first and can override this.
 
 ## Mode Behavior
 

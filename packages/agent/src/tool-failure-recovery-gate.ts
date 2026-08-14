@@ -1,10 +1,15 @@
 import { getToolExecutionUnchangedRetryLimit } from "@caupulican/pi-ai/tool-repair-registry";
 import {
+	forEachPairedToolResult,
 	getToolExecutionKey,
 	getToolFailureRecordExecutionKey,
+	isClosedOperationFailureCode,
+	readVisibleToolFailureCode,
+	restoreToolFailureRecord,
 	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
 import type {
+	AgentMessage,
 	AgentTool,
 	AgentToolFailureRecoveryAuthority,
 	AgentToolFailureRecoveryTarget,
@@ -90,18 +95,52 @@ export interface ToolFailureRecoveryHalt {
 }
 
 /**
- * Owns run-scoped execution admission and bounded unresolved-failure budgets.
+ * Owns execution admission and bounded unresolved-failure budgets.
  *
  * Recovery authority is exact and tool-owned. A failed tool declares opaque backend-specific targets;
  * a loaded recovery tool may teach actions only for the same authority and target kind. Only raw
  * successful repair evidence with byte-exact scope can reopen one probe. Argument text and hooks have
  * no recovery authority.
+ *
+ * Run-level halt and family/run counters stay on the current run. Per-operation execution budget and
+ * circuit are reconstructed from the transcript when a new run starts with an empty gate, so an
+ * already-exhausted identical operation is not re-executed after a user turn or session resume.
  */
 export class ToolFailureRecoveryGate {
 	private readonly statesByExecutionKey = new Map<string, FailureRecoveryState>();
 	private readonly failuresByFamily = new Map<string, number>();
 	private totalFailures = 0;
 	private halted: ToolFailureRecoveryHalt | undefined;
+
+	isEmpty(): boolean {
+		return this.statesByExecutionKey.size === 0 && this.halted === undefined && this.totalFailures === 0;
+	}
+
+	restoreFromMessages(messages: readonly AgentMessage[]): void {
+		if (!this.isEmpty()) return;
+		forEachPairedToolResult(messages, ({ tool, args, executionKey, result }) => {
+			if (!result.isError) {
+				const existing = this.statesByExecutionKey.get(executionKey);
+				if (existing) this.clearResolvedState(executionKey, existing);
+				return;
+			}
+			const state = this.ensureRestoredState(executionKey, restoreToolFailureRecord(result, tool, args));
+			if (!state) return false;
+			const visibleCode = readVisibleToolFailureCode(result);
+			if (isClosedOperationFailureCode(visibleCode)) {
+				state.operationCircuitOpen = true;
+				state.blockedReplays = MAX_BLOCKED_REPLAYS_PER_FAILURE;
+				state.recoveryAvailable = false;
+				return;
+			}
+			if (visibleCode === "repeated_failed_operation") {
+				state.blockedReplays++;
+				return;
+			}
+			state.reservedExecutions++;
+			state.failures++;
+		});
+	}
 
 	planFailure(
 		failedTool: AgentTool<any>,
@@ -221,6 +260,31 @@ export class ToolFailureRecoveryGate {
 			? state.reservedExecutions + (reservation?.executionKey === executionKey ? 0 : 1)
 			: 1;
 		return executionsIncludingCurrent < BASE_FAILURE_EXECUTIONS_PER_OPERATION + retryLimit;
+	}
+
+	private ensureRestoredState(
+		executionKey: string,
+		record: ToolFailureMemoryRecord,
+	): FailureRecoveryState | undefined {
+		const existing = this.statesByExecutionKey.get(executionKey);
+		if (existing) {
+			existing.record = record;
+			return existing;
+		}
+		if (this.statesByExecutionKey.size >= MAX_RECOVERY_STATES) return undefined;
+		const state: FailureRecoveryState = {
+			record,
+			recoveryTargets: [],
+			reservedExecutions: 0,
+			failures: 0,
+			failureFamilyCounts: new Map(),
+			recoveryProbes: 0,
+			blockedReplays: 0,
+			recoveryAvailable: false,
+			operationCircuitOpen: false,
+		};
+		this.statesByExecutionKey.set(executionKey, state);
+		return state;
 	}
 
 	private getOrCreateState(

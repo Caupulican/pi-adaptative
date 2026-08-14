@@ -9,6 +9,7 @@ import {
 	rememberToolFailure,
 	sanitizeToolFailureContext,
 	type ToolFailureMemoryRecord,
+	transcriptHasClosedToolOperation,
 } from "../src/tool-failure-memory.ts";
 import type { AgentMessage } from "../src/types.ts";
 
@@ -544,6 +545,42 @@ describe("tool failure memory", () => {
 			correction: original.correction,
 			occurrence: 2,
 		});
+	});
+
+	it("detects a closed identical operation from persisted recovery_exhausted results", () => {
+		const original = record("failed", "error");
+		const exhausted = createToolFailureRecoveryExhaustedResult(original, "run circuit opened");
+		const args = { action: "list_lists", envFile: "/tmp/trello.env" };
+		const messages: AgentMessage[] = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "trello-1", name: "trello", arguments: args }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "mock",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "trello-1",
+				toolName: "trello",
+				content: exhausted.content,
+				details: exhausted.details,
+				isError: true,
+				timestamp: 1,
+			},
+		];
+		expect(transcriptHasClosedToolOperation(messages)).toBe(true);
+		expect(transcriptHasClosedToolOperation(JSON.parse(JSON.stringify(messages)) as AgentMessage[])).toBe(true);
 	});
 
 	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {

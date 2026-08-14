@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stopped `task_steps_context` from telling the model to continue an in_progress step after tool-recovery exhaustion of the last unchanged operation.
+- Healed extension tool calls that omit identity already produced by a successful result from the same extension (for example `boardId` after `resolve_project_scope`), so the next call executes with that evidence instead of repeating the empty operation.
+
 ## [0.90.11] - 2026-08-14
 
 ### Fixed

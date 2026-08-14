@@ -4,6 +4,12 @@
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
+export {
+	applyExtensionSessionHeal,
+	ExtensionSessionScope,
+	extensionScopeOwnerKey,
+	extensionSessionScopeFor,
+} from "./extension-session-scope.ts";
 export { createExtensionRuntime } from "./factory-runtime.ts";
 export type {
 	ExtensionErrorListener,

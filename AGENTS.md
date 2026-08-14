@@ -221,6 +221,8 @@ anything fully encoded in code, tests, or docs does not belong here.
 ## Tooling, Shell, and Extensions
 
 - Tool-call repair is validate-then-repair through the named registry (`tool-repair/{registry,analyzer,repairer}.ts`): valid arguments pass unchanged, and there are no tool-specific pre-coercion shims. Delegated worker actions pass through the same choke point.
+- Extension tools share a runner-scoped identity map: after a successful result, schema fields that are `*Id`/`card`/`project`/`board` (including nested `name.id` → `nameId`) fill vacant args on the next call from the same extension. Builtin tools are excluded; unresolved `needs_*`/`ambiguous*` statuses are not retained.
+- Tool-failure recovery admission is reconstructed from the transcript when a new run starts with an empty gate: per-operation execution budget and circuit survive user turns and session resume, so an already-exhausted identical operation is not re-executed. Run-level halt and family/run counters stay on the current run so other operations remain available. Memory occurrence counts are not an admission budget.
 - Bash runs in persistent per-agent shell sessions (`shell-session.ts`): a nonce sentinel carries the exit code; timeout/abort/silence kills the whole session tree and the next exec respawns — state loss is by design; explicit `shellPath` or a changed per-command env falls back to per-command semantics. Shell discovery is process-lifetime: successful platform resolutions are cached, failures are not.
 - Extension load failures are isolated startup warnings, never fatal: failed factories restore shared state and dispose subscriptions; `/reload` is transactional and preserves the current runtime on a failed generation.
 

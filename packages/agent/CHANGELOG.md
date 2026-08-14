@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reconstructed tool-failure recovery admission from the transcript at the start of a new run so an already-exhausted identical operation is not re-executed after a user turn or session resume; run-level halt stays on the current run.
+- Emitted the mandatory recovery diagnostic when the toolless delivery turn did not report the unresolved failure.
+
 ## [0.90.11] - 2026-08-14
 
 ## [0.90.10] - 2026-08-14

@@ -1,12 +1,18 @@
 /**
  * Tool wrappers for extension-registered tools.
  *
- * These wrappers only adapt tool execution so extension tools receive the runner context.
+ * These wrappers adapt tool execution so extension tools receive the runner context
+ * and reuse session-scoped identity from prior successful results of the same extension.
  * Tool call and tool result interception is handled by AgentSession via agent-core hooks.
  */
 
 import type { AgentTool } from "@caupulican/pi-agent-core";
-import { wrapToolDefinition, wrapToolDefinitions } from "../tools/tool-definition-wrapper.ts";
+import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+import {
+	applyExtensionSessionHeal,
+	extensionScopeOwnerKey,
+	extensionSessionScopeFor,
+} from "./extension-session-scope.ts";
 import type { ExtensionRunner } from "./runner.ts";
 import type { RegisteredTool } from "./types.ts";
 
@@ -15,7 +21,12 @@ import type { RegisteredTool } from "./types.ts";
  * Uses the runner's createContext() for consistent context across tools and event handlers.
  */
 export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: ExtensionRunner): AgentTool {
-	return wrapToolDefinition(registeredTool.definition, () => runner.createContext());
+	const ownerKey = extensionScopeOwnerKey(registeredTool.sourceInfo);
+	const definition =
+		ownerKey === undefined
+			? registeredTool.definition
+			: applyExtensionSessionHeal(registeredTool.definition, ownerKey, extensionSessionScopeFor(runner));
+	return wrapToolDefinition(definition, () => runner.createContext());
 }
 
 /**
@@ -23,8 +34,5 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
  * Uses the runner's createContext() for consistent context across tools and event handlers.
  */
 export function wrapRegisteredTools(registeredTools: RegisteredTool[], runner: ExtensionRunner): AgentTool[] {
-	return wrapToolDefinitions(
-		registeredTools.map((registeredTool) => registeredTool.definition),
-		() => runner.createContext(),
-	);
+	return registeredTools.map((registeredTool) => wrapRegisteredTool(registeredTool, runner));
 }

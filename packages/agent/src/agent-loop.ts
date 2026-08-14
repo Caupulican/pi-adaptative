@@ -192,6 +192,19 @@ function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, abort
 	};
 }
 
+function mandatoryDeliveryReportsHalt(message: AssistantMessage, halt: ToolFailureRecoveryHalt): boolean {
+	const text = message.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n")
+		.toLowerCase();
+	if (!text.trim()) return false;
+	if (text.includes("recovery")) return true;
+	if (text.includes(halt.record.failureCode.toLowerCase())) return true;
+	const diagnostic = halt.record.diagnostic ?? halt.diagnostic;
+	return diagnostic !== undefined && text.includes(diagnostic.toLowerCase().slice(0, 40));
+}
+
 function createMandatoryRecoveryDeliveryFallback(
 	halt: ToolFailureRecoveryHalt,
 	config: AgentLoopConfig,
@@ -307,6 +320,7 @@ async function runLoop(
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
+	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages);
 	let mandatoryRecoveryDeliveryPending = false;
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
@@ -380,7 +394,7 @@ async function runLoop(
 					}
 				}
 				await emit({ type: "turn_end", message, toolResults });
-				if (toolCalls.length > 0) {
+				if (toolCalls.length > 0 || !mandatoryDeliveryReportsHalt(message, recoveryDeliveryHalt)) {
 					const fallback = createMandatoryRecoveryDeliveryFallback(recoveryDeliveryHalt, config);
 					currentContext.messages.push(fallback);
 					newMessages.push(fallback);

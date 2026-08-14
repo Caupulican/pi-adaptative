@@ -379,6 +379,98 @@ export function getUnresolvedToolFailure(
 	return tracker.get(getToolFailureKey(tool, args));
 }
 
+export function readVisibleToolFailureCode(result: ToolResultMessage): string | undefined {
+	for (const block of result.content) {
+		if (block.type !== "text") continue;
+		const match = /"failure_code"\s*:\s*"([^"]+)"/.exec(block.text);
+		if (match) return match[1];
+	}
+	return undefined;
+}
+
+export function isClosedOperationFailureCode(code: string | undefined): boolean {
+	return code === "operation_recovery_exhausted" || code === "recovery_exhausted";
+}
+
+export function restoreToolFailureRecord(
+	result: ToolResultMessage,
+	tool: string,
+	args: unknown,
+): ToolFailureMemoryRecord {
+	const executionKey = getToolExecutionKey(tool, args);
+	const persisted = readFailureRecord(result.details);
+	if (persisted) {
+		return {
+			...persisted,
+			[TOOL_FAILURE_EXECUTION_KEY]: getToolFailureRecordExecutionKey(persisted) ?? executionKey,
+		};
+	}
+	const identity = operationIdentity(tool, args);
+	return {
+		version: TOOL_FAILURE_MEMORY_VERSION,
+		failureKey: identity.failureKey,
+		[TOOL_FAILURE_EXECUTION_KEY]: executionKey,
+		tool: identity.tool,
+		operation: identity.operation,
+		occurrence: 1,
+		state: "failed",
+		phase: "execution",
+		failureCode: boundedFailureCode(readVisibleToolFailureCode(result) ?? "tool_error"),
+		correction: fallbackFailureGuidance("failed", false, "execution"),
+	};
+}
+
+export interface PairedToolResult {
+	tool: string;
+	args: unknown;
+	executionKey: string;
+	result: ToolResultMessage;
+}
+
+export function forEachPairedToolResult(
+	messages: readonly AgentMessage[],
+	visit: (pair: PairedToolResult) => boolean | undefined,
+): void {
+	const callsById = new Map<string, { name: string; args: unknown }>();
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "toolCall") {
+					callsById.set(block.id, { name: block.name, args: block.arguments });
+				}
+			}
+			continue;
+		}
+		if (message.role !== "toolResult") continue;
+		const call = callsById.get(message.toolCallId);
+		if (!call) continue;
+		if (
+			visit({
+				tool: call.name,
+				args: call.args,
+				executionKey: getToolExecutionKey(call.name, call.args),
+				result: message,
+			}) === false
+		) {
+			return;
+		}
+	}
+}
+
+export function transcriptHasClosedToolOperation(messages: readonly AgentMessage[]): boolean {
+	const closedByExecutionKey = new Map<string, true>();
+	forEachPairedToolResult(messages, ({ executionKey, result }) => {
+		if (!result.isError) {
+			closedByExecutionKey.delete(executionKey);
+			return;
+		}
+		if (isClosedOperationFailureCode(readVisibleToolFailureCode(result))) {
+			closedByExecutionKey.set(executionKey, true);
+		}
+	});
+	return closedByExecutionKey.size > 0;
+}
+
 function boundedFailureCode(value: string): string {
 	const normalized = value
 		.trim()
