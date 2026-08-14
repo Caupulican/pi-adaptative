@@ -503,7 +503,7 @@ import { getModel, streamSimple, completeSimple } from '@caupulican/pi-ai';
 const model = getModel('anthropic', 'claude-sonnet-4-20250514');
 // or getModel('openai', 'gpt-5-mini');
 // or getModel('google', 'gemini-2.5-flash');
-// or getModel('xai', 'grok-code-fast-1');
+// or getModel('xai', 'grok-4.6');
 // or getModel('groq', 'openai/gpt-oss-20b');
 // or getModel('cerebras', 'gpt-oss-120b');
 // or getModel('openrouter', 'z-ai/glm-4.5v');

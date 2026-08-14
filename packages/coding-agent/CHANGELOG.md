@@ -27,7 +27,7 @@
 - Split releases into prepare and promote: the tag is created only after CI is green on the exact release commit, staging uses an explicit allowlist, the gate guard is an execution proof, and changelog or release-note gaps abort loudly.
 - Made model catalog generation hermetic by default (live fetch only with PI_FETCH_MODELS=1) with a scheduled drift check that fails on removal of repo-referenced models.
 - Extracted extension runtime binding from AgentSession into ExtensionBindingController and ratcheted the session line ceiling down (4000 to 3900).
-- Defaulted the xAI provider to grok-4.5 (was grok-4.20-0309-reasoning).
+- Defaulted the xAI provider to grok-4.6; the native catalog is grok-4.5 and grok-4.6 on the subscription Responses path.
 - Documented the propertyAliasNormalize repair mode in the bundled tool-call-repair skill and reference grammar.
 
 ## [0.90.7] - 2026-08-13

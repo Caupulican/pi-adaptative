@@ -236,7 +236,16 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 ]);
-const XAI_RESPONSES_MODEL_ID = "grok-4.5";
+const XAI_RESPONSES_MODEL_IDS = new Set(["grok-4.5", "grok-4.6"]);
+const XAI_BUILTIN_EXCLUDED_MODEL_IDS = new Set([
+	"grok-3",
+	"grok-3-fast",
+	"grok-4.20-0309-non-reasoning",
+	"grok-4.20-0309-reasoning",
+	"grok-code-fast-1",
+	"grok-4.3",
+	"grok-build-0.1",
+]);
 const XAI_RESPONSES_COMPAT: OpenAIResponsesCompat = {
 	supportsLongCacheRetention: false,
 };
@@ -352,8 +361,14 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
 	}
-	if (model.provider === "xai" && model.api === "openai-responses" && model.id === XAI_RESPONSES_MODEL_ID) {
+	if (model.provider === "xai" && model.api === "openai-responses") {
+		// Reasoning cannot be disabled. Unspecified effort is high (xAI + Grok CLI).
+		// xhigh is grok-4.6+ only; grok-4.5 treats an unsupported xhigh request as high.
 		mergeThinkingLevelMap(model, { off: null, minimal: null });
+		if (model.id !== "grok-4.5") {
+			mergeThinkingLevelMap(model, { xhigh: "xhigh" });
+		}
+		model.defaultThinkingLevel = "high";
 	}
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
@@ -846,7 +861,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			for (const [modelId, model] of Object.entries(data.xai.models)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
-				const useResponsesApi = modelId === XAI_RESPONSES_MODEL_ID;
+				if (XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(modelId)) continue;
+				const useResponsesApi = XAI_RESPONSES_MODEL_IDS.has(modelId);
 
 				models.push({
 					id: modelId,
@@ -1382,6 +1398,7 @@ async function generateModels() {
 	// Combine models (models.dev has priority)
 	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels, ...FUGU_MODELS].filter(
 		(model) =>
+			!(model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) &&
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
 	);
 
