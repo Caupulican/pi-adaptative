@@ -27,6 +27,7 @@ import type {
 	Usage,
 } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai";
+import { onTestFinished } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -354,7 +355,7 @@ export interface Harness {
 	/** Temp directory (cleaned up by cleanup()). */
 	tempDir: string;
 	/** Dispose session and remove temp directory. */
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 function createTempDir(): string {
@@ -419,12 +420,20 @@ function createHarnessWithResourceLoader(
 		events.push(event);
 	});
 
-	const cleanup = () => {
-		session.dispose();
-		if (existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
-		}
+	let cleanupPromise: Promise<void> | undefined;
+	const cleanup = (): Promise<void> => {
+		cleanupPromise ??= (async () => {
+			try {
+				await session.disposeAndWait();
+			} finally {
+				if (existsSync(tempDir)) {
+					rmSync(tempDir, { recursive: true, maxRetries: 5, retryDelay: 100 });
+				}
+			}
+		})();
+		return cleanupPromise;
 	};
+	onTestFinished(cleanup);
 
 	return {
 		session,

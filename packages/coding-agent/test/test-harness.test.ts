@@ -6,7 +6,7 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, createHarnessWithExtensions, type Harness } from "./test-harness.ts";
 
 describe("test harness", () => {
@@ -323,5 +323,14 @@ describe("test harness", () => {
 		const entries = harness.sessionManager.getEntries();
 		const messageEntries = entries.filter((e) => e.type === "message");
 		expect(messageEntries.length).toBeGreaterThanOrEqual(2); // user + assistant
+	});
+
+	it("awaits the session disposal boundary exactly once during cleanup", async () => {
+		harness = createHarness();
+		const disposeAndWait = vi.spyOn(harness.session, "disposeAndWait");
+
+		await Promise.all([harness.cleanup(), harness.cleanup()]);
+
+		expect(disposeAndWait).toHaveBeenCalledOnce();
 	});
 });
