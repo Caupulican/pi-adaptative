@@ -23,7 +23,11 @@ import {
 } from "./goal-runtime-snapshot.ts";
 import { applyGoalEvent, type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "./goal-state.ts";
 import { applyGoalAction } from "./goal-tool-core.ts";
-import { type ExplicitGoalStartAuthority, parseExplicitChatGoal } from "./natural-language-goal.ts";
+import {
+	type ExplicitGoalStartAuthority,
+	parseExplicitChatGoal,
+	priorUserPromptText,
+} from "./natural-language-goal.ts";
 import {
 	appendGoalClearedSnapshot,
 	appendGoalStateSnapshot,
@@ -145,15 +149,20 @@ export class GoalSessionController {
 	 * goal tool. This is intentionally narrower than task detection: ordinary work never starts a
 	 * goal, and an unfinished goal is never replaced implicitly.
 	 */
-	admitExplicitChatGoal(text: string, now = new Date().toISOString()): ChatGoalAdmission {
-		const parsed = parseExplicitChatGoal(text);
+	admitOwnerChatGoal(text: string, messages: readonly { role: string; content?: unknown }[]): ChatGoalAdmission {
+		return this.admitExplicitChatGoal(text, undefined, priorUserPromptText(messages, text));
+	}
+
+	admitExplicitChatGoal(text: string, now?: string, priorUserText?: string): ChatGoalAdmission {
+		const admittedAt = now ?? new Date().toISOString();
+		const parsed = parseExplicitChatGoal(text, priorUserText);
 		if (!parsed) return { status: "not_explicit" };
 		const current = this.getState();
 		if (current && isGoalUnfinishedStatus(current.status)) {
 			return { status: "unfinished_goal_exists", state: current };
 		}
 		const digest = createHash("sha256")
-			.update(`${now}\0${current?.goalId ?? "none"}\0${parsed.objective}`)
+			.update(`${admittedAt}\0${current?.goalId ?? "none"}\0${parsed.objective}`)
 			.digest("hex")
 			.slice(0, 20);
 		const result = applyGoalAction(
@@ -164,7 +173,7 @@ export class GoalSessionController {
 				userGoal: parsed.objective,
 				tokenBudget: parsed.tokenBudget,
 			},
-			now,
+			admittedAt,
 		);
 		if (!result.ok) throw new Error(result.error);
 		this.saveState(result.state, current ? getGoalStateRevision(current) : undefined);

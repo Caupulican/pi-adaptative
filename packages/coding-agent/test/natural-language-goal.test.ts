@@ -4,6 +4,7 @@ import {
 	parseExplicitChatGoal,
 	parseExplicitGoalStartAuthority,
 	parseRequestedTokenBudget,
+	priorUserPromptText,
 } from "../src/core/goals/natural-language-goal.ts";
 
 describe("natural-language persistent goal admission", () => {
@@ -58,6 +59,28 @@ describe("natural-language persistent goal admission", () => {
 		});
 		expect(parseExplicitGoalStartAuthority("Investigate and fix the bug")).toBeUndefined();
 		expect(parseExplicitGoalStartAuthority("this is a goal-oriented design")).toBeUndefined();
+		expect(parseExplicitChatGoal("this is a goal. implement the inspect wording.")).toEqual({
+			objective: "implement the inspect wording.",
+		});
+		expect(parseExplicitChatGoal("this is a goal, use it", "Ship the inspect wording so workers can start.")).toEqual(
+			{
+				objective: "Ship the inspect wording so workers can start.",
+			},
+		);
+		expect(parseExplicitChatGoal("the task is a goal", "Fix worker start without a profile.")).toEqual({
+			objective: "Fix worker start without a profile.",
+		});
+		expect(parseExplicitChatGoal("treat this task as a goal", "Keep workers starting without a base.")).toEqual({
+			objective: "Keep workers starting without a base.",
+		});
+		expect(parseExplicitChatGoal("this is a goal")).toBeUndefined();
+		expect(parseExplicitChatGoal("this is a goal with a 40k token budget")).toBeUndefined();
+		expect(
+			parseExplicitChatGoal("this is a goal with a 40k token budget", "Keep working the inspect wording."),
+		).toEqual({
+			objective: "Keep working the inspect wording.",
+			tokenBudget: 40_000,
+		});
 		expect(parseExplicitChatGoal("Set a persistent goal: process 40k tokens of archived logs.")).toEqual({
 			objective: "process 40k tokens of archived logs.",
 		});
@@ -73,6 +96,21 @@ describe("natural-language persistent goal admission", () => {
 		// single letters k/m, so "5 million." parsed as 5, "2 M." as 2, "500 k." as 500, and the dotted
 		// thousands separator "1.000.000" produced NaN (silently unbounded, undefined).
 		expect(parseRequestedTokenBudget(text)).toBe(expected);
+	});
+
+	it("walks back past the current classification phrase when it is already in history", () => {
+		const prior = "Implement the inspect wording so workers can start without a profile.";
+		expect(
+			priorUserPromptText(
+				[
+					{ role: "user", content: prior },
+					{ role: "assistant", content: "noted" },
+					{ role: "user", content: "this is a goal" },
+				],
+				"this is a goal",
+			),
+		).toBe(prior);
+		expect(priorUserPromptText([{ role: "user", content: prior }], "this is a goal")).toBe(prior);
 	});
 
 	it("fails closed instead of silently going unbounded when a token budget is clearly stated but unparseable", () => {

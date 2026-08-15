@@ -36,6 +36,25 @@ describe("AgentSession natural-language goal admission", () => {
 		}
 	});
 
+	it("starts a durable goal when the owner later says the stated task is a goal", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("noted the task"), fauxAssistantMessage("goal is active")]);
+			await harness.session.prompt("Implement the inspect wording so workers can start without a profile.", {
+				autoContinueGoal: false,
+			});
+			expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+
+			await harness.session.prompt("this is a goal", { autoContinueGoal: false });
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				userGoal: "Implement the inspect wording so workers can start without a profile.",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("feeds an admitted chat goal into the existing hidden continuation loop", async () => {
 		const harness = await createHarness();
 		try {

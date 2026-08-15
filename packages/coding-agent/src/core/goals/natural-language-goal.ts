@@ -22,8 +22,12 @@ const STANDALONE_GOAL_AUTHORITY_PATTERNS = [
 	// After "goal" require end, whitespace, or punctuation — not a hyphen — so
 	// "this is a goal, use it" authorizes while "this is a goal-oriented design" does not.
 	/^\s*(?:this|that)\s+is\s+(?:now\s+)?a\s+(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
+	/^\s*(?:this|the|that)\s+task\s+is\s+(?:now\s+)?a\s+(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
 	/^\s*(?:make|treat)\s+this\s+(?:as\s+)?(?:my\s+|a\s+)?(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
+	/^\s*(?:make|treat)\s+this\s+task\s+(?:as\s+)?(?:my\s+|a\s+)?(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
 ] as const;
+
+const STANDALONE_GOAL_FILLER = /^(?:use it|please|now|ok|okay|thanks|go|do it)(?:[.!?])?$/i;
 
 /** Raised when text unambiguously states a token-budget directive but the amount cannot be resolved
  * to an exact positive integer. Callers must let this propagate as a loud, explicit failure instead
@@ -126,7 +130,76 @@ export function parseRequestedTokenBudget(
  * Recognize only explicit persistence language. Ordinary multi-step work and discussion ABOUT goal
  * mechanics deliberately return undefined; those must not silently expand into autonomous work.
  */
-export function parseExplicitChatGoal(text: string): ExplicitChatGoal | undefined {
+function standaloneGoalRemainder(text: string): string | undefined {
+	for (const pattern of STANDALONE_GOAL_AUTHORITY_PATTERNS) {
+		const match = pattern.exec(text);
+		if (!match) continue;
+		return text
+			.slice(match.index + match[0].length)
+			.replace(/^[\s,.:;!?-]+/, "")
+			.replace(/^(?:and|then|so)\s+/i, "")
+			.trim();
+	}
+	return undefined;
+}
+
+function remainderWithoutBudgetPhrase(remainder: string): string {
+	let next = remainder;
+	for (const pattern of TOKEN_BUDGET_PATTERNS) {
+		next = next.replace(pattern, " ");
+	}
+	return next
+		.replace(/\b(?:with|of|is|a|the|:|=)\b/gi, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function isBudgetOnlyRemainder(remainder: string): boolean {
+	if (!remainder || STANDALONE_GOAL_FILLER.test(remainder)) return true;
+	try {
+		if (parseRequestedTokenBudget(remainder) === undefined) return false;
+	} catch {
+		return false;
+	}
+	const leftover = remainderWithoutBudgetPhrase(remainder);
+	return leftover.length === 0 || STANDALONE_GOAL_FILLER.test(leftover);
+}
+
+function userMessageText(content: unknown): string {
+	if (typeof content === "string") return content.trim();
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter(
+			(block): block is { type: "text"; text: string } =>
+				typeof block === "object" &&
+				block !== null &&
+				"type" in block &&
+				block.type === "text" &&
+				"text" in block &&
+				typeof block.text === "string",
+		)
+		.map((block) => block.text)
+		.join("")
+		.trim();
+}
+
+/** Latest owner prompt that is not the current classification phrase itself. */
+export function priorUserPromptText(
+	messages: readonly { role: string; content?: unknown }[],
+	currentText: string,
+): string | undefined {
+	const current = currentText.trim();
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "user") continue;
+		const text = userMessageText(message.content);
+		if (!text || text === current) continue;
+		return text;
+	}
+	return undefined;
+}
+
+export function parseExplicitChatGoal(text: string, priorUserText?: string): ExplicitChatGoal | undefined {
 	for (const pattern of EXPLICIT_GOAL_PATTERNS) {
 		const match = pattern.exec(text);
 		const rawObjective = match?.[1];
@@ -141,7 +214,19 @@ export function parseExplicitChatGoal(text: string): ExplicitChatGoal | undefine
 		const tokenBudget = parseRequestedTokenBudget(text, objectiveSpan);
 		return { objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
 	}
-	return undefined;
+	const remainder = standaloneGoalRemainder(text);
+	if (remainder === undefined) return undefined;
+	const tokenBudget = parseRequestedTokenBudget(text);
+	const inline = remainder && !isBudgetOnlyRemainder(remainder) ? remainder : undefined;
+	const prior = priorUserText?.trim();
+	const objective =
+		inline && inline.length <= MAX_GOAL_OBJECTIVE_LENGTH
+			? inline
+			: prior && prior !== text.trim() && prior.length <= MAX_GOAL_OBJECTIVE_LENGTH
+				? prior
+				: undefined;
+	if (!objective) return undefined;
+	return { objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
 }
 
 /** Exact owner authority for model-facing goal creation; ordinary work and meta-discussion fail closed. */

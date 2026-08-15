@@ -3,6 +3,7 @@
 ### Fixed
 
 - Empty `profile_inspect` bases no longer read as a start gate. Native `delegate start` still omits `profileId` and uses `authority`; `profile_create` is the only action that needs an owner-authored explorer or implementer base.
+- An explicit owner phrase such as `this is a goal` or `the task is a goal` now starts the durable goal from the rest of that message or the previous user task, instead of only authorizing a later `goal start` tool call.
 
 ## [0.91.3] - 2026-08-15
 

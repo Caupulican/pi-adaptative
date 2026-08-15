@@ -65,7 +65,8 @@ Use `/goal resume` when you want to resume the blocked goal in the current sessi
 sessions.
 
 An explicit goal stated in normal chat does not require `/goal`. Phrases such as `Set a persistent
-goal: ...`, `The goal is to ...`, or `Keep working until this is complete: ...` create the same durable
+goal: ...`, `The goal is to ...`, `Keep working until this is complete: ...`, `this is a goal.
+<task>`, or a follow-up `this is a goal` / `the task is a goal` after a task create the same durable
 goal record. Pi deliberately does not infer persistence from an ordinary multi-step request, and it
 will not replace an unfinished goal implicitly. Active chat-created goals use the normal bounded,
 hidden continuation trigger and survive compaction through one compact active-goal projection.

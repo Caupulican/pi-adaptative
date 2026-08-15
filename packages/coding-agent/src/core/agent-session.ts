@@ -2619,7 +2619,7 @@ export class AgentSession {
 
 			if (!options?.internalContextType) {
 				goalToolStartAuthority = parseExplicitGoalStartAuthority(expandedText);
-				const admission = this._goals.admitExplicitChatGoal(expandedText);
+				const admission = this._goals.admitOwnerChatGoal(expandedText, this.agent.state.messages);
 				if (admission.status === "started") admittedGoalId = admission.state.goalId;
 				if (admission.status === "unfinished_goal_exists") {
 					this._emit({
