@@ -484,7 +484,7 @@ const CAVEMAN_DELEGATE_GUIDELINE =
 	"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; budget=authority.budget; idle=reuse.";
 
 const CAVEMAN_PROFILE_GUIDELINE =
-	"CAVEMAN MODE - MANDATORY: profileId/model must be available or omitted; never invent IDs.";
+	"CAVEMAN MODE - MANDATORY: profileId/model must be available or omitted; never invent IDs. Empty owner bases do not block start; omit profileId and use authority.";
 
 const CAVEMAN_QUEUE_GUIDELINE =
 	"CAVEMAN MODE - MANDATORY: queued=admitted; no interrupt; parallel read-only=no write/edit.";
@@ -608,7 +608,7 @@ function orchestrationProfileGuidelines(
 ): string[] {
 	if (!profiles || profiles.length === 0) {
 		return [
-			"No orchestration presets. Children inherit caller model/reasoning/tools/paths/resources/remaining budget.",
+			"No orchestration presets. Children inherit caller model/reasoning/tools/paths/resources/remaining budget. Empty profile_inspect bases do not block start.",
 		];
 	}
 	const visibleProfiles = profiles.slice(0, MAX_VISIBLE_ORCHESTRATION_PROFILES);

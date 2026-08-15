@@ -95,6 +95,11 @@ export function delegateProfilePanelModel(details: DelegateProfileToolDetails): 
 	};
 }
 
+export function formatTaskProfileInspection(inspection: TaskProfileInspection): string {
+	const bases = inspection.baseProfiles.map((profile) => profile.profileId).join(", ") || "none";
+	return `Reusable owner-authored bases for profile_create: ${bases}. Native delegate start does not need a base; omit profileId and set authority.role to explorer or implementer. profile_create requires an owner-authored explorer or implementer base. Available configured models: ${inspection.models.length}.`;
+}
+
 export function executeDelegateProfileAction(
 	action: DelegateProfileAction,
 	input: DelegateProfileInput,
@@ -106,7 +111,7 @@ export function executeDelegateProfileAction(
 			content: [
 				{
 					type: "text",
-					text: `Authorized bases: ${inspection.baseProfiles.map((profile) => profile.profileId).join(", ") || "none"}. Available configured models: ${inspection.models.length}.`,
+					text: formatTaskProfileInspection(inspection),
 				},
 			],
 			details: { started: true, action, kind: "profile", created: false, inspection },

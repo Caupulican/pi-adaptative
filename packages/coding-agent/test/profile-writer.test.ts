@@ -8,7 +8,11 @@ import {
 	SESSION_TASK_PROFILE_CUSTOM_TYPE,
 	SessionTaskProfileStore,
 } from "../src/core/orchestration/session-task-profile-store.ts";
-import type { DelegateProfileToolDetails } from "../src/core/tools/profile-writer.ts";
+import {
+	type DelegateProfileToolDetails,
+	executeDelegateProfileAction,
+	formatTaskProfileInspection,
+} from "../src/core/tools/profile-writer.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
 
@@ -40,6 +44,26 @@ function taskProfile(profileId: string): OrchestrationProfile {
 }
 
 describe("delegate profile actions", () => {
+	it("does not treat empty inspect bases as a start block", () => {
+		const text = formatTaskProfileInspection({
+			baseProfiles: [],
+			models: [{ provider: "faux", modelId: "m", thinkingLevels: ["off"] }],
+		});
+		expect(text).toContain("Reusable owner-authored bases for profile_create: none");
+		expect(text).toContain("Native delegate start does not need a base");
+		expect(text).not.toContain("Authorized bases:");
+
+		const inspected = executeDelegateProfileAction(
+			"profile_inspect",
+			{},
+			{
+				inspectTaskProfileOptions: () => ({ baseProfiles: [], models: [] }),
+				createTaskProfile: () => ({ created: false }),
+			},
+		);
+		expect(inspected.content[0]?.text).toContain("Native delegate start does not need a base");
+	});
+
 	it("creates one immutable session profile and dispatches the selected fast model with only requested tools", async () => {
 		const base = workerProfile("base-profile", "base-worker");
 		const harness = await createHarness({
