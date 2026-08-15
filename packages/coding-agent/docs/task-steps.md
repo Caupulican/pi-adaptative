@@ -31,6 +31,7 @@ The native tool supports:
 - `list`: show open work; set `showCompleted` to include terminal steps.
 - `compact`: archive completed and cancelled counts while retaining open work.
 - `clear`: remove all tracked and archived steps.
+- `advance`: complete the current step and start the next pending step.
 
 An update selector can be `current`/`active`, an exact step ID, a unique ID prefix, or unique step content. IDs are shown in tool and command output for unambiguous updates.
 

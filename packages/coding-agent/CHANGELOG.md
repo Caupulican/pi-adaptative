@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Host-owned `pipeline` tool walks numbered folder stages (ICM): status is `output/` files, increment completes the current stage then starts the next. `task_steps advance` and `goal increment` share that complete-current-then-start-next verb. Goal complete refuses an active pipeline; pipeline increment refuses linked open task_steps and running `tool_task`s. Current-stage context is injected as a GC-managed `<pipeline_context>` page. Workers and lean models cannot activate `pipeline`. The bundled `icm-architect` skill is the authoring method for building a workspace; the runtime does not name it from the tool.
+
 ## [0.91.0] - 2026-08-14
 
 ### Breaking Changes

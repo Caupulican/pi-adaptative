@@ -61,6 +61,7 @@ export function isWorkerSession(env: NodeJS.ProcessEnv = process.env): boolean {
  */
 export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"goal",
+	"pipeline",
 	"ask_question",
 	"secret_store",
 	"skill",

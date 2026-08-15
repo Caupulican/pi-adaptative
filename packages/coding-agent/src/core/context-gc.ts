@@ -110,6 +110,7 @@ const DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS: Required<SemanticMemoryGcSettings> = 
 		// fresh every turn from live TaskStepsState -- same GC treatment as a memory recall page (Bug
 		// #7 lineage): pack stale turn-copies down to the most recent one instead of accumulating.
 		"<task_steps_context",
+		"<pipeline_context",
 	],
 };
 
@@ -138,6 +139,7 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 		"subagent",
 		"delegate",
 		"task_steps",
+		"pipeline",
 		"task_background",
 		"task_goal",
 		"run_ledger",

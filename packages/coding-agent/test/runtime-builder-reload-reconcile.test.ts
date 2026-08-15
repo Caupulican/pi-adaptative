@@ -127,6 +127,8 @@ function makeDeps(cwd: string, resourceLoader: ResourceLoader): TestDeps {
 		saveGoalStateSnapshot: () => unreachable("saveGoalStateSnapshot"),
 		getTaskStepsStateSnapshot: () => unreachable("getTaskStepsStateSnapshot"),
 		saveTaskStepsStateSnapshot: () => unreachable("saveTaskStepsStateSnapshot"),
+		getPipelineRunSnapshot: () => undefined,
+		savePipelineRunSnapshot: () => unreachable("savePipelineRunSnapshot"),
 		getContextGcReport: () => unreachable("getContextGcReport"),
 		startWorkerDelegation: () => unreachable("startWorkerDelegation"),
 		getOrchestrationProfileCatalog: () => [],

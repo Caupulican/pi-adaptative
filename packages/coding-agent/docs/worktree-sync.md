@@ -164,7 +164,7 @@ environment value a lane-bound process can set to shed the worker ceiling below.
 
 ### Forbidden-tool ceiling
 
-A worker session can never activate: `goal`, `delegate`, `improvement_loop`,
+A worker session can never activate: `goal`, `pipeline`, `delegate`, `improvement_loop`,
 `extensionify`, `skillify`, `run_toolkit_script`, `model_fitness`, `tmux_agent_manager`,
 `context_scout`, `python`. This is enforced as the FIRST line of the tool registry's allow
 predicate (`RuntimeBuilder.refreshToolRegistry`'s `isAllowedTool`) -- it wins over an allow-list,

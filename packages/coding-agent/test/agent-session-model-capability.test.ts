@@ -27,6 +27,7 @@ describe("model capability auto-detection", () => {
 				"write",
 				"goal",
 				"task_steps",
+				"pipeline",
 				"ask_question",
 				"secret_store",
 				"delegate",

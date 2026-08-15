@@ -18,6 +18,7 @@ const DEFAULT_ACTIVE = [
 	"write",
 	"context_audit",
 	"goal",
+	"pipeline",
 	"task_steps",
 	"ask_question",
 	"delegate",

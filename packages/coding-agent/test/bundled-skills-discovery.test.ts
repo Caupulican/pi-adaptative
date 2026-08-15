@@ -37,6 +37,7 @@ describe("bundled skills discovery", () => {
 		const authorizedWebSecurityAudit = skills.find((s) => s.name === "authorized-web-security-audit");
 		const secureAgentToolSurfaces = skills.find((s) => s.name === "secure-agent-tool-surfaces");
 		const workerProfileWriter = skills.find((s) => s.name === "worker-profile-writer");
+		const icmArchitect = skills.find((s) => s.name === "icm-architect");
 
 		expect(skillArchitect).toBeDefined();
 		expect(skillCreator).toBeDefined();
@@ -47,6 +48,7 @@ describe("bundled skills discovery", () => {
 		expect(authorizedWebSecurityAudit).toBeDefined();
 		expect(secureAgentToolSurfaces).toBeDefined();
 		expect(workerProfileWriter).toBeDefined();
+		expect(icmArchitect).toBeDefined();
 
 		// Verify bundled skills have correct source info
 		if (skillArchitect) {

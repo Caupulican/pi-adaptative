@@ -9,6 +9,7 @@ const COLLAPSED_FILE_SNIPPET = 3;
 /** Human nouns for collapsed group headers. Keys are toolGroup ids, not raw tool names. */
 const GROUP_NOUNS: Record<string, { singular: string; plural: string }> = {
 	task_steps: { singular: "Task Step", plural: "Task Steps" },
+	pipeline: { singular: "Pipeline", plural: "Pipelines" },
 	skills: { singular: "Skill", plural: "Skills" },
 	delegate: { singular: "Worker", plural: "Workers" },
 	explore: { singular: "Search", plural: "Searches" },

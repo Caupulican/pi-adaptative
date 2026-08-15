@@ -307,6 +307,53 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(blocked.error).toContain("tool_task");
 		expect(blocked.error).toContain("tool-task-1");
 	});
+
+	it("increments by satisfying the first open requirement from unused evidence", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r2", text: "Do Y" }, "T2"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed" },
+				"T3",
+			),
+		);
+		state = expectOk(applyGoalAction(state, { action: "increment" }, "T4"));
+		expect(state.requirements[0].status).toBe("satisfied");
+		expect(state.requirements[1].status).toBe("open");
+	});
+
+	it("refuses increment when the current requirement has no unused evidence", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		const blocked = applyGoalAction(state, { action: "increment" }, "T2");
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("no unused evidence");
+	});
+
+	it("refuses agent complete while an active pipeline remains", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed" },
+				"T2",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T3"),
+		);
+		const blocked = applyGoalAction(state, { action: "complete" }, "T4", {
+			activePipeline: { runId: "run-1", pipelineName: "draft", status: "active", goalId: "g1" },
+		});
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("pipeline");
+		expect(blocked.error).toContain("run-1");
+	});
 });
 
 function expectOk(result: ReturnType<typeof applyGoalAction>) {

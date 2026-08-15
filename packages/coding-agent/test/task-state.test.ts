@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { advanceTaskSteps } from "../src/core/pipelines/increment.ts";
 import {
 	addTaskStep,
 	clearTaskSteps,
@@ -67,6 +68,20 @@ describe("task step state", () => {
 		expect(() => resolveTaskStepSelector(state.steps, "verify")).toThrow(/ambiguous/i);
 		expect(() => resolveTaskStepSelector(state.steps, "current")).toThrow(/No in_progress/i);
 		expect(() => resolveTaskStepSelector(state.steps, "missing")).toThrow(/not found/i);
+	});
+
+	it("advances by completing the current step and starting the next pending step", () => {
+		const state = setTaskSteps(
+			createTaskStepsState("T0"),
+			[{ content: "Inspect", status: "in_progress" }, { content: "Implement" }, { content: "Verify" }],
+			"T1",
+		);
+		const first = advanceTaskSteps(state, "T2");
+		expect(first.result).toMatchObject({ surface: "task_steps", from: "step-1", to: "step-2", completed: false });
+		expect(first.state.steps.map((step) => step.status)).toEqual(["completed", "in_progress", "pending"]);
+		const last = advanceTaskSteps(advanceTaskSteps(first.state, "T3").state, "T4");
+		expect(last.result.completed).toBe(true);
+		expect(last.state.steps.every((step) => step.status === "completed")).toBe(true);
 	});
 
 	it("updates one step, appends bounded evidence, and demotes the prior active step", () => {

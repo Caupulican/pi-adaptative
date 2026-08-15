@@ -63,6 +63,7 @@ export type GoalAction =
 	| { action: "progress" }
 	| { action: "no_progress" }
 	| { action: "complete" }
+	| { action: "increment" }
 	| { action: "block_goal"; reason: string };
 
 export type GoalActionName = GoalAction["action"];
@@ -94,6 +95,8 @@ export interface ApplyGoalActionOptions {
 	openTaskSteps?: readonly OpenTaskStepRef[];
 	/** Live background tool_task records used to re-check kind:"tool" evidence at complete time. */
 	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
+	/** Active ICM pipeline run; agent complete refuses while a joined or any active run remains. */
+	activePipeline?: { runId: string; pipelineName: string; goalId?: string; status: string };
 }
 
 function requirementExists(state: GoalState, requirementId: string): boolean {
@@ -149,6 +152,27 @@ export function applyGoalAction(
 			ok: false,
 			error: `Goal '${current.goalId}' is ${current.status}. Lifecycle changes are owner/system controlled; use the /goal controls.`,
 		};
+	}
+
+	if (action.action === "increment") {
+		const firstOpen = current.requirements.find((requirement) => requirement.status === "open");
+		if (firstOpen) {
+			const used = new Set(current.requirements.flatMap((requirement) => requirement.evidenceIds));
+			const unused = current.evidence.filter((evidence) => !used.has(evidence.id)).map((evidence) => evidence.id);
+			if (unused.length === 0) {
+				return {
+					ok: false,
+					error: `Cannot increment goal: open requirement '${firstOpen.id}' has no unused evidence. Record evidence, then increment.`,
+				};
+			}
+			return applyGoalAction(
+				current,
+				{ action: "satisfy_requirement", requirementId: firstOpen.id, evidenceIds: unused },
+				now,
+				options,
+			);
+		}
+		return applyGoalAction(current, { action: "complete" }, now, options);
 	}
 
 	const event = toGoalEvent(current, action, now, options);
@@ -294,6 +318,8 @@ function toGoalEvent(
 			return { ok: true, event: { type: "progress", now } };
 		case "no_progress":
 			return { ok: true, event: { type: "no_progress", now } };
+		case "increment":
+			return { ok: false, error: "increment must be expanded by applyGoalAction." };
 		case "complete": {
 			const unsatisfied = state.requirements.filter((requirement) => requirement.status !== "satisfied");
 			if (unsatisfied.length > 0) {
@@ -318,6 +344,16 @@ function toGoalEvent(
 					ok: false,
 					error: `Cannot complete goal: cited tool_task(s) are not complete (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
 				};
+			}
+			const activePipeline = options?.activePipeline;
+			if (activePipeline && activePipeline.status === "active") {
+				const joined = !activePipeline.goalId || activePipeline.goalId === state.goalId;
+				if (joined) {
+					return {
+						ok: false,
+						error: `Cannot complete goal: pipeline '${activePipeline.pipelineName}' run '${activePipeline.runId}' is still active. Increment or abandon it first.`,
+					};
+				}
 			}
 			const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
 			if (requireVerifiedEvidence && unprovenRequirementIds.length > 0) {

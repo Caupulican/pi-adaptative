@@ -1,5 +1,6 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { advanceTaskSteps } from "../pipelines/increment.ts";
 import {
 	addTaskStep,
 	clearTaskSteps,
@@ -71,6 +72,7 @@ const taskStepsSchema = Type.Object(
 				Type.Literal("clear"),
 				Type.Literal("compact"),
 				Type.Literal("intake"),
+				Type.Literal("advance"),
 			],
 			{ description: "Checklist action. Use list to read without mutation." },
 		),
@@ -262,6 +264,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Use for complex/explicitly tracked work, not one-step work. Keep one in_progress step.",
 			"Batch transitions. Address first open step; record evidence/blocker. Never call only to narrate unchanged state.",
 			"intake preserves every supplied item; link steps to active goal requirementIds.",
+			"advance completes the current step then starts the next pending step.",
 			"Attach completed tool_task taskIds as evidence. Goal complete refuses while linked steps stay open.",
 			"Before final: clear stale in_progress, discuss/defer remainder. Goal owns outcomes; delegate owns workers.",
 		],
@@ -349,6 +352,11 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 					case "compact":
 						state = compactTaskSteps(state, timestamp);
 						break;
+					case "advance": {
+						const advanced = advanceTaskSteps(before, timestamp);
+						state = advanced.state;
+						break;
+					}
 					case "list":
 						if (input.clearCompleted) state = compactTaskSteps(state, timestamp);
 						break;

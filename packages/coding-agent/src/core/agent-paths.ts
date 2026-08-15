@@ -74,6 +74,7 @@ export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"prompts",
 	"themes",
 	"profiles",
+	"pipelines",
 	"state",
 	"cache",
 	"bin",
@@ -319,7 +320,7 @@ export function gitDir(agentDir: string): string {
 	return join(agentDir, "git");
 }
 
-export type AgentResourceKind = "skills" | "prompts" | "themes" | "extensions" | "profiles";
+export type AgentResourceKind = "skills" | "prompts" | "themes" | "extensions" | "profiles" | "pipelines";
 
 /** `<agentDir>/<kind>` -- a user-managed resource directory. Root, kept: moving it breaks users. */
 export function resourceDir(kind: AgentResourceKind, agentDir: string): string {

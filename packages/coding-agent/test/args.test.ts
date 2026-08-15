@@ -51,6 +51,7 @@ describe("parseArgs", () => {
 				const output = log.mock.calls.map((call) => call.join(" ")).join("\n");
 				expect(output).toContain("python");
 				expect(output).toContain("task_steps");
+				expect(output).toContain("pipeline");
 				expect(output).toContain("ask_question");
 				expect(output).not.toContain("task_goal");
 				expect(output).not.toContain("task_background");

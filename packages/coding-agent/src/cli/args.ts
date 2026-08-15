@@ -451,6 +451,7 @@ ${chalk.bold("Built-in Tool Names:")}
   edit       - Edit files with find/replace
   write      - Write files (creates/overwrites)
   task_steps - Track the active session checklist
+  pipeline   - Walk a numbered ICM folder pipeline one stage at a time
   ask_question - Ask the human owner for a consequential choice
   secret_store - Capture and manage model-blind owner credentials
   context_audit - Inspect active context/tool/system prompt usage (read-only)

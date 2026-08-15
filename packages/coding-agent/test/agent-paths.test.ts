@@ -111,7 +111,7 @@ describe("agent-paths SSOT accessors", () => {
 	});
 
 	it("resourceDir builds each user-resource directory at the agentDir root", () => {
-		for (const kind of ["skills", "prompts", "themes", "extensions", "profiles"] as const) {
+		for (const kind of ["skills", "prompts", "themes", "extensions", "profiles", "pipelines"] as const) {
 			expect(resourceDir(kind, AGENT_DIR)).toBe(join(AGENT_DIR, kind));
 		}
 	});

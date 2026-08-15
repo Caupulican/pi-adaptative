@@ -35,6 +35,7 @@ const goalSchema = Type.Object(
 				Type.Literal("progress"),
 				Type.Literal("no_progress"),
 				Type.Literal("complete"),
+				Type.Literal("increment"),
 				Type.Literal("block_goal"),
 			],
 			{ description: "Goal record action." },
@@ -191,6 +192,8 @@ export interface GoalToolDependencies {
 	getOpenTaskSteps?: () => readonly OpenTaskStepRef[];
 	/** Live background tool_task records for kind:"tool" evidence and complete-time re-check. */
 	getBackgroundToolTasks?: () => readonly BackgroundToolTaskRef[];
+	/** Active ICM pipeline run for the complete/increment join. */
+	getActivePipeline?: () => { runId: string; pipelineName: string; goalId?: string; status: string } | undefined;
 	/** Model-facing start authority for the current foreground turn. Omitted by direct owner/test callers. */
 	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | undefined;
 	/**
@@ -300,6 +303,8 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			return { action: "no_progress" };
 		case "complete":
 			return { action: "complete" };
+		case "increment":
+			return { action: "increment" };
 		case "block_goal":
 			return { action: "block_goal", reason: input.reason ?? "" };
 		case "get":
@@ -375,7 +380,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 		promptGuidelines: [
 			"Start only for explicit persistent chat/system goal. get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
-			"complete needs current authoritative evidence, no remaining work, no linked open task_steps, no running tool_task. block_goal needs same real impasse for 3 goal turns.",
+			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
+			"complete needs current authoritative evidence, no remaining work, no linked open task_steps, no running tool_task, no active pipeline. block_goal needs same real impasse for 3 goal turns.",
 		],
 		parameters: goalSchema,
 		renderShell: "self",
@@ -533,6 +539,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 					requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
 					openTaskSteps: deps.getOpenTaskSteps?.(),
 					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
+					activePipeline: deps.getActivePipeline?.(),
 				});
 				if (!result.ok) {
 					return {

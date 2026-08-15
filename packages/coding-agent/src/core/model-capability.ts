@@ -52,6 +52,7 @@ export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"delegate",
 	"context_audit",
 	"goal",
+	"pipeline",
 	"worktree_sync",
 	"improvement_loop",
 	"extensionify",

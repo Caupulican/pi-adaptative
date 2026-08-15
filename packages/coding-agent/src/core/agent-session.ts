@@ -157,6 +157,12 @@ import {
 } from "./models/perf-profile.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import {
+	appendPipelineRunSnapshot,
+	formatActivePipelineContext,
+	getLatestPipelineRunSnapshot,
+	type PipelineRun,
+} from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
@@ -921,6 +927,8 @@ export class AgentSession {
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
+			getPipelineRunSnapshot: () => this.getPipelineRunSnapshot(),
+			savePipelineRunSnapshot: (run) => this.savePipelineRunSnapshot(run),
 			getContextGcReport: (messages) => this.getContextGcReport(messages),
 			startWorkerDelegation: (request) => this._backgroundLanes.startWorkerDelegation(request),
 			workerAgentControl: this._backgroundLanes,
@@ -2788,6 +2796,20 @@ export class AgentSession {
 				);
 			}
 
+			const pipelineRun = options?.internalContextType ? undefined : this.getPipelineRunSnapshot();
+			const pipelineContext = pipelineRun ? formatActivePipelineContext(pipelineRun) : undefined;
+			if (pipelineRun && pipelineContext) {
+				messages.push(
+					createCustomMessage(
+						"pipeline_context",
+						pipelineContext,
+						false,
+						{ revision: pipelineRun.revision },
+						new Date().toISOString(),
+					),
+				);
+			}
+
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(
 				expandedText,
@@ -3610,6 +3632,16 @@ export class AgentSession {
 	/** Retrieve the latest valid native task-step state from the active session log. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined {
 		return getLatestTaskStepsStateSnapshot(this.sessionManager);
+	}
+
+	/** Save the active ICM pipeline run pointer to the session log. */
+	savePipelineRunSnapshot(run: PipelineRun): string {
+		return appendPipelineRunSnapshot(this.sessionManager, run);
+	}
+
+	/** Latest valid pipeline run snapshot on the active branch. */
+	getPipelineRunSnapshot(): PipelineRun | undefined {
+		return getLatestPipelineRunSnapshot(this.sessionManager);
 	}
 
 	/**

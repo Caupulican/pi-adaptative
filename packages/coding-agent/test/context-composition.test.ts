@@ -130,6 +130,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"edit",
 					"goal",
 					"improvement_loop",
+					"pipeline",
 					"python",
 					"read",
 					"run_toolkit_script",
@@ -149,13 +150,14 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// compactRedundantEnumConstraints). Default surface now also includes skillify,
 			// skill_audit, and improvement_loop. Measured stable values: toolSchemaTokens 3406,
 			// delegate 844 (enum-heavy actions).
-			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_450);
+			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_650);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
-			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(430);
+			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(460);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
-			expect(toolTokens.get("goal")).toBeLessThanOrEqual(250);
+			expect(toolTokens.get("goal")).toBeLessThanOrEqual(280);
+			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);
 			// sorted heaviest-first
 			for (let index = 1; index < report.tools.length; index++) {
 				expect(report.tools[index - 1]!.schemaTokens).toBeGreaterThanOrEqual(report.tools[index]!.schemaTokens);

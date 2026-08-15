@@ -39,7 +39,7 @@ import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { getShellEnv } from "../utils/shell.ts";
-import { managedSecretEnvDir, secretVaultFile } from "./agent-paths.ts";
+import { managedSecretEnvDir, resourceDir, secretVaultFile } from "./agent-paths.ts";
 import type {
 	IsolatedCompletionOptions,
 	IsolatedCompletionResult,
@@ -87,6 +87,7 @@ import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
+import { isPipelineRunActive, type PipelineRun } from "./pipelines/types.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
 import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -122,6 +123,7 @@ import { createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
+import { createPipelineToolDefinition } from "./tools/pipeline.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
@@ -328,6 +330,8 @@ export interface RuntimeBuilderDeps {
 	/** Native task-step state accessors. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
 	saveTaskStepsStateSnapshot(state: TaskStepsState): string;
+	getPipelineRunSnapshot(): PipelineRun | undefined;
+	savePipelineRunSnapshot(run: PipelineRun): string;
 	/** Context-gc report for the core diagnostics tool. */
 	getContextGcReport(messages: AgentMessage[]): ContextGcReport;
 	/** Non-blocking worker-delegation starter for the delegate tool. */
@@ -1001,6 +1005,16 @@ export class RuntimeBuilder {
 					// SessionManager access needed for the cross-visibility nudge.
 					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
 					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
+					getActivePipeline: () => {
+						const run = this.deps.getPipelineRunSnapshot();
+						if (!run || !isPipelineRunActive(run)) return undefined;
+						return {
+							runId: run.runId,
+							pipelineName: run.pipelineName,
+							goalId: run.goalId,
+							status: run.status,
+						};
+					},
 				});
 				this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
 			}
@@ -1012,6 +1026,20 @@ export class RuntimeBuilder {
 					},
 				});
 				this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
+			}
+			if (toolAccess.allows("pipeline")) {
+				const pipelineToolDefinition = createPipelineToolDefinition({
+					cwd: () => this.deps.getCwd(),
+					agentPipelinesDir: () => resourceDir("pipelines", this.deps.getAgentDir()),
+					getPipelineRun: () => this.deps.getPipelineRunSnapshot(),
+					savePipelineRun: (run) => {
+						this.deps.savePipelineRunSnapshot(run);
+					},
+					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
+					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
+				});
+				this._baseToolDefinitions.set(pipelineToolDefinition.name, pipelineToolDefinition);
 			}
 			if (toolAccess.allows("ask_question")) {
 				const askQuestionToolDefinition = createAskQuestionToolDefinition({
