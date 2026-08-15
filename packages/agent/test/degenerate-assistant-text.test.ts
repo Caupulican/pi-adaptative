@@ -58,6 +58,12 @@ describe("degenerate assistant text", () => {
 		expect(shouldAbortDegenerateStream(looping)).toBe(true);
 	});
 
+	it("does not treat a long run of one filler character as a tiled status sentence", () => {
+		const filler = "x".repeat(220_000);
+		expect(collapseRepeatedLines(filler)).toBe(filler);
+		expect(shouldAbortDegenerateStream(filler)).toBe(false);
+	});
+
 	it("collapses a status sentence concatenated with no space", () => {
 		const sentence = "Session ended mid-implementation. Checking the written plan and what actually landed.";
 		expect(collapseRepeatedLines(sentence + sentence)).toBe(sentence);

@@ -65,16 +65,23 @@ function splitSentences(text: string): string[] {
 	return text.split(/(?<=[.!?])\s+/);
 }
 
-/** Smallest unit that tiles `text` exactly, if the tile is long enough and repeats. */
+function isProseTile(unit: string): boolean {
+	return /[.!?]/.test(unit) || /\s/.test(unit);
+}
+
+/** Smallest power-of-two prose tile that repeats to `text` (`Foo.Foo.` / `Foo.`×4). */
 export function exactTiledRepeat(text: string): { unit: string; times: number } | undefined {
 	if (text.length < DEGENERATE_EXACT_REPEAT_MIN * 2) return undefined;
-	for (let period = DEGENERATE_EXACT_REPEAT_MIN; period <= text.length / 2; period++) {
-		if (text.length % period !== 0) continue;
-		const unit = text.slice(0, period);
-		const times = text.length / period;
-		if (unit.repeat(times) === text) return { unit, times };
+	let unit = text;
+	let times = 1;
+	while (unit.length >= DEGENERATE_EXACT_REPEAT_MIN * 2 && unit.length % 2 === 0) {
+		const half = unit.length / 2;
+		const next = unit.slice(0, half);
+		if (!isProseTile(next) || next !== unit.slice(half)) break;
+		unit = next;
+		times *= 2;
 	}
-	return undefined;
+	return times > 1 ? { unit, times } : undefined;
 }
 
 /**
