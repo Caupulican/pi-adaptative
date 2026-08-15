@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Bun-compiled binaries now await CLI startup, preventing RPC mode from exiting before it attaches stdin and returns the first response on Windows.
+
 ## [0.91.4] - 2026-08-15
 
 ### Fixed

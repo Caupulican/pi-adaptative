@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: false
+      verify_only:
+        description: Build and verify artifacts without creating a GitHub Release or publishing npm
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -65,7 +70,7 @@ jobs:
 
   verify-windows-binary:
     name: Verify Windows binary (${{ matrix.arch }})
-    if: ${{ github.event_name == 'push' || inputs.skip_windows_verify != true }}
+    if: github.event_name == 'push' || inputs.verify_only == true || inputs.skip_windows_verify != true
     strategy:
       fail-fast: false
       matrix:
@@ -173,6 +178,7 @@ jobs:
           if ($rpc.ExitCode -ne 0) { throw "pi.exe RPC smoke failed with exit code $($rpc.ExitCode)" }
 
   release:
+    if: github.event_name == 'push' || inputs.verify_only != true
     runs-on: ubuntu-latest
     # Binary build is the publish gate. Windows RPC smoke is extra product
     # verification and must not block npm after a green test SHA.

@@ -6,6 +6,16 @@ import { describe, expect, it } from "vitest";
 const REPOSITORY_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 describe("release workflow quality gate", () => {
+	it("can verify tagged artifacts on Windows without publishing a release", () => {
+		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
+
+		expect(release).toContain("verify_only:");
+		expect(release).toContain(
+			"if: github.event_name == 'push' || inputs.verify_only == true || inputs.skip_windows_verify != true",
+		);
+		expect(release).toContain("if: github.event_name == 'push' || inputs.verify_only != true");
+	});
+
 	it("gates npm publish on the tagged quality-gate and binary build, not Windows RPC smoke", () => {
 		const ci = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
 		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");

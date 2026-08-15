@@ -40,4 +40,4 @@ if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.h
 }
 
 const { main } = await import("./main.ts");
-main(cliArgs);
+await main(cliArgs);
