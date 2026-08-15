@@ -7,6 +7,7 @@
  */
 import { APP_NAME, VERSION } from "./config.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
+import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 
 process.title = APP_NAME;
 process.env.PI_CODING_AGENT = "true";
@@ -37,6 +38,11 @@ if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.h
 	}
 	printHelp([]);
 	process.exit(0);
+}
+
+const finiteCommands = new Set(["--version", "-v", "--list-models", "--export"]);
+if (!packageCommands.has(firstArg ?? "") && !cliArgs.some((argument) => finiteCommands.has(argument))) {
+	startCliPowerShellWarmStart({ cwd: process.cwd(), env: process.env });
 }
 
 const { main } = await import("./main.ts");

@@ -4,6 +4,9 @@ import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { ensureManagedJscpd } from "./bundled-jscpd.ts";
 import { normalizePath } from "./paths.ts";
+import { POWERSHELL_ARGS, POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "./powershell-session-protocol.ts";
+
+export { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "./powershell-session-protocol.ts";
 
 export type PlatformShellToolName = "bash" | "powershell";
 
@@ -13,10 +16,6 @@ export interface ShellConfig {
 }
 
 export const POWERSHELL_UTF8_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
-/** Native PowerShell cold starts can cross five seconds under loaded Windows/WSL hosts. */
-export const POWERSHELL_STARTUP_PROBE_TIMEOUT_MS = 15_000;
-
-const POWERSHELL_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"];
 
 export function getPlatformShellToolName(platform: NodeJS.Platform = process.platform): PlatformShellToolName {
 	return platform === "win32" ? "powershell" : "bash";

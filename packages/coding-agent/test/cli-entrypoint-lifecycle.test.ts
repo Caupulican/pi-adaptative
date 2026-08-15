@@ -11,8 +11,11 @@ describe("CLI entrypoint lifecycle", () => {
 
 	it("keeps finite version and help fast paths ahead of main startup", () => {
 		const mainImport = cliEntrypoint.indexOf('await import("./main.ts")');
+		const powerShellWarmStart = cliEntrypoint.indexOf("startCliPowerShellWarmStart({");
 		expect(mainImport).toBeGreaterThan(0);
 		expect(cliEntrypoint.indexOf('firstArg === "--version"')).toBeLessThan(mainImport);
 		expect(cliEntrypoint.indexOf('cliArgs.includes("--help")')).toBeLessThan(mainImport);
+		expect(powerShellWarmStart).toBeGreaterThan(cliEntrypoint.indexOf('cliArgs.includes("--help")'));
+		expect(powerShellWarmStart).toBeLessThan(mainImport);
 	});
 });

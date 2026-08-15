@@ -7,6 +7,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
+import { setChildProcessLoopRef } from "../../utils/child-process-ref.ts";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 
 export interface PersistentChildHandlers {
@@ -108,17 +109,7 @@ export class PersistentProcessCoordinator {
 	setLoopRef(active: boolean): void {
 		const child = this.currentChild;
 		if (!child) return;
-		const streams = [child.stdin, child.stdout, child.stderr] as unknown as Array<{
-			ref?: () => void;
-			unref?: () => void;
-		} | null>;
-		if (active) {
-			child.ref();
-			for (const stream of streams) stream?.ref?.();
-		} else {
-			child.unref();
-			for (const stream of streams) stream?.unref?.();
-		}
+		setChildProcessLoopRef(child, active);
 	}
 
 	private clear(child: ChildProcess): boolean {
