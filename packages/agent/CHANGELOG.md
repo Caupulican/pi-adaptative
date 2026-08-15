@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Collapsed a status sentence concatenated with no space (`Foo.Foo.`), dropped a later text block that repeats an earlier one, and dropped a later tool call with the same execution identity, so a Responses double-emit cannot persist or re-execute into the next turn.
+
 ## [0.91.2] - 2026-08-15
 
 ## [0.91.1] - 2026-08-15

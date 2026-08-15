@@ -179,7 +179,7 @@
 		"generate-models": "node scripts/generate-models.ts",
 		"generate-image-models": "node scripts/generate-image-models.ts",
 		"build": "npm run generate-models && npm run generate-image-models && node ../../scripts/run-tsc.mjs -p tsconfig.build.json",
-		"test": "vitest --run",
+		"test": "vitest --run --bail=1",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {

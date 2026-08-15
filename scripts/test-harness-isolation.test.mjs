@@ -264,6 +264,7 @@ test("the mandatory root check owns the isolated release-test harness contract",
 		"node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs",
 	);
 	assert.match(packageJson.scripts.check, /npm run check:test-harness-isolation/);
+	assert.equal(packageJson.scripts.test, "node scripts/run-workspace-tests.mjs");
 });
 
 test("the release command runs the full isolated suite before version mutation", () => {

@@ -89,6 +89,30 @@ export function pickWorkflowConclusion(runs, sha) {
 	return { state: "missing" };
 }
 
+/**
+ * Snapshot verdict for starting a versioned prepare. Never polls: an unfinished
+ * or missing CI run is a hard refuse so we do not buy a second full matrix.
+ */
+export function interpretHeadWorkflow(match, sha, workflow) {
+	if (match.state === "completed" && match.conclusion === "success") return { ok: true };
+	if (match.state === "pending") {
+		return {
+			ok: false,
+			error: `HEAD ${sha} ${workflow} is ${match.status}. Wait for that run to succeed, then retry prepare. Do not start a versioned release while CI is unfinished.`,
+		};
+	}
+	if (match.state === "completed") {
+		return {
+			ok: false,
+			error: `HEAD ${sha} ${workflow} concluded ${match.conclusion}. Fix that commit; do not prepare a new version on a red tree.`,
+		};
+	}
+	return {
+		ok: false,
+		error: `HEAD ${sha} has no ${workflow} run. Push main and wait for CI to succeed before prepare.`,
+	};
+}
+
 export function partitionReleaseChanges(statusOutput, repoRoot = ".") {
 	const allowlist = computeReleaseAllowlist(repoRoot);
 	const changedPaths = collectChangedPaths(statusOutput);

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Reused the Responses message and function-call blocks created on `output_item.added` when later items arrive before `output_item.done`, so xAI/Grok no longer persist the same status sentence or tool call twice.
+
 ## [0.91.2] - 2026-08-15
 
 ## [0.91.1] - 2026-08-15

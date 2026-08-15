@@ -137,6 +137,17 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain('FILE "/repo/AGENTS.md"');
 		});
 
+		test("encodes deferred Windows paths as JSON so join() backslashes are not a substring", () => {
+			const winPath = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\proj\\AGENTS.md";
+			const prompt = buildSystemPrompt({
+				contextFiles: [{ path: winPath }],
+				skills: [],
+				cwd: process.cwd(),
+			});
+			expect(prompt).toContain(JSON.stringify(winPath));
+			expect(prompt).not.toContain(winPath);
+		});
+
 		test("keeps skill metadata out of the stable prompt and emits only the mandatory vault rule", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "skill"],

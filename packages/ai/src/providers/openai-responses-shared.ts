@@ -418,13 +418,46 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 	};
 	const finalizedOutputItemKeys = new Set<string>();
-	const outputItemKey = (item: { type: string; id?: string | null; call_id?: string }): string | undefined => {
+	const functionCallBlocksByItemId = new Map<string, ToolCall & { partialJson?: string }>();
+	const functionCallBlocksByCallId = new Map<string, ToolCall & { partialJson?: string }>();
+	const outputItemKeys = (item: { type: string; id?: string | null; call_id?: string }): string[] => {
 		if (item.type === "reasoning" || item.type === "message") {
-			return item.id ? `${item.type}:${item.id}` : undefined;
+			return item.id ? [`${item.type}:${item.id}`] : [];
 		}
 		if (item.type === "function_call") {
-			return `function_call:${item.call_id ?? ""}|${item.id ?? ""}`;
+			const keys: string[] = [];
+			if (item.id) keys.push(`function_call:id:${item.id}`);
+			if (item.call_id) keys.push(`function_call:call:${item.call_id}`);
+			keys.push(`function_call:${item.call_id ?? ""}|${item.id ?? ""}`);
+			return keys;
 		}
+		return [];
+	};
+	const registerFunctionCallBlock = (
+		item: { id?: string | null; call_id?: string },
+		block: ToolCall & { partialJson?: string },
+	): void => {
+		if (item.id) functionCallBlocksByItemId.set(item.id, block);
+		if (item.call_id) functionCallBlocksByCallId.set(item.call_id, block);
+	};
+	const findFunctionCallBlock = (
+		item: ResponseFunctionToolCall,
+	): (ToolCall & { partialJson?: string }) | undefined => {
+		const id = `${item.call_id}|${item.id}`;
+		const byExactId = output.content.find(
+			(candidate): candidate is ToolCall & { partialJson?: string } =>
+				candidate.type === "toolCall" && candidate.id === id,
+		);
+		if (byExactId) return byExactId;
+		if (item.id) {
+			const byItemId = functionCallBlocksByItemId.get(item.id);
+			if (byItemId) return byItemId;
+		}
+		if (item.call_id) {
+			const byCallId = functionCallBlocksByCallId.get(item.call_id);
+			if (byCallId) return byCallId;
+		}
+		if (currentBlock?.type === "toolCall") return currentBlock;
 		return undefined;
 	};
 	const contentIndexOf = (block: AssistantMessage["content"][number]): number => output.content.indexOf(block);
@@ -432,8 +465,8 @@ export async function processResponsesStream<TApi extends Api>(
 		item: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall,
 		emit: boolean,
 	): void => {
-		const key = outputItemKey(item);
-		if (key && finalizedOutputItemKeys.has(key)) return;
+		const keys = outputItemKeys(item);
+		if (keys.some((key) => finalizedOutputItemKeys.has(key))) return;
 
 		if (item.type === "reasoning") {
 			if (item.summary) {
@@ -466,7 +499,7 @@ export async function processResponsesStream<TApi extends Api>(
 				});
 			}
 			if (currentBlock === block) currentBlock = null;
-			if (key) finalizedOutputItemKeys.add(key);
+			for (const key of keys) finalizedOutputItemKeys.add(key);
 			return;
 		}
 
@@ -483,6 +516,23 @@ export async function processResponsesStream<TApi extends Api>(
 						candidate.type === "text" && parseTextSignature(candidate.textSignature)?.id === item.id,
 				);
 			}
+			// xAI/Grok emits message.added + deltas, then function_call items, then
+			// message.done / response.output. currentBlock has already moved to the
+			// tool; the live text block must be reused or the same sentence is stored
+			// twice (unsigned before tools, signed after).
+			if (!block) {
+				block = [...output.content]
+					.reverse()
+					.find(
+						(candidate): candidate is TextContent =>
+							candidate.type === "text" &&
+							!candidate.textSignature &&
+							(candidate.text === "" ||
+								text === "" ||
+								text.startsWith(candidate.text) ||
+								candidate.text.startsWith(text)),
+					);
+			}
 			const isNew = !block;
 			if (!block) {
 				block = { type: "text", text: "" };
@@ -498,20 +548,12 @@ export async function processResponsesStream<TApi extends Api>(
 				stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
 			}
 			if (currentBlock === block) currentBlock = null;
-			if (key) finalizedOutputItemKeys.add(key);
+			for (const key of keys) finalizedOutputItemKeys.add(key);
 			return;
 		}
 
 		const id = `${item.call_id}|${item.id}`;
-		let block: (ToolCall & { partialJson?: string }) | undefined = output.content.find(
-			(candidate): candidate is ToolCall & { partialJson?: string } =>
-				candidate.type === "toolCall" && candidate.id === id,
-		);
-		if (!block && currentBlock?.type === "toolCall") {
-			block = currentBlock;
-			block.id = id;
-			block.name = options?.toolNameMap?.toOriginalName(item.name) ?? item.name;
-		}
+		let block = findFunctionCallBlock(item);
 		const isNew = !block;
 		if (!block) {
 			block = {
@@ -521,9 +563,13 @@ export async function processResponsesStream<TApi extends Api>(
 				arguments: {},
 			};
 			output.content.push(block);
+		} else {
+			block.id = id;
+			block.name = options?.toolNameMap?.toOriginalName(item.name) ?? item.name;
 		}
 		block.arguments = parseStreamingJson(block.partialJson || item.arguments || "{}");
 		delete block.partialJson;
+		registerFunctionCallBlock(item, block);
 		if (emit) {
 			const contentIndex = contentIndexOf(block);
 			if (isNew) {
@@ -532,7 +578,7 @@ export async function processResponsesStream<TApi extends Api>(
 			stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 		}
 		if (currentBlock === block) currentBlock = null;
-		if (key) finalizedOutputItemKeys.add(key);
+		for (const key of keys) finalizedOutputItemKeys.add(key);
 	};
 	const applyResponseOutput = (
 		responseOutput: NonNullable<
@@ -633,10 +679,14 @@ export async function processResponsesStream<TApi extends Api>(
 					currentBlock = { type: "thinking", thinking: "" };
 					currentReasoningSummaryPartText = "";
 					output.content.push(currentBlock);
+					if (item.id) reasoningBlocksById.set(item.id, currentBlock);
 					stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
 				} else if (item.type === "message") {
 					currentItem = item;
 					currentBlock = { type: "text", text: "" };
+					if (item.id) {
+						currentBlock.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
+					}
 					output.content.push(currentBlock);
 					stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
 				} else if (item.type === "function_call") {
@@ -649,6 +699,7 @@ export async function processResponsesStream<TApi extends Api>(
 						partialJson: item.arguments || "",
 					};
 					output.content.push(currentBlock);
+					registerFunctionCallBlock(item, currentBlock);
 					stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
 				}
 			} else if (event.type === "response.reasoning_summary_part.added") {

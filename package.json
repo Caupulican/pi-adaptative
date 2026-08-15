@@ -26,7 +26,7 @@
 		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
-		"test": "npm run test --workspaces --if-present",
+		"test": "node scripts/run-workspace-tests.mjs",
 	"test:destructive": "npm run test:destructive --workspace=packages/coding-agent",
 	"test:destructive:crash": "npm run test:destructive:crash --workspace=packages/coding-agent",
 	"test:destructive:chaos": "npm run test:destructive:chaos --workspace=packages/coding-agent",

@@ -7,6 +7,7 @@ import {
 	computeReleaseAllowlist,
 	parsePorcelainPath,
 	partitionReleaseChanges,
+	interpretHeadWorkflow,
 	pickWorkflowConclusion,
 } from "./release-staging.mjs";
 
@@ -65,4 +66,21 @@ test("pickWorkflowConclusion prefers success over a cancelled run on the same SH
 		pickWorkflowConclusion([{ headSha: sha, status: "in_progress", conclusion: null }], sha),
 		{ state: "pending", status: "in_progress" },
 	);
+});
+
+test("interpretHeadWorkflow refuses prepare unless HEAD CI already succeeded", () => {
+	const sha = "def456";
+	assert.deepEqual(interpretHeadWorkflow({ state: "completed", conclusion: "success" }, sha, "ci.yml"), {
+		ok: true,
+	});
+	const pending = interpretHeadWorkflow({ state: "pending", status: "in_progress" }, sha, "ci.yml");
+	assert.equal(pending.ok, false);
+	assert.match(pending.error, /in_progress/);
+	assert.match(pending.error, /Do not start a versioned release/);
+	const failed = interpretHeadWorkflow({ state: "completed", conclusion: "failure" }, sha, "ci.yml");
+	assert.equal(failed.ok, false);
+	assert.match(failed.error, /red tree/);
+	const missing = interpretHeadWorkflow({ state: "missing" }, sha, "ci.yml");
+	assert.equal(missing.ok, false);
+	assert.match(missing.error, /has no ci.yml run/);
 });

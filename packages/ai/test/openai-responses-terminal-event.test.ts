@@ -326,6 +326,160 @@ async function* createDoneWithoutAddedEvents(): AsyncIterable<ResponseStreamEven
 	} as unknown as ResponseStreamEvent;
 }
 
+async function* createFunctionCallAddedThenMessageThenFunctionCallDoneEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: {
+			type: "function_call",
+			id: "fc_xai",
+			call_id: "call_xai",
+			name: "python",
+			arguments: "",
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.function_call_arguments.delta",
+		item_id: "fc_xai",
+		delta: '{"code":"print(1)"}',
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.added",
+		item: { id: "msg_after", type: "message", role: "assistant", status: "in_progress", content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_text.delta",
+		item_id: "msg_after",
+		content_index: 0,
+		delta: "Running the extractor.",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "msg_after",
+			type: "message",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "output_text", text: "Running the extractor.", annotations: [] }],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			type: "function_call",
+			id: "fc_xai",
+			call_id: "call_xai",
+			name: "python",
+			arguments: '{"code":"print(1)"}',
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_xai_tool_interleaved",
+			status: "completed",
+			output: [
+				{
+					type: "function_call",
+					id: "fc_xai",
+					call_id: "call_xai",
+					name: "python",
+					arguments: '{"code":"print(1)"}',
+				},
+				{
+					id: "msg_after",
+					type: "message",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Running the extractor.", annotations: [] }],
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
+async function* createMessageAddedThenFunctionCallThenMessageDoneEvents(): AsyncIterable<ResponseStreamEvent> {
+	yield {
+		type: "response.output_item.added",
+		item: { id: "msg_xai", type: "message", role: "assistant", status: "in_progress", content: [] },
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_text.delta",
+		item_id: "msg_xai",
+		content_index: 0,
+		delta: "Checking Claude project sessions for that UUID.",
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.added",
+		item: {
+			type: "function_call",
+			id: "fc_xai",
+			call_id: "call_xai",
+			name: "bash",
+			arguments: "",
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.function_call_arguments.delta",
+		item_id: "fc_xai",
+		delta: '{"command":"ls"}',
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			type: "function_call",
+			id: "fc_xai",
+			call_id: "call_xai",
+			name: "bash",
+			arguments: '{"command":"ls"}',
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.output_item.done",
+		item: {
+			id: "msg_xai",
+			type: "message",
+			role: "assistant",
+			status: "completed",
+			content: [
+				{
+					type: "output_text",
+					text: "Checking Claude project sessions for that UUID.",
+					annotations: [],
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		response: {
+			id: "resp_xai_interleaved",
+			status: "completed",
+			output: [
+				{
+					id: "msg_xai",
+					type: "message",
+					role: "assistant",
+					status: "completed",
+					content: [
+						{
+							type: "output_text",
+							text: "Checking Claude project sessions for that UUID.",
+							annotations: [],
+						},
+					],
+				},
+				{
+					type: "function_call",
+					id: "fc_xai",
+					call_id: "call_xai",
+					name: "bash",
+					arguments: '{"command":"ls"}',
+				},
+			],
+		},
+	} as unknown as ResponseStreamEvent;
+}
+
 async function* createOutputTextDeltasWithTerminalOutputEvents(): AsyncIterable<ResponseStreamEvent> {
 	yield {
 		type: "response.output_item.added",
@@ -644,5 +798,57 @@ describe("OpenAI Responses terminal events", () => {
 
 		expect(output.content).toHaveLength(1);
 		expect(output.content[0]).toMatchObject({ type: "text", text: "Hello world" });
+	});
+
+	it("reuses the added function-call block when another item arrives before function_call.done", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createFunctionCallAddedThenMessageThenFunctionCallDoneEvents(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		expect(output.content.filter((block) => block.type === "toolCall")).toHaveLength(1);
+		expect(output.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "call_xai|fc_xai",
+				name: "python",
+			}),
+			expect.objectContaining({
+				type: "text",
+				text: "Running the extractor.",
+			}),
+		]);
+		expect(output.stopReason).toBe("toolUse");
+	});
+
+	it("reuses the added message block when function calls arrive before message.done", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(
+			createMessageAddedThenFunctionCallThenMessageDoneEvents(),
+			output,
+			new AssistantMessageEventStream(),
+			model,
+		);
+
+		expect(output.content).toEqual([
+			expect.objectContaining({
+				type: "text",
+				text: "Checking Claude project sessions for that UUID.",
+			}),
+			expect.objectContaining({
+				type: "toolCall",
+				id: "call_xai|fc_xai",
+				name: "bash",
+			}),
+		]);
+		expect(output.content.filter((block) => block.type === "text")).toHaveLength(1);
+		expect(output.stopReason).toBe("toolUse");
 	});
 });

@@ -3,6 +3,8 @@
 ### Fixed
 
 - Release promote now dispatches the destructive suite on `release-vX.Y.Z` instead of a raw commit SHA, which GitHub rejects and left promote polling until timeout.
+- Release prepare now refuses unless HEAD already has a successful `ci.yml` run, so a red or unfinished tree cannot buy another full Ubuntu+Windows matrix or burn a version number.
+- CI skips `npm test` and the Windows runner on `Release v*` commits and on the tag publish quality gate. The suite already ran locally (`./test.sh`) and on HEAD. Workspace tests now stop at the first failing package or file.
 
 ## [0.91.2] - 2026-08-15
 

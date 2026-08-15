@@ -58,6 +58,67 @@ describe("degenerate assistant text", () => {
 		expect(shouldAbortDegenerateStream(looping)).toBe(true);
 	});
 
+	it("collapses a status sentence concatenated with no space", () => {
+		const sentence = "Session ended mid-implementation. Checking the written plan and what actually landed.";
+		expect(collapseRepeatedLines(sentence + sentence)).toBe(sentence);
+		expect(collapseRepeatedLines(sentence.repeat(4))).toBe(sentence);
+	});
+
+	it("drops a later tool call that repeats an earlier execution identity", () => {
+		const original = assistant("");
+		const first = {
+			type: "toolCall" as const,
+			id: "call-1",
+			name: "python",
+			arguments: { code: "print(1)", timeout: 30 },
+		};
+		original.content = [
+			first,
+			{
+				type: "toolCall",
+				id: "call-2",
+				name: "python",
+				arguments: { code: "print(1)", timeout: 90 },
+			},
+			{
+				type: "toolCall",
+				id: "call-3",
+				name: "python",
+				arguments: { code: "print(2)" },
+			},
+		];
+		const collapsed = collapseDegenerateAssistantMessage(original);
+		expect(collapsed.content).toEqual([
+			first,
+			{
+				type: "toolCall",
+				id: "call-3",
+				name: "python",
+				arguments: { code: "print(2)" },
+			},
+		]);
+		expect(isCollapsedDegenerateAssistantMessage(collapsed)).toBe(true);
+	});
+
+	it("drops a later text block that repeats an earlier block around tool calls", () => {
+		const sentence = "Session ended mid-implementation. Checking the written plan and what actually landed.";
+		const doubled = sentence + sentence;
+		const original = assistant("");
+		original.content = [
+			{ type: "text", text: doubled },
+			{
+				type: "toolCall",
+				id: "call-1",
+				name: "python",
+				arguments: { code: "print(1)" },
+			},
+			{ type: "text", text: doubled },
+		];
+		const collapsed = collapseDegenerateAssistantMessage(original);
+		expect(collapsed.content).toEqual([{ type: "text", text: sentence }, original.content[1]]);
+		expect(isCollapsedDegenerateAssistantMessage(collapsed)).toBe(true);
+	});
+
 	it("marks a collapsed generation loop so a leftover copy is not a halt report", () => {
 		const line = "Recovery exhausted. recovery_exhausted is not harness failure.";
 		const original = assistant(Array.from({ length: 8 }, () => line).join("\n"));

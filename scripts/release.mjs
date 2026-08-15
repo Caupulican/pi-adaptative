@@ -10,13 +10,16 @@
  * The release flow is split into two gated phases so a CI failure never costs a version number:
  *
  * PREPARE (major|minor|patch|x.y.z) - a pure function of the committed tree, no tag:
- * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused.
+ * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused,
+ *    and HEAD already has a successful ci.yml run. Refuse immediately if CI is missing, pending,
+ *    or red — do not buy a second full matrix by bumping a tree Windows has not already passed.
  * 2. Run the full isolated test suite.
  * 3. Bump version via npm run version:xxx or set an explicit version.
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date.
  * 5. Regenerate the coding-agent shrinkwrap.
  * 6. Run checks.
- * 7. Commit "Release vX.Y.Z" and push main (this is the commit CI must validate).
+ * 7. Commit "Release vX.Y.Z" and push main. CI on that commit is build+check only;
+ *    tests already ran locally and on the preflight SHA.
  * 8. Add new [Unreleased] sections to changelogs, commit, and push main again.
  * Any failure during steps 3-8 resets the local tree back to the preflight commit.
  *
@@ -34,7 +37,11 @@
 import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
-import { partitionReleaseChanges, pickWorkflowConclusion } from "./release-staging.mjs";
+import {
+	interpretHeadWorkflow,
+	partitionReleaseChanges,
+	pickWorkflowConclusion,
+} from "./release-staging.mjs";
 
 const RELEASE_TARGET = process.argv[2];
 const BUMP_TYPES = new Set(["major", "minor", "patch"]);
@@ -254,8 +261,27 @@ function preflight() {
 	assertTagIsFree(prospectiveVersion);
 
 	const preflightSha = run("git rev-parse HEAD", { silent: true }).trim();
+	assertHeadCiSucceeded(preflightSha);
 	console.log(`  Preflight OK at ${preflightSha} (prospective version ${prospectiveVersion})\n`);
 	return preflightSha;
+}
+
+function assertHeadCiSucceeded(sha) {
+	const repo = getRepoSlug();
+	const listing = run(
+		`gh run list -R ${shellQuote(repo)} --workflow=${CI_WORKFLOW} --json headSha,status,conclusion --limit 30`,
+		{ silent: true, ignoreError: true },
+	);
+	if (!listing) {
+		console.error(`Error: could not list ${CI_WORKFLOW} runs for ${repo}.`);
+		process.exit(1);
+	}
+	const verdict = interpretHeadWorkflow(pickWorkflowConclusion(JSON.parse(listing), sha), sha, CI_WORKFLOW);
+	if (!verdict.ok) {
+		console.error(`Error: ${verdict.error}`);
+		process.exit(1);
+	}
+	console.log(`  HEAD ${sha} already has a successful ${CI_WORKFLOW} run`);
 }
 
 function rollbackToPreflightSha(preflightSha) {
