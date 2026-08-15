@@ -29,14 +29,10 @@ jobs:
     name: Build, check, test (${{ matrix.os }})
     strategy:
       fail-fast: true
+      # Job-level `if` cannot see `matrix` (evaluated before expansion). Compute
+      # the OS list instead: skip Windows when tests are already proven.
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    # Release commits already paid for local ./test.sh and a green HEAD CI. Do not
-    # buy a Windows runner just to rebuild version metadata.
-    if: >
-      matrix.os == 'ubuntu-latest' ||
-      (inputs.skip_tests != true &&
-      (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v')))
+        os: ${{ fromJSON((inputs.skip_tests || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
