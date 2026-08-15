@@ -16,6 +16,15 @@ describe("release workflow quality gate", () => {
 		expect(release).toContain("if: github.event_name == 'push' || inputs.verify_only != true");
 	});
 
+	it("measures the same compiled-binary RPC and shell paths on Linux and Windows", () => {
+		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
+
+		expect(release).toContain("benchmark-linux-binary:");
+		expect(release).toContain("pi-linux-x64-benchmark.json");
+		expect(release).toContain(`pi-windows-\${{ matrix.arch }}-benchmark.json`);
+		expect(release.match(/release-binary-rpc-benchmark\.mjs/gu)).toHaveLength(2);
+	});
+
 	it("gates npm publish on the tagged quality-gate and binary build, not Windows RPC smoke", () => {
 		const ci = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
 		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
