@@ -320,6 +320,16 @@ function sanitizeExactActionInput(
 	for (const field of Object.keys(exactInput) as DelegateInputField[]) {
 		if (exactInput[field] !== undefined && !allowed.includes(field)) {
 			if (action === "start" && field === "task") {
+				const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
+				const instructionsText = typeof exactInput.instructions === "string" ? exactInput.instructions.trim() : "";
+				// `task` is a profile_create field on the shared schema. A start that only
+				// populated it still has the worker brief — use it. Both fields together is a
+				// conflict; do not drop either.
+				if (taskText && !instructionsText) {
+					exactInput.instructions = exactInput.task;
+					delete exactInput.task;
+					continue;
+				}
 				return {
 					input: exactInput,
 					violation: {

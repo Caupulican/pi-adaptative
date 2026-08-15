@@ -4,6 +4,11 @@
 
 - Empty `profile_inspect` bases no longer read as a start gate. Native `delegate start` still omits `profileId` and uses `authority`; `profile_create` is the only action that needs an owner-authored explorer or implementer base.
 - An explicit owner phrase such as `this is a goal` or `the task is a goal` now starts the durable goal from the rest of that message or the previous user task, instead of only authorizing a later `goal start` tool call.
+- Handover language after `this is a goal` (`by the way`, `i'm handing over`, sub-agent/role assignment) is classification, not the objective. The previous user task becomes the goal.
+- `delegate start` with only the shared-schema `task` field now starts the worker using that brief. Sending both `task` and `instructions` is still rejected so neither value is dropped.
+- Failed ad-hoc `python`/`node` `-c` or heredoc probes no longer advertise workspace edit/write repair. That guidance was steering the model to rewrite the probe instead of stopping.
+- `read` on a Pi session `.jsonl` now returns a labeled user/assistant/tool transcript. Thinking, signatures, and successful tool payloads are omitted so resume cannot dump the raw file into context.
+- Owner course-changes such as `instead of …, I want to …` and `I want to refactor …` now start the durable goal and authorize `goal start`.
 
 ## [0.91.3] - 2026-08-15
 

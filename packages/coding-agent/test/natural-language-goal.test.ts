@@ -26,6 +26,8 @@ describe("natural-language persistent goal admission", () => {
 			"Keep working until this is complete: fix the Windows harness and prove the regression.",
 			"fix the Windows harness and prove the regression.",
 		],
+		["instead of trace and fix, i want to refactor what is in place", "refactor what is in place"],
+		["I want to refactor the generator pipeline into one owner.", "refactor the generator pipeline into one owner."],
 	])("admits explicit durable chat intent", (text, objective) => {
 		expect(parseExplicitChatGoal(text)).toEqual({ objective });
 	});
@@ -73,6 +75,24 @@ describe("natural-language persistent goal admission", () => {
 		expect(parseExplicitChatGoal("treat this task as a goal", "Keep workers starting without a base.")).toEqual({
 			objective: "Keep workers starting without a base.",
 		});
+		expect(
+			parseExplicitChatGoal(
+				"this is a goal by the way, i'm handing over to you, use max 2 sub agents to help you deliver. You are the orchestrator and also reviewer and team lead",
+				"finish the mixed-surface generator so water and mountain stay present",
+			),
+		).toEqual({
+			objective: "finish the mixed-surface generator so water and mountain stay present",
+		});
+		expect(
+			parseExplicitChatGoal(
+				"this is a goal by the way, i'm handing over to you, use max 2 sub agents to help you deliver. You are the orchestrator and also reviewer and team lead",
+			),
+		).toBeUndefined();
+		expect(
+			parseExplicitGoalStartAuthority(
+				"this is a goal by the way, i'm handing over to you, use max 2 sub agents to help you deliver. You are the orchestrator and also reviewer and team lead",
+			),
+		).toEqual({});
 		expect(parseExplicitChatGoal("this is a goal")).toBeUndefined();
 		expect(parseExplicitChatGoal("this is a goal with a 40k token budget")).toBeUndefined();
 		expect(

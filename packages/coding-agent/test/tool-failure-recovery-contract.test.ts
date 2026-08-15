@@ -48,6 +48,17 @@ describe("tool-owned failure recovery contracts", () => {
 				{ failureCode: "operation_rejected" },
 			),
 		).toEqual([]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.(
+				{
+					command: "cd /tmp/proj && .venv/bin/python - <<'PY'\nfrom collections import Counter\nprint(1)\nPY",
+				},
+				{ failureCode: "exit_1" },
+			),
+		).toEqual([]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.({ command: "python -c 'print(1)'" }, { failureCode: "exit_1" }),
+		).toEqual([]);
 
 		const input = { path: "subject.txt", edits: [{ oldText: "before", newText: "after" }] };
 		const edit = createEditTool(cwd);

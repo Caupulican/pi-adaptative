@@ -31,6 +31,7 @@ import {
 } from "./file-failure-recovery.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
+import { isPiSessionJsonlPath, projectPiSessionJsonlLine } from "./session-transcript-read.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const readSchema = Type.Object({
@@ -530,10 +531,17 @@ export function createReadToolDefinition(
 										userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length;
 								}
 								const startLineDisplay = startLine + 1;
+								const projectSessionTranscript = isPiSessionJsonlPath(absolutePath);
+								if (projectSessionTranscript) {
+									slicedLines = slicedLines.map((item) => ({
+										text: projectPiSessionJsonlLine(item.text),
+										originalIndex: item.originalIndex,
+									}));
+								}
 								const firstSelectedLineText = slicedLines[0]?.text ?? "";
 
 								// Safe text filtering
-								let canFilter = true;
+								let canFilter = !projectSessionTranscript;
 								if (mimeType) {
 									canFilter = false;
 								} else {
@@ -644,6 +652,9 @@ export function createReadToolDefinition(
 								} else {
 									// No truncation and no remaining content.
 									outputText = truncation.content;
+								}
+								if (projectSessionTranscript) {
+									outputText = `Pi session transcript (user/assistant/tool labels only; thinking and payloads omitted).\n${outputText}`;
 								}
 								content = [{ type: "text", text: outputText }];
 							}

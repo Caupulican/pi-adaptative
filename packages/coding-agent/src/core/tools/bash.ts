@@ -444,6 +444,12 @@ function rebuildBashResultRenderComponent(
 	}
 }
 
+/** Ad-hoc python/node -c / heredoc probes are not workspace mutations. */
+function isAdHocInterpreterProbe(command: string): boolean {
+	if (!/(?:^|[\s;|&/`])(?:python\d*(?:\.\d+)?|pypy\d*|node)\b/i.test(command)) return false;
+	return /\s-c\b/.test(command) || /<</.test(command);
+}
+
 function createShellToolDefinition(
 	cwd: string,
 	backendShell: PlatformShellToolName,
@@ -496,8 +502,10 @@ function createShellToolDefinition(
 				],
 		parameters: bashSchema,
 		failureRecovery: {
-			getFailureTargets: (_params, failure) =>
-				failureRecoveryAuthority && /^exit_-?[1-9]\d*$/.test(failure.failureCode)
+			getFailureTargets: (params, failure) =>
+				failureRecoveryAuthority &&
+				/^exit_-?[1-9]\d*$/.test(failure.failureCode) &&
+				!isAdHocInterpreterProbe(typeof params.command === "string" ? params.command : "")
 					? [workspaceRecoveryTarget(failureRecoveryAuthority, WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, cwd)]
 					: [],
 		},

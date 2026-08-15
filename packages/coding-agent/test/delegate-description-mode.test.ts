@@ -203,12 +203,14 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
 	});
 
-	it("treats a misplaced start task as correctable input and preserves it for one retry", async () => {
+	it("starts a worker when the brief is only in the shared-schema task field", async () => {
 		let startCalls = 0;
+		let startedInstructions: string | undefined;
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
-			startWorkerDelegation: () => {
+			startWorkerDelegation: (input) => {
 				startCalls += 1;
+				startedInstructions = input.instructions;
 				return {
 					started: true,
 					record: { laneId: "worker-1", type: "worker", status: "queued" },
@@ -229,16 +231,13 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 
-		expect(text).toContain("CAVEMAN MODE - MANDATORY");
-		expect(text).toContain("expected API correction, not harness failure");
-		expect(text).toContain("Retry once now");
-		expect(text).toContain("move the complete task text unchanged into instructions");
-		expect(text).toContain("No worker started; nothing was dropped");
-		expect(startCalls).toBe(0);
-		expect(result.details).toEqual({
-			started: false,
-			skipReason: "action_field_forbidden",
-			action: "start",
+		expect(startCalls).toBe(1);
+		expect(startedInstructions).toBe("EXACT TASK TEXT");
+		expect(text).toContain("worker-1");
+		expect(result.details).toMatchObject({
+			started: true,
+			agentId: "worker-1",
+			status: "queued",
 		});
 	});
 

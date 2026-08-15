@@ -16,6 +16,8 @@ const EXPLICIT_GOAL_PATTERNS = [
 	/^\s*treat\s+this\s+as\s+my\s+(?:persistent\s+)?goal\s*:\s*(.+)$/is,
 	/^\s*i\s+want\s+this\s+as\s+(?:my\s+)?(?:persistent\s+)?goal\s*:\s*(.+)$/is,
 	/^\s*keep\s+working\s+until\s+this\s+is\s+(?:complete|done)\s*:\s*(.+)$/is,
+	/^\s*instead of .+,\s*i want to (.+)$/is,
+	/^\s*i want to ((?:refactor|rewrite|rebuild|redesign)\b.+)$/is,
 ] as const;
 
 const STANDALONE_GOAL_AUTHORITY_PATTERNS = [
@@ -28,6 +30,16 @@ const STANDALONE_GOAL_AUTHORITY_PATTERNS = [
 ] as const;
 
 const STANDALONE_GOAL_FILLER = /^(?:use it|please|now|ok|okay|thanks|go|do it)(?:[.!?])?$/i;
+
+const STANDALONE_GOAL_PROCESS_PHRASES = [
+	/\bby the way\b/gi,
+	/\bi(?:'m| am) handing (?:(?:this|it) )?over(?: to you)?\b/gi,
+	/\bhand(?:ing)? (?:(?:this|it) )?over(?: to you)?\b/gi,
+	/\buse max(?:imum)? \d+ sub[-\s]?agents?\b/gi,
+	/\byou are (?:the )?(?:orchestrator|reviewer|team lead)(?:(?:\s+and|\s*,)\s*(?:also\s+)?(?:the\s+)?(?:orchestrator|reviewer|team lead))*\b/gi,
+	/\bhelp you deliver\b/gi,
+	/\b(?:orchestrator|reviewer|team lead)\b/gi,
+] as const;
 
 /** Raised when text unambiguously states a token-budget directive but the amount cannot be resolved
  * to an exact positive integer. Callers must let this propagate as a loud, explicit failure instead
@@ -154,15 +166,29 @@ function remainderWithoutBudgetPhrase(remainder: string): string {
 		.trim();
 }
 
-function isBudgetOnlyRemainder(remainder: string): boolean {
+function remainderWithoutProcessPhrases(remainder: string): string {
+	let next = remainder;
+	for (const pattern of STANDALONE_GOAL_PROCESS_PHRASES) {
+		next = next.replace(pattern, " ");
+	}
+	return next
+		.replace(/\b(?:with|of|is|a|the|to|and|also|you|i|i'm|:|=)\b/gi, " ")
+		.replace(/[.,:;!?]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function isClassificationRemainder(remainder: string): boolean {
 	if (!remainder || STANDALONE_GOAL_FILLER.test(remainder)) return true;
+	const leftover = remainderWithoutProcessPhrases(remainder);
+	if (!leftover || STANDALONE_GOAL_FILLER.test(leftover)) return true;
 	try {
 		if (parseRequestedTokenBudget(remainder) === undefined) return false;
 	} catch {
 		return false;
 	}
-	const leftover = remainderWithoutBudgetPhrase(remainder);
-	return leftover.length === 0 || STANDALONE_GOAL_FILLER.test(leftover);
+	const afterBudget = remainderWithoutBudgetPhrase(leftover);
+	return afterBudget.length === 0 || STANDALONE_GOAL_FILLER.test(afterBudget);
 }
 
 function userMessageText(content: unknown): string {
@@ -217,7 +243,7 @@ export function parseExplicitChatGoal(text: string, priorUserText?: string): Exp
 	const remainder = standaloneGoalRemainder(text);
 	if (remainder === undefined) return undefined;
 	const tokenBudget = parseRequestedTokenBudget(text);
-	const inline = remainder && !isBudgetOnlyRemainder(remainder) ? remainder : undefined;
+	const inline = remainder && !isClassificationRemainder(remainder) ? remainder : undefined;
 	const prior = priorUserText?.trim();
 	const objective =
 		inline && inline.length <= MAX_GOAL_OBJECTIVE_LENGTH

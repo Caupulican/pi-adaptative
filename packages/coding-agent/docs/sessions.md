@@ -66,10 +66,16 @@ sessions.
 
 An explicit goal stated in normal chat does not require `/goal`. Phrases such as `Set a persistent
 goal: ...`, `The goal is to ...`, `Keep working until this is complete: ...`, `this is a goal.
-<task>`, or a follow-up `this is a goal` / `the task is a goal` after a task create the same durable
-goal record. Pi deliberately does not infer persistence from an ordinary multi-step request, and it
-will not replace an unfinished goal implicitly. Active chat-created goals use the normal bounded,
-hidden continuation trigger and survive compaction through one compact active-goal projection.
+<task>`, a follow-up `this is a goal` / `the task is a goal` after a task, `instead of …, I want
+to …`, or `I want to refactor/rewrite/rebuild/redesign …` create the same durable goal record.
+Handover wording (`by the way`, `i'm handing over`, sub-agent or role assignment) is classification
+only; the previous user task is the objective. Pi deliberately does not infer persistence from an
+ordinary multi-step request, and it will not replace an unfinished goal implicitly. Active
+chat-created goals use the normal bounded, hidden continuation trigger and survive compaction
+through one compact active-goal projection.
+
+Reading a session `.jsonl` with `read` returns a labeled transcript (user/assistant/tool names).
+Thinking, signatures, and successful tool payloads are omitted.
 
 ## Naming Sessions
 

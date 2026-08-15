@@ -36,6 +36,44 @@ describe("AgentSession natural-language goal admission", () => {
 		}
 	});
 
+	it("starts a durable goal when the owner replaces the approach with I-want-to-refactor", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("goal is active")]);
+			await harness.session.prompt("instead of trace and fix, i want to refactor what is in place", {
+				autoContinueGoal: false,
+			});
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				userGoal: "refactor what is in place",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("starts a durable goal from handover language using the previous user task", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("noted the task"), fauxAssistantMessage("goal is active")]);
+			await harness.session.prompt("finish the mixed-surface generator so water and mountain stay present", {
+				autoContinueGoal: false,
+			});
+			expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+
+			await harness.session.prompt(
+				"this is a goal by the way, i'm handing over to you, use max 2 sub agents to help you deliver. You are the orchestrator and also reviewer and team lead",
+				{ autoContinueGoal: false },
+			);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				userGoal: "finish the mixed-surface generator so water and mountain stay present",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("starts a durable goal when the owner later says the stated task is a goal", async () => {
 		const harness = await createHarness();
 		try {
