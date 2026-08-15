@@ -2,7 +2,6 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { BashExecutionController } from "../src/core/bash-execution-controller.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
-import { POWERSHELL_UTF8_PREFIX } from "../src/utils/shell.ts";
 
 const originalBitwardenSession = process.env.BW_SESSION;
 
@@ -96,7 +95,7 @@ describe("BashExecutionController", () => {
 		};
 
 		await controller.executeBash("node --version", undefined, { operations, platform: "win32", pythonEngine: false });
-		expect(executedCommand).toContain(POWERSHELL_UTF8_PREFIX);
+		expect(executedCommand).not.toContain("OutputEncoding");
 		expect(executedCommand).toContain("& 'node' '--version'");
 		expect(executedTimeout).toBe(120);
 
@@ -109,6 +108,25 @@ describe("BashExecutionController", () => {
 				pythonEngine: false,
 			}),
 		).rejects.toThrow(/Unsupported Bash construct on Windows/i);
+	});
+
+	it("decodes UTF-8 and Windows-1252 output in the owner Windows shell", async () => {
+		const controller = makeController();
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, options) => {
+				options.onData(Buffer.from("ação 日本 €\n", "utf8"));
+				options.onData(Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+				return { exitCode: 0 };
+			},
+		};
+
+		const result = await controller.executeBash("legacy-output.exe", undefined, {
+			operations,
+			platform: "win32",
+			pythonEngine: false,
+		});
+
+		expect(result.output).toBe("ação 日本 €\ncafé\n");
 	});
 
 	if (!resolvePython()) {

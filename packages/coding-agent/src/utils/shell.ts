@@ -1,10 +1,15 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
+import { basename, delimiter } from "node:path";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { ensureManagedJscpd } from "./bundled-jscpd.ts";
 import { normalizePath } from "./paths.ts";
-import { POWERSHELL_ARGS, POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "./powershell-session-protocol.ts";
+import {
+	createPowerShellHostEnvironment,
+	POWERSHELL_7_GUARD,
+	POWERSHELL_ARGS,
+	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
+} from "./powershell-session-protocol.ts";
 
 export { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "./powershell-session-protocol.ts";
 
@@ -15,14 +20,8 @@ export interface ShellConfig {
 	args: string[];
 }
 
-export const POWERSHELL_UTF8_PREFIX = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n";
-
 export function getPlatformShellToolName(platform: NodeJS.Platform = process.platform): PlatformShellToolName {
 	return platform === "win32" ? "powershell" : "bash";
-}
-
-export function prefixPowerShellCommand(command: string): string {
-	return command.trimStart().startsWith(POWERSHELL_UTF8_PREFIX) ? command : `${POWERSHELL_UTF8_PREFIX}${command}`;
 }
 
 function findExecutableOnPath(executable: string): string | null {
@@ -46,8 +45,9 @@ function findExecutableOnPath(executable: string): string | null {
 function isPowerShellExecutableAvailable(executable: string): boolean {
 	try {
 		return (
-			spawnSync(executable, [...POWERSHELL_ARGS, "Write-Output ok"], {
+			spawnSync(executable, [...POWERSHELL_ARGS, `${POWERSHELL_7_GUARD}Write-Output ok`], {
 				encoding: "utf-8",
+				env: createPowerShellHostEnvironment(process.env),
 				timeout: POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 				windowsHide: true,
 			}).status === 0
@@ -55,6 +55,10 @@ function isPowerShellExecutableAvailable(executable: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+function isPowerShell7Executable(executable: string): boolean {
+	return /^pwsh(?:\.exe)?$/iu.test(basename(executable));
 }
 
 /**
@@ -66,7 +70,7 @@ export function getPowerShellCandidateConfigs(): ShellConfig[] {
 	const candidates: ShellConfig[] = [];
 	const seen = new Set<string>();
 	const addCandidate = (shell: string | null): void => {
-		if (!shell) return;
+		if (!shell || !isPowerShell7Executable(shell)) return;
 		const identity = process.platform === "win32" ? shell.toLowerCase() : shell;
 		if (seen.has(identity)) return;
 		seen.add(identity);
@@ -79,13 +83,9 @@ export function getPowerShellCandidateConfigs(): ShellConfig[] {
 	const knownPaths: string[] = [];
 	const programFiles = process.env.ProgramFiles;
 	if (programFiles) knownPaths.push(`${programFiles}\\PowerShell\\7\\pwsh.exe`);
-	const systemRoot = process.env.SystemRoot;
-	if (systemRoot) knownPaths.push(`${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`);
 	for (const path of knownPaths) {
 		if (existsSync(path)) addCandidate(path);
 	}
-
-	addCandidate(findExecutableOnPath("powershell.exe"));
 	return candidates;
 }
 
@@ -93,9 +93,7 @@ function getPowerShellConfig(): ShellConfig {
 	for (const candidate of getPowerShellCandidateConfigs()) {
 		if (isPowerShellExecutableAvailable(candidate.shell)) return candidate;
 	}
-	throw new Error(
-		"No PowerShell executable found. Install PowerShell 7 (pwsh), restore Windows PowerShell, or set shellPath in settings.json.",
-	);
+	throw new Error("PowerShell 7 (pwsh) was not found. Install pwsh or set shellPath to a pwsh executable.");
 }
 
 function getBashConfig(): ShellConfig {
@@ -130,6 +128,9 @@ export function getShellConfig(
 ): ShellConfig {
 	if (customShellPath) {
 		const resolvedShellPath = normalizePath(customShellPath);
+		if (shellName === "powershell" && !isPowerShell7Executable(resolvedShellPath)) {
+			throw new Error(`Custom PowerShell host must be PowerShell 7 (pwsh): ${resolvedShellPath}`);
+		}
 		if (!existsSync(resolvedShellPath)) throw new Error(`Custom shell path not found: ${resolvedShellPath}`);
 		return {
 			shell: resolvedShellPath,

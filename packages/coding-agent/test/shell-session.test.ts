@@ -8,6 +8,7 @@ import {
 	disposePersistentShellSession,
 	PersistentShellSession,
 	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	type ShellSessionExecOptions,
 } from "../src/core/tools/shell-session.ts";
 import { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
@@ -82,6 +83,8 @@ describe("PersistentShellSession startup", () => {
 		writeFileSync(
 			goodFixture,
 			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
+process.stderr.write(stderrMarker);
 process.stdout.write(marker.slice(0, 4));
 setImmediate(() => process.stdout.write(marker.slice(4)));
 let pending = "";
@@ -94,7 +97,7 @@ process.stdin.on("data", (chunk) => {
 		pending = pending.slice(newline + 1);
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
-		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e");
+		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
 		process.stdout.write("ok\\n\\n\\x1e" + nonce + ":0\\x1e");
 		newline = pending.indexOf("\\n");
 	}
@@ -105,6 +108,7 @@ process.stdin.on("data", (chunk) => {
 		chmodSync(goodFixture, 0o755);
 
 		const spawnCalls: string[] = [];
+		const spawnEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
 		let resolutionCalls = 0;
 		const session = new PersistentShellSession("prewarm-fallback", "powershell", {
 			resolvePowerShellCandidates: () => {
@@ -116,6 +120,7 @@ process.stdin.on("data", (chunk) => {
 			},
 			spawn: (command: string, args: string[], options: SpawnOptions) => {
 				spawnCalls.push(command);
+				spawnEnvironments.push(options.env);
 				const fixture = command === "bad-powershell" ? badFixture : goodFixture;
 				return spawn(process.execPath, [fixture, ...args], options);
 			},
@@ -132,6 +137,14 @@ process.stdin.on("data", (chunk) => {
 			});
 			expect(resolutionCalls).toBe(1);
 			expect(spawnCalls).toEqual(["bad-powershell", "good-powershell"]);
+			for (const environment of spawnEnvironments) {
+				expect(environment).toMatchObject({
+					NO_COLOR: "1",
+					POWERSHELL_DIAGNOSTICS_OPTOUT: "1",
+					POWERSHELL_TELEMETRY_OPTOUT: "1",
+					POWERSHELL_UPDATECHECK: "Off",
+				});
+			}
 		} finally {
 			session.dispose();
 			rmSync(directory, { recursive: true, force: true });
@@ -144,6 +157,8 @@ process.stdin.on("data", (chunk) => {
 		writeFileSync(
 			fixture,
 			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
+process.stderr.write(stderrMarker);
 process.stdout.write(marker);
 let pending = "";
 process.stdin.setEncoding("utf8");
@@ -156,7 +171,10 @@ process.stdin.on("data", (chunk) => {
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
 		process.stdout.write("host-before-stderr\\n\\n\\x1e" + nonce + ":0\\x1e");
-		setTimeout(() => process.stderr.write("late-stderr\\x1e" + nonce + ":stderr\\x1e"), 50);
+		setTimeout(
+			() => process.stderr.write("late-stderr\\x1e" + nonce + ":stderr\\x1e\\n"),
+			50,
+		);
 		newline = pending.indexOf("\\n");
 	}
 });
@@ -346,6 +364,18 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 
 describe.skipIf(!HAS_POWERSHELL)("PersistentShellSession (powershell)", () => {
 	const cwd = process.cwd();
+
+	it("keeps the native code page while preserving managed Unicode output", async () => {
+		const session = makeSession("powershell");
+		const result = await run(
+			session,
+			"$__pi_cp = [Console]::OutputEncoding.CodePage; Write-Output 'ação 日本 €'; Write-Output ('codepage=' + $__pi_cp + ':' + [Console]::OutputEncoding.CodePage)",
+			cwd,
+		);
+		expect(result.output).toContain("ação 日本 €");
+		const codePages = result.output.match(/codepage=(\d+):(\d+)/u);
+		expect(codePages?.[1]).toBe(codePages?.[2]);
+	});
 
 	it("persists state across commands and reports native exit codes", async () => {
 		const session = makeSession("powershell");

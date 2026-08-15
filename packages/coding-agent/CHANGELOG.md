@@ -1,9 +1,19 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Native Windows now requires PowerShell 7 (`pwsh.exe`) as its sole agent-shell host; legacy Windows PowerShell 5.1 and custom non-`pwsh` shell paths are rejected.
+
+### Changed
+
+- The persistent Windows PowerShell host now uses process-scoped headless performance settings and a warmed command path without changing the native code page; managed Unicode stays UTF-8 and mixed Windows-1252 output is decoded compatibly.
+
 ### Fixed
 
 - Bun-compiled binaries now await CLI startup, preventing RPC mode from exiting before it attaches stdin and returns the first response on Windows.
 - Windows runtimes now prewarm and validate one persistent PowerShell process without a disposable startup probe, and release publishing is gated on native x64/ARM64 latency against Linux.
+- PowerShell command completion now joins stdout with a nonce-framed stderr barrier, preventing late stderr from leaking into the next command or racing session teardown.
+- Worker-lane teardown now disposes the complete Windows shell execution session before temporary directories are removed, preventing locked-cwd `EPERM` failures.
 
 ## [0.91.4] - 2026-08-15
 

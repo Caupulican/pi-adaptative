@@ -10,6 +10,7 @@ import {
 import {
 	PersistentShellSession,
 	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	type ShellSessionExecOptions,
 } from "../src/core/tools/shell-session.ts";
 
@@ -40,6 +41,8 @@ describe("early CLI PowerShell session handoff", () => {
 			fixture,
 			`import { appendFileSync } from "node:fs";
 const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
+process.stderr.write(stderrMarker);
 process.stdout.write(marker.slice(0, 3));
 setImmediate(() => process.stdout.write(marker.slice(3)));
 let pending = "";
@@ -54,7 +57,7 @@ process.stdin.on("data", (chunk) => {
 		const nonce = line.slice(0, separator);
 		const body = Buffer.from(line.slice(separator + 1), "base64").toString("utf8");
 		appendFileSync(process.env.PI_CAPTURE_PATH, JSON.stringify(body) + "\\n");
-		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e");
+		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
 		process.stdout.write("ok\\n\\n\\x1e" + nonce + ":0\\x1e");
 		newline = pending.indexOf("\\n");
 	}
@@ -67,6 +70,7 @@ process.stdin.on("data", (chunk) => {
 		const desiredEnv = { ...earlyEnv, PI_EARLY_ENV: "new", PI_LATE_ENV: "present" };
 		let earlySpawns = 0;
 		let fallbackResolutions = 0;
+		let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
 		startCliPowerShellWarmStart({
 			platform: "win32",
 			cwd: directory,
@@ -74,6 +78,7 @@ process.stdin.on("data", (chunk) => {
 			candidates: ["fixture-powershell"],
 			spawn: (_command: string, args: string[], options: SpawnOptions) => {
 				earlySpawns += 1;
+				spawnedEnvironment = options.env;
 				return spawn(process.execPath, [fixture, ...args], options);
 			},
 			startupTimeoutMs: 2_000,
@@ -93,6 +98,12 @@ process.stdin.on("data", (chunk) => {
 			});
 			expect(earlySpawns).toBe(1);
 			expect(fallbackResolutions).toBe(0);
+			expect(spawnedEnvironment).toMatchObject({
+				NO_COLOR: "1",
+				POWERSHELL_DIAGNOSTICS_OPTOUT: "1",
+				POWERSHELL_TELEMETRY_OPTOUT: "1",
+				POWERSHELL_UPDATECHECK: "Off",
+			});
 
 			const commands = readFileSync(capture, "utf8")
 				.trim()

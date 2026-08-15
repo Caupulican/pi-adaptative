@@ -9,6 +9,7 @@ import {
 } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../../config.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
+import { createShellOutputDecoder, type ShellOutputDecoder } from "./shell-output-decoder.ts";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
@@ -19,6 +20,8 @@ export interface OutputAccumulatorOptions {
 	persistAllOutput?: boolean;
 	/** Maximum raw bytes persisted to the managed output file. Defaults to no additional cap. */
 	maxPersistedBytes?: number;
+	/** Decode valid UTF-8 plus isolated Windows-1252 bytes from native Windows programs. */
+	windowsCompatibleEncoding?: boolean;
 }
 
 export interface OutputSnapshot {
@@ -88,7 +91,7 @@ export class OutputAccumulator {
 	private readonly tempDirectory: string;
 	private readonly persistAllOutput: boolean;
 	private readonly maxPersistedBytes: number;
-	private readonly decoder = new TextDecoder();
+	private readonly decoder: ShellOutputDecoder;
 
 	private rawChunks: Buffer[] = [];
 	private headLines: string[] = [];
@@ -122,6 +125,7 @@ export class OutputAccumulator {
 		this.tempDirectory = options.tempDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "tool-streams").path;
 		this.persistAllOutput = options.persistAllOutput ?? false;
 		this.maxPersistedBytes = options.maxPersistedBytes ?? Number.POSITIVE_INFINITY;
+		this.decoder = createShellOutputDecoder(options.windowsCompatibleEncoding);
 	}
 
 	append(data: Buffer): void {

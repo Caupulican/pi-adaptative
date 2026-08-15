@@ -1,15 +1,18 @@
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { setChildProcessLoopRef } from "../../utils/child-process-ref.ts";
 import {
+	createPowerShellHostEnvironment,
 	POWERSHELL_ARGS,
 	POWERSHELL_BOOTSTRAP,
 	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 } from "../../utils/powershell-session-protocol.ts";
 
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
-const DEFAULT_CANDIDATES = ["pwsh.exe", "powershell.exe"];
+const STDERR_READY_BYTES = Buffer.from(POWERSHELL_SESSION_STDERR_READY_MARKER, "latin1");
+const DEFAULT_CANDIDATES = ["pwsh.exe"];
 
 export interface CliPowerShellWarmStartOptions {
 	platform?: NodeJS.Platform;
@@ -40,6 +43,8 @@ function waitForReady(
 		let settled = false;
 		let stdout: Buffer = Buffer.alloc(0);
 		let stderr: Buffer = Buffer.alloc(0);
+		let stdoutReady = false;
+		let stderrReady = false;
 		let timeoutTimer: NodeJS.Timeout | undefined;
 
 		const diagnostic = (): string => {
@@ -60,17 +65,23 @@ function waitForReady(
 			child.kill();
 			reject(error);
 		};
-		const onStdout = (data: Buffer): void => {
-			if (settled) return;
-			stdout = stdout.length === 0 ? data : Buffer.concat([stdout, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
-			if (stdout.indexOf(READY_BYTES) === -1) return;
+		const resolveWhenReady = (): void => {
+			if (settled || !stdoutReady || !stderrReady) return;
 			settled = true;
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			resolve({ child, cwd, env, releaseStartupListeners });
 		};
+		const onStdout = (data: Buffer): void => {
+			if (settled) return;
+			stdout = stdout.length === 0 ? data : Buffer.concat([stdout, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
+			stdoutReady ||= stdout.indexOf(READY_BYTES) !== -1;
+			resolveWhenReady();
+		};
 		const onStderr = (data: Buffer): void => {
 			if (settled) return;
 			stderr = stderr.length === 0 ? data : Buffer.concat([stderr, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
+			stderrReady ||= stderr.indexOf(STDERR_READY_BYTES) !== -1;
+			resolveWhenReady();
 		};
 		const onError = (error: Error): void => fail(new Error(`${error.message}${diagnostic()}`));
 		const onExit = (code: number | null): void =>
@@ -122,7 +133,7 @@ export function startCliPowerShellWarmStart(options: CliPowerShellWarmStartOptio
 	warmStartClaimed = false;
 	warmStart = startFirstUsableSession({
 		cwd: options.cwd,
-		env: { ...options.env },
+		env: createPowerShellHostEnvironment(options.env),
 		candidates: options.candidates ?? DEFAULT_CANDIDATES,
 		startupTimeoutMs: options.startupTimeoutMs ?? POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 		spawnProcess: options.spawn ?? spawn,

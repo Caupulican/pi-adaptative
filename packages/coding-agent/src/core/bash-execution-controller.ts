@@ -84,6 +84,7 @@ export class BashExecutionController {
 				enableGitFilter,
 				timeout: resolveCommandTimeoutSeconds(options?.timeout),
 				environment,
+				windowsCompatibleEncoding: platform === "win32",
 			});
 
 			this.recordBashResult(command, result, options);

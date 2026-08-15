@@ -39,9 +39,11 @@ import { basename } from "node:path";
 import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
 import { type ChildProcess, type SpawnOptions, spawn } from "child_process";
 import {
+	createPowerShellHostEnvironment,
 	POWERSHELL_ARGS,
 	POWERSHELL_BOOTSTRAP,
 	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STDERR_BARRIER_LABEL,
 } from "../../utils/powershell-session-protocol.ts";
 import {
@@ -55,13 +57,17 @@ import {
 import { claimCliPowerShellWarmStart } from "./early-powershell-session.ts";
 import { PersistentProcessCoordinator } from "./persistent-process-coordinator.ts";
 
-export { POWERSHELL_SESSION_READY_MARKER } from "../../utils/powershell-session-protocol.ts";
+export {
+	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_SESSION_STDERR_READY_MARKER,
+} from "../../utils/powershell-session-protocol.ts";
 
 const SENTINEL_BYTE = 0x1e;
 /** Longest possible sentinel: "\n" + 0x1e + 16-hex nonce + ":" + exit code digits + 0x1e. */
 const SENTINEL_HOLDBACK_BYTES = 64;
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const POWERSHELL_SESSION_READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
+const POWERSHELL_SESSION_STDERR_READY_BYTES = Buffer.from(POWERSHELL_SESSION_STDERR_READY_MARKER, "latin1");
 
 export interface ShellSessionExecOptions {
 	onData: (data: Buffer) => void;
@@ -191,21 +197,22 @@ export class PersistentShellSession {
 	prewarm(cwd: string, env: NodeJS.ProcessEnv = getShellEnv()): Promise<void> {
 		return this.coordinator.runSerialized(async () => {
 			if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
+			const resolvedEnv = this.kind === "powershell" ? createPowerShellHostEnvironment(env) : env;
 			if (
 				this.kind !== "powershell" &&
 				this.coordinator.child &&
 				this.childEnv &&
-				!shallowEnvEquals(this.childEnv, env)
+				!shallowEnvEquals(this.childEnv, resolvedEnv)
 			) {
 				this.killChild();
 			}
-			if (!this.coordinator.child) await this.spawnChild(cwd, env);
+			if (!this.coordinator.child) await this.spawnChild(cwd, resolvedEnv);
 			if (
 				this.kind === "powershell" &&
 				this.childEnv &&
-				(!shallowEnvEquals(this.childEnv, env) || this.lastRequestedCwd !== cwd)
+				(!shallowEnvEquals(this.childEnv, resolvedEnv) || this.lastRequestedCwd !== cwd)
 			) {
-				const result = await this.execNow("", cwd, { onData: () => {}, env });
+				const result = await this.execNow("", cwd, { onData: () => {}, env: resolvedEnv });
 				if (result.exitCode !== 0) {
 					this.killChild();
 					throw new Error(`PowerShell session reconciliation failed with exit code ${result.exitCode ?? "null"}`);
@@ -232,7 +239,8 @@ export class PersistentShellSession {
 		if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
 
-		const resolvedEnv = env ?? getShellEnv();
+		const requestedEnv = env ?? getShellEnv();
+		const resolvedEnv = this.kind === "powershell" ? createPowerShellHostEnvironment(requestedEnv) : requestedEnv;
 		// The environment is spawn-time shell config: an env that differs from the running
 		// session's (e.g. a spawn hook rewriting it per command) requires a fresh shell.
 		if (
@@ -269,7 +277,7 @@ export class PersistentShellSession {
 				? buildPowerShellWire(resolvedCommand, nonce, cdTo)
 				: buildBashWire(resolvedCommand, nonce, cdTo);
 		const sentinelPrefix = Buffer.from(`\n\x1e${nonce}:`, "latin1");
-		const stderrBarrier = Buffer.from(`\x1e${nonce}:${POWERSHELL_STDERR_BARRIER_LABEL}\x1e`, "latin1");
+		const stderrBarrier = Buffer.from(`\x1e${nonce}:${POWERSHELL_STDERR_BARRIER_LABEL}\x1e\n`, "latin1");
 
 		this.coordinator.setLoopRef(true);
 		try {
@@ -446,9 +454,7 @@ export class PersistentShellSession {
 			}
 		}
 		const detail = failures.length > 0 ? ` Candidate failures: ${failures.join("; ")}` : "";
-		throw new Error(
-			`No PowerShell executable found. Install PowerShell 7 (pwsh), restore Windows PowerShell, or set shellPath in settings.json.${detail}`,
-		);
+		throw new Error(`PowerShell 7 (pwsh) was not found. Install pwsh before using the Windows shell.${detail}`);
 	}
 
 	private spawnPowerShellCandidate(shell: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
@@ -456,6 +462,8 @@ export class PersistentShellSession {
 			let startupSettled = false;
 			let startupStdout: Buffer = Buffer.alloc(0);
 			let startupStderr: Buffer = Buffer.alloc(0);
+			let stdoutReady = false;
+			let stderrReady = false;
 			let timeoutTimer: NodeJS.Timeout | undefined;
 
 			const settleStartup = (finish: () => void): void => {
@@ -471,6 +479,10 @@ export class PersistentShellSession {
 			};
 			const rejectStartup = (error: Error): void => {
 				settleStartup(() => reject(error));
+			};
+			const resolveWhenReady = (): void => {
+				if (!stdoutReady || !stderrReady) return;
+				settleStartup(resolve);
 			};
 
 			let child: ChildProcess;
@@ -499,11 +511,8 @@ export class PersistentShellSession {
 						startupStdout.length === 0
 							? data
 							: Buffer.concat([startupStdout, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
-					const markerIndex = startupStdout.indexOf(POWERSHELL_SESSION_READY_BYTES);
-					if (markerIndex === -1) return;
-					const trailing = startupStdout.subarray(markerIndex + POWERSHELL_SESSION_READY_BYTES.length);
-					settleStartup(resolve);
-					if (trailing.length > 0) this.activeExec?.onStdout(trailing);
+					stdoutReady ||= startupStdout.indexOf(POWERSHELL_SESSION_READY_BYTES) !== -1;
+					resolveWhenReady();
 				},
 				onStderr: (data) => {
 					if (startupSettled) {
@@ -514,6 +523,8 @@ export class PersistentShellSession {
 						startupStderr.length === 0
 							? data
 							: Buffer.concat([startupStderr, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
+					stderrReady ||= startupStderr.indexOf(POWERSHELL_SESSION_STDERR_READY_BYTES) !== -1;
+					resolveWhenReady();
 				},
 				onError: (error) => {
 					this.resetChildState();

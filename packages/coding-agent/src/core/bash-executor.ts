@@ -17,6 +17,7 @@ import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-strea
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
+import { createShellOutputDecoder } from "./tools/shell-output-decoder.ts";
 
 // ============================================================================
 // Types
@@ -33,6 +34,8 @@ export interface BashExecutorOptions {
 	timeout?: number;
 	/** Explicit process environment for both the filtered Git and shell execution paths. */
 	environment?: NodeJS.ProcessEnv;
+	/** Decode valid UTF-8 plus isolated Windows-1252 bytes from native Windows programs. */
+	windowsCompatibleEncoding?: boolean;
 }
 
 export interface BashResult {
@@ -131,13 +134,12 @@ export async function executeBashWithOperations(
 		}
 	};
 
-	const decoder = new TextDecoder();
+	const decoder = createShellOutputDecoder(options?.windowsCompatibleEncoding);
 
-	const onData = (data: Buffer) => {
-		totalBytes += data.length;
-
+	const appendDecodedOutput = (decoded: string) => {
 		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
-		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
+		const text = sanitizeBinaryOutput(stripAnsi(decoded)).replace(/\r/g, "");
+		if (text.length === 0) return;
 
 		// Start writing to temp file if exceeds threshold
 		if (totalBytes > DEFAULT_MAX_BYTES) {
@@ -163,6 +165,11 @@ export async function executeBashWithOperations(
 			options.onChunk(text);
 		}
 	};
+	const onData = (data: Buffer) => {
+		totalBytes += data.length;
+		appendDecodedOutput(decoder.decode(data, { stream: true }));
+	};
+	const finishDecoding = () => appendDecodedOutput(decoder.decode());
 
 	try {
 		const result = await operations.exec(command, cwd, {
@@ -171,6 +178,7 @@ export async function executeBashWithOperations(
 			timeout: options?.timeout,
 			env: options?.environment,
 		});
+		finishDecoding();
 
 		const fullOutput = outputChunks.join("");
 		const truncationResult = truncateMiddle(fullOutput);
@@ -192,6 +200,7 @@ export async function executeBashWithOperations(
 			fullOutputPath: tempFilePath,
 		};
 	} catch (err) {
+		finishDecoding();
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");

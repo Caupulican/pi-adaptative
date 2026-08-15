@@ -24,6 +24,7 @@ import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
 import { createReadTool } from "../tools/read.ts";
 import { createRunProcessTool } from "../tools/run-process.ts";
+import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
@@ -262,7 +263,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.shellSessionKey,
 			options.shellOutputDirectory,
 		),
-		dispose: () => fileMutationIntents.dispose(),
+		dispose: async () => {
+			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
+			await fileMutationIntents.dispose();
+		},
 		allowedTools,
 		deniedTools,
 		unboundAllowPatterns,

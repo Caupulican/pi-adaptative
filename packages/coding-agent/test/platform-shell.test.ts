@@ -12,12 +12,11 @@ import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { type BashToolOptions, createAllToolDefinitions, createBashToolDefinition } from "../src/core/tools/index.ts";
 import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
 import {
-	getPlatformShellToolName,
-	getShellConfig,
-	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
-	POWERSHELL_UTF8_PREFIX,
-	prefixPowerShellCommand,
-} from "../src/utils/shell.ts";
+	createPowerShellHostEnvironment,
+	POWERSHELL_7_GUARD,
+	POWERSHELL_BOOTSTRAP,
+} from "../src/utils/powershell-session-protocol.ts";
+import { getPlatformShellToolName, getShellConfig, POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
 
 describe("automatic platform shell contract", () => {
 	it("keeps one Bash-like agent contract while selecting the backend by platform", () => {
@@ -33,16 +32,35 @@ describe("automatic platform shell contract", () => {
 		expect(mapToolNamesForPlatform(["bash", "powershell"], "linux")).toEqual(["bash"]);
 	});
 
-	it("uses Codex-compatible PowerShell launch flags and idempotent UTF-8 setup", () => {
-		expect(getShellConfig(process.execPath, "powershell")).toEqual({
-			shell: process.execPath,
-			args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
-		});
+	it("uses headless PowerShell launch flags without overriding command encoding", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-pwsh-flags-"));
+		const pwsh = join(directory, "pwsh.exe");
+		writeFileSync(pwsh, "official");
+		try {
+			expect(getShellConfig(pwsh, "powershell")).toEqual({
+				shell: pwsh,
+				args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 		expect(getShellConfig(process.execPath, "bash")).toEqual({ shell: process.execPath, args: ["-c"] });
-		expect(prefixPowerShellCommand("Write-Output 'ok'")).toBe(`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`);
-		expect(prefixPowerShellCommand(`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`)).toBe(
-			`${POWERSHELL_UTF8_PREFIX}Write-Output 'ok'`,
-		);
+		expect(POWERSHELL_BOOTSTRAP).toContain(POWERSHELL_7_GUARD.trimEnd());
+		expect(POWERSHELL_BOOTSTRAP).not.toContain("OutputEncoding");
+		const original = {
+			KEEP_ME: "yes",
+			no_color: "0",
+			powershell_telemetry_optout: "false",
+			POWERSHELL_UPDATECHECK: "Default",
+		};
+		expect(createPowerShellHostEnvironment(original)).toEqual({
+			KEEP_ME: "yes",
+			NO_COLOR: "1",
+			POWERSHELL_DIAGNOSTICS_OPTOUT: "1",
+			POWERSHELL_TELEMETRY_OPTOUT: "1",
+			POWERSHELL_UPDATECHECK: "Off",
+		});
+		expect(original).toHaveProperty("no_color", "0");
 	});
 
 	it("expands a home-relative custom shell path before validation", () => {
@@ -50,6 +68,20 @@ describe("automatic platform shell contract", () => {
 		expect(() => getShellConfig(missingPath, "bash")).toThrow(
 			`Custom shell path not found: ${join(homedir(), missingPath.slice(2))}`,
 		);
+	});
+
+	it("rejects a legacy Windows PowerShell path and accepts only pwsh as a custom PowerShell host", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-official-pwsh-"));
+		const legacyPowerShell = join(directory, "powershell.exe");
+		const officialPowerShell = join(directory, "pwsh.exe");
+		try {
+			writeFileSync(legacyPowerShell, "legacy");
+			writeFileSync(officialPowerShell, "official");
+			expect(getShellConfig(officialPowerShell, "powershell").shell).toBe(officialPowerShell);
+			expect(() => getShellConfig(legacyPowerShell, "powershell")).toThrow("PowerShell 7 (pwsh)");
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it("prefers a usable PowerShell 7 executable", () => {
@@ -90,7 +122,7 @@ describe("automatic platform shell contract", () => {
 			undefined,
 			undefined as never,
 		);
-		expect(executedCommand).toContain(POWERSHELL_UTF8_PREFIX);
+		expect(executedCommand).not.toContain("OutputEncoding");
 		expect(executedCommand).toContain("& 'node' '--version'");
 		expect(executedTimeout).toBe(120);
 		const content = result.content[0];
@@ -105,6 +137,30 @@ describe("automatic platform shell contract", () => {
 			undefined as never,
 		);
 		expect(executedTimeout).toBe(3_600);
+	});
+
+	it("decodes mixed UTF-8 and Windows-1252 output without changing the command encoding", async () => {
+		const tool = createBashToolDefinition(process.cwd(), {
+			platform: "win32",
+			operations: {
+				exec: async (_command, _cwd, { onData }) => {
+					onData(Buffer.from("ação 日本 €\n", "utf8"));
+					onData(Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+					return { exitCode: 0 };
+				},
+			},
+		});
+
+		const result = await tool.execute(
+			"encoding",
+			{ command: "legacy-output.exe" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		const content = result.content[0];
+		if (content?.type !== "text") throw new Error("Expected shell text output");
+		expect(content.text).toBe("ação 日本 €\ncafé\n");
 	});
 
 	it("registers only the stable contract in built-in tool definitions", () => {

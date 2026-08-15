@@ -14,6 +14,7 @@ import {
 } from "../src/core/orchestration/contracts.ts";
 import type { NormalizedProfile } from "../src/core/profile-registry.ts";
 import type { ResourceProfileSettings } from "../src/core/settings-manager.ts";
+import { acquirePersistentShellSession, disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
 
 function profile(resources: ResourceProfileSettings): NormalizedProfile {
 	return { name: "lane", resources, source: "inline" };
@@ -97,6 +98,28 @@ describe("classified lane tool surface", () => {
 		expect(surface.allowedTools).toEqual(["delegate"]);
 		expect(surface.tools).toEqual([delegateTool]);
 		expect(await gate(surface, "delegate", {})).toBeUndefined();
+	});
+
+	it("disposes the persistent shell session owned by a lane", async () => {
+		const shellSessionKey = `lane-shell-${Math.random().toString(36).slice(2)}`;
+		const shellKind = process.platform === "win32" ? "powershell" : "bash";
+		const surface = createLaneToolSurface({
+			cwd,
+			profile: profile({ tools: { allow: ["bash"] } }),
+			shellSessionKey,
+		});
+		const shell = surface.tools.find((tool) => tool.name === "bash");
+		if (!shell) throw new Error("Expected lane shell tool.");
+
+		try {
+			await shell.execute("lane-shell", { command: "echo lane-shell-ready" } as never);
+			const ownedSession = acquirePersistentShellSession(shellSessionKey, shellKind);
+			await surface.dispose();
+			const replacement = acquirePersistentShellSession(shellSessionKey, shellKind);
+			expect(replacement).not.toBe(ownedSession);
+		} finally {
+			disposePersistentShellSession(shellSessionKey);
+		}
 	});
 
 	it("denies all tools for active profiles with a missing or empty tools kind", () => {

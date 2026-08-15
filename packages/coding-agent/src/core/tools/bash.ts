@@ -17,12 +17,12 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { createPowerShellHostEnvironment, POWERSHELL_7_GUARD } from "../../utils/powershell-session-protocol.ts";
 import {
 	getPlatformShellToolName,
 	getShellConfig,
 	getShellEnv,
 	type PlatformShellToolName,
-	prefixPowerShellCommand,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
@@ -174,10 +174,12 @@ function createLocalShellOperations(
 			}
 			if (signal?.aborted) throw new Error("aborted");
 
-			const child = spawn(shell, [...args, command], {
+			const shellEnvironment = env ?? getShellEnv();
+			const hostedCommand = shellName === "powershell" ? `${POWERSHELL_7_GUARD}${command}` : command;
+			const child = spawn(shell, [...args, hostedCommand], {
 				cwd,
 				detached: process.platform !== "win32",
-				env: env ?? getShellEnv(),
+				env: shellName === "powershell" ? createPowerShellHostEnvironment(shellEnvironment) : shellEnvironment,
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
 			});
@@ -289,7 +291,6 @@ export function createLocalPlatformShellOperations(
 				if (route.kind === "powershell") resolvedCommand = route.command;
 			}
 			if (options.commandPrefix) resolvedCommand = `${options.commandPrefix}\n${resolvedCommand}`;
-			if (platform === "win32") resolvedCommand = prefixPowerShellCommand(resolvedCommand);
 			return operations.exec(resolvedCommand, resolvedCwd, resolvedExecOptions);
 		},
 	};
@@ -622,6 +623,7 @@ function createShellToolDefinition(
 				tempDirectory: options?.outputDirectory,
 				persistAllOutput: routeBroadSearchOutput,
 				maxPersistedBytes: routeBroadSearchOutput ? BROAD_SEARCH_MAX_PERSISTED_BYTES : undefined,
+				windowsCompatibleEncoding: routesWindowsContract,
 			});
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
@@ -874,15 +876,13 @@ function createShellToolDefinition(
 					// by the very next call regardless of which tier runs it.
 					effectiveCwd = resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd);
 				}
-				// The engine executes the RAW Bash source unchanged: no commandPrefix (arbitrary
-				// PowerShell setup would not parse as Bash grammar) and no PowerShell UTF-8 prefix.
+				// The engine executes the RAW Bash source unchanged: an arbitrary PowerShell
+				// commandPrefix would not parse as Bash grammar.
 				const resolvedCommand = engineRoute
 					? backendCommand
-					: backendShell === "powershell"
-						? prefixPowerShellCommand(commandPrefix ? `${commandPrefix}\n${backendCommand}` : backendCommand)
-						: commandPrefix
-							? `${commandPrefix}\n${backendCommand}`
-							: backendCommand;
+					: commandPrefix
+						? `${commandPrefix}\n${backendCommand}`
+						: backendCommand;
 				const spawnContext = resolveSpawnContext(resolvedCommand, effectiveCwd, spawnHook);
 				if (routesWindowsContract) {
 					spawnContext.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), spawnContext.env);

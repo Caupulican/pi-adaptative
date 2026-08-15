@@ -6,7 +6,7 @@ Pi supports native Windows on x64 and ARM64. The Node.js package runs under Wind
 
 - Windows 10 or newer
 - Node.js 24.18 or newer for the npm package
-- Windows PowerShell 5.1 or PowerShell 7
+- PowerShell 7 (`pwsh.exe`)
 - Git for Windows for native Git commands
 - Windows Terminal, WezTerm, or the VS Code terminal for the best keyboard support
 
@@ -20,13 +20,12 @@ External programs are not reimplemented. A simple `rg` call runs the installed n
 
 Shell persistence preserves process state; it does not require every raw command byte to remain in model context. Recognized single test-runner commands use a bounded command-aware projection after execution: passing/progress chatter is counted, failure blocks and summaries remain visible, exit status is unchanged, and exact raw bytes are saved to the reported managed path. Mixed commands and unknown nonzero formats stay raw, and Pi also falls back to raw output if it cannot create the exact-output handoff.
 
-The agent never selects a shell or emits native PowerShell or Python. Pi resolves the PowerShell executable in this order:
+The agent never selects a shell or emits native PowerShell or Python. Pi accepts only PowerShell 7 and resolves its executable in this order:
 
-1. `shellPath` in `%USERPROFILE%\.pi\agent\settings.json`
+1. A `shellPath` ending in `pwsh.exe` in `%USERPROFILE%\.pi\agent\settings.json`
 2. PowerShell 7 (`pwsh.exe`) on `PATH` or under `Program Files`
-3. Windows PowerShell (`powershell.exe`) under `System32` or on `PATH`
 
-The PowerShell tier runs with `-NoLogo -NoProfile -NonInteractive -Command` and a best-effort UTF-8 console-output prefix. Every agent, interactive, and RPC shell call has a 120-second wall-clock default, even while output continues.
+The PowerShell tier runs with `-NoLogo -NoProfile -NonInteractive -Command`. Pi applies process-only headless settings before startup: PowerShell telemetry, update notifications, diagnostic IPC, ANSI color, and progress rendering are disabled. It warms the long-lived command path once, then reuses that process. Pi gives managed PowerShell output a UTF-8 writer without overwriting `[Console]::InputEncoding`, `[Console]::OutputEncoding`, or `$OutputEncoding`, so native programs retain their code-page choice. The Windows output decoder preserves valid Unicode UTF-8 and recovers Windows-1252 bytes, including mixed streams and UTF-8 sequences split across chunks. Pi's private command framing remains line-safe Base64 with ASCII control markers. Every agent, interactive, and RPC shell call has a 120-second wall-clock default, even while output continues.
 
 ### Supported forms
 
@@ -106,6 +105,8 @@ The Windows release archive includes `collect-pi-incident.ps1` beside `pi.exe`. 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\collect-pi-incident.ps1
 ```
 
+This explicit `powershell.exe` invocation is an isolated Windows incident-collection integration, not the agent shell. The agent shell itself requires `pwsh.exe`.
+
 From a source checkout, use `-File .\scripts\collect-pi-incident.ps1`. The collector selects the latest human session by default and creates `pi-incident-<timestamp>.zip` beside the collector script. To select exact evidence or another destination:
 
 ```powershell
@@ -169,12 +170,12 @@ See [Terminal setup](terminal-setup.md) for VS Code, WezTerm, and other terminal
 
 ## Troubleshooting
 
-### No PowerShell executable found
+### PowerShell 7 (`pwsh`) not found
 
-Restore Windows PowerShell, install PowerShell 7, or set `shellPath` to an existing `pwsh.exe`/`powershell.exe`. Confirm discovery from a terminal:
+Install PowerShell 7 or set `shellPath` to an existing `pwsh.exe`. Confirm discovery from a terminal:
 
 ```powershell
-Get-Command pwsh, powershell -ErrorAction SilentlyContinue
+Get-Command pwsh -ErrorAction Stop
 ```
 
 ### Modified Enter does not reach Pi
