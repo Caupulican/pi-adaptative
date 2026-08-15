@@ -241,6 +241,41 @@ describe("delegate tool description varies by wiring mode", () => {
 		});
 	});
 
+	it("rejects conflicting task and instructions fields without dispatching a worker", async () => {
+		let startCalls = 0;
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation: () => {
+				startCalls += 1;
+				return {
+					started: true,
+					record: { laneId: "worker-1", type: "worker", status: "queued" },
+				};
+			},
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+
+		const result = await definition.execute(
+			"call-conflicting-task",
+			{ action: "start", task: "TASK FIELD", instructions: "INSTRUCTIONS FIELD" },
+			new AbortController().signal,
+			() => {},
+			{} as never,
+		);
+		const text = result.content
+			.filter((content) => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+
+		expect(startCalls).toBe(0);
+		expect(text).toContain("delegate start field task is forbidden");
+		expect(result.details).toEqual({
+			started: false,
+			skipReason: "action_field_forbidden",
+			action: "start",
+		});
+	});
+
 	it("treats a misplaced start budget as correctable input and preserves it for one retry", async () => {
 		let startCalls = 0;
 		const definition = createDelegateToolDefinition({

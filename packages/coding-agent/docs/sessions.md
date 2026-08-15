@@ -74,8 +74,9 @@ ordinary multi-step request, and it will not replace an unfinished goal implicit
 chat-created goals use the normal bounded, hidden continuation trigger and survive compaction
 through one compact active-goal projection.
 
-Reading a session `.jsonl` with `read` returns a labeled transcript (user/assistant/tool names).
-Thinking, signatures, and successful tool payloads are omitted.
+Reading a session `.jsonl` with `read` returns a labeled transcript (user/assistant/compaction or
+branch summaries/tool names). Thinking, signatures, summary details, and successful tool payloads are
+omitted.
 
 ## Naming Sessions
 

@@ -3,10 +3,15 @@ import { textContentPrefix } from "../context/message-text.ts";
 const SESSION_PATH_MARKER = "/.pi/agent/sessions/";
 const MAX_USER_CHARS = 400;
 const MAX_ASSISTANT_CHARS = 240;
+const MAX_SUMMARY_CHARS = 16_000;
 
-export function isPiSessionJsonlPath(absolutePath: string): boolean {
+export function isPiSessionJsonlPath(absolutePath: string, configuredSessionDirectory?: string): boolean {
 	const posix = absolutePath.split("\\").join("/");
-	return posix.includes(SESSION_PATH_MARKER) && posix.endsWith(".jsonl");
+	if (!posix.endsWith(".jsonl")) return false;
+	if (posix.includes(SESSION_PATH_MARKER)) return true;
+	if (!configuredSessionDirectory) return false;
+	const sessionDirectory = configuredSessionDirectory.split("\\").join("/").replace(/\/+$/, "");
+	return posix.startsWith(`${sessionDirectory}/`);
 }
 
 function clip(text: string, maxChars: number): string {
@@ -54,6 +59,14 @@ export function projectPiSessionJsonlLine(line: string): string {
 	}
 	if (!entry || typeof entry !== "object") return "";
 	const raw = entry as Record<string, unknown>;
+	if (raw.type === "compaction" && typeof raw.summary === "string") {
+		const summary = clip(raw.summary, MAX_SUMMARY_CHARS);
+		return summary ? `SUMMARY ${summary}` : "";
+	}
+	if (raw.type === "branch_summary" && typeof raw.summary === "string") {
+		const summary = clip(raw.summary, MAX_SUMMARY_CHARS);
+		return summary ? `BRANCH_SUMMARY ${summary}` : "";
+	}
 	const message =
 		raw.type === "message" && raw.message && typeof raw.message === "object"
 			? (raw.message as Record<string, unknown>)

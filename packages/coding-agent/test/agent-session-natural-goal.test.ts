@@ -116,4 +116,130 @@ describe("AgentSession natural-language goal admission", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("applies a queued chat goal's token budget to its first provider request", async () => {
+		const harness = await createHarness();
+		let releaseFirstResponse: (() => void) | undefined;
+		const firstResponseGate = new Promise<void>((resolve) => {
+			releaseFirstResponse = resolve;
+		});
+		let markFirstResponseStarted: (() => void) | undefined;
+		const firstResponseStarted = new Promise<void>((resolve) => {
+			markFirstResponseStarted = resolve;
+		});
+		let queuedRequestMaxTokens: number | undefined;
+		try {
+			harness.setResponses([
+				async () => {
+					markFirstResponseStarted?.();
+					await firstResponseGate;
+					return fauxAssistantMessage("initial turn settled");
+				},
+				(_context, options) => {
+					queuedRequestMaxTokens = options?.maxTokens;
+					return fauxAssistantMessage("queued goal turn settled");
+				},
+			]);
+
+			const firstPrompt = harness.session.prompt("inspect the current behavior", { autoContinueGoal: false });
+			await firstResponseStarted;
+			await harness.session.prompt("Set a persistent goal: fix the queued behavior with a token budget of 5000.", {
+				autoContinueGoal: false,
+				streamingBehavior: "followUp",
+			});
+			releaseFirstResponse?.();
+			await firstPrompt;
+
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				tokenBudget: 5000,
+			});
+			expect(queuedRequestMaxTokens).toBe(5000);
+		} finally {
+			releaseFirstResponse?.();
+			harness.cleanup();
+		}
+	});
+
+	it("does not persist a queued chat goal that is cleared before execution", async () => {
+		const harness = await createHarness();
+		let releaseFirstResponse: (() => void) | undefined;
+		const firstResponseGate = new Promise<void>((resolve) => {
+			releaseFirstResponse = resolve;
+		});
+		let markFirstResponseStarted: (() => void) | undefined;
+		const firstResponseStarted = new Promise<void>((resolve) => {
+			markFirstResponseStarted = resolve;
+		});
+		try {
+			harness.setResponses([
+				async () => {
+					markFirstResponseStarted?.();
+					await firstResponseGate;
+					return fauxAssistantMessage("initial turn settled");
+				},
+			]);
+
+			const firstPrompt = harness.session.prompt("inspect the current behavior", { autoContinueGoal: false });
+			await firstResponseStarted;
+			await harness.session.prompt("Set a persistent goal: this queued request must remain cancellable.", {
+				autoContinueGoal: false,
+				streamingBehavior: "followUp",
+			});
+			expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+			expect(harness.session.clearQueue().followUp).toEqual([
+				"Set a persistent goal: this queued request must remain cancellable.",
+			]);
+			releaseFirstResponse?.();
+			await firstPrompt;
+
+			expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+		} finally {
+			releaseFirstResponse?.();
+			harness.cleanup();
+		}
+	});
+
+	it("transfers execution attribution when a queued goal follows a completed goal", async () => {
+		const harness = await createHarness();
+		let releaseFirstResponse: (() => void) | undefined;
+		const firstResponseGate = new Promise<void>((resolve) => {
+			releaseFirstResponse = resolve;
+		});
+		let markFirstResponseStarted: (() => void) | undefined;
+		const firstResponseStarted = new Promise<void>((resolve) => {
+			markFirstResponseStarted = resolve;
+		});
+		try {
+			harness.setResponses([
+				async () => {
+					markFirstResponseStarted?.();
+					await firstResponseGate;
+					return fauxAssistantMessage([fauxToolCall("goal", { action: "complete" })], {
+						stopReason: "toolUse",
+					});
+				},
+				fauxAssistantMessage("the first goal is closed"),
+				fauxAssistantMessage("the queued goal is active"),
+			]);
+
+			const firstPrompt = harness.session.prompt("Set a persistent goal: finish the first bounded task.", {
+				autoContinueGoal: false,
+			});
+			await firstResponseStarted;
+			await harness.session.prompt("Set a persistent goal: start the second bounded task.", {
+				autoContinueGoal: false,
+				streamingBehavior: "followUp",
+			});
+			releaseFirstResponse?.();
+			await firstPrompt;
+
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				userGoal: "start the second bounded task.",
+			});
+		} finally {
+			releaseFirstResponse?.();
+			harness.cleanup();
+		}
+	});
 });

@@ -59,6 +59,36 @@ describe("tool-owned failure recovery contracts", () => {
 		expect(
 			bash.failureRecovery?.getFailureTargets?.({ command: "python -c 'print(1)'" }, { failureCode: "exit_1" }),
 		).toEqual([]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.({ command: "node -e 'console.log(1)'" }, { failureCode: "exit_1" }),
+		).toEqual([]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.(
+				{ command: "node --eval='console.log(1)'" },
+				{ failureCode: "exit_1" },
+			),
+		).toEqual([]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.(
+				{ command: "node scripts/check.js --eval strict" },
+				{ failureCode: "exit_1" },
+			),
+		).toEqual([expect.objectContaining({ kind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, scope: cwd })]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.(
+				{ command: "python scripts/check.py -c strict" },
+				{ failureCode: "exit_1" },
+			),
+		).toEqual([expect.objectContaining({ kind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, scope: cwd })]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.({ command: "echo node -e && false" }, { failureCode: "exit_1" }),
+		).toEqual([expect.objectContaining({ kind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, scope: cwd })]);
+		expect(
+			bash.failureRecovery?.getFailureTargets?.(
+				{ command: "python scripts/check.py <<'EOF'\ninput\nEOF" },
+				{ failureCode: "exit_1" },
+			),
+		).toEqual([expect.objectContaining({ kind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND, scope: cwd })]);
 
 		const input = { path: "subject.txt", edits: [{ oldText: "before", newText: "after" }] };
 		const edit = createEditTool(cwd);

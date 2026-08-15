@@ -352,6 +352,7 @@ export function createReadToolDefinition(
 	);
 	const maxTextReadBytes = options?.maxTextReadBytes ?? DEFAULT_MAX_TEXT_READ_BYTES;
 	const maxImageReadBytes = options?.maxImageReadBytes ?? DEFAULT_MAX_IMAGE_READ_BYTES;
+	const configuredSessionDirectory = join(getAgentDir(), "sessions");
 	return {
 		name: "read",
 		label: "read",
@@ -531,7 +532,7 @@ export function createReadToolDefinition(
 										userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length;
 								}
 								const startLineDisplay = startLine + 1;
-								const projectSessionTranscript = isPiSessionJsonlPath(absolutePath);
+								const projectSessionTranscript = isPiSessionJsonlPath(absolutePath, configuredSessionDirectory);
 								if (projectSessionTranscript) {
 									slicedLines = slicedLines.map((item) => ({
 										text: projectPiSessionJsonlLine(item.text),
@@ -654,7 +655,7 @@ export function createReadToolDefinition(
 									outputText = truncation.content;
 								}
 								if (projectSessionTranscript) {
-									outputText = `Pi session transcript (user/assistant/tool labels only; thinking and payloads omitted).\n${outputText}`;
+									outputText = `Pi session transcript (user/assistant/summary/tool labels only; thinking and payloads omitted).\n${outputText}`;
 								}
 								content = [{ type: "text", text: outputText }];
 							}

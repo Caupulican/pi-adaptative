@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type {
 	GoalContinuationLoopOptions,
@@ -86,6 +87,11 @@ interface MutableGoalExecutionLease extends GoalExecutionLease {
 	admittedWhileActive: boolean;
 }
 
+interface QueuedOwnerChatGoal {
+	text: string;
+	authority: ExplicitGoalStartAuthority;
+}
+
 /**
  * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
  * AgentSession facade supplies process collaborators but no longer implements goal lifecycle rules.
@@ -95,6 +101,8 @@ export class GoalSessionController {
 	private readonly loop: GoalLoopController;
 	private executionLease: MutableGoalExecutionLease | undefined;
 	private startAuthority: ExplicitGoalStartAuthority | undefined;
+	private readonly queuedOwnerChatGoals = new WeakMap<AgentMessage, QueuedOwnerChatGoal>();
+	private queuedOwnerChatExecutionLease: GoalExecutionLease | undefined;
 
 	constructor(deps: GoalSessionControllerDeps) {
 		this.deps = deps;
@@ -151,6 +159,44 @@ export class GoalSessionController {
 	 */
 	admitOwnerChatGoal(text: string, messages: readonly { role: string; content?: unknown }[]): ChatGoalAdmission {
 		return this.admitExplicitChatGoal(text, undefined, priorUserPromptText(messages, text));
+	}
+
+	startOwnerChatGoal(text: string, messages: readonly { role: string; content?: unknown }[]): string | undefined {
+		const admission = this.admitOwnerChatGoal(text, messages);
+		if (admission.status === "started") return admission.state.goalId;
+		if (admission.status === "unfinished_goal_exists") {
+			this.deps.emitWarning(
+				`Explicit chat goal was not started because unfinished goal '${admission.state.goalId}' is ${admission.state.status}. Complete, clear, or explicitly replace it first.`,
+			);
+		}
+		return undefined;
+	}
+
+	queueOwnerChatGoal(message: AgentMessage, text: string, authority: ExplicitGoalStartAuthority): void {
+		this.queuedOwnerChatGoals.set(message, { text, authority });
+	}
+
+	activateQueuedOwnerChatGoal(message: AgentMessage, messages: readonly { role: string; content?: unknown }[]): void {
+		const queued = this.queuedOwnerChatGoals.get(message);
+		if (!queued) return;
+		this.queuedOwnerChatGoals.delete(message);
+		const goalId = this.startOwnerChatGoal(queued.text, messages);
+		if (!goalId) return;
+		this.setStartAuthority(queued.authority);
+		const lease = this.beginExecution(goalId);
+		if (!lease) {
+			this.setStartAuthority(undefined);
+			return;
+		}
+		this.queuedOwnerChatExecutionLease = lease;
+	}
+
+	endQueuedOwnerChatGoalExecution(): void {
+		const lease = this.queuedOwnerChatExecutionLease;
+		if (!lease) return;
+		this.queuedOwnerChatExecutionLease = undefined;
+		this.setStartAuthority(undefined);
+		this.endExecution(lease);
 	}
 
 	admitExplicitChatGoal(text: string, now?: string, priorUserText?: string): ChatGoalAdmission {

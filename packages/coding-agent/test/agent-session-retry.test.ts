@@ -73,6 +73,7 @@ describe("AgentSession retry", () => {
 		maxRetries?: number;
 		delayAssistantMessageEndMs?: number;
 		baseDelayMs?: number;
+		onRequest?: (callCount: number, maxTokens: number | undefined) => void;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
@@ -84,8 +85,9 @@ describe("AgentSession retry", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: () => {
+			streamFn: (_model, _context, streamOptions) => {
 				callCount++;
+				options?.onRequest?.(callCount, streamOptions?.maxTokens);
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					if (callCount <= failCount) {
@@ -185,6 +187,30 @@ describe("AgentSession retry", () => {
 		// The steering message was consumed by the retried turn, not dropped.
 		expect(steerIndex).toBeGreaterThan(-1);
 		expect(successIndex).toBeGreaterThan(steerIndex);
+	});
+
+	it("keeps a queued chat goal's execution lease across retry", async () => {
+		const requestMaxTokens: Array<number | undefined> = [];
+		const created = createSession({
+			failCount: 1,
+			baseDelayMs: 50,
+			onRequest: (_callCount, maxTokens) => requestMaxTokens.push(maxTokens),
+		});
+		let queuedGoal: Promise<void> | undefined;
+		created.session.subscribe((event) => {
+			if (event.type !== "auto_retry_start" || queuedGoal) return;
+			queuedGoal = created.session.prompt(
+				"Set a persistent goal: keep retry admission bounded with a token budget of 5000.",
+				{ autoContinueGoal: false, streamingBehavior: "steer" },
+			);
+		});
+
+		await created.session.prompt("Hello", { autoContinueGoal: false });
+		await queuedGoal;
+
+		expect(created.getCallCount()).toBe(2);
+		expect(requestMaxTokens).toEqual([undefined, 5000]);
+		expect(created.session.getGoalStateSnapshot()).toMatchObject({ tokenBudget: 5000 });
 	});
 
 	it("exhausts max retries and emits failure", async () => {

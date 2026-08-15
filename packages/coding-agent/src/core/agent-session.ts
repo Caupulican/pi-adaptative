@@ -1843,6 +1843,7 @@ export class AgentSession {
 					}
 				}
 			}
+			this._goals.activateQueuedOwnerChatGoal(event.message, this.agent.state.messages);
 		}
 		if (event.type === "turn_end" || event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			this._skillVault.noteActivity();
@@ -1932,6 +1933,7 @@ export class AgentSession {
 			// The shared projection excludes raw tool-result payloads and bounds both roles before any
 			// provider sees the turn. Synchronization is serialized in the background by MemoryController.
 			this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
+			this._goals.endQueuedOwnerChatGoalExecution();
 		}
 	};
 
@@ -2617,17 +2619,7 @@ export class AgentSession {
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			if (!options?.internalContextType) {
-				goalToolStartAuthority = parseExplicitGoalStartAuthority(expandedText);
-				const admission = this._goals.admitOwnerChatGoal(expandedText, this.agent.state.messages);
-				if (admission.status === "started") admittedGoalId = admission.state.goalId;
-				if (admission.status === "unfinished_goal_exists") {
-					this._emit({
-						type: "warning",
-						message: `Explicit chat goal was not started because unfinished goal '${admission.state.goalId}' is ${admission.state.status}. Complete, clear, or explicitly replace it first.`,
-					});
-				}
-			}
+			if (!options?.internalContextType) goalToolStartAuthority = parseExplicitGoalStartAuthority(expandedText);
 
 			// If streaming — or waiting out a retry backoff, which is still an active
 			// operation — queue via steer() or followUp() instead of starting a
@@ -2642,14 +2634,18 @@ export class AgentSession {
 					);
 				}
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
+					await this._queueFollowUp(expandedText, currentImages, goalToolStartAuthority);
 				} else {
-					await this._queueSteer(expandedText, currentImages);
+					await this._queueSteer(expandedText, currentImages, goalToolStartAuthority);
 				}
 				preflightResult?.(true);
 				return;
 			}
 			this._foregroundPromptLease = submission.lease;
+
+			if (!options?.internalContextType) {
+				admittedGoalId = this._goals.startOwnerChatGoal(expandedText, this.agent.state.messages) ?? admittedGoalId;
+			}
 
 			// This submission is starting a new foreground turn. Queued steer/follow-up messages above
 			// remain part of the already-active turn and must not erase its spawned-cost baseline.
@@ -2874,6 +2870,7 @@ export class AgentSession {
 			await this._modelRouter.runRoutedTurn(messages, routedTurnModel, routedTurnRouteDecision);
 			this._toolProtocol.recordParseOutcomeFromLastAssistant();
 		} finally {
+			this._goals.endQueuedOwnerChatGoalExecution();
 			this._goals.setStartAuthority(undefined);
 			this._goals.endExecution(goalExecutionLease);
 			// Normally consumed by the authoritative message_start. If execution failed before that
@@ -2985,38 +2982,41 @@ export class AgentSession {
 		await this._queueFollowUp(this._prepareQueuedMessageText(text), images);
 	}
 
+	private _createQueuedUserMessage(
+		text: string,
+		images: ImageContent[] | undefined,
+		queuedGoalAuthority: ExplicitGoalStartAuthority | undefined,
+	): AgentMessage {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...(images ?? [])];
+		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
+		if (queuedGoalAuthority) this._goals.queueOwnerChatGoal(message, text, queuedGoalAuthority);
+		return message;
+	}
+
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueSteer(
+		text: string,
+		images?: ImageContent[],
+		queuedGoalAuthority?: ExplicitGoalStartAuthority,
+	): Promise<void> {
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
-		this.agent.steer({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.steer(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueFollowUp(
+		text: string,
+		images?: ImageContent[],
+		queuedGoalAuthority?: ExplicitGoalStartAuthority,
+	): Promise<void> {
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
-		this.agent.followUp({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.followUp(this._createQueuedUserMessage(text, images, queuedGoalAuthority));
 	}
 
 	/**

@@ -6,9 +6,10 @@
 - An explicit owner phrase such as `this is a goal` or `the task is a goal` now starts the durable goal from the rest of that message or the previous user task, instead of only authorizing a later `goal start` tool call.
 - Handover language after `this is a goal` (`by the way`, `i'm handing over`, sub-agent/role assignment) is classification, not the objective. The previous user task becomes the goal.
 - `delegate start` with only the shared-schema `task` field now starts the worker using that brief. Sending both `task` and `instructions` is still rejected so neither value is dropped.
-- Failed ad-hoc `python`/`node` `-c` or heredoc probes no longer advertise workspace edit/write repair. That guidance was steering the model to rewrite the probe instead of stopping.
-- `read` on a Pi session `.jsonl` now returns a labeled user/assistant/tool transcript. Thinking, signatures, and successful tool payloads are omitted so resume cannot dump the raw file into context.
+- Failed ad-hoc Python `-c`, Node `-e`/`--eval`/print, and interpreter heredoc probes no longer advertise workspace edit/write repair. That guidance was steering the model to rewrite the probe instead of stopping.
+- `read` on a Pi session `.jsonl`, including sessions under a configured custom agent directory, now returns a labeled user/assistant/summary/tool transcript. Authoritative compaction and branch summaries remain visible, while thinking, signatures, summary details, and successful tool payloads are omitted.
 - Owner course-changes such as `instead of …, I want to …` and `I want to refactor …` now start the durable goal and authorize `goal start`.
+- Explicit goals queued behind an active turn are admitted only when their user message starts, so clearing the queue cancels them and their first request plus retries retain the declared token-budget lease.
 
 ## [0.91.3] - 2026-08-15
 
