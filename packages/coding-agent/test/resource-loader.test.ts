@@ -364,7 +364,7 @@ Content`,
 			});
 			expect(prompt).toContain("Global must-load");
 			expect(prompt).not.toContain("Be helpful.");
-			expect(prompt).not.toContain(join(cwd, "AGENTS.md"));
+			expect(prompt).not.toContain(JSON.stringify(join(cwd, "AGENTS.md")));
 		});
 
 		it("lists project AGENTS.md by path without injecting contents when opted in", async () => {
@@ -794,8 +794,8 @@ Content`,
 			expect(prompt).toContain("GLOBAL_MARKER_MUST_LOAD");
 			expect(prompt).not.toContain("PARENT_MARKER_MUST_NOT_LOAD");
 			expect(prompt).not.toContain("NESTED_MARKER_MUST_NOT_LOAD");
-			expect(prompt).not.toContain(join(parent, "AGENTS.md"));
-			expect(prompt).not.toContain(join(nested, "AGENTS.md"));
+			expect(prompt).not.toContain(JSON.stringify(join(parent, "AGENTS.md")));
+			expect(prompt).not.toContain(JSON.stringify(join(nested, "AGENTS.md")));
 		});
 
 		it("lists opted-in project paths in the prompt without injecting or threat-scanning them", async () => {
@@ -826,9 +826,10 @@ Content`,
 				selectedTools: ["read"],
 			});
 			expect(prompt).toContain("GLOBAL_MARKER_MUST_LOAD");
-			expect(prompt).toContain(join(cwd, "AGENTS.md"));
+			const listedPath = JSON.stringify(join(cwd, "AGENTS.md"));
+			expect(prompt).toContain(listedPath);
 			expect(prompt).not.toContain(injection);
-			expect(prompt).not.toContain(`FILE "${join(cwd, "AGENTS.md")}`);
+			expect(prompt).not.toContain(`FILE ${listedPath}`);
 		});
 
 		it("keeps --no-context-files from disabling the global file when the project is opted in", async () => {
