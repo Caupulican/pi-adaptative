@@ -1,12 +1,13 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "child_process";
+import { type SpawnOptions, spawn, spawnSync } from "child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	acquirePersistentShellSession,
 	disposePersistentShellSession,
-	type PersistentShellSession,
+	PersistentShellSession,
+	POWERSHELL_SESSION_READY_MARKER,
 	type ShellSessionExecOptions,
 } from "../src/core/tools/shell-session.ts";
 import { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
@@ -70,6 +71,71 @@ function makeSession(kind: "bash" | "powershell"): PersistentShellSession {
 afterEach(() => {
 	for (const key of liveKeys) disposePersistentShellSession(key);
 	liveKeys.length = 0;
+});
+
+describe("PersistentShellSession startup", () => {
+	it("prewarms one usable PowerShell process and falls back without a disposable probe", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-shell-prewarm-"));
+		const badFixture = join(directory, "bad-powershell.mjs");
+		const goodFixture = join(directory, "good-powershell.mjs");
+		writeFileSync(badFixture, "process.exit(9);\n");
+		writeFileSync(
+			goodFixture,
+			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+process.stdout.write(marker.slice(0, 4));
+setImmediate(() => process.stdout.write(marker.slice(4)));
+let pending = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	pending += chunk;
+	let newline = pending.indexOf("\\n");
+	while (newline !== -1) {
+		const line = pending.slice(0, newline);
+		pending = pending.slice(newline + 1);
+		const separator = line.indexOf(" ");
+		const nonce = line.slice(0, separator);
+		process.stdout.write("ok\\n\\n\\x1e" + nonce + ":0\\x1e");
+		newline = pending.indexOf("\\n");
+	}
+});
+`,
+		);
+		chmodSync(badFixture, 0o755);
+		chmodSync(goodFixture, 0o755);
+
+		const spawnCalls: string[] = [];
+		let resolutionCalls = 0;
+		const session = new PersistentShellSession("prewarm-fallback", "powershell", {
+			resolvePowerShellCandidates: () => {
+				resolutionCalls += 1;
+				return [
+					{ shell: "bad-powershell", args: [] },
+					{ shell: "good-powershell", args: [] },
+				];
+			},
+			spawn: (command: string, args: string[], options: SpawnOptions) => {
+				spawnCalls.push(command);
+				const fixture = command === "bad-powershell" ? badFixture : goodFixture;
+				return spawn(process.execPath, [fixture, ...args], options);
+			},
+			startupTimeoutMs: 2_000,
+		});
+		try {
+			const firstPrewarm = session.prewarm(process.cwd(), process.env);
+			const repeatedPrewarm = session.prewarm(process.cwd(), process.env);
+			const command = run(session, "Write-Output ok", process.cwd(), { env: process.env });
+			await Promise.all([firstPrewarm, repeatedPrewarm]);
+			expect(await command).toEqual({
+				exitCode: 0,
+				output: "ok\n",
+			});
+			expect(resolutionCalls).toBe(1);
+			expect(spawnCalls).toEqual(["bad-powershell", "good-powershell"]);
+		} finally {
+			session.dispose();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
 });
 
 describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {

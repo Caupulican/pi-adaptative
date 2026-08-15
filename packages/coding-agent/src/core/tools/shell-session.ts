@@ -36,13 +36,23 @@
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
-import { spawn } from "child_process";
-import { getShellConfig, getShellEnv, type PlatformShellToolName } from "../../utils/shell.ts";
+import { type ChildProcess, type SpawnOptions, spawn } from "child_process";
+import {
+	getPowerShellCandidateConfigs,
+	getShellConfig,
+	getShellEnv,
+	type PlatformShellToolName,
+	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
+	type ShellConfig,
+} from "../../utils/shell.ts";
 import { PersistentProcessCoordinator } from "./persistent-process-coordinator.ts";
 
 const SENTINEL_BYTE = 0x1e;
 /** Longest possible sentinel: "\n" + 0x1e + 16-hex nonce + ":" + exit code digits + 0x1e. */
 const SENTINEL_HOLDBACK_BYTES = 64;
+const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
+export const POWERSHELL_SESSION_READY_MARKER = "\x1epi-shell-ready\x1e";
+const POWERSHELL_SESSION_READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
 
 export interface ShellSessionExecOptions {
 	onData: (data: Buffer) => void;
@@ -52,6 +62,12 @@ export interface ShellSessionExecOptions {
 	/** Output-silence bound in ms; when set, silence kills the session and throws `silence:<s>`. */
 	silenceMs?: number;
 	env?: NodeJS.ProcessEnv;
+}
+
+export interface PersistentShellSessionOptions {
+	resolvePowerShellCandidates?: () => ShellConfig[];
+	spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
+	startupTimeoutMs?: number;
 }
 
 function escapeSingleQuotesPosix(value: string): string {
@@ -104,6 +120,7 @@ export function buildPowerShellWire(command: string, nonce: string, cdTo: string
 const POWERSHELL_BOOTSTRAP = [
 	"$ProgressPreference = 'SilentlyContinue'",
 	"try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}",
+	"[Console]::Out.Write(([char]30) + 'pi-shell-ready' + ([char]30))",
 	"function global:__pi_complete_status([int]$Code) { $global:LASTEXITCODE = $Code }",
 	"$__pi_in = [Console]::In",
 	"while ($true) {",
@@ -144,15 +161,22 @@ interface ActiveExec {
 export class PersistentShellSession {
 	private readonly key: string;
 	private readonly kind: PlatformShellToolName;
+	private readonly resolvePowerShellCandidates: () => ShellConfig[];
+	private readonly spawnProcess: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
+	private readonly startupTimeoutMs: number;
 	private readonly coordinator = new PersistentProcessCoordinator();
 	private childEnv: NodeJS.ProcessEnv | null = null;
 	private lastRequestedCwd: string | null = null;
 	private activeExec: ActiveExec | null = null;
+	private rejectStartup: ((error: Error) => void) | null = null;
 	private disposed = false;
 
-	constructor(key: string, kind: PlatformShellToolName) {
+	constructor(key: string, kind: PlatformShellToolName, options: PersistentShellSessionOptions = {}) {
 		this.key = key;
 		this.kind = kind;
+		this.resolvePowerShellCandidates = options.resolvePowerShellCandidates ?? getPowerShellCandidateConfigs;
+		this.spawnProcess = options.spawn ?? spawn;
+		this.startupTimeoutMs = options.startupTimeoutMs ?? POWERSHELL_STARTUP_PROBE_TIMEOUT_MS;
 	}
 
 	get sessionKind(): PlatformShellToolName {
@@ -164,9 +188,20 @@ export class PersistentShellSession {
 		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
 	}
 
+	/** Start and validate the long-lived shell before the first user command. Idempotent per session. */
+	prewarm(cwd: string, env: NodeJS.ProcessEnv = getShellEnv()): Promise<void> {
+		return this.coordinator.runSerialized(async () => {
+			if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
+			if (this.coordinator.child && this.childEnv && !shallowEnvEquals(this.childEnv, env)) this.killChild();
+			if (!this.coordinator.child) await this.spawnChild(cwd, env);
+			this.coordinator.setLoopRef(false);
+		});
+	}
+
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.rejectStartup?.(new Error(`Shell session "${this.key}" is disposed`));
 		this.activeExec?.fail(new Error(`Shell session "${this.key}" is disposed`));
 		this.coordinator.dispose();
 		this.resetChildState();
@@ -191,7 +226,7 @@ export class PersistentShellSession {
 		// request preserves the agent's own in-session `cd` (that persistence is the feature).
 		let cdTo: string | null = null;
 		if (!this.coordinator.child) {
-			this.spawnChild(cwd, resolvedEnv);
+			await this.spawnChild(cwd, resolvedEnv);
 		} else if (this.lastRequestedCwd !== cwd) {
 			cdTo = cwd;
 		}
@@ -313,21 +348,133 @@ export class PersistentShellSession {
 		}
 	}
 
-	private spawnChild(cwd: string, env: NodeJS.ProcessEnv): void {
-		const { shell } = getShellConfig(undefined, this.kind);
-		const args =
-			this.kind === "powershell"
-				? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_BOOTSTRAP]
-				: basename(shell).toLowerCase().includes("bash")
-					? ["--noprofile", "--norc"]
-					: [];
-		const child = spawn(shell, args, {
-			cwd,
-			env,
-			detached: process.platform !== "win32",
-			stdio: ["pipe", "pipe", "pipe"],
-			windowsHide: true,
+	private async spawnChild(cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+		if (this.kind === "powershell") {
+			await this.spawnPowerShellChild(cwd, env);
+		} else {
+			const { shell } = getShellConfig(undefined, this.kind);
+			const args = basename(shell).toLowerCase().includes("bash") ? ["--noprofile", "--norc"] : [];
+			const child = this.spawnProcess(shell, args, {
+				cwd,
+				env,
+				detached: process.platform !== "win32",
+				stdio: ["pipe", "pipe", "pipe"],
+				windowsHide: true,
+			});
+			this.attachReadyChild(child);
+		}
+		this.childEnv = env;
+		this.lastRequestedCwd = cwd;
+	}
+
+	private async spawnPowerShellChild(cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+		const failures: string[] = [];
+		for (const candidate of this.resolvePowerShellCandidates()) {
+			try {
+				await this.spawnPowerShellCandidate(candidate.shell, cwd, env);
+				return;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				failures.push(`${candidate.shell}: ${message}`);
+			}
+		}
+		const detail = failures.length > 0 ? ` Candidate failures: ${failures.join("; ")}` : "";
+		throw new Error(
+			`No PowerShell executable found. Install PowerShell 7 (pwsh), restore Windows PowerShell, or set shellPath in settings.json.${detail}`,
+		);
+	}
+
+	private spawnPowerShellCandidate(shell: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			let startupSettled = false;
+			let startupStdout: Buffer = Buffer.alloc(0);
+			let startupStderr: Buffer = Buffer.alloc(0);
+			let timeoutTimer: NodeJS.Timeout | undefined;
+
+			const settleStartup = (finish: () => void): void => {
+				if (startupSettled) return;
+				startupSettled = true;
+				if (timeoutTimer) clearTimeout(timeoutTimer);
+				if (this.rejectStartup === rejectStartup) this.rejectStartup = null;
+				finish();
+			};
+			const startupDiagnostic = (): string => {
+				const combined = Buffer.concat([startupStdout, startupStderr]).toString("utf8").trim();
+				return combined ? `: ${combined}` : "";
+			};
+			const rejectStartup = (error: Error): void => {
+				settleStartup(() => reject(error));
+			};
+
+			let child: ChildProcess;
+			try {
+				child = this.spawnProcess(
+					shell,
+					["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_BOOTSTRAP],
+					{
+						cwd,
+						env,
+						detached: process.platform !== "win32",
+						stdio: ["pipe", "pipe", "pipe"],
+						windowsHide: true,
+					},
+				);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				rejectStartup(new Error(`spawn failed: ${message}`));
+				return;
+			}
+
+			this.rejectStartup = rejectStartup;
+			this.coordinator.attach(child, {
+				onStdout: (data) => {
+					if (startupSettled) {
+						this.activeExec?.onStdout(data);
+						return;
+					}
+					startupStdout =
+						startupStdout.length === 0
+							? data
+							: Buffer.concat([startupStdout, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
+					const markerIndex = startupStdout.indexOf(POWERSHELL_SESSION_READY_BYTES);
+					if (markerIndex === -1) return;
+					const trailing = startupStdout.subarray(markerIndex + POWERSHELL_SESSION_READY_BYTES.length);
+					settleStartup(resolve);
+					if (trailing.length > 0) this.activeExec?.onStdout(trailing);
+				},
+				onStderr: (data) => {
+					if (startupSettled) {
+						this.activeExec?.onStderr(data);
+						return;
+					}
+					startupStderr =
+						startupStderr.length === 0
+							? data
+							: Buffer.concat([startupStderr, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
+				},
+				onError: (error) => {
+					this.resetChildState();
+					if (!startupSettled) rejectStartup(new Error(`${error.message}${startupDiagnostic()}`));
+					else this.activeExec?.fail(error);
+				},
+				onClose: (code) => {
+					this.resetChildState();
+					if (!startupSettled) {
+						rejectStartup(new Error(`exited with code ${code ?? "null"} before readiness${startupDiagnostic()}`));
+					} else {
+						this.activeExec?.onChildClose(code);
+					}
+				},
+			});
+			timeoutTimer = setTimeout(() => {
+				this.coordinator.kill();
+				this.resetChildState();
+				rejectStartup(new Error(`startup timed out after ${this.startupTimeoutMs}ms${startupDiagnostic()}`));
+			}, this.startupTimeoutMs);
 		});
+	}
+
+	private attachReadyChild(child: ChildProcess): void {
 		this.coordinator.attach(child, {
 			onStdout: (data) => this.activeExec?.onStdout(data),
 			onStderr: (data) => this.activeExec?.onStderr(data),
@@ -340,8 +487,6 @@ export class PersistentShellSession {
 				this.activeExec?.onChildClose(code);
 			},
 		});
-		this.childEnv = env;
-		this.lastRequestedCwd = cwd;
 	}
 
 	private resetChildState(): void {

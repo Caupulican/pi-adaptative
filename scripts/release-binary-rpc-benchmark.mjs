@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { requireFlagValue } from "./flag-value-args.mjs";
 
 const DEFAULT_SAMPLES = 3;
 const DEFAULT_WARM_ITERATIONS = 5;
@@ -186,6 +187,7 @@ async function runSample(options, sampleIndex) {
 		const coldShellStartedAt = performance.now();
 		const coldShell = await client.request({ id: coldShellId, type: "bash", command: "echo benchmark-ok" });
 		const coldShellMs = performance.now() - coldShellStartedAt;
+		const firstShellReadyMs = performance.now() - processStartedAt;
 		const coldShellFailure = responseError(coldShell, coldShellId, "bash");
 		if (coldShellFailure) throw new Error(coldShellFailure);
 		if (coldShell.data?.exitCode !== 0 || !String(coldShell.data?.output ?? "").includes("benchmark-ok")) {
@@ -214,7 +216,7 @@ async function runSample(options, sampleIndex) {
 		}
 
 		await client.close();
-		return { coldRpcMs, coldShellMs, warmRpcMs, warmShellMs };
+		return { coldRpcMs, coldShellMs, firstShellReadyMs, warmRpcMs, warmShellMs };
 	} catch (error) {
 		client.abort();
 		throw error;
@@ -247,7 +249,7 @@ export async function runReleaseBinaryRpcBenchmark({
 	}
 
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		label,
 		platform: process.platform,
 		architecture: process.arch,
@@ -256,6 +258,7 @@ export async function runReleaseBinaryRpcBenchmark({
 		metrics: {
 			coldRpc: summarizeLatencySamples(measured.map((sample) => sample.coldRpcMs)),
 			coldShell: summarizeLatencySamples(measured.map((sample) => sample.coldShellMs)),
+			firstShellReady: summarizeLatencySamples(measured.map((sample) => sample.firstShellReadyMs)),
 			warmRpc: summarizeLatencySamples(measured.flatMap((sample) => sample.warmRpcMs)),
 			warmShell: summarizeLatencySamples(measured.flatMap((sample) => sample.warmShellMs)),
 		},
@@ -271,37 +274,33 @@ function parseCliArgs(argv) {
 	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];
-		const value = () => {
-			const next = argv[index + 1];
-			if (!next) throw new Error(`${argument} requires a value`);
-			index += 1;
-			return next;
-		};
+		const value = requireFlagValue(argv, index);
 		switch (argument) {
 			case "--binary":
-				options.executable = resolve(value());
+				options.executable = resolve(value);
 				break;
 			case "--samples":
-				options.samples = positiveInteger(value(), "--samples");
+				options.samples = positiveInteger(value, "--samples");
 				break;
 			case "--warm-iterations":
-				options.warmIterations = positiveInteger(value(), "--warm-iterations");
+				options.warmIterations = positiveInteger(value, "--warm-iterations");
 				break;
 			case "--warmup-samples":
-				options.warmupSamples = positiveInteger(value(), "--warmup-samples", { allowZero: true });
+				options.warmupSamples = positiveInteger(value, "--warmup-samples", { allowZero: true });
 				break;
 			case "--request-timeout-ms":
-				options.requestTimeoutMs = positiveInteger(value(), "--request-timeout-ms");
+				options.requestTimeoutMs = positiveInteger(value, "--request-timeout-ms");
 				break;
 			case "--label":
-				options.label = value();
+				options.label = value;
 				break;
 			case "--output":
-				options.output = resolve(value());
+				options.output = resolve(value);
 				break;
 			default:
 				throw new Error(`Unknown argument: ${argument}`);
 		}
+		index += 1;
 	}
 	if (!options.executable) throw new Error("--binary is required");
 	return options;

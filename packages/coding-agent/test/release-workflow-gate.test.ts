@@ -24,9 +24,11 @@ describe("release workflow quality gate", () => {
 		expect(release).toContain(`tar -xzf artifacts/pi-linux-x64.tar.gz -C "\${extract_dir}" --strip-components=1`);
 		expect(release).toContain(`pi-windows-\${{ matrix.arch }}-benchmark.json`);
 		expect(release.match(/release-binary-rpc-benchmark\.mjs/gu)).toHaveLength(2);
+		expect(release).toContain("--samples 5");
+		expect(release).toContain("--warm-iterations 10");
 	});
 
-	it("gates npm publish on the tagged quality-gate and binary build, not Windows RPC smoke", () => {
+	it("gates GitHub and npm publishing on native Windows correctness and Linux-relative performance", () => {
 		const ci = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
 		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
 
@@ -37,7 +39,9 @@ describe("release workflow quality gate", () => {
 		);
 		expect(release).toContain(`ref: \${{ github.event.inputs.tag || github.ref_name }}`);
 		expect(release).toContain("skip_tests: true");
-		expect(release).toContain("needs: [quality-gate, build]");
-		expect(release).not.toContain("needs: [quality-gate, build, verify-windows-binary]");
+		expect(release).toContain("verify-release-binary-performance:");
+		expect(release).toContain("needs: [benchmark-linux-binary, verify-windows-binary]");
+		expect(release).toContain("release-binary-performance-gate.mjs");
+		expect(release).toContain("needs: [quality-gate, build, verify-release-binary-performance]");
 	});
 });

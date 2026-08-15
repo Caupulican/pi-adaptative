@@ -3,6 +3,7 @@
 ### Fixed
 
 - Bun-compiled binaries now await CLI startup, preventing RPC mode from exiting before it attaches stdin and returns the first response on Windows.
+- Windows runtimes now prewarm and validate one persistent PowerShell process without a disposable startup probe, and release publishing is gated on native x64/ARM64 latency against Linux.
 
 ## [0.91.4] - 2026-08-15
 

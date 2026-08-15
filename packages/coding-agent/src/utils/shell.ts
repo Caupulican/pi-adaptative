@@ -58,11 +58,24 @@ function isPowerShellExecutableAvailable(executable: string): boolean {
 	}
 }
 
-function getPowerShellConfig(): ShellConfig {
+/**
+ * Ordered PowerShell candidates without launching a disposable interpreter. Persistent sessions
+ * validate these candidates with their real long-lived bootstrap, so the normal path pays for one
+ * PowerShell process instead of probing one process and then spawning another.
+ */
+export function getPowerShellCandidateConfigs(): ShellConfig[] {
+	const candidates: ShellConfig[] = [];
+	const seen = new Set<string>();
+	const addCandidate = (shell: string | null): void => {
+		if (!shell) return;
+		const identity = process.platform === "win32" ? shell.toLowerCase() : shell;
+		if (seen.has(identity)) return;
+		seen.add(identity);
+		candidates.push({ shell, args: [...POWERSHELL_ARGS] });
+	};
+
 	const pwshOnPath = findExecutableOnPath(process.platform === "win32" ? "pwsh.exe" : "pwsh");
-	if (pwshOnPath && isPowerShellExecutableAvailable(pwshOnPath)) {
-		return { shell: pwshOnPath, args: [...POWERSHELL_ARGS] };
-	}
+	addCandidate(pwshOnPath);
 
 	const knownPaths: string[] = [];
 	const programFiles = process.env.ProgramFiles;
@@ -70,14 +83,16 @@ function getPowerShellConfig(): ShellConfig {
 	const systemRoot = process.env.SystemRoot;
 	if (systemRoot) knownPaths.push(`${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`);
 	for (const path of knownPaths) {
-		if (existsSync(path) && isPowerShellExecutableAvailable(path)) {
-			return { shell: path, args: [...POWERSHELL_ARGS] };
-		}
+		if (existsSync(path)) addCandidate(path);
 	}
 
-	const windowsPowerShellOnPath = findExecutableOnPath("powershell.exe");
-	if (windowsPowerShellOnPath && isPowerShellExecutableAvailable(windowsPowerShellOnPath)) {
-		return { shell: windowsPowerShellOnPath, args: [...POWERSHELL_ARGS] };
+	addCandidate(findExecutableOnPath("powershell.exe"));
+	return candidates;
+}
+
+function getPowerShellConfig(): ShellConfig {
+	for (const candidate of getPowerShellCandidateConfigs()) {
+		if (isPowerShellExecutableAvailable(candidate.shell)) return candidate;
 	}
 	throw new Error(
 		"No PowerShell executable found. Install PowerShell 7 (pwsh), restore Windows PowerShell, or set shellPath in settings.json.",

@@ -132,6 +132,7 @@ function createLaneTools(
 		factories.set(STABLE_SHELL_TOOL_NAME, () =>
 			createBashTool(cwd, {
 				sessionKey: shellSessionKey,
+				prewarmWindowsShell: true,
 				...(shellOutputDirectory ? { outputDirectory: shellOutputDirectory } : {}),
 			}),
 		);

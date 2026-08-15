@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { requireFlagValue } from "./flag-value-args.mjs";
 import { runReleaseBinaryRpcBenchmark } from "./release-binary-rpc-benchmark.mjs";
 
 function writeFixture(directory, name, source) {
@@ -11,6 +12,11 @@ function writeFixture(directory, name, source) {
 	chmodSync(fixturePath, 0o755);
 	return fixturePath;
 }
+
+test("requires an explicit value after a release-script flag", () => {
+	assert.equal(requireFlagValue(["--output", "result.json"], 0), "result.json");
+	assert.throws(() => requireFlagValue(["--output", "--samples", "5"], 0), /--output requires a value/u);
+});
 
 test("benchmarks cold startup plus cold and warm RPC shell latency", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "pi-release-binary-benchmark-"));
@@ -50,6 +56,7 @@ process.stdin.on("data", (chunk) => {
 		assert.equal(result.warmIterations, 2);
 		assert.equal(result.metrics.coldRpc.samples.length, 2);
 		assert.equal(result.metrics.coldShell.samples.length, 2);
+		assert.equal(result.metrics.firstShellReady.samples.length, 2);
 		assert.equal(result.metrics.warmRpc.samples.length, 4);
 		assert.equal(result.metrics.warmShell.samples.length, 4);
 		for (const metric of Object.values(result.metrics)) {

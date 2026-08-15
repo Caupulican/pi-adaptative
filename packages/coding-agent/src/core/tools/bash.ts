@@ -331,6 +331,8 @@ export interface BashToolOptions {
 	windowsShellPythonEngine?: boolean;
 	/** Test/embedding hook: overrides the engine tier's runtime/spawn/state resolution. */
 	windowsShellEngineOptions?: WindowsShellEngineOptions;
+	/** Start the native Windows PowerShell session during runtime initialization. Default: false. */
+	prewarmWindowsShell?: boolean;
 	/** Test/embedding hook: override the managed directory used for complete command output. */
 	outputDirectory?: string;
 }
@@ -545,6 +547,23 @@ function createShellToolDefinition(
 	const engineOperations = routesWindowsContract
 		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
 		: undefined;
+	if (
+		options?.prewarmWindowsShell === true &&
+		process.platform === "win32" &&
+		routesWindowsContract &&
+		backendShell === "powershell" &&
+		options.operations === undefined &&
+		options.shellPath === undefined
+	) {
+		const session = acquirePersistentShellSession(sessionKey, backendShell);
+		setImmediate(() => {
+			const context = resolveSpawnContext("", cwd, spawnHook);
+			context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
+			void session.prewarm(context.cwd, context.env).catch(() => {
+				// The first real command retries and surfaces the complete candidate failure.
+			});
+		});
+	}
 	const contractDescription = routesWindowsContract
 		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
 		: "Execute a Bash command in a persistent per-agent shell session: the current directory and environment variables persist across calls, and a timed-out or aborted command resets the session.";
