@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Release promote now dispatches the destructive suite on `release-vX.Y.Z` instead of a raw commit SHA, which GitHub rejects and left promote polling until timeout.
+
 ## [0.91.2] - 2026-08-15
 
 ## [0.91.1] - 2026-08-15

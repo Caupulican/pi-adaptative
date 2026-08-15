@@ -23,7 +23,8 @@
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
  * 9. Locate the "Release vX.Y.Z" commit and poll GitHub Actions (workflow ci.yml) for its
  *    conclusion on that exact SHA.
- * 10. Poll destructive.yml on the same SHA (dispatch one if none exists).
+ * 10. Poll destructive.yml on the same SHA. If none exists, push `release-vX.Y.Z` at that
+ *     SHA and dispatch workflow_dispatch on that branch (GitHub rejects a raw SHA ref).
  * 11. Only on success of both: create and push the vX.Y.Z tag, which triggers build-binaries.yml.
  * On CI failure or timeout, no tag is created; rerun `npm run release:promote` to resume once
  * CI is fixed or rerun. Never rerun the prepare step (release:patch/minor/major) for the same
@@ -363,8 +364,19 @@ async function waitForWorkflow(sha, workflow, options = {}) {
 			if (match.state === "pending") {
 				console.log(`  ${workflow} for ${sha}: ${match.status}...`);
 			} else if (options.dispatchIfMissing && !dispatched) {
-				console.log(`  No ${workflow} run on ${sha}; dispatching...`);
-				run(`gh workflow run ${workflow} --ref ${shellQuote(sha)}`, { ignoreError: true });
+				const dispatchRef = options.dispatchRef;
+				if (!dispatchRef) {
+					throw new Error(`Cannot dispatch ${workflow}: dispatchRef is required (workflow_dispatch rejects a raw SHA).`);
+				}
+				console.log(`  No ${workflow} run on ${sha}; dispatching on ${dispatchRef}...`);
+				run(`git push origin ${shellQuote(sha)}:refs/heads/${dispatchRef}`);
+				const dispatchedRun = run(
+					`gh workflow run ${workflow} -R ${shellQuote(repo)} --ref ${shellQuote(dispatchRef)}`,
+					{ ignoreError: true },
+				);
+				if (dispatchedRun === undefined) {
+					throw new Error(`Failed to dispatch ${workflow} on ${dispatchRef}.`);
+				}
 				dispatched = true;
 			} else {
 				console.log(`  ${workflow} run not registered yet...`);
@@ -380,8 +392,11 @@ async function waitForCi(sha) {
 	return waitForWorkflow(sha, CI_WORKFLOW);
 }
 
-async function waitForDestructive(sha) {
-	return waitForWorkflow(sha, DESTRUCTIVE_WORKFLOW, { dispatchIfMissing: true });
+async function waitForDestructive(sha, version) {
+	return waitForWorkflow(sha, DESTRUCTIVE_WORKFLOW, {
+		dispatchIfMissing: true,
+		dispatchRef: `release-v${version}`,
+	});
 }
 
 function ensureTagPushed(tag) {
@@ -425,7 +440,7 @@ async function promoteRelease(versionArg) {
 		);
 	}
 
-	const destructive = await waitForDestructive(releaseSha);
+	const destructive = await waitForDestructive(releaseSha, version);
 	if (destructive !== "success") {
 		throw new Error(
 			`Destructive suite did not succeed for release commit ${releaseSha} (conclusion: ${destructive}). ` +
