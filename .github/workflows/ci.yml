@@ -11,6 +11,11 @@ on:
         description: Exact commit or tag to validate
         required: false
         type: string
+      skip_tests:
+        description: Skip npm test; local ./test.sh and HEAD CI already passed
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   # PR updates cancel the previous PR run. Pushes use the commit SHA so a later
@@ -23,9 +28,15 @@ jobs:
   build-check-test:
     name: Build, check, test (${{ matrix.os }})
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, windows-latest]
+    # Release commits already paid for local ./test.sh and a green HEAD CI. Do not
+    # buy a Windows runner just to rebuild version metadata.
+    if: >
+      matrix.os == 'ubuntu-latest' ||
+      (inputs.skip_tests != true &&
+      (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v')))
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -76,12 +87,18 @@ jobs:
         run: npm run check
 
       - name: Test
+        if: >
+          inputs.skip_tests != true &&
+          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
         env:
           NODE_OPTIONS: --conditions=pi-source
         run: npm test
 
       - name: Test native incident collector with Windows PowerShell 5.1
-        if: runner.os == 'Windows'
+        if: >
+          runner.os == 'Windows' &&
+          inputs.skip_tests != true &&
+          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
         shell: pwsh
         working-directory: packages/coding-agent
         env:
