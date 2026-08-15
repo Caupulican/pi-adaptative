@@ -70,42 +70,6 @@ describe("degenerate assistant text", () => {
 		expect(collapseRepeatedLines(sentence.repeat(4))).toBe(sentence);
 	});
 
-	it("drops a later tool call that repeats an earlier execution identity", () => {
-		const original = assistant("");
-		const first = {
-			type: "toolCall" as const,
-			id: "call-1",
-			name: "python",
-			arguments: { code: "print(1)", timeout: 30 },
-		};
-		original.content = [
-			first,
-			{
-				type: "toolCall",
-				id: "call-2",
-				name: "python",
-				arguments: { code: "print(1)", timeout: 90 },
-			},
-			{
-				type: "toolCall",
-				id: "call-3",
-				name: "python",
-				arguments: { code: "print(2)" },
-			},
-		];
-		const collapsed = collapseDegenerateAssistantMessage(original);
-		expect(collapsed.content).toEqual([
-			first,
-			{
-				type: "toolCall",
-				id: "call-3",
-				name: "python",
-				arguments: { code: "print(2)" },
-			},
-		]);
-		expect(isCollapsedDegenerateAssistantMessage(collapsed)).toBe(true);
-	});
-
 	it("drops a later text block that repeats an earlier block around tool calls", () => {
 		const sentence = "Session ended mid-implementation. Checking the written plan and what actually landed.";
 		const doubled = sentence + sentence;

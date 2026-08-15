@@ -1,5 +1,4 @@
-import type { AssistantMessage, ToolCall } from "@caupulican/pi-ai/types";
-import { getToolExecutionKey } from "./tool-failure-memory.ts";
+import type { AssistantMessage } from "@caupulican/pi-ai/types";
 
 /** Consecutive identical non-empty units (lines or sentences) at or above this run count are degeneration. */
 export const DEGENERATE_REPEATED_LINE_MIN = 4;
@@ -119,26 +118,11 @@ export function shouldAbortDegenerateStream(text: string): boolean {
 
 const collapsedDegenerateMessages = new WeakSet<AssistantMessage>();
 
-function toolCallExecutionKey(block: ToolCall): string {
-	return getToolExecutionKey(block.name, block.arguments);
-}
-
 export function collapseDegenerateAssistantMessage(message: AssistantMessage): AssistantMessage {
 	let changed = false;
 	const seenText = new Set<string>();
-	const seenToolCalls = new Set<string>();
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
-		if (block.type === "toolCall") {
-			const key = toolCallExecutionKey(block);
-			if (seenToolCalls.has(key)) {
-				changed = true;
-				continue;
-			}
-			seenToolCalls.add(key);
-			content.push(block);
-			continue;
-		}
 		if (block.type !== "text") {
 			content.push(block);
 			continue;

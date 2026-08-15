@@ -2,7 +2,7 @@
 
 ### Fixed
 
-- Collapsed a status sentence concatenated with no space (`Foo.Foo.`), dropped a later text block that repeats an earlier one, and dropped a later tool call with the same execution identity, so a Responses double-emit cannot persist or re-execute into the next turn. Exact-tile collapse is power-of-two prose only; a long run of one filler character is not a generation loop.
+- Collapsed a status sentence concatenated with no space (`Foo.Foo.`) and dropped a later text block that repeats an earlier one, so a Responses double-emit cannot persist into the next turn. Exact-tile collapse is power-of-two prose only; a long run of one filler character is not a generation loop. Parallel tool calls with distinct ids are not dropped.
 
 ## [0.91.2] - 2026-08-15
 
