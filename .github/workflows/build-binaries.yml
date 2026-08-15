@@ -240,7 +240,7 @@ jobs:
         run: |
           extract_dir="${RUNNER_TEMP}/pi-adaptative/linux-x64"
           mkdir -p "${extract_dir}" "${PI_ADAPTATIVE_CODING_AGENT_DIR}"
-          tar -xzf artifacts/pi-linux-x64.tar.gz -C "${extract_dir}"
+          tar -xzf artifacts/pi-linux-x64.tar.gz -C "${extract_dir}" --strip-components=1
           node scripts/release-binary-rpc-benchmark.mjs \
             --binary "${extract_dir}/pi" \
             --samples 3 \

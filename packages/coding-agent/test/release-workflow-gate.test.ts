@@ -21,6 +21,7 @@ describe("release workflow quality gate", () => {
 
 		expect(release).toContain("benchmark-linux-binary:");
 		expect(release).toContain("pi-linux-x64-benchmark.json");
+		expect(release).toContain(`tar -xzf artifacts/pi-linux-x64.tar.gz -C "\${extract_dir}" --strip-components=1`);
 		expect(release).toContain(`pi-windows-\${{ matrix.arch }}-benchmark.json`);
 		expect(release.match(/release-binary-rpc-benchmark\.mjs/gu)).toHaveLength(2);
 	});
