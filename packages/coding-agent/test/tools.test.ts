@@ -610,7 +610,7 @@ describe("Coding Agent Tools", () => {
 				args: ["-c"],
 			});
 
-			const bashWithBadShell = bashToolFor(testDir);
+			const bashWithBadShell = bashToolFor(testDir, { operations: createLocalBashOperations() });
 
 			await expect(bashWithBadShell.execute("test-call-12", { command: "echo test" })).rejects.toThrow(/ENOENT/);
 		});
