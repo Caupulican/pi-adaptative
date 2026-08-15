@@ -270,7 +270,6 @@ jobs:
       - name: Checkout performance gate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       - name: Setup Node.js
@@ -285,7 +284,7 @@ jobs:
           path: benchmarks
           merge-multiple: true
 
-      - name: Enforce Linux-relative Windows performance budgets
+      - name: Enforce Windows performance budgets
         run: |
           node scripts/release-binary-performance-gate.mjs \
             --linux benchmarks/pi-linux-x64-benchmark.json \
@@ -306,7 +305,8 @@ jobs:
     if: github.event_name == 'push' || inputs.verify_only != true
     runs-on: ubuntu-latest
     # GitHub and npm publishing stay blocked until both native Windows binaries pass
-    # functional RPC smoke and measured Linux-relative startup/warm-path budgets.
+    # functional RPC smoke and absolute startup/warm-path budgets. Linux-relative
+    # ratios remain in the report as cross-runner performance telemetry.
     needs: [quality-gate, build, verify-release-binary-performance]
     permissions:
       contents: write

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Kept Linux-relative Windows benchmark ratios visible without letting independent runner variance block binaries that satisfy the absolute release budgets.
+
 ## [0.92.0] - 2026-08-15
 
 ### Breaking Changes

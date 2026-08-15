@@ -84,6 +84,31 @@ test("rejects a Windows slowdown even when the Linux comparison is also slow", (
 	);
 });
 
+test("reports Linux-relative runner variance without blocking acceptable absolute Windows latency", () => {
+	const linux = benchmark("linux-x64", {
+		firstShellReady: metric(666, 677),
+	});
+	const windows = [
+		benchmark("windows-x64", {
+			coldShell: metric(56, 59),
+			firstShellReady: metric(1_621, 1_642),
+			warmRpc: metric(0.48, 0.58),
+			warmShell: metric(1.94, 3.26),
+		}),
+	];
+
+	const report = evaluateReleaseBinaryPerformance({ linux, windows });
+	const medianRatio = report.platforms[0].checks.find(
+		(check) => check.name === "firstShellReady.medianRatio",
+	);
+
+	assert.equal(report.schemaVersion, 2);
+	assert.equal(report.passed, true);
+	assert.equal(report.platforms[0].passed, true);
+	assert.equal(medianRatio?.passed, false);
+	assert.equal(medianRatio?.blocking, false);
+});
+
 test("requires paired first-shell metrics from one Linux and at least one Windows benchmark", () => {
 	assert.throws(
 		() => evaluateReleaseBinaryPerformance({ linux: benchmark("linux-x64", { firstShellReady: undefined }), windows: [] }),

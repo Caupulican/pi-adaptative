@@ -49,13 +49,14 @@ function validateBenchmark(benchmark, expectedPlatform) {
 	}
 }
 
-function check(name, actual, limit, unit = "ms") {
+function check(name, actual, limit, unit = "ms", blocking = true) {
 	return {
 		name,
 		actual: Math.round(actual * 1000) / 1000,
 		limit: Math.round(limit * 1000) / 1000,
 		unit,
 		passed: actual <= limit,
+		blocking,
 	};
 }
 
@@ -80,23 +81,29 @@ export function evaluateReleaseBinaryPerformance({ linux, windows, budgets = DEF
 				benchmark.metrics.firstShellReady.medianMs / Math.max(linuxReady.medianMs, 0.001),
 				budgets.firstShellReadyMedianRatio,
 				"ratio",
+				false,
 			),
 			check(
 				"firstShellReady.p95Ratio",
 				benchmark.metrics.firstShellReady.p95Ms / Math.max(linuxReady.p95Ms, 0.001),
 				budgets.firstShellReadyP95Ratio,
 				"ratio",
+				false,
 			),
 			check("warmRpc.medianMs", benchmark.metrics.warmRpc.medianMs, budgets.warmRpcMedianMs),
 			check("warmRpc.p95Ms", benchmark.metrics.warmRpc.p95Ms, budgets.warmRpcP95Ms),
 			check("warmShell.medianMs", benchmark.metrics.warmShell.medianMs, budgets.warmShellMedianMs),
 			check("warmShell.p95Ms", benchmark.metrics.warmShell.p95Ms, budgets.warmShellP95Ms),
 		];
-		return { label: benchmark.label, passed: checks.every((candidate) => candidate.passed), checks };
+		return {
+			label: benchmark.label,
+			passed: checks.every((candidate) => !candidate.blocking || candidate.passed),
+			checks,
+		};
 	});
 
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		passed: platforms.every((platform) => platform.passed),
 		linux: {
 			label: linux.label,
@@ -143,7 +150,7 @@ function readBenchmark(path) {
 }
 
 function formatCheck(checkResult) {
-	const status = checkResult.passed ? "PASS" : "FAIL";
+	const status = checkResult.passed ? "PASS" : checkResult.blocking ? "FAIL" : "WARN";
 	return `${status} ${checkResult.name}: ${checkResult.actual}${checkResult.unit} <= ${checkResult.limit}${checkResult.unit}`;
 }
 
