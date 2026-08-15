@@ -12,6 +12,15 @@ test("normal CI keeps small workspaces on the quality job and shards coding-agen
 	assert.doesNotMatch(workflow, /^\s+run: npm test\s*$/mu);
 });
 
+test("normal CI hard-stops every critical-path job at five minutes", () => {
+	const shardJobStart = workflow.indexOf("  coding-agent-test:");
+	assert.notEqual(shardJobStart, -1);
+	const qualityJob = workflow.slice(0, shardJobStart);
+	const shardJob = workflow.slice(shardJobStart);
+	assert.match(qualityJob, /^    timeout-minutes: 5$/mu);
+	assert.match(shardJob, /^    timeout-minutes: 5$/mu);
+});
+
 test("release fast paths skip every coding-agent shard after the exact suite already passed", () => {
 	const qualityJob = workflow.slice(0, workflow.indexOf("  coding-agent-test:"));
 	assert.match(qualityJob, /runner\.os == 'Linux' &&\n\s+inputs\.skip_tests != true/u);
