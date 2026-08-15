@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Split the coding-agent CI suite into four independent shards per OS and removed test-only system setup from release fast paths, targeting a sub-five-minute critical path without reducing coverage or Windows worker parallelism.
+
 ### Fixed
 
 - Kept Linux-relative Windows benchmark ratios visible without letting independent runner variance block binaries that satisfy the absolute release budgets.

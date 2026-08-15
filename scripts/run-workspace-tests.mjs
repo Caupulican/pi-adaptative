@@ -6,8 +6,9 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolveWorkspaceTestPlan } from "./workspace-test-plan.mjs";
 
-const WORKSPACES = ["packages/tui", "packages/ai", "packages/agent", "packages/coding-agent"];
+const workspaces = resolveWorkspaceTestPlan(process.argv.slice(2));
 
 function hasTestScript(workspace) {
 	const pkgPath = join(workspace, "package.json");
@@ -16,7 +17,7 @@ function hasTestScript(workspace) {
 	return typeof pkg.scripts?.test === "string";
 }
 
-for (const workspace of WORKSPACES) {
+for (const workspace of workspaces) {
 	if (!hasTestScript(workspace)) continue;
 	console.log(`\n=== ${workspace} ===\n`);
 	const result = spawnSync("npm", ["run", "test", "--workspace", workspace], {

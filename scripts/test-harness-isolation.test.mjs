@@ -261,7 +261,7 @@ test("the mandatory root check owns the isolated release-test harness contract",
 	assert.doesNotMatch(source, /^\s*(?:export\s+)?PATH=/m);
 	assert.equal(
 		packageJson.scripts["check:test-harness-isolation"],
-		"node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs",
+		"node --test scripts/test-harness-isolation.test.mjs scripts/release-staging.test.mjs scripts/workspace-test-plan.test.mjs scripts/ci-workflow-performance.test.mjs",
 	);
 	assert.match(packageJson.scripts.check, /npm run check:test-harness-isolation/);
 	assert.equal(packageJson.scripts.test, "node scripts/run-workspace-tests.mjs");
