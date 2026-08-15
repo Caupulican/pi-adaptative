@@ -22,10 +22,11 @@
  * process; the direct child's own exit is what unblocks the sentinel line, exactly like the
  * per-command backend and like bash's stdio inheritance above. The bounded consequence: a native
  * command's stderr no longer merges into the session's stdout pipe (there is no capturing pipeline
- * stage to merge it) — it arrives on the session's own stderr pipe instead, forwarded via
- * `onStderr` -> `onData` same as the shell's own diagnostics. PowerShell 5.1's habit of wrapping
- * redirected stderr text in a `NativeCommandError` record also disappears, which is an accuracy
- * improvement (the raw stderr bytes are reported, not a wrapped/duplicated rendering of them).
+ * stage to merge it) — it arrives on the session's own stderr pipe instead. A nonce-bearing barrier
+ * on that pipe joins it deterministically with the stdout completion frame before the command
+ * resolves. PowerShell 5.1's habit of wrapping redirected stderr text in a `NativeCommandError`
+ * record also disappears, which is an accuracy improvement (the raw stderr bytes are reported,
+ * not a wrapped/duplicated rendering of them).
  *
  * Kill semantics: timeout/abort/silence kill the WHOLE session process tree (a hung foreground
  * command cannot be killed individually without job control) and the next exec respawns a fresh
@@ -41,6 +42,7 @@ import {
 	POWERSHELL_ARGS,
 	POWERSHELL_BOOTSTRAP,
 	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_STDERR_BARRIER_LABEL,
 } from "../../utils/powershell-session-protocol.ts";
 import {
 	getPowerShellCandidateConfigs,
@@ -267,12 +269,16 @@ export class PersistentShellSession {
 				? buildPowerShellWire(resolvedCommand, nonce, cdTo)
 				: buildBashWire(resolvedCommand, nonce, cdTo);
 		const sentinelPrefix = Buffer.from(`\n\x1e${nonce}:`, "latin1");
+		const stderrBarrier = Buffer.from(`\x1e${nonce}:${POWERSHELL_STDERR_BARRIER_LABEL}\x1e`, "latin1");
 
 		this.coordinator.setLoopRef(true);
 		try {
 			return await new Promise<{ exitCode: number | null }>((resolve, reject) => {
 				let settled = false;
-				let pending: Buffer = Buffer.alloc(0);
+				let stdoutPending: Buffer = Buffer.alloc(0);
+				let stderrPending: Buffer = Buffer.alloc(0);
+				let commandExitCode: number | null | undefined;
+				let stderrBarrierSeen = this.kind !== "powershell";
 				let timeoutTimer: NodeJS.Timeout | undefined;
 
 				const silenceWatchdog =
@@ -301,51 +307,73 @@ export class PersistentShellSession {
 					settle(() => reject(new Error("aborted")));
 				};
 
-				const emitPending = (upTo: number) => {
+				const emitStdoutPending = (upTo: number) => {
 					if (upTo <= 0) return;
-					onData(pending.subarray(0, upTo));
-					pending = pending.subarray(upTo);
+					onData(stdoutPending.subarray(0, upTo));
+					stdoutPending = stdoutPending.subarray(upTo);
+				};
+				const emitStderrPending = (upTo: number) => {
+					if (upTo <= 0) return;
+					onData(stderrPending.subarray(0, upTo));
+					stderrPending = stderrPending.subarray(upTo);
+				};
+				const resolveWhenComplete = () => {
+					const exitCode = commandExitCode;
+					if (exitCode === undefined || !stderrBarrierSeen) return;
+					settle(() => resolve({ exitCode }));
 				};
 
 				this.activeExec = {
 					onStdout: (data) => {
 						silenceWatchdog?.touch();
-						pending = pending.length === 0 ? data : Buffer.concat([pending, data]);
-						const prefixIndex = pending.indexOf(sentinelPrefix);
+						if (commandExitCode !== undefined) {
+							onData(data);
+							return;
+						}
+						stdoutPending = stdoutPending.length === 0 ? data : Buffer.concat([stdoutPending, data]);
+						const prefixIndex = stdoutPending.indexOf(sentinelPrefix);
 						if (prefixIndex !== -1) {
-							const closeIndex = pending.indexOf(SENTINEL_BYTE, prefixIndex + sentinelPrefix.length);
+							const closeIndex = stdoutPending.indexOf(SENTINEL_BYTE, prefixIndex + sentinelPrefix.length);
 							if (closeIndex !== -1) {
-								const codeText = pending
+								const codeText = stdoutPending
 									.subarray(prefixIndex + sentinelPrefix.length, closeIndex)
 									.toString("latin1");
-								emitPending(prefixIndex);
+								emitStdoutPending(prefixIndex);
+								stdoutPending = stdoutPending.subarray(closeIndex - prefixIndex + 1);
+								emitStdoutPending(stdoutPending.length);
 								const parsed = Number.parseInt(codeText, 10);
-								// Defer the settle by one microtask turn: with the bare Invoke-Expression
-								// form a native command's stderr now arrives on the session's OWN stderr
-								// pipe (see module doc header) instead of being pre-merged into the same
-								// stdout bytes the sentinel rides on. Node fires already-queued stream
-								// 'data' events in event-loop order; queueing the resolution behind a
-								// microtask guarantees any stderr chunk the kernel delivered alongside (or
-								// just before) this stdout chunk has already run its 'data' handler — and
-								// thus reached `onData` — before the promise settles, so callers never see a
-								// truncated stderr tail immediately after resolution.
-								queueMicrotask(() => settle(() => resolve({ exitCode: Number.isNaN(parsed) ? null : parsed })));
+								commandExitCode = Number.isNaN(parsed) ? null : parsed;
+								resolveWhenComplete();
 								return;
 							}
 						}
 						// Stream promptly but retain a tail large enough to hold any split sentinel.
-						emitPending(pending.length - SENTINEL_HOLDBACK_BYTES);
+						emitStdoutPending(stdoutPending.length - SENTINEL_HOLDBACK_BYTES);
 					},
 					onStderr: (data) => {
-						// The command's stderr is merged into stdout at the shell; this pipe only
-						// carries the session shell's own diagnostics. Forward for visibility.
 						silenceWatchdog?.touch();
-						onData(data);
+						if (this.kind !== "powershell" || stderrBarrierSeen) {
+							onData(data);
+							return;
+						}
+						stderrPending = stderrPending.length === 0 ? data : Buffer.concat([stderrPending, data]);
+						const barrierIndex = stderrPending.indexOf(stderrBarrier);
+						if (barrierIndex !== -1) {
+							emitStderrPending(barrierIndex);
+							stderrPending = stderrPending.subarray(stderrBarrier.length);
+							emitStderrPending(stderrPending.length);
+							stderrBarrierSeen = true;
+							resolveWhenComplete();
+							return;
+						}
+						// Preserve enough bytes to recognize a barrier split across chunks.
+						emitStderrPending(stderrPending.length - stderrBarrier.length + 1);
 					},
 					onChildClose: (code) => {
 						// The command terminated the shell itself (e.g. `exit 3`) or the shell
 						// crashed: report its exit code like the per-command backend would.
-						emitPending(pending.length);
+						emitStdoutPending(stdoutPending.length);
+						emitStderrPending(stderrPending.length);
 						settle(() => resolve({ exitCode: code }));
 					},
 					fail: (error) => {

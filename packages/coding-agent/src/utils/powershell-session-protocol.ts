@@ -2,6 +2,7 @@
 export const POWERSHELL_STARTUP_PROBE_TIMEOUT_MS = 15_000;
 export const POWERSHELL_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"] as const;
 export const POWERSHELL_SESSION_READY_MARKER = "\x1epi-shell-ready\x1e";
+export const POWERSHELL_STDERR_BARRIER_LABEL = "stderr";
 
 /**
  * PowerShell 5.1-compatible persistent REPL bootstrap. The readiness marker lets the process that
@@ -27,6 +28,8 @@ export const POWERSHELL_BOOTSTRAP = [
 	"\t$__pi_code = $global:LASTEXITCODE",
 	"\tif ($null -eq $__pi_code) { $__pi_code = if ($__pi_succeeded) { 0 } else { 1 } }",
 	"\tif ($__pi_thrown -and ($__pi_code -eq 0)) { $__pi_code = 1 }",
+	`\t[Console]::Error.Write(('{0}{1}:${POWERSHELL_STDERR_BARRIER_LABEL}{0}' -f [char]30, $__pi_nonce))`,
+	"\t[Console]::Error.Flush()",
 	"\t[Console]::Out.Write(('{0}{1}{2}:{3}{1}' -f [char]10, [char]30, $__pi_nonce, $__pi_code))",
 	"}",
 ].join("\n");

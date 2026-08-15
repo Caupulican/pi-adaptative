@@ -54,6 +54,7 @@ process.stdin.on("data", (chunk) => {
 		const nonce = line.slice(0, separator);
 		const body = Buffer.from(line.slice(separator + 1), "base64").toString("utf8");
 		appendFileSync(process.env.PI_CAPTURE_PATH, JSON.stringify(body) + "\\n");
+		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e");
 		process.stdout.write("ok\\n\\n\\x1e" + nonce + ":0\\x1e");
 		newline = pending.indexOf("\\n");
 	}

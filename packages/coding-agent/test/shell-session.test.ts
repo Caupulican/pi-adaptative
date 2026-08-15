@@ -94,6 +94,7 @@ process.stdin.on("data", (chunk) => {
 		pending = pending.slice(newline + 1);
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
+		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e");
 		process.stdout.write("ok\\n\\n\\x1e" + nonce + ":0\\x1e");
 		newline = pending.indexOf("\\n");
 	}
@@ -131,6 +132,49 @@ process.stdin.on("data", (chunk) => {
 			});
 			expect(resolutionCalls).toBe(1);
 			expect(spawnCalls).toEqual(["bad-powershell", "good-powershell"]);
+		} finally {
+			session.dispose();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("waits for delayed PowerShell stderr before resolving a command", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-shell-stderr-barrier-"));
+		const fixture = join(directory, "powershell-fixture.mjs");
+		writeFileSync(
+			fixture,
+			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+process.stdout.write(marker);
+let pending = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	pending += chunk;
+	let newline = pending.indexOf("\\n");
+	while (newline !== -1) {
+		const line = pending.slice(0, newline);
+		pending = pending.slice(newline + 1);
+		const separator = line.indexOf(" ");
+		const nonce = line.slice(0, separator);
+		process.stdout.write("host-before-stderr\\n\\n\\x1e" + nonce + ":0\\x1e");
+		setTimeout(() => process.stderr.write("late-stderr\\x1e" + nonce + ":stderr\\x1e"), 50);
+		newline = pending.indexOf("\\n");
+	}
+});
+`,
+		);
+		chmodSync(fixture, 0o755);
+
+		const session = new PersistentShellSession("stderr-barrier", "powershell", {
+			resolvePowerShellCandidates: () => [{ shell: "fixture-powershell", args: [] }],
+			spawn: (_command: string, args: string[], options: SpawnOptions) =>
+				spawn(process.execPath, [fixture, ...args], options),
+			startupTimeoutMs: 2_000,
+		});
+		try {
+			expect(await run(session, "Write-Output ignored", process.cwd())).toEqual({
+				exitCode: 0,
+				output: "host-before-stderr\nlate-stderr",
+			});
 		} finally {
 			session.dispose();
 			rmSync(directory, { recursive: true, force: true });
