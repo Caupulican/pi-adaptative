@@ -2148,6 +2148,22 @@ describe("AgentSession worker delegation", () => {
 			workerOrchestrationProfile: implementationProfile,
 			additionalOrchestrationProfiles: [verifierProfile],
 		});
+		let signalRejected!: () => void;
+		const rejected = new Promise<void>((resolve) => {
+			signalRejected = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type === "delegate_workers" &&
+				event.terminalSinceFlush.some(
+					(record) =>
+						record.status === "failed" &&
+						record.reasonCode === "independent_verification_rejected:focused_checks_failed",
+				)
+			) {
+				signalRejected();
+			}
+		});
 		try {
 			harness.setResponses([
 				fauxAssistantMessage('{"summary":"implementation complete","status":"completed","findings":[]}'),
@@ -2159,12 +2175,11 @@ describe("AgentSession worker delegation", () => {
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Implement and verify" });
 			if (!run.started || !run.record) throw new Error("Expected implementation worker to start");
 			const subjectLaneId = run.record.laneId;
-			await vi.waitFor(() => {
-				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
-				expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
-					status: "failed",
-					reasonCode: "independent_verification_rejected:focused_checks_failed",
-				});
+			await rejected;
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
+			expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
+				status: "failed",
+				reasonCode: "independent_verification_rejected:focused_checks_failed",
 			});
 
 			expect(
@@ -2175,6 +2190,7 @@ describe("AgentSession worker delegation", () => {
 				reasonCodes: ["focused_checks_failed"],
 			});
 		} finally {
+			unsubscribe();
 			harness.cleanup();
 		}
 	});
