@@ -855,7 +855,6 @@ export class RuntimeBuilder {
 				shellPath,
 				sessionKey: this.deps.getShellSessionKey(),
 				platform: process.platform,
-				prewarmWindowsShell: true,
 				spawnHook: (context) => {
 					const env = { ...context.env, ...this._credentialManager.getEnvironmentForCwd(context.cwd) };
 					delete env.BW_SESSION;
