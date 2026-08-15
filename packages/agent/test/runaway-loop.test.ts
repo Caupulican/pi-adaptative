@@ -1948,7 +1948,7 @@ describe("runaway-loop backstop", () => {
 		expect(providerPrompts[2]).toContain("Timeout unchanged retry exhausted");
 	});
 
-	it("reserves one timeout retry across parallel duplicates and blocks the excess call", async () => {
+	it("collapses parallel identical tool calls to one execution before the timeout gate", async () => {
 		let executions = 0;
 		const timingOutTool = createEchoTool();
 		timingOutTool.execute = async () => {
@@ -1996,6 +1996,15 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
+		const secondTurnCalls = events.flatMap((event) =>
+			event.type === "message_end" &&
+			event.message.role === "assistant" &&
+			event.message.content.some((block) => block.type === "toolCall" && block.id.startsWith("timeout-2-"))
+				? event.message.content.filter((block) => block.type === "toolCall")
+				: [],
+		);
+		expect(secondTurnCalls).toHaveLength(1);
+		expect(secondTurnCalls[0]).toMatchObject({ id: "timeout-2-0", name: "echo" });
 		expect(executions).toBe(2);
 		expect(
 			events.filter(
@@ -2003,7 +2012,7 @@ describe("runaway-loop backstop", () => {
 					event.type === "tool_execution_end" &&
 					resultContainsFailureCode(event.result, "repeated_failed_operation"),
 			),
-		).toHaveLength(1);
+		).toHaveLength(0);
 	});
 
 	it("accounts parallel failures in bounded waves before launching more work", async () => {
