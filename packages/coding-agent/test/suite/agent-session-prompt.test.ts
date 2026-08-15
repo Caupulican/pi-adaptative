@@ -293,6 +293,7 @@ describe("AgentSession prompt characterization", () => {
 			"write",
 			"goal",
 			"task_steps",
+			"pipeline",
 			"ask_question",
 			"secret_store",
 			"delegate",
