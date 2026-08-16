@@ -4,6 +4,7 @@ import {
 	type ToolCallRepairInfo,
 } from "@caupulican/pi-agent-core";
 import { truncateHead } from "@caupulican/pi-agent-core/truncate";
+import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import {
 	Box,
 	type Component,
@@ -21,6 +22,7 @@ import {
 	formatCollapsedToolOutputHint,
 	getTextOutput as getRenderedTextOutput,
 } from "../../../core/tools/render-utils.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { renderTitleBadge, titleBadge } from "./tool-title.ts";
@@ -103,6 +105,27 @@ class ToolTimingComponent implements Component {
 	}
 
 	invalidate(): void {}
+}
+
+/** Let a tool suppress its collapsed result while preventing its result body from leaking. */
+class CollapsedToolResultHintComponent implements Component {
+	private readonly resultPreview: Component;
+	private readonly hint: Text;
+
+	constructor(resultPreview: Component) {
+		this.resultPreview = resultPreview;
+		this.hint = new Text(formatCollapsedToolOutputHint(theme), 0, 0);
+	}
+
+	render(width: number): string[] {
+		const hasPreview = this.resultPreview.render(width).some((line) => stripAnsi(line).trim().length > 0);
+		return hasPreview ? this.hint.render(width) : [];
+	}
+
+	invalidate(): void {
+		this.resultPreview.invalidate();
+		this.hint.invalidate();
+	}
 }
 
 // Components only use built-in definitions for display (renderers, grouping), so one
@@ -347,6 +370,40 @@ export class ToolExecutionComponent extends Container {
 		return new Text(`${theme.fg("toolOutput", truncation.content)}\n${note}`, 0, 0);
 	}
 
+	private createCollapsedResultHint(result: ToolExecutionResult): Component | undefined {
+		if (this.mustDeferResultPayload(result)) {
+			return new Text(formatCollapsedToolOutputHint(theme), 0, 0);
+		}
+		const resultPreview = this.createRenderedResult(result, false);
+		return resultPreview ? new CollapsedToolResultHintComponent(resultPreview) : undefined;
+	}
+
+	private mustDeferResultPayload(result: ToolExecutionResult): boolean {
+		if (!this.deferResultUntilExpanded) return false;
+		const content = Object.getOwnPropertyDescriptor(result, "content");
+		const details = Object.getOwnPropertyDescriptor(result, "details");
+		return typeof content?.get === "function" || typeof details?.get === "function";
+	}
+
+	private createRenderedResult(result: ToolExecutionResult, expanded: boolean): Component | undefined {
+		const resultRenderer = this.getResultRenderer();
+		if (!resultRenderer) return this.createResultFallback(result);
+
+		try {
+			const component = resultRenderer(
+				{ content: result.content as (TextContent | ImageContent)[], details: result.details },
+				{ expanded, isPartial: this.isPartial },
+				theme,
+				this.getRenderContext(this.resultRendererComponent),
+			);
+			this.resultRendererComponent = component;
+			return component;
+		} catch {
+			this.resultRendererComponent = undefined;
+			return this.createResultFallback(result);
+		}
+	}
+
 	updateArgs(args: any, repair?: ToolCallRepairInfo): void {
 		this.args = args;
 		this.repair = repair;
@@ -543,37 +600,18 @@ export class ToolExecutionComponent extends Container {
 			}
 
 			if (this.result && !this.expanded) {
-				renderContainer.addChild(new Text(formatCollapsedToolOutputHint(theme), 0, 0));
-				hasContent = true;
+				const collapsedResultHint = this.createCollapsedResultHint(this.result);
+				if (collapsedResultHint) {
+					renderContainer.addChild(collapsedResultHint);
+					hasContent = true;
+				}
 			}
 
 			if (materializedResult) {
-				const resultRenderer = this.getResultRenderer();
-				if (!resultRenderer) {
-					const component = this.createResultFallback(materializedResult);
-					if (component) {
-						renderContainer.addChild(component);
-						hasContent = true;
-					}
-				} else {
-					try {
-						const component = resultRenderer(
-							{ content: materializedResult.content as any, details: materializedResult.details },
-							{ expanded: this.expanded, isPartial: this.isPartial },
-							theme,
-							this.getRenderContext(this.resultRendererComponent),
-						);
-						this.resultRendererComponent = component;
-						renderContainer.addChild(component);
-						hasContent = true;
-					} catch {
-						this.resultRendererComponent = undefined;
-						const component = this.createResultFallback(materializedResult);
-						if (component) {
-							renderContainer.addChild(component);
-							hasContent = true;
-						}
-					}
+				const component = this.createRenderedResult(materializedResult, this.expanded);
+				if (component) {
+					renderContainer.addChild(component);
+					hasContent = true;
 				}
 			}
 			if (this.timing.hasStarted()) {
@@ -642,7 +680,11 @@ export class ToolExecutionComponent extends Container {
 		if (content) {
 			text += `\n\n${content}`;
 		}
-		if (this.result && !this.expanded) {
+		if (
+			this.result &&
+			!this.expanded &&
+			(this.mustDeferResultPayload(this.result) || this.getTextOutput(this.result).trim().length > 0)
+		) {
 			text += formatCollapsedToolOutputHint(theme);
 		}
 		const output = result ? this.getTextOutput(result) : "";

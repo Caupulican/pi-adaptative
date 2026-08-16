@@ -17,35 +17,37 @@ describe("orchestration history collapse", () => {
 	});
 
 	it("keeps successful task bookkeeping out of collapsed history and available on expansion", () => {
-		const state = createTaskStepsState("T0");
-		const definition = createTaskStepsToolDefinition({
-			getTaskStepsState: () => state,
-			saveTaskStepsState: () => {},
-		});
-		const component = new ToolExecutionComponent(
-			"task_steps",
-			"task-call-1",
-			{ action: "list" },
-			{},
-			definition,
-			fakeTui(),
-			process.cwd(),
-		);
-		component.updateResult({
-			content: [{ type: "text", text: "No tracked steps." }],
-			details: { action: "list", applied: true, state },
-			isError: false,
-		});
+		for (const deferResultUntilExpanded of [false, true]) {
+			const state = createTaskStepsState("T0");
+			const definition = createTaskStepsToolDefinition({
+				getTaskStepsState: () => state,
+				saveTaskStepsState: () => {},
+			});
+			const component = new ToolExecutionComponent(
+				"task_steps",
+				"task-call-1",
+				{ action: "list" },
+				{ deferResultUntilExpanded },
+				definition,
+				fakeTui(),
+				process.cwd(),
+			);
+			component.updateResult({
+				content: [{ type: "text", text: "No tracked steps." }],
+				details: { action: "list", applied: true, state },
+				isError: false,
+			});
 
-		expect(component.render(100)).toEqual([]);
-		const group = new ToolGroupComponent("task_steps", [component]);
-		const collapsed = stripAnsi(group.render(100).join("\n"));
-		expect(collapsed).toContain("1 Task Step");
-		expect(collapsed).not.toContain("task_steps");
-		expect(collapsed).not.toContain("[task steps] list");
-		expect(collapsed).not.toContain("No tracked steps.");
+			expect(component.render(100)).toEqual([]);
+			const group = new ToolGroupComponent("task_steps", [component]);
+			const collapsed = stripAnsi(group.render(100).join("\n"));
+			expect(collapsed).toContain("1 Task Step");
+			expect(collapsed).not.toContain("task_steps");
+			expect(collapsed).not.toContain("[task steps] list");
+			expect(collapsed).not.toContain("No tracked steps.");
 
-		group.setExpanded(true);
-		expect(stripAnsi(group.render(100).join("\n"))).toContain("[task steps] list");
+			group.setExpanded(true);
+			expect(stripAnsi(group.render(100).join("\n"))).toContain("[task steps] list");
+		}
 	});
 });

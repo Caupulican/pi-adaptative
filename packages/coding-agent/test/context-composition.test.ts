@@ -126,8 +126,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"artifact_retrieve",
 					"ask_question",
 					"bash",
+					"create_goal",
 					"delegate",
 					"edit",
+					"get_goal",
 					"goal",
 					"improvement_loop",
 					"pipeline",
@@ -140,6 +142,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"skillify",
 					"task_steps",
 					"tool_task",
+					"update_goal",
 					"write",
 				].sort(),
 			);
@@ -148,9 +151,9 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// properties (providers whose function-declaration schema requires `type` per property,
 			// e.g. Google's OpenAPI subset, reject the whole tool list with a 400 otherwise — see
 			// compactRedundantEnumConstraints). Default surface now also includes skillify,
-			// skill_audit, and improvement_loop. Measured stable values: toolSchemaTokens 3406,
-			// delegate 844 (enum-heavy actions).
-			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_650);
+			// skill_audit, improvement_loop, and the three lifecycle goal tools. Measured stable
+			// values: toolSchemaTokens 3701, delegate 844 (enum-heavy actions).
+			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_950);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);

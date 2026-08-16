@@ -19,9 +19,9 @@
 
 - Kept Linux-relative Windows benchmark ratios visible without letting independent runner variance block binaries that satisfy the absolute release budgets.
 - Projected transient active-skill guidance through the provider system channel so models cannot mistake repeated skill projection for new user instructions.
-- Kept every collapsed tool panel header-only, including partial, failed, extension, unknown-tool, lazy-history, and direct-shell results, until the user expands it.
+- Kept every collapsed tool panel header-only, including partial, failed, extension, unknown-tool, lazy-history, and direct-shell results, until the user expands it, without orphan expansion hints for renderers that intentionally stay blank.
 - Made goal auto-continuation independent of research/delegation lane capability and host-counted unchanged passes toward the durable stall limit, preventing models from bypassing the stop by omitting `no_progress`.
-- Let compact lifecycle models report concrete active progress and reject agent-requested goal blocking until three consecutive stalled turns have been recorded.
+- Let compact lifecycle models report concrete active progress and reject agent-requested goal blocking until three consecutive stalled turns have been recorded while keeping active-goal provider context within its 400-character overhead budget.
 - Recorded and reported provider-turn cost-fuse stops distinctly from repeated identical-tool loops, including the correct durable goal stop reason.
 
 ## [0.92.0] - 2026-08-15
