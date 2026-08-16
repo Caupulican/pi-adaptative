@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-agent-core",
-	"version": "0.92.0",
+	"version": "0.93.0",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -141,7 +141,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@caupulican/pi-ai": "^0.92.0",
+		"@caupulican/pi-ai": "^0.93.0",
 		"ignore": "7.0.5",
 		"typebox": "1.1.38",
 		"yaml": "2.9.0"
