@@ -327,7 +327,7 @@ describe("AgentSession background tool tasks", () => {
 		}
 	});
 
-	it("blocks goal continuation after a failed durable task wait exhausts recovery", async () => {
+	it("blocks goal continuation locally after a failed durable task wait exhausts recovery", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const failedTask: BackgroundToolTaskRecord = {
 			sessionId: sessionManager.getSessionId(),
@@ -367,7 +367,17 @@ describe("AgentSession background tool tasks", () => {
 		try {
 			await harness.session.prompt("inspect the failed task", { autoContinueGoal: false });
 
-			expect(harness.faux.callCount).toBe(5);
+			const assistantText = harness.agent.state.messages
+				.flatMap((message) =>
+					message.role === "assistant"
+						? message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+						: [],
+				)
+				.join("\n");
+			// Terminal recovery is host-delivered: do not buy the queued provider-authored wrap-up.
+			expect(harness.faux.callCount).toBe(4);
+			expect(assistantText).toContain("Tool recovery stopped for tool_task");
+			expect(assistantText).not.toContain("The background task failure requires owner action.");
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 				goalId: "goal-task-wait",
 				status: "blocked",
