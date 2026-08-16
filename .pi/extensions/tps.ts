@@ -42,6 +42,7 @@ export default function (pi: ExtensionAPI) {
 		const elapsedSeconds = elapsedMs / 1000;
 		const tokensPerSecond = output / elapsedSeconds;
 		const message = `TPS ${tokensPerSecond.toFixed(1)} tok/s. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSeconds.toFixed(1)}s`;
-		ctx.ui.notify(message, "info");
+		// Footer status stays until the next turn overwrites it. notify() is a 2s activity-lane flash.
+		ctx.ui.setStatus("tps", message);
 	});
 }
