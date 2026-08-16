@@ -1,4 +1,5 @@
 import type { HarnessCapability } from "./capability-contract.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 
 export interface ToolCapabilityPolicy {
@@ -33,7 +34,9 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["skill_audit", policy(["skill.read"], "path-scope")],
 	["skillify", policy(["skill.write"], "path-scope")],
 	["extensionify", policy(["source.write"], "path-scope")],
-	["goal", policy(["memory.mutate"], "memory-broker")],
+	...["goal", ...GOAL_LIFECYCLE_TOOL_NAMES].map(
+		(toolName) => [toolName, policy(["memory.mutate"], "memory-broker")] as const,
+	),
 	["memory", policy(["memory.mutate", "memory.query"], "memory-broker")],
 	["secret_store", policy(["credentials.use"], "service-proxy")],
 	["delegate", DELEGATE_POLICY],

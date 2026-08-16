@@ -18,6 +18,9 @@ const DEFAULT_ACTIVE = [
 	"write",
 	"context_audit",
 	"goal",
+	"create_goal",
+	"get_goal",
+	"update_goal",
 	"pipeline",
 	"task_steps",
 	"ask_question",
@@ -119,7 +122,14 @@ describe("filterToolNamesForCapability", () => {
 		expect(filtered).toContain("task_steps");
 	});
 
-	it("reduces minimal to the core coding set and chat to nothing", () => {
+	it("keeps compact goal lifecycle controls in every model class", () => {
+		for (const contextWindow of [200_000, 16_384, 8_192, 4_096]) {
+			const filtered = filterToolNamesForCapability(DEFAULT_ACTIVE, deriveModelCapabilityProfile({ contextWindow }));
+			expect(filtered).toEqual(expect.arrayContaining(["create_goal", "get_goal", "update_goal"]));
+		}
+	});
+
+	it("reduces minimal to the core coding set and chat to compact goal lifecycle controls", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, minimal)).toEqual([
 			"read",
@@ -128,13 +138,16 @@ describe("filterToolNamesForCapability", () => {
 			"python",
 			"edit",
 			"write",
+			"create_goal",
+			"get_goal",
+			"update_goal",
 			"ask_question",
 			"run_toolkit_script",
 		]);
 
 		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([...MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS]);
-		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([]);
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual(["create_goal", "get_goal", "update_goal"]);
 	});
 
 	it("keeps owner clarification available to lean and minimal models", () => {
@@ -146,7 +159,11 @@ describe("filterToolNamesForCapability", () => {
 
 	it("preserves requested order and never invents tools", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
-		expect(filterToolNamesForCapability(["write", "goal", "read"], minimal)).toEqual(["write", "read"]);
+		expect(filterToolNamesForCapability(["write", "goal", "update_goal", "read"], minimal)).toEqual([
+			"write",
+			"update_goal",
+			"read",
+		]);
 		expect(filterToolNamesForCapability([], minimal)).toEqual([]);
 	});
 });

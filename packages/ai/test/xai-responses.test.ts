@@ -1,7 +1,9 @@
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel, getModels } from "../src/models.ts";
 import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
-import type { Context } from "../src/types.ts";
+import type { AssistantMessage, Context, Model, ToolResultMessage, Usage } from "../src/types.ts";
+import { xaiOAuthProvider } from "../src/utils/oauth/xai.ts";
 
 // Regression coverage for the xAI subscription polish layer: the built-in catalog is grok-4.5
 // and grok-4.6 on the Responses API. Both must echo reasoning.encrypted_content once reasoning
@@ -9,6 +11,15 @@ import type { Context } from "../src/types.ts";
 
 const context: Context = {
 	messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+};
+
+const usage: Usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
 function completedResponsesSse(): Response {
@@ -38,6 +49,8 @@ function completedResponsesSse(): Response {
 async function captureResponsesRequest(
 	modelId: "grok-4.5" | "grok-4.6",
 	options: Parameters<typeof streamOpenAIResponses>[2],
+	requestContext: Context = context,
+	modelOverride?: Model<"openai-responses">,
 ): Promise<{ url: string; headers: Headers; body: Record<string, unknown> }> {
 	let capturedUrl: string | undefined;
 	let capturedInit: RequestInit | undefined;
@@ -49,8 +62,8 @@ async function captureResponsesRequest(
 	}) as typeof fetch;
 
 	try {
-		const model = getModel("xai", modelId);
-		await streamOpenAIResponses(model, context, options).result();
+		const model = modelOverride ?? getModel("xai", modelId);
+		await streamOpenAIResponses(model, requestContext, options).result();
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
@@ -117,6 +130,138 @@ describe("xAI Responses lane (grok-4.6 xhigh)", () => {
 		const { body } = await captureResponsesRequest("grok-4.6", { apiKey: "test-key-123", reasoningEffort: "xhigh" });
 		expect(body.reasoning).toMatchObject({ effort: "xhigh" });
 		expect(body.include).toEqual(["reasoning.encrypted_content"]);
+	});
+});
+
+describe("xAI Grok CLI subscription schema", () => {
+	it("routes OAuth subscription models through the Grok CLI proxy without changing API-key models", () => {
+		const apiModel = getModel("xai", "grok-4.6");
+		const modified = xaiOAuthProvider.modifyModels?.([apiModel], {
+			access: "oauth-access",
+			refresh: "oauth-refresh",
+			expires: Date.now() + 60_000,
+		});
+
+		expect(apiModel.baseUrl).toBe("https://api.x.ai/v1");
+		expect(modified).toHaveLength(1);
+		expect(modified?.[0]).toMatchObject({
+			provider: "xai",
+			baseUrl: "https://cli-chat-proxy.grok.com/v1",
+			compat: { requestFormat: "xai-cli", supportsLongCacheRetention: false },
+		});
+	});
+
+	it("matches the installed Grok CLI request and replay schema", async () => {
+		const reasoningItem = {
+			type: "reasoning" as const,
+			id: "rs_capture",
+			status: "completed" as const,
+			summary: [{ type: "summary_text" as const, text: "Run one harmless command." }],
+			encrypted_content: "encrypted-capture",
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Run one harmless command.",
+					thinkingSignature: JSON.stringify(reasoningItem),
+				},
+				{
+					type: "text",
+					text: "I will check.",
+					textSignature: JSON.stringify({ v: 1, id: "msg_capture_tool" }),
+				},
+				{
+					type: "toolCall",
+					id: "call_capture|fc_capture",
+					name: "run_terminal_command",
+					arguments: { command: "pwd", description: "Confirm the workspace path." },
+				},
+			],
+			api: "openai-responses",
+			provider: "xai",
+			model: "grok-4.6",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 2,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_capture|fc_capture",
+			toolName: "run_terminal_command",
+			content: [{ type: "text", text: "exit: 0\n/workspace\n" }],
+			isError: false,
+			timestamp: 3,
+		};
+		const requestContext: Context = {
+			systemPrompt: "Follow the system instructions.",
+			messages: [{ role: "user", content: "Run it.", timestamp: 1 }, assistant, toolResult],
+			tools: [
+				{
+					name: "run_terminal_command",
+					description: "Run a command.",
+					parameters: Type.Object({
+						command: Type.String(),
+						description: Type.String(),
+					}),
+				},
+			],
+		};
+		const subscriptionModel: Model<"openai-responses"> = {
+			...getModel("xai", "grok-4.6"),
+			baseUrl: "https://cli-chat-proxy.grok.com/v1",
+			compat: { requestFormat: "xai-cli", supportsLongCacheRetention: false },
+		};
+
+		const { url, body } = await captureResponsesRequest(
+			"grok-4.6",
+			{ apiKey: "oauth-access", reasoningEffort: "high", sessionId: "session-capture" },
+			requestContext,
+			subscriptionModel,
+		);
+
+		expect(url).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+		expect(body).toMatchObject({
+			model: "grok-4.6",
+			prompt_cache_key: "session-capture",
+			store: false,
+			stream: true,
+			include: ["reasoning.encrypted_content"],
+			reasoning: { effort: "high", summary: "concise" },
+		});
+		expect(body.instructions).toBeUndefined();
+		expect(body.prompt_cache_retention).toBeUndefined();
+		expect(body.input).toEqual([
+			{ type: "message", role: "system", content: "Follow the system instructions." },
+			{ type: "message", role: "user", content: "Run it." },
+			{
+				type: "reasoning",
+				id: "rs_capture",
+				summary: [{ type: "summary_text", text: "Run one harmless command." }],
+				encrypted_content: "encrypted-capture",
+			},
+			{ type: "message", role: "assistant", content: "I will check." },
+			{
+				type: "function_call",
+				call_id: "call_capture",
+				name: "run_terminal_command",
+				arguments: JSON.stringify({ command: "pwd", description: "Confirm the workspace path." }),
+			},
+			{ type: "function_call_output", call_id: "call_capture", output: "exit: 0\n/workspace\n" },
+		]);
+		expect(body.tools).toEqual([
+			{
+				type: "function",
+				name: "run_terminal_command",
+				description: "Run a command.",
+				parameters: {
+					type: "object",
+					properties: { command: { type: "string" }, description: { type: "string" } },
+					required: ["command", "description"],
+				},
+			},
+		]);
 	});
 });
 

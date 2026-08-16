@@ -257,13 +257,67 @@ describe("GPT-5.6 integration", () => {
 		expect(input[0]).toMatchObject({
 			type: "additional_tools",
 			role: "developer",
-			tools: [{ type: "function", name: "read_file" }],
+			tools: [
+				{
+					type: "namespace",
+					name: "functions",
+					description: "",
+					tools: [{ type: "function", name: "read_file", strict: false }],
+				},
+			],
 		});
 		expect(input[1]).toMatchObject({ type: "message", role: "developer" });
+		expect(input[2]).toMatchObject({ type: "message", role: "user" });
 
 		const serializedBody = JSON.stringify(requestBody);
 		expect(serializedBody).toContain('"type":"input_image"');
 		expect(serializedBody).not.toContain('"detail"');
+	});
+
+	it("omits the Responses Lite developer message when no instructions exist", async () => {
+		let requestBody: Record<string, unknown> | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+				requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return completedSse();
+			}),
+		);
+
+		await streamOpenAICodexResponses(
+			getModel("openai-codex", "gpt-5.6-luna"),
+			{ messages: [{ role: "user", content: "Answer briefly.", timestamp: Date.now() }] },
+			{ apiKey: mockCodexToken(), transport: "sse" },
+		).result();
+
+		const input = requestBody?.input;
+		if (!Array.isArray(input)) throw new Error("Expected Responses Lite input array");
+		expect(input).toHaveLength(2);
+		expect(input[0]).toEqual({ type: "additional_tools", role: "developer", tools: [] });
+		expect(input[1]).toMatchObject({ type: "message", role: "user" });
+	});
+
+	it("keeps the legacy Codex Responses contract unchanged for pre-5.6 models", async () => {
+		let requestBody: Record<string, unknown> | undefined;
+		let requestHeaders: Headers | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+				requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				requestHeaders = new Headers(init?.headers);
+				return completedSse();
+			}),
+		);
+
+		await streamOpenAICodexResponses(getModel("openai-codex", "gpt-5.5"), contextWithImageAndTool(), {
+			apiKey: mockCodexToken(),
+			transport: "sse",
+		}).result();
+
+		expect(requestHeaders?.has("x-openai-internal-codex-responses-lite")).toBe(false);
+		expect(requestBody?.instructions).toBe("Use tools when useful.");
+		expect(requestBody?.tools).toEqual([expect.objectContaining({ type: "function", name: "read_file" })]);
+		expect(JSON.stringify(requestBody?.input)).not.toContain("additional_tools");
 	});
 
 	it("preserves supported Codex off and clamps unsupported GPT-5.6 off explicitly", async () => {

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
-import { createGoalToolDefinition, type GoalToolDetails, type GoalToolInput } from "../src/core/tools/goal.ts";
+import {
+	createGoalLifecycleToolDefinitions,
+	createGoalToolDefinition,
+	type GoalToolDetails,
+	type GoalToolInput,
+} from "../src/core/tools/goal.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
 
@@ -127,5 +132,35 @@ describe("goal tool", () => {
 		await run({ action: "start", goalId: "g1", userGoal: "Ship", tokenBudget: 12_000 });
 		expect(getState()?.tokenBudget).toBe(12_000);
 		expect(getState()?.tokensUsed).toBe(0);
+	});
+
+	it("exposes compact Codex-compatible lifecycle tools through the same authoritative executor", async () => {
+		const { tool, getState } = createHarness();
+		const lifecycleTools = createGoalLifecycleToolDefinitions(tool);
+		expect(lifecycleTools.map((definition) => definition.name)).toEqual(["create_goal", "get_goal", "update_goal"]);
+
+		const create = lifecycleTools[0];
+		const created = await create.execute(
+			"call-create",
+			{ objective: "Ship model-neutral goals", token_budget: 12_000 },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(created.isError).not.toBe(true);
+		expect(getState()).toMatchObject({
+			status: "active",
+			userGoal: "Ship model-neutral goals",
+			tokenBudget: 12_000,
+		});
+
+		const get = lifecycleTools[1];
+		const viewed = await get.execute("call-get", {}, undefined, undefined, ctx);
+		expect(viewed.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("model-neutral") });
+
+		const update = lifecycleTools[2];
+		const completed = await update.execute("call-update", { status: "complete" }, undefined, undefined, ctx);
+		expect(completed.isError).not.toBe(true);
+		expect(getState()?.status).toBe("completed");
 	});
 });

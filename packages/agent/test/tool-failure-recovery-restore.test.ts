@@ -210,12 +210,12 @@ describe("tool-failure recovery restore", () => {
 			executions++;
 		});
 		let calls = 0;
-		let deliveryTurns = 0;
+		let toolFreeProviderTurns = 0;
 		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				if (providerContext.tools?.length === 0) {
-					deliveryTurns++;
+					toolFreeProviderTurns++;
 					stream.push({
 						type: "done",
 						reason: "stop",
@@ -245,11 +245,11 @@ describe("tool-failure recovery restore", () => {
 		agent.maxStallTurns = 0;
 		await agent.prompt("review the QA card");
 		expect(executions).toBe(1);
-		expect(deliveryTurns).toBe(1);
+		expect(toolFreeProviderTurns).toBe(0);
 
 		await agent.prompt("looks like you are stuck in a loop there");
 		expect(executions).toBe(1);
-		expect(deliveryTurns).toBe(2);
+		expect(toolFreeProviderTurns).toBe(0);
 		expect(
 			agent.state.messages.some(
 				(message) =>

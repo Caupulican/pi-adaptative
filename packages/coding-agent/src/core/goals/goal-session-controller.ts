@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { AgentMessage, AgentRunawayStopInfo } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type {
 	GoalContinuationLoopOptions,
@@ -226,18 +226,53 @@ export class GoalSessionController {
 		return { status: "started", state: result.state };
 	}
 
-	/** Attribute turn/wall-clock telemetry after usage has already been charged per response. */
-	recordContinuationPass(pass: { turns: number; wallClockMs: number }): void {
+	/** Attribute turn/wall-clock telemetry without inferring progress (public/manual accounting seam). */
+	recordContinuationTelemetry(pass: { turns: number; wallClockMs: number }): void {
+		this.persistContinuationPass(pass);
+	}
+
+	/** Attribute one host-driven pass and derive stall state from the authoritative revision. */
+	private recordContinuationPass(pass: {
+		turns: number;
+		wallClockMs: number;
+		goalId: string;
+		progressRevision: number;
+		stallTurns: number;
+	}): void {
+		this.persistContinuationPass(pass);
+	}
+
+	private persistContinuationPass(
+		pass: { turns: number; wallClockMs: number } & Partial<
+			Pick<GoalState, "goalId" | "progressRevision" | "stallTurns">
+		>,
+	): void {
 		const state = this.getState();
 		if (!state) return;
-		const updated = applyGoalEvent(state, {
+		if (pass.goalId !== undefined && state.goalId !== pass.goalId) {
+			this.deps.emitWarning(
+				`Goal continuation accounting skipped because goal '${pass.goalId}' was replaced by '${state.goalId}' during the pass.`,
+			);
+			return;
+		}
+		const now = new Date().toISOString();
+		let updated = applyGoalEvent(state, {
 			type: "record_continuation_budget",
 			turns: pass.turns,
 			wallClockMs: pass.wallClockMs,
 			tokens: 0,
 			spendUsd: 0,
-			now: new Date().toISOString(),
+			now,
 		});
+		if (
+			pass.progressRevision !== undefined &&
+			pass.stallTurns !== undefined &&
+			isGoalExecutionActive(state.status) &&
+			(state.progressRevision ?? 0) <= pass.progressRevision &&
+			state.stallTurns <= pass.stallTurns
+		) {
+			updated = applyGoalEvent(updated, { type: "no_progress", now });
+		}
 		this.saveState(updated, getGoalStateRevision(state));
 	}
 
@@ -455,11 +490,12 @@ export class GoalSessionController {
 		);
 	}
 
-	markRunawayBlocked(info: { signature: string; repeats: number }): boolean {
-		return this.stopActiveGoal(
-			"blocked",
-			`runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`,
-		);
+	markHarnessGuardBlocked(info: AgentRunawayStopInfo): boolean {
+		const reason =
+			info.reason === "provider_turn_limit"
+				? `provider_turn_limit: reached the ${info.repeats}-request provider-turn cost fuse`
+				: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
+		return this.stopActiveGoal("blocked", reason);
 	}
 
 	markTerminalToolFailureBlocked(toolName: string): boolean {

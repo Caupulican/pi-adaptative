@@ -9,14 +9,11 @@ import {
 	truncateTail,
 } from "@caupulican/pi-agent-core/node";
 import { Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { formatCollapsedToolOutputHint } from "../../../core/tools/render-utils.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
-import { truncateToVisualLines } from "./visual-truncate.ts";
-
-// Preview line limit when not expanded (matches tool execution behavior)
-const PREVIEW_LINES = 20;
 
 export class BashExecutionComponent extends Container {
 	private command: string;
@@ -138,10 +135,6 @@ export class BashExecutionComponent extends Container {
 		// Get the lines to potentially display (after context truncation)
 		const availableLines = contextTruncation.content ? contextTruncation.content.split("\n") : [];
 
-		// Apply preview truncation based on expanded state
-		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
-		const hiddenLineCount = availableLines.length - previewLogicalLines.length;
-
 		// Rebuild content container
 		this.contentContainer.clear();
 
@@ -156,25 +149,7 @@ export class BashExecutionComponent extends Container {
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
 				this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
 			} else {
-				// Use shared visual truncation utility with width-aware caching
-				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
-				const styledInput = `\n${styledOutput}`;
-				let cachedWidth: number | undefined;
-				let cachedLines: string[] | undefined;
-				this.contentContainer.addChild({
-					render: (width: number) => {
-						if (cachedLines === undefined || cachedWidth !== width) {
-							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 1);
-							cachedLines = result.visualLines;
-							cachedWidth = width;
-						}
-						return cachedLines ?? [];
-					},
-					invalidate: () => {
-						cachedWidth = undefined;
-						cachedLines = undefined;
-					},
-				});
+				this.contentContainer.addChild(new Text(formatCollapsedToolOutputHint(theme), 1, 0));
 			}
 		}
 
@@ -184,15 +159,8 @@ export class BashExecutionComponent extends Container {
 		} else {
 			const statusParts: string[] = [];
 
-			// Show how many lines are hidden (collapsed preview)
-			if (hiddenLineCount > 0) {
-				if (this.expanded) {
-					statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
-				} else {
-					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
-					);
-				}
+			if (this.expanded && availableLines.length > 0) {
+				statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
 			}
 
 			if (this.status === "cancelled") {

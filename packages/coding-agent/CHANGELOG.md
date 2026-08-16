@@ -4,6 +4,10 @@
 
 - Removed `ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE`; active skill guidance is now projected through `AgentContextPlan.transientSystemPrompt` instead of a custom message.
 
+### Added
+
+- Added compact provider-neutral `create_goal`, `get_goal`, and `update_goal` lifecycle tools on every model-capability class, backed by the existing authoritative goal executor and persistence path.
+
 ### Changed
 
 - Split the coding-agent CI suite into four independent shards per OS and removed test-only system setup from release fast paths, targeting a sub-five-minute critical path without reducing coverage or Windows worker parallelism.
@@ -12,6 +16,9 @@
 
 - Kept Linux-relative Windows benchmark ratios visible without letting independent runner variance block binaries that satisfy the absolute release budgets.
 - Projected transient active-skill guidance through the provider system channel so models cannot mistake repeated skill projection for new user instructions.
+- Kept every collapsed tool panel header-only, including partial, failed, extension, unknown-tool, lazy-history, and direct-shell results, until the user expands it.
+- Made goal auto-continuation independent of research/delegation lane capability and host-counted unchanged passes toward the durable stall limit, preventing models from bypassing the stop by omitting `no_progress`.
+- Recorded and reported provider-turn cost-fuse stops distinctly from repeated identical-tool loops, including the correct durable goal stop reason.
 
 ## [0.92.0] - 2026-08-15
 

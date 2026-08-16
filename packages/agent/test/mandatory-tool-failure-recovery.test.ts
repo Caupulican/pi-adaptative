@@ -15,10 +15,7 @@ import {
 	sanitizeToolFailureContext,
 	type ToolFailureMemoryRecord,
 } from "../src/tool-failure-memory.ts";
-import {
-	appendMandatoryToolFailureDeliveryPrompt,
-	MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
-} from "../src/tool-failure-recovery-protocol.ts";
+import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../src/tool-failure-recovery-protocol.ts";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -102,16 +99,8 @@ async function drain(stream: ReturnType<typeof agentLoop>): Promise<AgentEvent[]
 }
 
 describe("mandatory tool failure recovery protocol", () => {
-	it("keeps the mandatory standing and delivery templates compact", () => {
+	it("keeps the mandatory standing template compact", () => {
 		expect(MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT.length).toBeLessThan(650);
-		expect(
-			appendMandatoryToolFailureDeliveryPrompt("", {
-				tool: "read",
-				failureCode: "file_not_found",
-				diagnostic: "missing",
-				requiredAction: "create the exact file",
-			}).length,
-		).toBeLessThan(500);
 	});
 	it("uses one explicit mandatory template for repair, execution, blocked, and exhausted failures", () => {
 		const record = failureRecord();
@@ -174,7 +163,7 @@ describe("mandatory tool failure recovery protocol", () => {
 		expect(sanitized.systemPrompt).not.toContain("<mandatory_tool_failure");
 	});
 
-	it("uses one tool-free provider turn after replaying an already-open operation circuit", async () => {
+	it("emits a local terminal diagnostic without paying for another provider turn", async () => {
 		const schema = Type.Object({ action: Type.String(), project: Type.String() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof schema> = {
@@ -241,19 +230,15 @@ describe("mandatory tool failure recovery protocol", () => {
 		);
 
 		expect(executions).toBe(1);
-		expect(providerTurns).toBe(5);
-		expect(providerContexts[4]?.tools).toEqual([]);
-		expect(providerContexts[4]?.systemPrompt).toContain("MANDATORY TOOL FAILURE DELIVERY v1");
-		expect(providerContexts[4]?.systemPrompt).toContain('"diagnostic":"Trello credentials not found."');
-		expect(providerContexts[4]?.systemPrompt).toContain('"required_action":');
+		expect(providerTurns).toBe(4);
+		expect(providerContexts).toHaveLength(4);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "message_end" &&
 					event.message.role === "assistant" &&
 					event.message.content.some(
-						(block) =>
-							block.type === "text" && block.text.includes("blocked until its credentials are connected"),
+						(block) => block.type === "text" && block.text.includes("Tool recovery stopped for trello"),
 					),
 			),
 		).toBe(true);
@@ -368,7 +353,7 @@ describe("mandatory tool failure recovery protocol", () => {
 		).toBe(true);
 	});
 
-	it("pairs but never executes a tool call hallucinated during mandatory delivery", async () => {
+	it("never opens a provider turn that could hallucinate another tool call after recovery halts", async () => {
 		const schema = Type.Object({ value: Type.String() });
 		let executions = 0;
 		let beforeCalls = 0;
@@ -424,7 +409,7 @@ describe("mandatory tool failure recovery protocol", () => {
 			),
 		);
 
-		expect(providerTurns).toBe(5);
+		expect(providerTurns).toBe(4);
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
 		expect(
@@ -434,7 +419,7 @@ describe("mandatory tool failure recovery protocol", () => {
 					event.message.role === "toolResult" &&
 					event.message.toolCallId === "delivery-violation",
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(
 			events.some(
 				(event) =>

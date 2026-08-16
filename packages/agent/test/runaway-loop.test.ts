@@ -120,6 +120,70 @@ function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode
 }
 
 describe("runaway-loop backstop", () => {
+	it("caps varied tool churn at the default provider-turn budget from session 01a00b38", async () => {
+		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
+		let providerTurns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				if (providerTurns <= 24) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `varied-${providerTurns}`,
+									name: "echo",
+									arguments: { value: `different-${providerTurns}` },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "late stop" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "inspect and implement", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [echoTool] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 12,
+					onRunawayStop: (info) => stalls.push(info),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(providerTurns).toBe(20);
+		expect(stalls).toEqual([expect.objectContaining({ reason: "provider_turn_limit", repeats: 20 })]);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.content.some(
+						(block) => block.type === "text" && block.text.includes("Provider turn limit (20) reached"),
+					),
+			),
+		).toBe(true);
+	});
+
 	it("retains the runaway window across a host continuation after compaction", async () => {
 		const stalls: Array<{ signature: string; repeats: number }> = [];
 		let providerCalls = 0;
@@ -171,9 +235,59 @@ describe("runaway-loop backstop", () => {
 		expect(providerCalls).toBe(5);
 	});
 
+	it("retains the provider-turn cost fuse across a host continuation", async () => {
+		let providerCalls = 0;
+		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerCalls++;
+				if (providerCalls === 2) {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "compaction boundary" }], "stop"),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `provider-${providerCalls}`, name: "echo", arguments: { value: "work" } }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+		const agent = new Agent({
+			streamFn,
+			maxProviderTurns: 3,
+			initialState: { model: createModel(), systemPrompt: "", tools: [echoTool] },
+			onRunawayStop: (info) => stalls.push(info),
+		});
+		agent.maxStallTurns = 0;
+
+		await agent.prompt("start");
+		agent.state.messages.push({
+			role: "custom",
+			customType: "compactionSummary",
+			content: "continue after compaction",
+			display: false,
+			timestamp: Date.now(),
+		});
+		await agent.continue();
+
+		expect(providerCalls).toBe(3);
+		expect(stalls).toEqual([
+			expect.objectContaining({ reason: "provider_turn_limit", signature: "provider_turn_limit", repeats: 3 }),
+		]);
+	});
+
 	it("retains varied failure-family recovery accounting across a host continuation", async () => {
 		let providerCalls = 0;
-		let sawMandatoryToollessDelivery = false;
+		let sawToollessProviderTurn = false;
 		const failingTool = createEchoTool(() => {
 			throw new Error("unsupported option");
 		});
@@ -182,7 +296,7 @@ describe("runaway-loop backstop", () => {
 			queueMicrotask(() => {
 				providerCalls++;
 				if (context.tools?.length === 0) {
-					sawMandatoryToollessDelivery = true;
+					sawToollessProviderTurn = true;
 					completeMandatoryDelivery(stream, context);
 					return;
 				}
@@ -227,8 +341,8 @@ describe("runaway-loop backstop", () => {
 		});
 		await agent.continue();
 
-		expect(sawMandatoryToollessDelivery).toBe(true);
-		expect(providerCalls).toBe(6);
+		expect(sawToollessProviderTurn).toBe(false);
+		expect(providerCalls).toBe(5);
 	});
 
 	it("stops a loop that repeats the identical tool call, firing onRunawayStop", async () => {
@@ -598,12 +712,12 @@ describe("runaway-loop backstop", () => {
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
 		const stalls: Array<{ signature: string; repeats: number }> = [];
 		let calls = 0;
-		let deliveryTurns = 0;
+		let toolFreeProviderTurns = 0;
 		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				if (completeMandatoryDelivery(stream, providerContext)) {
-					deliveryTurns++;
+					toolFreeProviderTurns++;
 					return;
 				}
 				calls++;
@@ -647,7 +761,7 @@ describe("runaway-loop backstop", () => {
 		expect(toolEndMessages[2]).toContain('"failure_code":"operation_recovery_exhausted"');
 		expect(toolEndMessages[3]).toContain('"failure_code":"recovery_exhausted"');
 		expect(stalls).toHaveLength(0);
-		expect(deliveryTurns).toBe(1);
+		expect(toolFreeProviderTurns).toBe(0);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
@@ -715,7 +829,7 @@ describe("runaway-loop backstop", () => {
 
 		expect(executions).toBe(1);
 		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 	});
 
 	it("does not treat changed volatile-looking arguments as an unchanged operation", async () => {
@@ -867,7 +981,7 @@ describe("runaway-loop backstop", () => {
 
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(toolResultIds).toEqual(["refresh-1", "refresh-2", "refresh-3", "refresh-4"]);
 		expect(blocked).toHaveLength(1);
 		expect(operationExhausted).toHaveLength(1);
@@ -1555,7 +1669,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(3);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(targetExecutions).toBe(2);
 		expect(recoveryExecutions).toBe(1);
 		expect(
@@ -1628,7 +1742,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(4);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(executions).toBe(1);
 		expect(
 			events.some(
@@ -1700,7 +1814,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(4);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(executions).toBe(4);
 		expect(
 			events.some(
@@ -1771,7 +1885,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(4);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(beforeCalls).toBe(4);
 		expect(executions).toBe(0);
 		expect(
@@ -1844,7 +1958,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(12);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(executions).toBe(12);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
@@ -2065,7 +2179,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(turns).toBe(1);
-		expect(deliveryTurns).toBe(1);
+		expect(deliveryTurns).toBe(0);
 		expect(executions).toBe(4);
 		expect(pairedResultIds).toEqual(Array.from({ length: 10 }, (_, index) => `parallel-varied-${index}`));
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
@@ -2243,7 +2357,7 @@ describe("runaway-loop backstop", () => {
 		let n = 0;
 		const cycle = ["A", "B", "C"];
 
-		// A 3-state cycle never repeats back-to-back, so a small 2×L window can't see L repeats of any one
+		// A 3-state cycle never repeats back-to-back, so a small window must span enough periods to see
 		// state. The L×4 window must still catch it.
 		const streamFn = () => {
 			const stream = new MockAssistantStream();

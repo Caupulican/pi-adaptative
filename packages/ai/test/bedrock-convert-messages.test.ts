@@ -159,6 +159,93 @@ describe("bedrock tool-name routing", () => {
 	});
 });
 
+describe("bedrock tool arguments", () => {
+	it("preserves empty property names in the streamed assistant message", async () => {
+		bedrockMock.streamEvents = [
+			{ messageStart: { role: "assistant" } },
+			{
+				contentBlockStart: {
+					contentBlockIndex: 0,
+					start: { toolUse: { toolUseId: "tool-1", name: "edit" } },
+				},
+			},
+			{
+				contentBlockDelta: {
+					contentBlockIndex: 0,
+					delta: { toolUse: { input: '{"edits":[{"path":"file.ts","":"invalid"}]}' } },
+				},
+			},
+			{ contentBlockStop: { contentBlockIndex: 0 } },
+			{ messageStop: { stopReason: "tool_use" } },
+		];
+
+		const result = await streamBedrock(baseModel, {
+			messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }],
+		}).result();
+
+		expect(result.content[0]).toMatchObject({
+			type: "toolCall",
+			arguments: { edits: [{ path: "file.ts", "": "invalid" }] },
+		});
+	});
+
+	it("removes empty property names only from outbound replay documents", async () => {
+		const toolArguments = {
+			path: "/workspace/file.ts",
+			metadata: {},
+			edits: [
+				{ oldText: "first", newText: "updated first" },
+				{ oldText: "second", newText: "updated second", "": { nested: true } },
+			],
+		};
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "edit", arguments: toolArguments }],
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				model: baseModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "done" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		];
+
+		const payload = await capturePayload({ messages });
+		const request = payload as {
+			messages: Array<{ content: Array<{ toolUse?: { input: unknown } }> }>;
+		};
+		expect(request.messages[0].content[0].toolUse?.input).toEqual({
+			path: "/workspace/file.ts",
+			metadata: {},
+			edits: [
+				{ oldText: "first", newText: "updated first" },
+				{ oldText: "second", newText: "updated second" },
+			],
+		});
+		expect(toolArguments.edits[1]).toEqual({
+			oldText: "second",
+			newText: "updated second",
+			"": { nested: true },
+		});
+	});
+});
+
 describe("bedrock image format downgrade", () => {
 	it("downgrades unsupported image formats without dropping supported content", async () => {
 		const payload = await capturePayload({

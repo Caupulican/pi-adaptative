@@ -24,9 +24,10 @@
  *    exercised, not just the guard in isolation.
  */
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GoalContinuationLoopResult } from "../src/core/agent-session.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
+import { GoalAutoContinueController } from "../src/core/goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -47,6 +48,51 @@ function makeSnapshot(goalId: string): GoalRuntimeSnapshot {
 		},
 	};
 }
+
+describe("GoalAutoContinueController provider neutrality", () => {
+	it("schedules an active goal even when the selected model has background lanes disabled", async () => {
+		vi.useFakeTimers();
+		let continuationCalls = 0;
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => ({
+						goalAutoContinue: true,
+						goalAutoContinueDelayMs: 0,
+						goalContinueTurns: 1,
+						goalContinueMaxWallClockMinutes: 0,
+						maxStallTurns: 3,
+					}),
+				}) as never,
+			getModelCapabilityProfile: () => ({ backgroundLanesEnabled: false }) as never,
+			getGoalRuntimeSnapshot: () => makeSnapshot("g1"),
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				continuationCalls++;
+				return {
+					turnsSubmitted: 1,
+					stopReason: "max_turns_reached",
+					finalSnapshot: makeSnapshot("g1"),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		} as never);
+
+		try {
+			controller.scheduleFromIdle();
+			await vi.runAllTimersAsync();
+			expect(continuationCalls).toBe(1);
+		} finally {
+			controller.clearTimer();
+			vi.useRealTimers();
+		}
+	});
+});
 
 describe("BackgroundLaneController.continueGoalLoopExclusive (guard mechanics)", () => {
 	it("does not enter the raw goal loop until the active foreground owner has become idle", async () => {

@@ -8,6 +8,8 @@
  * `bash` is the stable agent shell contract on every platform; its finite grammar routes to
  * PowerShell on Windows. `python` is a separate bounded, uv-managed execution contract.
  */
+import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
+
 export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 
 export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.platform): readonly string[] {
@@ -20,7 +22,8 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"python",
 		"edit",
 		"write",
-		"goal",
+		LEGACY_GOAL_TOOL_NAME,
+		...GOAL_LIFECYCLE_TOOL_NAMES,
 		"task_steps",
 		"pipeline",
 		"ask_question",

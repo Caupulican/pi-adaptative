@@ -94,6 +94,10 @@ export function getTextOutput(
 	return output;
 }
 
+export function formatCollapsedToolOutputHint(currentTheme: Theme): string {
+	return `\n${currentTheme.fg("muted", "...")} ${keyHint("app.tools.expand", "to expand")}`;
+}
+
 export type ToolRenderResultLike<TDetails> = {
 	content: (TextContent | ImageContent)[];
 	details: TDetails;
@@ -111,19 +115,19 @@ export function formatCollapsibleToolResult<TDetails>(args: {
 	warnings: (details: TDetails | undefined) => string[];
 }): string {
 	const output = getTextOutput(args.result, args.showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = args.options.expanded ? lines.length : args.collapsedLineLimit;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => args.theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${args.theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
-		}
+	const warnings = args.warnings(args.result.details);
+	if (!args.options.expanded) {
+		return output || warnings.length > 0 ? formatCollapsedToolOutputHint(args.theme) : "";
 	}
 
-	const warnings = args.warnings(args.result.details);
+	let text = "";
+	if (output) {
+		text += `\n${output
+			.split("\n")
+			.map((line) => args.theme.fg("toolOutput", line))
+			.join("\n")}`;
+	}
+
 	if (warnings.length > 0) text += `\n${args.theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
 	return text;
 }

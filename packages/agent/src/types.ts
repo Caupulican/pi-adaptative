@@ -164,6 +164,15 @@ export interface AgentLoopTurnUpdate {
 	thinkingLevel?: ThinkingLevel;
 }
 
+export type AgentRunawayStopReason = "repeated_tool_call" | "provider_turn_limit";
+
+/** Semantic cause and evidence for a host-enforced runaway/cost stop. */
+export interface AgentRunawayStopInfo {
+	reason: AgentRunawayStopReason;
+	signature: string;
+	repeats: number;
+}
+
 export interface ToolValidationEscalationEvent {
 	tool: string;
 	signature: string;
@@ -237,10 +246,12 @@ export type ProviderRequestAdmissionResult =
 
 /**
  * Default runaway-loop backstop: a single identical tool-call signature recurring this many times
- * within a sliding window (2×) stops the loop. Generous enough that legitimate long/varied work never
+ * within a sliding window (4×) stops the loop. Generous enough that legitimate long/varied work never
  * trips it, but bounds the cost of a model wedged repeating one failing call forever.
  */
 export const DEFAULT_MAX_STALL_TURNS = 12;
+/** Maximum paid provider turns in one logical prompt before the local cost fuse stops the run. */
+export const DEFAULT_MAX_PROVIDER_TURNS = 20;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
@@ -357,7 +368,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Runaway-loop backstop. A model stuck repeating the SAME tool call (identical name + arguments) —
 	 * because a tool keeps erroring, or it is confused/oscillating — makes no progress yet keeps
 	 * consuming tokens indefinitely (history grows every turn). This bounds that cost: if one tool-call
-	 * signature recurs at least this many times within a sliding window (2×), the loop stops gracefully
+	 * signature recurs at least this many times within a sliding window (4×), the loop stops gracefully
 	 * (emits `agent_end`). It counts ONLY turns that issued tool calls and keys on exact name+arguments,
 	 * so legitimate long or varied agentic work never trips it. `0` disables the backstop.
 	 * Default: {@link DEFAULT_MAX_STALL_TURNS}.
@@ -365,10 +376,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	maxStallTurns?: number;
 
 	/**
-	 * Observability hook fired once if the {@link maxStallTurns} runaway backstop trips, just before the
-	 * loop stops. Lets the host surface/log why the run ended. Must not throw.
+	 * Absolute provider-request cost fuse for one logical prompt, including host continuations.
+	 * Unlike {@link maxStallTurns}, this also catches varied tool churn that never repeats an exact
+	 * signature. The loop emits a local terminal diagnostic before another provider request. `0`
+	 * disables the fuse. Default: {@link DEFAULT_MAX_PROVIDER_TURNS}.
 	 */
-	onRunawayStop?: (info: { signature: string; repeats: number }) => void;
+	maxProviderTurns?: number;
+
+	/**
+	 * Observability hook fired once if either the repeated-call backstop or provider-turn cost fuse trips,
+	 * just before the loop stops. Lets the host surface/log the exact cause. Must not throw.
+	 */
+	onRunawayStop?: (info: AgentRunawayStopInfo) => void;
 
 	/**
 	 * Called after `turn_end` and before the loop decides whether another provider request should start.

@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Routed xAI OAuth subscriptions through the Grok CLI proxy and matched its Responses request and replay schema while keeping API-key models on the public xAI API.
+- Matched GPT-5.6 ChatGPT-subscription Responses Lite payloads to the current Codex client, including explicit message items, namespaced non-strict tools, and omission of empty developer instructions.
+- Removed empty object-property names recursively from outbound Amazon Bedrock tool-call replays without mutating stored assistant arguments or valid empty objects.
+
 ## [0.92.0] - 2026-08-15
 
 ## [0.91.4] - 2026-08-15

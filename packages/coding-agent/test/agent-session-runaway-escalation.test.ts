@@ -82,7 +82,11 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			harness.session.saveGoalStateSnapshot(state);
 			const prompt = vi.spyOn(harness.session, "prompt").mockResolvedValue(undefined);
 
-			harness.session.agent.onRunawayStop?.({ signature: "tool_task:{wait}", repeats: 12 });
+			harness.session.agent.onRunawayStop?.({
+				reason: "repeated_tool_call",
+				signature: "tool_task:{wait}",
+				repeats: 12,
+			});
 
 			const blocked = harness.session.getGoalStateSnapshot();
 			expect(blocked).toMatchObject({
@@ -96,6 +100,46 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			expect(result.submitted).toBe(false);
 			expect(result.snapshot.continuation.action).toBe("ask-user");
 			expect(prompt).not.toHaveBeenCalled();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("records and reports the provider-turn cost fuse without mislabeling it as an identical-tool loop", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-provider-fuse", userGoal: "Finish varied work", now: "T0" }),
+				{ type: "add_requirement", id: "work", text: "Complete the work", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+
+			harness.session.agent.onRunawayStop?.({
+				reason: "provider_turn_limit",
+				signature: "provider_turn_limit",
+				repeats: 20,
+			});
+
+			const warnings = harness.eventsOfType("warning");
+			expect(warnings.at(-1)?.message).toContain("provider-turn cost limit");
+			expect(warnings.at(-1)?.message).not.toContain("repeated the same tool call");
+
+			const entry = harness.sessionManager
+				.getEntries()
+				.find(
+					(candidate): candidate is CustomEntry<RunawayStopRecord> =>
+						candidate.type === "custom" && candidate.customType === RUNAWAY_STOP_CUSTOM_TYPE,
+				);
+			expect(entry?.data).toMatchObject({
+				reason: "provider_turn_limit",
+				signature: "provider_turn_limit",
+				repeats: 20,
+			});
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-provider-fuse",
+				status: "blocked",
+				blockedReason: expect.stringContaining("provider_turn_limit"),
+			});
 		} finally {
 			harness.cleanup();
 		}
@@ -170,7 +214,11 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				goalId: "goal-runaway-worker",
 			});
 			await workerTerminal;
-			harness.session.agent.onRunawayStop?.({ signature: "read:loop", repeats: 12 });
+			harness.session.agent.onRunawayStop?.({
+				reason: "repeated_tool_call",
+				signature: "read:loop",
+				repeats: 12,
+			});
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 				goalId: "goal-runaway-worker",
 				status: "blocked",
@@ -226,7 +274,9 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			await harness.session.prompt("go", { autoContinueGoal: false });
 
 			expect(executions).toBe(1);
-			expect(harness.getPendingResponseCount()).toBe(0);
+			// Terminal recovery is delivered locally; the queued provider-authored wrap-up is never
+			// purchased after the circuit has already proved that the operation cannot recover.
+			expect(harness.getPendingResponseCount()).toBe(1);
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 				goalId: "goal-recovery",
 				status: "blocked",

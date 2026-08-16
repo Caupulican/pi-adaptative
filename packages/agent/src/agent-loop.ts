@@ -19,8 +19,6 @@ import {
 import {
 	assistantMessageText,
 	collapseDegenerateAssistantMessage,
-	isCollapsedDegenerateAssistantMessage,
-	isDegenerateRepeatedText,
 	shouldAbortDegenerateStream,
 } from "./degenerate-assistant-text.ts";
 import { startPlannedAgentProviderRequest } from "./provider-request-planner.ts";
@@ -45,7 +43,6 @@ import {
 	type ToolFailureRecoveryGateEffect,
 	type ToolFailureRecoveryHalt,
 } from "./tool-failure-recovery-gate.ts";
-import { appendMandatoryToolFailureDeliveryPrompt } from "./tool-failure-recovery-protocol.ts";
 import { rejectNativeToolProtocolResidue } from "./tool-protocol-residue.ts";
 import type {
 	AgentContext,
@@ -58,7 +55,7 @@ import type {
 	StreamFn,
 	ToolCallRepairInfo,
 } from "./types.ts";
-import { DEFAULT_MAX_STALL_TURNS } from "./types.ts";
+import { DEFAULT_MAX_PROVIDER_TURNS, DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 
 export {
@@ -71,12 +68,13 @@ export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /** Bounded no-progress state retained across host-owned continuations of one logical prompt. */
 export interface AgentLoopContinuationState {
+	providerTurns: number;
 	stallWindow: string[];
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
 }
 
 export function createAgentLoopContinuationState(): AgentLoopContinuationState {
-	return { stallWindow: [], toolFailureRecoveryGate: new ToolFailureRecoveryGate() };
+	return { providerTurns: 0, stallWindow: [], toolFailureRecoveryGate: new ToolFailureRecoveryGate() };
 }
 
 /**
@@ -203,30 +201,28 @@ function createLoopFailureMessage(error: unknown, config: AgentLoopConfig, abort
 	};
 }
 
-function mandatoryDeliveryReportsHalt(message: AssistantMessage, halt: ToolFailureRecoveryHalt): boolean {
-	const raw = assistantMessageText(message);
-	if (!raw.trim()) return false;
-	if (isCollapsedDegenerateAssistantMessage(message) || isDegenerateRepeatedText(raw)) return false;
-	const text = raw.toLowerCase();
-	if (text.includes("recovery")) return true;
-	if (text.includes(halt.record.failureCode.toLowerCase())) return true;
-	const diagnostic = halt.record.diagnostic ?? halt.diagnostic;
-	return diagnostic !== undefined && text.includes(diagnostic.toLowerCase().slice(0, 40));
-}
-
 function createMandatoryRecoveryDeliveryFallback(
 	halt: ToolFailureRecoveryHalt,
 	config: AgentLoopConfig,
 ): AssistantMessage {
 	const diagnostic = halt.record.diagnostic ?? halt.diagnostic;
+	return createLocalDiagnosticMessage(
+		config,
+		`Tool recovery stopped for ${halt.record.tool}: ${diagnostic} Required recovery: ${halt.record.correction}`,
+	);
+}
+
+function createProviderTurnLimitMessage(config: AgentLoopConfig, providerTurns: number): AssistantMessage {
+	return createLocalDiagnosticMessage(
+		config,
+		`Provider turn limit (${providerTurns}) reached. The harness stopped before another paid model request; continue explicitly if more work is needed.`,
+	);
+}
+
+function createLocalDiagnosticMessage(config: AgentLoopConfig, text: string): AssistantMessage {
 	return {
 		role: "assistant",
-		content: [
-			{
-				type: "text",
-				text: `Tool recovery stopped for ${halt.record.tool}: ${diagnostic} Required recovery: ${halt.record.correction}`,
-			},
-		],
+		content: [{ type: "text", text }],
 		api: config.model.api,
 		provider: config.model.provider,
 		model: config.model.id,
@@ -234,6 +230,19 @@ function createMandatoryRecoveryDeliveryFallback(
 		stopReason: "stop",
 		timestamp: Date.now(),
 	};
+}
+
+async function emitTerminalLocalMessage(
+	message: AssistantMessage,
+	newMessages: AgentMessage[],
+	emit: AgentEventSink,
+	startTurn: boolean,
+): Promise<void> {
+	if (startTurn) await emit({ type: "turn_start" });
+	await emit({ type: "message_start", message });
+	await emit({ type: "message_end", message });
+	await emit({ type: "turn_end", message, toolResults: [] });
+	await emit({ type: "agent_end", messages: newMessages });
 }
 
 function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
@@ -324,13 +333,13 @@ async function runLoop(
 	// window slides past it. Counts only turns that issued tool calls, so varied/long work never trips
 	// it. `0` disables.
 	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
+	const providerTurnLimit = config.maxProviderTurns ?? DEFAULT_MAX_PROVIDER_TURNS;
 	const stallWindow = continuationState.stallWindow;
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
 	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages);
-	let mandatoryRecoveryDeliveryPending = false;
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
@@ -359,26 +368,20 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			// Recovery exhaustion receives exactly one provider turn without tools so the mandatory
-			// diagnostic can reach the user instead of terminating on an undelivered tool result.
-			const recoveryDeliveryTurn = mandatoryRecoveryDeliveryPending;
-			const recoveryDeliveryHalt = recoveryDeliveryTurn ? toolFailureRecoveryGate.getHalt() : undefined;
-			if (recoveryDeliveryTurn && !recoveryDeliveryHalt) {
-				throw new Error("Mandatory recovery delivery started without a recovery halt");
+			if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) {
+				const fallback = createProviderTurnLimitMessage(config, continuationState.providerTurns);
+				currentContext.messages.push(fallback);
+				newMessages.push(fallback);
+				config.onRunawayStop?.({
+					reason: "provider_turn_limit",
+					signature: "provider_turn_limit",
+					repeats: continuationState.providerTurns,
+				});
+				await emitTerminalLocalMessage(fallback, newMessages, emit, false);
+				return;
 			}
-			const responseContext = recoveryDeliveryHalt
-				? {
-						...currentContext,
-						systemPrompt: appendMandatoryToolFailureDeliveryPrompt(currentContext.systemPrompt, {
-							tool: recoveryDeliveryHalt.record.tool,
-							failureCode: recoveryDeliveryHalt.record.failureCode,
-							diagnostic: recoveryDeliveryHalt.record.diagnostic ?? recoveryDeliveryHalt.diagnostic,
-							requiredAction: recoveryDeliveryHalt.record.correction,
-						}),
-						tools: [],
-					}
-				: currentContext;
-			const message = await streamAssistantResponse(responseContext, config, signal, emit, streamFn);
+			continuationState.providerTurns++;
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -391,30 +394,7 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
-			if (recoveryDeliveryTurn) {
-				if (!recoveryDeliveryHalt) {
-					throw new Error("Mandatory recovery delivery continued without a recovery halt");
-				}
-				if (toolCalls.length > 0) {
-					toolResults.push(...(await rejectRecoveryDeliveryToolCalls(toolCalls, recoveryDeliveryHalt, emit)));
-					for (const result of toolResults) {
-						currentContext.messages.push(result);
-						newMessages.push(result);
-					}
-				}
-				await emit({ type: "turn_end", message, toolResults });
-				if (toolCalls.length > 0 || !mandatoryDeliveryReportsHalt(message, recoveryDeliveryHalt)) {
-					const fallback = createMandatoryRecoveryDeliveryFallback(recoveryDeliveryHalt, config);
-					currentContext.messages.push(fallback);
-					newMessages.push(fallback);
-					await emit({ type: "turn_start" });
-					await emit({ type: "message_start", message: fallback });
-					await emit({ type: "message_end", message: fallback });
-					await emit({ type: "turn_end", message: fallback, toolResults: [] });
-				}
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
+			let recoveryHalt: ToolFailureRecoveryHalt | undefined;
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
@@ -438,8 +418,8 @@ async function runLoop(
 				);
 				toolResults.push(...executedToolBatch.messages);
 				if (toolFailureRecoveryGate.isHalted()) {
-					mandatoryRecoveryDeliveryPending = true;
-					hasMoreToolCalls = true;
+					recoveryHalt = toolFailureRecoveryGate.getHalt();
+					if (!recoveryHalt) throw new Error("Tool recovery halted without a failure record");
 				} else {
 					hasMoreToolCalls = !executedToolBatch.terminate;
 				}
@@ -465,15 +445,22 @@ async function runLoop(
 			}
 
 			await emit({ type: "turn_end", message, toolResults });
+			if (recoveryHalt) {
+				const fallback = createMandatoryRecoveryDeliveryFallback(recoveryHalt, config);
+				currentContext.messages.push(fallback);
+				newMessages.push(fallback);
+				await emitTerminalLocalMessage(fallback, newMessages, emit, true);
+				return;
+			}
 
 			// Runaway-loop backstop (cost guard): detect a model stuck repeating one action.
-			if (!mandatoryRecoveryDeliveryPending && stallLimit > 0 && toolCalls.length > 0) {
+			if (stallLimit > 0 && toolCalls.length > 0) {
 				const signature = normalizeToolSignature(toolCalls.map((c) => [c.name, c.arguments ?? null]));
 				stallWindow.push(signature);
 				if (stallWindow.length > stallLimit * STALL_WINDOW_PERIODS) stallWindow.shift();
 				const repeats = stallWindow.reduce((n, s) => (s === signature ? n + 1 : n), 0);
 				if (repeats >= stallLimit) {
-					config.onRunawayStop?.({ signature, repeats });
+					config.onRunawayStop?.({ reason: "repeated_tool_call", signature, repeats });
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
 				}
@@ -499,13 +486,12 @@ async function runLoop(
 			}
 
 			if (
-				!mandatoryRecoveryDeliveryPending &&
-				(await config.shouldStopAfterTurn?.({
+				await config.shouldStopAfterTurn?.({
 					message,
 					toolResults,
 					context: currentContext,
 					newMessages,
-				}))
+				})
 			) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -1656,28 +1642,4 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
 	await emit({ type: "message_start", message: toolResultMessage });
 	await emit({ type: "message_end", message: toolResultMessage });
-}
-
-async function rejectRecoveryDeliveryToolCalls(
-	toolCalls: readonly AgentToolCall[],
-	halt: ToolFailureRecoveryHalt,
-	emit: AgentEventSink,
-): Promise<ToolResultMessage[]> {
-	const messages: ToolResultMessage[] = [];
-	for (const toolCall of toolCalls) {
-		await emitToolExecutionStart(toolCall, emit);
-		const finalized: FinalizedToolCallOutcome = {
-			toolCall,
-			result: createToolFailureRecoveryExhaustedResult(
-				halt.record,
-				"Tool execution is disabled during the mandatory recovery delivery turn.",
-			),
-			isError: true,
-		};
-		await emitToolExecutionEnd(finalized, emit);
-		const message = createToolResultMessage(finalized);
-		await emitToolResultMessage(message, emit);
-		messages.push(message);
-	}
-	return messages;
 }

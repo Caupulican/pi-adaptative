@@ -21,61 +21,57 @@ describe("AgentSession goal idle autosteer", () => {
 		vi.useRealTimers();
 	});
 
-	it("continues past the retired 20-turn ceiling until the goal reaches a real terminal state", async () => {
+	it("stops unchanged automatic continuations at the host-owned stall limit", async () => {
 		const harness = await createHarness();
 		try {
 			seedActiveGoal(harness);
+			harness.settingsManager.setAutonomySettings({ maxStallTurns: 3 });
 			const responses = [fauxAssistantMessage("initial turn settled")];
-			for (let i = 1; i <= 21; i++) responses.push(fauxAssistantMessage(`continued ${i}`));
-			responses.push(
-				fauxAssistantMessage([fauxToolCall("goal", { action: "block_goal", reason: "owner input required" })], {
-					stopReason: "toolUse",
-				}),
-			);
+			for (let i = 1; i <= 5; i++) responses.push(fauxAssistantMessage(`unchanged ${i}`));
 			harness.setResponses(responses);
 
 			await harness.session.prompt("start the task");
 			await vi.runAllTimersAsync();
 
-			expect(harness.session.getGoalStateSnapshot()?.continuationTurnsUsed).toBe(22);
-			expect(harness.session.getGoalStateSnapshot()?.status).toBe("blocked");
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				continuationTurnsUsed: 3,
+				stallTurns: 3,
+				status: "active",
+			});
 			// Hidden continuation triggers never pollute persisted user history.
 			expect(getUserTexts(harness)).toEqual(["start the task"]);
-			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(harness.getPendingResponseCount()).toBe(2);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("a lean-window model (16-32k) gets NO autosteer continuation: its surface lacks the goal tool, so the loop skips goal_tool_unavailable", async () => {
+	it("a lean-window model autosteers through compact lifecycle tools without enabling orchestration tools", async () => {
 		const harness = await createHarness({ models: [{ id: "lean-model", contextWindow: 16_384 }] });
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("lean");
-			// The lean capability blocklist removes the goal tool from the active surface entirely
-			// ("adaptative must prevail": sub-full models are not driven through complex agentic
-			// loops they cannot execute) -- so autosteer must not submit ANY continuation prompt,
-			// not merely fewer. The pre-blocklist behavior (a reduced 2-turn budget) is retired.
 			expect(harness.session.getActiveToolNames()).not.toContain("goal");
-			seedActiveGoal(harness, 5);
-
-			const responses = [fauxAssistantMessage("initial turn settled")];
-			for (let i = 1; i <= 4; i++) {
-				responses.push(
-					fauxAssistantMessage(
-						[fauxToolCall("goal", { action: "satisfy_requirement", requirementId: `req-${i}` })],
-						{ stopReason: "toolUse" },
-					),
-				);
-				responses.push(fauxAssistantMessage(`continued ${i}`));
-			}
-			harness.setResponses(responses);
+			expect(harness.session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["create_goal", "get_goal", "update_goal"]),
+			);
+			expect(harness.session.getActiveToolNames()).not.toContain("delegate");
+			seedActiveGoal(harness);
+			harness.setResponses([
+				fauxAssistantMessage("initial turn settled"),
+				fauxAssistantMessage([fauxToolCall("update_goal", { status: "blocked" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("goal blocked after audited impasse"),
+			]);
 
 			await harness.session.prompt("start the task");
 			await vi.runAllTimersAsync();
 
-			expect(harness.session.getGoalStateSnapshot()?.continuationTurnsUsed).toBe(0);
-			// Every continuation response remains unconsumed: the loop never started.
-			expect(harness.getPendingResponseCount()).toBeGreaterThan(0);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				continuationTurnsUsed: 1,
+				status: "blocked",
+			});
+			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			harness.cleanup();
 		}

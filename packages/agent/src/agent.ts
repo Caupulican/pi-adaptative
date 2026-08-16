@@ -131,6 +131,7 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	maxStallTurns?: number;
+	maxProviderTurns?: number;
 	onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	toolExecution?: ToolExecutionMode;
 }
@@ -243,7 +244,9 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Runaway-loop backstop for repeated identical tool-call turns. */
 	public maxStallTurns?: number;
-	/** Observability hook fired once if the {@link maxStallTurns} runaway backstop trips. */
+	/** Absolute provider-request cost fuse for one logical prompt. */
+	public maxProviderTurns?: number;
+	/** Observability hook fired once if a repeated-call or provider-turn guard trips. */
 	public onRunawayStop?: AgentLoopConfig["onRunawayStop"];
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
@@ -279,6 +282,7 @@ export class Agent {
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.maxStallTurns = options.maxStallTurns;
+		this.maxProviderTurns = options.maxProviderTurns;
 		this.onRunawayStop = options.onRunawayStop;
 		this.toolExecution = options.toolExecution ?? "parallel";
 	}
@@ -506,6 +510,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			maxStallTurns: this.maxStallTurns,
+			maxProviderTurns: this.maxProviderTurns,
 			onRunawayStop: this.onRunawayStop,
 			toolExecution: this.toolExecution,
 			toolArgumentTeachEnabled: this.toolArgumentTeachEnabled,

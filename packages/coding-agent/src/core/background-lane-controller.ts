@@ -79,10 +79,8 @@ export interface BackgroundLaneControllerDeps
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps {
-	/** True iff the `goal` tool is in the session's ACTIVE surface -- the capability-adaptive gate
-	 * for every goal-continuation loop (see `continueGoalLoopExclusive`): a surface without the
-	 * goal tool (lean capability blocklist, worker role ceiling, --tools/profile exclusion) must
-	 * never be driven with continuation prompts it cannot execute. */
+	/** True iff the active surface can terminalize a goal through `goal` or `update_goal`.
+	 * Explicit tool/profile exclusion and the worker-role ceiling still disable continuation. */
 	isGoalToolActive(): boolean;
 	/** Capability profile of the SESSION model (gates background lanes, scales continuation budgets). */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
@@ -138,7 +136,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			isDisposed: deps.isDisposed,
 			isGoalToolActive: deps.isGoalToolActive,
 			getSettingsManager: deps.getSettingsManager,
-			getModelCapabilityProfile: deps.getModelCapabilityProfile,
 			getGoalRuntimeSnapshot: deps.getGoalRuntimeSnapshot,
 			hasInFlightLaneForGoal: (goalId) => this._hasInFlightLaneForGoal(goalId),
 			continueGoalLoop: deps.continueGoalLoop,

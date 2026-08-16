@@ -301,7 +301,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(registry.getReusable(statusKey)).toBe(panel);
 	});
 
-	test("stacks custom call and result renderers like the old implementation", () => {
+	test("stacks custom call and result renderers after output expansion", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
 			renderCall: () => new Text("custom call", 0, 0),
@@ -330,7 +330,11 @@ describe("ToolExecutionComponent parity", () => {
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("custom call");
-		expect(rendered).toContain("custom result");
+		expect(rendered).toContain("to expand");
+		expect(rendered).not.toContain("custom result");
+
+		component.setExpanded(true);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("custom result");
 	});
 
 	test("uses built-in rendering for built-in overrides without custom renderers", () => {
@@ -510,6 +514,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "hello" }], details: undefined, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("read");
 		expect(rendered).toContain("README.md");
@@ -532,6 +537,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "hello" }], details: undefined, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("override call");
 		expect(rendered).toContain("override result");
@@ -555,6 +561,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "hello" }], details: undefined, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("wrapped override call");
 		expect(rendered).toContain("wrapped override result");
@@ -583,6 +590,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("custom call shared-token");
 		expect(rendered).toContain("custom result shared-token");
@@ -606,6 +614,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("arg:bar");
 	});
@@ -625,6 +634,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("Custom Tool");
 		expect(rendered).not.toContain("custom_tool");
@@ -665,6 +675,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "first result" }], details: {}, isError: false }, false);
+		component.setExpanded(true);
 
 		component.resetInvocation("second_tool", "tool-reset-2", { path: "second.txt" }, secondDefinition);
 		component.updateResult(
@@ -1150,6 +1161,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: lines.join("\n") }], isError: false });
+		component.setExpanded(true);
 
 		const rendered = stripAnsi(component.render(200).join("\n"));
 		expect(rendered).toContain("fallback-line-0000");
@@ -1176,6 +1188,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: lines.join("\n") }], isError: false });
+		component.setExpanded(true);
 
 		const rendered = stripAnsi(component.render(200).join("\n"));
 		expect(rendered).toContain("payload-line-0000");
@@ -1201,6 +1214,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			createFakeTui(),
 			process.cwd(),
 		);
+		component.setExpanded(true);
 
 		component.updateResult({
 			content: [{ type: "text", text: "ok" }],
@@ -1230,6 +1244,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			createFakeTui(),
 			process.cwd(),
 		);
+		component.setExpanded(true);
 
 		component.updateResult({
 			content: [{ type: "text", text: "ok" }],
@@ -1258,6 +1273,7 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			createFakeTui(),
 			process.cwd(),
 		);
+		component.setExpanded(true);
 
 		const partialPayload = { payload: "x".repeat(200_000) };
 		component.updateResult(

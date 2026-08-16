@@ -75,6 +75,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
@@ -119,7 +120,7 @@ import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { createFindTool } from "./tools/find.ts";
-import { createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
+import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
@@ -928,7 +929,7 @@ export class RuntimeBuilder {
 			// the goal->tmux lane-first dispatch dep (`createLaneWorktree`, immediately below) and the
 			// `worktree_sync` tool registration later in this method -- one source of truth, no drift.
 			const worktreeSyncSettings =
-				toolAccess.allows("goal") || toolAccess.allows("worktree_sync")
+				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || toolAccess.allows("worktree_sync")
 					? settingsManager.getWorktreeSyncSettings()
 					: undefined;
 			const worktreeSyncEngineDeps = () =>
@@ -938,7 +939,9 @@ export class RuntimeBuilder {
 					settingsManager: this.deps.getSettingsManager(),
 					sessionId: this.deps.getSessionManager().getSessionId(),
 				});
-			if (toolAccess.allows("goal")) {
+			const shouldBuildGoalExecutor =
+				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(toolAccess.allows);
+			if (shouldBuildGoalExecutor) {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
 					authorizeStart: (input) =>
@@ -1016,7 +1019,14 @@ export class RuntimeBuilder {
 						};
 					},
 				});
-				this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
+				if (toolAccess.allows(LEGACY_GOAL_TOOL_NAME)) {
+					this._baseToolDefinitions.set(goalToolDefinition.name, goalToolDefinition);
+				}
+				for (const definition of createGoalLifecycleToolDefinitions(goalToolDefinition)) {
+					if (toolAccess.allows(definition.name)) {
+						this._baseToolDefinitions.set(definition.name, definition);
+					}
+				}
 			}
 			if (toolAccess.allows("task_steps")) {
 				const taskStepsToolDefinition = createTaskStepsToolDefinition({

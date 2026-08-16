@@ -53,6 +53,10 @@ describe("compact active-goal context", () => {
 		expect(text).not.toContain("ledger detail");
 		expect(text).toContain("task_steps for decomposition");
 		expect(text).toContain("current user message steers this turn");
+		expect(text).toContain("get_goal");
+		expect(text).toContain("requirement-by-requirement audit");
+		expect(text).toContain("same blocking condition");
+		expect(text).toContain('update_goal with status "complete"');
 	});
 
 	it("removes stale goal context without injecting a record for terminal or missing goals", () => {

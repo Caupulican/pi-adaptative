@@ -17,7 +17,10 @@ import {
 } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
-import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import {
+	formatCollapsedToolOutputHint,
+	getTextOutput as getRenderedTextOutput,
+} from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { renderTitleBadge, titleBadge } from "./tool-title.ts";
@@ -380,10 +383,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private shouldMaterializeResult(): boolean {
-		return (
-			this.result !== undefined &&
-			(!this.deferResultUntilExpanded || this.expanded || this.isPartial || this.result.isError)
-		);
+		return this.result !== undefined && this.expanded;
 	}
 
 	private getMaterializedResult(): ToolExecutionResult | undefined {
@@ -423,7 +423,7 @@ export class ToolExecutionComponent extends Container {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
-		if (!expanded && this.deferResultUntilExpanded) {
+		if (!expanded) {
 			this.resultRendererComponent = undefined;
 			this.materializedResult = undefined;
 			this.convertedImages.clear();
@@ -542,6 +542,11 @@ export class ToolExecutionComponent extends Container {
 				hasContent = true;
 			}
 
+			if (this.result && !this.expanded) {
+				renderContainer.addChild(new Text(formatCollapsedToolOutputHint(theme), 0, 0));
+				hasContent = true;
+			}
+
 			if (materializedResult) {
 				const resultRenderer = this.getResultRenderer();
 				if (!resultRenderer) {
@@ -636,6 +641,9 @@ export class ToolExecutionComponent extends Container {
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;
+		}
+		if (this.result && !this.expanded) {
+			text += formatCollapsedToolOutputHint(theme);
 		}
 		const output = result ? this.getTextOutput(result) : "";
 		if (output) {

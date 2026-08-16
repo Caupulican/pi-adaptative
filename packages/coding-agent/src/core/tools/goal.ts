@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
@@ -13,6 +14,7 @@ import {
 	type OpenTaskStepRef,
 	summarizeGoalState,
 } from "../goals/goal-tool-core.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import {
 	emptyOrchestrationCall,
 	type OrchestrationPanelModel,
@@ -93,7 +95,30 @@ const goalSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const createGoalSchema = Type.Object(
+	{
+		objective: Type.String({ description: "Required. The concrete objective to start pursuing." }),
+		token_budget: Type.Optional(
+			Type.Integer({ minimum: 1, description: "Positive token budget. Omit unless explicitly requested." }),
+		),
+	},
+	{ additionalProperties: false },
+);
+
+const getGoalSchema = Type.Object({}, { additionalProperties: false });
+
+const updateGoalSchema = Type.Object(
+	{
+		status: Type.Union([Type.Literal("complete"), Type.Literal("blocked")], {
+			description:
+				"Set complete only after a requirement-by-requirement audit. Set blocked only after the same blocker recurs for at least three consecutive goal turns.",
+		}),
+	},
+	{ additionalProperties: false },
+);
+
 export type GoalToolInput = Static<typeof goalSchema>;
+export type GoalToolDefinition = ToolDefinition;
 
 export interface GoalToolDetails {
 	action: GoalActionName | "get";
@@ -369,10 +394,10 @@ function goalPanelModel(details: GoalToolDetails | undefined): OrchestrationPane
 	};
 }
 
-export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefinition {
+export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDefinition {
 	const now = deps.now ?? (() => new Date().toISOString());
 	return {
-		name: "goal",
+		name: LEGACY_GOAL_TOOL_NAME,
 		label: "goal",
 		description:
 			"Read or update the durable goal for explicitly persistent work. Use task_steps for plans and delegate for workers; owner or system controls lifecycle and budget stops.",
@@ -568,4 +593,72 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): ToolDefini
 			};
 		},
 	};
+}
+
+/**
+ * Build the compact Codex-compatible lifecycle surface as adapters over the authoritative legacy
+ * goal executor. The wrappers own no state and duplicate no validation, persistence, accounting,
+ * completion gate, or start-authority rule.
+ */
+export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition) {
+	const createGoal: ToolDefinition = {
+		name: GOAL_LIFECYCLE_TOOL_NAMES[0],
+		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
+		description:
+			"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
+		promptSnippet: "Create an explicitly requested durable goal.",
+		parameters: createGoalSchema,
+		execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
+			return goalTool.execute(
+				toolCallId,
+				{
+					action: "start",
+					goalId: `goal-${randomUUID()}`,
+					userGoal: input.objective,
+					tokenBudget: input.token_budget,
+				},
+				signal,
+				onUpdate,
+				context,
+			);
+		},
+	};
+
+	const getGoal: ToolDefinition = {
+		name: GOAL_LIFECYCLE_TOOL_NAMES[1],
+		label: GOAL_LIFECYCLE_TOOL_NAMES[1],
+		description:
+			"Get the current goal for this session, including status, budget, token and elapsed-time usage, requirements, evidence, and progress.",
+		promptSnippet: "Inspect the current durable goal.",
+		parameters: getGoalSchema,
+		execute(toolCallId, _input, signal, onUpdate, context) {
+			return goalTool.execute(toolCallId, { action: "get" }, signal, onUpdate, context);
+		},
+	};
+
+	const updateGoal: ToolDefinition = {
+		name: GOAL_LIFECYCLE_TOOL_NAMES[2],
+		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
+		description:
+			"Update the existing goal. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only after the same blocking condition has recurred for at least three consecutive goal turns and no meaningful progress is possible without user input or external change. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+		promptSnippet: "Mark the current durable goal complete or genuinely blocked.",
+		parameters: updateGoalSchema,
+		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
+			return goalTool.execute(
+				toolCallId,
+				input.status === "complete"
+					? { action: "complete" }
+					: {
+							action: "block_goal",
+							reason:
+								"blocked after the same external impasse recurred for at least three consecutive goal turns",
+						},
+				signal,
+				onUpdate,
+				context,
+			);
+		},
+	};
+
+	return [createGoal, getGoal, updateGoal] as const;
 }

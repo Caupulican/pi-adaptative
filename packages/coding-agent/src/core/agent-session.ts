@@ -16,6 +16,7 @@ import type {
 	AgentContext,
 	AgentEvent,
 	AgentMessage,
+	AgentRunawayStopInfo,
 	AgentState,
 	AgentTool,
 	StreamFn,
@@ -122,6 +123,7 @@ import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { HumanInputController } from "./human-input-controller.ts";
@@ -601,7 +603,7 @@ export class AgentSession {
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
-			isGoalToolActive: () => this.getActiveToolNames().includes("goal"),
+			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
@@ -1711,15 +1713,11 @@ export class AgentSession {
 		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
 	}
 
-	/**
-	 * The runaway-loop backstop ({@link Agent.maxStallTurns}) stopped a turn stuck repeating one
-	 * identical tool-call signature. Previously silent — this is the first host handler. Records a
-	 * session-log/telemetry entry (see {@link RUNAWAY_STOP_CUSTOM_TYPE}) and surfaces a user-visible
-	 * warning through the same event the context-window/compaction backstops use.
-	 */
-	private _handleRunawayStop(info: { signature: string; repeats: number }): void {
-		const goalBlocked = this._goals.markRunawayBlocked(info);
+	/** Persist and surface the exact semantic cause when either host runaway/cost guard stops a run. */
+	private _handleRunawayStop(info: AgentRunawayStopInfo): void {
+		const goalBlocked = this._goals.markHarnessGuardBlocked(info);
 		const record: RunawayStopRecord = {
+			reason: info.reason,
 			signature: info.signature,
 			repeats: info.repeats,
 			model: this.model?.id,
@@ -1727,9 +1725,13 @@ export class AgentSession {
 			at: new Date().toISOString(),
 		};
 		this.sessionManager.appendCustomEntry(RUNAWAY_STOP_CUSTOM_TYPE, record);
+		const cause =
+			info.reason === "provider_turn_limit"
+				? `the provider-turn cost limit of ${info.repeats} requests was reached`
+				: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
 		this._emit({
 			type: "warning",
-			message: `Stopped: the model repeated the same tool call ${info.repeats} times in a row without making progress.${goalBlocked ? " The active goal was blocked to prevent automatic restart." : ""} Review the last tool result and steer or retry with a different approach.`,
+			message: `Stopped: ${cause}.${goalBlocked ? " The active goal was blocked to prevent automatic restart." : ""} Review the run and steer or retry with a different approach.`,
 		});
 	}
 
@@ -3617,7 +3619,7 @@ export class AgentSession {
 	 * A no-op when no goal state exists.
 	 */
 	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void {
-		this._goals.recordContinuationPass(pass);
+		this._goals.recordContinuationTelemetry(pass);
 	}
 
 	/** Restore runtime intent without mutating persisted goal lifecycle state. */

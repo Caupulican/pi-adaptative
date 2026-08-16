@@ -8,8 +8,9 @@
  * gated only by real terminal conditions and limits the owner explicitly supplied: an optional
  * per-invocation turn cap, an optional per-invocation wall-clock cap, and an optional durable token
  * budget on the goal. Each submitted pass still reports turn/wall-clock telemetry; provider usage
- * and spend are attributed at the response boundary. Progress is inferred from real work and
- * terminal goal updates; telemetry never becomes an implicit execution limit.
+ * and spend are attributed at the response boundary. The host compares each pass's authoritative
+ * progress revision and records unchanged passes as stalls, so a model cannot bypass the stall
+ * limit by omitting a voluntary `no_progress` call.
  */
 
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
@@ -64,7 +65,13 @@ export interface GoalLoopControllerDeps {
 	 * at each assistant response before another request can be admitted. Called once per
 	 * pass actually SUBMITTED (never for a no-op `continueGoalOnce` call).
 	 */
-	recordGoalContinuationPass(pass: { turns: number; wallClockMs: number }): void;
+	recordGoalContinuationPass(pass: {
+		turns: number;
+		wallClockMs: number;
+		goalId: string;
+		progressRevision: number;
+		stallTurns: number;
+	}): void;
 	/** Persist an exhausted/non-retryable continuation failure as a stopped goal state. */
 	recordGoalContinuationFailure(error: unknown): void;
 	/** Persist a reason-specific budget terminal state before returning control. */
@@ -131,6 +138,16 @@ export class GoalLoopController {
 			}
 
 			const passStartedAt = now();
+			const beforeGoal = beforeSnapshot.goalState;
+			if (!beforeGoal) {
+				return { turnsSubmitted, stopReason: "continuation_not_allowed", finalSnapshot: beforeSnapshot };
+			}
+			const passAccounting = {
+				turns: 1,
+				goalId: beforeGoal.goalId,
+				progressRevision: beforeGoal.progressRevision ?? 0,
+				stallTurns: beforeGoal.stallTurns,
+			};
 			let result: GoalContinuationOnceResult;
 			try {
 				result = await this.continueGoalOnce(options);
@@ -139,7 +156,7 @@ export class GoalLoopController {
 				// coordination, not a consumed goal turn and not evidence that the goal is blocked.
 				if (error instanceof AgentBusyError) throw error;
 				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt });
+				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
 				if (error instanceof GoalBudgetExhaustedError) {
 					// The goal already stopped itself durably (markBudgetLimited ran synchronously before
 					// this signal was thrown) — surface the existing clean stop instead of reclassifying an
@@ -152,7 +169,7 @@ export class GoalLoopController {
 			}
 			if (result.submitted) {
 				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ turns: 1, wallClockMs: now() - passStartedAt });
+				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
 			}
 
 			if (hasReachedWallClockBudget()) {

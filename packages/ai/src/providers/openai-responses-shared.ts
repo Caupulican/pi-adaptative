@@ -109,6 +109,9 @@ export interface ConvertResponsesToolsOptions {
 export interface ConvertResponsesMessagesOptions {
 	/** null omits image detail for transports such as ChatGPT Responses Lite. */
 	imageDetail?: "auto" | null;
+	/** Emit the explicit Responses message discriminator required by Lite transports. */
+	includeMessageType?: boolean;
+	requestFormat?: "openai" | "xai-cli";
 	toolNameMap?: ToolNameMap;
 }
 
@@ -184,6 +187,15 @@ export function convertResponsesMessages<TApi extends Api>(
 ): ResponseInput {
 	const messages: ResponseInput = [];
 	const imageDetail = options?.imageDetail === undefined ? "auto" : options.imageDetail;
+	const useXaiCliFormat = options?.requestFormat === "xai-cli";
+	const includeMessageType = useXaiCliFormat || options?.includeMessageType === true;
+	if (useXaiCliFormat && context.systemPrompt) {
+		messages.push({
+			type: "message",
+			role: "system",
+			content: sanitizeSurrogates(context.systemPrompt),
+		});
+	}
 
 	const normalizeIdPart = (part: string): string => {
 		const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -216,10 +228,15 @@ export function convertResponsesMessages<TApi extends Api>(
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
-				messages.push({
-					role: "user",
-					content: [{ type: "input_text", text: sanitizeSurrogates(msg.content) }],
-				});
+				messages.push(
+					useXaiCliFormat
+						? { type: "message", role: "user", content: sanitizeSurrogates(msg.content) }
+						: {
+								...(includeMessageType ? { type: "message" as const } : {}),
+								role: "user",
+								content: [{ type: "input_text", text: sanitizeSurrogates(msg.content) }],
+							},
+				);
 			} else {
 				const content: ResponseInputContent[] = msg.content.map((item): ResponseInputContent => {
 					if (item.type === "text") {
@@ -232,6 +249,7 @@ export function convertResponsesMessages<TApi extends Api>(
 				});
 				if (content.length === 0) continue;
 				messages.push({
+					...(includeMessageType ? { type: "message" as const } : {}),
 					role: "user",
 					content,
 				});
@@ -249,10 +267,29 @@ export function convertResponsesMessages<TApi extends Api>(
 				if (block.type === "thinking") {
 					if (block.thinkingSignature) {
 						const reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
-						output.push(reasoningItem);
+						if (useXaiCliFormat) {
+							output.push({
+								type: "reasoning",
+								id: reasoningItem.id,
+								summary: reasoningItem.summary,
+								...(reasoningItem.encrypted_content
+									? { encrypted_content: reasoningItem.encrypted_content }
+									: {}),
+							});
+						} else {
+							output.push(reasoningItem);
+						}
 					}
 				} else if (block.type === "text") {
 					const textBlock = block as TextContent;
+					if (useXaiCliFormat) {
+						output.push({
+							type: "message",
+							role: "assistant",
+							content: sanitizeSurrogates(textBlock.text),
+						});
+						continue;
+					}
 					const parsedSignature = parseTextSignature(textBlock.textSignature);
 					const fallbackMessageId =
 						textBlockIndex === 0 ? `msg_pi_${msgIndex}` : `msg_pi_${msgIndex}_${textBlockIndex}`;
@@ -286,7 +323,7 @@ export function convertResponsesMessages<TApi extends Api>(
 
 					output.push({
 						type: "function_call",
-						id: itemId,
+						id: useXaiCliFormat ? undefined : itemId,
 						call_id: callId,
 						name: options?.toolNameMap?.toProviderName(toolCall.name) ?? toolCall.name,
 						arguments: JSON.stringify(toolCall.arguments),
@@ -343,13 +380,20 @@ export function convertResponsesMessages<TApi extends Api>(
 
 export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesToolsOptions): OpenAITool[] {
 	const strict = options?.strict === undefined ? false : options.strict;
-	return tools.map((tool) => ({
-		type: "function",
-		name: options?.toolNameMap?.toProviderName(tool.name) ?? tool.name,
-		description: tool.description,
-		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-		strict,
-	}));
+	return tools.map((tool) => {
+		const converted: Extract<OpenAITool, { type: "function" }> = {
+			type: "function",
+			name: options?.toolNameMap?.toProviderName(tool.name) ?? tool.name,
+			description: tool.description,
+			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
+			strict: strict ?? false,
+		};
+		if (strict === null) {
+			// The installed Grok CLI omits this field, while the OpenAI SDK type requires it.
+			delete (converted as Partial<typeof converted>).strict;
+		}
+		return converted;
+	});
 }
 
 // =============================================================================

@@ -1,5 +1,6 @@
 /** xAI OAuth device-code flow. */
 
+import type { Api, Model } from "../../types.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.ts";
 
@@ -9,6 +10,7 @@ const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
+const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 
 type JsonObject = Record<string, unknown>;
 
@@ -199,4 +201,18 @@ export const xaiOAuthProvider: OAuthProviderInterface = {
 	login: loginXai,
 	refreshToken: (credentials) => refreshXaiToken(credentials.refresh),
 	getApiKey: (credentials) => credentials.access,
+	modifyModels(models: Model<Api>[]): Model<Api>[] {
+		return models.map((model) => {
+			if (model.provider !== "xai" || model.api !== "openai-responses") return model;
+			return {
+				...model,
+				baseUrl: XAI_CLI_PROXY_BASE_URL,
+				compat: {
+					...model.compat,
+					requestFormat: "xai-cli",
+					supportsLongCacheRetention: false,
+				},
+			};
+		});
+	},
 };

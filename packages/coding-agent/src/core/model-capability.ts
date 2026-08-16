@@ -9,6 +9,8 @@
  * per class via the `modelCapability.mode` setting.
  */
 
+import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
+
 export type ModelCapabilityClass = "full" | "lean" | "minimal" | "chat";
 
 export type ModelCapabilityMode = "auto" | "off" | ModelCapabilityClass;
@@ -23,7 +25,7 @@ export interface ModelCapabilityProfile {
 	allowedToolNames?: readonly string[];
 	/** Block-list applied after the allow-list; undefined = nothing blocked. */
 	blockedToolNames?: readonly string[];
-	/** Whether idle background lanes (goal auto-continue, research) may run on this model. */
+	/** Whether resource-heavy research/delegation background lanes may run on this model. */
 	backgroundLanesEnabled: boolean;
 	/** Output-token cap for lane isolated completions, scaled to the window. */
 	laneMaxOutputTokens: number;
@@ -69,11 +71,12 @@ export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"powershell",
 	"edit",
 	"write",
+	...GOAL_LIFECYCLE_TOOL_NAMES,
 	"ask_question",
 	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.
 	"run_toolkit_script",
 ];
-export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [];
+export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [...GOAL_LIFECYCLE_TOOL_NAMES];
 
 export const DEFAULT_LANE_MAX_OUTPUT_TOKENS = 2048;
 const MIN_LANE_MAX_OUTPUT_TOKENS = 256;

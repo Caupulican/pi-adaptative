@@ -3,6 +3,11 @@
 ### Added
 
 - Added request-local system-prompt projection to `AgentContextPlan`, keeping host-owned instructions non-durable and non-compactable without representing them as user messages.
+- Added a default 20-provider-turn cost fuse that remains active across host continuations of one logical prompt.
+
+### Fixed
+
+- Ended exhausted tool-recovery runs with a deterministic local diagnostic instead of spending another provider turn on final delivery.
 
 ## [0.92.0] - 2026-08-15
 

@@ -48,6 +48,9 @@ describe("SDK default tool surface", () => {
 			expect(session.getActiveToolNames()).toContain("skillify");
 			expect(session.getActiveToolNames()).toContain("skill_audit");
 			expect(session.getActiveToolNames()).toContain("memory");
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["create_goal", "get_goal", "update_goal"]),
+			);
 			expect(session.getToolDefinition("memory")).toBeDefined();
 			expect(session.getActiveToolNames()).toContain("improvement_loop");
 			expect(session.getToolDefinition("improvement_loop")).toBeDefined();

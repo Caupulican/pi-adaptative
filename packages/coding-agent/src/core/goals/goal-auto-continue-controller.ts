@@ -5,7 +5,6 @@ import type {
 	GoalContinuationLoopResult,
 	PromptOptions,
 } from "../agent-session.ts";
-import type { ModelCapabilityProfile } from "../model-capability.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
@@ -13,7 +12,6 @@ export interface GoalAutoContinueControllerDeps {
 	isDisposed(): boolean;
 	isGoalToolActive(): boolean;
 	getSettingsManager(): SettingsManager;
-	getModelCapabilityProfile(): ModelCapabilityProfile;
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	hasInFlightLaneForGoal(goalId: string): boolean;
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
@@ -42,7 +40,6 @@ export class GoalAutoContinueController {
 
 	scheduleFromIdle(options?: PromptOptions): void {
 		if (options?.autoContinueGoal === false || this._isContinuing || this.deps.isDisposed()) return;
-		if (!this.deps.getModelCapabilityProfile().backgroundLanesEnabled) return;
 
 		const { maxStallTurns, goalAutoContinue, goalAutoContinueDelayMs } = this.deps
 			.getSettingsManager()

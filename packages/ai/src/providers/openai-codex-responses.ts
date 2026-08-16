@@ -1,5 +1,6 @@
 import type * as NodeOs from "node:os";
 import type {
+	NamespaceTool,
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
 	ResponseInput,
@@ -592,13 +593,16 @@ function buildRequestBody(
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		imageDetail: lite ? null : "auto",
+		includeMessageType: lite,
 		toolNameMap,
 	});
-	const instructions = buildResponsesInstructions(context) || "You are a helpful assistant.";
-	const tools =
+	const configuredInstructions = buildResponsesInstructions(context);
+	const instructions = configuredInstructions || "You are a helpful assistant.";
+	const convertedTools =
 		context.tools && context.tools.length > 0
-			? convertResponsesTools(context.tools, { strict: null, toolNameMap })
+			? convertResponsesTools(context.tools, { strict: lite ? false : null, toolNameMap })
 			: [];
+	const tools = lite ? groupCodexResponsesLiteTools(convertedTools) : convertedTools;
 	const input: ResponseInput = lite
 		? [
 				{
@@ -606,11 +610,15 @@ function buildRequestBody(
 					role: "developer",
 					tools,
 				} satisfies ResponseInputItem.AdditionalTools,
-				{
-					type: "message",
-					role: "developer",
-					content: [{ type: "input_text", text: instructions }],
-				} satisfies ResponseInputItem.Message,
+				...(configuredInstructions
+					? [
+							{
+								type: "message" as const,
+								role: "developer" as const,
+								content: [{ type: "input_text" as const, text: configuredInstructions }],
+							} satisfies ResponseInputItem.Message,
+						]
+					: []),
 				...messages,
 			]
 		: messages;
@@ -658,6 +666,26 @@ function buildRequestBody(
 	}
 
 	return body;
+}
+
+function groupCodexResponsesLiteTools(tools: OpenAITool[]): OpenAITool[] {
+	if (tools.length === 0) return [];
+
+	const functions: NamespaceTool.Function[] = tools.map((tool) => {
+		if (tool.type !== "function") {
+			throw new Error(`Unsupported Responses Lite tool type: ${tool.type}`);
+		}
+		return tool;
+	});
+
+	return [
+		{
+			type: "namespace",
+			name: "functions",
+			description: "",
+			tools: functions,
+		},
+	];
 }
 
 function resolveCodexServiceTier(

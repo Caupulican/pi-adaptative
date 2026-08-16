@@ -46,6 +46,7 @@ function detectSessionAffinityFormat(model: Pick<Model<"openai-responses">, "pro
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
 		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
+		requestFormat: model.compat?.requestFormat ?? "openai",
 		supportsReasoningEffort: model.compat?.supportsReasoningEffort ?? true,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
 	};
@@ -171,14 +172,17 @@ function resolveBaseUrl(model: Model<"openai-responses">): string {
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { toolNameMap });
-
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);
+	const useXaiCliFormat = compat.requestFormat === "xai-cli";
+	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+		requestFormat: compat.requestFormat,
+		toolNameMap,
+	});
 	const isGpt56 = model.provider === "openai" && model.id.startsWith("gpt-5.6");
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
-		instructions: buildResponsesInstructions(context),
+		instructions: useXaiCliFormat ? undefined : buildResponsesInstructions(context),
 		input: messages,
 		stream: true,
 		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
@@ -206,7 +210,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertResponsesTools(context.tools, { toolNameMap });
+		params.tools = convertResponsesTools(context.tools, { strict: useXaiCliFormat ? null : undefined, toolNameMap });
 	}
 	if (options?.toolChoice !== undefined) {
 		params.tool_choice = options.toolChoice;
@@ -229,7 +233,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],
 				...(supportsReasoningSummary && !reasoningDisabled && options?.reasoningSummary !== null
-					? { summary: options?.reasoningSummary ?? "auto" }
+					? { summary: options?.reasoningSummary ?? (useXaiCliFormat ? "concise" : "auto") }
 					: {}),
 				...(options?.reasoningMode ? { mode: options.reasoningMode } : {}),
 				...(options?.reasoningContext ? { context: options.reasoningContext } : {}),
