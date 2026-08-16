@@ -12,7 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
+import { type CreateAgentSessionOptions, createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("createAgentSession stream options", () => {
@@ -78,6 +78,7 @@ describe("createAgentSession stream options", () => {
 		requestOptions: SimpleStreamOptions = {},
 		provider = "capture-provider",
 		isChildSession = false,
+		sessionOptions: Pick<CreateAgentSessionOptions, "serviceTier"> = {},
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api, provider);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -97,6 +98,7 @@ describe("createAgentSession stream options", () => {
 
 		const sessionManager = SessionManager.inMemory(cwd);
 		const { session } = await createAgentSession({
+			...sessionOptions,
 			cwd,
 			agentDir,
 			model,
@@ -177,6 +179,40 @@ describe("createAgentSession stream options", () => {
 		);
 
 		expect(options?.websocketConnectTimeoutMs).toBe(0);
+	});
+
+	it("forwards the session service tier to provider requests", async () => {
+		const options = await captureStreamOptions("openai-responses", {}, {}, "capture-provider", false, {
+			serviceTier: "priority",
+		});
+
+		expect(options?.serviceTier).toBe("priority");
+	});
+
+	it("lets a request-specific service tier override the session default", async () => {
+		const options = await captureStreamOptions(
+			"openai-responses",
+			{},
+			{ serviceTier: "default" },
+			"capture-provider",
+			false,
+			{ serviceTier: "priority" },
+		);
+
+		expect(options?.serviceTier).toBe("default");
+	});
+
+	it("lets an explicit null service tier clear the session default", async () => {
+		const options = await captureStreamOptions(
+			"openai-responses",
+			{},
+			{ serviceTier: null },
+			"capture-provider",
+			false,
+			{ serviceTier: "priority" },
+		);
+
+		expect(options?.serviceTier).toBeNull();
 	});
 
 	it("wires OAuth rejection recovery by the Codex provider id rather than its API id", async () => {

@@ -1,6 +1,6 @@
-import { composeRequestSystemPrompt, estimateProviderRequestTokens } from "@caupulican/pi-agent-core";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
-import { narrowRequestMaxTokens } from "@caupulican/pi-agent-core/agent-loop";
+import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
+import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
 import type { CompactionController } from "./compaction-controller.ts";
 import type { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 

@@ -22,10 +22,20 @@ const agentSrcMessages = fileURLToPath(new URL("../agent/src/messages.ts", impor
 const agentSrcNode = fileURLToPath(new URL("../agent/src/node.ts", import.meta.url));
 const agentSrcPaths = fileURLToPath(new URL("../agent/src/utils/paths.ts", import.meta.url));
 const agentSrcProcessTree = fileURLToPath(new URL("../agent/src/reliability/process-tree.ts", import.meta.url));
+const agentSrcProviderRequestEstimator = fileURLToPath(
+	new URL("../agent/src/provider-request-estimator.ts", import.meta.url),
+);
+const agentSrcProviderRequestPlanner = fileURLToPath(
+	new URL("../agent/src/provider-request-planner.ts", import.meta.url),
+);
+const agentSrcProviderToolProjection = fileURLToPath(
+	new URL("../agent/src/provider-tool-projection.ts", import.meta.url),
+);
 const agentSrcReliability = fileURLToPath(new URL("../agent/src/reliability/index.ts", import.meta.url));
 const agentSrcSession = fileURLToPath(new URL("../agent/src/session/session-manager.ts", import.meta.url));
 const agentSrcShellOutput = fileURLToPath(new URL("../agent/src/utils/shell-output.ts", import.meta.url));
 const agentSrcToolFailureMemory = fileURLToPath(new URL("../agent/src/tool-failure-memory.ts", import.meta.url));
+const agentSrcToolProtocolResidue = fileURLToPath(new URL("../agent/src/tool-protocol-residue.ts", import.meta.url));
 const agentSrcTruncate = fileURLToPath(new URL("../agent/src/utils/truncate.ts", import.meta.url));
 const agentSrcTypes = fileURLToPath(new URL("../agent/src/types.ts", import.meta.url));
 const agentSrcUsage = fileURLToPath(new URL("../agent/src/usage.ts", import.meta.url));
@@ -126,10 +136,23 @@ export default defineConfig({
 			{ find: /^@caupulican\/pi-agent-core\/node$/, replacement: agentSrcNode },
 			{ find: /^@caupulican\/pi-agent-core\/paths$/, replacement: agentSrcPaths },
 			{ find: /^@caupulican\/pi-agent-core\/process-tree$/, replacement: agentSrcProcessTree },
+			{
+				find: /^@caupulican\/pi-agent-core\/provider-request-estimator$/,
+				replacement: agentSrcProviderRequestEstimator,
+			},
+			{
+				find: /^@caupulican\/pi-agent-core\/provider-request-planner$/,
+				replacement: agentSrcProviderRequestPlanner,
+			},
+			{
+				find: /^@caupulican\/pi-agent-core\/provider-tool-projection$/,
+				replacement: agentSrcProviderToolProjection,
+			},
 			{ find: /^@caupulican\/pi-agent-core\/reliability$/, replacement: agentSrcReliability },
 			{ find: /^@caupulican\/pi-agent-core\/session$/, replacement: agentSrcSession },
 			{ find: /^@caupulican\/pi-agent-core\/shell-output$/, replacement: agentSrcShellOutput },
 			{ find: /^@caupulican\/pi-agent-core\/tool-failure-memory$/, replacement: agentSrcToolFailureMemory },
+			{ find: /^@caupulican\/pi-agent-core\/tool-protocol-residue$/, replacement: agentSrcToolProtocolResidue },
 			{ find: /^@caupulican\/pi-agent-core\/truncate$/, replacement: agentSrcTruncate },
 			{ find: /^@caupulican\/pi-agent-core\/types$/, replacement: agentSrcTypes },
 			{ find: /^@caupulican\/pi-agent-core\/usage$/, replacement: agentSrcUsage },

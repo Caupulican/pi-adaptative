@@ -430,7 +430,10 @@ describe("goal-owned execution budget", () => {
 	it("drains the closing wrap-up through the session after the goal tool blocks mid-turn, then denies the next turn", async () => {
 		const harness = await createHarness();
 		try {
-			const goal = createGoalState({ goalId: "goal-public-block", userGoal: "Stop after blocking", now: "T0" });
+			let goal = createGoalState({ goalId: "goal-public-block", userGoal: "Stop after blocking", now: "T0" });
+			goal = applyGoalEvent(goal, { type: "no_progress", now: "T1" });
+			goal = applyGoalEvent(goal, { type: "no_progress", now: "T2" });
+			goal = applyGoalEvent(goal, { type: "no_progress", now: "T3" });
 			harness.session.saveGoalStateSnapshot(goal);
 			const admissions = vi.spyOn(harness.session.agent, "admitProviderRequest");
 			harness.setResponses([

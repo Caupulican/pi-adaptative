@@ -1,18 +1,66 @@
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GoalAutoContinueController } from "../src/core/goals/goal-auto-continue-controller.ts";
+import { evaluateGoalContinuation } from "../src/core/goals/goal-continuation-controller.ts";
+import type { GoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
-import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
-import { createHarness, getUserTexts } from "./suite/harness.ts";
 
-function seedActiveGoal(harness: Awaited<ReturnType<typeof createHarness>>, requirementCount = 1): void {
-	let state = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
-	for (let i = 1; i <= requirementCount; i++) {
-		state = applyGoalEvent(state, { type: "add_requirement", id: `req-${i}`, text: `Requirement ${i}`, now: "T0" });
-	}
-	appendGoalStateSnapshot(harness.sessionManager, state);
+const AUTONOMY_SETTINGS = {
+	goalAutoContinue: true,
+	goalAutoContinueDelayMs: 0,
+	goalContinueTurns: 5,
+	goalContinueMaxWallClockMinutes: 2,
+	maxStallTurns: 3,
+};
+
+function activeSnapshot(): GoalRuntimeSnapshot {
+	const goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
+	return {
+		goalState,
+		workerClaims: [],
+		learningDecisions: [],
+		continuation: evaluateGoalContinuation({
+			state: goalState,
+			settings: { maxStallTurns: AUTONOMY_SETTINGS.maxStallTurns },
+		}),
+	};
 }
 
-describe("AgentSession goal idle autosteer", () => {
+function createController(snapshot: GoalRuntimeSnapshot) {
+	const continuationOptions: Array<{
+		maxTurns?: number;
+		maxStallTurns: number;
+		maxWallClockMinutes?: number;
+	}> = [];
+	const snapshotSettings: Array<{ maxStallTurns: number }> = [];
+	const controller = new GoalAutoContinueController({
+		isDisposed: () => false,
+		isGoalToolActive: () => true,
+		getSettingsManager: () =>
+			({
+				getAutonomySettings: () => AUTONOMY_SETTINGS,
+			}) as never,
+		getGoalRuntimeSnapshot: (settings) => {
+			snapshotSettings.push(settings);
+			return snapshot;
+		},
+		hasInFlightLaneForGoal: () => false,
+		continueGoalLoop: async (options) => {
+			continuationOptions.push(options);
+			return {
+				turnsSubmitted: 1,
+				stopReason: "max_turns_reached",
+				finalSnapshot: snapshot,
+			};
+		},
+		isForegroundBusy: () => false,
+		waitForForegroundIdle: async () => {},
+		markGoalToolUnavailable: () => {},
+		emit: () => {},
+	});
+	return { controller, continuationOptions, snapshotSettings };
+}
+
+describe("GoalAutoContinueController idle autosteer", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 	});
@@ -21,75 +69,58 @@ describe("AgentSession goal idle autosteer", () => {
 		vi.useRealTimers();
 	});
 
-	it("stops unchanged automatic continuations at the host-owned stall limit", async () => {
-		const harness = await createHarness();
-		try {
-			seedActiveGoal(harness);
-			harness.settingsManager.setAutonomySettings({ maxStallTurns: 3 });
-			const responses = [fauxAssistantMessage("initial turn settled")];
-			for (let i = 1; i <= 5; i++) responses.push(fauxAssistantMessage(`unchanged ${i}`));
-			harness.setResponses(responses);
+	it("forwards the host-owned turn, stall, and wall-clock limits to one scheduled loop", async () => {
+		const { controller, continuationOptions, snapshotSettings } = createController(activeSnapshot());
 
-			await harness.session.prompt("start the task");
-			await vi.runAllTimersAsync();
+		controller.scheduleFromIdle();
+		await vi.runAllTimersAsync();
 
-			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
-				continuationTurnsUsed: 3,
-				stallTurns: 3,
-				status: "active",
-			});
-			// Hidden continuation triggers never pollute persisted user history.
-			expect(getUserTexts(harness)).toEqual(["start the task"]);
-			expect(harness.getPendingResponseCount()).toBe(2);
-		} finally {
-			harness.cleanup();
-		}
+		expect(snapshotSettings).toEqual([{ maxStallTurns: 3 }, { maxStallTurns: 3 }]);
+		expect(continuationOptions).toEqual([
+			{
+				maxTurns: 5,
+				maxStallTurns: 3,
+				maxWallClockMinutes: 2,
+			},
+		]);
 	});
 
-	it("a lean-window model autosteers through compact lifecycle tools without enabling orchestration tools", async () => {
-		const harness = await createHarness({ models: [{ id: "lean-model", contextWindow: 16_384 }] });
-		try {
-			expect(harness.session.getModelCapabilityProfile().class).toBe("lean");
-			expect(harness.session.getActiveToolNames()).not.toContain("goal");
-			expect(harness.session.getActiveToolNames()).toEqual(
-				expect.arrayContaining(["create_goal", "get_goal", "update_goal"]),
-			);
-			expect(harness.session.getActiveToolNames()).not.toContain("delegate");
-			seedActiveGoal(harness);
-			harness.setResponses([
-				fauxAssistantMessage("initial turn settled"),
-				fauxAssistantMessage([fauxToolCall("update_goal", { status: "blocked" })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage("goal blocked after audited impasse"),
-			]);
-
-			await harness.session.prompt("start the task");
-			await vi.runAllTimersAsync();
-
-			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
-				continuationTurnsUsed: 1,
-				status: "blocked",
-			});
-			expect(harness.getPendingResponseCount()).toBe(0);
-		} finally {
-			harness.cleanup();
+	it("does not schedule after the authoritative continuation decision reaches the stall limit", async () => {
+		let goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
+		goalState = applyGoalEvent(goalState, {
+			type: "add_requirement",
+			id: "req-1",
+			text: "Ship the requested behavior",
+			now: "T0",
+		});
+		for (let pass = 0; pass < AUTONOMY_SETTINGS.maxStallTurns; pass++) {
+			goalState = applyGoalEvent(goalState, { type: "no_progress", now: `T${pass + 1}` });
 		}
+		const snapshot: GoalRuntimeSnapshot = {
+			goalState,
+			workerClaims: [],
+			learningDecisions: [],
+			continuation: evaluateGoalContinuation({
+				state: goalState,
+				settings: { maxStallTurns: AUTONOMY_SETTINGS.maxStallTurns },
+			}),
+		};
+		const { controller, continuationOptions } = createController(snapshot);
+
+		controller.scheduleFromIdle();
+		await vi.runAllTimersAsync();
+
+		expect(snapshot.continuation).toMatchObject({ action: "ask-user", reasonCode: "stall_limit_reached" });
+		expect(continuationOptions).toEqual([]);
 	});
 
-	it("does not auto-inject continuation prompts when autoContinueGoal is false", async () => {
-		const harness = await createHarness();
-		try {
-			seedActiveGoal(harness);
-			harness.setResponses([fauxAssistantMessage("manual continuation settled")]);
+	it("does not inject a continuation when the foreground prompt opts out", async () => {
+		const { controller, continuationOptions, snapshotSettings } = createController(activeSnapshot());
 
-			await harness.session.prompt("manual continuation prompt", { autoContinueGoal: false });
-			await vi.runAllTimersAsync();
+		controller.scheduleFromIdle({ autoContinueGoal: false });
+		await vi.runAllTimersAsync();
 
-			expect(harness.session.getGoalStateSnapshot()?.continuationTurnsUsed).toBe(0);
-			expect(getUserTexts(harness)).toEqual(["manual continuation prompt"]);
-		} finally {
-			harness.cleanup();
-		}
+		expect(snapshotSettings).toEqual([]);
+		expect(continuationOptions).toEqual([]);
 	});
 });

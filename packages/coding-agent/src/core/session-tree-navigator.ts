@@ -8,13 +8,12 @@
  * here through a dep so the session's abort/compacting surface is untouched.
  */
 
-import type { Agent } from "@caupulican/pi-agent-core";
+import type { Agent } from "@caupulican/pi-agent-core/agent";
 import {
-	type BranchSummaryEntry,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
-	type SessionManager,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/compaction/branch-summarization";
+import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import type { ExtensionRunner, SessionBeforeTreeResult, TreePreparation } from "./extensions/index.ts";
 import type { RequestAuth } from "./request-auth.ts";

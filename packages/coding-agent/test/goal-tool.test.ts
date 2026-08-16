@@ -119,6 +119,9 @@ describe("goal tool", () => {
 		await run({ action: "start", goalId: "g1", userGoal: "Ship" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Get access" });
 		await run({ action: "block_requirement", requirementId: "r1", reason: "waiting for user" });
+		await run({ action: "no_progress" });
+		await run({ action: "no_progress" });
+		await run({ action: "no_progress" });
 		await run({ action: "block_goal", reason: "waiting for user" });
 
 		const viewed = await run({ action: "get" });
@@ -162,5 +165,63 @@ describe("goal tool", () => {
 		const completed = await update.execute("call-update", { status: "complete" }, undefined, undefined, ctx);
 		expect(completed.isError).not.toBe(true);
 		expect(getState()?.status).toBe("completed");
+	});
+
+	it("lets compact lifecycle callers report concrete progress without terminalizing the goal", async () => {
+		const { tool, run, getState } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship model-neutral goals" });
+		await run({ action: "no_progress" });
+		await run({ action: "no_progress" });
+		const beforeRevision = getState()?.progressRevision;
+		const update = createGoalLifecycleToolDefinitions(tool)[2];
+
+		const progressed = await update.execute("call-progress", { status: "active" }, undefined, undefined, ctx);
+
+		expect(progressed.isError).not.toBe(true);
+		expect(getState()).toMatchObject({ status: "active", stallTurns: 0 });
+		expect(getState()?.progressRevision).toBe((beforeRevision ?? 0) + 1);
+	});
+
+	it("rejects compact blocked updates before three stalled turns and preserves the supplied reason", async () => {
+		const premature = createHarness();
+		await premature.run({ action: "start", goalId: "g1", userGoal: "Ship" });
+		const prematureUpdate = createGoalLifecycleToolDefinitions(premature.tool)[2];
+		const rejected = await prematureUpdate.execute(
+			"call-blocked-early",
+			{ status: "blocked", reason: "waiting for owner access" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(rejected.isError).toBe(true);
+		expect(premature.getState()?.status).toBe("active");
+
+		const eligible = createHarness();
+		await eligible.run({ action: "start", goalId: "g2", userGoal: "Ship" });
+		await eligible.run({ action: "no_progress" });
+		await eligible.run({ action: "no_progress" });
+		await eligible.run({ action: "no_progress" });
+		const eligibleUpdate = createGoalLifecycleToolDefinitions(eligible.tool)[2];
+		const missingReason = await eligibleUpdate.execute(
+			"call-blocked-without-reason",
+			{ status: "blocked" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(missingReason.isError).toBe(true);
+		expect(missingReason.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("reason") });
+		const blocked = await eligibleUpdate.execute(
+			"call-blocked",
+			{ status: "blocked", reason: "waiting for owner access" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(blocked.isError).not.toBe(true);
+		expect(eligible.getState()).toMatchObject({
+			status: "blocked",
+			blockedReason: "waiting for owner access",
+		});
 	});
 });

@@ -3,7 +3,7 @@ import {
 	type SessionInfo,
 	type SessionListProgress,
 	SessionManager,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/session";
 import { getAgentDir, getSessionsDir } from "../config.ts";
 
 /**

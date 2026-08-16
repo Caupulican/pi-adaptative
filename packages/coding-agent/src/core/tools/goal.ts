@@ -6,7 +6,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "../goals/goal-lifecycle.ts";
-import type { GoalEvidenceKind, GoalState } from "../goals/goal-state.ts";
+import { type GoalEvidenceKind, type GoalState, type GoalStatus, isGoalExecutionActive } from "../goals/goal-state.ts";
 import {
 	applyGoalAction,
 	type GoalAction,
@@ -109,10 +109,13 @@ const getGoalSchema = Type.Object({}, { additionalProperties: false });
 
 const updateGoalSchema = Type.Object(
 	{
-		status: Type.Union([Type.Literal("complete"), Type.Literal("blocked")], {
+		status: Type.Union([Type.Literal("active"), Type.Literal("complete"), Type.Literal("blocked")], {
 			description:
-				"Set complete only after a requirement-by-requirement audit. Set blocked only after the same blocker recurs for at least three consecutive goal turns.",
+				"Set active after concrete progress, complete after an evidence audit, or blocked after the same blocker persists for three turns.",
 		}),
+		reason: Type.Optional(
+			Type.String({ minLength: 1, description: "Required for blocked: the recurring external blocker." }),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -640,23 +643,17 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		name: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
-			"Update the existing goal. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only after the same blocking condition has recurred for at least three consecutive goal turns and no meaningful progress is possible without user input or external change. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
-		promptSnippet: "Mark the current durable goal complete or genuinely blocked.",
+			"Update the existing goal. Set active only after concrete, verifiable progress in the current turn. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only after the same blocking condition has recurred for at least three consecutive goal turns and no meaningful progress is possible without user input or external change; include that condition in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+		promptSnippet: "Report concrete progress or mark the durable goal complete or genuinely blocked.",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
-			return goalTool.execute(
-				toolCallId,
-				input.status === "complete"
+			const requestedGoalStatus: GoalStatus = input.status === "complete" ? "completed" : input.status;
+			const action: GoalToolInput = isGoalExecutionActive(requestedGoalStatus)
+				? { action: "progress" }
+				: input.status === "complete"
 					? { action: "complete" }
-					: {
-							action: "block_goal",
-							reason:
-								"blocked after the same external impasse recurred for at least three consecutive goal turns",
-						},
-				signal,
-				onUpdate,
-				context,
-			);
+					: { action: "block_goal", reason: input.reason ?? "" };
+			return goalTool.execute(toolCallId, action, signal, onUpdate, context);
 		},
 	};
 

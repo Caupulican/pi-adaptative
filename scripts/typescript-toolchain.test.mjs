@@ -31,3 +31,17 @@ test("has one compiler execution path with no legacy fallback", () => {
 	assert.doesNotMatch(source, /\.cmd|shell:|run\("tsgo"|falling back|native-preview/);
 	assert.throws(() => readFileSync(join("scripts", "tsgo-or-tsc.mjs"), "utf8"), { code: "ENOENT" });
 });
+
+test("keeps CI and release toolchain assertions on the pinned Vite version", () => {
+	const pinnedVite = rootPackage.devDependencies.vite;
+	assert.deepEqual(
+		[..."npm ls vite@8.2.1 vitest@4.1.10 --depth=0".matchAll(/npm ls vite@([^\s]+)/g)].map((match) => match[1]),
+		["8.2.1"],
+	);
+	for (const relativePath of [".github/workflows/ci.yml", ".github/workflows/build-binaries.yml"]) {
+		const source = readFileSync(relativePath, "utf8");
+		const assertedVersions = [...source.matchAll(/npm ls vite@([^\s]+)/g)].map((match) => match[1]);
+		assert.ok(assertedVersions.length > 0, `${relativePath} must assert the native Vite toolchain`);
+		assert.deepEqual([...new Set(assertedVersions)], [pinnedVite], relativePath);
+	}
+});

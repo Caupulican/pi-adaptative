@@ -103,6 +103,8 @@ export interface OpenAIResponsesStreamOptions {
 
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
+	/** Omit the strict field for transports whose wire schema rejects it, such as the Grok CLI proxy. */
+	omitStrict?: boolean;
 	toolNameMap?: ToolNameMap;
 }
 
@@ -386,9 +388,9 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 			name: options?.toolNameMap?.toProviderName(tool.name) ?? tool.name,
 			description: tool.description,
 			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-			strict: strict ?? false,
+			strict,
 		};
-		if (strict === null) {
+		if (options?.omitStrict === true) {
 			// The installed Grok CLI omits this field, while the OpenAI SDK type requires it.
 			delete (converted as Partial<typeof converted>).strict;
 		}

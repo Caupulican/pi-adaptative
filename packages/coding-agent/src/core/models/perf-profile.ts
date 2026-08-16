@@ -1,4 +1,6 @@
-import { estimateProviderRequestTokens, type StreamFn, type StreamIdleOptions } from "@caupulican/pi-agent-core";
+import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
+import type { StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
+import type { StreamFn } from "@caupulican/pi-agent-core/types";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type {
 	Api,

@@ -4,7 +4,7 @@ import {
 	type AgentToolFailureRecoveryAuthority,
 	type AgentToolFailureRecoveryTarget,
 	createAgentToolFailureRecoveryAuthority,
-} from "@caupulican/pi-agent-core";
+} from "@caupulican/pi-agent-core/types";
 import { resolveToCwd } from "./path-utils.ts";
 
 export const FILE_EXISTS_RECOVERY_TARGET_KIND = "filesystem.file.exists";

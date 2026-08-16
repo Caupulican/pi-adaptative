@@ -18,6 +18,7 @@ const MAX_GOAL_REQUIREMENTS = 256;
 const MAX_GOAL_EVIDENCE = 512;
 const MAX_GOAL_LEDGER_TEXT_LENGTH = 4_000;
 const MAX_GOAL_URI_LENGTH = 4_096;
+const MIN_AGENT_BLOCK_STALL_TURNS = 3;
 
 /**
  * Agent-facing goal ledger actions.
@@ -370,6 +371,12 @@ function toGoalEvent(
 		case "block_goal": {
 			const reason = action.reason.trim();
 			if (!reason) return { ok: false, error: "block_goal requires a non-empty reason." };
+			if (state.stallTurns < MIN_AGENT_BLOCK_STALL_TURNS) {
+				return {
+					ok: false,
+					error: `Cannot block goal: the host has recorded ${state.stallTurns}/${MIN_AGENT_BLOCK_STALL_TURNS} consecutive no-progress goal turns. Keep the goal active until the same blocker has persisted for at least three consecutive goal turns.`,
+				};
+			}
 			return { ok: true, event: { type: "block_goal", reason, now } };
 		}
 		default:

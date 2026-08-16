@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR, projectToolsForProvider } from "@caupulican/pi-agent-core";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
+import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
 import {
 	DEFAULT_STREAM_IDLE,
 	type StreamIdleOptions,
@@ -12,6 +12,7 @@ import {
 } from "@caupulican/pi-agent-core/reliability";
 import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import { transcriptHasClosedToolOperation } from "@caupulican/pi-agent-core/tool-failure-memory";
+import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -66,7 +67,6 @@ import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
-// (module-scope helper for curation goal extraction defined below the imports)
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";

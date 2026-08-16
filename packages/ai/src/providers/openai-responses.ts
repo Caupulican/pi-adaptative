@@ -210,7 +210,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertResponsesTools(context.tools, { strict: useXaiCliFormat ? null : undefined, toolNameMap });
+		params.tools = convertResponsesTools(context.tools, { omitStrict: useXaiCliFormat, toolNameMap });
 	}
 	if (options?.toolChoice !== undefined) {
 		params.tool_choice = options.toolChoice;

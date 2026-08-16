@@ -54,6 +54,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: CreateAgentSessionOptions["serviceTier"];
 	/** Preserve whether the foreground model came from an explicit launch flag. */
 	isExplicitModel?: boolean;
 	/** Preserve whether the thinking level came from an explicit launch flag. */
@@ -247,6 +248,7 @@ export async function createAgentSessionFromServices(
 		sessionManager: options.sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
+		serviceTier: options.serviceTier,
 		isExplicitModel: options.isExplicitModel,
 		isExplicitThinking: options.isExplicitThinking,
 		scopedModels: options.scopedModels,

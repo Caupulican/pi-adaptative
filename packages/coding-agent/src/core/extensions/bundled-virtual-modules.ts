@@ -11,10 +11,14 @@ import * as bundledPiAgentCoreMessages from "@caupulican/pi-agent-core/messages"
 import * as bundledPiAgentCoreNode from "@caupulican/pi-agent-core/node";
 import * as bundledPiAgentCorePaths from "@caupulican/pi-agent-core/paths";
 import * as bundledPiAgentCoreProcessTree from "@caupulican/pi-agent-core/process-tree";
+import * as bundledPiAgentCoreProviderRequestEstimator from "@caupulican/pi-agent-core/provider-request-estimator";
+import * as bundledPiAgentCoreProviderRequestPlanner from "@caupulican/pi-agent-core/provider-request-planner";
+import * as bundledPiAgentCoreProviderToolProjection from "@caupulican/pi-agent-core/provider-tool-projection";
 import * as bundledPiAgentCoreReliability from "@caupulican/pi-agent-core/reliability";
 import * as bundledPiAgentCoreSession from "@caupulican/pi-agent-core/session";
 import * as bundledPiAgentCoreShellOutput from "@caupulican/pi-agent-core/shell-output";
 import * as bundledPiAgentCoreToolFailureMemory from "@caupulican/pi-agent-core/tool-failure-memory";
+import * as bundledPiAgentCoreToolProtocolResidue from "@caupulican/pi-agent-core/tool-protocol-residue";
 import * as bundledPiAgentCoreTruncate from "@caupulican/pi-agent-core/truncate";
 import * as bundledPiAgentCoreTypes from "@caupulican/pi-agent-core/types";
 import * as bundledPiAgentCoreUsage from "@caupulican/pi-agent-core/usage";
@@ -66,10 +70,14 @@ const piAgentCoreVirtualSubpaths: Record<PiAgentCoreExtensionSubpath, unknown> =
 	node: bundledPiAgentCoreNode,
 	paths: bundledPiAgentCorePaths,
 	"process-tree": bundledPiAgentCoreProcessTree,
+	"provider-request-estimator": bundledPiAgentCoreProviderRequestEstimator,
+	"provider-request-planner": bundledPiAgentCoreProviderRequestPlanner,
+	"provider-tool-projection": bundledPiAgentCoreProviderToolProjection,
 	reliability: bundledPiAgentCoreReliability,
 	session: bundledPiAgentCoreSession,
 	"shell-output": bundledPiAgentCoreShellOutput,
 	"tool-failure-memory": bundledPiAgentCoreToolFailureMemory,
+	"tool-protocol-residue": bundledPiAgentCoreToolProtocolResidue,
 	truncate: bundledPiAgentCoreTruncate,
 	types: bundledPiAgentCoreTypes,
 	usage: bundledPiAgentCoreUsage,

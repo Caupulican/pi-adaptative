@@ -2,7 +2,14 @@ import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
-import { type Api, type Message, type Model, resolveModelThinkingLevel, streamSimple } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type Message,
+	type Model,
+	resolveModelThinkingLevel,
+	type ServiceTier,
+	streamSimple,
+} from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { configFile } from "./agent-paths.ts";
@@ -63,6 +70,8 @@ export interface CreateAgentSessionOptions {
 	model?: Model<Api>;
 	/** Thinking level. Default: from settings, then the model's declared default, else 'medium'. */
 	thinkingLevel?: ThinkingLevel;
+	/** Default provider processing tier for this session. Per-request options take precedence. */
+	serviceTier?: ServiceTier;
 	/**
 	 * Whether `model` came from an explicit CLI/SDK flag (vs. profile/settings resolution).
 	 * When false (default), the active profile's model is re-applied on reload so live profile
@@ -254,6 +263,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	bindSavedBedrockScope(settingsManager, modelRegistry);
 	const isChildSession = options.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
 	const forceBackgroundRequests = isChildSession || isWorkerSession();
+	const defaultServiceTier = options.serviceTier;
 	const orchestrationProfile = options.orchestrationProfile;
 	if (orchestrationProfile) {
 		validateOrchestrationProfile(orchestrationProfile);
@@ -486,6 +496,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const attributionHeaders = getAttributionHeaders(model, settingsManager, options?.sessionId);
 			const providerOptions = {
 				...options,
+				serviceTier: options?.serviceTier === undefined ? defaultServiceTier : options.serviceTier,
 				...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
 				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
 				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,

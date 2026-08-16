@@ -1,9 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Added provider-neutral service-tier forwarding through the simple streaming path, including xAI Priority Processing with `serviceTier: "priority"`.
+
+### Changed
+
+- Updated the official Anthropic, AWS Bedrock, Google GenAI, Mistral, and OpenAI SDKs to their current releases.
+
 ### Fixed
 
+- Classified Google GenAI's `TOO_MANY_TOOL_CALLS` terminal reason as a provider error.
 - Routed xAI OAuth subscriptions through the Grok CLI proxy and matched its Responses request and replay schema while keeping API-key models on the public xAI API.
 - Matched GPT-5.6 ChatGPT-subscription Responses Lite payloads to the current Codex client, including explicit message items, namespaced non-strict tools, and omission of empty developer instructions.
+- Preserved `strict: null` on legacy Codex Responses tools while omitting the field only for the Grok CLI transport.
 - Removed empty object-property names recursively from outbound Amazon Bedrock tool-call replays without mutating stored assistant arguments or valid empty objects.
 
 ## [0.92.0] - 2026-08-15

@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { validateRequiredSecurityOverrides } from "./lib/dependency-security-policy.mjs";
 
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 const exactVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -40,6 +41,13 @@ function getVersionSpecifier(specifier) {
 const failures = [];
 
 collectPackageJsonFiles(".");
+
+failures.push(
+	...validateRequiredSecurityOverrides(
+		JSON.parse(readFileSync("package.json", "utf8")),
+		JSON.parse(readFileSync("package-lock.json", "utf8")),
+	),
+);
 
 for (const file of packageJsonFiles.sort()) {
 	const packageJson = JSON.parse(readFileSync(file, "utf8"));

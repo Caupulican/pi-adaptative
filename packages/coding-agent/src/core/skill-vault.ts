@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core";
+import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core/provider-request-planner";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { MAX_SKILL_FRONTMATTER_BYTES, type Skill, type SkillFrontmatter } from "./skills.ts";

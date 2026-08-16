@@ -61,6 +61,21 @@
 			"pi-source": "./src/messages.ts",
 			"import": "./dist/messages.js"
 		},
+		"./provider-request-estimator": {
+			"types": "./dist/provider-request-estimator.d.ts",
+			"pi-source": "./src/provider-request-estimator.ts",
+			"import": "./dist/provider-request-estimator.js"
+		},
+		"./provider-request-planner": {
+			"types": "./dist/provider-request-planner.d.ts",
+			"pi-source": "./src/provider-request-planner.ts",
+			"import": "./dist/provider-request-planner.js"
+		},
+		"./provider-tool-projection": {
+			"types": "./dist/provider-tool-projection.d.ts",
+			"pi-source": "./src/provider-tool-projection.ts",
+			"import": "./dist/provider-tool-projection.js"
+		},
 		"./paths": {
 			"types": "./dist/utils/paths.d.ts",
 			"pi-source": "./src/utils/paths.ts",
@@ -90,6 +105,11 @@
 			"types": "./dist/tool-failure-memory.d.ts",
 			"pi-source": "./src/tool-failure-memory.ts",
 			"import": "./dist/tool-failure-memory.js"
+		},
+		"./tool-protocol-residue": {
+			"types": "./dist/tool-protocol-residue.d.ts",
+			"pi-source": "./src/tool-protocol-residue.ts",
+			"import": "./dist/tool-protocol-residue.js"
 		},
 		"./truncate": {
 			"types": "./dist/utils/truncate.d.ts",

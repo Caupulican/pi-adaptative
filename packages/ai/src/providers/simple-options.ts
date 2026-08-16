@@ -7,6 +7,7 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		signal: options?.signal,
 		apiKey: apiKey || options?.apiKey,
 		transport: options?.transport,
+		serviceTier: options?.serviceTier,
 		cacheRetention: options?.cacheRetention,
 		reasoningMode: options?.reasoningMode,
 		reasoningContext: options?.reasoningContext,

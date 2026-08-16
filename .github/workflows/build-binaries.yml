@@ -404,7 +404,7 @@ jobs:
 
       - name: Verify native TypeScript test toolchain
         run: |
-          npm ls vite@8.2.0 vitest@4.1.10 --depth=0
+          npm ls vite@8.2.1 vitest@4.1.10 --depth=0
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 

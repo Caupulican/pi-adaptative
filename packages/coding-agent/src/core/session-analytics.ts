@@ -10,22 +10,16 @@
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import {
-	type AgentMessage,
-	type AgentState,
-	addUsage,
-	createEmptyUsage,
-	getSessionEntryUsage,
-} from "@caupulican/pi-agent-core";
+import { calculateContextTokens, estimateContextTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import {
 	CURRENT_SESSION_VERSION,
-	calculateContextTokens,
-	estimateContextTokens,
 	getLatestCompactionEntry,
 	type SessionEntry,
 	type SessionHeader,
 	type SessionManager,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/session";
+import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core/types";
+import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { Model, Usage } from "@caupulican/pi-ai";
 import { getSessionsDir } from "../config.ts";
 import { theme } from "../modes/interactive/theme/theme.ts";

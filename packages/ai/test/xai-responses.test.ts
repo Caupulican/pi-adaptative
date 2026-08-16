@@ -262,6 +262,7 @@ describe("xAI Grok CLI subscription schema", () => {
 				},
 			},
 		]);
+		expect((body.tools as Array<Record<string, unknown>>)[0]).not.toHaveProperty("strict");
 	});
 });
 

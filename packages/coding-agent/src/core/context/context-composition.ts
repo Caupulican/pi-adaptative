@@ -1,9 +1,9 @@
+import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import {
-	type AgentMessage,
 	normalizeProviderToolDescription,
 	projectToolSchemaForProvider,
-} from "@caupulican/pi-agent-core";
-import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
+} from "@caupulican/pi-agent-core/provider-tool-projection";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { CurationTelemetrySnapshot } from "./brain-curator.ts";
 
 /**

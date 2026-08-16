@@ -1,13 +1,13 @@
 import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import {
 	DEFAULT_MAX_BYTES,
 	formatSize,
 	GREP_MAX_LINE_LENGTH,
 	type TruncationResult,
 	truncateLine,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/truncate";
+import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import { spawn } from "child_process";
 import path from "path";
 import { type Static, Type } from "typebox";

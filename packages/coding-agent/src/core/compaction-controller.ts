@@ -1,4 +1,3 @@
-import { estimateProviderRequestTokens, projectToolsForProvider } from "@caupulican/pi-agent-core";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import {
 	assessCompactionNeed,
@@ -13,6 +12,8 @@ import {
 	shouldCompact,
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { runCompactionLoop } from "@caupulican/pi-agent-core/compaction/loop";
+import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
+import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
 import {
 	classifyFailure,
 	computeRetryDelayMs,

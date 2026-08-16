@@ -1,4 +1,4 @@
-import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core";
+import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core/types";
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
 import { readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";

@@ -44,6 +44,16 @@ describe("parseArgs", () => {
 			}
 		});
 
+		test("documents the service-tier flag", () => {
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				printHelp();
+				expect(log.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("--service-tier <tier>");
+			} finally {
+				log.mockRestore();
+			}
+		});
+
 		test("lists the native task, question, and Python tool surfaces", () => {
 			const log = vi.spyOn(console, "log").mockImplementation(() => {});
 			try {
@@ -200,6 +210,29 @@ describe("parseArgs", () => {
 		test.each(["high", "xhigh", "max", "ultra"] as const)("parses --thinking %s", (level) => {
 			const result = parseArgs(["--thinking", level]);
 			expect(result.thinking).toBe(level);
+		});
+
+		test.each(["priority", "fast"] as const)("parses --service-tier %s", (tier) => {
+			const result = parseArgs(["--service-tier", tier]);
+			expect(result.serviceTier).toBe(tier);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("rejects an invalid service tier", () => {
+			const result = parseArgs(["--service-tier", "turbo"]);
+			expect(result.serviceTier).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{
+					type: "error",
+					message: 'Invalid service tier "turbo". Valid values: auto, default, fast, flex, scale, priority',
+				},
+			]);
+		});
+
+		test("requires a service-tier value", () => {
+			const result = parseArgs(["--service-tier"]);
+			expect(result.serviceTier).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--service-tier requires a value" }]);
 		});
 
 		test("reports the complete valid list for an invalid thinking level", () => {

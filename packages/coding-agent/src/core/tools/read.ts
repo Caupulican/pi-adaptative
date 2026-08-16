@@ -1,13 +1,13 @@
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
 	type TruncationResult,
 	truncateHead,
-} from "@caupulican/pi-agent-core/node";
+} from "@caupulican/pi-agent-core/truncate";
+import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
 import { Text } from "@caupulican/pi-tui";

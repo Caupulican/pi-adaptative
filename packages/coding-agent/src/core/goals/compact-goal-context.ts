@@ -54,8 +54,9 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 		instruction,
 		"Keep the full objective intact across turns. Make concrete progress toward the requested end state now; do not redefine success around an easier subset, and do not substitute a plan or status explanation for doing the work.",
 		"Treat the current worktree, external state, and tool results as authoritative. Use get_goal whenever detailed requirements/evidence or the current lifecycle state are needed. Use task_steps for decomposition, delegate for workers, and tool/artifact results as evidence.",
+		'After concrete, verifiable progress in a goal turn, call update_goal with status "active" so the host does not classify that turn as stalled. Repeated reads, plans, or unsupported claims are not progress.',
 		'Before completion, perform a requirement-by-requirement audit against the full objective and current authoritative evidence. Missing, indirect, stale, narrow, or merely plausible evidence means incomplete. Only when every requirement is proven and no required work remains, call update_goal with status "complete".',
-		'Blocked audit: do not stop at the first obstacle. Call update_goal with status "blocked" only when the same blocking condition has recurred for at least three consecutive goal turns and meaningful progress is impossible without user input or an external-state change. Difficulty, uncertainty, incomplete work, or useful clarification alone are not blockers.',
+		'Blocked audit: do not stop at the first obstacle. Call update_goal with status "blocked" and a concrete reason only when the same blocking condition has recurred for at least three consecutive goal turns and meaningful progress is impossible without user input or an external-state change. Difficulty, uncertainty, incomplete work, or useful clarification alone are not blockers.',
 		"Do not mark complete because the budget is low or the turn is ending. Otherwise leave the goal active and continue making verifiable progress.",
 	].join("\n");
 }

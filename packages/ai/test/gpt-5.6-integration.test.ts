@@ -316,7 +316,9 @@ describe("GPT-5.6 integration", () => {
 
 		expect(requestHeaders?.has("x-openai-internal-codex-responses-lite")).toBe(false);
 		expect(requestBody?.instructions).toBe("Use tools when useful.");
-		expect(requestBody?.tools).toEqual([expect.objectContaining({ type: "function", name: "read_file" })]);
+		expect(requestBody?.tools).toEqual([
+			expect.objectContaining({ type: "function", name: "read_file", strict: null }),
+		]);
 		expect(JSON.stringify(requestBody?.input)).not.toContain("additional_tools");
 	});
 

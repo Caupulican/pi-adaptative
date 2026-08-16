@@ -20,6 +20,43 @@ const memoryProviders = [
 	"../src/core/memory/providers/file-store.ts",
 	"../src/core/memory/providers/user-memory-archive.ts",
 ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8"));
+const eagerAgentCoreRuntimeOwners = [
+	"../src/core/agent-session.ts",
+	"../src/core/compaction-controller.ts",
+	"../src/core/context/context-composition.ts",
+	"../src/core/extensions/runner.ts",
+	"../src/core/models/perf-profile.ts",
+	"../src/core/provider-request-runtime-controller.ts",
+	"../src/core/session-analytics.ts",
+	"../src/core/skill-vault.ts",
+	"../src/core/tools/edit.ts",
+	"../src/core/tools/file-failure-recovery.ts",
+	"../src/core/tools/write.ts",
+].map((path) => ({ path, source: readFileSync(new URL(path, import.meta.url), "utf8") }));
+const eagerAgentCoreNodeRuntimeOwners = [
+	"../src/core/session-analytics.ts",
+	"../src/core/session-manager-factory.ts",
+	"../src/core/session-tree-navigator.ts",
+	"../src/core/tools/grep.ts",
+	"../src/core/tools/read.ts",
+].map((path) => ({ path, source: readFileSync(new URL(path, import.meta.url), "utf8") }));
+const focusedGoalIntegrationTests = [
+	"./agent-session-goal-autosteer.test.ts",
+	"./goal-task-compaction-survival.test.ts",
+].map((path) => ({ path, source: readFileSync(new URL(path, import.meta.url), "utf8") }));
+
+function agentCoreRuntimeImports(source: string, subpath = ""): string[] {
+	const escapedSpecifier = `@caupulican/pi-agent-core${subpath}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return source.match(new RegExp(`import[ \\t]+(?!type\\b)[^;]+[ \\t]+from[ \\t]+"${escapedSpecifier}";`, "g")) ?? [];
+}
+
+function focusedTestHeavyRuntimeImports(source: string): string[] {
+	return (
+		source.match(
+			/import[ \t]+(?!type\b)[^;]+[ \t]+from[ \t]+"(?:\.\.\/src\/core\/agent-session\.ts|\.\/suite\/harness\.ts)";/g,
+		) ?? []
+	);
+}
 
 describe("extension loader dependency boundary", () => {
 	it("keeps ordinary session construction off the heavyweight extension-loader graph", () => {
@@ -28,6 +65,46 @@ describe("extension loader dependency boundary", () => {
 		expect(runtimeBuilder).not.toMatch(/from "\.\/tools\/index\.ts"/);
 		expect(extensionifyRuntime).not.toMatch(/extensions\/loader\.ts|jiti/);
 		for (const provider of memoryProviders) expect(provider).not.toMatch(/resource-loader\.ts/);
+	});
+
+	it("keeps ordinary session construction off the agent-core root runtime barrel", () => {
+		const mixedImport = 'import { type AgentMessage, measureJsonLength } from "@caupulican/pi-agent-core";';
+		const typeOnlyImport = 'import type { AgentMessage } from "@caupulican/pi-agent-core";';
+		expect(agentCoreRuntimeImports(mixedImport)).toEqual([mixedImport]);
+		expect(agentCoreRuntimeImports(typeOnlyImport)).toEqual([]);
+
+		const violations = eagerAgentCoreRuntimeOwners.flatMap(({ path, source }) =>
+			agentCoreRuntimeImports(source).map((statement) => ({ path, statement })),
+		);
+		expect(violations).toEqual([]);
+	});
+
+	it("keeps ordinary session construction off the batteries-included agent-core node entry", () => {
+		const violations = eagerAgentCoreNodeRuntimeOwners.flatMap(({ path, source }) =>
+			agentCoreRuntimeImports(source, "/node").map((statement) => ({ path, statement })),
+		);
+		expect(violations).toEqual([]);
+	});
+
+	it("keeps focused goal integration tests off batteries-included package barrels", () => {
+		const violations = focusedGoalIntegrationTests.flatMap(({ path, source }) =>
+			(source.match(/import[ \t]+(?!type\b)[^;]+[ \t]+from[ \t]+"@caupulican\/pi-(?:agent-core|ai)";/g) ?? []).map(
+				(statement) => ({ path, statement }),
+			),
+		);
+		expect(violations).toEqual([]);
+	});
+
+	it("keeps focused goal regressions on narrow owners instead of the full session harness", () => {
+		const runtimeImport = 'import { AgentSession } from "../src/core/agent-session.ts";';
+		const typeOnlyImport = 'import type { AgentSession } from "../src/core/agent-session.ts";';
+		expect(focusedTestHeavyRuntimeImports(runtimeImport)).toEqual([runtimeImport]);
+		expect(focusedTestHeavyRuntimeImports(typeOnlyImport)).toEqual([]);
+
+		const violations = focusedGoalIntegrationTests.flatMap(({ path, source }) =>
+			focusedTestHeavyRuntimeImports(source).map((statement) => ({ path, statement })),
+		);
+		expect(violations).toEqual([]);
 	});
 
 	it("keeps extension-loading entry points available from the public package", () => {

@@ -2,8 +2,9 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import { type AgentMessage, measureJsonLength } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { measureJsonLength } from "@caupulican/pi-agent-core/provider-request-estimator";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { KeyId } from "@caupulican/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";

@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { build } from "esbuild";
+import { browserSmokeNodeImportPolicy } from "./lib/browser-smoke-node-import-policy.mjs";
 import { acquireScriptWorkRun, removeScriptWorkRun } from "./lib/work-directory.mjs";
 
 const workRun = acquireScriptWorkRun("validation", "browser-smoke");
@@ -15,6 +16,7 @@ try {
 		format: "esm",
 		logLevel: "silent",
 		outfile: outputPath,
+		plugins: [browserSmokeNodeImportPolicy],
 	});
 	removeScriptWorkRun(workRun);
 	process.exit(0);

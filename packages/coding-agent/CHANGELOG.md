@@ -7,10 +7,13 @@
 ### Added
 
 - Added compact provider-neutral `create_goal`, `get_goal`, and `update_goal` lifecycle tools on every model-capability class, backed by the existing authoritative goal executor and persistence path.
+- Added `--service-tier` and a session-level `serviceTier` SDK option so harness requests can opt into xAI Priority Processing while retaining request-level overrides.
 
 ### Changed
 
 - Split the coding-agent CI suite into four independent shards per OS and removed test-only system setup from release fast paths, targeting a sub-five-minute critical path without reducing coverage or Windows worker parallelism.
+- Replaced eager agent-core runtime barrel imports with lean owner entry points to reduce `AgentSession` startup and focused-test import time.
+- Updated the Anthropic SDK and sandbox-runtime extension examples to the current releases.
 
 ### Fixed
 
@@ -18,6 +21,7 @@
 - Projected transient active-skill guidance through the provider system channel so models cannot mistake repeated skill projection for new user instructions.
 - Kept every collapsed tool panel header-only, including partial, failed, extension, unknown-tool, lazy-history, and direct-shell results, until the user expands it.
 - Made goal auto-continuation independent of research/delegation lane capability and host-counted unchanged passes toward the durable stall limit, preventing models from bypassing the stop by omitting `no_progress`.
+- Let compact lifecycle models report concrete active progress and reject agent-requested goal blocking until three consecutive stalled turns have been recorded.
 - Recorded and reported provider-turn cost-fuse stops distinctly from repeated identical-tool loops, including the correct durable goal stop reason.
 
 ## [0.92.0] - 2026-08-15

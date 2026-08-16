@@ -91,6 +91,7 @@ export interface PromptCacheOptions {
 }
 
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
+export type ServiceTier = "auto" | "default" | "fast" | "flex" | "scale" | "priority" | null;
 export type SessionAffinityFormat = "openai" | "openai-nosession" | "openrouter";
 
 export interface ProviderResponse {
@@ -145,6 +146,11 @@ export interface StreamOptions {
 	 * Providers that do not support this option ignore it.
 	 */
 	transport?: Transport;
+	/**
+	 * Processing-tier preference for providers that support request scheduling tiers.
+	 * For xAI, "priority" enables Priority Processing at the provider's premium token rate.
+	 */
+	serviceTier?: ServiceTier;
 	/**
 	 * Prompt cache retention preference. Providers map this to their supported values.
 	 * Default: "short".

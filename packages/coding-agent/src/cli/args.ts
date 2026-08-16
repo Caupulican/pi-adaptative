@@ -3,6 +3,7 @@
  */
 
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { ServiceTier } from "@caupulican/pi-ai";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
@@ -22,6 +23,7 @@ export interface Args {
 	taskRef?: string;
 	sessionMode?: TerminalSessionMode;
 	thinking?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	continue?: boolean;
 	resume?: boolean;
 	help?: boolean;
@@ -66,9 +68,14 @@ export interface Args {
 }
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+const VALID_SERVICE_TIERS = ["auto", "default", "fast", "flex", "scale", "priority"] as const;
 
 export function isValidThinkingLevel(level: string): level is ThinkingLevel {
 	return VALID_THINKING_LEVELS.includes(level as ThinkingLevel);
+}
+
+function isValidServiceTier(tier: string): tier is (typeof VALID_SERVICE_TIERS)[number] {
+	return (VALID_SERVICE_TIERS as readonly string[]).includes(tier);
 }
 
 export function parseArgs(args: string[]): Args {
@@ -101,6 +108,21 @@ export function parseArgs(args: string[]): Args {
 			result.model = args[++i];
 		} else if (arg === "--api-key" && i + 1 < args.length) {
 			result.apiKey = args[++i];
+		} else if (arg === "--service-tier") {
+			const tier = args[i + 1];
+			if (!tier || tier.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--service-tier requires a value" });
+			} else {
+				i++;
+				if (isValidServiceTier(tier)) {
+					result.serviceTier = tier;
+				} else {
+					result.diagnostics.push({
+						type: "error",
+						message: `Invalid service tier "${tier}". Valid values: ${VALID_SERVICE_TIERS.join(", ")}`,
+					});
+				}
+			}
 		} else if (arg === "--system-prompt" && i + 1 < args.length) {
 			result.systemPrompt = args[++i];
 		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {
@@ -291,6 +313,8 @@ ${chalk.bold("Options:")}
   --provider <name>              Provider name (with --model, or alone to select provider default)
   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
   --api-key <key>                API key (defaults to env vars)
+  --service-tier <tier>          Provider processing tier: auto, default, fast, flex, scale, or priority
+                                 xAI priority processing uses premium token pricing
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --worktree-lane <laneKey>      Bind this session to a worktree-sync lane (sets PI_WORKTREE_LANE; enables the lane gate + epoch watcher)

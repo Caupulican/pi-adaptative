@@ -85,7 +85,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(result.ok).toBe(false);
 	});
 
-	it("blocks requirements and goals with a reason", () => {
+	it("blocks requirements and gates goal blocking on three consecutive stalled turns", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
 		const blockedReqNoReason = applyGoalAction(
@@ -100,7 +100,15 @@ describe("applyGoalAction (goal producer core)", () => {
 		);
 		expect(state.requirements[0].status).toBe("blocked");
 
-		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T3"));
+		const premature = applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T3");
+		expect(premature.ok).toBe(false);
+		if (premature.ok) return;
+		expect(premature.error).toContain("three consecutive goal turns");
+
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T4"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T5"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T6"));
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T7"));
 		expect(state.status).toBe("blocked");
 		expect(state.blockedReason).toBe("stuck");
 	});
@@ -111,17 +119,23 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(state, { action: "block_requirement", requirementId: "r1", reason: "no access" }, "T2"),
 		);
-		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T3"));
-		state = expectOk(resumeGoal(state, "T4"));
-		state = expectOk(applyGoalAction(state, { action: "reopen_requirement", requirementId: "r1" }, "T5"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T3"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T4"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T5"));
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T6"));
+		state = expectOk(resumeGoal(state, "T7"));
+		state = expectOk(applyGoalAction(state, { action: "reopen_requirement", requirementId: "r1" }, "T8"));
 
 		expect(state.status).toBe("active");
 		expect(state.blockedReason).toBeUndefined();
 		expect(state.requirements[0].status).toBe("open");
 		expect(state.requirements[0].blockedReason).toBeUndefined();
 
-		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "blocked again" }, "T6"));
-		state = expectOk(cancelGoal(state, "T7"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T9"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T10"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T11"));
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "blocked again" }, "T12"));
+		state = expectOk(cancelGoal(state, "T13"));
 		expect(state.status).toBe("cancelled");
 	});
 

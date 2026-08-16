@@ -509,6 +509,7 @@ function buildSessionOptions(
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
 	}
+	options.serviceTier = parsed.serviceTier;
 
 	// Scoped models for Ctrl+P cycling
 	// Keep thinking level undefined when not explicitly set in the model pattern.
@@ -979,6 +980,7 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionStartEvent,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
+			serviceTier: sessionOptions.serviceTier,
 			isExplicitModel: sessionOptions.isExplicitModel,
 			isExplicitThinking: sessionOptions.isExplicitThinking,
 			scopedModels: sessionOptions.scopedModels,

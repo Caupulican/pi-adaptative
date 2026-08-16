@@ -117,12 +117,15 @@ describe("dispatch_worker (pure reducer)", () => {
 
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
-		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T2"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T2"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T3"));
+		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T4"));
+		state = expectOk(applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T5"));
 
 		const whileBlocked = applyGoalAction(
 			state,
 			{ action: "dispatch_worker", requirementId: "r1", instructions: "go" },
-			"T3",
+			"T6",
 		);
 		expect(whileBlocked.ok).toBe(false);
 	});
