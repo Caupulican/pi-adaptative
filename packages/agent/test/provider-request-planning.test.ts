@@ -201,6 +201,35 @@ describe("provider request planning", () => {
 		expect(JSON.stringify(nonCompactableMessages)).not.toContain("durable history");
 	});
 
+	it("projects host-owned transient instructions through the system channel", async () => {
+		let admittedMessages: Message[] | undefined;
+		let admittedSystemPrompt: string | undefined;
+		const config: AgentLoopConfig = {
+			model: model(),
+			convertToLlm: toLlm,
+			planContext: async ({ messages }) => ({
+				messages,
+				transientSystemPrompt: "ACTIVE SKILL test-skill\nFollow the active skill.",
+			}),
+			admitProviderRequest: ({ context, nonCompactableContext }) => {
+				admittedMessages = context.messages;
+				admittedSystemPrompt = nonCompactableContext.systemPrompt;
+				return { action: "send" };
+			},
+		};
+
+		const response = await startAgentProviderRequest(
+			{ systemPrompt: "BASE SYSTEM", messages: [user("actual user request")], tools: [] },
+			config,
+			undefined,
+			() => new MockAssistantStream(assistant("sent")),
+		);
+		await response.result();
+
+		expect(admittedSystemPrompt).toBe("BASE SYSTEM\n\nACTIVE SKILL test-skill\nFollow the active skill.");
+		expect(admittedMessages).toEqual([user("actual user request")]);
+	});
+
 	it("rejects admission replans that try to replace the system or tool surface", async () => {
 		let transportCount = 0;
 		const config: AgentLoopConfig = {

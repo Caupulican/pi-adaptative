@@ -144,7 +144,7 @@ describe("AgentSession prompt characterization", () => {
 		expect(sawImage).toBe(true);
 	});
 
-	it("loads slash-command skills request-locally without persisting or XML-wrapping the body", async () => {
+	it("loads slash-command skills into request-local system context without persisting the body", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
@@ -175,9 +175,11 @@ describe("AgentSession prompt characterization", () => {
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
 		let providerUserText: string[] = [];
+		let providerSystemPrompt = "";
 
 		harness.setResponses([
 			(context) => {
+				providerSystemPrompt = context.systemPrompt ?? "";
 				providerUserText = context.messages
 					.filter((message) => message.role === "user")
 					.map((message) => getMessageText(message));
@@ -188,14 +190,16 @@ describe("AgentSession prompt characterization", () => {
 		await harness.session.prompt("/skill:test explain this");
 
 		expect(providerUserText).toContain("explain this");
-		expect(providerUserText.some((text) => text.includes("Use the skill body."))).toBe(true);
+		expect(providerUserText.some((text) => text.includes("Use the skill body."))).toBe(false);
+		expect(providerSystemPrompt).toContain("ACTIVE SKILL test");
+		expect(providerSystemPrompt).toContain("Use the skill body.");
 		expect(providerUserText.join("\n")).not.toContain("<skill");
 		expect(harness.session.messages.map((message) => getMessageText(message)).join("\n")).not.toContain(
 			"Use the skill body.",
 		);
-		expect(harness.session.getContextCompositionReport().messageClasses).toEqual(
-			expect.arrayContaining([expect.objectContaining({ label: "custom (active_skill_context)" })]),
-		);
+		const composition = harness.session.getContextCompositionReport();
+		expect(composition.systemPromptChars).toBeGreaterThan(harness.session.systemPrompt.length);
+		expect(composition.messageClasses.some((row) => row.label === "custom (active_skill_context)")).toBe(false);
 	});
 
 	it("expands prompt templates before sending the prompt", async () => {

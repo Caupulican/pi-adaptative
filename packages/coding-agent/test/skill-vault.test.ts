@@ -1,22 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AgentMessage, projectToolsForProvider } from "@caupulican/pi-agent-core";
+import { projectToolsForProvider } from "@caupulican/pi-agent-core";
 import { generateTextToolProtocolPrimer } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
-	SkillVaultController,
-	type SkillVaultStatus,
-} from "../src/core/skill-vault.ts";
+import { SkillVaultController, type SkillVaultStatus } from "../src/core/skill-vault.ts";
 import { loadSkillsFromDir, type Skill } from "../src/core/skills.ts";
 import { createSkillVaultToolDefinition } from "../src/core/tools/skill.ts";
-
-const USER_MESSAGE: AgentMessage = {
-	role: "user",
-	content: [{ type: "text", text: "Build the requested interface." }],
-	timestamp: 1,
-};
 
 describe("SkillVaultController", () => {
 	let root = "";
@@ -80,7 +70,7 @@ describe("SkillVaultController", () => {
 		expect(vault.search("unrelated-needle").candidates).toEqual([]);
 	});
 
-	it("loads one exact skill, appends it request-locally, never mutates source history", () => {
+	it("loads one exact skill as a request-local system prompt section", () => {
 		const skills = createSkills([
 			{
 				name: "frontend-motion",
@@ -96,34 +86,23 @@ describe("SkillVaultController", () => {
 			idleTimeoutMs: 5_000,
 			onSkillUsed: used,
 		});
-		const history = [USER_MESSAGE];
-
 		expect(vault.load("frontend-motion", "model")).toMatchObject({ ok: true, state: "loaded_pending" });
 		expect(vault.status()).toMatchObject({ state: "loaded_pending", name: "frontend-motion" });
 
-		const projected = vault.projectContext(history);
-		const activeMessage = projected.at(-1);
+		const preview = vault.previewSystemPromptSection();
+		const projected = vault.commitSystemPromptSection();
 
-		expect(history).toEqual([USER_MESSAGE]);
-		expect(projected).not.toBe(history);
-		expect(activeMessage).toMatchObject({
-			role: "custom",
-			customType: ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
-			display: false,
-		});
-		expect(activeMessage && "content" in activeMessage ? activeMessage.content : "").toContain(
-			"Use interruptible transforms.",
-		);
-		expect(activeMessage && "content" in activeMessage ? activeMessage.content : "").not.toContain(
-			"resource-profile",
-		);
-		expect(activeMessage && "content" in activeMessage ? activeMessage.content : "").not.toContain("<skill");
+		expect(projected).toBe(preview);
+		expect(projected).toContain("ACTIVE SKILL frontend-motion");
+		expect(projected).toContain("Use interruptible transforms.");
+		expect(projected).not.toContain("resource-profile");
+		expect(projected).not.toContain("<skill");
 		expect(vault.status()).toMatchObject({ state: "active", name: "frontend-motion", lastUsedAtMs: 1_000 });
 		expect(used).toHaveBeenCalledTimes(1);
 
 		now = 2_000;
-		const projectedAgain = vault.projectContext(history);
-		expect(projectedAgain.at(-1)).toBe(activeMessage);
+		const projectedAgain = vault.commitSystemPromptSection();
+		expect(projectedAgain).toBe(projected);
 		expect(vault.status()).toMatchObject({ state: "active", lastUsedAtMs: 2_000 });
 		expect(used).toHaveBeenCalledTimes(1);
 	});
@@ -140,7 +119,7 @@ describe("SkillVaultController", () => {
 		});
 
 		expect(() => vault.load("frontend-motion", "model")).not.toThrow();
-		expect(() => vault.projectContext([USER_MESSAGE])).not.toThrow();
+		expect(() => vault.commitSystemPromptSection()).not.toThrow();
 		expect(vault.status().state).toBe("active");
 	});
 
@@ -152,11 +131,11 @@ describe("SkillVaultController", () => {
 		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, idleTimeoutMs: 5_000 });
 		vault.load("frontend-motion", "model");
 
-		expect(vault.previewContext([USER_MESSAGE])).toHaveLength(2);
+		expect(vault.previewSystemPromptSection()).toContain("Use transforms.");
 		expect(vault.status().state).toBe("loaded_pending");
-		vault.projectContext([USER_MESSAGE]);
+		vault.commitSystemPromptSection();
 		now = 2_000;
-		expect(vault.previewContext([USER_MESSAGE])).toHaveLength(2);
+		expect(vault.previewSystemPromptSection()).toContain("Use transforms.");
 		expect(vault.status()).toMatchObject({ state: "active", lastUsedAtMs: 1_000, idleForMs: 1_000 });
 	});
 
@@ -167,12 +146,12 @@ describe("SkillVaultController", () => {
 		let now = 10_000;
 		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, idleTimeoutMs: 1_000 });
 		vault.load("frontend-motion", "model");
-		vault.projectContext([USER_MESSAGE]);
+		vault.commitSystemPromptSection();
 
 		now = 11_000;
-		const projected = vault.projectContext([USER_MESSAGE]);
+		const projected = vault.commitSystemPromptSection();
 
-		expect(projected).toEqual([USER_MESSAGE]);
+		expect(projected).toBeUndefined();
 		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "idle_expired" });
 	});
 
@@ -196,7 +175,7 @@ describe("SkillVaultController", () => {
 		let now = 10_000;
 		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, idleTimeoutMs: 1_000 });
 		vault.load("frontend-motion", "model");
-		vault.projectContext([USER_MESSAGE]);
+		vault.commitSystemPromptSection();
 
 		now = 15_000;
 		vault.noteActivity();
@@ -212,7 +191,7 @@ describe("SkillVaultController", () => {
 		vault.load("frontend-motion", "model");
 		skills = [];
 
-		expect(vault.projectContext([USER_MESSAGE])).toEqual([USER_MESSAGE]);
+		expect(vault.commitSystemPromptSection()).toBeUndefined();
 		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "resource_unavailable" });
 	});
 
@@ -240,7 +219,7 @@ describe("SkillVaultController", () => {
 		vault.load("frontend-motion", "model");
 
 		expect(vault.unload()).toMatchObject({ ok: true, unloaded: "frontend-motion" });
-		expect(vault.projectContext([USER_MESSAGE])).toEqual([USER_MESSAGE]);
+		expect(vault.commitSystemPromptSection()).toBeUndefined();
 		expect(vault.status().state).toBe("unloaded");
 	});
 
@@ -257,11 +236,11 @@ describe("SkillVaultController", () => {
 		let bodyLimit = 16_384;
 		const vault = new SkillVaultController({ getSkills: () => skills, getMaxBodyBytes: () => bodyLimit });
 		vault.load("large-skill", "model");
-		vault.projectContext([USER_MESSAGE]);
+		vault.commitSystemPromptSection();
 
 		bodyLimit = 4_096;
 
-		expect(vault.projectContext([USER_MESSAGE])).toEqual([USER_MESSAGE]);
+		expect(vault.commitSystemPromptSection()).toBeUndefined();
 		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "budget_exceeded" });
 	});
 

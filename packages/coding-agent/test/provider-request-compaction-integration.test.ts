@@ -48,10 +48,10 @@ describe("provider request compaction integration", () => {
 		harness.agent.textToolCallProtocol = true;
 		const sessionPlanContext = harness.agent.planContext?.bind(harness.agent);
 		if (!sessionPlanContext) throw new Error("Expected session provider request planner");
-		const plannedTransients: AgentMessage[][] = [];
+		const plannedSkillPrompts: Array<string | undefined> = [];
 		harness.agent.planContext = async (request, signal) => {
 			const plan = await sessionPlanContext(request, signal);
-			plannedTransients.push(plan.transientMessages ?? []);
+			plannedSkillPrompts.push(plan.transientSystemPrompt);
 			return plan;
 		};
 
@@ -83,13 +83,17 @@ describe("provider request compaction integration", () => {
 
 		expect(admissions.map((input) => input.attempt)).toEqual([0, 1, 0]);
 		expect(admittedContexts).toHaveLength(3);
-		expect(admittedContexts.map((context) => JSON.stringify(context.messages))).toEqual([
+		expect(admittedContexts.map((context) => context.systemPrompt)).toEqual([
 			expect.stringContaining(bodyMarker),
 			expect.stringContaining(bodyMarker),
 			expect.stringContaining(bodyMarker),
 		]);
-		expect(plannedTransients).toHaveLength(3);
-		expect(plannedTransients.map((messages) => JSON.stringify(messages))).toEqual([
+		expect(admittedContexts.map((context) => JSON.stringify(context.messages))).toEqual([
+			expect.not.stringContaining(bodyMarker),
+			expect.not.stringContaining(bodyMarker),
+			expect.not.stringContaining(bodyMarker),
+		]);
+		expect(plannedSkillPrompts).toEqual([
 			expect.stringContaining(bodyMarker),
 			expect.stringContaining(bodyMarker),
 			expect.stringContaining(bodyMarker),
@@ -100,8 +104,9 @@ describe("provider request compaction integration", () => {
 		for (const delivered of harness.faux.contexts) {
 			expect(delivered.tools).toBeUndefined();
 			expect(delivered.systemPrompt).toContain('<pi:call name="TOOL">');
+			expect(delivered.systemPrompt).toContain(bodyMarker);
 			expect(JSON.stringify(delivered.messages)).toContain("COMPACTED-HISTORY");
-			expect(JSON.stringify(delivered.messages)).toContain(bodyMarker);
+			expect(JSON.stringify(delivered.messages)).not.toContain(bodyMarker);
 			expect(JSON.stringify(delivered.messages)).not.toContain("ORIGINAL-HISTORY");
 		}
 		expect(internals._skillVault.status()).toMatchObject({ state: "active", useCount: 2 });

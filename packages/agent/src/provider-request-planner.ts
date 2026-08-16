@@ -15,6 +15,15 @@ import type {
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
 const MAX_PROVIDER_REQUEST_REPLANS = 2;
 
+/** Compose request-local host instructions without representing them as conversation history. */
+export function composeRequestSystemPrompt(
+	base: string | undefined,
+	transient: string | undefined,
+): string | undefined {
+	if (!transient) return base;
+	return base ? `${base}\n\n${transient}` : transient;
+}
+
 function nextStalePlanCount(count: number): number {
 	const next = count + 1;
 	if (next >= MAX_STALE_PROVIDER_REQUEST_PLANS) {
@@ -147,7 +156,7 @@ export async function startPlannedAgentProviderRequest(
 			signal?.throwIfAborted();
 
 			const sourceProviderContext: Context = {
-				systemPrompt: sanitized.systemPrompt,
+				systemPrompt: composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt),
 				messages: llmMessages,
 				tools: projectToolsForProvider(sourceContext.tools),
 			};

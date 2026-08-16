@@ -183,12 +183,15 @@ export interface AgentContextPlanRequest {
 }
 
 /**
- * Replay-safe context plan. `messages` is compactable history; `transientMessages` is mandatory,
- * request-local context that compaction must never summarize or drop.
+ * Replay-safe context plan. `messages` is compactable history. `transientMessages` and
+ * `transientSystemPrompt` are mandatory request-local context that compaction must never summarize
+ * or drop.
  */
 export interface AgentContextPlan {
 	messages: AgentMessage[];
 	transientMessages?: AgentMessage[];
+	/** Host-owned instructions appended to the system channel for this request only. */
+	transientSystemPrompt?: string;
 	/** Cheap freshness check immediately before admission/commit. */
 	isCurrent?: () => boolean;
 	/**

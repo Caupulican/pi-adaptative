@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added request-local system-prompt projection to `AgentContextPlan`, keeping host-owned instructions non-durable and non-compactable without representing them as user messages.
+
 ## [0.92.0] - 2026-08-15
 
 ## [0.91.4] - 2026-08-15

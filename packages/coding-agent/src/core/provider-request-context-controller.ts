@@ -65,11 +65,11 @@ export class ProviderRequestContextController {
 			memoryReport,
 		);
 		const beforeSkill = injectCompactGoalContext(withMemory, goalState);
-		const plannedMessages = this.deps.skillVault.previewContext(beforeSkill);
-		if (!isDeepStrictEqual(plannedMessages.slice(0, compactableMessages.length), compactableMessages)) {
+		if (!isDeepStrictEqual(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
-		const transientMessages = plannedMessages.slice(compactableMessages.length);
+		const transientMessages = beforeSkill.slice(compactableMessages.length);
+		const transientSystemPrompt = this.deps.skillVault.previewSystemPromptSection();
 		const skillRevision = this.deps.skillVault.getContextRevision();
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
@@ -85,13 +85,14 @@ export class ProviderRequestContextController {
 		return {
 			messages: compactableMessages,
 			transientMessages,
+			transientSystemPrompt,
 			isCurrent: dependenciesCurrent,
 			prepareCommit: () => {
 				if (!dependenciesCurrent()) return false;
 				const projected = projectCommit(false);
 				return (
 					isDeepStrictEqual(projected.enforcement.messages, previewEnforcement.messages) &&
-					isDeepStrictEqual(this.deps.skillVault.previewContext(beforeSkill), plannedMessages)
+					this.deps.skillVault.previewSystemPromptSection() === transientSystemPrompt
 				);
 			},
 			commit: () => {
@@ -102,7 +103,7 @@ export class ProviderRequestContextController {
 				this.deps.correlatePromptPolicyWithContextGc(committed.gc.report);
 				this.deps.enqueueRelevanceCuration(committed.providerMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration();
-				if (!isDeepStrictEqual(this.deps.skillVault.projectContext(beforeSkill), plannedMessages)) {
+				if (this.deps.skillVault.commitSystemPromptSection() !== transientSystemPrompt) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 			},

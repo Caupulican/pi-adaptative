@@ -1544,7 +1544,8 @@ export class AgentSession {
 	getContextCompositionReport(): ContextCompositionReport {
 		const rawMessages = this.agent.state.messages.slice();
 		const gcResult = this._applyContextGc(rawMessages, false);
-		const requestMessages = this._skillVault.previewContext(gcResult.messages);
+		const requestMessages = gcResult.messages;
+		const requestSystemPrompt = this._skillVault.previewRequestSystemPrompt(this.systemPrompt);
 		const extensions = this._resourceLoader.getExtensions().extensions;
 		const extensionToolNames = new Set(extensions.flatMap((extension) => [...extension.tools.keys()]));
 		const usage = this.getContextUsage();
@@ -1560,7 +1561,7 @@ export class AgentSession {
 			.filter((item) => item.enforced && typeof item.originalChars === "number")
 			.reduce((sum, item) => sum + Math.max(0, Math.ceil((item.originalChars ?? 0) / 4) - 50), 0);
 		return buildContextCompositionReport({
-			systemPrompt: this.systemPrompt ?? "",
+			systemPrompt: requestSystemPrompt ?? "",
 			tools: this.agent.state.tools.map((tool) => ({
 				name: tool.name,
 				description: tool.description,

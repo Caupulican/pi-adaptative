@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE`; active skill guidance is now projected through `AgentContextPlan.transientSystemPrompt` instead of a custom message.
+
 ### Changed
 
 - Split the coding-agent CI suite into four independent shards per OS and removed test-only system setup from release fast paths, targeting a sub-five-minute critical path without reducing coverage or Windows worker parallelism.
@@ -7,6 +11,7 @@
 ### Fixed
 
 - Kept Linux-relative Windows benchmark ratios visible without letting independent runner variance block binaries that satisfy the absolute release budgets.
+- Projected transient active-skill guidance through the provider system channel so models cannot mistake repeated skill projection for new user instructions.
 
 ## [0.92.0] - 2026-08-15
 

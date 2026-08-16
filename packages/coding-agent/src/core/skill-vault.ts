@@ -1,13 +1,11 @@
 import { statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
+import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { MAX_SKILL_FRONTMATTER_BYTES, type Skill, type SkillFrontmatter } from "./skills.ts";
 import { readBoundedTextFileSync, sameFileVersion } from "./util/bounded-file.ts";
 
-export const ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE = "active_skill_context";
 export const DEFAULT_SKILL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_ACTIVE_SKILL_BODY_BYTES = 64 * 1024;
 export const MIN_ACTIVE_SKILL_BODY_BYTES = 4 * 1024;
@@ -20,7 +18,7 @@ type SkillVaultUnloadReason = "explicit" | "idle_expired" | "resource_unavailabl
 interface LoadedSkill {
 	skill: Skill;
 	bodyBytes: number;
-	contextMessage: AgentMessage;
+	systemPromptSection: string;
 	requester: SkillVaultRequester;
 	loadedAtMs: number;
 	fileDevice: number;
@@ -191,13 +189,7 @@ export class SkillVaultController {
 			state: "loaded_pending",
 			skill,
 			bodyBytes,
-			contextMessage: createCustomMessage(
-				ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
-				activeSkillContext(skill, body),
-				false,
-				{ name: skill.name, requestLocal: true },
-				new Date().toISOString(),
-			),
+			systemPromptSection: activeSkillContext(skill, body),
 			requester,
 			loadedAtMs: this.now(),
 			fileDevice: file.dev,
@@ -246,10 +238,10 @@ export class SkillVaultController {
 		};
 	}
 
-	projectContext(messages: AgentMessage[]): AgentMessage[] {
+	commitSystemPromptSection(): string | undefined {
 		const now = this.now();
 		this.reconcile(now);
-		if (this.current.state === "unloaded") return messages;
+		if (this.current.state === "unloaded") return undefined;
 		const loaded = this.current;
 		const firstUse = loaded.state === "loaded_pending";
 		const useCount = firstUse ? 1 : loaded.useCount + 1;
@@ -261,23 +253,24 @@ export class SkillVaultController {
 				// Usage telemetry must never block skill application.
 			}
 		}
-		return this.appendContext(messages, loaded);
+		return loaded.systemPromptSection;
 	}
 
-	/** Model the next request's transient skill cost without treating a diagnostic read as use. */
-	previewContext(messages: AgentMessage[]): AgentMessage[] {
+	/** Model the next request's transient system cost without treating a diagnostic read as use. */
+	previewSystemPromptSection(): string | undefined {
 		this.reconcile(this.now());
-		return this.current.state === "unloaded" ? messages : this.appendContext(messages, this.current);
+		return this.current.state === "unloaded" ? undefined : this.current.systemPromptSection;
+	}
+
+	/** Compose the exact provider system prompt for read-only diagnostics. */
+	previewRequestSystemPrompt(base: string | undefined): string | undefined {
+		return composeRequestSystemPrompt(base, this.previewSystemPromptSection());
 	}
 
 	/** Monotonic identity for provider-visible skill projection changes. */
 	getContextRevision(): number {
 		this.reconcile(this.now());
 		return this.contextRevision;
-	}
-
-	private appendContext(messages: AgentMessage[], loaded: LoadedSkill): AgentMessage[] {
-		return [...messages, loaded.contextMessage];
 	}
 
 	/** Record host-observed work derived from an active skill, independent of agent cooperation. */

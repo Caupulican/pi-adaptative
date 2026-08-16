@@ -350,7 +350,6 @@ export {
 	type SettingsManagerCreateOptions,
 } from "./core/settings-manager.ts";
 export {
-	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
 	DEFAULT_SKILL_IDLE_TIMEOUT_MS,
 	MAX_ACTIVE_SKILL_BODY_BYTES,
 	MIN_ACTIVE_SKILL_BODY_BYTES,

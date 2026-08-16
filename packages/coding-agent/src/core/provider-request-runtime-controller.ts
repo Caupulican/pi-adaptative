@@ -1,4 +1,4 @@
-import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core";
+import { composeRequestSystemPrompt, estimateProviderRequestTokens } from "@caupulican/pi-agent-core";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { narrowRequestMaxTokens } from "@caupulican/pi-agent-core/agent-loop";
 import type { CompactionController } from "./compaction-controller.ts";
@@ -56,6 +56,10 @@ export class ProviderRequestRuntimeController {
 			return {
 				messages: sessionPlan.messages,
 				transientMessages: [...(basePlan.transientMessages ?? []), ...(sessionPlan.transientMessages ?? [])],
+				transientSystemPrompt: composeRequestSystemPrompt(
+					basePlan.transientSystemPrompt,
+					sessionPlan.transientSystemPrompt,
+				),
 				isCurrent: () => basePlan.isCurrent?.() !== false && sessionPlan.isCurrent?.() !== false,
 				prepareCommit: () => {
 					if (basePlan.isCurrent?.() === false || sessionPlan.isCurrent?.() === false) return false;

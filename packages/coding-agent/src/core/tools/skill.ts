@@ -28,7 +28,7 @@ function searchText(result: SkillSearchResult): string {
 
 function statusText(result: SkillVaultStatus): string {
 	if (result.state === "unloaded") return `skill state: unloaded${result.reason ? `, ${result.reason}` : ""}`;
-	if (result.state === "loaded_pending") return `skill state: loaded_pending, ${result.name}, applies next request`;
+	if (result.state === "loaded_pending") return `skill state: loaded_pending, ${result.name}, activates next request`;
 	return `skill state: active, ${result.name}, idle ${Math.round(result.idleForMs ?? 0)}ms, expires ${Math.round(result.expiresInMs ?? 0)}ms`;
 }
 
@@ -68,7 +68,7 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 							{
 								type: "text" as const,
 								text: result.ok
-									? `skill loaded: ${result.name}, applies next request`
+									? `skill loaded: ${result.name}, active across requests until idle expiry`
 									: `skill load failed: ${result.message}`,
 							},
 						],
