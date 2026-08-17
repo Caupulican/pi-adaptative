@@ -52,19 +52,19 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 			Type.String({
 				minLength: 1,
 				maxLength: 128,
-				description: "Active pipeline run id this step advances. Supply together with pipelineStageId.",
+				description: "Run id; pair with pipelineStageId.",
 			}),
 		),
 		pipelineStageId: Type.Optional(
 			Type.String({
 				minLength: 1,
 				maxLength: MAX_PIPELINE_STAGE_ID_LENGTH,
-				description: "Stage id in pipelineRunId this step advances. Supply both ids together.",
+				description: "Stage id; pair with pipelineRunId.",
 			}),
 		),
 		clearPipelineLink: Type.Optional(
 			Type.Boolean({
-				description: "Remove both pipeline ids. Cannot be combined with pipelineRunId/pipelineStageId.",
+				description: "Clear pipeline ids; use alone.",
 			}),
 		),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
@@ -78,7 +78,7 @@ const stepInputSchema = Type.Object(
 		activeForm: Type.Optional(
 			Type.String({ minLength: 1, maxLength: 2_000, description: "Short present-progress label for active UI." }),
 		),
-		...optionalTaskStepFields("Goal requirement ids this foreground step advances."),
+		...optionalTaskStepFields("Goal requirement ids advanced."),
 	},
 	{ additionalProperties: false },
 );
@@ -111,7 +111,7 @@ const taskStepsSchema = Type.Object(
 		),
 		content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
 		activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
-		...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
+		...optionalTaskStepFields("Goal requirement ids; [] clears."),
 		clearCompleted: Type.Optional(
 			Type.Boolean({ description: "For list: compact completed and cancelled steps before rendering." }),
 		),
