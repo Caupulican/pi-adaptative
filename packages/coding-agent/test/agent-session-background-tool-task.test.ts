@@ -327,6 +327,42 @@ describe("AgentSession background tool tasks", () => {
 		}
 	});
 
+	it("inherits durable task records only through a legitimate fork lineage", async () => {
+		const sourceSessionManager = SessionManager.inMemory();
+		const sourceSessionId = sourceSessionManager.getSessionId();
+		const retained: BackgroundToolTaskRecord = {
+			sessionId: sourceSessionId,
+			taskId: "tool-task-7",
+			toolCallId: "retained-call",
+			toolName: "slow",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:01.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed: retained output",
+			output: "retained output",
+		};
+		const retainedEntryId = sourceSessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, retained);
+		const forkedSessionManager = sourceSessionManager.createBranchedSessionManager(retainedEntryId);
+		forkedSessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, {
+			...retained,
+			sessionId: "unrelated-session",
+			taskId: "tool-task-99",
+		});
+		const harness = createHarness({ sessionManager: forkedSessionManager });
+
+		try {
+			const taskTool = harness.agent.state.tools.find((tool) => tool.name === "tool_task");
+			expect(taskTool).toBeDefined();
+			const list = await taskTool!.execute("list-forked-tasks", { action: "list" });
+			const listText = list.content[0]?.type === "text" ? list.content[0].text : "";
+			expect(listText).toContain("tool-task-7: completed");
+			expect(listText).not.toContain("tool-task-99");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("blocks goal continuation locally after a failed durable task wait exhausts recovery", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const failedTask: BackgroundToolTaskRecord = {

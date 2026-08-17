@@ -4,6 +4,10 @@
 
 - Added bounded tool-owned failure evidence and operation-local recovery exhaustion contracts so recoverable failures can teach a corrected call without exposing unbounded raw diagnostics or stopping unrelated work.
 
+### Fixed
+
+- Preserved bounded session lineage across in-memory and persisted forks so session-owned projections can distinguish legitimate ancestry from unrelated records.
+
 ## [0.93.3] - 2026-08-17
 
 ### Changed

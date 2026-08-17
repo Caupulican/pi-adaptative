@@ -11,6 +11,7 @@
 - Re-authorized action-sensitive memory and pipeline calls at the compiled gateway while preserving explicit extension manifests, kept delegated memory query-only, enforced credential-migration source scopes, and gated every context-scout child read through one immutable caller envelope without inventing outer paths for composite or fixed-store reads.
 - Persisted exact pipeline run/stage checklist links with explicit unlinking, aligned stage-id bounds with valid pipeline contracts, serialized project-wide pipeline lifecycle mutations across processes, and made run/definition/context restoration project-owned, symlink-safe, bounded, disk-authoritative, fail-closed on corrupt or conflicting manifests, and resilient to stale or unavailable session snapshots.
 - Preserved primary manual-compaction failures through reconnect cleanup, rejected lexical path escapes before realpath access, isolated malformed pipeline definitions, and made bounded durable reads symlink-resistant and version-stable while context-scout line counting stays constant-memory.
+- Restored background tool tasks only from the active session's bounded fork lineage, excluding unrelated records from task lists and monotonic task-id allocation.
 
 ## [0.93.3] - 2026-08-17
 

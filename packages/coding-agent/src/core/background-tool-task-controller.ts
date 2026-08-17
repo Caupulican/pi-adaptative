@@ -109,6 +109,8 @@ export interface BackgroundToolTerminalMessage {
 
 export interface BackgroundToolTaskControllerDeps {
 	getSessionId(): string;
+	/** Current session followed by the authoritative fork ancestry whose branch records remain visible. */
+	getSessionLineageIds?(): readonly string[];
 	getArtifactStore(): ArtifactStore | undefined;
 	/** Durable task records on the active branch, newest first, without rebuilding full model context. */
 	loadPersistedRecordsNewestFirst?(): readonly unknown[];
@@ -228,11 +230,12 @@ function cloneUsage(value: unknown): Usage | undefined {
 	};
 }
 
-function decodeRecord(value: unknown, sessionId: string): BackgroundToolTaskRecord | undefined {
+function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): BackgroundToolTaskRecord | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECORD_KEYS)) return undefined;
 	if (
 		typeof value.sessionId !== "string" ||
 		value.sessionId.length === 0 ||
+		!sessionIds.has(value.sessionId) ||
 		typeof value.taskId !== "string" ||
 		taskNumber(value.taskId) === undefined ||
 		typeof value.toolCallId !== "string" ||
@@ -262,7 +265,7 @@ function decodeRecord(value: unknown, sessionId: string): BackgroundToolTaskReco
 	const usage = value.usage === undefined ? undefined : cloneUsage(value.usage);
 	if (value.usage !== undefined && !usage) return undefined;
 	return {
-		sessionId: value.sessionId || sessionId,
+		sessionId: value.sessionId,
 		taskId: value.taskId,
 		toolCallId: value.toolCallId,
 		toolName: value.toolName,
@@ -474,17 +477,26 @@ export class BackgroundToolTaskController {
 			return;
 		}
 		const sessionId = this.deps.getSessionId();
+		const sessionIds = new Set(this.deps.getSessionLineageIds?.() ?? [sessionId]);
+		sessionIds.add(sessionId);
 		const seenTaskIds = new Set<string>();
 		const latestRecords: BackgroundToolTaskRecord[] = [];
 		let highestTaskNumber = 0;
 		for (const value of values) {
-			if (!isPlainRecord(value) || typeof value.taskId !== "string") continue;
+			if (
+				!isPlainRecord(value) ||
+				typeof value.sessionId !== "string" ||
+				!sessionIds.has(value.sessionId) ||
+				typeof value.taskId !== "string"
+			) {
+				continue;
+			}
 			const numericTaskId = taskNumber(value.taskId);
 			if (numericTaskId === undefined) continue;
 			highestTaskNumber = Math.max(highestTaskNumber, numericTaskId);
 			if (seenTaskIds.has(value.taskId)) continue;
 			seenTaskIds.add(value.taskId);
-			const record = decodeRecord(value, sessionId);
+			const record = decodeRecord(value, sessionIds);
 			if (record) latestRecords.push(record);
 		}
 		this.nextTaskId = highestTaskNumber + 1;

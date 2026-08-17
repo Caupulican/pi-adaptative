@@ -33,6 +33,7 @@ import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 export const CURRENT_SESSION_VERSION = 3;
 /** Maximum borrowed entries one non-copying SessionManager visit may inspect. */
 export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
+const MAX_SESSION_LINEAGE_DEPTH = 64;
 
 export interface SessionHeader {
 	type: "session";
@@ -239,6 +240,7 @@ export type ReadonlySessionManager = Pick<
 	| "getCwd"
 	| "getSessionDir"
 	| "getSessionId"
+	| "getSessionLineageIds"
 	| "getSessionFile"
 	| "getLeafId"
 	| "getLeafEntry"
@@ -534,6 +536,7 @@ export function getDefaultSessionDir(cwd: string, agentDir: string): string {
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 // One line must fit comfortably under V8's max string length (~512MiB chars).
 const MAX_SESSION_LINE_CHARS = 256 * 1024 * 1024;
+const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;
@@ -725,10 +728,16 @@ function retainedStringChars(value: unknown, stopAfter: number): number {
 function readSessionHeader(filePath: string): SessionHeader | null {
 	try {
 		const fd = openSync(filePath, "r");
-		const buffer = Buffer.alloc(512);
-		const bytesRead = readSync(fd, buffer, 0, 512, 0);
-		closeSync(fd);
-		const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n")[0];
+		const buffer = Buffer.alloc(MAX_SESSION_HEADER_BYTES + 1);
+		let bytesRead: number;
+		try {
+			bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+		} finally {
+			closeSync(fd);
+		}
+		const newlineIndex = buffer.indexOf(0x0a, 0);
+		if (newlineIndex < 0 && bytesRead > MAX_SESSION_HEADER_BYTES) return null;
+		const firstLine = buffer.toString("utf8", 0, newlineIndex >= 0 ? newlineIndex : bytesRead);
 		if (!firstLine) return null;
 		const header = JSON.parse(firstLine) as Record<string, unknown>;
 		if (header.type !== "session" || typeof header.id !== "string") {
@@ -738,6 +747,28 @@ function readSessionHeader(filePath: string): SessionHeader | null {
 	} catch {
 		return null;
 	}
+}
+
+/** Resolve the bounded parent-file chain that authoritatively defines a fork's session lineage. */
+function collectParentSessionIds(parentSession: unknown, relativeToDir: string): Set<string> {
+	const sessionIds = new Set<string>();
+	const visitedPaths = new Set<string>();
+	let nextPath =
+		typeof parentSession === "string" && parentSession.length > 0
+			? normalizePath(resolve(relativeToDir, parentSession))
+			: undefined;
+	for (let depth = 0; nextPath && depth < MAX_SESSION_LINEAGE_DEPTH; depth++) {
+		if (visitedPaths.has(nextPath)) break;
+		visitedPaths.add(nextPath);
+		const header = readSessionHeader(nextPath);
+		if (!header || header.id.length === 0) break;
+		sessionIds.add(header.id);
+		nextPath =
+			typeof header.parentSession === "string" && header.parentSession.length > 0
+				? normalizePath(resolve(dirname(nextPath), header.parentSession))
+				: undefined;
+	}
+	return sessionIds;
 }
 
 function getSessionHeaderCwd(header: SessionHeader): string | undefined {
@@ -1037,6 +1068,7 @@ export class SessionManager {
 	private indexedSessionFileBytes = 0;
 	private sessionContextCache: SessionContextCache | undefined;
 	private persistenceStateUncertain = false;
+	private inheritedSessionIds = new Set<string>();
 
 	private constructor(
 		cwd: string,
@@ -1130,6 +1162,7 @@ export class SessionManager {
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? createSessionId();
+			this.inheritedSessionIds = collectParentSessionIds(header?.parentSession, dirname(this.sessionFile));
 			this._ensureEntryFileLocations(this.coldPayloadEntryIds);
 
 			const migrated = migrateToCurrentVersion(this.fileEntries);
@@ -1158,6 +1191,7 @@ export class SessionManager {
 			assertValidSessionId(options.id);
 		}
 		this.sessionId = options?.id ?? createSessionId();
+		this.inheritedSessionIds = collectParentSessionIds(options?.parentSession, this.sessionDir || this.cwd);
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
 			type: "session",
@@ -1291,6 +1325,11 @@ export class SessionManager {
 
 	getSessionId(): string {
 		return this.sessionId;
+	}
+
+	/** Current session id followed by the bounded, de-duplicated ids of sessions it was forked from. */
+	getSessionLineageIds(): string[] {
+		return [this.sessionId, ...[...this.inheritedSessionIds].filter((id) => id !== this.sessionId)];
 	}
 
 	getSessionFile(): string | undefined {
@@ -2156,6 +2195,7 @@ export class SessionManager {
 		const branched = new SessionManager(this.cwd, this.sessionDir, undefined, this.persist, this.agentDir);
 		branched.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 		branched.sessionId = newSessionId;
+		branched.inheritedSessionIds = new Set(this.getSessionLineageIds());
 		branched.sessionFile = this.persist ? newSessionFile : undefined;
 		branched.coldPayloadEntryIds.clear();
 		for (const id of this.coldPayloadEntryIds) {
@@ -2199,6 +2239,7 @@ export class SessionManager {
 		this.labelTimestampsById = branched.labelTimestampsById;
 		this.leafId = branched.leafId;
 		this.persistenceStateUncertain = branched.persistenceStateUncertain;
+		this.inheritedSessionIds = new Set(branched.inheritedSessionIds);
 		this.coldPayloadEntryIds.clear();
 		for (const id of branched.coldPayloadEntryIds) this.coldPayloadEntryIds.add(id);
 		this._resetEntryFileIndex();

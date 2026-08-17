@@ -93,6 +93,7 @@ describe("SessionManager.newSession with custom id", () => {
 
 	it("generates a UUIDv7 id when creating a branched session", () => {
 		const session = SessionManager.inMemory();
+		const sourceSessionId = session.getSessionId();
 		const firstId = session.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "hello" }],
@@ -103,6 +104,43 @@ describe("SessionManager.newSession with custom id", () => {
 
 		expect(session.getSessionId()).toMatch(UUID_V7_RE);
 		expect(session.getHeader()!.id).toBe(session.getSessionId());
+		expect(session.getSessionLineageIds()).toEqual([session.getSessionId(), sourceSessionId]);
+	});
+
+	it("restores relative parent lineage without looping through a cyclic lineage", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-lineage-"));
+		const parentPath = join(tempDir, "parent.jsonl");
+		const forkPath = join(tempDir, "fork.jsonl");
+		try {
+			writeFileSync(
+				parentPath,
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "parent-session",
+					timestamp: new Date().toISOString(),
+					cwd: tempDir,
+					parentSession: "fork.jsonl",
+					padding: "x".repeat(1_024),
+				})}\n`,
+			);
+			writeFileSync(
+				forkPath,
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "forked-session",
+					timestamp: new Date().toISOString(),
+					cwd: tempDir,
+					parentSession: "parent.jsonl",
+				})}\n`,
+			);
+
+			const forked = SessionManager.open(forkPath, tempDir, tempDir);
+			expect(forked.getSessionLineageIds()).toEqual(["forked-session", "parent-session"]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("generates a UUIDv7 id when forking from another session file", () => {

@@ -161,11 +161,9 @@ import { resolveConfiguredOrchestrationModel } from "./orchestration/model-bindi
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import {
 	appendPipelineRunSnapshot,
-	formatActivePipelineContext,
+	createActivePipelineContextMessage,
 	getLatestPipelineRunSnapshot,
 	type PipelineRun,
-	resolveCurrentProjectPipelineRun,
-	resolvePipelineDefinitionForRun,
 } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -671,6 +669,7 @@ export class AgentSession {
 		});
 		this._backgroundToolTasks = new BackgroundToolTaskController({
 			getSessionId: () => this.sessionManager.getSessionId(),
+			getSessionLineageIds: () => this.sessionManager.getSessionLineageIds(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
 			persist: (record) => this.sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
@@ -2797,40 +2796,14 @@ export class AgentSession {
 				);
 			}
 
-			let pipelineRun: PipelineRun | undefined;
-			let pipelineContext: string | undefined;
-			if (!options?.internalContextType) {
-				try {
-					pipelineRun = resolveCurrentProjectPipelineRun(this._cwd, this.getPipelineRunSnapshot());
-					const pipelineDefinition = pipelineRun
-						? resolvePipelineDefinitionForRun(
-								{ agentPipelinesDir: resourceDir("pipelines", this._agentDir), cwd: this._cwd },
-								pipelineRun,
-							)
-						: undefined;
-					pipelineContext =
-						pipelineRun && pipelineDefinition
-							? formatActivePipelineContext(pipelineDefinition, pipelineRun)
-							: undefined;
-				} catch (error) {
-					pipelineRun = undefined;
-					this._emit({
-						type: "warning",
-						message: `Pipeline context unavailable: ${error instanceof Error ? error.message : String(error)}`,
+			const pipelineContextMessage = options?.internalContextType
+				? undefined
+				: createActivePipelineContextMessage({
+						options: { agentPipelinesDir: resourceDir("pipelines", this._agentDir), cwd: this._cwd },
+						snapshot: this.getPipelineRunSnapshot(),
+						onError: (message) => this._emit({ type: "warning", message }),
 					});
-				}
-			}
-			if (pipelineRun && pipelineContext) {
-				messages.push(
-					createCustomMessage(
-						"pipeline_context",
-						pipelineContext,
-						false,
-						{ revision: pipelineRun.revision },
-						new Date().toISOString(),
-					),
-				);
-			}
+			if (pipelineContextMessage) messages.push(pipelineContextMessage);
 
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(

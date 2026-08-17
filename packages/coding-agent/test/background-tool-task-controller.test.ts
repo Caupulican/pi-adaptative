@@ -289,9 +289,9 @@ describe("BackgroundToolTaskController", () => {
 		await controller.shutdown();
 	});
 
-	it("restores terminal tasks per session and deterministically closes orphaned running tasks", async () => {
+	it("restores only the admitted session lineage and deterministically closes orphaned running tasks", async () => {
 		const completed: BackgroundToolTaskRecord = {
-			sessionId: "session-a",
+			sessionId: "parent-session",
 			taskId: "tool-task-3",
 			toolCallId: "call-completed",
 			toolName: "slow",
@@ -314,7 +314,8 @@ describe("BackgroundToolTaskController", () => {
 		const persisted: BackgroundToolTaskRecord[] = [];
 		const notifications: BackgroundToolTaskRecord[] = [];
 		const controller = new BackgroundToolTaskController({
-			getSessionId: () => "session-a",
+			getSessionId: () => "forked-session",
+			getSessionLineageIds: () => ["forked-session", "parent-session"],
 			getArtifactStore: () => undefined,
 			loadPersistedRecordsNewestFirst: () => [
 				{ ...completed, sessionId: "another-session", taskId: "tool-task-99" },
@@ -336,13 +337,15 @@ describe("BackgroundToolTaskController", () => {
 				status: "failed",
 				output: expect.stringContaining("owning process ended"),
 			}),
-			expect.objectContaining({ taskId: "tool-task-99", status: "completed", output: "retained output" }),
 		]);
 		expect(persisted).toEqual([expect.objectContaining({ taskId: "tool-task-4", status: "failed" })]);
 		expect(notifications).toEqual([]);
 
 		const call = controlledContext("call-new");
-		expect(controller.handoff(call.context)?.result.details).toMatchObject({ taskId: "tool-task-100" });
+		expect(controller.handoff(call.context)?.result.details).toMatchObject({
+			sessionId: "forked-session",
+			taskId: "tool-task-5",
+		});
 		await controller.shutdown();
 	});
 });

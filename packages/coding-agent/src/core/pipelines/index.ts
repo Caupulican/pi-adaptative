@@ -1,4 +1,9 @@
 export {
+	type ActivePipelineContext,
+	createActivePipelineContextMessage,
+	resolveActivePipelineContext,
+} from "./active-context.ts";
+export {
 	assembleStageContext,
 	currentPipelineStage,
 	formatActivePipelineContext,
