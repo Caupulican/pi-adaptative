@@ -1,3 +1,4 @@
+import { projectMessagesForModelImageSupport } from "../image-support.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -8,7 +9,6 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { projectMessagesForModelImageSupport } from "../image-support.ts";
 
 export const INTERRUPTED_TOOL_RESULT_TEXT =
 	'[harness] {"state":"interrupted","outcome":"unknown","reason":"missing_terminal_result","next_action":"Inspect side effects before retrying; do not assume the operation failed."}';

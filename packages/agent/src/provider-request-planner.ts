@@ -1,5 +1,6 @@
 import { materializeProviderRequest, startMaterializedProviderStream, streamSimple } from "@caupulican/pi-ai/stream";
 import type { Context, Message } from "@caupulican/pi-ai/types";
+import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
 import { sanitizeToolFailureContext } from "./tool-failure-memory.ts";
 import type {
@@ -11,7 +12,6 @@ import type {
 	RequestPreflightResult,
 	StreamFn,
 } from "./types.ts";
-import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
 const MAX_PROVIDER_REQUEST_REPLANS = 2;
