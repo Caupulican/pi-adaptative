@@ -133,6 +133,7 @@ export function isPipelineRun(value: unknown): value is PipelineRun {
 	}
 	return (
 		record.version === 1 &&
+		typeof record.revision === "number" &&
 		Number.isSafeInteger(record.revision) &&
 		record.revision >= 0 &&
 		typeof record.pipelineName === "string" &&

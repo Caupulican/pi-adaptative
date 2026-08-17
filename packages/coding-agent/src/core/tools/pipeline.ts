@@ -148,9 +148,7 @@ function pipelinePanel(details: PipelineToolDetails | undefined): OrchestrationP
 	};
 }
 
-export function createPipelineToolDefinition(
-	deps: PipelineToolDependencies,
-): ToolDefinition<typeof pipelineSchema, PipelineToolDetails> {
+export function createPipelineToolDefinition(deps: PipelineToolDependencies): ToolDefinition {
 	const now = deps.now ?? (() => new Date().toISOString());
 	return {
 		name: "pipeline",
