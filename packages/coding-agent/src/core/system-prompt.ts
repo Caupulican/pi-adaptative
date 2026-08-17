@@ -196,7 +196,12 @@ function appendPromptResources(
 	// Day-granularity only; keep this tail stable across every call on the same calendar day.
 	result += `\nCurrent date: ${options.date}`;
 	result += `\nCurrent working directory: ${options.promptCwd}`;
-	return options.modelCapability ? enforceModelCapabilitySystemPromptBudget(result, options.modelCapability) : result;
+	// Prompt resources can come from CRLF checkouts or user files. Canonicalize once at the final
+	// assembly boundary so capability budgets and provider cache keys are host-independent.
+	const normalizedResult = result.replace(/\r\n?/g, "\n");
+	return options.modelCapability
+		? enforceModelCapabilitySystemPromptBudget(normalizedResult, options.modelCapability)
+		: normalizedResult;
 }
 
 /**

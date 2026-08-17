@@ -129,4 +129,30 @@ describe("capability-shaped system prompts", () => {
 		});
 		expect(fullPrompt).toContain(oversizedExpansion);
 	});
+
+	it("canonicalizes CRLF resources before enforcing a constrained prompt budget", () => {
+		const modelCapability = deriveModelCapabilityProfile({ contextWindow: 16_384 });
+		const options: BuildSystemPromptOptions = {
+			modelCapability,
+			selectedTools: ["read"],
+			toolSnippets: { read: "Read files" },
+			cwd: "/repo",
+		};
+		const basePrompt = buildSystemPrompt(options);
+		const maxChars = modelCapability.systemPromptMaxChars;
+		if (maxChars === undefined) throw new Error("Expected a constrained lean prompt budget");
+		const newlineCount = 256;
+		const appendLength = maxChars - basePrompt.length - 2;
+		expect(appendLength).toBeGreaterThan(newlineCount);
+		const lfAppend = `${"x".repeat(appendLength - newlineCount)}${"\n".repeat(newlineCount)}`;
+		const lfPrompt = buildSystemPrompt({ ...options, appendSystemPrompt: lfAppend });
+		expect(lfPrompt).toHaveLength(maxChars);
+
+		const crlfPrompt = buildSystemPrompt({
+			...options,
+			appendSystemPrompt: lfAppend.replace(/\n/g, "\r\n"),
+		});
+		expect(crlfPrompt).toBe(lfPrompt);
+		expect(crlfPrompt).not.toContain("\r");
+	});
 });
