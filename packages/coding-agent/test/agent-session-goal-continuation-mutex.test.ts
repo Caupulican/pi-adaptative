@@ -439,6 +439,9 @@ describe("AgentSession goal-continuation single-flight mutex (end-to-end)", () =
 			expect(manualResult.finalSnapshot.goalState?.goalId).toBe("g1");
 			expect(manualResult.finalSnapshot.continuation).toBeDefined();
 
+			// The mutex race is proven. Disable later batches so this test observes only
+			// the in-flight pass; multi-batch re-arming has separate focused coverage.
+			harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
 			// Let the idle-triggered pass complete.
 			releaseIdlePass?.();
 			await waitUntil(() => (harness.session.getGoalStateSnapshot()?.continuationTurnsUsed ?? 0) >= 1);
