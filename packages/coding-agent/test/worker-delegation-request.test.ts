@@ -5,7 +5,7 @@ import {
 } from "../src/core/delegation/worker-delegation-request.ts";
 
 describe("parseWorkerDelegationAuthorityRequest", () => {
-	it("accepts the complete model-authored authority vocabulary", () => {
+	it("accepts the complete trusted-caller authority vocabulary", () => {
 		expect(
 			parseWorkerDelegationAuthorityRequest({
 				role: "orchestrator",

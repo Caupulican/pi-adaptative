@@ -19,7 +19,7 @@ describe("thinking selector", () => {
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Maximum reasoning depth for the hardest problems");
-		expect(output).toContain("Maximum reasoning with reinforced proactive delegation");
+		expect(output).toContain("Maximum available reasoning effort (provider permitting)");
 
 		selector.getSelectList().handleInput("\x1b[A");
 		selector.getSelectList().handleInput("\r");

@@ -45,21 +45,22 @@ describe("AgentSession foreground envelope (G7, observe-only)", () => {
 		expect(envelope.capabilities).toContain("memory.mutate");
 		// filesystem.read appears once despite both read and grep being active.
 		expect(envelope.capabilities.filter((cap) => cap === "filesystem.read")).toHaveLength(1);
-		// the per-turn cost ceiling flows through from the cost-guard setting (default 2.5)
-		expect(envelope.maxEstimatedUsd).toBe(harness.settingsManager.getCostGuardSettings().maxTurnUsd);
+		// Productive foreground work has no implicit spend ceiling.
+		expect(harness.settingsManager.getCostGuardSettings().maxTurnUsd).toBe(0);
+		expect(envelope.maxEstimatedUsd).toBeUndefined();
 	});
 
-	it("omits the usd bound when the per-turn cost ceiling is disabled", async () => {
+	it("projects an explicitly configured per-turn cost ceiling", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "edit"],
-			settings: { costGuard: { maxTurnUsd: 0 } },
+			settings: { costGuard: { maxTurnUsd: 1.25 } },
 		});
 		harnesses.push(harness);
 
 		harness.setResponses([fauxAssistantMessage("done")]);
 		await harness.session.prompt("do a thing");
 
-		expect(harness.session.getForegroundEnvelope()?.maxEstimatedUsd).toBeUndefined();
+		expect(harness.session.getForegroundEnvelope()?.maxEstimatedUsd).toBe(1.25);
 	});
 
 	it("surfaces one bounded foreground-envelope line on the /context dashboard", async () => {

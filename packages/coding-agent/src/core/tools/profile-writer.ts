@@ -6,7 +6,6 @@ import {
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	ORCHESTRATION_THINKING_LEVELS,
 } from "../orchestration/contracts.ts";
-import { createRiskBudgetSchema } from "../orchestration/risk-budget.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -25,7 +24,6 @@ export interface DelegateProfileInput {
 	model?: TaskProfileCreateInput["model"];
 	toolNames?: readonly string[];
 	resourceProfileNames?: readonly string[];
-	budget?: TaskProfileCreateInput["budget"];
 }
 
 export interface DelegateProfileToolDetails extends TaskProfileCreateResult {
@@ -62,7 +60,6 @@ export function createDelegateProfileParameterSchemas() {
 				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
 			}),
 		),
-		budget: Type.Optional(createRiskBudgetSchema()),
 	};
 }
 
@@ -136,7 +133,6 @@ export function executeDelegateProfileAction(
 		...(input.model !== undefined ? { model: input.model } : {}),
 		...(input.toolNames !== undefined ? { toolNames: input.toolNames } : {}),
 		...(input.resourceProfileNames !== undefined ? { resourceProfileNames: input.resourceProfileNames } : {}),
-		...(input.budget !== undefined ? { budget: input.budget } : {}),
 	};
 	const result = writer.createTaskProfile(request);
 	return {

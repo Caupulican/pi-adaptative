@@ -111,6 +111,8 @@ describe("bundled skills discovery", () => {
 		expect(content).toContain("exact harness-issued profile ID");
 		expect(content).toContain("Human edge");
 		expect(content).toContain("Empty `profile_inspect` bases are not a start block");
+		expect(content).toContain("Never add a budget");
+		expect(content).toContain("inherits the base budget unchanged");
 		expect(content.split("\n").length).toBeLessThan(500);
 	});
 

@@ -83,8 +83,10 @@ export async function runProviderCompletionWithBackoff(args: {
 		} catch (error) {
 			args.onAttemptFailure();
 			if (args.signal?.aborted) throw error;
+			if (error instanceof WorkerCompletionProtocolError) {
+				throw new BoundedCompletionFailureError("failed", "worker_protocol_error", error.message, error);
+			}
 			if (
-				error instanceof WorkerCompletionProtocolError ||
 				error instanceof WorkerConversationOwnershipError ||
 				error instanceof CapabilityGatewayDeniedError ||
 				error instanceof WorkerTreeBudgetExceededError ||
@@ -595,7 +597,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											throw error;
 										}
 									},
-									onMessage: (message) => {
+									onMessage: (message, origin) => {
 										try {
 											signal.throwIfAborted();
 											if (message.role === "assistant" && isToolRequest(message)) {
@@ -614,12 +616,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												const pending = pendingToolAssistants.get(message.toolCallId);
 												if (pending) persistToolRequest(pending);
 											}
-											if (message.role === "assistant") {
+											if (message.role === "assistant" && origin !== "local") {
 												providerTurn.accountAssistantUsage(message.usage);
 											}
 											options.conversation.appendMessage(message);
 											options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
-											if (message.role === "assistant") {
+											if (message.role === "assistant" && origin !== "local") {
 												checkpointUsage(
 													"Persisted worker assistant response and its cumulative provider usage.",
 												);

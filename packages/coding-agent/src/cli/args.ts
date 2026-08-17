@@ -346,7 +346,7 @@ ${chalk.bold("Options:")}
   --resource-profile-json <json>  One-shot profile definitions as JSON or <resource-profile> tag text
   --orchestration-profile <id>   Pin this session to an owner-authored orchestration profile
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max, ultra
-                                 Ultra uses max model effort and reinforces available delegation
+                                 Ultra requests the model's maximum available reasoning effort
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
   --skill <path>                 Load a skill file or directory (can be used multiple times)

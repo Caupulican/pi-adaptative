@@ -198,7 +198,7 @@ describe("unified delegate model surface", () => {
 		expect(result.content).toEqual([
 			expect.objectContaining({
 				type: "text",
-				text: expect.stringMatching(/CAVEMAN MODE - MANDATORY.*budget.*authority\.budget/s),
+				text: expect.stringMatching(/CAVEMAN MODE - MANDATORY.*model-authored budgets.*profileId/s),
 			}),
 		]);
 		expect(result.details).toMatchObject({
@@ -209,7 +209,7 @@ describe("unified delegate model surface", () => {
 		expect(runWorkerDelegation).not.toHaveBeenCalled();
 	});
 
-	it("keeps fresh-start defaults lean while admitting explicit authority ceilings", () => {
+	it("keeps fresh-start defaults unbounded and excludes model-authored ceilings", () => {
 		const { tool } = createUnifiedDelegate();
 		expect(Value.Check(tool.parameters, { action: "start", instructions: "Inspect the repository" })).toBe(true);
 		expect(
@@ -218,7 +218,14 @@ describe("unified delegate model surface", () => {
 				instructions: "Attempt an ad-hoc task ceiling",
 				authority: { budget: { maxTokens: 8_000, maxToolCalls: 12 } },
 			}),
-		).toBe(true);
+		).toBe(false);
+		expect(
+			Value.Check(tool.parameters, {
+				action: "profile_create",
+				task: "Attempt an ad-hoc profile ceiling",
+				budget: { maxTokens: 8_000 },
+			}),
+		).toBe(false);
 		expect(
 			Value.Check(tool.parameters, {
 				action: "start",
@@ -228,7 +235,7 @@ describe("unified delegate model surface", () => {
 		).toBe(false);
 	});
 
-	it("preserves an explicit authority budget without adding one to the omitted baseline", async () => {
+	it("rejects a bypassed authority budget before admitting the unbounded baseline", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
@@ -239,7 +246,7 @@ describe("unified delegate model surface", () => {
 			runWorkerDelegation: () => Promise.resolve({ started: false, skipReason: "unused" }),
 		});
 
-		await tool.execute(
+		const rejected = await tool.execute(
 			"explicit-budget",
 			{
 				action: "start",
@@ -258,13 +265,37 @@ describe("unified delegate model surface", () => {
 			context,
 		);
 
-		expect(startWorkerDelegation).toHaveBeenNthCalledWith(1, {
-			instructions: "Run a bounded verification",
-			authority: { budget: { maxTokens: 8_000, maxWallClockMs: 60_000, maxToolCalls: 12 } },
+		expect(rejected.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "authority_budget_forbidden",
 		});
-		expect(startWorkerDelegation).toHaveBeenNthCalledWith(2, {
+		expect(startWorkerDelegation).toHaveBeenCalledTimes(1);
+		expect(startWorkerDelegation).toHaveBeenCalledWith({
 			instructions: "Run an unbudgeted verification",
 		});
+	});
+
+	it("rejects a bypassed profile budget before the profile writer", async () => {
+		const { createTaskProfile, tool } = createUnifiedDelegate();
+		const rejected = await tool.execute(
+			"profile-budget",
+			{
+				action: "profile_create",
+				task: "Attempt a model-authored ceiling",
+				budget: { maxTokens: 8_000 },
+			} as never,
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(rejected.details).toMatchObject({
+			started: false,
+			action: "profile_create",
+			skipReason: "profile_budget_forbidden",
+		});
+		expect(createTaskProfile).not.toHaveBeenCalled();
 	});
 
 	it("inspects and creates task profiles through delegate", async () => {

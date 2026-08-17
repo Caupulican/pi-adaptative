@@ -49,6 +49,7 @@ import {
 	MAX_WORKER_DELEGATION_MAX_USD,
 } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
+import { THINKING_LEVEL_DESCRIPTIONS } from "../thinking-level-descriptions.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
 import { COMPACT_SELECTOR_LIST_LAYOUT, SelectorHeading } from "./selector-list.ts";
@@ -57,17 +58,6 @@ const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
 const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
 const MODEL_ROUTER_INHERIT_THINKING_VALUE = "__inherit_model_router_thinking__";
 const MODEL_ROUTER_INHERIT_THINKING_LABEL = "(inherit)";
-
-const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
-	off: "No reasoning",
-	minimal: "Very brief reasoning (~1k tokens)",
-	low: "Light reasoning (~2k tokens)",
-	medium: "Moderate reasoning (~8k tokens)",
-	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Maximum reasoning (~32k tokens)",
-	max: "Maximum reasoning depth for the hardest problems",
-	ultra: "Maximum reasoning with reinforced proactive delegation",
-};
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["0", "1", "3", "5", "10", "20"];
@@ -333,7 +323,7 @@ function buildModelRouterRoleModelOptions(options: {
 
 function buildModelRouterThinkingOptions(
 	inheritDescription: string,
-	availableLevels: ThinkingLevel[] = Object.keys(THINKING_DESCRIPTIONS) as ThinkingLevel[],
+	availableLevels: ThinkingLevel[] = Object.keys(THINKING_LEVEL_DESCRIPTIONS) as ThinkingLevel[],
 ): SelectItem[] {
 	return [
 		{
@@ -344,7 +334,7 @@ function buildModelRouterThinkingOptions(
 		...availableLevels.map((level) => ({
 			value: level,
 			label: level,
-			description: THINKING_DESCRIPTIONS[level],
+			description: THINKING_LEVEL_DESCRIPTIONS[level],
 		})),
 	];
 }
@@ -2388,7 +2378,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "worker-delegation",
 				label: "Worker Delegation",
 				description:
-					"Default-on autonomous agent trees: recursive delegation, inherited authority, and optional execution presets; Ultra reinforces proactive use",
+					"Default-on provider-neutral agent trees: recursive delegation, inherited authority, and optional owner-authored execution presets",
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
 				submenu: (_currentValue, done) =>
 					new WorkerDelegationSettingsSubmenu(
@@ -2543,16 +2533,16 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "thinking",
 				label: "Thinking level",
-				description: "Reasoning depth; supported Ultra models also reinforce proactive delegation",
+				description: "Reasoning depth for the active model; delegation policy is configured independently",
 				currentValue: config.thinkingLevel,
 				submenu: (currentValue, done) =>
 					new SelectSubmenu(
 						"Thinking Level",
-						"Select reasoning depth; Ultra reinforces delegation already available to capable models",
+						"Select the reasoning depth supported by the active model",
 						config.availableThinkingLevels.map((level) => ({
 							value: level,
 							label: level,
-							description: THINKING_DESCRIPTIONS[level],
+							description: THINKING_LEVEL_DESCRIPTIONS[level],
 						})),
 						currentValue,
 						(value) => {

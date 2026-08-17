@@ -14,13 +14,9 @@ describe("worker delegation settings", () => {
 
 		const resolved = settingsManager.getWorkerDelegationSettings();
 
-		// A profile-free tree must get a nonzero default ceiling out of the box (root-cause fix for
-		// 1b1afb16f zeroing these implicit ceilings): unbounded is an explicit owner opt-in only,
-		// never the shipped default. See settings-manager.ts for the restoration rationale.
-		expect(DEFAULT_WORKER_DELEGATION_MAX_USD).toBe(0.5);
-		expect(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS).toBe(120_000);
-		expect(DEFAULT_WORKER_DELEGATION_MAX_USD).toBeGreaterThan(0);
-		expect(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS).toBeGreaterThan(0);
+		// Ordinary delegation is unbounded unless the owner or an active profile supplies a ceiling.
+		expect(DEFAULT_WORKER_DELEGATION_MAX_USD).toBe(0);
+		expect(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS).toBe(0);
 		expect(resolved.enabled).toBe(true);
 		expect(resolved.orchestrationProfile).toBeUndefined();
 		expect(resolved.maxUsd).toBe(DEFAULT_WORKER_DELEGATION_MAX_USD);
@@ -30,7 +26,7 @@ describe("worker delegation settings", () => {
 		expect(resolved.writePaths).toEqual(["."]);
 	});
 
-	it("keeps explicit 0 as an unbounded opt-in, distinct from the omitted-field default", () => {
+	it("keeps explicit 0 as the same unbounded policy as the omitted default", () => {
 		const settingsManager = SettingsManager.inMemory({
 			workerDelegation: { maxUsd: 0, maxWallClockMs: 0 },
 		});

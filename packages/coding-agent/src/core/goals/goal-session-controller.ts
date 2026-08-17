@@ -493,7 +493,7 @@ export class GoalSessionController {
 	markHarnessGuardBlocked(info: AgentRunawayStopInfo): boolean {
 		const reason =
 			info.reason === "provider_turn_limit"
-				? `provider_turn_limit: reached the ${info.repeats}-request provider-turn cost fuse`
+				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
 				: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
 		return this.stopActiveGoal("blocked", reason);
 	}

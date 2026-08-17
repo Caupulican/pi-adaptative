@@ -101,7 +101,7 @@ async function* highContextUsageEvents(): AsyncIterable<ResponseStreamEvent> {
 }
 
 describe("GPT-5.6 integration", () => {
-	it("publishes family capabilities and Sol/Terra-only Ultra orchestration", () => {
+	it("publishes family capabilities and the eligible GPT-5.6 Ultra reasoning alias", () => {
 		const alias = getModel("openai", "gpt-5.6");
 		const directSol = getModel("openai", "gpt-5.6-sol");
 		const directTerra = getModel("openai", "gpt-5.6-terra");

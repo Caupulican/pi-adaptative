@@ -65,6 +65,41 @@ const PROVIDER_CASES: readonly ProviderContractCase[] = [
 		expectedTextProtocol: undefined,
 	},
 	{
+		name: "xAI Responses",
+		api: "openai-responses",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		model: {
+			id: "grok-contract-model",
+			reasoning: true,
+			defaultThinkingLevel: "high",
+			thinkingLevelMap: { xhigh: "xhigh" },
+			contextWindow: 256_000,
+			maxTokens: 16_384,
+		},
+		requestedThinking: "xhigh",
+		profileThinking: "xhigh",
+		expectedThinking: "xhigh",
+		expectedTextProtocol: undefined,
+	},
+	{
+		name: "Amazon Bedrock Converse",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+		model: {
+			id: "bedrock-contract-model",
+			reasoning: true,
+			defaultThinkingLevel: "high",
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+		},
+		requestedThinking: "high",
+		profileThinking: "high",
+		expectedThinking: "high",
+		expectedTextProtocol: undefined,
+	},
+	{
 		name: "Responses-compatible API",
 		api: "openai-responses",
 		provider: "compatible-api",
@@ -147,6 +182,7 @@ describe("provider-neutral model contract matrix", () => {
 				workerOrchestrationProfile: profile,
 			});
 			try {
+				expect(harness.session.systemPrompt).toContain("PI DELEGATION");
 				let observed:
 					| {
 							api: string;

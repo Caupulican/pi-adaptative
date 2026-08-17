@@ -108,22 +108,27 @@ describe("Agent", () => {
 				throw new Error("provider exploded");
 			},
 		});
-		const events: string[] = [];
+		const events: Array<{ type: string; origin?: "local" }> = [];
 		agent.subscribe((event) => {
-			events.push(event.type);
+			events.push({
+				type: event.type,
+				...((event.type === "message_start" || event.type === "message_end") && event.origin
+					? { origin: event.origin }
+					: {}),
+			});
 		});
 
 		await agent.prompt("hello");
 
 		expect(events).toEqual([
-			"agent_start",
-			"turn_start",
-			"message_start",
-			"message_end",
-			"message_start",
-			"message_end",
-			"turn_end",
-			"agent_end",
+			{ type: "agent_start" },
+			{ type: "turn_start" },
+			{ type: "message_start" },
+			{ type: "message_end" },
+			{ type: "message_start", origin: "local" },
+			{ type: "message_end", origin: "local" },
+			{ type: "turn_end" },
+			{ type: "agent_end" },
 		]);
 		const lastMessage = agent.state.messages[agent.state.messages.length - 1];
 		expect(lastMessage?.role).toBe("assistant");

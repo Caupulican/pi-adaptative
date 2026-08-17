@@ -118,7 +118,7 @@ describe("settings selector", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("labels max reasoning and ultra orchestration in the thinking selector", () => {
+	it("labels max and ultra as reasoning levels without coupling delegation", () => {
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ thinkingLevel: "max", availableThinkingLevels: ["max", "ultra"] }),
 			makeCallbacks(),
@@ -129,7 +129,7 @@ describe("settings selector", () => {
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Maximum reasoning depth for the hardest problems");
-		expect(output).toContain("Maximum reasoning with reinforced proactive delegation");
+		expect(output).toContain("Maximum available reasoning effort (provider permitting)");
 	});
 
 	it("exposes project AGENTS.md opt-in in the searchable settings TUI", () => {
@@ -233,17 +233,14 @@ describe("settings selector", () => {
 		expect(output).toContain("unbounded turns, stall 20, auto on");
 	});
 
-	it("labels the default worker tree with its restored nonzero ceiling, not a zero-dollar budget", () => {
-		// DEFAULT_WORKER_DELEGATION_MAX_USD is a real, positive ceiling (settings-manager.ts) —
-		// unbounded is an explicit owner opt-in, never the shipped default, so the unconfigured
-		// default must render as a real budget here too.
+	it("labels the default worker tree as unbounded", () => {
 		const selector = new SettingsSelectorComponent(makeConfig({ workerDelegation: {} }), makeCallbacks());
 
 		selector.getSettingsList().handleInput("worker delegation");
 		const output = selector.render(180).join("\n");
 
-		expect(output).toContain("enabled ($0.5/tree)");
-		expect(output).not.toContain("enabled (unbounded)");
+		expect(output).toContain("enabled (unbounded)");
+		expect(output).not.toContain("$0/tree");
 	});
 
 	it("labels an explicit zero-dollar opt-in as unbounded", () => {

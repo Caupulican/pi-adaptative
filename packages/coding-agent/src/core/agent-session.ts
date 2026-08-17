@@ -550,7 +550,6 @@ export class AgentSession {
 			getModelAdaptationRules: () => this._toolProtocol.getAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
-			getThinkingLevel: () => this.thinkingLevel,
 			// The evidence-gated tool-selection hint block — self-gated by kill switch/evidence
 			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
@@ -1727,7 +1726,7 @@ export class AgentSession {
 		this.sessionManager.appendCustomEntry(RUNAWAY_STOP_CUSTOM_TYPE, record);
 		const cause =
 			info.reason === "provider_turn_limit"
-				? `the provider-turn cost limit of ${info.repeats} requests was reached`
+				? `the configured provider-turn limit of ${info.repeats} requests was reached`
 				: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
 		this._emit({
 			type: "warning",

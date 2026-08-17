@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Made root and nested-worker delegation guidance provider- and reasoning-independent with task-scoped parallelism criteria, removed per-dispatch budgets from model-facing worker starts and task profiles, disabled foreground cost warnings by default, and left worker-tree cost/time ceilings unbounded unless explicitly configured.
+
+### Fixed
+
+- Kept local worker terminal messages out of provider usage and reservation accounting, classified worker protocol faults without transport retries, and allowed incremental edits after prior successes without cross-operation failure-family shutdowns or contradictory completion guidance.
+
 ## [0.93.2] - 2026-08-17
 
 ### Fixed

@@ -55,7 +55,7 @@ export interface CostGuardSettings {
 }
 
 export const DEFAULT_COST_GUARD_SETTINGS: CostGuardSettings = {
-	maxTurnUsd: 2.5,
+	maxTurnUsd: 0,
 	action: "warn",
 };
 

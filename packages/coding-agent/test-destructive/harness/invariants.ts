@@ -93,10 +93,9 @@ export interface BoundedWaitWorld {
 
 export interface TreeBudgetWorld {
 	spendUsd: number;
-	ceilingUsd: number;
+	ceilingUsd?: number;
 	finalTurnOverrunUsd: number;
-	profileFree: boolean;
-	ceilingIsZero: boolean;
+	ceilingSource: "none" | "explicit";
 }
 
 export interface CompactionRoundTripWorld {
@@ -272,8 +271,14 @@ export function assertInvW6(world: InvariantWorld, repro: ReproFields): void {
 
 export function assertInvB1(world: InvariantWorld, repro: ReproFields): void {
 	const tree = requireWorld(world, "treeBudget", "INV-B1", repro);
-	if (tree.profileFree && tree.ceilingIsZero) {
-		throw reproError("INV-B1 violated: a profile-free tree has a zero/absent ceiling.", repro);
+	if (tree.ceilingSource === "none") {
+		if (tree.ceilingUsd !== undefined) {
+			throw reproError("INV-B1 violated: a tree without an explicit budget received an implicit ceiling.", repro);
+		}
+		return;
+	}
+	if (tree.ceilingUsd === undefined || !Number.isFinite(tree.ceilingUsd) || tree.ceilingUsd < 0) {
+		throw reproError("INV-B1 violated: an explicit tree budget has no non-negative finite ceiling.", repro);
 	}
 	if (tree.spendUsd > tree.ceilingUsd + tree.finalTurnOverrunUsd) {
 		throw reproError(

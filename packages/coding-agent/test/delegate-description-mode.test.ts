@@ -38,8 +38,9 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(guidelines.some((line) => line.includes("Completion: wait/wait_many"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Timeout alone") && line.includes("never interrupt"))).toBe(true);
 		expect(guidelines).toContain(
-			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; budget=authority.budget; idle=reuse.",
+			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; idle=reuse.",
 		);
+		expect(guidelines.some((line) => line.includes("Owner profiles/settings own ceilings"))).toBe(true);
 	});
 
 	it("teaches the async event-driven retrieval contract when startWorkerDelegation is wired", () => {
@@ -74,8 +75,9 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(guidelines.some((line) => line.includes("Completion: wait/wait_many"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Timeout alone") && line.includes("never interrupt"))).toBe(true);
 		expect(guidelines).toContain(
-			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; budget=authority.budget; idle=reuse.",
+			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; task=instructions; idle=reuse.",
 		);
+		expect(guidelines.some((line) => line.includes("Owner profiles/settings own ceilings"))).toBe(true);
 	});
 
 	it("keeps both descriptions as per-wiring-mode static strings (prompt-cache stable)", () => {
@@ -276,7 +278,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		});
 	});
 
-	it("treats a misplaced start budget as correctable input and preserves it for one retry", async () => {
+	it("rejects a misplaced start budget without dropping the task text", async () => {
 		let startCalls = 0;
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
@@ -292,7 +294,7 @@ describe("delegate tool description varies by wiring mode", () => {
 
 		const result = await definition.execute(
 			"call-misplaced-budget",
-			{ action: "start", instructions: "EXACT TASK TEXT", budget: { maxTokens: 12_345 } },
+			{ action: "start", instructions: "EXACT TASK TEXT", budget: { maxTokens: 12_345 } } as never,
 			new AbortController().signal,
 			() => {},
 			{} as never,
@@ -305,7 +307,8 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(text).toContain("CAVEMAN MODE - MANDATORY");
 		expect(text).toContain("expected API correction, not harness failure");
 		expect(text).toContain("Retry once now");
-		expect(text).toContain("move the budget unchanged into authority.budget");
+		expect(text).toContain("Ceilings come only from host settings or an owner-authored profileId");
+		expect(text).toContain("Retry once without budget");
 		expect(text).toContain("No worker started; nothing was dropped");
 		expect(startCalls).toBe(0);
 		expect(result.details).toEqual({

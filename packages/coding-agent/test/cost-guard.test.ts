@@ -68,7 +68,7 @@ describe("estimateTurnCostUsd", () => {
 
 describe("evaluateCostGuard", () => {
 	it("exports the same warning-only default used by SettingsManager", () => {
-		expect(DEFAULT_COST_GUARD_SETTINGS).toEqual({ maxTurnUsd: 2.5, action: "warn" });
+		expect(DEFAULT_COST_GUARD_SETTINGS).toEqual({ maxTurnUsd: 0, action: "warn" });
 	});
 
 	it("is never over when disabled (maxTurnUsd <= 0)", () => {

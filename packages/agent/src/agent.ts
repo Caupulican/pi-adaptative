@@ -244,7 +244,7 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Runaway-loop backstop for repeated identical tool-call turns. */
 	public maxStallTurns?: number;
-	/** Absolute provider-request cost fuse for one logical prompt. */
+	/** Optional provider-request fuse for one logical prompt; disabled when omitted or zero. */
 	public maxProviderTurns?: number;
 	/** Observability hook fired once if a repeated-call or provider-turn guard trips. */
 	public onRunawayStop?: AgentLoopConfig["onRunawayStop"];
@@ -580,8 +580,8 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		await this.processEvents({ type: "message_start", message: failureMessage });
-		await this.processEvents({ type: "message_end", message: failureMessage });
+		await this.processEvents({ type: "message_start", message: failureMessage, origin: "local" });
+		await this.processEvents({ type: "message_end", message: failureMessage, origin: "local" });
 		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
 		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
 	}

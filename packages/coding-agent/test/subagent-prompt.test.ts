@@ -6,9 +6,11 @@ describe("subagent level-0 prompt composition", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(140);
 	});
 
-	it("describes bounded delegation and transcript authority without granting peer transcript access", () => {
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host-enforced fleet bounds");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("own control subtree transcripts");
+	it("keeps the immutable core capability-neutral and bounds peer coordination", () => {
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("Delegate useful independent");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("never invent ceilings");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host fleet bounds/control subtree");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("use exposed tools for peers");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("inspect exact peer transcripts");
 	});
 

@@ -164,6 +164,78 @@ describe("tool-failure recovery restore", () => {
 		expect(admission.exhausted).toBe(true);
 	});
 
+	it("reconstructs an evicted exact operation without blocking cache-miss work", () => {
+		const tracker = new Map();
+		const messages: AgentMessage[] = [{ role: "user", content: "inspect every board", timestamp: 1 }];
+		const firstArgs = { ...listListsArgs, boardId: "board-0" };
+		for (let index = 0; index < 80; index++) {
+			const args = { ...listListsArgs, boardId: `board-${index}` };
+			const failed = rememberToolFailure(
+				tracker,
+				"trello",
+				args,
+				"failed",
+				"error",
+				"Use a corrected board identifier.",
+				"Board lookup failed",
+			);
+			const callId = `bounded-${index}`;
+			messages.push(assistantCall(callId, "trello", args));
+			messages.push(toolResultMessage(callId, "trello", createToolFailureResult(failed), true));
+		}
+
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(messages);
+		const memory = createToolFailureMemoryTracker(messages);
+		expect(getUnresolvedToolFailure(memory, "trello", firstArgs)).toBeUndefined();
+
+		const tool = createTrelloTool(() => {
+			throw new Error("execute must not run during admission");
+		});
+		const replay = gate.admit(tool, firstArgs, undefined, messages);
+		expect(replay.kind).toBe("blocked");
+		if (replay.kind !== "blocked") return;
+		expect(replay.exhausted).toBe(false);
+
+		const newOperation = gate.admit(tool, { ...listListsArgs, boardId: "brand-new-board" }, undefined, messages);
+		expect(newOperation.kind).toBe("allowed");
+	});
+
+	it("does not resurrect a successful operation from the pre-result transcript snapshot", () => {
+		const tracker = new Map();
+		const otherArgs = { ...listListsArgs, boardId: "still-failed" };
+		const messages: AgentMessage[] = [{ role: "user", content: "retry after repair", timestamp: 1 }];
+		for (const [index, args] of [listListsArgs, otherArgs].entries()) {
+			const failed = rememberToolFailure(
+				tracker,
+				"trello",
+				args,
+				"failed",
+				"error",
+				"Use a corrected board identifier.",
+				"Board lookup failed",
+			);
+			const callId = `initial-${index}`;
+			messages.push(assistantCall(callId, "trello", args));
+			messages.push(toolResultMessage(callId, "trello", createToolFailureResult(failed), true));
+		}
+
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(messages);
+		const tool = createTrelloTool(() => {
+			throw new Error("execute must not run during admission");
+		});
+		const success = { content: [{ type: "text" as const, text: "board resolved" }], details: {} };
+		gate.apply({ kind: "success", tool, args: listListsArgs, evidenceResult: success });
+
+		expect(gate.admit(tool, listListsArgs, undefined, messages).kind).toBe("allowed");
+		expect(gate.admit(tool, otherArgs, undefined, messages).kind).toBe("blocked");
+
+		messages.push(assistantCall("successful-retry", "trello", listListsArgs));
+		messages.push(toolResultMessage("successful-retry", "trello", success, false));
+		expect(gate.admit(tool, listListsArgs, undefined, messages).kind).toBe("allowed");
+	});
+
 	it("does not restore a prompt-scoped owner-authorization circuit across a new user turn", () => {
 		const args = { action: "start", userGoal: "evaluate the harness" };
 		const tracker = new Map();

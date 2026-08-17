@@ -590,7 +590,7 @@ export function createEditToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Successfully replaced ${edits.length} block(s) in ${path}; this edit is complete, so do not call edit again for this path. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
+							text: `Successfully replaced ${edits.length} block(s) in ${path}. To copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.`,
 						},
 					],
 					details: {

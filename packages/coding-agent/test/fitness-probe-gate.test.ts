@@ -332,7 +332,7 @@ describe("runFitnessAndAssign gates adoption on the probe verdict", () => {
 
 		expect(selectorOpened()).toBe(2);
 		expect(thinkingSelectorOutput()).toContain("Maximum reasoning depth for the hardest problems");
-		expect(thinkingSelectorOutput()).toContain("Maximum reasoning with reinforced proactive delegation");
+		expect(thinkingSelectorOutput()).toContain("Maximum available reasoning effort (provider permitting)");
 		expect(getModelRouterSettings()).toMatchObject({
 			cheapModel: "ollama/good-model",
 			cheapThinking: "ultra",

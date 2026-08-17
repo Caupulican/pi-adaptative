@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Made the provider-turn fuse opt-in and removed cross-operation tool-failure family, run-count, and state-count stops while preserving exact repeated-operation recovery circuits.
+
+### Fixed
+
+- Marked host-synthesized assistant terminals as local so isolated consumers never charge them as provider output or consume a provider reservation, and kept an exact successful retry resolved until its result reaches the transcript.
+
 ## [0.93.2] - 2026-08-17
 
 ### Fixed

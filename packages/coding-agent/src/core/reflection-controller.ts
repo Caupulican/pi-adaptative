@@ -383,7 +383,7 @@ export class ReflectionController {
 					childContext,
 					loopConfig,
 					async (event) => {
-						if (event.type === "message_end") await opts.onMessage?.(event.message as Message);
+						if (event.type === "message_end") await opts.onMessage?.(event.message as Message, event.origin);
 					},
 					opts.signal,
 					agent.streamFn,

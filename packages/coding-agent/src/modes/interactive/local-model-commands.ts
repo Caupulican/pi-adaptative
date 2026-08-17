@@ -62,6 +62,7 @@ import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
 import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
 import { getSelectListTheme } from "./theme/theme.ts";
+import { THINKING_LEVEL_DESCRIPTIONS } from "./thinking-level-descriptions.ts";
 
 type SelectorFactory = (done: () => void) => { component: Component; focus: Component };
 
@@ -72,17 +73,6 @@ const MODEL_ROUTER_THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 const MODEL_ROUTER_THINKING_INHERIT_VALUE = "__inherit_model_router_thinking__";
 const MODEL_ROUTER_THINKING_INHERIT_LABEL = "(inherit)";
-
-const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
-	off: "No reasoning",
-	minimal: "Very brief reasoning (~1k tokens)",
-	low: "Light reasoning (~2k tokens)",
-	medium: "Moderate reasoning (~8k tokens)",
-	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Maximum reasoning (~32k tokens)",
-	max: "Maximum reasoning depth for the hardest problems",
-	ultra: "Maximum reasoning with reinforced proactive delegation",
-};
 
 const MODEL_ROUTER_THINKING_FALLBACK_LEVELS: readonly ThinkingLevel[] = [
 	"off",

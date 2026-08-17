@@ -780,8 +780,8 @@ export class ModelRouterController {
 					agent.state.tools = swappedTools;
 				}
 			}
-			// The routed prompt follows both the routed tool surface and its effective thinking mode.
-			// This removes an Ultra policy during max/Luna routes, including same-model tier overrides.
+			// The routed prompt follows the routed tool surface and keeps provider-neutral delegation
+			// guidance whenever delegate remains active, including same-model thinking overrides.
 			// Per-turn only; a live extension override is preserved rather than silently replaced.
 			if (agent.state.systemPrompt === this.deps.getBaseSystemPrompt()) {
 				swappedSystemPrompt = this.deps.buildSystemPromptForToolNames(agent.state.tools.map((tool) => tool.name));

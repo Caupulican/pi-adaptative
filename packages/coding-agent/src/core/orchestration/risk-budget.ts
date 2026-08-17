@@ -1,4 +1,3 @@
-import { Type } from "typebox";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { RiskBudget } from "./contracts.ts";
 
@@ -20,23 +19,6 @@ const DISCRETE_BUDGET_FIELDS: ReadonlySet<(typeof RISK_BUDGET_FIELDS)[number]> =
 	"maxAttempts",
 	"maxToolCalls",
 ]);
-
-/** One model-facing schema for every explicit worker/profile budget boundary. */
-export function createRiskBudgetSchema() {
-	// Shape belongs to the tool schema. Numeric range and integer invariants belong to
-	// parseRiskBudget so every caller follows the same authoritative validation path.
-	return Type.Object(
-		{
-			maxTokens: Type.Optional(Type.Number()),
-			maxWallClockMs: Type.Optional(Type.Number()),
-			maxCostUsd: Type.Optional(Type.Number()),
-			maxAttempts: Type.Optional(Type.Number()),
-			maxToolCalls: Type.Optional(Type.Number()),
-			requireApprovalAboveCostUsd: Type.Optional(Type.Number()),
-		},
-		{ additionalProperties: false },
-	);
-}
 
 function assertKnownRiskBudgetFields(budget: Record<string, unknown>, label: string): void {
 	const unknownField = Object.keys(budget).find(

@@ -5,11 +5,14 @@
  * Dynamic task/context text remains with its owning system.
  */
 
+export const DELEGATION_DECISION_RULE =
+	"Delegate useful independent research, implementation, tests, or specialist review early; keep dependent, trivial, context-heavy, or interactive work local.";
+
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
 	"Autonomous orchestration-tree agent. Contract:",
-	"1. Use useful exposed tools; host enforces inherited authority.",
-	"2. Delegate only within host-enforced fleet bounds; inspect only your own control subtree transcripts; message peers only through exposed tools.",
-	"3. Host owns concurrency, budgets, leases, cycles, cancellation, and irreversible-authority gates.",
+	"1. Use exposed tools; host enforces inherited authority.",
+	"2. Stay in host fleet bounds/control subtree; use exposed tools for peers.",
+	"3. Host owns limits/cancellation; never invent ceilings or irreversible authority.",
 	"4. Never invent facts, paths, APIs, results; state uncertainty.",
 	"5. Obey the output contract; your result is independently verifiable evidence.",
 ].join("\n");
@@ -120,10 +123,10 @@ export function buildWorkerSystemPrompt(capabilities: {
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
 	return [
 		"Autonomous durable-tree worker; use tools. Host enforces grant.",
-		"CAVEMAN MODE - MANDATORY: Inherited parent history is context only. Execute only the latest TASK envelope. Parent-owned orchestration stays parent-owned; delegate only when that TASK explicitly assigns delegation.",
+		"CAVEMAN MODE - MANDATORY: Inherited parent history is context only. Execute only the latest TASK envelope. Parent-owned orchestration stays parent-owned; decide work from that TASK, never inherited parent intent.",
 		...(capabilities.delegate
 			? [
-					"Delegate within host depth/child/session/queue bounds; coordinate via list/transcript/messages. Host owns concurrency, budgets, leases, cycles, cancellation.",
+					`${DELEGATION_DECISION_RULE} Stay within host depth/child/session/queue bounds; coordinate via list/transcript/messages. Host owns concurrency, budgets, leases, cycles, cancellation.`,
 				]
 			: []),
 		...(capabilities.write

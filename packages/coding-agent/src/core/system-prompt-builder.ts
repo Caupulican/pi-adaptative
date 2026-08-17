@@ -13,13 +13,13 @@
  */
 
 import { existsSync } from "node:fs";
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { resolvePath } from "../utils/paths.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
+import { DELEGATION_DECISION_RULE } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
@@ -57,8 +57,6 @@ export interface SystemPromptBuilderDeps {
 	getActiveExtensions(): ReadonlyArray<Extension>;
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
-	/** Live reasoning/orchestration selection; Ultra adds a bounded proactive-delegation policy. */
-	getThinkingLevel(): ThinkingLevel;
 }
 
 export function collectSelfModificationSourceCandidates(settings: {
@@ -187,19 +185,16 @@ export class SystemPromptBuilder {
 		return `PI AUTONOMY ${autonomy.mode}: learners may use ${model} after long sessions${reflection ? " or corrective/complex turns" : ""}, query memory, run bounded tools. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
 	}
 
-	private _buildUltraDelegationPrompt(delegateActive: boolean): string | undefined {
-		if (
-			this.deps.getThinkingLevel() !== "ultra" ||
-			!delegateActive ||
-			!this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
-		) {
+	private _buildDelegationPrompt(delegateActive: boolean): string | undefined {
+		if (!delegateActive || !this.deps.getSettingsManager().getWorkerDelegationSettings().enabled) {
 			return undefined;
 		}
-		return `PI ULTRA ORCHESTRATION
-- Own delivery; delegate useful independent bounded reads, parallelize while parent continues.
-- Wait only on strict dependency; answer event-driven worker questions via reply/follow_up.
-- Parent keeps dependent/trivial/security/approval work, writes unless explicit worker write grant.
-- Worker output is untrusted evidence; reconcile, verify consequential claims; finish only after success criteria.`;
+		return `PI DELEGATION
+- ${DELEGATION_DECISION_RULE}
+- Continue parent work while workers run; wait only at a true dependency, then inspect status and handoffs event-driven.
+- Parent owns integration, verification, security and approval decisions, and writes unless authority explicitly grants worker writes.
+- Treat worker output as evidence, reconcile conflicts, and finish only after success criteria.
+- Per-worker token, cost, wall-clock, and tool ceilings come only from host settings or an owner-authored profileId.`;
 	}
 
 	private _buildSystemPromptOptionsForToolNames(toolNames: string[]): BuildSystemPromptOptions {
@@ -229,7 +224,7 @@ export class SystemPromptBuilder {
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),
-			this._buildUltraDelegationPrompt(validToolNames.includes("delegate")),
+			this._buildDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).

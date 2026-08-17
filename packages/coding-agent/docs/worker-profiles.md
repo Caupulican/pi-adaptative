@@ -1,6 +1,6 @@
 # Task worker presets
 
-Native delegation does not require a profile. `delegate.authority` can choose a child model, reasoning level, role label, classified tools, capabilities, paths, and budget directly. Omitted fields inherit from the caller, and Pi persists the resulting immutable execution grant.
+Native delegation does not require a profile. `delegate.authority` can choose a child model, reasoning level, role label, and classified tool names directly. Omitted fields inherit from the caller, and Pi persists the resulting immutable execution grant. The model-facing tool has no token, cost, time, attempt, or tool-call ceiling fields; those come only from host settings or owner-authored profiles.
 
 `delegate` profile actions remain useful when the foreground orchestrator wants a reusable session-scoped preset. They do not edit user or project profile files. Task presets are:
 
@@ -8,10 +8,10 @@ Native delegation does not require a profile. `delegate.authority` can choose a 
 - Immutable and assigned a `task-...` ID by Pi.
 - Stored on the owning session branch, never shared across independent sessions.
 - Limited to 32 presets per session.
-- Unable to add tools, resources, or budget beyond the base profile.
+- Unable to add tools or resources beyond the base profile, and always inherit its budget unchanged.
 - Limited to configured, authenticated, non-exhausted models and a reasoning level that model supports.
 
-Use `delegate { action: "profile_inspect" }` when the reusable bases or model combinations are unknown. Then call `profile_create` with a concise task and only the defaults worth preserving. Pass the returned profile ID unchanged to `delegate start`; never invent one.
+Use `delegate { action: "profile_inspect" }` when the reusable bases or model combinations are unknown. Then call `profile_create` with a concise task and only the model/tool/resource defaults worth preserving. Pass the returned profile ID unchanged to `delegate start`; never invent one.
 
 Worker agents do not receive the root-only profile/status actions. They receive `delegate` only when their admitted tool set and capability ceiling both retain delegation; a caller can create a non-delegating leaf by narrowing either field. Delegating workers may recursively create descendants within the fixed depth, direct-child, session-agent, and queue bounds. They can discover safe session-peer metadata, exchange non-waking threaded messages and bounded broadcasts, and use event-driven `wait`/`wait_many`, but bounded transcript reads and waking controls remain limited to the caller's own control subtree. Transcript cursors address raw session entries, so a continuation page may be empty after non-message entries; an individually oversized message is omitted with a count instead of being truncated. A descendant may vary model or role through another preset, but it cannot acquire new resources: pointers must fully match the ancestor's admitted pointer metadata, soul text must match exactly, and verifier resources and authority stay within the ancestral verifier or worker boundary.
 

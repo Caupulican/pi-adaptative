@@ -94,7 +94,8 @@ describe("edit tool prepareArguments", () => {
 		const resultText = result.content[0];
 		if (resultText?.type !== "text") throw new Error("Expected edit result text.");
 		expect(result.details?.contentRef).toMatch(/^file-content:/);
-		expect(resultText.text).toContain("Successfully replaced 1 block(s) in legacy.txt;");
+		expect(resultText.text).toContain("Successfully replaced 1 block(s) in legacy.txt.");
+		expect(resultText.text).not.toContain("do not call edit again");
 		expect(resultText.text).toContain(`contentRef ${result.details?.contentRef}`);
 		expect(await readFile(filePath, "utf8")).toBe("after\n");
 	});

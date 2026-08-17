@@ -49,7 +49,6 @@ function makeDeps(overrides: Partial<SystemPromptBuilderDeps> = {}): SystemPromp
 			backgroundLanesEnabled: true,
 			laneMaxOutputTokens: 2_048,
 		}),
-		getThinkingLevel: () => "medium",
 		...overrides,
 	};
 }

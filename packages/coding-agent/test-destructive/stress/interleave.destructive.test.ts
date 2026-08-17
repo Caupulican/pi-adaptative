@@ -26,10 +26,7 @@ import {
 } from "../../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../../src/core/orchestration/delegation-ledger.ts";
 import { createWorkerExecutionContract } from "../../src/core/orchestration/worker-execution-contract.ts";
-import {
-	DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,
-	DEFAULT_WORKER_DELEGATION_MAX_USD,
-} from "../../src/core/settings-manager.ts";
+import { DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT } from "../../src/core/settings-manager.ts";
 import {
 	createTestExecutionGrant,
 	createTestWorkerExecutionAuthority,
@@ -364,10 +361,8 @@ class InterleaveWorld {
 				},
 				treeBudget: {
 					spendUsd: this.spendUsd,
-					ceilingUsd: DEFAULT_WORKER_DELEGATION_MAX_USD,
 					finalTurnOverrunUsd: 0,
-					profileFree: true,
-					ceilingIsZero: DEFAULT_WORKER_DELEGATION_MAX_USD === 0,
+					ceilingSource: "none",
 				},
 			},
 			["INV-W1", "INV-W2", "INV-W3", "INV-W5", "INV-B1"],

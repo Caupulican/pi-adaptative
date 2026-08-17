@@ -250,8 +250,8 @@ export type ProviderRequestAdmissionResult =
  * trips it, but bounds the cost of a model wedged repeating one failing call forever.
  */
 export const DEFAULT_MAX_STALL_TURNS = 12;
-/** Maximum paid provider turns in one logical prompt before the local cost fuse stops the run. */
-export const DEFAULT_MAX_PROVIDER_TURNS = 20;
+/** Provider-turn fuse is opt-in; varied productive work has no implicit request-count ceiling. */
+export const DEFAULT_MAX_PROVIDER_TURNS = 0;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
@@ -376,15 +376,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	maxStallTurns?: number;
 
 	/**
-	 * Absolute provider-request cost fuse for one logical prompt, including host continuations.
+	 * Optional provider-request fuse for one logical prompt, including host continuations.
 	 * Unlike {@link maxStallTurns}, this also catches varied tool churn that never repeats an exact
-	 * signature. The loop emits a local terminal diagnostic before another provider request. `0`
-	 * disables the fuse. Default: {@link DEFAULT_MAX_PROVIDER_TURNS}.
+	 * signature. The loop emits a local terminal diagnostic before another provider request. Positive
+	 * values explicitly enable the fuse; `0` disables it. Default: {@link DEFAULT_MAX_PROVIDER_TURNS}.
 	 */
 	maxProviderTurns?: number;
 
 	/**
-	 * Observability hook fired once if either the repeated-call backstop or provider-turn cost fuse trips,
+	 * Observability hook fired once if either the repeated-call backstop or explicit provider-turn fuse trips,
 	 * just before the loop stops. Lets the host surface/log the exact cause. Must not throw.
 	 */
 	onRunawayStop?: (info: AgentRunawayStopInfo) => void;
@@ -501,9 +501,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 /**
  * Thinking/reasoning level for models that support it.
  * Note: "xhigh", "max", and "ultra" are only supported by selected model families. "ultra" maps
- * to the model's maximum provider effort and reinforces proactive orchestration in capable hosts;
- * delegation can remain available at lower levels. Use model thinking-level metadata from
- * @caupulican/pi-ai to detect support for a concrete model.
+ * to the model's maximum provider effort. Delegation policy is provider- and reasoning-independent.
+ * Use model thinking-level metadata from @caupulican/pi-ai to detect support for a concrete model.
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -564,6 +563,9 @@ export interface AgentState {
 	/** Error message from the most recent failed or aborted assistant turn, if any. */
 	readonly errorMessage?: string;
 }
+
+/** Provenance marker for messages synthesized by the host instead of a provider transport. */
+export type AgentMessageOrigin = "local";
 
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
@@ -725,10 +727,10 @@ export type AgentEvent =
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
 	// Message lifecycle - emitted for user, assistant, and toolResult messages
-	| { type: "message_start"; message: AgentMessage }
+	| { type: "message_start"; message: AgentMessage; origin?: AgentMessageOrigin }
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
-	| { type: "message_end"; message: AgentMessage }
+	| { type: "message_end"; message: AgentMessage; origin?: AgentMessageOrigin }
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; repair?: ToolCallRepairInfo }
 	| {

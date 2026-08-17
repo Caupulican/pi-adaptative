@@ -138,20 +138,19 @@ describe("destructive/crash: worker concurrency, fence, wait, tree budget", () =
 		);
 	});
 
-	it("INV-B1: profile-free default tree ceilings are nonzero", () => {
+	it("INV-B1: profile-free default trees have no implicit cost or time ceiling", () => {
 		assertInvariants(
 			{
 				treeBudget: {
 					spendUsd: 0,
-					ceilingUsd: DEFAULT_WORKER_DELEGATION_MAX_USD,
 					finalTurnOverrunUsd: 0,
-					profileFree: true,
-					ceilingIsZero: DEFAULT_WORKER_DELEGATION_MAX_USD === 0,
+					ceilingSource: "none",
 				},
 			},
 			["INV-B1"],
 			{ seed: 0, scenario: "INV-B1" },
 		);
-		expect(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS).toBeGreaterThan(0);
+		expect(DEFAULT_WORKER_DELEGATION_MAX_USD).toBe(0);
+		expect(DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS).toBe(0);
 	});
 });

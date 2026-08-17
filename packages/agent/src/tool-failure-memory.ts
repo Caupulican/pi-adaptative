@@ -410,6 +410,21 @@ export function getToolExecutionKey(tool: string, args: unknown): string {
 	return toolOperationKey(tool, args, false);
 }
 
+/** Read the four hash words already encoded by this module's exact execution-key owner. */
+export function getToolExecutionKeyHashParts(executionKey: string): readonly [number, number, number, number] {
+	const separator = executionKey.lastIndexOf(":");
+	const signature = executionKey.slice(separator + 1);
+	if (separator < 0 || signature.length !== TOOL_SIGNATURE_HEX_CHARS || !/^[0-9a-f]+$/.test(signature)) {
+		throw new TypeError("Tool execution key has an invalid hash signature.");
+	}
+	return [
+		Number.parseInt(signature.slice(0, 8), 16),
+		Number.parseInt(signature.slice(8, 16), 16),
+		Number.parseInt(signature.slice(16, 24), 16),
+		Number.parseInt(signature.slice(24, 32), 16),
+	];
+}
+
 export function getToolFailureRecordExecutionKey(record: ToolFailureMemoryRecord): string | undefined {
 	return record[TOOL_FAILURE_EXECUTION_KEY];
 }

@@ -8,6 +8,7 @@ import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
+import { DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
 import {
 	DEFAULT_GOAL_AUTO_CONTINUE,
 	DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS,
@@ -271,13 +272,8 @@ export type ResolvedResearchLaneSettings = Required<Omit<ResearchLaneSettings, "
 	Pick<ResearchLaneSettings, "model" | "profile" | "systemPrompt">;
 
 export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
-// Restored (1b1afb16f zeroed these to stop trees hard-failing on an implicit ceiling; that was a
-// workaround for the ungraceful termination, not evidence the $0.50/120s values themselves were
-// wrong — 78a2158dd fixed the real cause by making budget exhaustion a "partial" claim requiring
-// review instead of a hard failure, so the default ceiling is now safe to restore. Unbounded stays
-// available as an explicit owner opt-in: set workerDelegation.maxUsd/maxWallClockMs to 0.
-export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0.5;
-export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 120_000;
+export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;
+export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
 export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 20;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_WRITE_PATHS = ["."] as const;
@@ -288,8 +284,8 @@ export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
 	orchestrationProfile?: string; // optional execution preset; agents may replace its defaults within inherited authority
-	maxUsd?: number; // default: 0.50 shared by one recursive agent tree; 0 disables this settings-level ceiling
-	maxWallClockMs?: number; // default: 120000 cumulative active time across one tree; 0 disables the budget
+	maxUsd?: number; // default: 0 (unbounded); a positive value caps shared spend for one recursive agent tree
+	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps cumulative active time across one tree
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	writePaths?: string[]; // default: ["."]; explicit empty array revokes direct write/edit tools
 	maxConcurrent?: number; // default: 20; running-worker concurrency; fixed fleet safety ceilings separately bound depth, children, identities, and queued dispatches
@@ -2675,15 +2671,14 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Proactive per-turn cost guard (#34). Default ON in WARN-only mode with a high anomaly-catching
-	 * projection threshold so an unusually expensive turn surfaces a visible footer notice without silently
-	 * changing behavior. Set `maxTurnUsd: 0` to disable, or `action: "downgrade"` to also auto-reduce
-	 * reasoning effort over the ceiling.
+	 * Optional per-turn cost guard (#34). Disabled by default so productive work has no implicit spend
+	 * limiter. Set a positive `maxTurnUsd` to warn at that projected ceiling, or pair it with
+	 * `action: "downgrade"` to also auto-reduce reasoning effort.
 	 */
 	getCostGuardSettings(): { maxTurnUsd: number; action: "warn" | "downgrade" } {
 		return {
-			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? 2.5,
-			action: this.settings.costGuard?.action ?? "warn",
+			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? DEFAULT_COST_GUARD_SETTINGS.maxTurnUsd,
+			action: this.settings.costGuard?.action ?? DEFAULT_COST_GUARD_SETTINGS.action,
 		};
 	}
 

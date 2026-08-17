@@ -4,6 +4,7 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentMessageOrigin,
 	AgentTool,
 	StreamIdleOptions,
 	ThinkingLevel,
@@ -246,7 +247,7 @@ export interface IsolatedCompletionOptions {
 	 * before execution starts and each tool result is recorded before the next provider request.
 	 * Throwing aborts the child loop; continuing without durable history would make replay unsafe.
 	 */
-	onMessage?: (message: Message) => Promise<void> | void;
+	onMessage?: (message: Message, origin?: AgentMessageOrigin) => Promise<void> | void;
 	/** Durable mid-run steering inbox owned by the child conversation. */
 	getSteeringMessages?: AgentLoopConfig["getSteeringMessages"];
 	/** Durable post-turn follow-up inbox owned by the child conversation. */

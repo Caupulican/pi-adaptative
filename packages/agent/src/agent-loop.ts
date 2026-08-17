@@ -37,7 +37,6 @@ import {
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
 import {
-	TOOL_FAILURE_RECOVERY_ACCOUNTING_WAVE_SIZE,
 	type ToolFailureExecutionReservation,
 	ToolFailureRecoveryGate,
 	type ToolFailureRecoveryGateEffect,
@@ -65,6 +64,9 @@ export {
 } from "./provider-request-planner.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+/** Bound simultaneous tool starts without imposing a failure-count or operation-count stop. */
+const TOOL_EXECUTION_WAVE_SIZE = 4;
 
 /** Bounded no-progress state retained across host-owned continuations of one logical prompt. */
 export interface AgentLoopContinuationState {
@@ -215,7 +217,7 @@ function createMandatoryRecoveryDeliveryFallback(
 function createProviderTurnLimitMessage(config: AgentLoopConfig, providerTurns: number): AssistantMessage {
 	return createLocalDiagnosticMessage(
 		config,
-		`Provider turn limit (${providerTurns}) reached. The harness stopped before another paid model request; continue explicitly if more work is needed.`,
+		`Configured provider turn limit (${providerTurns}) reached. The harness stopped before another provider request; continue explicitly if more work is needed.`,
 	);
 }
 
@@ -239,8 +241,8 @@ async function emitTerminalLocalMessage(
 	startTurn: boolean,
 ): Promise<void> {
 	if (startTurn) await emit({ type: "turn_start" });
-	await emit({ type: "message_start", message });
-	await emit({ type: "message_end", message });
+	await emit({ type: "message_start", message, origin: "local" });
+	await emit({ type: "message_end", message, origin: "local" });
 	await emit({ type: "turn_end", message, toolResults: [] });
 	await emit({ type: "agent_end", messages: newMessages });
 }
@@ -770,10 +772,10 @@ async function executeToolCallsParallel(
 ): Promise<ExecutedToolCallBatch> {
 	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
 	let nextIndex = 0;
-	// Account each bounded concurrent wave before launching more calls. Otherwise a single
-	// assistant batch could start an unbounded number of failures before the circuit observes one.
+	// Account each bounded concurrent wave before launching more calls. This controls concurrency;
+	// admission remains operation-specific and does not stop unrelated work after failures.
 	while (nextIndex < toolCalls.length && !execCtx.signal?.aborted) {
-		const waveEnd = Math.min(nextIndex + TOOL_FAILURE_RECOVERY_ACCOUNTING_WAVE_SIZE, toolCalls.length);
+		const waveEnd = Math.min(nextIndex + TOOL_EXECUTION_WAVE_SIZE, toolCalls.length);
 		const wave: FinalizedToolCallEntry[] = [];
 		const completionOrder: FinalizedToolCallOutcome[] = [];
 		for (; nextIndex < waveEnd; nextIndex++) {
@@ -1115,7 +1117,7 @@ async function prepareToolCall(
 			toolCall.arguments = validatedArgs;
 		}
 		const unresolvedRecord = getUnresolvedToolFailure(toolFailureMemory, toolCall.name, validatedArgs);
-		const admission = toolFailureRecoveryGate.admit(tool, validatedArgs, unresolvedRecord);
+		const admission = toolFailureRecoveryGate.admit(tool, validatedArgs, unresolvedRecord, currentContext.messages);
 		if (admission.kind === "blocked") {
 			const failureCode = admission.exhausted
 				? admission.scope === "operation"

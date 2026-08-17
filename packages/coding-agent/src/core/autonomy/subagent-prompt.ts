@@ -5,7 +5,7 @@ export { SUBAGENT_CORE_SYSTEM_PROMPT };
 /**
  * Agent system-prompt composition with an irreducible execution-contract core.
  *
- * The core is the "ultimate level-0 default": ~80 tokens of non-negotiable rules that survive ANY
+ * The core is the "ultimate level-0 default": ~100 tokens of non-negotiable rules that survive ANY
  * customization. Everything above it — the lane's role prompt and a shipped profile's soul — is a
  * replaceable layer: settings, a lane profile, or the calling model (delegate tool) can erase and
  * replace it entirely. This keeps shipped subagents maximally efficient on small open models (a

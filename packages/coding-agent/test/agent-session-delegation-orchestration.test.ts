@@ -2,30 +2,33 @@ import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { createHarness } from "./suite/harness.ts";
 
-const ULTRA_POLICY_HEADING = "PI ULTRA ORCHESTRATION";
+const DELEGATION_POLICY_HEADING = "PI DELEGATION";
 
-describe("AgentSession Ultra orchestration", () => {
-	it("reinforces delegation only while Ultra is selected", async () => {
+describe("AgentSession provider-neutral delegation orchestration", () => {
+	it("advertises delegation whenever the tool is active, independent of reasoning level", async () => {
 		const harness = await createHarness({ models: [{ id: "sol", reasoning: true, contextWindow: 372_000 }] });
 		try {
 			const model = harness.session.model;
 			if (!model) throw new Error("Expected harness model");
 			model.thinkingLevelMap = { max: "max", ultra: "max" };
 
-			harness.session.setThinkingLevel("ultra");
-			expect(harness.session.systemPrompt).toContain(ULTRA_POLICY_HEADING);
+			harness.session.setThinkingLevel("max");
+			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);
 			expect(harness.session.systemPrompt).toContain(
-				"Own delivery; delegate useful independent bounded reads, parallelize while parent continues.",
+				"Delegate useful independent research, implementation, tests, or specialist review early",
+			);
+			expect(harness.session.systemPrompt).toContain(
+				"ceilings come only from host settings or an owner-authored profileId",
 			);
 
-			harness.session.setThinkingLevel("max");
-			expect(harness.session.systemPrompt).not.toContain(ULTRA_POLICY_HEADING);
+			harness.session.setThinkingLevel("ultra");
+			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("does not advertise reinforced delegation when the user or active tool profile disables it", async () => {
+	it("does not advertise delegation when the user or active tool profile disables it", async () => {
 		const disabledHarness = await createHarness({
 			models: [{ id: "sol", reasoning: true, contextWindow: 372_000 }],
 			settings: { workerDelegation: { enabled: false } },
@@ -40,7 +43,7 @@ describe("AgentSession Ultra orchestration", () => {
 				if (!model) throw new Error("Expected harness model");
 				model.thinkingLevelMap = { max: "max", ultra: "max" };
 				harness.session.setThinkingLevel("ultra");
-				expect(harness.session.systemPrompt).not.toContain(ULTRA_POLICY_HEADING);
+				expect(harness.session.systemPrompt).not.toContain(DELEGATION_POLICY_HEADING);
 			}
 		} finally {
 			disabledHarness.cleanup();
@@ -48,7 +51,7 @@ describe("AgentSession Ultra orchestration", () => {
 		}
 	});
 
-	it("removes Ultra policy for a routed Luna/max turn and restores it afterward", async () => {
+	it("keeps delegation policy for a routed provider/model turn", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "sol", reasoning: true, contextWindow: 372_000 },
@@ -79,15 +82,15 @@ describe("AgentSession Ultra orchestration", () => {
 			await harness.session.prompt("Explain this code block", { autoContinueGoal: false });
 
 			expect(routedReasoning).toBe("max");
-			expect(routedPrompt).not.toContain(ULTRA_POLICY_HEADING);
+			expect(routedPrompt).toContain(DELEGATION_POLICY_HEADING);
 			expect(harness.session.thinkingLevel).toBe("ultra");
-			expect(harness.session.systemPrompt).toContain(ULTRA_POLICY_HEADING);
+			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("applies a same-model tier thinking override without leaking the Ultra policy", async () => {
+	it("keeps delegation policy across a same-model thinking override", async () => {
 		const harness = await createHarness({
 			models: [{ id: "sol", reasoning: true, contextWindow: 372_000 }],
 			settings: {
@@ -115,9 +118,9 @@ describe("AgentSession Ultra orchestration", () => {
 			await harness.session.prompt("Explain this code block", { autoContinueGoal: false });
 
 			expect(routedReasoning).toBe("max");
-			expect(routedPrompt).not.toContain(ULTRA_POLICY_HEADING);
+			expect(routedPrompt).toContain(DELEGATION_POLICY_HEADING);
 			expect(harness.session.thinkingLevel).toBe("ultra");
-			expect(harness.session.systemPrompt).toContain(ULTRA_POLICY_HEADING);
+			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);
 		} finally {
 			harness.cleanup();
 		}

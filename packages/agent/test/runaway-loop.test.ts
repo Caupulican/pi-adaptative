@@ -120,7 +120,7 @@ function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode
 }
 
 describe("runaway-loop backstop", () => {
-	it("caps varied tool churn at the default provider-turn budget from session 01a00b38", async () => {
+	it("does not impose an implicit provider-turn budget on varied work", async () => {
 		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
 		let providerTurns = 0;
 		const streamFn = () => {
@@ -169,17 +169,15 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(providerTurns).toBe(20);
-		expect(stalls).toEqual([expect.objectContaining({ reason: "provider_turn_limit", repeats: 20 })]);
+		expect(providerTurns).toBe(25);
+		expect(stalls).toEqual([]);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "message_end" &&
 					event.message.role === "assistant" &&
-					event.message.content.some(
-						(block) => block.type === "text" && block.text.includes("Provider turn limit (20) reached"),
-					),
+					event.message.content.some((block) => block.type === "text" && block.text === "late stop"),
 			),
 		).toBe(true);
 	});
@@ -235,9 +233,10 @@ describe("runaway-loop backstop", () => {
 		expect(providerCalls).toBe(5);
 	});
 
-	it("retains the provider-turn cost fuse across a host continuation", async () => {
+	it("retains an explicit provider-turn fuse across a host continuation", async () => {
 		let providerCalls = 0;
 		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
+		const localTerminalMessages: AssistantMessage[] = [];
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
@@ -268,6 +267,11 @@ describe("runaway-loop backstop", () => {
 			onRunawayStop: (info) => stalls.push(info),
 		});
 		agent.maxStallTurns = 0;
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.origin === "local" && event.message.role === "assistant") {
+				localTerminalMessages.push(event.message);
+			}
+		});
 
 		await agent.prompt("start");
 		agent.state.messages.push({
@@ -283,9 +287,14 @@ describe("runaway-loop backstop", () => {
 		expect(stalls).toEqual([
 			expect.objectContaining({ reason: "provider_turn_limit", signature: "provider_turn_limit", repeats: 3 }),
 		]);
+		expect(localTerminalMessages).toHaveLength(1);
+		expect(localTerminalMessages[0]?.role).toBe("assistant");
+		expect(localTerminalMessages[0]?.content).toEqual([
+			expect.objectContaining({ type: "text", text: expect.stringContaining("Configured provider turn limit (3)") }),
+		]);
 	});
 
-	it("retains varied failure-family recovery accounting across a host continuation", async () => {
+	it("does not accumulate changed-operation failures across a host continuation", async () => {
 		let providerCalls = 0;
 		let sawToollessProviderTurn = false;
 		const failingTool = createEchoTool(() => {
@@ -342,7 +351,7 @@ describe("runaway-loop backstop", () => {
 		await agent.continue();
 
 		expect(sawToollessProviderTurn).toBe(false);
-		expect(providerCalls).toBe(5);
+		expect(providerCalls).toBe(6);
 	});
 
 	it("stops a loop that repeats the identical tool call, firing onRunawayStop", async () => {
@@ -1753,7 +1762,7 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("bounds varied-argument failures by failure family", async () => {
+	it("does not block distinct failed operations because they share a failure family", async () => {
 		const schema = Type.Object({ path: Type.String() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof schema> = {
@@ -1813,19 +1822,88 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(turns).toBe(4);
+		expect(turns).toBe(11);
 		expect(deliveryTurns).toBe(0);
-		expect(executions).toBe(4);
+		expect(executions).toBe(10);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("bounds varied policy rejections without executing the tool", async () => {
+	it("does not accumulate an edit failure family across successful edits", async () => {
+		const schema = Type.Object({ path: Type.String(), fail: Type.Boolean() });
+		let executions = 0;
+		const editLikeTool: AgentTool<typeof schema> = {
+			name: "edit",
+			label: "Edit-like",
+			description: "Apply one focused replacement",
+			parameters: schema,
+			async execute(_id, params) {
+				executions++;
+				if (params.fail) throw new Error(`Old text not found in ${params.path}`);
+				return { content: [{ type: "text", text: `edited ${params.path}` }], details: { phase: "edited" } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [editLikeTool] };
+		let turns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turns++;
+				if (turns <= 8) {
+					const fail = turns % 2 === 1;
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `edit-${turns}`,
+									name: "edit",
+									arguments: { path: `file-${turns}.ts`, fail },
+								},
+							],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "all edits complete" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "apply the edit sequence", timestamp: 1 }],
+				context,
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(turns).toBe(9);
+		expect(executions).toBe(8);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+			),
+		).toBe(false);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("does not block distinct policy rejections as a shared failure family", async () => {
 		let executions = 0;
 		let beforeCalls = 0;
 		const guardedTool = createEchoTool(() => executions++);
@@ -1884,20 +1962,20 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(turns).toBe(4);
+		expect(turns).toBe(11);
 		expect(deliveryTurns).toBe(0);
-		expect(beforeCalls).toBe(4);
+		expect(beforeCalls).toBe(10);
 		expect(executions).toBe(0);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("bounds total failures when a model varies both operation and failure family", async () => {
+	it("does not impose a run-wide failure count on distinct operations", async () => {
 		const schema = Type.Object({ attempt: Type.Number() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof schema> = {
@@ -1921,7 +1999,7 @@ describe("runaway-loop backstop", () => {
 					return;
 				}
 				turns++;
-				if (turns <= 16) {
+				if (turns <= 80) {
 					stream.push({
 						type: "done",
 						reason: "toolUse",
@@ -1957,9 +2035,9 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(turns).toBe(12);
+		expect(turns).toBe(81);
 		expect(deliveryTurns).toBe(0);
-		expect(executions).toBe(12);
+		expect(executions).toBe(80);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 

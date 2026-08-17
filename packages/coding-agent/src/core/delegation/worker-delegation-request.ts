@@ -33,7 +33,10 @@ export interface WorkerDelegationModelRequest {
 	modelId: string;
 }
 
-/** Model-authored execution preferences compiled into an immutable, inherited runtime grant. */
+/**
+ * Trusted caller execution preferences compiled into an immutable, inherited runtime grant.
+ * The model-facing `delegate` adapter intentionally exposes a budget-free subset.
+ */
 export interface WorkerDelegationAuthorityRequest {
 	role?: WorkerRole;
 	model?: WorkerDelegationModelRequest;
@@ -62,7 +65,7 @@ function uniqueStringArray(value: unknown, label: string, options: { maxEntries?
 	});
 }
 
-/** Parse the model-facing authority request before it reaches admission or durable state. */
+/** Parse a caller authority request before it reaches admission or durable state. */
 export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDelegationAuthorityRequest {
 	if (!isPlainRecord(value)) throw new WorkerDelegationRequestError("Delegation authority must be an object.");
 	if (

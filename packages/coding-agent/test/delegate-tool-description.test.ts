@@ -143,7 +143,7 @@ describe("delegate tool capability description", () => {
 		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: fresh=no agentId");
 		expect(promptGuidelines).toContain("reuse=returned agentId");
 		expect(promptGuidelines).toContain("task=instructions");
-		expect(promptGuidelines).toContain("budget=authority.budget");
+		expect(promptGuidelines).toContain("Owner profiles/settings own ceilings");
 		expect(promptGuidelines).toContain("queued=admitted");
 		expect(promptGuidelines).toContain("parallel read-only=no write/edit");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");

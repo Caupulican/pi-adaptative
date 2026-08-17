@@ -287,7 +287,7 @@ function isOpenAiGpt56(modelId: string): boolean {
 	return modelId.includes("gpt-5.6");
 }
 
-function supportsPiUltra(model: Model<Api>): boolean {
+function supportsUltraThinkingAlias(model: Model<Api>): boolean {
 	return (
 		(model.provider === "openai" || model.provider === "openai-codex") &&
 		(model.id === "gpt-5.6" || model.id.includes("gpt-5.6-sol") || model.id.includes("gpt-5.6-terra"))
@@ -376,8 +376,8 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (isOpenAiGpt56(model.id)) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
-	if (supportsPiUltra(model)) {
-		// Ultra is pi-side proactive orchestration; GPT-5.6 receives max on the wire.
+	if (supportsUltraThinkingAlias(model)) {
+		// Ultra is a UI reasoning label; supported GPT-5.6 variants receive max on the wire.
 		mergeThinkingLevelMap(model, { ultra: "max" });
 	}
 	if (model.provider === "openai" && model.id === "gpt-5.5") {

@@ -1,7 +1,9 @@
 import { getToolExecutionUnchangedRetryLimit } from "@caupulican/pi-ai/tool-repair-registry";
+import type { ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
 	forEachPairedToolResult,
 	getToolExecutionKey,
+	getToolExecutionKeyHashParts,
 	getToolFailureRecordExecutionKey,
 	isClosedOperationFailureCode,
 	isPromptScopedFailureCode,
@@ -22,10 +24,8 @@ const MAX_BLOCKED_REPLAYS_PER_FAILURE = 2;
 const BASE_FAILURE_EXECUTIONS_PER_OPERATION = 1;
 const MAX_RECOVERY_PROBES_PER_OPERATION = 1;
 const MAX_REJECTIONS_PER_OPERATION = 4;
-export const TOOL_FAILURE_RECOVERY_ACCOUNTING_WAVE_SIZE = 4;
-const MAX_FAILURES_PER_FAMILY = TOOL_FAILURE_RECOVERY_ACCOUNTING_WAVE_SIZE;
-const MAX_FAILURES_PER_RUN = 12;
-const MAX_RECOVERY_STATES = 64;
+const MAX_HOT_RECOVERY_STATES = 64;
+const SEEN_EXECUTION_FILTER_BYTES = 64 * 1024;
 const MAX_RECOVERY_TARGETS = 8;
 const MAX_RECOVERY_ACTIONS = 8;
 const MAX_TARGET_KIND_CHARS = 64;
@@ -69,12 +69,16 @@ interface FailureRecoveryState {
 	recoveryTargets: readonly AgentToolFailureRecoveryTarget[];
 	reservedExecutions: number;
 	failures: number;
-	failureFamilyCounts: Map<string, number>;
 	recoveryProbes: number;
 	blockedReplays: number;
 	recoveryAvailable: boolean;
 	operationCircuitOpen: boolean;
 }
+
+type TranscriptRecoveryReduction =
+	| { kind: "resolved" }
+	| { kind: "ignored"; state: FailureRecoveryState | undefined }
+	| { kind: "failed"; state: FailureRecoveryState };
 
 interface AvailableRecoveryAction {
 	toolName: string;
@@ -96,6 +100,39 @@ export interface ToolFailureRecoveryHalt {
 }
 
 /**
+ * Bounded negative lookup for exact execution identities.
+ *
+ * A miss proves the operation has not failed while this gate has been alive. A hit only means
+ * "possibly seen" and must be verified against the transcript, so collisions can cost a scan but
+ * can never deny an execution. Keeping this separate from the hot state cache lets old exact
+ * circuits survive eviction without retaining one live object graph per historical operation.
+ */
+class SeenExecutionFilter {
+	private readonly bits = new Uint8Array(SEEN_EXECUTION_FILTER_BYTES);
+
+	add(executionKey: string): void {
+		for (const hash of getToolExecutionKeyHashParts(executionKey)) this.set(hash);
+	}
+
+	mightContain(executionKey: string): boolean {
+		for (const hash of getToolExecutionKeyHashParts(executionKey)) {
+			if (!this.has(hash)) return false;
+		}
+		return true;
+	}
+
+	private set(hash: number): void {
+		const bit = (hash >>> 0) % (SEEN_EXECUTION_FILTER_BYTES * 8);
+		this.bits[bit >>> 3] |= 1 << (bit & 7);
+	}
+
+	private has(hash: number): boolean {
+		const bit = (hash >>> 0) % (SEEN_EXECUTION_FILTER_BYTES * 8);
+		return (this.bits[bit >>> 3] & (1 << (bit & 7))) !== 0;
+	}
+}
+
+/**
  * Owns execution admission and bounded unresolved-failure budgets.
  *
  * Recovery authority is exact and tool-owned. A failed tool declares opaque backend-specific targets;
@@ -103,47 +140,39 @@ export interface ToolFailureRecoveryHalt {
  * successful repair evidence with byte-exact scope can reopen one probe. Argument text and hooks have
  * no recovery authority.
  *
- * Run-level halt and family/run counters stay on the current run. Per-operation execution budget and
- * circuit are reconstructed from the transcript when a new run starts with an empty gate, so an
- * already-exhausted identical operation is not re-executed after a user turn or session resume.
+ * Run-level halt stays on the current run, but admission is never denied because unrelated operations
+ * happened to fail. A bounded hot cache carries active per-operation state. A fixed-size negative
+ * lookup sends an evicted exact replay back to the transcript for authoritative reconstruction, so
+ * cache pressure cannot either stop new work or reopen an already-exhausted operation.
  */
 export class ToolFailureRecoveryGate {
 	private readonly statesByExecutionKey = new Map<string, FailureRecoveryState>();
-	private readonly failuresByFamily = new Map<string, number>();
-	private totalFailures = 0;
+	private readonly seenFailedExecutions = new SeenExecutionFilter();
+	/** Exact successes not yet present in the transcript snapshot consulted by admission. */
+	private readonly resolvedBeforeTranscriptCommit = new Set<string>();
+	private transcriptMessages: readonly AgentMessage[] = [];
+	private transcriptLength = 0;
+	private transcriptTail: AgentMessage | undefined;
+	private restoredFromTranscript = false;
 	private halted: ToolFailureRecoveryHalt | undefined;
 
 	isEmpty(): boolean {
-		return this.statesByExecutionKey.size === 0 && this.halted === undefined && this.totalFailures === 0;
+		return this.statesByExecutionKey.size === 0 && this.halted === undefined;
 	}
 
 	restoreFromMessages(messages: readonly AgentMessage[]): void {
-		if (!this.isEmpty()) return;
+		this.trackTranscript(messages);
+		if (this.restoredFromTranscript || !this.isEmpty()) return;
+		this.restoredFromTranscript = true;
 		forEachPairedToolResult(messages, ({ tool, args, executionKey, result }) => {
-			if (!result.isError) {
-				const existing = this.statesByExecutionKey.get(executionKey);
-				if (existing) this.clearResolvedState(executionKey, existing);
+			const reduction = this.reduceTranscriptResult(this.statesByExecutionKey.get(executionKey), tool, args, result);
+			if (reduction.kind === "resolved") {
+				this.clearResolvedState(executionKey);
 				return;
 			}
-			const restored = restoreToolFailureRecord(result, tool, args);
-			const visibleCode = readVisibleToolFailureCode(result);
-			if (isPromptScopedFailureCode(visibleCode) || isPromptScopedFailureCode(restored.failureCode)) {
-				return;
-			}
-			const state = this.ensureRestoredState(executionKey, restored);
-			if (!state) return false;
-			if (isClosedOperationFailureCode(visibleCode)) {
-				state.operationCircuitOpen = true;
-				state.blockedReplays = MAX_BLOCKED_REPLAYS_PER_FAILURE;
-				state.recoveryAvailable = false;
-				return;
-			}
-			if (visibleCode === "repeated_failed_operation") {
-				state.blockedReplays++;
-				return;
-			}
-			state.reservedExecutions++;
-			state.failures++;
+			if (reduction.kind === "ignored") return;
+			this.seenFailedExecutions.add(executionKey);
+			this.retainHotState(executionKey, reduction.state);
 		});
 	}
 
@@ -167,35 +196,32 @@ export class ToolFailureRecoveryGate {
 		tool: AgentTool<any>,
 		args: unknown,
 		record: ToolFailureMemoryRecord | undefined,
+		messages: readonly AgentMessage[] = this.transcriptMessages,
 	): ToolFailureRecoveryAdmission {
-		const stateCapacityHalt = this.halted;
-		if (stateCapacityHalt) {
+		this.trackTranscript(messages);
+		const runHalt = this.halted;
+		if (runHalt) {
 			return {
 				kind: "blocked",
-				record: stateCapacityHalt.record,
+				record: runHalt.record,
 				exhausted: true,
 				scope: "run",
-				diagnostic: stateCapacityHalt.diagnostic,
+				diagnostic: runHalt.diagnostic,
 			};
 		}
 
 		const executionKey = getToolExecutionKey(tool.name, args);
-		let state = this.statesByExecutionKey.get(executionKey);
+		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) return { kind: "allowed" };
+		let state = this.getHotState(executionKey);
+		if (!state && this.seenFailedExecutions.mightContain(executionKey)) {
+			state = this.restoreOperationFromTranscript(executionKey);
+		}
 		if (!state && record && getToolFailureRecordExecutionKey(record) === executionKey) {
 			state = this.getOrCreateState(executionKey, record, readFailureTargets(tool, args, record.failureCode));
 		}
-		if (this.halted) {
-			return {
-				kind: "blocked",
-				record: this.halted.record,
-				exhausted: true,
-				scope: "run",
-				diagnostic: this.halted.diagnostic,
-			};
-		}
 		if (!state) return { kind: "allowed" };
 
-		if (record) state.record = record;
+		if (record && getToolFailureRecordExecutionKey(record) === executionKey) state.record = record;
 		if (state.operationCircuitOpen) {
 			if (state.recoveryAvailable && state.recoveryProbes < MAX_RECOVERY_PROBES_PER_OPERATION) {
 				state.operationCircuitOpen = false;
@@ -267,57 +293,15 @@ export class ToolFailureRecoveryGate {
 		return executionsIncludingCurrent < BASE_FAILURE_EXECUTIONS_PER_OPERATION + retryLimit;
 	}
 
-	private ensureRestoredState(
-		executionKey: string,
-		record: ToolFailureMemoryRecord,
-	): FailureRecoveryState | undefined {
-		const existing = this.statesByExecutionKey.get(executionKey);
-		if (existing) {
-			existing.record = record;
-			return existing;
-		}
-		if (this.statesByExecutionKey.size >= MAX_RECOVERY_STATES) return undefined;
-		const state: FailureRecoveryState = {
-			record,
-			recoveryTargets: [],
-			reservedExecutions: 0,
-			failures: 0,
-			failureFamilyCounts: new Map(),
-			recoveryProbes: 0,
-			blockedReplays: 0,
-			recoveryAvailable: false,
-			operationCircuitOpen: false,
-		};
-		this.statesByExecutionKey.set(executionKey, state);
-		return state;
-	}
-
 	private getOrCreateState(
 		executionKey: string,
 		record: ToolFailureMemoryRecord,
 		targets: readonly AgentToolFailureRecoveryTarget[],
 	): FailureRecoveryState {
-		const existing = this.statesByExecutionKey.get(executionKey);
+		const existing = this.getHotState(executionKey);
 		if (existing) return existing;
-		const state: FailureRecoveryState = {
-			record,
-			recoveryTargets: targets,
-			reservedExecutions: 0,
-			failures: 0,
-			failureFamilyCounts: new Map(),
-			recoveryProbes: 0,
-			blockedReplays: 0,
-			recoveryAvailable: false,
-			operationCircuitOpen: false,
-		};
-		if (this.statesByExecutionKey.size >= MAX_RECOVERY_STATES) {
-			this.halted = {
-				record,
-				diagnostic: `Recovery circuit opened at the ${MAX_RECOVERY_STATES}-operation state bound.`,
-			};
-			return state;
-		}
-		this.statesByExecutionKey.set(executionKey, state);
+		const state = createFailureRecoveryState(record, targets);
+		this.retainHotState(executionKey, state);
 		return state;
 	}
 
@@ -328,6 +312,8 @@ export class ToolFailureRecoveryGate {
 		reservation: ToolFailureExecutionReservation | undefined,
 	): void {
 		const executionKey = getToolExecutionKey(record.tool, args);
+		this.resolvedBeforeTranscriptCommit.delete(executionKey);
+		this.seenFailedExecutions.add(executionKey);
 		const state = this.getOrCreateState(executionKey, record, targets);
 		if (this.halted) return;
 		state.record = record;
@@ -337,11 +323,6 @@ export class ToolFailureRecoveryGate {
 		if (reservation?.executionKey !== executionKey) state.reservedExecutions++;
 
 		state.failures++;
-		this.totalFailures++;
-		const familyKey = `${record.tool}\0${record.failureCode}`;
-		const familyFailures = (this.failuresByFamily.get(familyKey) ?? 0) + 1;
-		this.failuresByFamily.set(familyKey, familyFailures);
-		state.failureFamilyCounts.set(familyKey, (state.failureFamilyCounts.get(familyKey) ?? 0) + 1);
 
 		const operationFailureLimit =
 			record.state === "failed"
@@ -354,29 +335,19 @@ export class ToolFailureRecoveryGate {
 				record,
 				diagnostic: `Recovery circuit opened after ${state.failures} failed outcomes for one operation.`,
 			};
-			return;
-		}
-		if (familyFailures >= MAX_FAILURES_PER_FAMILY) {
-			this.halted = {
-				record,
-				diagnostic: `Recovery circuit opened after ${familyFailures} failures in one tool failure family.`,
-			};
-			return;
-		}
-		if (this.totalFailures >= MAX_FAILURES_PER_RUN) {
-			this.halted = {
-				record,
-				diagnostic: `Recovery circuit opened after ${this.totalFailures} tool failures in one run.`,
-			};
 		}
 	}
 
 	private observeSuccess(tool: AgentTool<any>, args: unknown, result: AgentToolResult<any>): void {
 		const successfulExecutionKey = getToolExecutionKey(tool.name, args);
+		// Tool results are appended to the transcript after the current execution batch completes.
+		// Until then the last persisted failure is stale authority: remember the exact success so a
+		// later sequential call in this same batch cannot resurrect that failure from the transcript.
+		this.resolvedBeforeTranscriptCommit.add(successfulExecutionKey);
 		const evidenceTargets = readRecoveryEvidenceTargets(tool, args, result);
 		for (const [executionKey, state] of this.statesByExecutionKey) {
 			if (executionKey === successfulExecutionKey) {
-				this.clearResolvedState(executionKey, state);
+				this.clearResolvedState(executionKey);
 				continue;
 			}
 			if (
@@ -389,15 +360,103 @@ export class ToolFailureRecoveryGate {
 		}
 	}
 
-	private clearResolvedState(executionKey: string, state: FailureRecoveryState): void {
+	private clearResolvedState(executionKey: string): void {
 		this.statesByExecutionKey.delete(executionKey);
-		this.totalFailures = Math.max(0, this.totalFailures - state.failures);
-		for (const [familyKey, stateFailures] of state.failureFamilyCounts) {
-			const remaining = (this.failuresByFamily.get(familyKey) ?? 0) - stateFailures;
-			if (remaining > 0) this.failuresByFamily.set(familyKey, remaining);
-			else this.failuresByFamily.delete(familyKey);
+	}
+
+	private trackTranscript(messages: readonly AgentMessage[]): void {
+		const tail = messages[messages.length - 1];
+		if (
+			messages !== this.transcriptMessages ||
+			messages.length !== this.transcriptLength ||
+			tail !== this.transcriptTail
+		) {
+			// An advanced transcript now authoritatively records completed results. The temporary
+			// exact-success overlay is bounded to one uncommitted execution batch.
+			this.resolvedBeforeTranscriptCommit.clear();
+		}
+		this.transcriptMessages = messages;
+		this.transcriptLength = messages.length;
+		this.transcriptTail = tail;
+	}
+
+	private getHotState(executionKey: string): FailureRecoveryState | undefined {
+		const state = this.statesByExecutionKey.get(executionKey);
+		if (!state) return undefined;
+		this.statesByExecutionKey.delete(executionKey);
+		this.statesByExecutionKey.set(executionKey, state);
+		return state;
+	}
+
+	private retainHotState(executionKey: string, state: FailureRecoveryState): void {
+		this.statesByExecutionKey.delete(executionKey);
+		this.statesByExecutionKey.set(executionKey, state);
+		while (this.statesByExecutionKey.size > MAX_HOT_RECOVERY_STATES) {
+			const oldest = this.statesByExecutionKey.keys().next().value;
+			if (oldest === undefined) break;
+			this.statesByExecutionKey.delete(oldest);
 		}
 	}
+
+	private restoreOperationFromTranscript(executionKey: string): FailureRecoveryState | undefined {
+		let restoredState: FailureRecoveryState | undefined;
+		forEachPairedToolResult(this.transcriptMessages, ({ tool, args, executionKey: candidateKey, result }) => {
+			if (candidateKey !== executionKey) return;
+			const reduction = this.reduceTranscriptResult(restoredState, tool, args, result);
+			if (reduction.kind === "resolved") {
+				restoredState = undefined;
+				return;
+			}
+			if (reduction.kind === "failed") restoredState = reduction.state;
+		});
+		if (restoredState) this.retainHotState(executionKey, restoredState);
+		return restoredState;
+	}
+
+	private reduceTranscriptResult(
+		state: FailureRecoveryState | undefined,
+		tool: string,
+		args: unknown,
+		result: ToolResultMessage,
+	): TranscriptRecoveryReduction {
+		if (!result.isError) return { kind: "resolved" };
+		const record = restoreToolFailureRecord(result, tool, args);
+		const visibleCode = readVisibleToolFailureCode(result);
+		if (isPromptScopedFailureCode(visibleCode) || isPromptScopedFailureCode(record.failureCode)) {
+			return { kind: "ignored", state };
+		}
+		const next = state ?? createFailureRecoveryState(record, []);
+		next.record = record;
+		if (isClosedOperationFailureCode(visibleCode)) {
+			next.operationCircuitOpen = true;
+			next.blockedReplays = MAX_BLOCKED_REPLAYS_PER_FAILURE;
+			next.recoveryAvailable = false;
+			return { kind: "failed", state: next };
+		}
+		if (visibleCode === "repeated_failed_operation") {
+			next.blockedReplays++;
+			return { kind: "failed", state: next };
+		}
+		next.reservedExecutions++;
+		next.failures++;
+		return { kind: "failed", state: next };
+	}
+}
+
+function createFailureRecoveryState(
+	record: ToolFailureMemoryRecord,
+	recoveryTargets: readonly AgentToolFailureRecoveryTarget[],
+): FailureRecoveryState {
+	return {
+		record,
+		recoveryTargets,
+		reservedExecutions: 0,
+		failures: 0,
+		recoveryProbes: 0,
+		blockedReplays: 0,
+		recoveryAvailable: false,
+		operationCircuitOpen: false,
+	};
 }
 
 function readFailureTargets(

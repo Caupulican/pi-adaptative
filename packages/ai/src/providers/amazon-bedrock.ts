@@ -1026,7 +1026,7 @@ function buildAdditionalModelRequestFields(
 						high: 16384,
 						xhigh: 16384, // Claude doesn't support xhigh, clamp to high
 						max: 16384, // Claude doesn't support max, clamp to high
-						ultra: 16384, // Ultra orchestration does not raise Claude's wire effort
+						ultra: 16384, // Ultra maps to Claude's strongest supported non-adaptive wire effort
 					};
 
 					// Custom budgets override defaults (extended levels are not in ThinkingBudgets, use high).

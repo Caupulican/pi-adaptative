@@ -1,7 +1,6 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { MIN_VIABLE_WORKER_TOKEN_BUDGET } from "../src/core/delegation/worker-authority-resolver.ts";
 import type { OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
 import {
 	MAX_SESSION_TASK_PROFILES,
@@ -88,7 +87,6 @@ describe("delegate profile actions", () => {
 					model: { provider: "faux", modelId: "fast-worker", thinkingLevel: "low" },
 					toolNames: ["read", "grep"],
 					resourceProfileNames: [],
-					budget: { maxTokens: MIN_VIABLE_WORKER_TOKEN_BUDGET, maxToolCalls: 2 },
 				},
 				undefined,
 				undefined,
@@ -97,7 +95,7 @@ describe("delegate profile actions", () => {
 			const details = created.details as DelegateProfileToolDetails;
 			expect(details).toMatchObject({ created: true, baseProfileId: base.profileId });
 			expect(details.profileId).toMatch(/^task-/);
-			expect(details.changedFields).toEqual(["description", "model", "tools", "budget"]);
+			expect(details.changedFields).toEqual(["description", "model", "tools"]);
 			const persisted = harness.sessionManager
 				.getEntries()
 				.filter((entry) => entry.type === "custom" && entry.customType === SESSION_TASK_PROFILE_CUSTOM_TYPE);
@@ -157,7 +155,6 @@ describe("delegate profile actions", () => {
 					baseProfileId: base.profileId,
 					model: { provider: "faux", modelId: "base-worker", thinkingLevel: "ultra" },
 				},
-				{ task: "Expand budget", baseProfileId: base.profileId, budget: { maxTokens: 16_384 } },
 			] as const;
 
 			for (const [index, input] of invalidInputs.entries()) {
@@ -170,6 +167,29 @@ describe("delegate profile actions", () => {
 				);
 				expect(result.details).toMatchObject({ created: false });
 			}
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === SESSION_TASK_PROFILE_CUSTOM_TYPE),
+			).toHaveLength(0);
+
+			const budgetAttempt = await tool.execute(
+				"invalid-profile-budget",
+				{
+					action: "profile_create",
+					task: "Add a model-authored task ceiling",
+					baseProfileId: base.profileId,
+					budget: { maxTokens: 16_384 },
+				} as never,
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			expect(budgetAttempt.details).toMatchObject({
+				started: false,
+				action: "profile_create",
+				skipReason: "profile_budget_forbidden",
+			});
 			expect(
 				harness.sessionManager
 					.getEntries()

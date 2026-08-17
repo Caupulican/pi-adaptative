@@ -100,16 +100,22 @@ describe("destructive/invariants: every checker is falsifiable", () => {
 
 	it("INV-B1", () => {
 		expectRed(["INV-B1"], {
-			treeBudget: { spendUsd: 2, ceilingUsd: 0.5, finalTurnOverrunUsd: 0, profileFree: true, ceilingIsZero: true },
+			treeBudget: { spendUsd: 2, ceilingUsd: 0.5, finalTurnOverrunUsd: 0, ceilingSource: "none" },
 		});
 		expectGreen(["INV-B1"], {
-			treeBudget: {
-				spendUsd: 0.6,
-				ceilingUsd: 0.5,
-				finalTurnOverrunUsd: 0.2,
-				profileFree: true,
-				ceilingIsZero: false,
-			},
+			treeBudget: { spendUsd: 2, finalTurnOverrunUsd: 0, ceilingSource: "none" },
+		});
+		expectRed(["INV-B1"], {
+			treeBudget: { spendUsd: 2, ceilingUsd: 0.5, finalTurnOverrunUsd: 0, ceilingSource: "explicit" },
+		});
+		expectGreen(["INV-B1"], {
+			treeBudget: { spendUsd: 0.6, ceilingUsd: 0.5, finalTurnOverrunUsd: 0.2, ceilingSource: "explicit" },
+		});
+		expectGreen(["INV-B1"], {
+			treeBudget: { spendUsd: 0, ceilingUsd: 0, finalTurnOverrunUsd: 0, ceilingSource: "explicit" },
+		});
+		expectRed(["INV-B1"], {
+			treeBudget: { spendUsd: 0.01, ceilingUsd: 0, finalTurnOverrunUsd: 0, ceilingSource: "explicit" },
 		});
 	});
 

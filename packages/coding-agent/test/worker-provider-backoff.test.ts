@@ -4,6 +4,7 @@ import type { IsolatedCompletionResult } from "../src/core/agent-session-contrac
 import { BoundedCompletionFailureError } from "../src/core/autonomy/bounded-completion.ts";
 import { runProviderCompletionWithBackoff } from "../src/core/delegation/worker-attempt-executor.ts";
 import { WorkerConversationOwnershipError } from "../src/core/delegation/worker-conversation-revision.ts";
+import { WorkerCompletionProtocolError } from "../src/core/delegation/worker-provider-turn-protocol.ts";
 import { WorkerTreeBudgetExceededError } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
 import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 
@@ -100,6 +101,20 @@ describe("worker provider backoff", () => {
 		const failure = new WorkerConversationOwnershipError("WebSocket error");
 		const { run, warnings, released, calls } = harness([failure]);
 		await expect(run).rejects.toBe(failure);
+		expect(calls()).toBe(1);
+		expect(released).toEqual([1]);
+		expect(warnings).toHaveLength(0);
+	});
+
+	it("classifies a worker completion protocol violation separately from provider failures", async () => {
+		const failure = new WorkerCompletionProtocolError("provider reservation provenance mismatch");
+		const { run, warnings, released, calls } = harness([failure]);
+		const caught = await run.catch((error: unknown) => error);
+		expect(caught).toBeInstanceOf(BoundedCompletionFailureError);
+		const wrapped = caught as BoundedCompletionFailureError;
+		expect(wrapped.status).toBe("failed");
+		expect(wrapped.reasonCode).toBe("worker_protocol_error");
+		expect(wrapped.cause).toBe(failure);
 		expect(calls()).toBe(1);
 		expect(released).toEqual([1]);
 		expect(warnings).toHaveLength(0);

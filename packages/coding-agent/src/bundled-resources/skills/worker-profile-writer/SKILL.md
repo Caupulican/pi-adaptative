@@ -9,7 +9,7 @@ description: "Use only when you need a reusable session-scoped worker preset (pr
 
 Use this skill only to create a session-scoped task preset. Do not load it to start workers.
 
-Native `delegate start` does not need an owner-authored base. Omit `profileId` and set `authority` (role `explorer` or `implementer`, tools, budget). Empty `profile_inspect` bases are not a start block.
+Native `delegate start` does not need an owner-authored base. Omit `profileId` and set `authority` (role `explorer` or `implementer`, model/reasoning, and tools). Empty `profile_inspect` bases are not a start block. Never add a budget: host settings and owner-authored profiles own ceilings.
 
 Freedom Dial: high freedom for describing and composing the bounded task; low freedom for authority, persistence, model availability, and budget checks. Pi's core engineering and evidence rules remain mandatory.
 
@@ -26,9 +26,9 @@ Create the smallest immutable profile that can complete one explicit task, then 
 3. If inspect lists no owner-authored explorer/implementer base, do not ask the user to authorize one just to start work. Start with `delegate start` and `authority`. Ask the user only if they explicitly want a durable reusable base for future `profile_create`.
 4. When creating a preset, choose an owner-authored base whose role and authority already cover the task. Never derive from another generated task profile.
 5. Prefer the fastest model with demonstrated ability to satisfy the task contract. Configuration and authentication prove availability, not fitness; use existing fitness evidence or `model_fitness` when the risk justifies its token cost.
-6. Request only the tools and resource profiles the task needs. Omitted fields inherit the base; supplied fields must be exact subsets. Budgets may only tighten.
+6. Request only the tools and resource profiles the task needs. Omitted fields inherit the base; supplied fields must be exact subsets. The generated profile inherits the base budget unchanged because `profile_create` has no budget field.
 
-Human edge: if `profile_create` is required and the task needs an unlisted base, unavailable credentials, broader tools/resources, or a looser budget, stop and ask the user to authorize a durable owner-profile change. Do not route around a rejection. Do not treat that as a ban on `delegate start`.
+Human edge: if `profile_create` is required and the task needs an unlisted base, unavailable credentials, broader tools/resources, or a different budget, stop and ask the user to authorize a durable owner-profile change. Do not route around a rejection. Do not treat that as a ban on `delegate start`.
 
 ### 2. Execute and verify
 
@@ -43,13 +43,13 @@ Human edge: if `profile_create` is required and the task needs an unlisted base,
 - Blocking `delegate start` because `profile_inspect` listed no bases.
 - Writing one-off profile JSON, settings, reports, or dependencies into the repository.
 - Selecting a model or thinking level that `inspect` did not report as available.
-- Giving a worker extra tools "just in case" or loosening the base budget.
+- Giving a worker extra tools "just in case" or attempting to author a per-dispatch budget.
 - Inventing, guessing, editing, or reusing a generated profile ID across sessions or branches.
 - Treating a fast model as fit without task-shaped evidence.
 
 ## Examples
 
-Positive: inspect, derive from a read/write implementer, select an authenticated fast model at `low`, narrow tools to `read`, `grep`, and `edit`, tighten token/tool-call limits, then delegate with the returned `task-...` ID.
+Positive: inspect, derive from a read/write implementer, select an authenticated fast model at `low`, narrow tools to `read`, `grep`, and `edit`, inherit the base budget unchanged, then delegate with the returned `task-...` ID.
 
 Positive: inspect returns no bases; start two workers with `authority.role` `explorer` and `implementer` and no `profileId`.
 
@@ -64,7 +64,7 @@ Negative: telling the user workers are blocked until they authorize explorer/imp
 - The task has one bounded outcome and explicit acceptance evidence.
 - The base, if used, is owner-authored and authorized for this orchestrator.
 - Model and thinking level were reported available or otherwise resolved by the harness.
-- Tools/resources are subsets and the budget is unchanged or tighter.
+- Tools/resources are subsets and the owner-authored base budget is unchanged.
 - The returned ID is passed unchanged; no project/user profile file was created.
 
 ## Known Gaps

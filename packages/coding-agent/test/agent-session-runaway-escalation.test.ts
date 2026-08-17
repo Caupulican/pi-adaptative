@@ -105,7 +105,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
-	it("records and reports the provider-turn cost fuse without mislabeling it as an identical-tool loop", async () => {
+	it("records and reports an explicit provider-turn fuse without mislabeling it as an identical-tool loop", async () => {
 		const harness = await createHarness();
 		try {
 			const state = applyGoalEvent(
@@ -121,7 +121,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			});
 
 			const warnings = harness.eventsOfType("warning");
-			expect(warnings.at(-1)?.message).toContain("provider-turn cost limit");
+			expect(warnings.at(-1)?.message).toContain("configured provider-turn limit");
 			expect(warnings.at(-1)?.message).not.toContain("repeated the same tool call");
 
 			const entry = harness.sessionManager

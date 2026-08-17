@@ -131,9 +131,9 @@ function createExecutorHarness(
 						: {}),
 					...(options.onMessage
 						? {
-								onMessage: async (message) => {
-									if (message.role === "assistant") await ensurePreflight();
-									return options.onMessage?.(message);
+								onMessage: async (message, origin) => {
+									if (message.role === "assistant" && origin !== "local") await ensurePreflight();
+									return options.onMessage?.(message, origin);
 								},
 							}
 						: {}),
@@ -409,6 +409,57 @@ describe("worker attempt executor", () => {
 		expect(result.rawOutcome.accepted).toBe(true);
 		expect(nestedSettledBeforeNextTurn).toBe(true);
 		expect(nestedMaxTokens).toBe(80);
+	});
+
+	it("persists a local terminal assistant after a tool result without consuming a provider reservation", async () => {
+		const harness = createExecutorHarness(async (options) => {
+			await invokeRequestPreflight(options);
+			const assistant = assistantToolRequest(20);
+			const toolCall = assistant.content.find((content) => content.type === "toolCall");
+			if (!toolCall || toolCall.type !== "toolCall" || !options.beforeToolCall) {
+				throw new Error("Expected a worker tool gate.");
+			}
+			await options.onMessage?.(assistant);
+			await options.beforeToolCall(
+				{
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "focused.ts" },
+					context: { systemPrompt: "", messages: [], tools: [] },
+				},
+				undefined,
+			);
+			const toolResult: Message = {
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				content: [{ type: "text", text: "focused result" }],
+				isError: false,
+				timestamp: 2,
+			};
+			await options.onMessage?.(toolResult);
+			const localTerminal = fauxAssistantMessage(
+				'{"summary":"local terminal handoff persisted","status":"completed"}',
+			) as AssistantMessage;
+			await options.onMessage?.(localTerminal, "local");
+			return {
+				text: '{"summary":"local terminal handoff persisted","status":"completed"}',
+				usage: assistant.usage,
+				stopReason: "stop",
+				messages: [...(options.history ?? []), assistant, toolResult, localTerminal],
+			};
+		});
+
+		const result = await harness.executor.run();
+
+		expect(result.rawOutcome).toMatchObject({ accepted: true, reasonCode: "worker_completed" });
+		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+		expect(result.usage).toMatchObject({ inputTokens: 20, totalTokens: 20 });
 	});
 
 	it("redacts resolved provider failure metadata before persisting the worker result", async () => {

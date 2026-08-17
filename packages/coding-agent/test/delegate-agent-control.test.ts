@@ -427,7 +427,6 @@ describe("delegate logical-agent controls", () => {
 			capabilities: ["filesystem.read" as const, "process.exec" as const, "workflow.delegate" as const],
 			toolNames: ["read", "bash", "delegate"],
 			readPaths: ["."],
-			budget: { maxTokens: 8_192, maxToolCalls: 64 },
 		};
 
 		await tool.execute(
@@ -1609,13 +1608,43 @@ describe("delegate persistent worker reuse", () => {
 				action: "start",
 				agentId: "worker-1",
 				instructions: "task",
-				authority: { budget: { maxTokens: 9_000 } },
+				authority: { role: "implementer" },
 			},
 			undefined,
 			undefined,
 			context,
 		);
 		expect(result.details).toMatchObject({ started: true, agentId: "worker-1" });
+	});
+
+	it("rejects a bypassed model-authored budget before persistent-agent reuse", async () => {
+		const startWorkerAgentTask = vi.fn(() => ({
+			started: true,
+			steering: false as const,
+			messageId: "msg",
+			record: { laneId: "lane", type: "worker" as const, status: "queued" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+		const result = await tool.execute(
+			"call",
+			{
+				action: "start",
+				agentId: "worker-1",
+				instructions: "task",
+				authority: { budget: { maxTokens: 8_000 } },
+			} as never,
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details).toMatchObject({ started: false, skipReason: "authority_budget_forbidden" });
+		expect(startWorkerAgentTask).not.toHaveBeenCalled();
 	});
 
 	it("reports live activity per agent in list so idle workers are discoverable", async () => {
