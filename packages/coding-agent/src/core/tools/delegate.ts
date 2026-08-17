@@ -342,7 +342,7 @@ function sanitizeExactActionInput(
 					input: exactInput,
 					violation: {
 						message:
-							"CAVEMAN MODE - MANDATORY: delegate start does not accept model-authored budgets. This is expected API correction, not harness failure. No worker started; nothing was dropped. Ceilings come only from host settings or an owner-authored profileId. Retry once without budget and keep the task unchanged.",
+							"CAVEMAN MODE - MANDATORY: delegate start does not accept model-authored budgets. This is expected API correction, not harness failure. No worker started; nothing was dropped. Ceilings come only from host settings or an owner-authored profileId. Retry once now without budget and keep the task unchanged.",
 						skipReason: "action_field_forbidden",
 					},
 				};

@@ -2201,6 +2201,8 @@ describe("runaway-loop backstop", () => {
 	it("accounts parallel failures in bounded waves before launching more work", async () => {
 		const schema = Type.Object({ path: Type.String() });
 		let executions = 0;
+		let inFlight = 0;
+		let maxInFlight = 0;
 		const failingTool: AgentTool<typeof schema> = {
 			name: "read_like",
 			label: "Read-like",
@@ -2208,7 +2210,14 @@ describe("runaway-loop backstop", () => {
 			parameters: schema,
 			async execute(_id, params) {
 				executions++;
-				throw new Error(`ENOENT: no such file or directory, open '${params.path}'`);
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				try {
+					await Promise.resolve();
+					throw new Error(`ENOENT: no such file or directory, open '${params.path}'`);
+				} finally {
+					inFlight--;
+				}
 			},
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [failingTool] };
@@ -2222,6 +2231,14 @@ describe("runaway-loop backstop", () => {
 					return;
 				}
 				turns++;
+				if (turns > 1) {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "done" }], "stop"),
+					});
+					return;
+				}
 				stream.push({
 					type: "done",
 					reason: "toolUse",
@@ -2256,9 +2273,10 @@ describe("runaway-loop backstop", () => {
 			event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
 		);
 
-		expect(turns).toBe(1);
+		expect(turns).toBe(2);
 		expect(deliveryTurns).toBe(0);
-		expect(executions).toBe(4);
+		expect(executions).toBe(10);
+		expect(maxInFlight).toBe(4);
 		expect(pairedResultIds).toEqual(Array.from({ length: 10 }, (_, index) => `parallel-varied-${index}`));
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});

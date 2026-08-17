@@ -306,9 +306,8 @@ describe("delegate tool description varies by wiring mode", () => {
 
 		expect(text).toContain("CAVEMAN MODE - MANDATORY");
 		expect(text).toContain("expected API correction, not harness failure");
-		expect(text).toContain("Retry once now");
 		expect(text).toContain("Ceilings come only from host settings or an owner-authored profileId");
-		expect(text).toContain("Retry once without budget");
+		expect(text).toContain("Retry once now without budget and keep the task unchanged");
 		expect(text).toContain("No worker started; nothing was dropped");
 		expect(startCalls).toBe(0);
 		expect(result.details).toEqual({
