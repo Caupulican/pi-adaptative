@@ -299,130 +299,14 @@ export class CompactionController {
 		const abortController = new AbortController();
 		this.manualAbortController = abortController;
 		this.ineffectiveThresholdFrontier = undefined;
+		let result: CompactionResult | undefined;
 		let primaryError: unknown;
+		let cleanupError: unknown;
 
 		try {
 			this.deps.disconnectAgent();
 			await this.deps.abortForeground();
-			this.deps.emit({ type: "compaction_start", reason: "manual" });
-			const sessionModel = this.deps.getModel();
-			if (!sessionModel) throw new Error(formatNoModelSelectedMessage());
-
-			const selectedCompactionModel = this.deps.resolveModel(sessionModel);
-			if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
-			const selectionReason = this.deps.getSelectionReason() ?? "unknown";
-			const settings = this.deps.getAdaptedSettings();
-			const initialBranch = this.deps.sessionManager.getBranch();
-			const initialPreparation = prepareCompaction(initialBranch, settings);
-			if (!initialPreparation) {
-				const lastEntry = initialBranch[initialBranch.length - 1];
-				if (lastEntry?.type === "compaction") throw new Error("Already compacted");
-				throw new Error("Nothing to compact (session too small)");
-			}
-
-			const signal = abortController.signal;
-			// Resolve once for the complete retry ladder. Provider hooks can perform durable flushes and
-			// must not be repeated for every summarizer/gate retry.
-			const effectiveInstructions = await this.buildCompactionInstructions(customInstructions);
-			const extension = await this.getExtensionCompaction(
-				initialPreparation,
-				initialBranch,
-				effectiveInstructions,
-				signal,
-			);
-			if (extension.cancelled) throw new Error("Compaction cancelled");
-			if (extension.result) {
-				await this.applyResult(extension.result, true);
-				this.deps.emit({
-					type: "compaction_end",
-					reason: "manual",
-					result: extension.result,
-					aborted: false,
-					willRetry: false,
-				});
-				return extension.result;
-			}
-
-			let appliedResult: CompactionResult | undefined;
-			const outcome = await runCompactionLoop({
-				measureLiveTokens: () =>
-					Math.max(this.deps.estimateCurrentContextTokens(this.deps.agent.state.messages), 1),
-				shouldCompact: () => true,
-				getPostApplyMargin: () => 0,
-				getBranch: () => this.deps.sessionManager.getBranch(),
-				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
-				resolveModelAndAuth: async (modelTier) => {
-					const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
-					return this.deps.resolveModelAndAuth(model, sessionModel);
-				},
-				summarizeAndVerify: async (params, model, apiKey, headers, branch) => {
-					const preparation = prepareCompaction(
-						branch,
-						{ ...settings, keepRecentTokens: params.keepRecentTokens },
-						COMPACTION_RETRY_PREPARATION_OPTIONS,
-					);
-					if (!preparation) throw new Error("Nothing to compact (session too small)");
-					const compactionThinkingLevel = this.deps.resolveThinkingLevel(model, sessionModel);
-					const result = await this.deps.compactWithRetry(
-						() =>
-							compact(
-								preparation,
-								model,
-								apiKey,
-								headers,
-								effectiveInstructions,
-								signal,
-								compactionThinkingLevel,
-								this.deps.agent.streamFn,
-								this.deps.buildPreDigest(),
-								{ chunked: params.chunked },
-							),
-						signal,
-						model.provider,
-					);
-					return { result };
-				},
-				buildDeterministicCheckpoint: (params) => {
-					const preparation = prepareCompaction(
-						initialBranch,
-						{ ...settings, keepRecentTokens: params.keepRecentTokens },
-						COMPACTION_RETRY_PREPARATION_OPTIONS,
-					);
-					if (!preparation) throw new Error("Nothing to compact (session too small)");
-					return { result: createDeterministicCompaction(preparation) };
-				},
-				apply: async (result) => {
-					if (signal.aborted) throw new Error("Compaction cancelled");
-					await this.applyResult(result, false);
-					appliedResult = result;
-				},
-				verifyPostApplyEffect: () => false,
-				onTransition: ({ cycle, cause, detail }) => {
-					this.deps.emit({
-						type: "warning",
-						message: `manual compaction cycle ${cycle}: ${cause}${detail ? ` (${detail})` : ""} — retrying from step 0 (${this.deps.describeSummarizer()})`,
-					});
-				},
-				signal,
-			});
-
-			if (outcome.kind === "failed") {
-				if (outcome.reason === "aborted") throw new Error("Compaction cancelled");
-				throw new Error(
-					`manual compaction failed after retry ladder using ${selectedCompactionModel.provider}/${selectedCompactionModel.id} (${selectionReason}); first failure: ${outcome.reason}`,
-				);
-			}
-			if (outcome.kind === "skip" || !appliedResult) {
-				throw new Error(outcome.kind === "skip" ? outcome.reason : "Compaction failed");
-			}
-			this.deps.emit({
-				type: "compaction_end",
-				reason: "manual",
-				result: appliedResult,
-				aborted: false,
-				willRetry: false,
-			});
-			return appliedResult;
+			result = await this.runManualCompaction(customInstructions, abortController.signal);
 		} catch (error) {
 			primaryError = error;
 			const message = error instanceof Error ? error.message : String(error);
@@ -435,12 +319,10 @@ export class CompactionController {
 				willRetry: false,
 				errorMessage: aborted ? undefined : `Compaction failed: ${message}`,
 			});
-			throw error;
 		} finally {
 			if (this.manualAbortController === abortController) {
 				this.manualAbortController = undefined;
 			}
-			let cleanupError: unknown;
 			try {
 				this.deps.reconnectAgent();
 			} catch (error) {
@@ -452,8 +334,134 @@ export class CompactionController {
 					cleanupError ??= error;
 				}
 			}
-			if (primaryError === undefined && cleanupError !== undefined) throw cleanupError;
 		}
+		if (primaryError !== undefined) throw primaryError;
+		if (cleanupError !== undefined) throw cleanupError;
+		if (!result) throw new Error("Compaction failed");
+		return result;
+	}
+
+	private async runManualCompaction(
+		customInstructions: string | undefined,
+		signal: AbortSignal,
+	): Promise<CompactionResult> {
+		this.deps.emit({ type: "compaction_start", reason: "manual" });
+		const sessionModel = this.deps.getModel();
+		if (!sessionModel) throw new Error(formatNoModelSelectedMessage());
+
+		const selectedCompactionModel = this.deps.resolveModel(sessionModel);
+		if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
+		const selectionReason = this.deps.getSelectionReason() ?? "unknown";
+		const settings = this.deps.getAdaptedSettings();
+		const initialBranch = this.deps.sessionManager.getBranch();
+		const initialPreparation = prepareCompaction(initialBranch, settings);
+		if (!initialPreparation) {
+			const lastEntry = initialBranch[initialBranch.length - 1];
+			if (lastEntry?.type === "compaction") throw new Error("Already compacted");
+			throw new Error("Nothing to compact (session too small)");
+		}
+
+		// Resolve once for the complete retry ladder. Provider hooks can perform durable flushes and
+		// must not be repeated for every summarizer/gate retry.
+		const effectiveInstructions = await this.buildCompactionInstructions(customInstructions);
+		const extension = await this.getExtensionCompaction(
+			initialPreparation,
+			initialBranch,
+			effectiveInstructions,
+			signal,
+		);
+		if (extension.cancelled) throw new Error("Compaction cancelled");
+		if (extension.result) {
+			await this.applyResult(extension.result, true);
+			this.deps.emit({
+				type: "compaction_end",
+				reason: "manual",
+				result: extension.result,
+				aborted: false,
+				willRetry: false,
+			});
+			return extension.result;
+		}
+
+		let appliedResult: CompactionResult | undefined;
+		const outcome = await runCompactionLoop({
+			measureLiveTokens: () => Math.max(this.deps.estimateCurrentContextTokens(this.deps.agent.state.messages), 1),
+			shouldCompact: () => true,
+			getPostApplyMargin: () => 0,
+			getBranch: () => this.deps.sessionManager.getBranch(),
+			getBaseKeepRecentTokens: () => settings.keepRecentTokens,
+			resolveModelAndAuth: async (modelTier) => {
+				const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
+				return this.deps.resolveModelAndAuth(model, sessionModel);
+			},
+			summarizeAndVerify: async (params, model, apiKey, headers, branch) => {
+				const preparation = prepareCompaction(
+					branch,
+					{ ...settings, keepRecentTokens: params.keepRecentTokens },
+					COMPACTION_RETRY_PREPARATION_OPTIONS,
+				);
+				if (!preparation) throw new Error("Nothing to compact (session too small)");
+				const compactionThinkingLevel = this.deps.resolveThinkingLevel(model, sessionModel);
+				const result = await this.deps.compactWithRetry(
+					() =>
+						compact(
+							preparation,
+							model,
+							apiKey,
+							headers,
+							effectiveInstructions,
+							signal,
+							compactionThinkingLevel,
+							this.deps.agent.streamFn,
+							this.deps.buildPreDigest(),
+							{ chunked: params.chunked },
+						),
+					signal,
+					model.provider,
+				);
+				return { result };
+			},
+			buildDeterministicCheckpoint: (params) => {
+				const preparation = prepareCompaction(
+					initialBranch,
+					{ ...settings, keepRecentTokens: params.keepRecentTokens },
+					COMPACTION_RETRY_PREPARATION_OPTIONS,
+				);
+				if (!preparation) throw new Error("Nothing to compact (session too small)");
+				return { result: createDeterministicCompaction(preparation) };
+			},
+			apply: async (result) => {
+				if (signal.aborted) throw new Error("Compaction cancelled");
+				await this.applyResult(result, false);
+				appliedResult = result;
+			},
+			verifyPostApplyEffect: () => false,
+			onTransition: ({ cycle, cause, detail }) => {
+				this.deps.emit({
+					type: "warning",
+					message: `manual compaction cycle ${cycle}: ${cause}${detail ? ` (${detail})` : ""} — retrying from step 0 (${this.deps.describeSummarizer()})`,
+				});
+			},
+			signal,
+		});
+
+		if (outcome.kind === "failed") {
+			if (outcome.reason === "aborted") throw new Error("Compaction cancelled");
+			throw new Error(
+				`manual compaction failed after retry ladder using ${selectedCompactionModel.provider}/${selectedCompactionModel.id} (${selectionReason}); first failure: ${outcome.reason}`,
+			);
+		}
+		if (outcome.kind === "skip" || !appliedResult) {
+			throw new Error(outcome.kind === "skip" ? outcome.reason : "Compaction failed");
+		}
+		this.deps.emit({
+			type: "compaction_end",
+			reason: "manual",
+			result: appliedResult,
+			aborted: false,
+			willRetry: false,
+		});
+		return appliedResult;
 	}
 
 	async check(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {

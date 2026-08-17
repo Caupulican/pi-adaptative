@@ -146,10 +146,10 @@ import {
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
+import { countFileLinesSync } from "./util/bounded-file.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
 import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
-import { countFileLinesSync } from "./util/bounded-file.ts";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;

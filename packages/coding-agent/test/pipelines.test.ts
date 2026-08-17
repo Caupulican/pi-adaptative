@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,9 +15,9 @@ import {
 	loadPipelineDefinition,
 	loadPipelineRunById,
 	PipelineIncrementError,
+	type PipelineRun,
 	parseStageContract,
 	persistPipelineRun,
-	type PipelineRun,
 	resolveCurrentProjectPipelineRun,
 	resolvePipelineDefinitionForRun,
 	scanStageOutput,
