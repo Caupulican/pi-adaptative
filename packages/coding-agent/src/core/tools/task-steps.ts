@@ -15,9 +15,9 @@ import {
 	setTaskSteps,
 	type TaskStep,
 	type TaskStepInput,
-	type TaskStepUpdate,
 	TaskStepsError,
 	type TaskStepsState,
+	type TaskStepUpdate,
 	updateTaskStep,
 } from "../tasks/task-state.ts";
 import {

@@ -60,7 +60,9 @@ describe("GoalAutoContinueController provider neutrality", () => {
 				({
 					getAutonomySettings: () => ({
 						goalAutoContinue: true,
-						goalAutoContinueDelayMs: 0,
+						// Keep each deliberately re-armed batch at a distinct fake-clock instant so
+						// advancing one timer cannot also consume the next valid batch.
+						goalAutoContinueDelayMs: 1,
 						goalContinueTurns: 1,
 						goalContinueMaxWallClockMinutes: 0,
 						maxStallTurns: 3,
