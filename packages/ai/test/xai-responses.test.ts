@@ -97,6 +97,15 @@ describe.each(["grok-4.5", "grok-4.6"] as const)("xAI Responses lane (%s)", (mod
 		expect(headers.get("authorization")).toBe("Bearer test-key-123");
 	});
 
+	it("does not send Grok CLI proxy headers to the public API", async () => {
+		const { headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
+		expect(headers.get("x-xai-token-auth")).toBeNull();
+		expect(headers.get("x-grok-client-version")).toBeNull();
+		expect(headers.get("x-grok-client-identifier")).toBeNull();
+		expect(headers.get("x-grok-client-mode")).toBeNull();
+		expect(headers.get("x-grok-model-override")).toBeNull();
+	});
+
 	it("sends store:false and omits prompt_cache_retention/prompt_cache_key by default", async () => {
 		const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
 		expect(body.store).toBe(false);
@@ -147,6 +156,13 @@ describe("xAI Grok CLI subscription schema", () => {
 		expect(modified?.[0]).toMatchObject({
 			provider: "xai",
 			baseUrl: "https://cli-chat-proxy.grok.com/v1",
+			headers: {
+				"X-XAI-Token-Auth": "xai-grok-cli",
+				"x-grok-client-version": "1.0.3",
+				"x-grok-client-identifier": "grok-shell",
+				"x-grok-client-mode": "headless",
+				"x-grok-model-override": "grok-4.6",
+			},
 			compat: { requestFormat: "xai-cli", supportsLongCacheRetention: false },
 		});
 	});
@@ -208,13 +224,14 @@ describe("xAI Grok CLI subscription schema", () => {
 				},
 			],
 		};
-		const subscriptionModel: Model<"openai-responses"> = {
-			...getModel("xai", "grok-4.6"),
-			baseUrl: "https://cli-chat-proxy.grok.com/v1",
-			compat: { requestFormat: "xai-cli", supportsLongCacheRetention: false },
-		};
+		const subscriptionModel = xaiOAuthProvider.modifyModels?.([getModel("xai", "grok-4.6")], {
+			access: "oauth-access",
+			refresh: "oauth-refresh",
+			expires: Date.now() + 60_000,
+		})?.[0] as Model<"openai-responses"> | undefined;
+		if (!subscriptionModel) throw new Error("xAI OAuth model was not projected");
 
-		const { url, body } = await captureResponsesRequest(
+		const { url, headers, body } = await captureResponsesRequest(
 			"grok-4.6",
 			{ apiKey: "oauth-access", reasoningEffort: "high", sessionId: "session-capture" },
 			requestContext,
@@ -222,6 +239,11 @@ describe("xAI Grok CLI subscription schema", () => {
 		);
 
 		expect(url).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+		expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
+		expect(headers.get("x-grok-client-version")).toBe("1.0.3");
+		expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
+		expect(headers.get("x-grok-client-mode")).toBe("headless");
+		expect(headers.get("x-grok-model-override")).toBe("grok-4.6");
 		expect(body).toMatchObject({
 			model: "grok-4.6",
 			prompt_cache_key: "session-capture",

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Sent the required Grok CLI proxy identity, authentication-mode, and model-routing headers for xAI OAuth subscription requests.
+
 ## [0.93.0] - 2026-08-16
 
 ### Added

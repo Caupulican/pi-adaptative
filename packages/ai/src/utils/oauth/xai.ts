@@ -11,6 +11,12 @@ const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
 const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+const XAI_CLI_PROXY_HEADERS = {
+	"X-XAI-Token-Auth": "xai-grok-cli",
+	"x-grok-client-version": "1.0.3",
+	"x-grok-client-identifier": "grok-shell",
+	"x-grok-client-mode": "headless",
+} as const;
 
 type JsonObject = Record<string, unknown>;
 
@@ -207,6 +213,11 @@ export const xaiOAuthProvider: OAuthProviderInterface = {
 			return {
 				...model,
 				baseUrl: XAI_CLI_PROXY_BASE_URL,
+				headers: {
+					...model.headers,
+					...XAI_CLI_PROXY_HEADERS,
+					"x-grok-model-override": model.id,
+				},
 				compat: {
 					...model.compat,
 					requestFormat: "xai-cli",
