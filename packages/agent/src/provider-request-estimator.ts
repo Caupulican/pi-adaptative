@@ -7,8 +7,9 @@ export const ESTIMATED_IMAGE_CHARS = ESTIMATED_IMAGE_TOKENS * CHARS_PER_TOKEN_ES
 
 type JsonStringMeasure = (value: string) => number;
 
-function jsonStringUtf16Length(value: string): number {
+function measureJsonString(value: string, utf8: boolean, maximumLength: number): number {
 	let length = 2;
+	if (length > maximumLength) return maximumLength + 1;
 	for (let index = 0; index < value.length; index++) {
 		const code = value.charCodeAt(index);
 		if (
@@ -26,55 +27,32 @@ function jsonStringUtf16Length(value: string): number {
 		} else if (code >= 0xd800 && code <= 0xdbff) {
 			const next = value.charCodeAt(index + 1);
 			if (next >= 0xdc00 && next <= 0xdfff) {
-				length += 2;
+				length += utf8 ? 4 : 2;
 				index++;
 			} else {
 				length += 6;
 			}
 		} else if (code >= 0xdc00 && code <= 0xdfff) {
 			length += 6;
-		} else {
+		} else if (!utf8 || code <= 0x7f) {
 			length++;
+		} else if (code <= 0x7ff) {
+			length += 2;
+		} else {
+			length += 3;
 		}
+		if (length > maximumLength) return maximumLength + 1;
 	}
 	return length;
 }
 
-function jsonStringUtf8Bytes(value: string): number {
-	let bytes = 2;
-	for (let index = 0; index < value.length; index++) {
-		const code = value.charCodeAt(index);
-		if (
-			code === 0x22 ||
-			code === 0x5c ||
-			code === 0x08 ||
-			code === 0x09 ||
-			code === 0x0a ||
-			code === 0x0c ||
-			code === 0x0d
-		) {
-			bytes += 2;
-		} else if (code < 0x20) {
-			bytes += 6;
-		} else if (code <= 0x7f) {
-			bytes++;
-		} else if (code <= 0x7ff) {
-			bytes += 2;
-		} else if (code >= 0xd800 && code <= 0xdbff) {
-			const next = value.charCodeAt(index + 1);
-			if (next >= 0xdc00 && next <= 0xdfff) {
-				bytes += 4;
-				index++;
-			} else {
-				bytes += 6;
-			}
-		} else if (code >= 0xdc00 && code <= 0xdfff) {
-			bytes += 6;
-		} else {
-			bytes += 3;
-		}
-	}
-	return bytes;
+function jsonStringUtf16Length(value: string): number {
+	return measureJsonString(value, false, Number.POSITIVE_INFINITY);
+}
+
+/** Exact UTF-8 byte length of a JSON string, or `maximumBytes + 1` once its bound is exceeded. */
+export function measureJsonStringUtf8Bytes(value: string, maximumBytes = Number.POSITIVE_INFINITY): number {
+	return measureJsonString(value, true, maximumBytes);
 }
 
 function measuredJsonValue(
@@ -142,7 +120,7 @@ export function measureJsonLength(value: unknown): number | undefined {
 
 /** Exact UTF-8 byte length of standard JSON-compatible data without allocating its serialized copy. */
 export function measureJsonUtf8Bytes(value: unknown): number | undefined {
-	return measuredJsonValue(value, "", new Set(), jsonStringUtf8Bytes);
+	return measuredJsonValue(value, "", new Set(), measureJsonStringUtf8Bytes);
 }
 
 function semanticImageContent(

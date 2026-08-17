@@ -5,6 +5,7 @@ import {
 	ESTIMATED_IMAGE_TOKENS,
 	estimateProviderRequestTokens,
 	measureJsonLength,
+	measureJsonStringUtf8Bytes,
 	measureJsonUtf8Bytes,
 } from "../src/provider-request-estimator.ts";
 
@@ -64,6 +65,10 @@ describe("provider request estimator", () => {
 		};
 
 		expect(measureJsonUtf8Bytes(payload)).toBe(Buffer.byteLength(JSON.stringify(payload), "utf8"));
+		expect(measureJsonStringUtf8Bytes(payload.unicode)).toBe(
+			Buffer.byteLength(JSON.stringify(payload.unicode), "utf8"),
+		);
+		expect(measureJsonStringUtf8Bytes("A".repeat(1_000), 32)).toBe(33);
 	});
 
 	it("charges production-sized image payloads semantically without materializing lazy base64", () => {

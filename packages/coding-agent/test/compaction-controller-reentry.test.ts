@@ -219,7 +219,7 @@ describe("CompactionController auto-compaction re-entry", () => {
 				attempt: 2,
 			}),
 		).rejects.toThrow(
-			"3,500 total tokens after bounded history compaction (500 non-compactable; 3,000 compactable history remains)",
+			"3,500 total tokens (500 non-compactable; 3,000 compactable history remains) after bounded history compaction",
 		);
 		expect(compactWithRetry).not.toHaveBeenCalled();
 	});
