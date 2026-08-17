@@ -489,6 +489,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			}));
 			newState.lastProgressAt = event.now;
 			newState.stallTurns = 0;
+			newState.progressRevision = (state.progressRevision ?? 0) + 1;
 			break;
 		}
 

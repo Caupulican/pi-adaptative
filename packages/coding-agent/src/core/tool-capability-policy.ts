@@ -41,6 +41,14 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["secret_store", policy(["credentials.use"], "service-proxy")],
 	["delegate", DELEGATE_POLICY],
 	["model_fitness", policy(["research.execute"], "control-plane")],
+	["task_steps", policy(["workflow.plan", "memory.mutate"], "control-plane")],
+	["pipeline", policy(["workflow.plan", "filesystem.read"], "control-plane")],
+	["tool_task", policy(["process.exec", "workflow.delegate"], "control-plane")],
+	["worktree_sync", policy(["worktree.mutate", "worktree.read", "filesystem.write"], "path-scope")],
+	["ask_question", policy(["workflow.plan", "memory.query"], "control-plane")],
+	["artifact_retrieve", policy(["filesystem.read"], "path-scope")],
+	["context_scout", policy(["filesystem.read", "memory.query"], "path-scope")],
+	["tmux_dispatch", policy(["process.exec", "workflow.delegate"], "process-launcher")],
 ]);
 
 export function getToolCapabilityPolicy(toolName: string): ToolCapabilityPolicy | undefined {

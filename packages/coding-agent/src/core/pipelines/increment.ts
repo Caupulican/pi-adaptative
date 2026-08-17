@@ -120,10 +120,8 @@ export function advanceTaskSteps(
 	if (current.status !== "completed") {
 		nextState = updateTaskStep(nextState, current.id, { status: "completed" }, now);
 	}
-	const following = nextState.steps.find(
-		(step) => step.id !== current.id && (step.status === "pending" || step.status === "blocked"),
-	);
-	if (following && following.status === "pending") {
+	const following = nextState.steps.find((step) => step.id !== current.id && step.status === "pending");
+	if (following) {
 		nextState = updateTaskStep(nextState, following.id, { status: "in_progress" }, now);
 		return {
 			state: nextState,
@@ -133,6 +131,18 @@ export function advanceTaskSteps(
 				to: following.id,
 				completed: false,
 				detail: `Completed ${current.id}, started ${following.id}.`,
+			},
+		};
+	}
+	const blocked = nextState.steps.filter((step) => step.status === "blocked");
+	if (blocked.length > 0) {
+		return {
+			state: nextState,
+			result: {
+				surface: "task_steps",
+				from: current.id,
+				completed: false,
+				detail: `Completed ${current.id}. Remaining steps are blocked: ${blocked.map((step) => step.id).join(", ")}.`,
 			},
 		};
 	}

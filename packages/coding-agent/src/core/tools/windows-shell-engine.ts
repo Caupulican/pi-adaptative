@@ -380,7 +380,13 @@ class PersistentWindowsShellEngineSession {
 				};
 
 				this.activeExec = active;
-				if (signal) signal.addEventListener("abort", onAbort, { once: true });
+				if (signal) {
+					signal.addEventListener("abort", onAbort, { once: true });
+					if (signal.aborted) {
+						onAbort();
+						return;
+					}
+				}
 				if (timeoutMs !== undefined) {
 					timeoutTimer = setTimeout(() => failAndReset(new Error(`timeout:${timeout}`)), timeoutMs);
 				}

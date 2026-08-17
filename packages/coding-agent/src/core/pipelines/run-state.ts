@@ -19,19 +19,30 @@ function isRealOutputFile(name: string): boolean {
 	return name !== ".gitkeep" && name !== ".DS_Store" && !name.startsWith(".");
 }
 
+function collectOutputFiles(dir: string, relativePrefix = ""): string[] {
+	const results: string[] = [];
+	for (const entry of readdirSync(dir)) {
+		if (!isRealOutputFile(entry)) continue;
+		const fullPath = join(dir, entry);
+		const relPath = relativePrefix ? `${relativePrefix}/${entry}` : entry;
+		try {
+			const stat = statSync(fullPath);
+			if (stat.isFile()) {
+				results.push(relPath);
+			} else if (stat.isDirectory()) {
+				results.push(...collectOutputFiles(fullPath, relPath));
+			}
+		} catch {
+			// Ignore unreadable entries
+		}
+	}
+	return results;
+}
+
 export function scanStageOutput(outputDir: string): { status: StageDiskStatus; outputFiles: string[] } {
 	if (!existsSync(outputDir)) return { status: "empty", outputFiles: [] };
 	try {
-		const outputFiles = readdirSync(outputDir)
-			.filter((name) => {
-				if (!isRealOutputFile(name)) return false;
-				try {
-					return statSync(join(outputDir, name)).isFile();
-				} catch {
-					return false;
-				}
-			})
-			.sort();
+		const outputFiles = collectOutputFiles(outputDir).sort();
 		return { status: outputFiles.length > 0 ? "complete" : "empty", outputFiles };
 	} catch {
 		return { status: "empty", outputFiles: [] };

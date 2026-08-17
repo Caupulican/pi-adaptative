@@ -69,23 +69,51 @@ export function fallbackGateOutcome(args: { gate: string; reversible: boolean; r
 	};
 }
 
+const PATH_SCOPE_TOOLS = new Set([
+	"read",
+	"write",
+	"edit",
+	"edit-diff",
+	"ls",
+	"grep",
+	"find",
+	"artifact_retrieve",
+	"context_scout",
+	"worktree_sync",
+	"skill",
+	"skill_audit",
+	"skillify",
+	"extensionify",
+	"secret_store",
+]);
+
+const PATH_ARG_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
+const PATH_LIST_ARG_KEYS = ["paths", "files"] as const;
+
 export function extractCandidatePaths(toolName: string, args: unknown): string[] {
-	if (!args || typeof args !== "object") return [];
+	if (!args || typeof args !== "object" || !PATH_SCOPE_TOOLS.has(toolName.toLowerCase())) return [];
 	const obj = args as Record<string, unknown>;
 	const paths: string[] = [];
 
-	if (
-		toolName === "read" ||
-		toolName === "write" ||
-		toolName === "edit" ||
-		toolName === "ls" ||
-		toolName === "grep" ||
-		toolName === "find"
-	) {
-		if (typeof obj.path === "string" && obj.path.trim()) {
-			paths.push(obj.path.trim());
+	for (const key of PATH_ARG_KEYS) {
+		const val = obj[key];
+		if (typeof val === "string" && val.trim()) {
+			paths.push(val.trim());
 		}
-	} else if (toolName === "secret_store" && obj.action === "migrate" && Array.isArray(obj.sources)) {
+	}
+
+	for (const key of PATH_LIST_ARG_KEYS) {
+		const val = obj[key];
+		if (Array.isArray(val)) {
+			for (const item of val) {
+				if (typeof item === "string" && item.trim()) {
+					paths.push(item.trim());
+				}
+			}
+		}
+	}
+
+	if (toolName === "secret_store" && obj.action === "migrate" && Array.isArray(obj.sources)) {
 		for (const source of obj.sources) {
 			if (
 				source &&
@@ -140,52 +168,61 @@ export function evaluateToolGate(input: {
 
 	// 2. Path scope containment for file tools
 	const paths = extractCandidatePaths(input.toolName, input.args);
-	if (paths.length > 0 && envelope.allowedPaths) {
-		// If envelope has allowedPaths, we must check them
+	if (paths.length > 0) {
+		const allowedPaths = envelope.allowedPaths;
+		const deniedPaths = envelope.deniedPaths ?? [];
+
 		for (const targetPath of paths) {
 			const scopedTargetPath = path.isAbsolute(targetPath) ? targetPath : path.resolve(input.cwd, targetPath);
-			let isInsideAny = false;
-			let isDenied = false;
-			let denyRule = "";
 
-			for (const allowedRoot of envelope.allowedPaths) {
+			// 2.1 Check denied paths first (denials take precedence)
+			for (const deniedRoot of deniedPaths) {
+				const scopedDenied = path.isAbsolute(deniedRoot) ? deniedRoot : path.resolve(input.cwd, deniedRoot);
 				const decision = checkPathScope(
 					{
-						root: allowedRoot,
-						allowedPaths: envelope.allowedPaths,
-						deniedPaths: envelope.deniedPaths,
+						root: scopedDenied,
+						allowedPaths: [scopedDenied],
+						deniedPaths: [scopedDenied],
 					},
 					scopedTargetPath,
 				);
-
-				if (decision.kind === "denied") {
-					isDenied = true;
-					denyRule = decision.matchedRule || "";
-					break;
-				}
-				if (decision.kind === "inside") {
-					isInsideAny = true;
+				if (decision.kind === "denied" || decision.kind === "inside") {
+					return {
+						outcome: "block",
+						gate: "path_scope",
+						reasonCode: "path_denied",
+						message: `Path '${targetPath}' is explicitly denied by rule '${deniedRoot}'.`,
+					};
 				}
 			}
 
-			if (isDenied) {
-				return {
-					outcome: "block",
-					gate: "path_scope",
-					reasonCode: "path_denied",
-					message: `Path '${targetPath}' is explicitly denied by rule '${denyRule}'.`,
-				};
-			}
+			// 2.2 If allowedPaths is specified and non-empty, ensure containment
+			if (allowedPaths && allowedPaths.length > 0) {
+				let isInsideAny = false;
+				for (const allowedRoot of allowedPaths) {
+					const scopedAllowed = path.isAbsolute(allowedRoot) ? allowedRoot : path.resolve(input.cwd, allowedRoot);
+					const decision = checkPathScope(
+						{
+							root: scopedAllowed,
+							allowedPaths: envelope.allowedPaths,
+							deniedPaths: envelope.deniedPaths,
+						},
+						scopedTargetPath,
+					);
+					if (decision.kind === "inside") {
+						isInsideAny = true;
+						break;
+					}
+				}
 
-			if (!isInsideAny) {
-				// Block only if the tool is mutating. Wait, read path outside allowed root -> block.
-				// "read path inside allowed root -> allow. write/edit path outside allowed root -> block. denied path inside allowed root -> block."
-				return {
-					outcome: "block",
-					gate: "path_scope",
-					reasonCode: "path_outside_allowed_roots",
-					message: `Path '${targetPath}' is outside all allowed roots.`,
-				};
+				if (!isInsideAny) {
+					return {
+						outcome: "block",
+						gate: "path_scope",
+						reasonCode: "path_outside_allowed_roots",
+						message: `Path '${targetPath}' is outside all allowed roots.`,
+					};
+				}
 			}
 		}
 	}

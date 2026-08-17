@@ -764,6 +764,7 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			checkCompaction: (message) => this._checkCompaction(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
+			isCompacting: () => this._compaction.isCompacting,
 			prepareRun: async () => {
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 				await this._toolProtocol.ensureActiveModelProtocol();

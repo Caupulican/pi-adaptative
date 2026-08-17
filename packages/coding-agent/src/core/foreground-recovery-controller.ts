@@ -37,6 +37,7 @@ export interface ForegroundRecoveryControllerDeps {
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
 	afterRun(): Promise<void>;
+	isCompacting?: () => boolean;
 }
 
 /** Owns the complete logical foreground run plus retry/failover/compaction recovery ordering. */
@@ -75,7 +76,7 @@ export class ForegroundRecoveryController {
 			modelRegistry: deps.modelRegistry,
 			exhausted: new ExhaustedProviderRegistry(),
 			subscriptionHop: deps.settingsManager.getFailoverSettings().subscriptionHop,
-			emit: deps.emit,
+			emit: (event) => deps.emit(event),
 			recordFailure: (record) => deps.failureCorpus.record(record),
 		});
 	}
@@ -94,7 +95,11 @@ export class ForegroundRecoveryController {
 
 	get isBusy(): boolean {
 		return (
-			this.submissionLease !== undefined || this.isRunActive || this.deps.agent.state.isStreaming || this.isRetrying
+			this.submissionLease !== undefined ||
+			this.isRunActive ||
+			this.deps.agent.state.isStreaming ||
+			this.isRetrying ||
+			this.deps.isCompacting?.() === true
 		);
 	}
 
@@ -124,11 +129,10 @@ export class ForegroundRecoveryController {
 		if (!this.ownsSubmission(lease)) {
 			throw new Error("Cannot release foreground submission authority owned by another caller");
 		}
-		if (this.activeRuns > 0) {
-			throw new Error("Cannot release foreground submission authority while its agent run is active");
-		}
 		this.submissionLease = undefined;
-		this.resolveIdleWaiters();
+		if (this.activeRuns === 0) {
+			this.resolveIdleWaiters();
+		}
 	}
 
 	async runAgentPrompt(
@@ -147,7 +151,7 @@ export class ForegroundRecoveryController {
 			releaseLease = true;
 		}
 		if (this.activeRuns > 0) {
-			if (releaseLease) this.releaseSubmission(lease);
+			if (releaseLease && lease) this.releaseSubmission(lease);
 			throw new AgentBusyError("Agent is already processing.");
 		}
 
@@ -166,7 +170,10 @@ export class ForegroundRecoveryController {
 				await this.deps.afterRun();
 			} finally {
 				this.activeRuns--;
-				if (releaseLease) this.releaseSubmission(lease);
+				if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
+				if (this.activeRuns === 0 && this.submissionLease === undefined) {
+					this.resolveIdleWaiters();
+				}
 			}
 		}
 	}
@@ -174,7 +181,7 @@ export class ForegroundRecoveryController {
 	async waitForIdle(): Promise<void> {
 		while (true) {
 			if (this.shutdownReason) return;
-			if (this.submissionLease !== undefined || this.activeRuns > 0) {
+			if (this.submissionLease !== undefined || this.activeRuns > 0 || this.deps.isCompacting?.() === true) {
 				await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
 				continue;
 			}

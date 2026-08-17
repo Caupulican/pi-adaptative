@@ -231,7 +231,8 @@ function cloneUsage(value: unknown): Usage | undefined {
 function decodeRecord(value: unknown, sessionId: string): BackgroundToolTaskRecord | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECORD_KEYS)) return undefined;
 	if (
-		value.sessionId !== sessionId ||
+		typeof value.sessionId !== "string" ||
+		value.sessionId.length === 0 ||
 		typeof value.taskId !== "string" ||
 		taskNumber(value.taskId) === undefined ||
 		typeof value.toolCallId !== "string" ||
@@ -261,7 +262,7 @@ function decodeRecord(value: unknown, sessionId: string): BackgroundToolTaskReco
 	const usage = value.usage === undefined ? undefined : cloneUsage(value.usage);
 	if (value.usage !== undefined && !usage) return undefined;
 	return {
-		sessionId,
+		sessionId: value.sessionId || sessionId,
 		taskId: value.taskId,
 		toolCallId: value.toolCallId,
 		toolName: value.toolName,
@@ -477,7 +478,7 @@ export class BackgroundToolTaskController {
 		const latestRecords: BackgroundToolTaskRecord[] = [];
 		let highestTaskNumber = 0;
 		for (const value of values) {
-			if (!isPlainRecord(value) || value.sessionId !== sessionId || typeof value.taskId !== "string") continue;
+			if (!isPlainRecord(value) || typeof value.taskId !== "string") continue;
 			const numericTaskId = taskNumber(value.taskId);
 			if (numericTaskId === undefined) continue;
 			highestTaskNumber = Math.max(highestTaskNumber, numericTaskId);

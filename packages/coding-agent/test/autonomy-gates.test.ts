@@ -382,5 +382,40 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("block");
 			expect(outcome.reasonCode).toBe("path_denied");
 		});
+
+		it("enforces deniedPaths even when allowedPaths is omitted", () => {
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["filesystem.read"],
+				deniedPaths: ["/tmp/secret"],
+			};
+			const blocked = evaluateToolGate({
+				toolName: "read",
+				args: { path: "/tmp/secret/creds.json" },
+				cwd: "/tmp",
+				envelope,
+			});
+			expect(blocked.outcome).toBe("block");
+			expect(blocked.reasonCode).toBe("path_denied");
+
+			const allowed = evaluateToolGate({
+				toolName: "read",
+				args: { path: "/tmp/public/readme.md" },
+				cwd: "/tmp",
+				envelope,
+			});
+			expect(allowed.outcome).toBe("allow");
+		});
+
+		it("allows core harness tools with valid capabilities", () => {
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["workflow.plan", "memory.mutate", "process.exec", "workflow.delegate", "filesystem.read"],
+			};
+			for (const toolName of ["task_steps", "pipeline", "tool_task", "ask_question", "artifact_retrieve"]) {
+				const outcome = evaluateToolGate({ toolName, cwd: "/tmp", envelope });
+				expect(outcome.outcome).toBe("allow");
+			}
+		});
 	});
 });

@@ -390,7 +390,13 @@ export class PersistentShellSession {
 					},
 				};
 
-				if (signal) signal.addEventListener("abort", onAbort, { once: true });
+				if (signal) {
+					signal.addEventListener("abort", onAbort, { once: true });
+					if (signal.aborted) {
+						onAbort();
+						return;
+					}
+				}
 				if (timeoutSeconds !== undefined && timeoutSeconds > 0) {
 					timeoutTimer = setTimeout(() => {
 						this.killChild();

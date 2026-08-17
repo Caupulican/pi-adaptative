@@ -348,7 +348,7 @@ function toGoalEvent(
 			}
 			const activePipeline = options?.activePipeline;
 			if (activePipeline && activePipeline.status === "active") {
-				const joined = !activePipeline.goalId || activePipeline.goalId === state.goalId;
+				const joined = Boolean(activePipeline.goalId && activePipeline.goalId === state.goalId);
 				if (joined) {
 					return {
 						ok: false,

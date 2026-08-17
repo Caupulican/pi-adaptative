@@ -336,12 +336,13 @@ describe("BackgroundToolTaskController", () => {
 				status: "failed",
 				output: expect.stringContaining("owning process ended"),
 			}),
+			expect.objectContaining({ taskId: "tool-task-99", status: "completed", output: "retained output" }),
 		]);
 		expect(persisted).toEqual([expect.objectContaining({ taskId: "tool-task-4", status: "failed" })]);
 		expect(notifications).toEqual([]);
 
 		const call = controlledContext("call-new");
-		expect(controller.handoff(call.context)?.result.details).toMatchObject({ taskId: "tool-task-5" });
+		expect(controller.handoff(call.context)?.result.details).toMatchObject({ taskId: "tool-task-100" });
 		await controller.shutdown();
 	});
 });

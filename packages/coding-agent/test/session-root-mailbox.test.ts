@@ -339,7 +339,7 @@ describe("SessionRootMailbox", () => {
 			).toEqual({ status: "completed_replay", messageId: original.messageId, created: false });
 			expect(mailbox.pendingReplies({ maxMessages: 64 })).toEqual([]);
 		},
-		windowsLoadedSuiteTimeout(),
+		windowsLoadedSuiteTimeout(15_000) ?? 15_000,
 	);
 
 	it("reserves a source-owned reply across projected default lifecycle growth", () => {

@@ -1316,12 +1316,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			}, boundedTimeoutMs);
 			if (typeof timeout === "object" && "unref" in timeout) timeout.unref();
 			try {
-				// The deadlock check must run BEFORE yieldCallerForWait, not after: yielding releases
-				// the caller's write reservation (WorkerWriteReservationCoordinator.forgetLease), which
-				// erases the exact blockedByLocalLaneIds entries this check inspects. Checking after
-				// yielding always finds nothing blocked (the block was just released), so the intended
-				// "Worker wait would deadlock" rejection could never fire.
-				if (callerAgentId) {
+				let yielded = false;
+				if (callerAgentId && this.options.yieldCallerForWait) {
+					restoreYield = this.options.yieldCallerForWait(callerAgentId);
+					yielded = restoreYield !== undefined;
+				}
+				if (!yielded && callerAgentId) {
 					const statuses = currentStatuses();
 					const activeAgentIds = new Set(
 						statuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
@@ -1338,9 +1338,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 							`Worker wait would deadlock: ${blockedAgentIds.join(", ")} ${blockedAgentIds.length === 1 ? "is" : "are"} blocked by the caller's write reservation.`,
 						);
 					}
-				}
-				if (!hasFailure && callerAgentId && this.options.yieldCallerForWait) {
-					restoreYield = this.options.yieldCallerForWait(callerAgentId);
 				}
 				yieldInitialized = true;
 			} catch (error) {

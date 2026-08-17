@@ -519,6 +519,10 @@ export class CompactionController {
 		return Math.max(calculateContextTokens(assistantMessage.usage), estimatedTokens);
 	}
 
+	get isCompacting(): boolean {
+		return this.autoRunPromise !== undefined || this.manualAbortController !== undefined;
+	}
+
 	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {
 		if (this.autoRunPromise) return this.autoRunPromise;
 		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());

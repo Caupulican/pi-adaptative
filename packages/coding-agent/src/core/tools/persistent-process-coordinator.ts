@@ -70,19 +70,25 @@ export class PersistentProcessCoordinator {
 			if (!this.clear(child)) return;
 			handlers.onError(error instanceof Error ? error : new Error(String(error)));
 		});
-		// Process death is authoritative. Defer one check phase so stream data already delivered
-		// by the kernel reaches the active protocol handler before the terminal callback.
+		let exitCode: number | null = null;
+		let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
 		child.on("exit", (code) => {
 			if (this.currentChild !== child) return;
-			setImmediate(() => {
+			exitCode = code;
+			fallbackTimer = setTimeout(() => {
 				if (!this.clear(child)) return;
-				handlers.onClose(code);
-			});
+				handlers.onClose(exitCode);
+			}, 2_000);
+			if (typeof fallbackTimer === "object" && fallbackTimer && "unref" in fallbackTimer) {
+				fallbackTimer.unref();
+			}
 		});
-		// A genuine close may arrive first; `clear` makes exit/close settlement idempotent.
+
 		child.on("close", (code) => {
+			if (fallbackTimer) clearTimeout(fallbackTimer);
 			if (!this.clear(child)) return;
-			handlers.onClose(code);
+			handlers.onClose(code ?? exitCode);
 		});
 	}
 

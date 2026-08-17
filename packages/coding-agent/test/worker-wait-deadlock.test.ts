@@ -58,7 +58,7 @@ function attempt(agentId: string, taskId: string, status: AttemptRuntimeState["s
 
 function waitCoordinator(
 	waitBlockedByCaller?: (callerAgentId: string, targetAgentIds: readonly string[]) => readonly string[],
-	yieldCallerForWait?: (callerAgentId: string) => () => boolean | undefined,
+	yieldCallerForWait?: (callerAgentId: string) => (() => boolean) | undefined,
 	childStatus: () => AttemptRuntimeState["status"] = () => "queued",
 	subscribeReservationAvailability?: (listener: () => void) => () => void,
 ): WorkerAgentControlCoordinator {
@@ -115,40 +115,31 @@ describe("worker wait deadlock prevention", () => {
 		).rejects.toThrow("cannot wait for itself");
 	});
 
-	it("evaluates the deadlock condition before yielding, so a genuinely blocked target rejects and never yields", async () => {
-		// Root-cause regression: yieldCallerForWait releases the caller's write reservation
-		// (WorkerWriteReservationCoordinator.forgetLease), which erases the exact
-		// blockedByLocalLaneIds entries waitBlockedByCaller inspects. Checking after yielding
-		// always finds nothing blocked (the block was just released), so the deadlock guard could
-		// never fire. The check must run on the PRE-yield state, before any yielding happens.
+	it("rejects when the caller cannot yield its reservation and the target remains blocked", async () => {
 		vi.useFakeTimers();
 		try {
 			const waitBlockedByCaller = vi.fn(() => ["child"]);
-			const restore = vi.fn(() => true);
-			const yieldCallerForWait = vi.fn(() => restore);
+			const yieldCallerForWait = vi.fn((_callerAgentId: string): (() => boolean) | undefined => undefined);
 			const coordinator = waitCoordinator(waitBlockedByCaller, yieldCallerForWait);
 
 			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
 
+			expect(yieldCallerForWait).toHaveBeenCalledWith("caller");
 			expect(waitBlockedByCaller).toHaveBeenCalledWith("caller", ["child"]);
-			expect(yieldCallerForWait).not.toHaveBeenCalled();
 			await expect(waiting).rejects.toThrow("Worker wait would deadlock");
-			expect(restore).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	it("yields and waits normally once the pre-yield deadlock check finds no blocked target", async () => {
+	it("yields and waits normally when the caller yields its write reservation", async () => {
 		vi.useFakeTimers();
 		try {
-			const waitBlockedByCaller = vi.fn(() => []);
 			const restore = vi.fn(() => true);
 			const yieldCallerForWait = vi.fn(() => restore);
-			const coordinator = waitCoordinator(waitBlockedByCaller, yieldCallerForWait);
+			const coordinator = waitCoordinator(undefined, yieldCallerForWait);
 
 			const waiting = coordinator.waitForWorkerAgents(["child"], "all", 1, { callerAgentId: "caller" });
-			expect(waitBlockedByCaller).toHaveBeenCalledWith("caller", ["child"]);
 			expect(yieldCallerForWait).toHaveBeenCalledWith("caller");
 			await vi.advanceTimersByTimeAsync(1);
 

@@ -665,7 +665,11 @@ export class SessionRootMailbox {
 				if (settled) return;
 				settled = true;
 				cleanup();
-				resolve({ replies: [], timedOut: true });
+				let finalReplies: SessionRootReply[] = [];
+				try {
+					finalReplies = currentReplies();
+				} catch {}
+				resolve({ replies: finalReplies, timedOut: true });
 			}, timeoutMs);
 			if (typeof timeout === "object" && timeout && "unref" in timeout) timeout.unref();
 			settleFromPredicate();
