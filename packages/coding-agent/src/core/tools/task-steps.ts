@@ -322,7 +322,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Track the session's ordered multi-step checklist with status, notes, and evidence. Use goal for durable outcomes and delegate for workers.",
 		promptSnippet: "Track multi-step session work.",
 		promptGuidelines: [
-			"Use for multi-step work; keep one in_progress.",
+			"Use for multi-step work; keep one in_progress step.",
 			"Batch transitions; work the first open step; record evidence/blockers; skip unchanged narration.",
 			"intake keeps every item; link goal requirementIds.",
 			"advance completes current, then starts next pending.",
