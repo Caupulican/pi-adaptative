@@ -9,17 +9,18 @@ import {
 	assembleStageContext,
 	createPipelineRunRoot,
 	discoverPipelineDefinitions,
-	findActivePipelineRun,
 	findPipelineDefinition,
 	formatPipelineContext,
 	incrementPipelineRun,
 	instantiatePipelineRun,
 	isPipelineRunActive,
-	loadPipelineDefinition,
 	loadPipelineRunById,
 	type PipelineDefinition,
 	type PipelineRun,
+	resolveCurrentProjectPipelineRun,
+	resolvePipelineDefinitionForRun,
 	scanPipelineRun,
+	withPipelineLifecycleLock,
 } from "../pipelines/index.ts";
 import {
 	emptyOrchestrationCall,
@@ -57,6 +58,7 @@ export interface PipelineToolDetails {
 	action: PipelineToolAction;
 	applied: boolean;
 	error?: string;
+	warning?: string;
 	run?: PipelineRun;
 	definitionName?: string;
 }
@@ -81,16 +83,18 @@ function errorResult(action: PipelineToolAction, error: string, run?: PipelineRu
 	};
 }
 
-function resolveRun(deps: PipelineToolDependencies, runId: string | undefined): PipelineRun | undefined {
-	if (runId?.trim()) return loadPipelineRunById(deps.cwd(), runId.trim());
-	return deps.getPipelineRun() ?? findActivePipelineRun(deps.cwd());
+function resolveRun(deps: PipelineToolDependencies, cwd: string, runId: string | undefined): PipelineRun | undefined {
+	if (runId?.trim()) return loadPipelineRunById(cwd, runId.trim());
+	return resolveCurrentProjectPipelineRun(cwd, deps.getPipelineRun());
 }
 
-function resolveDefinition(deps: PipelineToolDependencies, run: PipelineRun): PipelineDefinition | undefined {
-	return (
-		loadPipelineDefinition(run.definitionPath) ??
-		findPipelineDefinition({ agentPipelinesDir: deps.agentPipelinesDir(), cwd: deps.cwd() }, run.pipelineName)
-	);
+function saveSessionSnapshot(deps: PipelineToolDependencies, run: PipelineRun): string | undefined {
+	try {
+		deps.savePipelineRun(run);
+		return undefined;
+	} catch (error) {
+		return `Durable pipeline state was saved, but the session snapshot failed: ${error instanceof Error ? error.message : String(error)}`;
+	}
 }
 
 function formatDefinitionList(definitions: readonly PipelineDefinition[], active?: PipelineRun): string {
@@ -103,7 +107,7 @@ function formatDefinitionList(definitions: readonly PipelineDefinition[], active
 	});
 	if (active) {
 		lines.unshift(
-			`Active run ${active.runId}: ${active.pipelineName} @ ${active.currentStageId} (${active.status}).`,
+			`${isPipelineRunActive(active) ? "Active" : "Latest"} run ${active.runId}: ${active.pipelineName} @ ${active.currentStageId} (${active.status}).`,
 		);
 	}
 	return `Pipelines:\n${lines.join("\n")}`;
@@ -140,10 +144,13 @@ function pipelinePanel(details: PipelineToolDetails | undefined): OrchestrationP
 			run.status === "completed" ? "success" : run.status === "abandoned" || details.error ? "warning" : "running",
 		summary: [`${run.pipelineName}`, run.currentStageId, run.status],
 		emptyText: details.error,
+		notices: details.warning ? [{ status: "warning", text: details.warning }] : undefined,
 	};
 }
 
-export function createPipelineToolDefinition(deps: PipelineToolDependencies): ToolDefinition {
+export function createPipelineToolDefinition(
+	deps: PipelineToolDependencies,
+): ToolDefinition<typeof pipelineSchema, PipelineToolDetails> {
 	const now = deps.now ?? (() => new Date().toISOString());
 	return {
 		name: "pipeline",
@@ -157,6 +164,7 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 			"Use task_steps advance for checklists, goal increment for requirements, delegate for concurrent work.",
 		],
 		parameters: pipelineSchema,
+		executionMode: "sequential",
 		renderShell: "self",
 		renderCall() {
 			return emptyOrchestrationCall();
@@ -171,11 +179,12 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 		},
 		async execute(_toolCallId, input: PipelineToolInput) {
 			const timestamp = now();
-			const discoverOpts = { agentPipelinesDir: deps.agentPipelinesDir(), cwd: deps.cwd() };
+			const cwd = deps.cwd();
+			const discoverOpts = { agentPipelinesDir: deps.agentPipelinesDir(), cwd };
 			try {
 				if (input.action === "list") {
 					const definitions = discoverPipelineDefinitions(discoverOpts);
-					const active = resolveRun(deps, input.runId);
+					const active = resolveRun(deps, cwd, input.runId);
 					return {
 						content: [{ type: "text" as const, text: formatDefinitionList(definitions, active) }],
 						details: { action: "list", applied: false, run: active } satisfies PipelineToolDetails,
@@ -188,28 +197,38 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 					if (!definition) {
 						return errorResult("start", `No pipeline definition named '${input.name.trim()}'.`);
 					}
-					const existing = deps.getPipelineRun();
-					if (existing && isPipelineRunActive(existing)) {
+					const admission = withPipelineLifecycleLock(cwd, () => {
+						const existing = resolveRun(deps, cwd, undefined);
+						if (existing && isPipelineRunActive(existing)) {
+							return { applied: false as const, run: existing };
+						}
+						const runId = deps.createRunId?.() ?? createWorkRunId();
+						return {
+							applied: true as const,
+							run: instantiatePipelineRun({
+								definition,
+								runId,
+								runRoot: createPipelineRunRoot(cwd, runId),
+								goalId: input.goalId?.trim() || deps.getGoalState?.()?.goalId,
+								now: timestamp,
+							}),
+						};
+					});
+					if (!admission.applied) {
 						return errorResult(
 							"start",
-							`An active run '${existing.runId}' already exists. Increment or abandon it first.`,
-							existing,
+							`An active run '${admission.run.runId}' already exists. Increment or abandon it first.`,
+							admission.run,
 						);
 					}
-					const runId = deps.createRunId?.() ?? createWorkRunId();
-					const run = instantiatePipelineRun({
-						definition,
-						runId,
-						runRoot: createPipelineRunRoot(deps.cwd(), runId),
-						goalId: input.goalId?.trim() || deps.getGoalState?.()?.goalId,
-						now: timestamp,
-					});
-					deps.savePipelineRun(run);
+					const run = admission.run;
+					const snapshotWarning = saveSessionSnapshot(deps, run);
 					const stage = definition.stages[0]!;
 					const assembled = assembleStageContext(definition, run, stage);
 					const text = [
 						`pipeline start recorded. Run ${run.runId} at ${stage.id}.`,
 						formatPipelineContext(definition, run, assembled),
+						...(snapshotWarning ? [`Warning: ${snapshotWarning}`] : []),
 					].join("\n");
 					return {
 						content: [{ type: "text" as const, text }],
@@ -217,19 +236,19 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 							action: "start",
 							applied: true,
 							run,
+							warning: snapshotWarning,
 							definitionName: definition.name,
 						} satisfies PipelineToolDetails,
 					};
 				}
 
-				const current = resolveRun(deps, input.runId);
-				if (!current) return errorResult(input.action, "No active pipeline run. Use start first.");
-				const definition = resolveDefinition(deps, current);
-				if (!definition) {
-					return errorResult(input.action, `Pipeline definition '${current.pipelineName}' is missing.`, current);
-				}
-
 				if (input.action === "status") {
+					const current = resolveRun(deps, cwd, input.runId);
+					if (!current) return errorResult("status", "No active pipeline run. Use start first.");
+					const definition = resolvePipelineDefinitionForRun(discoverOpts, current);
+					if (!definition) {
+						return errorResult("status", `Pipeline definition '${current.pipelineName}' is missing.`, current);
+					}
 					const assembled = assembleStageContext(definition, current);
 					return {
 						content: [
@@ -242,39 +261,65 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 					};
 				}
 
-				if (input.action === "abandon") {
-					const run = abandonPipelineRun(current, timestamp);
-					deps.savePipelineRun(run);
+				const mutation = withPipelineLifecycleLock(cwd, () => {
+					const current = resolveRun(deps, cwd, input.runId);
+					if (!current) {
+						return { kind: "error" as const, error: "No active pipeline run. Use start first.", run: undefined };
+					}
+					if (input.action === "abandon") {
+						return { kind: "abandon" as const, run: abandonPipelineRun(current, timestamp) };
+					}
+					const definition = resolvePipelineDefinitionForRun(discoverOpts, current);
+					if (!definition) {
+						return {
+							kind: "error" as const,
+							error: `Pipeline definition '${current.pipelineName}' is missing.`,
+							run: current,
+						};
+					}
+					const advanced = incrementPipelineRun(definition, current, timestamp, {
+						openTaskSteps: deps.getOpenTaskSteps?.(),
+						backgroundToolTasks: deps.getBackgroundToolTasks?.(),
+					});
+					return { kind: "increment" as const, definition, ...advanced };
+				});
+				if (mutation.kind === "error") {
+					return errorResult(input.action, mutation.error, mutation.run);
+				}
+				const snapshotWarning = saveSessionSnapshot(deps, mutation.run);
+				if (mutation.kind === "abandon") {
 					return {
 						content: [
-							{ type: "text" as const, text: `pipeline abandon recorded. Run ${run.runId} is abandoned.` },
+							{
+								type: "text" as const,
+								text: `pipeline abandon recorded. Run ${mutation.run.runId} is abandoned.${snapshotWarning ? `\nWarning: ${snapshotWarning}` : ""}`,
+							},
 						],
-						details: { action: "abandon", applied: true, run } satisfies PipelineToolDetails,
+						details: {
+							action: "abandon",
+							applied: true,
+							run: mutation.run,
+							warning: snapshotWarning,
+						} satisfies PipelineToolDetails,
 					};
 				}
-
-				const advanced = incrementPipelineRun(definition, current, timestamp, {
-					goal: deps.getGoalState?.(),
-					openTaskSteps: deps.getOpenTaskSteps?.(),
-					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
-				});
-				deps.savePipelineRun(advanced.run);
-				const assembled = assembleStageContext(definition, advanced.run);
+				const assembled = assembleStageContext(mutation.definition, mutation.run);
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `pipeline increment recorded. ${advanced.result.detail}\n${formatPipelineContext(definition, advanced.run, assembled)}`,
+							text: `pipeline increment recorded. ${mutation.result.detail}\n${formatPipelineContext(mutation.definition, mutation.run, assembled)}${snapshotWarning ? `\nWarning: ${snapshotWarning}` : ""}`,
 						},
 					],
-					details: { action: "increment", applied: true, run: advanced.run } satisfies PipelineToolDetails,
+					details: {
+						action: "increment",
+						applied: true,
+						run: mutation.run,
+						warning: snapshotWarning,
+					} satisfies PipelineToolDetails,
 				};
 			} catch (error) {
-				return errorResult(
-					input.action,
-					error instanceof Error ? error.message : String(error),
-					deps.getPipelineRun(),
-				);
+				return errorResult(input.action, error instanceof Error ? error.message : String(error));
 			}
 		},
 	};

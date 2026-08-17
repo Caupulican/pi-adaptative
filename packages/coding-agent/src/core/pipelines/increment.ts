@@ -1,7 +1,5 @@
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
-import type { GoalState } from "../goals/goal-state.ts";
 import type { OpenTaskStepRef } from "../goals/goal-tool-core.ts";
-import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import { type TaskStep, type TaskStepsState, updateTaskStep } from "../tasks/task-state.ts";
 import { currentPipelineStage } from "./context.ts";
 import { persistPipelineRun, scanStageOutput, stageOutputDir } from "./run-state.ts";
@@ -14,7 +12,6 @@ import {
 } from "./types.ts";
 
 export interface PipelineIncrementJoin {
-	goal?: GoalState;
 	openTaskSteps?: readonly OpenTaskStepRef[];
 	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
 }
@@ -31,26 +28,12 @@ function inFlightToolTasks(tasks: readonly BackgroundToolTaskRef[] | undefined):
 	return tasks.filter((task) => task.status === "running").map((task) => task.taskId);
 }
 
-function linkedOpenStepIds(
-	_definition: PipelineDefinition,
-	join: PipelineIncrementJoin,
-	run: PipelineRun,
-	stage?: PipelineStage,
-): string[] {
+function linkedOpenStepIds(join: PipelineIncrementJoin, run: PipelineRun, stage?: PipelineStage): string[] {
 	if (!stage) return [];
 	if (!join.openTaskSteps || join.openTaskSteps.length === 0) return [];
 
 	return join.openTaskSteps
-		.filter((step) => {
-			if (step.pipelineRunId && step.pipelineRunId === run.runId) {
-				return step.pipelineStageId === stage.id;
-			}
-			if (step.pipelineStageId) {
-				return step.pipelineStageId === stage.id;
-			}
-			if (!run.goalId || !join.goal || join.goal.goalId !== run.goalId) return false;
-			return join.goal.requirements.some((requirement) => taskStepReferencesRequirement(step, requirement));
-		})
+		.filter((step) => step.pipelineRunId === run.runId && step.pipelineStageId === stage.id)
 		.map((step) => step.id);
 }
 
@@ -67,7 +50,7 @@ export function incrementPipelineRun(
 	if (!stage) {
 		throw new PipelineIncrementError(`Current stage '${run.currentStageId}' is missing from the definition.`);
 	}
-	const linked = linkedOpenStepIds(definition, join, run, stage);
+	const linked = linkedOpenStepIds(join, run, stage);
 	if (linked.length > 0) {
 		throw new PipelineIncrementError(
 			`Cannot increment pipeline: open task_steps still reference current stage '${stage.id}' (${linked.join(", ")}).`,

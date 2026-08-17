@@ -1,6 +1,7 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { advanceTaskSteps } from "../pipelines/increment.ts";
+import { MAX_PIPELINE_STAGE_ID_LENGTH } from "../pipelines/types.ts";
 import {
 	addTaskStep,
 	clearTaskSteps,
@@ -14,6 +15,7 @@ import {
 	setTaskSteps,
 	type TaskStep,
 	type TaskStepInput,
+	TaskStepsError,
 	type TaskStepsState,
 	updateTaskStep,
 } from "../tasks/task-state.ts";
@@ -46,10 +48,23 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 			}),
 		),
 		pipelineRunId: Type.Optional(
-			Type.String({ minLength: 1, maxLength: 128, description: "Pipeline run id this step advances." }),
+			Type.String({
+				minLength: 1,
+				maxLength: 128,
+				description: "Active pipeline run id this step advances. Supply together with pipelineStageId.",
+			}),
 		),
 		pipelineStageId: Type.Optional(
-			Type.String({ minLength: 1, maxLength: 64, description: "Pipeline stage id this step advances." }),
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_PIPELINE_STAGE_ID_LENGTH,
+				description: "Stage id in pipelineRunId this step advances. Supply both ids together.",
+			}),
+		),
+		clearPipelineLink: Type.Optional(
+			Type.Boolean({
+				description: "Remove both pipeline ids. Cannot be combined with pipelineRunId/pipelineStageId.",
+			}),
 		),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
@@ -126,6 +141,7 @@ export interface TaskStepsToolDetails {
 export interface TaskStepsToolDependencies {
 	getTaskStepsState: () => TaskStepsState | undefined;
 	saveTaskStepsState: (state: TaskStepsState) => void;
+	getActivePipelineScope?: () => { runId: string; stageIds: readonly string[] } | undefined;
 	now?: () => string;
 }
 
@@ -137,9 +153,46 @@ function toTaskStepInput(input: TaskStepsToolInput): TaskStepInput {
 		priority: input.priority,
 		owner: input.owner,
 		requirementIds: input.requirementIds,
+		pipelineRunId: input.pipelineRunId,
+		pipelineStageId: input.pipelineStageId,
+		clearPipelineLink: input.clearPipelineLink,
 		note: input.note,
 		evidence: input.evidence,
 	};
+}
+
+function validatePipelineLink(
+	deps: TaskStepsToolDependencies,
+	pipelineRunId: string | undefined,
+	pipelineStageId: string | undefined,
+	clearPipelineLink = false,
+): void {
+	if (clearPipelineLink) {
+		if (pipelineRunId !== undefined || pipelineStageId !== undefined) {
+			throw new TaskStepsError("Task step cannot supply pipeline ids while clearPipelineLink is true.");
+		}
+		return;
+	}
+	const runId = pipelineRunId?.trim() || undefined;
+	const stageId = pipelineStageId?.trim() || undefined;
+	if ((runId === undefined) !== (stageId === undefined)) {
+		throw new TaskStepsError("Task step pipelineRunId and pipelineStageId must be supplied together.");
+	}
+	if (!runId || !stageId) return;
+	const active = deps.getActivePipelineScope?.();
+	if (!active) throw new TaskStepsError("Task step pipeline linkage requires an active pipeline run.");
+	if (runId !== active.runId) {
+		throw new TaskStepsError(`Task step pipelineRunId must match active run '${active.runId}'.`);
+	}
+	if (!active.stageIds.includes(stageId)) {
+		throw new TaskStepsError(`Task step pipelineStageId '${stageId}' is not in active run '${active.runId}'.`);
+	}
+}
+
+function validatePipelineInputs(deps: TaskStepsToolDependencies, inputs: readonly TaskStepInput[]): void {
+	for (const input of inputs) {
+		validatePipelineLink(deps, input.pipelineRunId, input.pipelineStageId, input.clearPipelineLink);
+	}
 }
 
 function counts(
@@ -186,6 +239,7 @@ function errorResult(action: TaskStepsAction, error: string, state?: TaskStepsSt
 	return {
 		content: [{ type: "text" as const, text: `task_steps ${action} failed: ${error}` }],
 		details: { action, applied: false, error, state, ...(state ? counts(state) : {}) } satisfies TaskStepsToolDetails,
+		isError: true as const,
 	};
 }
 
@@ -270,11 +324,13 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Use for complex/explicitly tracked work, not one-step work. Keep one in_progress step.",
 			"Batch transitions. Address first open step; record evidence/blocker. Never call only to narrate unchanged state.",
 			"intake preserves every supplied item; link steps to active goal requirementIds.",
+			"For pipeline work, supply the exact active pipelineRunId and pipelineStageId together; use clearPipelineLink to unlink both; unlinked steps do not gate pipeline increment.",
 			"advance completes the current step then starts the next pending step.",
 			"Attach completed tool_task taskIds as evidence. Goal complete refuses while linked steps stay open.",
 			"Before final: clear stale in_progress, discuss/defer remainder. Goal owns outcomes; delegate owns workers.",
 		],
 		parameters: taskStepsSchema,
+		executionMode: "sequential",
 		renderShell: "self",
 		renderCall() {
 			return emptyOrchestrationCall();
@@ -303,6 +359,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 				switch (input.action) {
 					case "set":
 						if (!input.steps) return errorResult(input.action, "set requires steps[].", current);
+						validatePipelineInputs(deps, input.steps);
 						state = setTaskSteps(state, input.steps, timestamp);
 						demotedStepIds = computeDemotedStepIds(
 							before,
@@ -313,6 +370,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 					case "intake":
 						if (!input.steps)
 							return errorResult(input.action, "intake requires a complete steps[] list.", current);
+						validatePipelineInputs(deps, input.steps);
 						state = setTaskSteps(state, input.steps, timestamp);
 						demotedStepIds = computeDemotedStepIds(
 							before,
@@ -321,6 +379,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						);
 						break;
 					case "add":
+						validatePipelineLink(deps, input.pipelineRunId, input.pipelineStageId, input.clearPipelineLink);
 						state = addTaskStep(state, toTaskStepInput(input), timestamp);
 						if (state === before) {
 							// The reducer returned the unchanged state: an open step already carries this
@@ -332,6 +391,21 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 						if (!input.id?.trim())
 							return errorResult(input.action, "update requires id or a unique selector.", current);
 						const selected = resolveTaskStepSelector(before.steps, input.id);
+						if (
+							input.pipelineRunId !== undefined ||
+							input.pipelineStageId !== undefined ||
+							input.clearPipelineLink === true
+						) {
+							const clearingPipelineLink = input.clearPipelineLink === true;
+							validatePipelineLink(
+								deps,
+								clearingPipelineLink ? input.pipelineRunId : (input.pipelineRunId ?? selected.pipelineRunId),
+								clearingPipelineLink
+									? input.pipelineStageId
+									: (input.pipelineStageId ?? selected.pipelineStageId),
+								clearingPipelineLink,
+							);
+						}
 						state = updateTaskStep(
 							state,
 							input.id,
@@ -342,6 +416,9 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 								priority: input.priority,
 								owner: input.owner,
 								requirementIds: input.requirementIds,
+								pipelineRunId: input.pipelineRunId,
+								pipelineStageId: input.pipelineStageId,
+								clearPipelineLink: input.clearPipelineLink,
 								note: input.note,
 								evidence: input.evidence,
 							},

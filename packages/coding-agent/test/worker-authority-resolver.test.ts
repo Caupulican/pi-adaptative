@@ -42,4 +42,22 @@ describe("resolveWorkerAuthority", () => {
 		expect(resolution.shipment.profile.toolNames).toEqual(["read", "bash"]);
 		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
 	});
+
+	it("admits the read-only memory surface with memory.query authority", () => {
+		const resolution = resolveWorkerAuthority({
+			authority: {
+				capabilities: ["memory.query"],
+				toolNames: ["memory"],
+			},
+			base: undefined,
+			foregroundModel: model,
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) return;
+		expect(resolution.shipment.profile.toolNames).toEqual(["memory"]);
+		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["memory.query"]);
+	});
 });

@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentTool } from "@caupulican/pi-agent-core";
+import { Type } from "typebox";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	deriveCompositeChildEnvelope,
+	wrapToolWithCapabilityEnvelopeGate,
+} from "../src/core/autonomy/composite-tool-gate.ts";
 import type { CapabilityEnvelope, GateOutcome, GateOutcomeKind } from "../src/core/autonomy/contracts.ts";
 import {
 	combineGateOutcomes,
@@ -9,6 +15,7 @@ import {
 	extractCandidatePaths,
 	fallbackGateOutcome,
 } from "../src/core/autonomy/gates.ts";
+import { resolveProfileToolCapabilities } from "../src/core/tool-capability-policy.ts";
 
 describe("Autonomy Gates", () => {
 	let tempDir: string;
@@ -257,6 +264,34 @@ describe("Autonomy Gates", () => {
 					envelope: writeEnvelope,
 				}).reasonCode,
 			).toBe("missing_capability");
+			expect(
+				evaluateToolGate({
+					toolName: "memory",
+					args: { query: "disguise", action: "add", target: "memory", content: "unsafe" },
+					cwd: "/tmp",
+					envelope: readEnvelope,
+				}).reasonCode,
+			).toBe("missing_capability");
+		});
+
+		it("classifies goal reads separately from goal mutations", () => {
+			const readEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory.query"] };
+			const writeEnvelope: CapabilityEnvelope = { ...baseEnvelope, capabilities: ["memory.mutate"] };
+
+			expect(evaluateToolGate({ toolName: "get_goal", args: {}, cwd: "/tmp", envelope: readEnvelope }).outcome).toBe(
+				"allow",
+			);
+			expect(
+				evaluateToolGate({ toolName: "goal", args: { action: "get" }, cwd: "/tmp", envelope: readEnvelope })
+					.outcome,
+			).toBe("allow");
+			expect(
+				evaluateToolGate({ toolName: "create_goal", args: {}, cwd: "/tmp", envelope: readEnvelope }).reasonCode,
+			).toBe("missing_capability");
+			expect(
+				evaluateToolGate({ toolName: "goal", args: { action: "get" }, cwd: "/tmp", envelope: writeEnvelope })
+					.reasonCode,
+			).toBe("missing_capability");
 		});
 
 		it("envelope with filesystem.read allows read path inside scope", () => {
@@ -497,6 +532,20 @@ describe("Autonomy Gates", () => {
 			expect(denied.reasonCode).toBe("path_denied");
 		});
 
+		it("requires a mutating pipeline action to remain inside its workspace path scope", () => {
+			const outcome = evaluateToolGate({
+				toolName: "pipeline",
+				args: { action: "start", name: "research" },
+				cwd: "/tmp/sandbox-repo",
+				envelope: {
+					...baseEnvelope,
+					capabilities: ["workflow.plan", "filesystem.write"],
+					allowedPaths: ["src"],
+				},
+			});
+			expect(outcome).toMatchObject({ outcome: "block", reasonCode: "path_outside_allowed_roots" });
+		});
+
 		it("enforces conjunctive capability requirements for mutating pipeline actions", () => {
 			const planOnlyEnvelope: CapabilityEnvelope = {
 				...baseEnvelope,
@@ -516,7 +565,7 @@ describe("Autonomy Gates", () => {
 					toolName: "pipeline",
 					args: { action: "status" },
 					cwd: "/tmp",
-					envelope: planOnlyEnvelope,
+					envelope: { ...planOnlyEnvelope, allowedPaths: ["isolated-subtree"] },
 				}).outcome,
 			).toBe("allow");
 
@@ -530,6 +579,7 @@ describe("Autonomy Gates", () => {
 				});
 				expect(outcome.outcome).toBe("block");
 				expect(outcome.reasonCode).toBe("missing_capability");
+				expect(outcome.message).toContain("workflow.plan and (filesystem.write or worktree.mutate)");
 			}
 
 			// Full grant allows all actions
@@ -549,7 +599,17 @@ describe("Autonomy Gates", () => {
 			}
 		});
 
-		it("enforces path gating on directory search tools and context_scout when path is omitted", () => {
+		it("materializes every conjunctive capability clause into profile tool manifests", () => {
+			expect(resolveProfileToolCapabilities({ capabilityCeiling: ["workflow.plan"] }, "pipeline")).toBeUndefined();
+			expect(
+				resolveProfileToolCapabilities({ capabilityCeiling: ["workflow.plan", "worktree.mutate"] }, "pipeline"),
+			).toEqual(["workflow.plan", "worktree.mutate"]);
+			expect(resolveProfileToolCapabilities({ capabilityCeiling: ["memory.query"] }, "memory")).toEqual([
+				"memory.query",
+			]);
+		});
+
+		it("gates omitted directory-search paths without treating context_scout as cwd access", () => {
 			const customCwd = "/tmp/sandbox-repo";
 			const scopedEnvelope: CapabilityEnvelope = {
 				...baseEnvelope,
@@ -558,7 +618,7 @@ describe("Autonomy Gates", () => {
 			};
 
 			// Directory search tools default to root "." and are blocked if whole root is not in allowedPaths
-			for (const toolName of ["find", "grep", "ls", "context_scout"]) {
+			for (const toolName of ["find", "grep", "ls"]) {
 				const outcome = evaluateToolGate({
 					toolName,
 					args: {},
@@ -568,6 +628,16 @@ describe("Autonomy Gates", () => {
 				expect(outcome.outcome).toBe("block");
 				expect(outcome.reasonCode).toBe("path_outside_allowed_roots");
 			}
+			expect(extractCandidatePaths("grep", undefined)).toEqual(["."]);
+
+			const scout = evaluateToolGate({
+				toolName: "context_scout",
+				args: { query: "inspect src" },
+				cwd: customCwd,
+				envelope: scopedEnvelope,
+			});
+			expect(scout.outcome).toBe("allow");
+			expect(extractCandidatePaths("context_scout", { query: "inspect src" })).toEqual([]);
 
 			// Explicitly pointing to allowed subpath succeeds
 			const allowedGrep = evaluateToolGate({
@@ -577,6 +647,53 @@ describe("Autonomy Gates", () => {
 				envelope: scopedEnvelope,
 			});
 			expect(allowedGrep.outcome).toBe("allow");
+		});
+
+		it("lets an authorized context_scout use internal read tools only inside the captured envelope", async () => {
+			const parameters = Type.Object({ path: Type.String() });
+			const execute = vi.fn(async () => ({
+				content: [{ type: "text" as const, text: "ok" }],
+				details: undefined,
+			}));
+			const readTool: AgentTool<typeof parameters, undefined> = {
+				name: "read",
+				label: "Read",
+				description: "Read one file.",
+				parameters,
+				execute,
+			};
+			const allowedPaths = [allowedRoot];
+			const callerEnvelope: CapabilityEnvelope = {
+				id: "scout-envelope",
+				capabilities: ["filesystem.read"],
+				allowedTools: ["context_scout"],
+				allowedPaths,
+				deniedPaths: [path.join(allowedRoot, "private")],
+			};
+			const childEnvelope = deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], callerEnvelope);
+			expect(childEnvelope?.allowedTools).toEqual(["context_scout", "read", "grep", "find"]);
+			allowedPaths[0] = outsideRoot;
+
+			const guarded = wrapToolWithCapabilityEnvelopeGate(readTool, tempDir, childEnvelope);
+			await expect(
+				guarded.execute("call-allowed", { path: path.join(allowedRoot, "file.txt") }),
+			).resolves.toMatchObject({ content: [{ text: "ok" }] });
+			await expect(guarded.execute("call-outside", { path: path.join(outsideRoot, "file.txt") })).rejects.toThrow(
+				"path_outside_allowed_roots",
+			);
+			await expect(
+				guarded.execute("call-denied", { path: path.join(allowedRoot, "private", "secret.txt") }),
+			).rejects.toThrow("path_denied");
+			expect(execute).toHaveBeenCalledOnce();
+		});
+
+		it("does not grant child tools when the composite parent is outside the allowlist", () => {
+			const childEnvelope = deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], {
+				id: "wrong-parent-envelope",
+				capabilities: ["filesystem.read"],
+				allowedTools: ["read"],
+			});
+			expect(childEnvelope?.allowedTools).toEqual([]);
 		});
 	});
 });

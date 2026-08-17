@@ -563,11 +563,28 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				// a `boundLaneId` was found on it.
 				nextState = current as GoalState;
 			} else {
+				let activePipeline: ReturnType<NonNullable<GoalToolDependencies["getActivePipeline"]>>;
+				if (
+					current &&
+					isGoalExecutionActive(current.status) &&
+					(action.action === "complete" || action.action === "increment")
+				) {
+					try {
+						activePipeline = deps.getActivePipeline?.();
+					} catch (error) {
+						const message = `Cannot verify active pipeline state: ${error instanceof Error ? error.message : String(error)}`;
+						return {
+							content: [{ type: "text" as const, text: `goal ${input.action} failed: ${message}` }],
+							details: { action: input.action, applied: false, error: message, state: current },
+							isError: true,
+						};
+					}
+				}
 				const result = applyGoalAction(current, action, now(), {
 					requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
 					openTaskSteps: deps.getOpenTaskSteps?.(),
 					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
-					activePipeline: deps.getActivePipeline?.(),
+					activePipeline,
 				});
 				if (!result.ok) {
 					return {

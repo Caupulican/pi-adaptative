@@ -33,7 +33,7 @@
  * `_refreshToolRegistry` delegation for its internal callers.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -45,9 +45,9 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
+import { deriveCompositeChildEnvelope, wrapToolWithCapabilityEnvelopeGate } from "./autonomy/composite-tool-gate.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
 import { isPathWithinEnvelope } from "./autonomy/envelope-enforcement.ts";
-import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { isCompletedBackgroundToolEvidence } from "./background-tool-task-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
@@ -90,6 +90,8 @@ import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
+import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
+import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
 import { isPipelineRunActive, type PipelineRun } from "./pipelines/types.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
 import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blockers.ts";
@@ -147,6 +149,7 @@ import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
 import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
+import { countFileLinesSync } from "./util/bounded-file.ts";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
@@ -496,6 +499,7 @@ export class RuntimeBuilder {
 	) {
 		const cwd = this.deps.getCwd();
 		const envelope = this.deps.getCapabilityEnvelope?.();
+		const childEnvelope = deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
 		const controller = new ScoutController({
 			resolveScoutModel: async () =>
 				resolveScoutModel(
@@ -507,64 +511,34 @@ export class RuntimeBuilder {
 				),
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => {
-				const readTool = createReadTool(toolCwd);
-				const grepTool = createGrepTool(toolCwd, { artifactStore });
-				const findTool = createFindTool(toolCwd, { artifactStore });
-				const wrapWithGating = (tool: AgentTool<any>) => ({
-					...tool,
-					execute: async (toolCallId: string, input: any) => {
-						const currentEnvelope = this.deps.getCapabilityEnvelope?.();
-						if (
-							currentEnvelope &&
-							(currentEnvelope.allowedPaths?.length || currentEnvelope.deniedPaths?.length)
-						) {
-							const outcome = evaluateToolGate({
-								toolName: tool.name,
-								args: input,
-								cwd: toolCwd,
-								envelope: currentEnvelope,
-							});
-							if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
-								return {
-									content: [
-										{
-											type: "text" as const,
-											text: `Tool '${tool.name}' execution blocked by autonomy path gate: ${outcome.message}`,
-										},
-									],
-									details: undefined,
-									isError: true,
-								};
-							}
-						}
-						return tool.execute(toolCallId, input);
-					},
-				});
+				const readTool = wrapToolWithCapabilityEnvelopeGate(createReadTool(toolCwd), toolCwd, childEnvelope);
+				const grepTool = wrapToolWithCapabilityEnvelopeGate(
+					createGrepTool(toolCwd, { artifactStore }),
+					toolCwd,
+					childEnvelope,
+				);
+				const findTool = wrapToolWithCapabilityEnvelopeGate(
+					createFindTool(toolCwd, { artifactStore }),
+					toolCwd,
+					childEnvelope,
+				);
 				return [
-					wrapToolWithCredentialExposureGuard(wrapWithGating(readTool), toolCwd, this._credentialExposureBoundary),
-					wrapToolWithCredentialExposureGuard(wrapWithGating(grepTool), toolCwd, this._credentialExposureBoundary),
-					wrapToolWithCredentialExposureGuard(wrapWithGating(findTool), toolCwd, this._credentialExposureBoundary),
+					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary),
+					wrapToolWithCredentialExposureGuard(grepTool, toolCwd, this._credentialExposureBoundary),
+					wrapToolWithCredentialExposureGuard(findTool, toolCwd, this._credentialExposureBoundary),
 				];
 			},
 			streamFn: this.deps.getAgent().streamFn,
 			fileExists: (path) => {
 				const target = resolveCwdPath(cwd, path);
-				if (
-					envelope &&
-					(envelope.allowedPaths?.length || envelope.deniedPaths?.length) &&
-					!isPathWithinEnvelope(envelope, target, cwd)
-				) {
+				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd)) {
 					return false;
 				}
 				return existsSync(target);
 			},
 			countLines: (path) => {
 				const target = resolveCwdPath(cwd, path);
-				if (
-					envelope &&
-					(envelope.allowedPaths?.length || envelope.deniedPaths?.length) &&
-					!isPathWithinEnvelope(envelope, target, cwd)
-				) {
+				if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd)) {
 					return undefined;
 				}
 				return countFileLines(target);
@@ -1062,7 +1036,7 @@ export class RuntimeBuilder {
 					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
 					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
 					getActivePipeline: () => {
-						const run = this.deps.getPipelineRunSnapshot();
+						const run = resolveCurrentProjectPipelineRun(this.deps.getCwd(), this.deps.getPipelineRunSnapshot());
 						if (!run || !isPipelineRunActive(run)) return undefined;
 						return {
 							runId: run.runId,
@@ -1086,6 +1060,18 @@ export class RuntimeBuilder {
 					getTaskStepsState: () => this.deps.getTaskStepsStateSnapshot(),
 					saveTaskStepsState: (state) => {
 						this.deps.saveTaskStepsStateSnapshot(state);
+					},
+					getActivePipelineScope: () => {
+						const run = resolveCurrentProjectPipelineRun(this.deps.getCwd(), this.deps.getPipelineRunSnapshot());
+						if (!run || !isPipelineRunActive(run)) return undefined;
+						const definition = resolvePipelineDefinitionForRun(
+							{
+								agentPipelinesDir: resourceDir("pipelines", this.deps.getAgentDir()),
+								cwd: this.deps.getCwd(),
+							},
+							run,
+						);
+						return { runId: run.runId, stageIds: definition?.stages.map((stage) => stage.id) ?? [] };
 					},
 				});
 				this._baseToolDefinitions.set(taskStepsToolDefinition.name, taskStepsToolDefinition);
@@ -1770,7 +1756,7 @@ function resolveCwdPath(cwd: string, path: string): string {
 
 function countFileLines(path: string): number | undefined {
 	try {
-		return readFileSync(path, "utf8").split(/\r?\n/).length;
+		return countFileLinesSync(path, "Context scout citation file");
 	} catch {
 		return undefined;
 	}

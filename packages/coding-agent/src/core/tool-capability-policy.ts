@@ -3,25 +3,41 @@ import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 
 export interface ToolCapabilityPolicy {
-	capabilityCandidates: readonly HarnessCapability[];
-	enforcement: CapabilityEnforcementKind;
+	/** AND across clauses; OR across the capability alternatives inside one clause. */
+	capabilityClauses: readonly (readonly HarnessCapability[])[];
+	enforcements: readonly CapabilityEnforcementKind[];
 }
 
+export type ToolPathAccess = "none" | "read" | "write";
+
+const READ_PATH_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set([
+	"filesystem.read",
+	"worktree.read",
+	"skill.read",
+	"source.read",
+]);
+const WRITE_PATH_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set([
+	"filesystem.write",
+	"worktree.mutate",
+	"skill.write",
+	"source.write",
+]);
+
 function policy(
-	capabilityCandidates: readonly HarnessCapability[],
-	enforcement: CapabilityEnforcementKind,
+	capabilityClauses: readonly (readonly HarnessCapability[])[],
+	enforcements: CapabilityEnforcementKind | readonly CapabilityEnforcementKind[],
 ): ToolCapabilityPolicy {
 	return Object.freeze({
-		capabilityCandidates: Object.freeze([...capabilityCandidates]),
-		enforcement,
+		capabilityClauses: Object.freeze(capabilityClauses.map((clause) => Object.freeze([...clause]))),
+		enforcements: Object.freeze(typeof enforcements === "string" ? [enforcements] : [...enforcements]),
 	});
 }
 
-const READ_POLICY = policy(["filesystem.read", "worktree.read"], "path-scope");
-const WRITE_POLICY = policy(["filesystem.write", "worktree.mutate"], "path-scope");
-const PROCESS_POLICY = policy(["process.exec", "tests.execute"], "process-launcher");
-const NETWORK_POLICY = policy(["network.http", "service.mcp"], "service-proxy");
-const DELEGATE_POLICY = policy(["workflow.delegate"], "control-plane");
+const READ_POLICY = policy([["filesystem.read", "worktree.read"]], "path-scope");
+const WRITE_POLICY = policy([["filesystem.write", "worktree.mutate"]], "path-scope");
+const PROCESS_POLICY = policy([["process.exec", "tests.execute"]], "process-launcher");
+const NETWORK_POLICY = policy([["network.http", "service.mcp"]], "service-proxy");
+const DELEGATE_POLICY = policy([["workflow.delegate"]], "control-plane");
 
 const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["read", "ls", "grep", "find"].map((toolName) => [toolName, READ_POLICY] as const),
@@ -30,26 +46,27 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 		(toolName) => [toolName, PROCESS_POLICY] as const,
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
-	["skill", policy(["skill.read"], "path-scope")],
-	["skill_audit", policy(["skill.read"], "path-scope")],
-	["skillify", policy(["skill.write"], "path-scope")],
-	["extensionify", policy(["source.write"], "path-scope")],
-	...["goal", ...GOAL_LIFECYCLE_TOOL_NAMES].map(
-		(toolName) => [toolName, policy(["memory.mutate"], "memory-broker")] as const,
-	),
-	["memory", policy(["memory.mutate", "memory.query"], "memory-broker")],
-	["secret_store", policy(["credentials.use"], "service-proxy")],
+	["skill", policy([["skill.read"]], "path-scope")],
+	["skill_audit", policy([["skill.read"]], "path-scope")],
+	["skillify", policy([["skill.write"]], "path-scope")],
+	["extensionify", policy([["source.write"]], "path-scope")],
+	["goal", policy([["memory.mutate", "memory.query"]], "memory-broker")],
+	[GOAL_LIFECYCLE_TOOL_NAMES[0], policy([["memory.mutate"]], "memory-broker")],
+	[GOAL_LIFECYCLE_TOOL_NAMES[1], policy([["memory.query"]], "memory-broker")],
+	[GOAL_LIFECYCLE_TOOL_NAMES[2], policy([["memory.mutate"]], "memory-broker")],
+	["memory", policy([["memory.mutate", "memory.query"]], "memory-broker")],
+	["secret_store", policy([["credentials.use"]], ["service-proxy", "path-scope"])],
 	["delegate", DELEGATE_POLICY],
-	["model_fitness", policy(["research.execute"], "control-plane")],
-	["task_steps", policy(["workflow.plan", "memory.mutate"], "control-plane")],
-	["pipeline", policy(["workflow.plan", "filesystem.write"], "control-plane")],
-	["tool_task", policy(["process.exec", "workflow.delegate"], "control-plane")],
-	["worktree_sync", policy(["worktree.mutate", "filesystem.write"], "path-scope")],
-	["ask_question", policy(["workflow.plan", "memory.query"], "control-plane")],
-	["artifact_retrieve", policy(["filesystem.read"], "path-scope")],
-	["context_scout", policy(["filesystem.read"], "path-scope")],
-	["tmux_dispatch", policy(["process.exec", "workflow.delegate"], "process-launcher")],
-	["improvement_loop", policy(["process.exec", "tests.execute"], "process-launcher")],
+	["model_fitness", policy([["research.execute"]], "control-plane")],
+	["task_steps", policy([["workflow.plan", "memory.mutate"]], "control-plane")],
+	["pipeline", policy([["workflow.plan"], ["filesystem.write", "worktree.mutate"]], ["control-plane", "path-scope"])],
+	["tool_task", policy([["process.exec", "workflow.delegate"]], "control-plane")],
+	["worktree_sync", policy([["worktree.mutate", "filesystem.write"]], "path-scope")],
+	["ask_question", policy([["workflow.plan", "memory.query"]], "control-plane")],
+	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
+	["context_scout", policy([["filesystem.read"]], "path-scope")],
+	["tmux_dispatch", policy([["process.exec", "workflow.delegate"]], "process-launcher")],
+	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);
 
 export function getToolCapabilityPolicy(toolName: string): ToolCapabilityPolicy | undefined {
@@ -60,13 +77,30 @@ export function hasToolCapabilityPolicy(toolName: string): boolean {
 	return getToolCapabilityPolicy(toolName) !== undefined;
 }
 
+export function toolUsesPathScope(toolName: string): boolean {
+	return getToolCapabilityPolicy(toolName)?.enforcements.includes("path-scope") ?? false;
+}
+
 export function toolCapabilityRequirementClauses(
 	toolName: string,
 	args?: unknown,
 ): readonly (readonly HarnessCapability[])[] {
 	const name = toolName.toLowerCase();
-	if (name === "memory") {
-		return args && typeof args === "object" && "query" in args ? [["memory.query"]] : [["memory.mutate"]];
+	if (name === "memory" && args !== undefined) {
+		const record =
+			args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
+		const isUnambiguousQuery =
+			record !== undefined &&
+			typeof record.query === "string" &&
+			Object.keys(record).every((key) => key === "query");
+		return isUnambiguousQuery ? [["memory.query"]] : [["memory.mutate"]];
+	}
+	if (name === "goal" && args !== undefined) {
+		const action =
+			args && typeof args === "object" && !Array.isArray(args) && "action" in args
+				? (args as { action: unknown }).action
+				: undefined;
+		return action === "get" ? [["memory.query"]] : [["memory.mutate"]];
 	}
 	if (name === "pipeline") {
 		const action =
@@ -78,7 +112,7 @@ export function toolCapabilityRequirementClauses(
 	}
 	const itemPolicy = getToolCapabilityPolicy(name);
 	if (!itemPolicy) return [];
-	return [itemPolicy.capabilityCandidates];
+	return itemPolicy.capabilityClauses;
 }
 
 export function requiredEnvelopeCapabilities(toolName: string, args?: unknown): readonly HarnessCapability[] {
@@ -86,30 +120,88 @@ export function requiredEnvelopeCapabilities(toolName: string, args?: unknown): 
 	return clauses.map((clause) => clause[0]).filter((c): c is HarnessCapability => c !== undefined);
 }
 
+export function formatToolCapabilityRequirement(toolName: string, args?: unknown): string {
+	return toolCapabilityRequirementClauses(toolName, args)
+		.map((clause) => (clause.length === 1 ? clause[0] : `(${clause.join(" or ")})`))
+		.filter((clause): clause is string => clause !== undefined)
+		.join(" and ");
+}
+
 export function envelopeHasToolCapability(
 	capabilities: readonly HarnessCapability[],
 	toolName: string,
 	args?: unknown,
 ): boolean {
-	const clauses = toolCapabilityRequirementClauses(toolName, args);
-	if (clauses.length === 0) return false;
-	return clauses.every((clause) => clause.some((capability) => capabilities.includes(capability)));
+	return resolveToolCallCapabilities(capabilities, toolName, args) !== undefined;
 }
 
-export function resolveProfileToolCapability(
+/** Resolve the exact alternative selected from every conjunctive clause for one invocation. */
+export function resolveToolCallCapabilities(
+	capabilities: readonly HarnessCapability[],
+	toolName: string,
+	args?: unknown,
+): readonly HarnessCapability[] | undefined {
+	const clauses = toolCapabilityRequirementClauses(toolName, args);
+	if (clauses.length === 0) return undefined;
+	const resolved: HarnessCapability[] = [];
+	for (const clause of clauses) {
+		const match = clause.find((capability) => capabilities.includes(capability));
+		if (!match) return undefined;
+		resolved.push(match);
+	}
+	return resolved;
+}
+
+export function resolveCapabilityPathAccess(
+	capabilities: readonly HarnessCapability[],
+): Exclude<ToolPathAccess, "none"> | undefined {
+	if (capabilities.some((capability) => WRITE_PATH_CAPABILITIES.has(capability))) return "write";
+	if (capabilities.some((capability) => READ_PATH_CAPABILITIES.has(capability))) return "read";
+	return undefined;
+}
+
+/** Resolve whether one authorized invocation exposes caller-controlled paths to a scoped boundary. */
+export function resolveToolCallPathAccess(
+	capabilities: readonly HarnessCapability[],
+	toolName: string,
+	args?: unknown,
+): ToolPathAccess {
+	const policy = getToolCapabilityPolicy(toolName);
+	if (!policy?.enforcements.includes("path-scope")) return "none";
+	const selected = resolveToolCallCapabilities(capabilities, toolName, args);
+	if (!selected) return "none";
+	const name = toolName.toLowerCase();
+	// These tools accept identifiers or natural-language queries, not filesystem paths. Their
+	// fixed stores are owned by the tool, while context_scout gates each concrete child read.
+	if (name === "artifact_retrieve" || name === "context_scout") return "none";
+	if (name === "pipeline" && selected.includes("workflow.plan") && selected.length === 1) return "none";
+	if (name === "secret_store") {
+		const action =
+			args && typeof args === "object" && !Array.isArray(args) && "action" in args
+				? (args as { action: unknown }).action
+				: undefined;
+		return action === "migrate" ? "read" : "none";
+	}
+	return resolveCapabilityPathAccess(selected) ?? "none";
+}
+
+export function resolveProfileToolCapabilities(
 	profile: Pick<OrchestrationProfile, "capabilityCeiling">,
 	toolName: string,
-): HarnessCapability | undefined {
+): readonly HarnessCapability[] | undefined {
 	const clauses = toolCapabilityRequirementClauses(toolName);
+	if (clauses.length === 0) return undefined;
+	const resolved: HarnessCapability[] = [];
 	for (const clause of clauses) {
 		const match = clause.find((capability) => profile.capabilityCeiling.includes(capability));
 		if (!match) return undefined;
+		resolved.push(match);
 	}
-	return clauses[0]?.[0];
+	return resolved;
 }
 
 export function describeToolCapabilityAuthority(toolName: string): string {
-	switch (getToolCapabilityPolicy(toolName)?.capabilityCandidates[0]) {
+	switch (getToolCapabilityPolicy(toolName)?.capabilityClauses[0]?.[0]) {
 		case "filesystem.read":
 		case "worktree.read":
 			return "read";

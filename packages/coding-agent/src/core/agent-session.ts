@@ -164,6 +164,8 @@ import {
 	formatActivePipelineContext,
 	getLatestPipelineRunSnapshot,
 	type PipelineRun,
+	resolveCurrentProjectPipelineRun,
+	resolvePipelineDefinitionForRun,
 } from "./pipelines/index.ts";
 import { ProfileFilterController } from "./profile-filter-controller.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -2795,8 +2797,29 @@ export class AgentSession {
 				);
 			}
 
-			const pipelineRun = options?.internalContextType ? undefined : this.getPipelineRunSnapshot();
-			const pipelineContext = pipelineRun ? formatActivePipelineContext(pipelineRun) : undefined;
+			let pipelineRun: PipelineRun | undefined;
+			let pipelineContext: string | undefined;
+			if (!options?.internalContextType) {
+				try {
+					pipelineRun = resolveCurrentProjectPipelineRun(this._cwd, this.getPipelineRunSnapshot());
+					const pipelineDefinition = pipelineRun
+						? resolvePipelineDefinitionForRun(
+								{ agentPipelinesDir: resourceDir("pipelines", this._agentDir), cwd: this._cwd },
+								pipelineRun,
+							)
+						: undefined;
+					pipelineContext =
+						pipelineRun && pipelineDefinition
+							? formatActivePipelineContext(pipelineDefinition, pipelineRun)
+							: undefined;
+				} catch (error) {
+					pipelineRun = undefined;
+					this._emit({
+						type: "warning",
+						message: `Pipeline context unavailable: ${error instanceof Error ? error.message : String(error)}`,
+					});
+				}
+			}
 			if (pipelineRun && pipelineContext) {
 				messages.push(
 					createCustomMessage(

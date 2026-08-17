@@ -293,12 +293,13 @@ export class CompactionController {
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		if (this.manualAbortController) {
+		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
 		}
 		const abortController = new AbortController();
 		this.manualAbortController = abortController;
 		this.ineffectiveThresholdFrontier = undefined;
+		let primaryError: unknown;
 
 		try {
 			this.deps.disconnectAgent();
@@ -319,7 +320,7 @@ export class CompactionController {
 				throw new Error("Nothing to compact (session too small)");
 			}
 
-			const signal = this.manualAbortController.signal;
+			const signal = abortController.signal;
 			// Resolve once for the complete retry ladder. Provider hooks can perform durable flushes and
 			// must not be repeated for every summarizer/gate retry.
 			const effectiveInstructions = await this.buildCompactionInstructions(customInstructions);
@@ -423,6 +424,7 @@ export class CompactionController {
 			});
 			return appliedResult;
 		} catch (error) {
+			primaryError = error;
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			this.deps.emit({
@@ -438,8 +440,19 @@ export class CompactionController {
 			if (this.manualAbortController === abortController) {
 				this.manualAbortController = undefined;
 			}
-			this.deps.reconnectAgent();
-			this.deps.onCompactionSettled?.();
+			let cleanupError: unknown;
+			try {
+				this.deps.reconnectAgent();
+			} catch (error) {
+				cleanupError = error;
+			} finally {
+				try {
+					this.deps.onCompactionSettled?.();
+				} catch (error) {
+					cleanupError ??= error;
+				}
+			}
+			if (primaryError === undefined && cleanupError !== undefined) throw cleanupError;
 		}
 	}
 
@@ -528,7 +541,7 @@ export class CompactionController {
 	}
 
 	get isCompacting(): boolean {
-		return this.autoRunPromise !== undefined || this.manualAbortController !== undefined;
+		return this.isRunning();
 	}
 
 	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {

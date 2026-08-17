@@ -15,10 +15,14 @@ import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts"
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
-import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
+import { getToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+
+function delegatedToolCapabilities(toolName: string): readonly HarnessCapability[] {
+	return toolName === "memory" ? ["memory.query"] : requiredEnvelopeCapabilities(toolName);
+}
 
 export interface WorkerExecutionPlan {
 	toolManifests: readonly ToolCapabilityManifest[];
@@ -117,18 +121,17 @@ export function buildWorkerExecutionPlan(args: {
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
-		...(memoryEligible ? (["memory"] as const) : []),
 		...enabledProcessToolNames,
 		...(profileToolNames.has("delegate") && args.profile.capabilityCeiling.includes("workflow.delegate")
 			? (["delegate"] as const)
 			: []),
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
-	if (memoryEligible && !toolManifests.some((manifest) => manifest.toolName === "memory")) {
+	if (memoryEligible) {
 		toolManifests.push({
 			toolName: "memory",
 			moduleSpecifier: "../tools/memory.ts",
-			capabilities: ["memory.query"],
+			capabilities: delegatedToolCapabilities("memory"),
 			roles: [args.profile.role],
 			enforcements: ["memory-broker"],
 		});
@@ -221,17 +224,17 @@ export function compileManagedProcessExecutionGrant(args: {
 	const unknownTools: string[] = [];
 	for (const toolName of [...new Set(args.allowedTools)]) {
 		const policy = getToolCapabilityPolicy(toolName);
-		const capability = policy?.capabilityCandidates[0];
-		if (!policy || !capability) {
+		const capabilities = delegatedToolCapabilities(toolName);
+		if (!policy || capabilities.length === 0) {
 			unknownTools.push(toolName);
 			continue;
 		}
 		manifests.push({
 			toolName,
 			moduleSpecifier: `managed-process:${toolName}`,
-			capabilities: [capability],
+			capabilities,
 			roles: [args.role],
-			enforcements: [policy.enforcement],
+			enforcements: policy.enforcements,
 		});
 	}
 	if (unknownTools.length > 0) return { ok: false, reasonCodes: unknownTools.map((name) => `unknown_tool:${name}`) };

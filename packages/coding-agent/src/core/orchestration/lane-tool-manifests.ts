@@ -1,5 +1,5 @@
 import { mapToolNamesForPlatform } from "../default-tool-surface.ts";
-import { getToolCapabilityPolicy, resolveProfileToolCapability } from "../tool-capability-policy.ts";
+import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
 
 export const CLASSIFIED_LANE_TOOL_NAMES = [
@@ -30,14 +30,14 @@ export function buildLaneToolManifests(
 	for (const toolName of new Set(mapToolNamesForPlatform(profile.toolNames))) {
 		if (!enabled.has(toolName)) continue;
 		const policy = getToolCapabilityPolicy(toolName);
-		const capability = resolveProfileToolCapability(profile, toolName);
-		if (!capability || !policy) continue;
+		const capabilities = resolveProfileToolCapabilities(profile, toolName);
+		if (!capabilities || !policy) continue;
 		manifests.push({
 			toolName,
 			moduleSpecifier: `../tools/${toolName}.ts`,
-			capabilities: [capability],
+			capabilities,
 			roles: [profile.role],
-			enforcements: [policy.enforcement],
+			enforcements: policy.enforcements,
 		});
 	}
 	return manifests;

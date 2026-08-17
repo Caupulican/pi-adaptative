@@ -1,4 +1,4 @@
-import { describeToolCapabilityAuthority, resolveProfileToolCapability } from "../tool-capability-policy.ts";
+import { describeToolCapabilityAuthority, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type {
 	ExecutionGrant,
@@ -285,7 +285,7 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 		);
 	}
 	for (const toolName of profile.toolNames) {
-		if (!resolveProfileToolCapability(profile, toolName)) {
+		if (!resolveProfileToolCapabilities(profile, toolName)) {
 			throw new OrchestrationProfileError(
 				`Profile '${profile.profileId}' tool '${toolName}' lacks ${describeToolCapabilityAuthority(toolName)} authority.`,
 			);

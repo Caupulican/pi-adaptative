@@ -84,6 +84,7 @@ export function taskStepPanelRow(step: TaskStep): OrchestrationPanelRow {
 		step.requirementIds?.length
 			? `${step.requirementIds.length} requirement${step.requirementIds.length === 1 ? "" : "s"}`
 			: undefined,
+		step.pipelineRunId && step.pipelineStageId ? `${step.pipelineRunId}/${step.pipelineStageId}` : undefined,
 		step.evidence.length ? `${step.evidence.length} evidence` : undefined,
 	].filter((value): value is string => value !== undefined);
 	const details = [

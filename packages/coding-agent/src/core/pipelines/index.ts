@@ -10,6 +10,7 @@ export {
 	loadPipelineDefinition,
 	projectPipelineRunsDir,
 	projectPipelinesDir,
+	resolvePipelineDefinitionForRun,
 } from "./discover.ts";
 export {
 	abandonPipelineRun,
@@ -24,12 +25,16 @@ export {
 	createPipelineRunRoot,
 	findActivePipelineRun,
 	instantiatePipelineRun,
+	isProjectPipelineRun,
 	loadPipelineRunById,
 	persistPipelineRun,
 	readPipelineRun,
+	resolveCurrentProjectPipelineRun,
+	resolveProjectPipelineRun,
 	scanPipelineRun,
 	scanStageOutput,
 	stageOutputDir,
+	withPipelineLifecycleLock,
 	writePipelineRun,
 } from "./run-state.ts";
 export {
@@ -43,6 +48,7 @@ export {
 	type IncrementResult,
 	isPipelineRun,
 	isPipelineRunActive,
+	MAX_PIPELINE_STAGE_ID_LENGTH,
 	PIPELINE_CONTEXT_MARKER,
 	PIPELINE_RUN_CUSTOM_TYPE,
 	PIPELINE_STAGE_FOLDER_RE,

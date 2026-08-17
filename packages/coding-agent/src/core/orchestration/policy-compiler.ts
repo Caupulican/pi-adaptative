@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import {
 	type ApprovalRequestContract,
 	type CapabilityDecision,
@@ -200,6 +201,14 @@ export class ExecutionPolicyCompiler {
 			}
 			if (!manifest.capabilities.every((capability) => granted.includes(capability))) {
 				toolReasonCodes.push(`tool_capability_denied:${toolName}`);
+				continue;
+			}
+			const canonicalPolicy = getToolCapabilityPolicy(toolName);
+			if (
+				canonicalPolicy &&
+				!canonicalPolicy.enforcements.every((enforcement) => manifest.enforcements.includes(enforcement))
+			) {
+				toolReasonCodes.push(`tool_enforcement_missing:${toolName}`);
 				continue;
 			}
 			if (

@@ -11,7 +11,7 @@ import {
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
-import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
+import { envelopeHasToolCapability, getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import { LEAN_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
@@ -161,11 +161,12 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	if (uniqueToolNames.includes("delegate") && inheritsDelegation) {
 		capabilities.add("workflow.delegate");
 	}
+	const capabilityList = [...capabilities];
 	const toolNames: string[] = [];
 	for (const toolName of uniqueToolNames) {
 		const policy = getToolCapabilityPolicy(toolName);
 		if (!policy) return { ok: false, reason: `orchestration_tool_unclassified:${toolName}` };
-		if (policy.capabilityCandidates.some((capability) => capabilities.has(capability))) {
+		if (envelopeHasToolCapability(capabilityList, toolName)) {
 			toolNames.push(toolName);
 			continue;
 		}

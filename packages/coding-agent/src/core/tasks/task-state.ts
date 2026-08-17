@@ -1,3 +1,4 @@
+import { MAX_PIPELINE_STAGE_ID_LENGTH } from "../pipelines/types.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const TASK_STEP_STATUSES = ["pending", "in_progress", "completed", "blocked", "cancelled"] as const;
@@ -14,6 +15,7 @@ const MAX_TASK_STEP_EVIDENCE = 32;
 const MAX_TASK_STEP_EVIDENCE_LENGTH = 2_000;
 const MAX_TASK_STEP_REQUIREMENTS = 32;
 const MAX_TASK_STEP_REQUIREMENT_ID_LENGTH = 200;
+const MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH = 128;
 
 export interface TaskStepInput {
 	content: string;
@@ -24,6 +26,7 @@ export interface TaskStepInput {
 	requirementIds?: readonly string[];
 	pipelineRunId?: string;
 	pipelineStageId?: string;
+	clearPipelineLink?: boolean;
 	note?: string;
 	notes?: readonly string[];
 	evidence?: readonly string[];
@@ -71,6 +74,7 @@ export interface TaskStepUpdate {
 	requirementIds?: readonly string[];
 	pipelineRunId?: string;
 	pipelineStageId?: string;
+	clearPipelineLink?: boolean;
 	note?: string;
 	evidence?: readonly string[];
 }
@@ -95,6 +99,14 @@ function hasOptionalString(record: Record<string, unknown>, key: string, maxLeng
 	return value === undefined || (typeof value === "string" && value.length <= maxLength);
 }
 
+function hasOptionalNormalizedString(record: Record<string, unknown>, key: string, maxLength: number): boolean {
+	const value = record[key];
+	return (
+		value === undefined ||
+		(typeof value === "string" && value.length > 0 && value.length <= maxLength && value.trim() === value)
+	);
+}
+
 function isBoundedStringArray(value: unknown, maxItems: number, maxLength: number): value is readonly string[] {
 	return (
 		Array.isArray(value) &&
@@ -117,6 +129,9 @@ function isTaskStep(value: unknown): value is TaskStep {
 		hasOptionalString(value, "owner", MAX_TASK_STEP_OWNER_LENGTH) &&
 		(value.requirementIds === undefined ||
 			isBoundedStringArray(value.requirementIds, MAX_TASK_STEP_REQUIREMENTS, MAX_TASK_STEP_REQUIREMENT_ID_LENGTH)) &&
+		hasOptionalNormalizedString(value, "pipelineRunId", MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH) &&
+		hasOptionalNormalizedString(value, "pipelineStageId", MAX_PIPELINE_STAGE_ID_LENGTH) &&
+		(value.pipelineRunId === undefined) === (value.pipelineStageId === undefined) &&
 		isBoundedStringArray(value.notes, MAX_TASK_STEP_EVIDENCE, MAX_TASK_STEP_NOTE_LENGTH) &&
 		isBoundedStringArray(value.evidence, MAX_TASK_STEP_EVIDENCE, MAX_TASK_STEP_EVIDENCE_LENGTH) &&
 		typeof value.createdAt === "string" &&
@@ -236,6 +251,25 @@ function normalizeInputNotes(input: TaskStepInput): string[] {
 	return notes;
 }
 
+function normalizePipelineLink(
+	pipelineRunId: string | undefined,
+	pipelineStageId: string | undefined,
+	clearPipelineLink = false,
+): Pick<TaskStep, "pipelineRunId" | "pipelineStageId"> {
+	if (clearPipelineLink) {
+		if (pipelineRunId !== undefined || pipelineStageId !== undefined) {
+			throw new TaskStepsError("Task step cannot supply pipeline ids while clearPipelineLink is true.");
+		}
+		return {};
+	}
+	const runId = optionalBoundedText(pipelineRunId, "Task step pipeline run id", MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH);
+	const stageId = optionalBoundedText(pipelineStageId, "Task step pipeline stage id", MAX_PIPELINE_STAGE_ID_LENGTH);
+	if ((runId === undefined) !== (stageId === undefined)) {
+		throw new TaskStepsError("Task step pipelineRunId and pipelineStageId must be supplied together.");
+	}
+	return runId && stageId ? { pipelineRunId: runId, pipelineStageId: stageId } : {};
+}
+
 /**
  * Find an OPEN (non-terminal) step whose content matches `content` case-insensitively.
  * Terminal steps (completed/cancelled) are deliberately excluded so a legitimate re-add of
@@ -293,6 +327,12 @@ function createStep(args: {
 		args.input.requirementIds === undefined
 			? [...(existing?.requirementIds ?? [])]
 			: normalizeStrings(args.input.requirementIds, "Task step requirement id", MAX_TASK_STEP_REQUIREMENT_ID_LENGTH);
+	const pipelineLink = args.input.clearPipelineLink
+		? normalizePipelineLink(args.input.pipelineRunId, args.input.pipelineStageId, true)
+		: normalizePipelineLink(
+				args.input.pipelineRunId === undefined ? existing?.pipelineRunId : args.input.pipelineRunId,
+				args.input.pipelineStageId === undefined ? existing?.pipelineStageId : args.input.pipelineStageId,
+			);
 	return {
 		id: args.id,
 		content: requireBoundedText(args.input.content, "Task step content", MAX_TASK_STEP_CONTENT_LENGTH),
@@ -307,14 +347,7 @@ function createStep(args: {
 				? existing?.owner
 				: optionalBoundedText(args.input.owner, "Task step owner", MAX_TASK_STEP_OWNER_LENGTH),
 		requirementIds,
-		pipelineRunId:
-			args.input.pipelineRunId === undefined
-				? existing?.pipelineRunId
-				: optionalBoundedText(args.input.pipelineRunId, "Task step pipeline run id", 128),
-		pipelineStageId:
-			args.input.pipelineStageId === undefined
-				? existing?.pipelineStageId
-				: optionalBoundedText(args.input.pipelineStageId, "Task step pipeline stage id", 64),
+		...pipelineLink,
 		notes,
 		evidence,
 		createdAt: args.createdAt,
@@ -415,7 +448,13 @@ export function updateTaskStep(
 		"Task step evidence",
 		MAX_TASK_STEP_EVIDENCE_LENGTH,
 	);
-	steps[selectedIndex] = {
+	const pipelineLink = update.clearPipelineLink
+		? normalizePipelineLink(update.pipelineRunId, update.pipelineStageId, true)
+		: normalizePipelineLink(
+				update.pipelineRunId === undefined ? current.pipelineRunId : update.pipelineRunId,
+				update.pipelineStageId === undefined ? current.pipelineStageId : update.pipelineStageId,
+			);
+	const nextStep: TaskStep = {
 		...current,
 		content:
 			update.content === undefined
@@ -435,18 +474,16 @@ export function updateTaskStep(
 			update.requirementIds === undefined
 				? [...(current.requirementIds ?? [])]
 				: normalizeStrings(update.requirementIds, "Task step requirement id", MAX_TASK_STEP_REQUIREMENT_ID_LENGTH),
-		pipelineRunId:
-			update.pipelineRunId === undefined
-				? current.pipelineRunId
-				: optionalBoundedText(update.pipelineRunId, "Task step pipeline run id", 128),
-		pipelineStageId:
-			update.pipelineStageId === undefined
-				? current.pipelineStageId
-				: optionalBoundedText(update.pipelineStageId, "Task step pipeline stage id", 64),
+		...pipelineLink,
 		notes,
 		evidence,
 		updatedAt: now,
 	};
+	if (!pipelineLink.pipelineRunId) {
+		delete nextStep.pipelineRunId;
+		delete nextStep.pipelineStageId;
+	}
+	steps[selectedIndex] = nextStep;
 	if (steps[selectedIndex].status === "in_progress") demoteOtherActiveSteps(steps, selectedIndex);
 	return nextState(state, steps, now);
 }
@@ -493,6 +530,9 @@ export function formatTaskSteps(
 			step.priority,
 			step.owner,
 			step.requirementIds?.length ? `requirements: ${step.requirementIds.join(", ")}` : undefined,
+			step.pipelineRunId && step.pipelineStageId
+				? `pipeline: ${step.pipelineRunId}/${step.pipelineStageId}`
+				: undefined,
 		]
 			.filter(Boolean)
 			.join(", ");
@@ -524,8 +564,10 @@ export function formatTaskStepsContext(
 		...open.slice(0, limit).map((step) => {
 			const label = step.activeForm || step.content;
 			const requirementIds = step.requirementIds?.length ? ` requirements=${step.requirementIds.join(",")}` : "";
+			const pipeline =
+				step.pipelineRunId && step.pipelineStageId ? ` pipeline=${step.pipelineRunId}/${step.pipelineStageId}` : "";
 			const evidence = step.evidence?.length ? ` evidence=${step.evidence.join(",")}` : "";
-			return `- [${step.status}] ${label}${requirementIds}${evidence}`;
+			return `- [${step.status}] ${label}${requirementIds}${pipeline}${evidence}`;
 		}),
 	];
 	if (open.length > limit) lines.push(`- omitted=${open.length - limit}`);

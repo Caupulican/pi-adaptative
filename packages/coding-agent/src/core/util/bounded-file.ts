@@ -1,5 +1,5 @@
-import { closeSync, fstatSync, opendirSync, openSync, readSync, type Stats } from "node:fs";
-import { type FileHandle, open as openAsync } from "node:fs/promises";
+import { closeSync, fstatSync, lstatSync, opendirSync, openSync, readSync, type Stats } from "node:fs";
+import { type FileHandle, lstat as lstatAsync, open as openAsync } from "node:fs/promises";
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -18,6 +18,15 @@ export function sameFileVersion(left: Stats, right: Stats): boolean {
 		left.mtimeMs === right.mtimeMs &&
 		left.ctimeMs === right.ctimeMs
 	);
+}
+
+function assertOpenedPathVersion(pathVersion: Stats, openedVersion: Stats, label: string): void {
+	if (!pathVersion.isFile() || pathVersion.isSymbolicLink()) {
+		throw new Error(`${label} is not a regular file.`);
+	}
+	if (!sameFileVersion(pathVersion, openedVersion)) {
+		throw new Error(`${label} changed while it was being opened.`);
+	}
 }
 
 async function readFileHandleBounded(fileHandle: FileHandle, maxBytes: number): Promise<Buffer | undefined> {
@@ -56,18 +65,92 @@ export function readFileDescriptorBoundedSync(fileDescriptor: number, maxBytes: 
 /** Bounded, version-stable text read for small durable state files. */
 export function readBoundedTextFileSync(filePath: string, maxBytes: number, label: string): string {
 	validateByteLimit(maxBytes);
+	const pathBefore = lstatSync(filePath);
 	const fileDescriptor = openSync(filePath, "r");
 	try {
 		const before = fstatSync(fileDescriptor);
-		if (!before.isFile()) throw new Error(`${label} is not a regular file.`);
+		assertOpenedPathVersion(pathBefore, before, label);
 		if (before.size > maxBytes) throw new Error(`${label} exceeds its byte limit.`);
 		const content = readFileDescriptorBoundedSync(fileDescriptor, maxBytes);
 		if (!content) throw new Error(`${label} exceeds its byte limit.`);
 		const after = fstatSync(fileDescriptor);
-		if (!sameFileVersion(before, after) || content.byteLength !== before.size) {
+		const pathAfter = lstatSync(filePath);
+		if (
+			!sameFileVersion(before, after) ||
+			!sameFileVersion(pathBefore, pathAfter) ||
+			content.byteLength !== before.size
+		) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
 		return content.toString("utf-8");
+	} finally {
+		closeSync(fileDescriptor);
+	}
+}
+
+export interface BoundedFilePrefix {
+	content: Buffer;
+	truncated: boolean;
+}
+
+/** Read one stable file prefix without allocating or reading beyond `maxBytes`. */
+export function readFilePrefixSync(filePath: string, maxBytes: number, label: string): BoundedFilePrefix {
+	validateByteLimit(maxBytes);
+	const pathBefore = lstatSync(filePath);
+	const fileDescriptor = openSync(filePath, "r");
+	try {
+		const before = fstatSync(fileDescriptor);
+		assertOpenedPathVersion(pathBefore, before, label);
+		const expectedBytes = Math.min(before.size, maxBytes);
+		const content = Buffer.allocUnsafe(expectedBytes);
+		let totalBytes = 0;
+		while (totalBytes < expectedBytes) {
+			const bytesRead = readSync(fileDescriptor, content, totalBytes, expectedBytes - totalBytes, null);
+			if (bytesRead === 0) break;
+			totalBytes += bytesRead;
+		}
+		const after = fstatSync(fileDescriptor);
+		const pathAfter = lstatSync(filePath);
+		if (!sameFileVersion(before, after) || !sameFileVersion(pathBefore, pathAfter) || totalBytes !== expectedBytes) {
+			throw new Error(`${label} changed while it was being read.`);
+		}
+		return { content, truncated: before.size > maxBytes };
+	} finally {
+		closeSync(fileDescriptor);
+	}
+}
+
+/** Count text lines with constant memory and reject a file that changes during the scan. */
+export function countFileLinesSync(filePath: string, label: string): number {
+	const pathBefore = lstatSync(filePath);
+	const fileDescriptor = openSync(filePath, "r");
+	try {
+		const before = fstatSync(fileDescriptor);
+		assertOpenedPathVersion(pathBefore, before, label);
+		const chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+		let bytesReadTotal = 0;
+		let lineCount = 1;
+		while (true) {
+			const bytesRead = readSync(fileDescriptor, chunk, 0, chunk.length, null);
+			if (bytesRead === 0) break;
+			bytesReadTotal += bytesRead;
+			for (let index = 0; index < bytesRead; index++) {
+				if (chunk[index] === 0x0a) lineCount++;
+			}
+			if (!Number.isSafeInteger(bytesReadTotal) || !Number.isSafeInteger(lineCount)) {
+				throw new Error(`${label} exceeds safe counting bounds.`);
+			}
+		}
+		const after = fstatSync(fileDescriptor);
+		const pathAfter = lstatSync(filePath);
+		if (
+			!sameFileVersion(before, after) ||
+			!sameFileVersion(pathBefore, pathAfter) ||
+			bytesReadTotal !== before.size
+		) {
+			throw new Error(`${label} changed while it was being read.`);
+		}
+		return lineCount;
 	} finally {
 		closeSync(fileDescriptor);
 	}
@@ -97,15 +180,21 @@ export function readBoundedDirectoryNamesSync(directoryPath: string, maxEntries:
 /** Async counterpart of {@link readBoundedTextFileSync}. */
 export async function readBoundedTextFile(filePath: string, maxBytes: number, label: string): Promise<string> {
 	validateByteLimit(maxBytes);
+	const pathBefore = await lstatAsync(filePath);
 	const fileHandle = await openAsync(filePath, "r");
 	try {
 		const before = await fileHandle.stat();
-		if (!before.isFile()) throw new Error(`${label} is not a regular file.`);
+		assertOpenedPathVersion(pathBefore, before, label);
 		if (before.size > maxBytes) throw new Error(`${label} exceeds its byte limit.`);
 		const content = await readFileHandleBounded(fileHandle, maxBytes);
 		if (!content) throw new Error(`${label} exceeds its byte limit.`);
 		const after = await fileHandle.stat();
-		if (!sameFileVersion(before, after) || content.byteLength !== before.size) {
+		const pathAfter = await lstatAsync(filePath);
+		if (
+			!sameFileVersion(before, after) ||
+			!sameFileVersion(pathBefore, pathAfter) ||
+			content.byteLength !== before.size
+		) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
 		return content.toString("utf-8");

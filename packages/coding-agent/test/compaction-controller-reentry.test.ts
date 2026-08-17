@@ -407,4 +407,60 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(controller.isCompacting).toBe(false);
 		expect(onCompactionSettled).toHaveBeenCalledOnce();
 	});
+
+	it("rejects manual compact() while automatic compaction owns the single-flight lease", async () => {
+		let released = false;
+		let resolveCompaction!: (result: CompactionResult) => void;
+		const compactionPromise = new Promise<CompactionResult>((resolve) => {
+			resolveCompaction = resolve;
+		});
+		const { compactWithRetry, controller, entryIds } = createFixture({
+			measureLiveContextTokens: () => (released ? 900 : 3_000),
+			createResult: async () => compactionPromise,
+		});
+
+		const automatic = controller.runAuto("threshold", false);
+		await vi.waitFor(() => expect(compactWithRetry).toHaveBeenCalledOnce());
+		await expect(controller.compact()).rejects.toThrow("Compaction already in progress");
+
+		released = true;
+		resolveCompaction(checkpoint(0, entryIds));
+		await expect(automatic).resolves.toBe(false);
+		expect(controller.isCompacting).toBe(false);
+	});
+
+	it("notifies settlement and propagates reconnect failure after successful manual compaction", async () => {
+		const onCompactionSettled = vi.fn();
+		const { controller } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			onCompactionSettled,
+			reconnectAgent: () => {
+				throw new Error("reconnectAgent failed");
+			},
+		});
+
+		await expect(controller.compact()).rejects.toThrow("reconnectAgent failed");
+		expect(onCompactionSettled).toHaveBeenCalledOnce();
+		expect(controller.isCompacting).toBe(false);
+	});
+
+	it("preserves the primary compaction failure when reconnect cleanup also fails", async () => {
+		const onCompactionSettled = vi.fn();
+		const { controller } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			onCompactionSettled,
+			abortForeground: async () => {
+				throw new Error("abortForeground failed");
+			},
+			reconnectAgent: () => {
+				throw new Error("reconnectAgent failed");
+			},
+		});
+
+		await expect(controller.compact()).rejects.toThrow("abortForeground failed");
+		expect(onCompactionSettled).toHaveBeenCalledOnce();
+		expect(controller.isCompacting).toBe(false);
+	});
 });

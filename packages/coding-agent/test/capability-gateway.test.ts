@@ -59,6 +59,45 @@ const readManifest: ToolCapabilityManifest = {
 	enforcements: ["path-scope"],
 };
 
+const memoryQueryManifest: ToolCapabilityManifest = {
+	toolName: "memory",
+	moduleSpecifier: "./tools/memory.ts",
+	capabilities: ["memory.query"],
+	roles: ["explorer"],
+	enforcements: ["memory-broker"],
+};
+
+const memoryMutationManifest: ToolCapabilityManifest = {
+	...memoryQueryManifest,
+	capabilities: ["memory.mutate"],
+};
+
+const pipelineMutationManifest: ToolCapabilityManifest = {
+	toolName: "pipeline",
+	moduleSpecifier: "./tools/pipeline.ts",
+	capabilities: ["workflow.plan", "filesystem.write"],
+	roles: ["explorer"],
+	enforcements: ["control-plane", "path-scope"],
+};
+
+const secretStoreManifest: ToolCapabilityManifest = {
+	toolName: "secret_store",
+	moduleSpecifier: "./tools/secret-store.ts",
+	capabilities: ["credentials.use"],
+	roles: ["explorer"],
+	enforcements: ["service-proxy", "path-scope"],
+};
+
+function fixedStoreReadManifest(toolName: "artifact_retrieve" | "context_scout"): ToolCapabilityManifest {
+	return {
+		toolName,
+		moduleSpecifier: `./tools/${toolName}.ts`,
+		capabilities: ["filesystem.read"],
+		roles: ["explorer"],
+		enforcements: ["path-scope"],
+	};
+}
+
 function initialUsage(overrides: Partial<GatewayInitialUsage> = {}): GatewayInitialUsage {
 	const usage = {
 		toolCalls: 0,
@@ -131,6 +170,147 @@ describe("CapabilityGateway", () => {
 		await expect(
 			gateway.execute(readManifest, "renamed_read", { path: "src/file.ts" }, () => "no"),
 		).rejects.toBeInstanceOf(CapabilityGatewayDeniedError);
+	});
+
+	it("preserves explicitly compiled extension manifests without bypassing their declared capability", async () => {
+		const fixture = createFixture();
+		const manifest: ToolCapabilityManifest = {
+			toolName: "extension_probe",
+			moduleSpecifier: "extension:probe",
+			capabilities: ["research.execute"],
+			roles: ["explorer"],
+			enforcements: ["control-plane"],
+		};
+		const extensionGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["research.execute"],
+			allowedTools: [manifest.toolName],
+			readPaths: [],
+		};
+		const gateway = new CapabilityGateway({ grant: extensionGrant, cwd: fixture.cwd });
+
+		await expect(gateway.execute(manifest, manifest.toolName, {}, () => "ok")).resolves.toBe("ok");
+		const ungranted = new CapabilityGateway({
+			grant: { ...extensionGrant, capabilities: [] },
+			cwd: fixture.cwd,
+		});
+		await expect(ungranted.execute(manifest, manifest.toolName, {}, () => "no")).rejects.toMatchObject({
+			reasonCode: "capability_not_granted",
+		});
+	});
+
+	it("re-authorizes action-sensitive memory calls against the compiled manifest", async () => {
+		const fixture = createFixture();
+		const queryGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["memory.query"],
+			allowedTools: ["memory"],
+			readPaths: [],
+		};
+		const queryGateway = new CapabilityGateway({ grant: queryGrant, cwd: fixture.cwd });
+
+		await expect(
+			queryGateway.execute(memoryQueryManifest, "memory", { query: "relevant fact" }, () => "memory"),
+		).resolves.toBe("memory");
+		await expect(
+			queryGateway.execute(memoryQueryManifest, "memory", { action: "add", content: "unsafe" }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "capability_not_granted" });
+		await expect(
+			queryGateway.execute(
+				memoryQueryManifest,
+				"memory",
+				{ query: "disguise", action: "add", content: "unsafe" },
+				() => "no",
+			),
+		).rejects.toMatchObject({ reasonCode: "capability_not_granted" });
+
+		const mutationGrant: ExecutionGrant = {
+			...queryGrant,
+			capabilities: ["memory.mutate"],
+		};
+		const mutationGateway = new CapabilityGateway({ grant: mutationGrant, cwd: fixture.cwd });
+		await expect(
+			mutationGateway.execute(memoryMutationManifest, "memory", { action: "add", content: "fact" }, () => "ok"),
+		).resolves.toBe("ok");
+		await expect(
+			mutationGateway.execute(memoryMutationManifest, "memory", { query: "secret" }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "capability_not_granted" });
+	});
+
+	it("derives action-sensitive pipeline path authority from the invocation", async () => {
+		const fixture = createFixture();
+		const pipelineGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["workflow.plan", "filesystem.write"],
+			allowedTools: ["pipeline"],
+			readPaths: [],
+			writePaths: [fixture.cwd],
+		};
+		const gateway = new CapabilityGateway({ grant: pipelineGrant, cwd: fixture.cwd });
+
+		await expect(
+			gateway.execute(pipelineMutationManifest, "pipeline", { action: "list" }, () => "listed"),
+		).resolves.toBe("listed");
+		await expect(
+			gateway.execute(pipelineMutationManifest, "pipeline", { action: "start", name: "research" }, () => "started"),
+		).resolves.toBe("started");
+
+		const unscoped = new CapabilityGateway({
+			grant: { ...pipelineGrant, writePaths: [] },
+			cwd: fixture.cwd,
+		});
+		await expect(
+			unscoped.execute(pipelineMutationManifest, "pipeline", { action: "start", name: "research" }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "scope_denied" });
+	});
+
+	it("enforces declared path scope for credential migration sources", async () => {
+		const fixture = createFixture();
+		const credentialGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["credentials.use"],
+			allowedTools: ["secret_store"],
+		};
+		const gateway = new CapabilityGateway({ grant: credentialGrant, cwd: fixture.cwd });
+
+		await expect(
+			gateway.execute(
+				secretStoreManifest,
+				"secret_store",
+				{ action: "migrate", sources: [{ kind: "file", path: "src/file.ts" }] },
+				() => "migrated",
+			),
+		).resolves.toBe("migrated");
+		await expect(
+			gateway.execute(
+				secretStoreManifest,
+				"secret_store",
+				{ action: "migrate", sources: [{ kind: "file", path: fixture.outside }] },
+				() => "no",
+			),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+	});
+
+	it("does not invent path arguments for fixed-store and composite read tools", async () => {
+		const fixture = createFixture();
+		for (const toolName of ["artifact_retrieve", "context_scout"] as const) {
+			const fixedGrant: ExecutionGrant = {
+				...grant(fixture.cwd),
+				allowedTools: [toolName],
+				readPaths: [],
+			};
+			const gateway = new CapabilityGateway({ grant: fixedGrant, cwd: fixture.cwd });
+			const params =
+				toolName === "artifact_retrieve" ? { artifactId: "tool-output:1" } : { query: "inspect repository" };
+			await expect(gateway.execute(fixedStoreReadManifest(toolName), toolName, params, () => "ok")).resolves.toBe(
+				"ok",
+			);
+		}
+
+		const pathGateway = new CapabilityGateway({ grant: grant(fixture.cwd), cwd: fixture.cwd });
+		await expect(pathGateway.execute(readManifest, "read", {}, () => "no")).rejects.toMatchObject({
+			reasonCode: "path_argument_required",
+		});
 	});
 
 	it("enforces cumulative tool, token, cost, and wall-clock budgets", async () => {

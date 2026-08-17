@@ -117,6 +117,32 @@ describe("ExecutionPolicyCompiler", () => {
 		expect(result).toMatchObject({ outcome: "deny", reasonCodes: ["tool_enforcement_missing:unsafe_shell"] });
 	});
 
+	it("refuses a classified manifest that omits a policy-mandated secondary enforcement", () => {
+		const result = compiler().compile({
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "implementer",
+			requiredCapabilities: ["workflow.plan", "filesystem.write"],
+			authorityCapabilities: ["workflow.plan", "filesystem.write"],
+			requestedTools: ["pipeline"],
+			toolManifests: [
+				{
+					toolName: "pipeline",
+					moduleSpecifier: "./tools/pipeline.ts",
+					capabilities: ["workflow.plan", "filesystem.write"],
+					roles: ["implementer"],
+					enforcements: ["path-scope"],
+				},
+			],
+			writePaths: ["."],
+			policyVersion: "policy-1",
+		});
+
+		expect(result).toMatchObject({ outcome: "deny", reasonCodes: ["tool_enforcement_missing:pipeline"] });
+	});
+
 	it("treats roles as scheduling labels when immutable authority grants the capability", () => {
 		const result = compiler().compile({
 			objectiveId: "objective-1",

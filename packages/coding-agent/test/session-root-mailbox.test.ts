@@ -650,7 +650,7 @@ describe("SessionRootMailbox", () => {
 	});
 
 	it("returns timedOut: false when trailing out-of-process replies are captured on timeout", async () => {
-		vi.useRealTimers();
+		vi.useFakeTimers();
 		const agentDir = root();
 		const mailbox = new SessionRootMailbox({ agentDir, parentSessionId: "parent-1" });
 		const mailboxPath = sessionRootMailboxFile(agentDir, "parent-1");
@@ -679,9 +679,24 @@ describe("SessionRootMailbox", () => {
 			"utf-8",
 		);
 
+		await vi.advanceTimersByTimeAsync(50);
 		const result = await waiting;
 		expect(result.timedOut).toBe(false);
 		expect(result.replies).toHaveLength(1);
 		expect(result.replies[0]?.content).toBe("out of process evidence");
+	});
+
+	it("propagates an out-of-process durable read failure from the timeout boundary", async () => {
+		vi.useFakeTimers();
+		const agentDir = root();
+		const mailbox = new SessionRootMailbox({ agentDir, parentSessionId: "parent-1" });
+		const mailboxPath = sessionRootMailboxFile(agentDir, "parent-1");
+		const waiting = mailbox.waitForReplies({ requestMessageId: "req-corrupt", timeoutMs: 50 });
+		const rejected = expect(waiting).rejects.toThrow();
+
+		mkdirSync(dirname(mailboxPath), { recursive: true });
+		writeFileSync(mailboxPath, "{not valid json", "utf-8");
+		await vi.advanceTimersByTimeAsync(50);
+		await rejected;
 	});
 });

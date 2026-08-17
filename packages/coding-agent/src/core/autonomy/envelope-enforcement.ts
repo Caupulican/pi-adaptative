@@ -20,17 +20,43 @@ export function extractPathArguments(params: unknown): string[] {
 	const found: string[] = [];
 	for (const key of PATH_ARGUMENT_KEYS) {
 		const value = record[key];
-		if (typeof value === "string" && value.length > 0) found.push(value);
+		if (typeof value === "string" && value.trim()) found.push(value.trim());
 	}
 	for (const key of PATH_LIST_ARGUMENT_KEYS) {
 		const value = record[key];
 		if (Array.isArray(value)) {
 			for (const entry of value) {
-				if (typeof entry === "string" && entry.length > 0) found.push(entry);
+				if (typeof entry === "string" && entry.trim()) found.push(entry.trim());
 			}
 		}
 	}
 	return found;
+}
+
+/** Tool-aware path projection shared by every envelope/gateway enforcement boundary. */
+export function extractToolPathArguments(toolName: string, params: unknown): string[] {
+	const normalizedToolName = toolName.toLowerCase();
+	const paths = extractPathArguments(params);
+	if (normalizedToolName === "secret_store" && params && typeof params === "object") {
+		const record = params as Record<string, unknown>;
+		if (record.action === "migrate" && Array.isArray(record.sources)) {
+			for (const source of record.sources) {
+				if (!source || typeof source !== "object" || !("path" in source)) continue;
+				const sourcePath = source.path;
+				if (typeof sourcePath === "string" && sourcePath.trim()) paths.push(sourcePath.trim());
+			}
+		}
+	}
+	if (
+		paths.length === 0 &&
+		(normalizedToolName === "find" ||
+			normalizedToolName === "grep" ||
+			normalizedToolName === "ls" ||
+			normalizedToolName === "pipeline")
+	) {
+		paths.push(".");
+	}
+	return paths;
 }
 
 /**
@@ -43,9 +69,23 @@ export function extractPathArguments(params: unknown): string[] {
  * denied subtree is still denied. An unresolvable target fails closed.
  */
 export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: string, cwd: string): boolean {
+	const lexicalTarget = resolve(cwd, rawPath);
+	const allowed = envelope.allowedPaths ?? [];
+	if (allowed.length > 0) {
+		const couldBeAllowed = allowed.some((root) => {
+			const lexicalRoot = resolve(cwd, root);
+			if (isPathWithinScope(lexicalTarget, lexicalRoot)) return true;
+			try {
+				return isPathWithinScope(lexicalTarget, safeRealpathSync(lexicalRoot));
+			} catch {
+				return false;
+			}
+		});
+		if (!couldBeAllowed) return false;
+	}
 	let target: string;
 	try {
-		target = safeRealpathSync(resolve(cwd, rawPath));
+		target = safeRealpathSync(lexicalTarget);
 	} catch {
 		return false;
 	}
@@ -56,7 +96,6 @@ export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: stri
 			// Mirror checkPathScope: an unresolvable deny root cannot match anything.
 		}
 	}
-	const allowed = envelope.allowedPaths ?? [];
 	if (allowed.length === 0) return true;
 	return allowed.some((root) => {
 		try {
@@ -85,7 +124,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 		...tool,
 		execute: (...args: unknown[]) => {
 			const params = args[1];
-			for (const rawPath of extractPathArguments(params)) {
+			for (const rawPath of extractToolPathArguments(tool.name, params)) {
 				if (!isPathWithinEnvelope(envelope, rawPath, cwd)) {
 					return {
 						content: [

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope } from "../src/core/autonomy/contracts.ts";
 import {
 	extractPathArguments,
+	extractToolPathArguments,
 	isPathWithinEnvelope,
 	wrapToolWithEnvelopeScope,
 } from "../src/core/autonomy/envelope-enforcement.ts";
@@ -99,6 +100,16 @@ describe("envelope path scope", () => {
 			["a", "b", "c", "d", "e"],
 		);
 		expect(extractPathArguments(undefined)).toEqual([]);
+	});
+
+	it("projects implicit and nested tool paths through the shared path owner", () => {
+		expect(extractToolPathArguments("grep", undefined)).toEqual(["."]);
+		expect(
+			extractToolPathArguments("secret_store", {
+				action: "migrate",
+				sources: [{ path: " first.env " }, { path: "second.env" }],
+			}),
+		).toEqual(["first.env", "second.env"]);
 	});
 });
 

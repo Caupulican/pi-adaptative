@@ -27,7 +27,7 @@ describe("buildForegroundEnvelope", () => {
 			["delegate", "workflow.delegate"],
 			["goal", "memory.mutate"],
 			["create_goal", "memory.mutate"],
-			["get_goal", "memory.mutate"],
+			["get_goal", "memory.query"],
 			["update_goal", "memory.mutate"],
 			["memory", "memory.mutate"],
 			["model_fitness", "research.execute"],

@@ -1,7 +1,13 @@
 import { resolve } from "node:path";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
-import { extractPathArguments } from "../autonomy/envelope-enforcement.ts";
+import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
+import {
+	getToolCapabilityPolicy,
+	resolveCapabilityPathAccess,
+	resolveToolCallCapabilities,
+	resolveToolCallPathAccess,
+} from "../tool-capability-policy.ts";
 import { validateAttemptUsageSnapshot } from "./attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, HarnessCapability, ToolCapabilityManifest } from "./contracts.ts";
 
@@ -353,13 +359,34 @@ export class CapabilityGateway {
 		if (!manifest.capabilities.every((capability) => this.grant.capabilities.includes(capability))) {
 			this.deny(toolName, "capability_not_granted", `Tool '${toolName}' requires an ungranted capability.`);
 		}
+		const callCapabilities = getToolCapabilityPolicy(toolName)
+			? resolveToolCallCapabilities(manifest.capabilities, toolName, params)
+			: manifest.capabilities;
+		if (!callCapabilities) {
+			this.deny(
+				toolName,
+				"capability_not_granted",
+				`Tool '${toolName}' action requires a capability outside its compiled manifest.`,
+			);
+		}
 		this.enforceBudget(toolName, wallClockMs);
 		this.sharedBudget?.assertBudgetAvailable(toolName);
 
-		if (manifest.capabilities.some((capability) => PATH_CAPABILITIES.has(capability))) {
-			const isWrite = manifest.capabilities.some((capability) => WRITE_CAPABILITIES.has(capability));
+		const canonicalPolicy = getToolCapabilityPolicy(toolName);
+		const hasDeclaredPathScope = manifest.enforcements.includes("path-scope");
+		const pathAccess = canonicalPolicy
+			? resolveToolCallPathAccess(manifest.capabilities, toolName, params)
+			: hasDeclaredPathScope
+				? (resolveCapabilityPathAccess(callCapabilities) ?? "none")
+				: "none";
+		const paths = pathAccess === "none" ? [] : extractToolPathArguments(toolName, params);
+		if (
+			pathAccess !== "none" &&
+			(callCapabilities.some((capability) => PATH_CAPABILITIES.has(capability)) || paths.length > 0)
+		) {
+			const isWrite =
+				pathAccess === "write" || callCapabilities.some((capability) => WRITE_CAPABILITIES.has(capability));
 			const allowedPaths = isWrite ? this.grant.writePaths : this.grant.readPaths;
-			const paths = extractPathArguments(params);
 			if (paths.length === 0) {
 				this.deny(toolName, "path_argument_required", `Tool '${toolName}' requires an explicit path argument.`);
 			}
@@ -409,16 +436,23 @@ export class CapabilityGateway {
 	}
 
 	private pathAllowed(rawPath: string, allowedPaths: readonly string[]): boolean {
+		if (allowedPaths.length === 0) return false;
+		const lexicalTarget = resolve(this.cwd, rawPath);
+		const allowedRoots = allowedPaths.flatMap((allowed) => {
+			const lexicalRoot = resolve(this.cwd, allowed);
+			const realRoot = resolveRealPath(this.cwd, allowed);
+			return realRoot ? [lexicalRoot, realRoot] : [lexicalRoot];
+		});
+		if (!allowedRoots.some((root) => isPathWithinScope(lexicalTarget, root))) {
+			return false;
+		}
 		const target = resolveRealPath(this.cwd, rawPath);
-		if (!target || allowedPaths.length === 0) return false;
+		if (!target) return false;
 		for (const denied of this.grant.deniedPaths) {
 			const root = resolveRealPath(this.cwd, denied);
 			if (root && isPathWithinScope(target, root)) return false;
 		}
-		return allowedPaths.some((allowed) => {
-			const root = resolveRealPath(this.cwd, allowed);
-			return root !== undefined && isPathWithinScope(target, root);
-		});
+		return allowedRoots.some((root) => isPathWithinScope(target, root));
 	}
 
 	private deny(toolName: string, reasonCode: GatewayDecisionCode, message: string): never {

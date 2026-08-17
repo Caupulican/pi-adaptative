@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	buildWorkerExecutionPlan,
+	compileManagedProcessExecutionGrant,
 	narrowWorkerExecutionPlan,
 	workerExecutionAuthorityFromPlan,
 } from "../src/core/delegation/worker-execution-policy.ts";
@@ -66,6 +67,46 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(plan.writeEnabled).toBe(false);
 		expect(plan.writePaths).toEqual([]);
 		expect(plan.readMemory).toBe(true);
+	});
+
+	it("materializes delegated memory as query-only even when the profile also permits mutation", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "bounded-memory",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["memory.query", "memory.mutate"],
+			toolNames: ["memory"],
+		});
+
+		const plan = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: true,
+		});
+
+		expect(plan.toolManifests).toMatchObject([
+			{ toolName: "memory", capabilities: ["memory.query"], enforcements: ["memory-broker"] },
+		]);
+		expect(plan.requiredCapabilities).toEqual(["memory.query"]);
+	});
+
+	it("never grants managed workers memory mutation authority", () => {
+		const compiled = compileManagedProcessExecutionGrant({
+			target: { objectiveId: "objective-1", taskId: "task-1", attemptId: "attempt-1" },
+			laneId: "lane-1",
+			authorizationId: "authorization-1",
+			role: "implementer",
+			allowedTools: ["memory"],
+			writePaths: [],
+			cwd: "/repo",
+			deniedPaths: [],
+			budget: {},
+		});
+
+		expect(compiled.ok).toBe(true);
+		if (!compiled.ok) throw new Error(compiled.reasonCodes.join(", "));
+		expect(compiled.grant.capabilities).toEqual(["memory.query"]);
 	});
 
 	it("treats the global zero wall-clock setting as disabled without creating an infinite budget value", () => {

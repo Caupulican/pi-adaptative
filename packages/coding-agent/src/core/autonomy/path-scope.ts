@@ -109,6 +109,25 @@ export function checkPathScope(scope: PathScope, targetPath: string): PathScopeD
 			reasonCode: "empty_path",
 		};
 	}
+	const lexicalTarget = path.resolve(targetPath);
+	const lexicalRoot = path.resolve(scope.root);
+	let resolvedRoot: string;
+	try {
+		resolvedRoot = safeRealpathSync(scope.root);
+	} catch {
+		return {
+			kind: "outside",
+			path: targetPath,
+			reasonCode: "unresolvable_root",
+		};
+	}
+	if (!isPathWithinScope(lexicalTarget, lexicalRoot) && !isPathWithinScope(lexicalTarget, resolvedRoot)) {
+		return {
+			kind: "outside",
+			path: targetPath,
+			reasonCode: "outside_root",
+		};
+	}
 
 	let resolvedTarget: string;
 	try {
@@ -119,17 +138,6 @@ export function checkPathScope(scope: PathScope, targetPath: string): PathScopeD
 			kind: "outside",
 			path: targetPath,
 			reasonCode: "unresolvable_target",
-		};
-	}
-
-	let resolvedRoot: string;
-	try {
-		resolvedRoot = safeRealpathSync(scope.root);
-	} catch {
-		return {
-			kind: "outside",
-			path: targetPath,
-			reasonCode: "unresolvable_root",
 		};
 	}
 

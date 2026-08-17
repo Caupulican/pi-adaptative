@@ -1,6 +1,10 @@
 /** ICM pipeline form: numbered stages, factory vs product, status from files. */
 
+import { assertPortablePathSegment } from "../../utils/work-directory.ts";
+
 export const PIPELINE_STAGE_FOLDER_RE = /^(\d{2})_([a-z0-9][a-z0-9-]{0,62})$/;
+/** Two-digit ordinal, separator, and the longest stage slug accepted by PIPELINE_STAGE_FOLDER_RE. */
+export const MAX_PIPELINE_STAGE_ID_LENGTH = 66;
 export const MAX_PIPELINE_STAGES = 32;
 export const MAX_PIPELINE_NAME_LENGTH = 64;
 export const MAX_CONTRACT_PROCESS_CHARS = 4_000;
@@ -121,21 +125,32 @@ export function isPipelineForm(value: unknown): value is PipelineForm {
 export function isPipelineRun(value: unknown): value is PipelineRun {
 	if (typeof value !== "object" || value === null) return false;
 	const record = value as Record<string, unknown>;
+	if (typeof record.runId !== "string") return false;
+	try {
+		assertPortablePathSegment("Pipeline run id", record.runId);
+	} catch {
+		return false;
+	}
 	return (
 		record.version === 1 &&
-		typeof record.revision === "number" &&
-		Number.isInteger(record.revision) &&
+		Number.isSafeInteger(record.revision) &&
 		record.revision >= 0 &&
-		typeof record.runId === "string" &&
-		record.runId.length > 0 &&
 		typeof record.pipelineName === "string" &&
+		record.pipelineName.length > 0 &&
+		record.pipelineName.length <= MAX_PIPELINE_NAME_LENGTH &&
+		record.pipelineName.trim() === record.pipelineName &&
 		typeof record.definitionPath === "string" &&
+		record.definitionPath.length > 0 &&
 		typeof record.runRoot === "string" &&
+		record.runRoot.length > 0 &&
 		typeof record.currentStageId === "string" &&
+		PIPELINE_STAGE_FOLDER_RE.test(record.currentStageId) &&
 		(record.status === "active" || record.status === "completed" || record.status === "abandoned") &&
 		typeof record.createdAt === "string" &&
+		record.createdAt.length > 0 &&
 		typeof record.updatedAt === "string" &&
-		(record.goalId === undefined || typeof record.goalId === "string")
+		record.updatedAt.length > 0 &&
+		(record.goalId === undefined || (typeof record.goalId === "string" && record.goalId.trim().length > 0))
 	);
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { advanceTaskSteps } from "../src/core/pipelines/increment.ts";
+import { MAX_PIPELINE_STAGE_ID_LENGTH } from "../src/core/pipelines/types.ts";
 import {
 	addTaskStep,
 	clearTaskSteps,
@@ -163,6 +164,23 @@ describe("task step state", () => {
 		expect(context).toContain("evidence=tool-task-1");
 	});
 
+	it("surfaces exact pipeline run and stage linkage in list and injected context", () => {
+		let state = addTaskStep(
+			createTaskStepsState("T0"),
+			{
+				content: "Research",
+				pipelineRunId: "run-1",
+				pipelineStageId: "01_research",
+			},
+			"T1",
+		);
+		expect(formatTaskSteps(state)).toContain("pipeline: run-1/01_research");
+		expect(formatTaskStepsContext(state)).toContain("pipeline=run-1/01_research");
+		state = updateTaskStep(state, "step-1", { clearPipelineLink: true }, "T2");
+		expect(state.steps[0]).not.toHaveProperty("pipelineRunId");
+		expect(state.steps[0]).not.toHaveProperty("pipelineStageId");
+	});
+
 	it("does not tell the model to continue an in_progress step after recovery exhaustion", () => {
 		const state = setTaskSteps(
 			createTaskStepsState("T0"),
@@ -222,7 +240,12 @@ describe("task step state", () => {
 	it("round-trips valid state and rejects malformed or future versions", () => {
 		const state = addTaskStep(
 			createTaskStepsState("T0"),
-			{ content: "Persist", requirementIds: ["req-1", "req-1", " req-2 "] },
+			{
+				content: "Persist",
+				requirementIds: ["req-1", "req-1", " req-2 "],
+				pipelineRunId: "run-1",
+				pipelineStageId: "01_research",
+			},
 			"T1",
 		);
 		expect(state.steps[0].requirementIds).toEqual(["req-1", "req-2"]);
@@ -233,6 +256,59 @@ describe("task step state", () => {
 		expect(parseTaskStepsState("not json")).toBeUndefined();
 		expect(parseTaskStepsState(JSON.stringify({ ...state, version: 2 }))).toBeUndefined();
 		expect(parseTaskStepsState(JSON.stringify({ ...state, steps: [{ id: 3 }] }))).toBeUndefined();
+	});
+
+	it("requires bounded pipeline run and stage ids as one atomic pair", () => {
+		const longestValidStageId = `01_${"a".repeat(63)}`;
+		expect(longestValidStageId).toHaveLength(MAX_PIPELINE_STAGE_ID_LENGTH);
+		const longestLinked = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "Longest valid stage", pipelineRunId: "run-1", pipelineStageId: longestValidStageId },
+			"T1",
+		);
+		expect(longestLinked.steps[0]?.pipelineStageId).toBe(longestValidStageId);
+		expect(parseTaskStepsState(JSON.stringify(longestLinked))).toEqual(longestLinked);
+		expect(() =>
+			addTaskStep(
+				createTaskStepsState("T0"),
+				{ content: "Oversized stage", pipelineRunId: "run-1", pipelineStageId: `${longestValidStageId}a` },
+				"T1",
+			),
+		).toThrow(new RegExp(`pipeline stage id must be at most ${MAX_PIPELINE_STAGE_ID_LENGTH}`, "i"));
+		expect(() =>
+			addTaskStep(createTaskStepsState("T0"), { content: "Partial", pipelineRunId: "run-1" }, "T1"),
+		).toThrow(/must be supplied together/i);
+		expect(() =>
+			addTaskStep(
+				createTaskStepsState("T0"),
+				{ content: "Oversized", pipelineRunId: "r".repeat(129), pipelineStageId: "01_research" },
+				"T1",
+			),
+		).toThrow(/pipeline run id must be at most 128/i);
+		expect(() =>
+			addTaskStep(
+				createTaskStepsState("T0"),
+				{
+					content: "Conflicting clear",
+					pipelineRunId: "run-1",
+					pipelineStageId: "01_research",
+					clearPipelineLink: true,
+				},
+				"T1",
+			),
+		).toThrow(/cannot supply pipeline ids/i);
+
+		const valid = addTaskStep(
+			createTaskStepsState("T0"),
+			{ content: "Persist", pipelineRunId: "run-1", pipelineStageId: "01_research" },
+			"T1",
+		);
+		const partial = JSON.parse(JSON.stringify(valid)) as { steps: Array<{ pipelineStageId?: string }> };
+		delete partial.steps[0].pipelineStageId;
+		expect(parseTaskStepsState(JSON.stringify(partial))).toBeUndefined();
+		const wrongType = JSON.parse(JSON.stringify(valid)) as { steps: Array<{ pipelineRunId: unknown }> };
+		wrongType.steps[0].pipelineRunId = 42;
+		expect(parseTaskStepsState(JSON.stringify(wrongType))).toBeUndefined();
 	});
 
 	it("replaces and clears explicit goal requirement links", () => {

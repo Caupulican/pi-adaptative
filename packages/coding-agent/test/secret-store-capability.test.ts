@@ -10,8 +10,8 @@ describe("secret_store capability boundary", () => {
 		expect(getDefaultActiveToolNames()).toContain("secret_store");
 		expect(WORKER_FORBIDDEN_TOOLS.has("secret_store")).toBe(true);
 		expect(getToolCapabilityPolicy("secret_store")).toEqual({
-			capabilityCandidates: ["credentials.use"],
-			enforcement: "service-proxy",
+			capabilityClauses: [["credentials.use"]],
+			enforcements: ["service-proxy", "path-scope"],
 		});
 	});
 

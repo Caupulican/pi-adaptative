@@ -114,6 +114,52 @@ describe("goal tool", () => {
 		expect(getState()?.stallTurns).toBe(0);
 	});
 
+	it("resolves active pipeline state only for goal completion", async () => {
+		let state: GoalState | undefined;
+		let pipelineReads = 0;
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			getActivePipeline: () => {
+				pipelineReads++;
+				return undefined;
+			},
+			now: () => "T0",
+		});
+
+		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+		await tool.execute("call-progress", { action: "progress" }, undefined, undefined, ctx);
+		expect(pipelineReads).toBe(0);
+
+		await tool.execute("call-complete", { action: "increment" }, undefined, undefined, ctx);
+		expect(pipelineReads).toBe(1);
+	});
+
+	it("returns a tool error when completion cannot verify durable pipeline state", async () => {
+		let state: GoalState | undefined;
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			getActivePipeline: () => {
+				throw new Error("pipeline store is inconsistent");
+			},
+			now: () => "T0",
+		});
+		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+
+		const result = await tool.execute("call-complete", { action: "complete" }, undefined, undefined, ctx);
+
+		expect(result).toMatchObject({
+			isError: true,
+			details: { applied: false, error: expect.stringContaining("pipeline store is inconsistent") },
+		});
+		expect(state?.status).toBe("active");
+	});
+
 	it("reads a blocked ledger without exposing owner resume authority", async () => {
 		const { run, getState } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship" });

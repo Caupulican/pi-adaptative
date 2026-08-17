@@ -1,11 +1,12 @@
 import path from "node:path";
 import {
-	hasCapabilityPolicyForTool,
-	hasRequiredCapabilityForTool,
-	requiredCapabilitiesForTool,
-} from "./approval-gate.ts";
+	resolveToolCallCapabilities,
+	resolveToolCallPathAccess,
+	toolUsesPathScope,
+} from "../tool-capability-policy.ts";
+import { describeCapabilityRequirementForTool, hasCapabilityPolicyForTool } from "./approval-gate.ts";
 import type { CapabilityEnvelope, GateOutcome, GateOutcomeKind } from "./contracts.ts";
-import { isPathWithinEnvelope } from "./envelope-enforcement.ts";
+import { extractToolPathArguments, isPathWithinEnvelope } from "./envelope-enforcement.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 import { assessOperationRisk } from "./risk-assessment.ts";
 
@@ -70,72 +71,8 @@ export function fallbackGateOutcome(args: { gate: string; reversible: boolean; r
 	};
 }
 
-const PATH_SCOPE_TOOLS = new Set([
-	"read",
-	"write",
-	"edit",
-	"edit-diff",
-	"ls",
-	"grep",
-	"find",
-	"artifact_retrieve",
-	"context_scout",
-	"worktree_sync",
-	"skill",
-	"skill_audit",
-	"skillify",
-	"extensionify",
-	"secret_store",
-]);
-
-const PATH_ARG_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
-const PATH_LIST_ARG_KEYS = ["paths", "files"] as const;
-
 export function extractCandidatePaths(toolName: string, args: unknown): string[] {
-	if (!args || typeof args !== "object" || !PATH_SCOPE_TOOLS.has(toolName.toLowerCase())) return [];
-	const obj = args as Record<string, unknown>;
-	const paths: string[] = [];
-
-	for (const key of PATH_ARG_KEYS) {
-		const val = obj[key];
-		if (typeof val === "string" && val.trim()) {
-			paths.push(val.trim());
-		}
-	}
-
-	for (const key of PATH_LIST_ARG_KEYS) {
-		const val = obj[key];
-		if (Array.isArray(val)) {
-			for (const item of val) {
-				if (typeof item === "string" && item.trim()) {
-					paths.push(item.trim());
-				}
-			}
-		}
-	}
-
-	if (toolName === "secret_store" && obj.action === "migrate" && Array.isArray(obj.sources)) {
-		for (const source of obj.sources) {
-			if (
-				source &&
-				typeof source === "object" &&
-				"path" in source &&
-				typeof source.path === "string" &&
-				source.path.trim()
-			) {
-				paths.push(source.path.trim());
-			}
-		}
-	}
-
-	if (
-		paths.length === 0 &&
-		(toolName === "find" || toolName === "grep" || toolName === "ls" || toolName === "context_scout")
-	) {
-		paths.push(".");
-	}
-
-	return paths;
+	return toolUsesPathScope(toolName) ? extractToolPathArguments(toolName, args) : [];
 }
 
 export function evaluateToolGate(input: {
@@ -174,8 +111,32 @@ export function evaluateToolGate(input: {
 		};
 	}
 
-	// 2. Path scope containment for file tools
-	const paths = extractCandidatePaths(input.toolName, input.args);
+	// 2. Capability checks. Resolve the selected alternatives once so action-sensitive path
+	// enforcement cannot disagree with capability admission.
+	if (!hasCapabilityPolicyForTool(input.toolName)) {
+		return {
+			outcome: "block",
+			gate: "tool_gate",
+			reasonCode: "unknown_tool_capability",
+			message: `Tool '${input.toolName}' has no capability policy in the active envelope.`,
+		};
+	}
+
+	const callCapabilities = resolveToolCallCapabilities(envelope.capabilities, input.toolName, input.args);
+	if (!callCapabilities) {
+		const requirement = describeCapabilityRequirementForTool(input.toolName, input.args);
+		return {
+			outcome: "block",
+			gate: "tool_gate",
+			reasonCode: "missing_capability",
+			message: `Tool '${input.toolName}' requires ${requirement || "a classified capability"}, which is missing from the active envelope.`,
+		};
+	}
+
+	// 3. Path scope containment for caller-controlled paths. A workflow.plan pipeline read is a
+	// fixed-root control-plane operation; selecting filesystem.read instead keeps the path gate.
+	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args);
+	const paths = pathAccess === "none" ? [] : extractCandidatePaths(input.toolName, input.args);
 	if (paths.length > 0) {
 		for (const targetPath of paths) {
 			if (!isPathWithinEnvelope(envelope, targetPath, input.cwd)) {
@@ -209,25 +170,6 @@ export function evaluateToolGate(input: {
 		}
 	}
 
-	// 2.5. Capability checks
-	if (!hasCapabilityPolicyForTool(input.toolName)) {
-		return {
-			outcome: "block",
-			gate: "tool_gate",
-			reasonCode: "unknown_tool_capability",
-			message: `Tool '${input.toolName}' has no capability policy in the active envelope.`,
-		};
-	}
-
-	const requiredCaps = requiredCapabilitiesForTool(input.toolName, input.args);
-	if (!hasRequiredCapabilityForTool(envelope.capabilities, input.toolName, input.args)) {
-		return {
-			outcome: "block",
-			gate: "tool_gate",
-			reasonCode: "missing_capability",
-			message: `Tool '${input.toolName}' requires capability '${requiredCaps.join(" or ")}', which is missing from the active envelope.`,
-		};
-	}
 	let command = "";
 	if (
 		input.toolName === "bash" ||
