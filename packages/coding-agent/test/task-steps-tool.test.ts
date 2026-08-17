@@ -1,7 +1,10 @@
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { MAX_PIPELINE_STAGE_ID_LENGTH } from "../src/core/pipelines/types.ts";
-import type { TaskStepsState } from "../src/core/tasks/task-state.ts";
+import {
+	MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH,
+	type TaskStepsState,
+} from "../src/core/tasks/task-state.ts";
 import { createTaskStepsToolDefinition } from "../src/core/tools/task-steps.ts";
 
 function createHarness(activePipelineScope?: { runId: string; stageIds: readonly string[] }) {
@@ -204,19 +207,22 @@ describe("task_steps tool", () => {
 
 	it("accepts the pipeline owner's longest valid stage id in its schema and state", async () => {
 		const stageId = `01_${"a".repeat(63)}`;
+		const runId = "r".repeat(MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH);
 		const input = {
 			action: "add",
 			content: "Longest valid stage",
-			pipelineRunId: "run-1",
+			pipelineRunId: runId,
 			pipelineStageId: stageId,
 		};
-		const harness = createHarness({ runId: "run-1", stageIds: [stageId] });
+		const harness = createHarness({ runId, stageIds: [stageId] });
 		expect(stageId).toHaveLength(MAX_PIPELINE_STAGE_ID_LENGTH);
+		expect(runId).toHaveLength(MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH);
 		expect(Value.Check(harness.tool.parameters, input)).toBe(true);
 		const result = await execute(harness.tool, input);
 		expect(result.details).toMatchObject({ action: "add", applied: true });
 		expect(harness.getState()?.steps[0]?.pipelineStageId).toBe(stageId);
 		expect(Value.Check(harness.tool.parameters, { ...input, pipelineStageId: `${stageId}a` })).toBe(false);
+		expect(Value.Check(harness.tool.parameters, { ...input, pipelineRunId: `${runId}a` })).toBe(false);
 	});
 
 	it("rejects partial, inactive-run, and unknown-stage pipeline links without persistence", async () => {
@@ -254,10 +260,10 @@ describe("task_steps tool", () => {
 		expect(createHarness().tool.executionMode).toBe("sequential");
 		expect(harnessGuidelines(createHarness().tool)).toContain("one in_progress step");
 		expect(harnessGuidelines(createHarness().tool)).toContain("first open step");
-		expect(harnessGuidelines(createHarness().tool)).toContain("Before final:");
+		expect(harnessGuidelines(createHarness().tool)).toContain("Before final");
 		expect(harnessGuidelines(createHarness().tool)).toContain("requirementIds");
-		expect(harnessGuidelines(createHarness().tool)).toContain("pipelineRunId");
-		expect(harnessGuidelines(createHarness().tool)).toContain("not one-step work");
+		expect(harnessGuidelines(createHarness().tool)).not.toContain("pipelineRunId");
+		expect(harnessGuidelines(createHarness().tool)).toContain("multi-step work");
 		expect(harnessGuidelines(createHarness().tool)).toContain("Batch transitions");
 	});
 });

@@ -8,6 +8,7 @@ import {
 	createTaskStepsState,
 	formatTaskSteps,
 	formatTaskStepsContext,
+	MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH,
 	parseTaskStepsState,
 	resolveTaskStepSelector,
 	setTaskSteps,
@@ -281,10 +282,14 @@ describe("task step state", () => {
 		expect(() =>
 			addTaskStep(
 				createTaskStepsState("T0"),
-				{ content: "Oversized", pipelineRunId: "r".repeat(129), pipelineStageId: "01_research" },
+				{
+					content: "Oversized",
+					pipelineRunId: "r".repeat(MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH + 1),
+					pipelineStageId: "01_research",
+				},
 				"T1",
 			),
-		).toThrow(/pipeline run id must be at most 128/i);
+		).toThrow(new RegExp(`pipeline run id must be at most ${MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH}`, "i"));
 		expect(() =>
 			addTaskStep(
 				createTaskStepsState("T0"),

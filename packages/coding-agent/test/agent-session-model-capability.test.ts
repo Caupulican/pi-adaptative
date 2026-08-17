@@ -259,6 +259,7 @@ describe("model capability auto-detection", () => {
 			settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 		});
 		try {
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
 			seedActiveGoal(harness);
 			let seenMaxTokens: number | undefined;
 			harness.setResponses([

@@ -159,6 +159,7 @@ export function createPipelineToolDefinition(deps: PipelineToolDependencies): To
 		promptGuidelines: [
 			"Use for repeating sequential workflows with stage folders. Status is output/ files, not chat memory.",
 			"increment completes the current stage then starts the next. Write outputs first. No Review-now latch.",
+			"Pipeline task_steps require active pipelineRunId+pipelineStageId; clearPipelineLink removes both; unlinked steps do not gate increment.",
 			"Use task_steps advance for checklists, goal increment for requirements, delegate for concurrent work.",
 		],
 		parameters: pipelineSchema,

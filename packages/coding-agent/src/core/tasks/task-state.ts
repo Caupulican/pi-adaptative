@@ -15,7 +15,7 @@ const MAX_TASK_STEP_EVIDENCE = 32;
 const MAX_TASK_STEP_EVIDENCE_LENGTH = 2_000;
 const MAX_TASK_STEP_REQUIREMENTS = 32;
 const MAX_TASK_STEP_REQUIREMENT_ID_LENGTH = 200;
-const MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH = 128;
+export const MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH = 128;
 
 export interface TaskStepInput {
 	content: string;
@@ -251,7 +251,7 @@ function normalizeInputNotes(input: TaskStepInput): string[] {
 	return notes;
 }
 
-function normalizePipelineLink(
+export function normalizeTaskStepPipelineLink(
 	pipelineRunId: string | undefined,
 	pipelineStageId: string | undefined,
 	clearPipelineLink = false,
@@ -328,8 +328,8 @@ function createStep(args: {
 			? [...(existing?.requirementIds ?? [])]
 			: normalizeStrings(args.input.requirementIds, "Task step requirement id", MAX_TASK_STEP_REQUIREMENT_ID_LENGTH);
 	const pipelineLink = args.input.clearPipelineLink
-		? normalizePipelineLink(args.input.pipelineRunId, args.input.pipelineStageId, true)
-		: normalizePipelineLink(
+		? normalizeTaskStepPipelineLink(args.input.pipelineRunId, args.input.pipelineStageId, true)
+		: normalizeTaskStepPipelineLink(
 				args.input.pipelineRunId === undefined ? existing?.pipelineRunId : args.input.pipelineRunId,
 				args.input.pipelineStageId === undefined ? existing?.pipelineStageId : args.input.pipelineStageId,
 			);
@@ -449,8 +449,8 @@ export function updateTaskStep(
 		MAX_TASK_STEP_EVIDENCE_LENGTH,
 	);
 	const pipelineLink = update.clearPipelineLink
-		? normalizePipelineLink(update.pipelineRunId, update.pipelineStageId, true)
-		: normalizePipelineLink(
+		? normalizeTaskStepPipelineLink(update.pipelineRunId, update.pipelineStageId, true)
+		: normalizeTaskStepPipelineLink(
 				update.pipelineRunId === undefined ? current.pipelineRunId : update.pipelineRunId,
 				update.pipelineStageId === undefined ? current.pipelineStageId : update.pipelineStageId,
 			);

@@ -170,6 +170,7 @@ export class SystemPromptBuilder {
 	private _buildToolApplicabilityPrompt(
 		validToolNames: readonly string[],
 		activeExtensions: ReadonlyArray<Extension>,
+		profile: ModelCapabilityProfile,
 	): string | undefined {
 		const activeNames = new Set(validToolNames);
 		if (!activeNames.has("secret_store")) {
@@ -183,6 +184,9 @@ export class SystemPromptBuilder {
 				if (hasActiveExtensionTool) break;
 			}
 			if (!hasActiveExtensionTool) return undefined;
+		}
+		if (profile.class !== "full") {
+			return "PI TOOL APPLICABILITY: availability is not a mandate. Use extension/project/account tools only when this request needs their data or action. Context or guidance alone is not a trigger. Missing optional credentials never block unrelated work or require secret_store.";
 		}
 		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools only when the current request explicitly asks for them or genuinely depends on their data/action; cwd, repository, prior session, wildcard profile, or tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
@@ -248,7 +252,7 @@ export class SystemPromptBuilder {
 			this._buildDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(),
-			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions),
+			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions, modelCapability),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
 			this._buildStaticMemoryPrompt(modelCapability),
 			...loaderAppendSystemPrompt,

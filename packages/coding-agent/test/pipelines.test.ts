@@ -357,6 +357,7 @@ parentPort.postMessage({ done: true });
 			now: () => "T0",
 		});
 		expect(tool.executionMode).toBe("sequential");
+		expect((tool.promptGuidelines ?? []).join("\n")).toContain("pipelineRunId+pipelineStageId");
 		const empty = await tool.execute("c1", { action: "list" }, undefined, undefined, ctx);
 		const emptyText = empty.content[0] && empty.content[0].type === "text" ? empty.content[0].text : "";
 		expect(emptyText).toContain("research");

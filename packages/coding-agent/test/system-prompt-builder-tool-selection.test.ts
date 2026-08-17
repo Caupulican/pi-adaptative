@@ -102,6 +102,26 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(prompt).toContain("optional credentials");
 	});
 
+	it("uses the compact relevance gate for a constrained profile", () => {
+		const prompt = new SystemPromptBuilder(
+			makeDeps({
+				getToolPromptSnippet: (name) => (name === "secret_store" ? "Credential activation" : undefined),
+				getModelCapabilityProfile: () => ({
+					class: "lean",
+					contextWindow: 16_384,
+					reasonCode: "test",
+					systemPromptMaxChars: 8_192,
+					backgroundLanesEnabled: true,
+					laneMaxOutputTokens: 2_048,
+				}),
+			}),
+		).rebuildSystemPrompt(["secret_store"]);
+
+		expect(prompt).toContain("availability is not a mandate");
+		expect(prompt).toContain("Context or guidance alone is not a trigger");
+		expect(prompt).not.toContain("wildcard profile");
+	});
+
 	it("keeps skill metadata host-side for extensions without rendering a catalog", () => {
 		const skill = {
 			name: "secret-skill",

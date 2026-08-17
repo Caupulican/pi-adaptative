@@ -10,7 +10,9 @@ import {
 	findOpenDuplicateStep,
 	formatTaskSteps,
 	hasUnverifiedCompletedStep,
+	MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH,
 	MAX_TASK_STEPS,
+	normalizeTaskStepPipelineLink,
 	resolveTaskStepSelector,
 	setTaskSteps,
 	type TaskStep,
@@ -51,7 +53,7 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 		pipelineRunId: Type.Optional(
 			Type.String({
 				minLength: 1,
-				maxLength: 128,
+				maxLength: MAX_TASK_STEP_PIPELINE_RUN_ID_LENGTH,
 				description: "Active pipeline run id this step advances. Supply together with pipelineStageId.",
 			}),
 		),
@@ -172,17 +174,11 @@ function validatePipelineLink(
 	pipelineStageId: string | undefined,
 	clearPipelineLink = false,
 ): void {
-	if (clearPipelineLink) {
-		if (pipelineRunId !== undefined || pipelineStageId !== undefined) {
-			throw new TaskStepsError("Task step cannot supply pipeline ids while clearPipelineLink is true.");
-		}
-		return;
-	}
-	const runId = pipelineRunId?.trim() || undefined;
-	const stageId = pipelineStageId?.trim() || undefined;
-	if ((runId === undefined) !== (stageId === undefined)) {
-		throw new TaskStepsError("Task step pipelineRunId and pipelineStageId must be supplied together.");
-	}
+	const { pipelineRunId: runId, pipelineStageId: stageId } = normalizeTaskStepPipelineLink(
+		pipelineRunId,
+		pipelineStageId,
+		clearPipelineLink,
+	);
 	if (!runId || !stageId) return;
 	const active = deps.getActivePipelineScope?.();
 	if (!active) throw new TaskStepsError("Task step pipeline linkage requires an active pipeline run.");
@@ -326,13 +322,12 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Track the session's ordered multi-step checklist with status, notes, and evidence. Use goal for durable outcomes and delegate for workers.",
 		promptSnippet: "Track multi-step session work.",
 		promptGuidelines: [
-			"Use for complex/explicitly tracked work, not one-step work. Keep one in_progress step.",
-			"Batch transitions. Address first open step; record evidence/blocker. Never call only to narrate unchanged state.",
-			"intake preserves every supplied item; link steps to active goal requirementIds.",
-			"For pipeline work, supply the exact active pipelineRunId and pipelineStageId together; use clearPipelineLink to unlink both; unlinked steps do not gate pipeline increment.",
-			"advance completes the current step then starts the next pending step.",
-			"Attach completed tool_task taskIds as evidence. Goal complete refuses while linked steps stay open.",
-			"Before final: clear stale in_progress, discuss/defer remainder. Goal owns outcomes; delegate owns workers.",
+			"Use for multi-step work; keep one in_progress.",
+			"Batch transitions; work the first open step; record evidence/blockers; skip unchanged narration.",
+			"intake keeps every item; link goal requirementIds.",
+			"advance completes current, then starts next pending.",
+			"Attach completed tool_task IDs as evidence; goal completion rejects open linked steps.",
+			"Before final, resolve or defer open work. goal owns outcomes; delegate owns workers.",
 		],
 		parameters: taskStepsSchema,
 		executionMode: "sequential",
