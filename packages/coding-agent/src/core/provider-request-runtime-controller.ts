@@ -85,10 +85,10 @@ export class ProviderRequestRuntimeController {
 			}
 		};
 		this.installedAdmission = async (request, signal) => {
-			const requestTokens = estimateProviderRequestTokens(request.context);
+			const requestTokens = estimateProviderRequestTokens(request.context, request.model);
 			const decision = await this.deps.compaction.admitProviderRequest({
 				requestTokens,
-				nonCompactableTokens: estimateProviderRequestTokens(request.nonCompactableContext),
+				nonCompactableTokens: estimateProviderRequestTokens(request.nonCompactableContext, request.model),
 				attempt: request.attempt,
 			});
 			if (decision.action === "replan") {

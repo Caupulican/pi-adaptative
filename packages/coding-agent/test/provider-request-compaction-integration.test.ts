@@ -111,4 +111,34 @@ describe("provider request compaction integration", () => {
 		}
 		expect(internals._skillVault.status()).toMatchObject({ state: "active", useCount: 2 });
 	});
+
+	it("admits production-sized image history by semantic tokens instead of base64 characters", async () => {
+		harness = createHarness({ responses: ["delivered"] });
+		const internals = harness.session as unknown as {
+			_compaction: {
+				admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision>;
+			};
+		};
+		const admissions: ProviderRequestCompactionInput[] = [];
+		vi.spyOn(internals._compaction, "admitProviderRequest").mockImplementation(async (input) => {
+			admissions.push(input);
+			return { action: "send" };
+		});
+		const images = Array.from({ length: 9 }, (_, index) => ({
+			type: "image" as const,
+			data: String.fromCharCode(65 + index).repeat(326_000),
+			mimeType: "image/png",
+		}));
+
+		await harness.agent.prompt("inspect every image", images);
+
+		expect(admissions).toHaveLength(1);
+		expect(admissions[0]?.requestTokens).toBeLessThan(20_000);
+		expect(admissions[0]?.requestTokens).toBeGreaterThan(9_000);
+		expect(
+			harness.faux.contexts[0]?.messages.flatMap((message) =>
+				Array.isArray(message.content) ? message.content.filter((block) => block.type === "image") : [],
+			),
+		).toHaveLength(9);
+	});
 });

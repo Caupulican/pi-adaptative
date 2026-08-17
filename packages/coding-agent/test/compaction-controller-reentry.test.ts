@@ -206,6 +206,24 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 	});
 
+	it("reports compactable and fixed context separately after the bounded hard-compaction ladder", async () => {
+		const { compactWithRetry, controller } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+
+		await expect(
+			controller.admitProviderRequest({
+				requestTokens: 3_500,
+				nonCompactableTokens: 500,
+				attempt: 2,
+			}),
+		).rejects.toThrow(
+			"3,500 total tokens after bounded history compaction (500 non-compactable; 3,000 compactable history remains)",
+		);
+		expect(compactWithRetry).not.toHaveBeenCalled();
+	});
+
 	it("uses one paid summary then deterministic progress when an image turn remains above the threshold", async () => {
 		const { compactWithRetry, controller, events, sessionManager } = createFixture({
 			measureLiveContextTokens: scriptedMeasure([3_000, 2_500, 2_500, 2_500, 2_500, 2_500]),

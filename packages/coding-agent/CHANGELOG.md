@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevent image-heavy sessions from entering ineffective auto-compaction and report fixed versus compactable context separately when bounded compaction cannot recover.
+
 ## [0.93.1] - 2026-08-17
 
 ## [0.93.0] - 2026-08-16

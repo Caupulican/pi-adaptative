@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Centralized model image-capability projection so provider transport, token admission, and request-body budgeting cannot diverge.
+
 ## [0.93.1] - 2026-08-17
 
 ### Fixed

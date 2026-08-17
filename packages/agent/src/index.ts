@@ -6,6 +6,7 @@ export * from "./agent-loop.ts";
 export * from "./messages.ts";
 // Complete provider-request budgeting without serializing a duplicate payload.
 export * from "./provider-request-estimator.ts";
+export * from "./provider-request-image-budget.ts";
 // Provider-only compact tool representation; execution retains authoritative tools.
 export * from "./provider-tool-projection.ts";
 // Proxy utilities

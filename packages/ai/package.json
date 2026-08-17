@@ -36,6 +36,11 @@
 			"pi-source": "./src/providers/google-vertex.ts",
 			"import": "./dist/providers/google-vertex.js"
 		},
+		"./image-support": {
+			"types": "./dist/image-support.d.ts",
+			"pi-source": "./src/image-support.ts",
+			"import": "./dist/image-support.js"
+		},
 		"./mistral": {
 			"types": "./dist/providers/mistral.d.ts",
 			"pi-source": "./src/providers/mistral.ts",

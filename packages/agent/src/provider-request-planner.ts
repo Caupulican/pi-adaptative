@@ -11,6 +11,7 @@ import type {
 	RequestPreflightResult,
 	StreamFn,
 } from "./types.ts";
+import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
 const MAX_PROVIDER_REQUEST_REPLANS = 2;
@@ -160,7 +161,12 @@ export async function startPlannedAgentProviderRequest(
 				messages: llmMessages,
 				tools: projectToolsForProvider(sourceContext.tools),
 			};
-			const materialized = materializeProviderRequest(sourceProviderContext, config);
+			const protocolMaterialized = materializeProviderRequest(sourceProviderContext, config);
+			const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
+			const materialized =
+				budgeted.context === protocolMaterialized.context
+					? protocolMaterialized
+					: { ...protocolMaterialized, context: budgeted.context };
 			const nonCompactableContext = nonCompactableProviderContext(
 				materialized.context,
 				compactableMessages.length,

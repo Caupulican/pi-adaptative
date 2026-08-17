@@ -14,6 +14,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
+import { ESTIMATED_IMAGE_CHARS } from "../provider-request-estimator.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
 import { addUsage, createEmptyUsage } from "../usage.ts";
@@ -410,8 +411,6 @@ export function shouldCompact(
 // ============================================================================
 // Cut point detection
 // ============================================================================
-
-const ESTIMATED_IMAGE_CHARS = 4800;
 
 function estimateTextAndImageContentChars(content: string | Array<{ type: string; text?: string }>): number {
 	if (typeof content === "string") {

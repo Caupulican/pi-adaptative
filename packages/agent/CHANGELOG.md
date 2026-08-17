@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Count inline images by semantic token cost and bound aggregate request bodies with provider-specific, request-local image eviction for xAI, Bedrock, and other providers.
+
 ## [0.93.1] - 2026-08-17
 
 ## [0.93.0] - 2026-08-16

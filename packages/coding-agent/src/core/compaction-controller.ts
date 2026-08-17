@@ -73,6 +73,13 @@ interface IneffectiveThresholdFrontier {
 	retryAtTokens: number;
 }
 
+function formatRequestTokenBreakdown(input: ProviderRequestCompactionInput): string {
+	const total = Math.max(0, Math.ceil(input.requestTokens));
+	const nonCompactable = Math.max(0, Math.min(total, Math.ceil(input.nonCompactableTokens)));
+	const compactable = total - nonCompactable;
+	return `${total.toLocaleString("en-US")} total tokens (${nonCompactable.toLocaleString("en-US")} non-compactable; ${compactable.toLocaleString("en-US")} compactable history remains)`;
+}
+
 type CompactionControllerEvent =
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| {
@@ -228,7 +235,7 @@ export class CompactionController {
 		if (input.attempt >= 2) {
 			if (requestNeed === "early") return { action: "send" };
 			throw new ProviderRequestEnvelopeOverflowError(
-				`Provider request still needs about ${input.requestTokens} tokens after bounded history compaction. Mandatory transient context was not dropped.`,
+				`Provider request still needs about ${formatRequestTokenBreakdown(input)} after bounded history compaction. Reduce retained history or select a larger-context model.`,
 			);
 		}
 
@@ -244,7 +251,7 @@ export class CompactionController {
 		if (latestAfter && latestAfter !== latestBefore) return { action: "replan" };
 		if (requestNeed === "early") return { action: "send" };
 		throw new ProviderRequestEnvelopeOverflowError(
-			`Provider request needs about ${input.requestTokens} tokens, but bounded history compaction made no progress. Mandatory transient context was not dropped.`,
+			`Provider request needs about ${formatRequestTokenBreakdown(input)}, but bounded history compaction made no progress. Reduce retained history or select a larger-context model.`,
 		);
 	}
 
@@ -268,6 +275,7 @@ export class CompactionController {
 				},
 				{ textToolCallProtocol: this.deps.agent.textToolCallProtocol },
 			).context,
+			model,
 		);
 
 		if (baseTokens >= contextWindow) {

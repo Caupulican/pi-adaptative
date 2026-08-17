@@ -8,9 +8,8 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { projectMessagesForModelImageSupport } from "../image-support.ts";
 
-const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
-const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
 export const INTERRUPTED_TOOL_RESULT_TEXT =
 	'[harness] {"state":"interrupted","outcome":"unknown","reason":"missing_terminal_result","next_action":"Inspect side effects before retrying; do not assume the operation failed."}';
 
@@ -30,77 +29,6 @@ export function joinTextContent(content: readonly (TextContent | ImageContent)[]
 	return parts?.join("\n") ?? first ?? "";
 }
 
-function replaceUnsupportedImagesWithPlaceholder(
-	content: (TextContent | ImageContent)[],
-	placeholder: string,
-	isSupported: (block: ImageContent) => boolean,
-): (TextContent | ImageContent)[] {
-	const result: (TextContent | ImageContent)[] = [];
-	let previousWasPlaceholder = false;
-
-	for (const block of content) {
-		if (block.type === "image" && !isSupported(block)) {
-			if (!previousWasPlaceholder) {
-				result.push({ type: "text", text: placeholder });
-			}
-			previousWasPlaceholder = true;
-			continue;
-		}
-
-		result.push(block);
-		previousWasPlaceholder = block.type === "text" && block.text === placeholder;
-	}
-
-	return result;
-}
-
-function createImageSupportPredicate<TApi extends Api>(model: Model<TApi>): (block: ImageContent) => boolean {
-	if (!model.input.includes("image")) {
-		return () => false;
-	}
-
-	if (!model.supportedImageMimeTypes) {
-		return () => true;
-	}
-
-	const supportedMimeTypes = new Set(model.supportedImageMimeTypes.map((mimeType) => mimeType.toLowerCase()));
-	return (block) => supportedMimeTypes.has(block.mimeType.toLowerCase());
-}
-
-function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model: Model<TApi>): Message[] {
-	if (model.input.includes("image") && !model.supportedImageMimeTypes) {
-		return messages;
-	}
-
-	const isSupportedImage = createImageSupportPredicate(model);
-
-	return messages.map((msg) => {
-		if (msg.role === "user" && Array.isArray(msg.content)) {
-			return {
-				...msg,
-				content: replaceUnsupportedImagesWithPlaceholder(
-					msg.content,
-					NON_VISION_USER_IMAGE_PLACEHOLDER,
-					isSupportedImage,
-				),
-			};
-		}
-
-		if (msg.role === "toolResult") {
-			return {
-				...msg,
-				content: replaceUnsupportedImagesWithPlaceholder(
-					msg.content,
-					NON_VISION_TOOL_IMAGE_PLACEHOLDER,
-					isSupportedImage,
-				),
-			};
-		}
-
-		return msg;
-	});
-}
-
 /**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
@@ -113,7 +41,7 @@ export function transformMessages<TApi extends Api>(
 ): Message[] {
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
-	const imageAwareMessages = downgradeUnsupportedImages(messages, model);
+	const imageAwareMessages = projectMessagesForModelImageSupport(messages, model);
 
 	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
 	const transformed = imageAwareMessages.map((msg) => {

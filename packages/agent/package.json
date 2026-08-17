@@ -66,6 +66,11 @@
 			"pi-source": "./src/provider-request-estimator.ts",
 			"import": "./dist/provider-request-estimator.js"
 		},
+		"./provider-request-image-budget": {
+			"types": "./dist/provider-request-image-budget.d.ts",
+			"pi-source": "./src/provider-request-image-budget.ts",
+			"import": "./dist/provider-request-image-budget.js"
+		},
 		"./provider-request-planner": {
 			"types": "./dist/provider-request-planner.d.ts",
 			"pi-source": "./src/provider-request-planner.ts",
