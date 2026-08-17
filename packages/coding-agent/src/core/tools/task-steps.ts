@@ -15,6 +15,7 @@ import {
 	setTaskSteps,
 	type TaskStep,
 	type TaskStepInput,
+	type TaskStepUpdate,
 	TaskStepsError,
 	type TaskStepsState,
 	updateTaskStep,
@@ -145,9 +146,9 @@ export interface TaskStepsToolDependencies {
 	now?: () => string;
 }
 
-function toTaskStepInput(input: TaskStepsToolInput): TaskStepInput {
+function toTaskStepUpdate(input: TaskStepsToolInput): TaskStepUpdate {
 	return {
-		content: input.content ?? "",
+		content: input.content,
 		activeForm: input.activeForm,
 		status: input.status,
 		priority: input.priority,
@@ -159,6 +160,10 @@ function toTaskStepInput(input: TaskStepsToolInput): TaskStepInput {
 		note: input.note,
 		evidence: input.evidence,
 	};
+}
+
+function toTaskStepInput(input: TaskStepsToolInput): TaskStepInput {
+	return { ...toTaskStepUpdate(input), content: input.content ?? "" };
 }
 
 function validatePipelineLink(
@@ -358,26 +363,18 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			try {
 				switch (input.action) {
 					case "set":
-						if (!input.steps) return errorResult(input.action, "set requires steps[].", current);
-						validatePipelineInputs(deps, input.steps);
-						state = setTaskSteps(state, input.steps, timestamp);
-						demotedStepIds = computeDemotedStepIds(
-							before,
-							state,
-							explicitStatusStepIds(input.steps, state.steps),
-						);
+					case "intake": {
+						const steps = input.steps;
+						if (!steps) {
+							const error =
+								input.action === "set" ? "set requires steps[]." : "intake requires a complete steps[] list.";
+							return errorResult(input.action, error, current);
+						}
+						validatePipelineInputs(deps, steps);
+						state = setTaskSteps(state, steps, timestamp);
+						demotedStepIds = computeDemotedStepIds(before, state, explicitStatusStepIds(steps, state.steps));
 						break;
-					case "intake":
-						if (!input.steps)
-							return errorResult(input.action, "intake requires a complete steps[] list.", current);
-						validatePipelineInputs(deps, input.steps);
-						state = setTaskSteps(state, input.steps, timestamp);
-						demotedStepIds = computeDemotedStepIds(
-							before,
-							state,
-							explicitStatusStepIds(input.steps, state.steps),
-						);
-						break;
+					}
 					case "add":
 						validatePipelineLink(deps, input.pipelineRunId, input.pipelineStageId, input.clearPipelineLink);
 						state = addTaskStep(state, toTaskStepInput(input), timestamp);
@@ -406,24 +403,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 								clearingPipelineLink,
 							);
 						}
-						state = updateTaskStep(
-							state,
-							input.id,
-							{
-								content: input.content,
-								activeForm: input.activeForm,
-								status: input.status,
-								priority: input.priority,
-								owner: input.owner,
-								requirementIds: input.requirementIds,
-								pipelineRunId: input.pipelineRunId,
-								pipelineStageId: input.pipelineStageId,
-								clearPipelineLink: input.clearPipelineLink,
-								note: input.note,
-								evidence: input.evidence,
-							},
-							timestamp,
-						);
+						state = updateTaskStep(state, input.id, toTaskStepUpdate(input), timestamp);
 						// Exclude the explicitly targeted step: its own status change was requested by
 						// the caller, so it is never a "silent" demotion even if it moved to pending.
 						demotedStepIds = computeDemotedStepIds(before, state, new Set([selected.id]));

@@ -29,6 +29,36 @@ function assertOpenedPathVersion(pathVersion: Stats, openedVersion: Stats, label
 	}
 }
 
+function assertStableReadVersion(
+	pathBefore: Stats,
+	openedBefore: Stats,
+	openedAfter: Stats,
+	pathAfter: Stats,
+	label: string,
+): void {
+	if (!sameFileVersion(openedBefore, openedAfter) || !sameFileVersion(pathBefore, pathAfter)) {
+		throw new Error(`${label} changed while it was being read.`);
+	}
+}
+
+function withStableFileDescriptorSync<T>(
+	filePath: string,
+	label: string,
+	read: (fileDescriptor: number, openedVersion: Stats) => T,
+): T {
+	const pathBefore = lstatSync(filePath);
+	const fileDescriptor = openSync(filePath, "r");
+	try {
+		const openedBefore = fstatSync(fileDescriptor);
+		assertOpenedPathVersion(pathBefore, openedBefore, label);
+		const result = read(fileDescriptor, openedBefore);
+		assertStableReadVersion(pathBefore, openedBefore, fstatSync(fileDescriptor), lstatSync(filePath), label);
+		return result;
+	} finally {
+		closeSync(fileDescriptor);
+	}
+}
+
 async function readFileHandleBounded(fileHandle: FileHandle, maxBytes: number): Promise<Buffer | undefined> {
 	validateByteLimit(maxBytes);
 	const chunks: Buffer[] = [];
@@ -65,27 +95,15 @@ export function readFileDescriptorBoundedSync(fileDescriptor: number, maxBytes: 
 /** Bounded, version-stable text read for small durable state files. */
 export function readBoundedTextFileSync(filePath: string, maxBytes: number, label: string): string {
 	validateByteLimit(maxBytes);
-	const pathBefore = lstatSync(filePath);
-	const fileDescriptor = openSync(filePath, "r");
-	try {
-		const before = fstatSync(fileDescriptor);
-		assertOpenedPathVersion(pathBefore, before, label);
+	return withStableFileDescriptorSync(filePath, label, (fileDescriptor, before) => {
 		if (before.size > maxBytes) throw new Error(`${label} exceeds its byte limit.`);
 		const content = readFileDescriptorBoundedSync(fileDescriptor, maxBytes);
 		if (!content) throw new Error(`${label} exceeds its byte limit.`);
-		const after = fstatSync(fileDescriptor);
-		const pathAfter = lstatSync(filePath);
-		if (
-			!sameFileVersion(before, after) ||
-			!sameFileVersion(pathBefore, pathAfter) ||
-			content.byteLength !== before.size
-		) {
+		if (content.byteLength !== before.size) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
 		return content.toString("utf-8");
-	} finally {
-		closeSync(fileDescriptor);
-	}
+	});
 }
 
 export interface BoundedFilePrefix {
@@ -96,11 +114,7 @@ export interface BoundedFilePrefix {
 /** Read one stable file prefix without allocating or reading beyond `maxBytes`. */
 export function readFilePrefixSync(filePath: string, maxBytes: number, label: string): BoundedFilePrefix {
 	validateByteLimit(maxBytes);
-	const pathBefore = lstatSync(filePath);
-	const fileDescriptor = openSync(filePath, "r");
-	try {
-		const before = fstatSync(fileDescriptor);
-		assertOpenedPathVersion(pathBefore, before, label);
+	return withStableFileDescriptorSync(filePath, label, (fileDescriptor, before) => {
 		const expectedBytes = Math.min(before.size, maxBytes);
 		const content = Buffer.allocUnsafe(expectedBytes);
 		let totalBytes = 0;
@@ -109,24 +123,16 @@ export function readFilePrefixSync(filePath: string, maxBytes: number, label: st
 			if (bytesRead === 0) break;
 			totalBytes += bytesRead;
 		}
-		const after = fstatSync(fileDescriptor);
-		const pathAfter = lstatSync(filePath);
-		if (!sameFileVersion(before, after) || !sameFileVersion(pathBefore, pathAfter) || totalBytes !== expectedBytes) {
+		if (totalBytes !== expectedBytes) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
 		return { content, truncated: before.size > maxBytes };
-	} finally {
-		closeSync(fileDescriptor);
-	}
+	});
 }
 
 /** Count text lines with constant memory and reject a file that changes during the scan. */
 export function countFileLinesSync(filePath: string, label: string): number {
-	const pathBefore = lstatSync(filePath);
-	const fileDescriptor = openSync(filePath, "r");
-	try {
-		const before = fstatSync(fileDescriptor);
-		assertOpenedPathVersion(pathBefore, before, label);
+	return withStableFileDescriptorSync(filePath, label, (fileDescriptor, before) => {
 		const chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES);
 		let bytesReadTotal = 0;
 		let lineCount = 1;
@@ -141,19 +147,11 @@ export function countFileLinesSync(filePath: string, label: string): number {
 				throw new Error(`${label} exceeds safe counting bounds.`);
 			}
 		}
-		const after = fstatSync(fileDescriptor);
-		const pathAfter = lstatSync(filePath);
-		if (
-			!sameFileVersion(before, after) ||
-			!sameFileVersion(pathBefore, pathAfter) ||
-			bytesReadTotal !== before.size
-		) {
+		if (bytesReadTotal !== before.size) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
 		return lineCount;
-	} finally {
-		closeSync(fileDescriptor);
-	}
+	});
 }
 
 /**
@@ -190,11 +188,8 @@ export async function readBoundedTextFile(filePath: string, maxBytes: number, la
 		if (!content) throw new Error(`${label} exceeds its byte limit.`);
 		const after = await fileHandle.stat();
 		const pathAfter = await lstatAsync(filePath);
-		if (
-			!sameFileVersion(before, after) ||
-			!sameFileVersion(pathBefore, pathAfter) ||
-			content.byteLength !== before.size
-		) {
+		assertStableReadVersion(pathBefore, before, after, pathAfter, label);
+		if (content.byteLength !== before.size) {
 			throw new Error(`${label} changed while it was being read.`);
 		}
 		return content.toString("utf-8");

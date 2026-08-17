@@ -85,8 +85,9 @@ describe("GoalAutoContinueController provider neutrality", () => {
 
 		try {
 			controller.scheduleFromIdle();
-			await vi.runAllTimersAsync();
+			await vi.advanceTimersToNextTimerAsync();
 			expect(continuationCalls).toBe(1);
+			expect(vi.getTimerCount()).toBe(1);
 		} finally {
 			controller.clearTimer();
 			vi.useRealTimers();
