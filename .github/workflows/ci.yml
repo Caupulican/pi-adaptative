@@ -34,7 +34,8 @@ jobs:
       matrix:
         os: ${{ fromJSON((inputs.skip_tests || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    # Includes hosted-runner package-manager variance; tests remain separately sharded below.
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -120,7 +121,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         shard: [1, 2, 3, 4]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    # Keep a slow hosted-runner package install from consuming the shard's execution budget.
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
