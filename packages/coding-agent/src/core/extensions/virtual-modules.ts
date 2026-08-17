@@ -12,6 +12,7 @@ export const PI_AGENT_CORE_EXTENSION_SUBPATHS = {
 	paths: "agent/src/utils/paths.ts",
 	"process-tree": "agent/src/reliability/process-tree.ts",
 	"provider-request-estimator": "agent/src/provider-request-estimator.ts",
+	"provider-request-image-budget": "agent/src/provider-request-image-budget.ts",
 	"provider-request-planner": "agent/src/provider-request-planner.ts",
 	"provider-tool-projection": "agent/src/provider-tool-projection.ts",
 	reliability: "agent/src/reliability/index.ts",

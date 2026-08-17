@@ -12,6 +12,7 @@ import * as bundledPiAgentCoreNode from "@caupulican/pi-agent-core/node";
 import * as bundledPiAgentCorePaths from "@caupulican/pi-agent-core/paths";
 import * as bundledPiAgentCoreProcessTree from "@caupulican/pi-agent-core/process-tree";
 import * as bundledPiAgentCoreProviderRequestEstimator from "@caupulican/pi-agent-core/provider-request-estimator";
+import * as bundledPiAgentCoreProviderRequestImageBudget from "@caupulican/pi-agent-core/provider-request-image-budget";
 import * as bundledPiAgentCoreProviderRequestPlanner from "@caupulican/pi-agent-core/provider-request-planner";
 import * as bundledPiAgentCoreProviderToolProjection from "@caupulican/pi-agent-core/provider-tool-projection";
 import * as bundledPiAgentCoreReliability from "@caupulican/pi-agent-core/reliability";
@@ -71,6 +72,7 @@ const piAgentCoreVirtualSubpaths: Record<PiAgentCoreExtensionSubpath, unknown> =
 	paths: bundledPiAgentCorePaths,
 	"process-tree": bundledPiAgentCoreProcessTree,
 	"provider-request-estimator": bundledPiAgentCoreProviderRequestEstimator,
+	"provider-request-image-budget": bundledPiAgentCoreProviderRequestImageBudget,
 	"provider-request-planner": bundledPiAgentCoreProviderRequestPlanner,
 	"provider-tool-projection": bundledPiAgentCoreProviderToolProjection,
 	reliability: bundledPiAgentCoreReliability,
