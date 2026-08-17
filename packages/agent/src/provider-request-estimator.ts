@@ -1,4 +1,4 @@
-import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai/image-support";
+import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai";
 import type { Api, Context, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai/types";
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
