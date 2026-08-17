@@ -126,6 +126,7 @@ export interface CompactionControllerDeps {
 		signal: AbortSignal,
 		provider?: string,
 	): Promise<CompactionResult>;
+	onCompactionSettled?(): void;
 }
 
 export async function runCompactionWithRetry<T>(options: {
@@ -292,13 +293,17 @@ export class CompactionController {
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		if (this.manualAbortController) {
+			throw new Error("Compaction already in progress");
+		}
+		const abortController = new AbortController();
+		this.manualAbortController = abortController;
 		this.ineffectiveThresholdFrontier = undefined;
-		this.deps.disconnectAgent();
-		await this.deps.abortForeground();
-		this.manualAbortController = new AbortController();
-		this.deps.emit({ type: "compaction_start", reason: "manual" });
 
 		try {
+			this.deps.disconnectAgent();
+			await this.deps.abortForeground();
+			this.deps.emit({ type: "compaction_start", reason: "manual" });
 			const sessionModel = this.deps.getModel();
 			if (!sessionModel) throw new Error(formatNoModelSelectedMessage());
 
@@ -430,8 +435,11 @@ export class CompactionController {
 			});
 			throw error;
 		} finally {
-			this.manualAbortController = undefined;
+			if (this.manualAbortController === abortController) {
+				this.manualAbortController = undefined;
+			}
 			this.deps.reconnectAgent();
+			this.deps.onCompactionSettled?.();
 		}
 	}
 
@@ -535,6 +543,7 @@ export class CompactionController {
 			.finally(() => {
 				if (this.autoRunPromise === runPromise) this.autoRunPromise = undefined;
 				if (this.autoAbortController === abortController) this.autoAbortController = undefined;
+				this.deps.onCompactionSettled?.();
 			});
 		this.autoRunPromise = runPromise;
 		return runPromise;

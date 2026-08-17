@@ -5,7 +5,8 @@ import {
 	requiredCapabilitiesForTool,
 } from "./approval-gate.ts";
 import type { CapabilityEnvelope, GateOutcome, GateOutcomeKind } from "./contracts.ts";
-import { checkPathScope } from "./path-scope.ts";
+import { isPathWithinEnvelope } from "./envelope-enforcement.ts";
+import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 import { assessOperationRisk } from "./risk-assessment.ts";
 
 function isGateOutcomeKind(value: unknown): value is GateOutcomeKind {
@@ -127,6 +128,13 @@ export function extractCandidatePaths(toolName: string, args: unknown): string[]
 		}
 	}
 
+	if (
+		paths.length === 0 &&
+		(toolName === "find" || toolName === "grep" || toolName === "ls" || toolName === "context_scout")
+	) {
+		paths.push(".");
+	}
+
 	return paths;
 }
 
@@ -169,60 +177,34 @@ export function evaluateToolGate(input: {
 	// 2. Path scope containment for file tools
 	const paths = extractCandidatePaths(input.toolName, input.args);
 	if (paths.length > 0) {
-		const allowedPaths = envelope.allowedPaths;
-		const deniedPaths = envelope.deniedPaths ?? [];
-
 		for (const targetPath of paths) {
-			const scopedTargetPath = path.isAbsolute(targetPath) ? targetPath : path.resolve(input.cwd, targetPath);
+			if (!isPathWithinEnvelope(envelope, targetPath, input.cwd)) {
+				let isDenied = false;
+				try {
+					const target = safeRealpathSync(path.resolve(input.cwd, targetPath));
+					isDenied = (envelope.deniedPaths ?? []).some((denied) => {
+						try {
+							return isPathWithinScope(target, safeRealpathSync(path.resolve(input.cwd, denied)));
+						} catch {
+							return false;
+						}
+					});
+				} catch {}
 
-			// 2.1 Check denied paths first (denials take precedence)
-			for (const deniedRoot of deniedPaths) {
-				const scopedDenied = path.isAbsolute(deniedRoot) ? deniedRoot : path.resolve(input.cwd, deniedRoot);
-				const decision = checkPathScope(
-					{
-						root: scopedDenied,
-						allowedPaths: [scopedDenied],
-						deniedPaths: [scopedDenied],
-					},
-					scopedTargetPath,
-				);
-				if (decision.kind === "denied" || decision.kind === "inside") {
+				if (isDenied) {
 					return {
 						outcome: "block",
 						gate: "path_scope",
 						reasonCode: "path_denied",
-						message: `Path '${targetPath}' is explicitly denied by rule '${deniedRoot}'.`,
+						message: `Path '${targetPath}' is explicitly denied.`,
 					};
 				}
-			}
-
-			// 2.2 If allowedPaths is specified and non-empty, ensure containment
-			if (allowedPaths && allowedPaths.length > 0) {
-				let isInsideAny = false;
-				for (const allowedRoot of allowedPaths) {
-					const scopedAllowed = path.isAbsolute(allowedRoot) ? allowedRoot : path.resolve(input.cwd, allowedRoot);
-					const decision = checkPathScope(
-						{
-							root: scopedAllowed,
-							allowedPaths: envelope.allowedPaths,
-							deniedPaths: envelope.deniedPaths,
-						},
-						scopedTargetPath,
-					);
-					if (decision.kind === "inside") {
-						isInsideAny = true;
-						break;
-					}
-				}
-
-				if (!isInsideAny) {
-					return {
-						outcome: "block",
-						gate: "path_scope",
-						reasonCode: "path_outside_allowed_roots",
-						message: `Path '${targetPath}' is outside all allowed roots.`,
-					};
-				}
+				return {
+					outcome: "block",
+					gate: "path_scope",
+					reasonCode: "path_outside_allowed_roots",
+					message: `Path '${targetPath}' is outside all allowed roots.`,
+				};
 			}
 		}
 	}

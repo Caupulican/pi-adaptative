@@ -690,9 +690,7 @@ export class AgentSession {
 		const failureCorpusPath = stateFile(this._agentDir, "failure-corpus.jsonl");
 		this._toolRecoveryEventLogPath = stateFile(this._agentDir, TOOL_RECOVERY_EVENT_LOG_FILE);
 		const toolRepairSettings = this._toolProtocol.getRepairSettings();
-		this._failureCorpus = new FailureCorpusRecorder({
-			filePath: failureCorpusPath,
-		});
+		this._failureCorpus = new FailureCorpusRecorder({ filePath: failureCorpusPath });
 		this._compaction = new CompactionController({
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -721,6 +719,7 @@ export class AgentSession {
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
 			compactWithRetry: (run, signal, provider) => this._compactWithRetry(run, signal, provider),
+			onCompactionSettled: () => this._foregroundRecovery?.wakeIdleWaiters(),
 		});
 		const providerRequestContext = new ProviderRequestContextController({
 			transformExtensions: async (messages) => {
@@ -897,6 +896,7 @@ export class AgentSession {
 				this._profileFilter.isExtensionPathAllowed(path, authority, baseDir),
 			filterExtensionsForRuntime: (extensions, explicitLiveExtensionPaths) =>
 				this._profileFilter.filterExtensionsForRuntime(extensions, explicitLiveExtensionPaths),
+			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			setUnboundToolGrantWarnings: (warnings) => {
 				this._unboundToolGrantWarnings = warnings;
 			},

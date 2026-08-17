@@ -22,6 +22,8 @@ export interface TaskStepInput {
 	priority?: TaskStepPriority;
 	owner?: string;
 	requirementIds?: readonly string[];
+	pipelineRunId?: string;
+	pipelineStageId?: string;
 	note?: string;
 	notes?: readonly string[];
 	evidence?: readonly string[];
@@ -36,6 +38,8 @@ export interface TaskStep {
 	owner?: string;
 	/** Goal requirements this foreground step advances. Optional only for snapshots from older sessions. */
 	requirementIds?: readonly string[];
+	pipelineRunId?: string;
+	pipelineStageId?: string;
 	notes: readonly string[];
 	evidence: readonly string[];
 	createdAt: string;
@@ -65,6 +69,8 @@ export interface TaskStepUpdate {
 	priority?: TaskStepPriority;
 	owner?: string;
 	requirementIds?: readonly string[];
+	pipelineRunId?: string;
+	pipelineStageId?: string;
 	note?: string;
 	evidence?: readonly string[];
 }
@@ -301,6 +307,14 @@ function createStep(args: {
 				? existing?.owner
 				: optionalBoundedText(args.input.owner, "Task step owner", MAX_TASK_STEP_OWNER_LENGTH),
 		requirementIds,
+		pipelineRunId:
+			args.input.pipelineRunId === undefined
+				? existing?.pipelineRunId
+				: optionalBoundedText(args.input.pipelineRunId, "Task step pipeline run id", 128),
+		pipelineStageId:
+			args.input.pipelineStageId === undefined
+				? existing?.pipelineStageId
+				: optionalBoundedText(args.input.pipelineStageId, "Task step pipeline stage id", 64),
 		notes,
 		evidence,
 		createdAt: args.createdAt,
@@ -421,6 +435,14 @@ export function updateTaskStep(
 			update.requirementIds === undefined
 				? [...(current.requirementIds ?? [])]
 				: normalizeStrings(update.requirementIds, "Task step requirement id", MAX_TASK_STEP_REQUIREMENT_ID_LENGTH),
+		pipelineRunId:
+			update.pipelineRunId === undefined
+				? current.pipelineRunId
+				: optionalBoundedText(update.pipelineRunId, "Task step pipeline run id", 128),
+		pipelineStageId:
+			update.pipelineStageId === undefined
+				? current.pipelineStageId
+				: optionalBoundedText(update.pipelineStageId, "Task step pipeline stage id", 64),
 		notes,
 		evidence,
 		updatedAt: now,

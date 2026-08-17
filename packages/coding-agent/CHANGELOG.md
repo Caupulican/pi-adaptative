@@ -7,6 +7,7 @@
 ### Fixed
 
 - Made stale `edit` anchors return a bounded digest-qualified snapshot from the exact current source checked by the atomic matcher, while keeping exhausted edit operations local so corrective reads and changed edits remain available without redundant post-success rereads.
+- Fixed workflow lifecycle and capability envelope defects: enforced mutating tool capabilities on `pipeline`, `worktree_sync`, and `improvement_loop`, unified cwd-aware path envelope evaluation across relative roots and denied subtrees, prevented stranded waiters and admission races across manual and automatic compaction, re-armed multi-batch goal auto-continuation loops without phantom budget charges on pre-provider exhaustions, stage-scoped open pipeline checklist gates, bounded recursive stage output discovery against external symlink escapes, and captured trailing out-of-process mailbox replies on timeout without error suppression.
 
 ## [0.93.3] - 2026-08-17
 

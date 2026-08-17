@@ -106,6 +106,12 @@ export class GoalAutoContinueController {
 				maxStallTurns,
 				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
 			});
+			if (!this.deps.isDisposed()) {
+				const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
+				if (nextSnapshot.continuation.action === "continue") {
+					this.scheduleFromIdle();
+				}
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.deps.emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });

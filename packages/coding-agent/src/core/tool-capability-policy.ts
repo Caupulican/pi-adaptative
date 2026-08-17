@@ -42,13 +42,14 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["delegate", DELEGATE_POLICY],
 	["model_fitness", policy(["research.execute"], "control-plane")],
 	["task_steps", policy(["workflow.plan", "memory.mutate"], "control-plane")],
-	["pipeline", policy(["workflow.plan", "filesystem.read"], "control-plane")],
+	["pipeline", policy(["workflow.plan", "filesystem.write"], "control-plane")],
 	["tool_task", policy(["process.exec", "workflow.delegate"], "control-plane")],
-	["worktree_sync", policy(["worktree.mutate", "worktree.read", "filesystem.write"], "path-scope")],
+	["worktree_sync", policy(["worktree.mutate", "filesystem.write"], "path-scope")],
 	["ask_question", policy(["workflow.plan", "memory.query"], "control-plane")],
 	["artifact_retrieve", policy(["filesystem.read"], "path-scope")],
-	["context_scout", policy(["filesystem.read", "memory.query"], "path-scope")],
+	["context_scout", policy(["filesystem.read"], "path-scope")],
 	["tmux_dispatch", policy(["process.exec", "workflow.delegate"], "process-launcher")],
+	["improvement_loop", policy(["process.exec", "tests.execute"], "process-launcher")],
 ]);
 
 export function getToolCapabilityPolicy(toolName: string): ToolCapabilityPolicy | undefined {
@@ -59,8 +60,30 @@ export function hasToolCapabilityPolicy(toolName: string): boolean {
 	return getToolCapabilityPolicy(toolName) !== undefined;
 }
 
+export function toolCapabilityRequirementClauses(
+	toolName: string,
+	args?: unknown,
+): readonly (readonly HarnessCapability[])[] {
+	const name = toolName.toLowerCase();
+	if (name === "memory") {
+		return args && typeof args === "object" && "query" in args ? [["memory.query"]] : [["memory.mutate"]];
+	}
+	if (name === "pipeline") {
+		const action =
+			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;
+		if (action === "list" || action === "status") {
+			return [["workflow.plan", "filesystem.read"]];
+		}
+		return [["workflow.plan"], ["filesystem.write", "worktree.mutate"]];
+	}
+	const itemPolicy = getToolCapabilityPolicy(name);
+	if (!itemPolicy) return [];
+	return [itemPolicy.capabilityCandidates];
+}
+
 export function requiredEnvelopeCapabilities(toolName: string, args?: unknown): readonly HarnessCapability[] {
-	return toolCapabilityCandidates(toolName, args).slice(0, 1);
+	const clauses = toolCapabilityRequirementClauses(toolName, args);
+	return clauses.map((clause) => clause[0]).filter((c): c is HarnessCapability => c !== undefined);
 }
 
 export function envelopeHasToolCapability(
@@ -68,17 +91,21 @@ export function envelopeHasToolCapability(
 	toolName: string,
 	args?: unknown,
 ): boolean {
-	const candidates = toolCapabilityCandidates(toolName, args);
-	return candidates.length > 0 && candidates.some((capability) => capabilities.includes(capability));
+	const clauses = toolCapabilityRequirementClauses(toolName, args);
+	if (clauses.length === 0) return false;
+	return clauses.every((clause) => clause.some((capability) => capabilities.includes(capability)));
 }
 
 export function resolveProfileToolCapability(
 	profile: Pick<OrchestrationProfile, "capabilityCeiling">,
 	toolName: string,
 ): HarnessCapability | undefined {
-	return getToolCapabilityPolicy(toolName)?.capabilityCandidates.find((capability) =>
-		profile.capabilityCeiling.includes(capability),
-	);
+	const clauses = toolCapabilityRequirementClauses(toolName);
+	for (const clause of clauses) {
+		const match = clause.find((capability) => profile.capabilityCeiling.includes(capability));
+		if (!match) return undefined;
+	}
+	return clauses[0]?.[0];
 }
 
 export function describeToolCapabilityAuthority(toolName: string): string {
@@ -118,11 +145,4 @@ export function describeToolCapabilityAuthority(toolName: string): string {
 		default:
 			return "capability";
 	}
-}
-
-function toolCapabilityCandidates(toolName: string, args?: unknown): readonly HarnessCapability[] {
-	if (toolName.toLowerCase() === "memory") {
-		return args && typeof args === "object" && "query" in args ? ["memory.query"] : ["memory.mutate"];
-	}
-	return getToolCapabilityPolicy(toolName)?.capabilityCandidates ?? [];
 }

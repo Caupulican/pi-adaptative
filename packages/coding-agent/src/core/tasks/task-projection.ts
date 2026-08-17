@@ -8,6 +8,8 @@ export interface OpenTaskStepProjection {
 	requirementIds?: readonly string[];
 	/** Evidence strings attached to the step (tool_task ids, toolCallIds, paths). */
 	evidence?: readonly string[];
+	pipelineRunId?: string;
+	pipelineStageId?: string;
 }
 
 export interface TaskRequirementReference {
@@ -43,6 +45,8 @@ export function projectOpenTaskSteps(state: TaskStepsState | undefined): OpenTas
 			content: step.activeForm || step.content,
 			requirementIds: [...(step.requirementIds ?? [])],
 			evidence: [...(step.evidence ?? [])],
+			...(step.pipelineRunId ? { pipelineRunId: step.pipelineRunId } : {}),
+			...(step.pipelineStageId ? { pipelineStageId: step.pipelineStageId } : {}),
 		}));
 }
 

@@ -267,7 +267,7 @@ describe("goal-owned execution budget", () => {
 		const result = await controller.continueGoalLoop({ maxStallTurns: 20, maxTurns: 3 });
 
 		expect(result.stopReason).toBe("goal_budget_exhausted");
-		expect(result.turnsSubmitted).toBe(1);
+		expect(result.turnsSubmitted).toBe(0);
 		expect(recordedFailures).toEqual([]);
 	});
 

@@ -155,15 +155,13 @@ export class GoalLoopController {
 				// Prompt admission did not happen. A concurrent foreground owner is transient session
 				// coordination, not a consumed goal turn and not evidence that the goal is blocked.
 				if (error instanceof AgentBusyError) throw error;
-				turnsSubmitted++;
-				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
 				if (error instanceof GoalBudgetExhaustedError) {
 					// The goal already stopped itself durably (markBudgetLimited ran synchronously before
-					// this signal was thrown) — surface the existing clean stop instead of reclassifying an
-					// intentional, already-recorded stop as a generic continuation failure and rejecting
-					// the whole loop promise.
+					// this signal was thrown) — surface the existing clean stop instead of charging a turn.
 					return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: snapshot() };
 				}
+				turnsSubmitted++;
+				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
 				this.deps.recordGoalContinuationFailure(error);
 				throw error;
 			}

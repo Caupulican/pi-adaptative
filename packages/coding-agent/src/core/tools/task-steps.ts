@@ -45,6 +45,12 @@ function optionalTaskStepFields(requirementIdsDescription: string) {
 				description: requirementIdsDescription,
 			}),
 		),
+		pipelineRunId: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 128, description: "Pipeline run id this step advances." }),
+		),
+		pipelineStageId: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 64, description: "Pipeline stage id this step advances." }),
+		),
 		note: Type.Optional(Type.String({ maxLength: 4_000 })),
 		evidence: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 32 })),
 	};

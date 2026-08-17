@@ -52,6 +52,10 @@ function createFixture(options: {
 	createResult(attempt: number, entryIds: string[]): Promise<CompactionResult>;
 	settings?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number; triggerPercent: number };
 	estimatedContextTokens?: number;
+	onCompactionSettled?: () => void;
+	abortForeground?: () => Promise<void>;
+	disconnectAgent?: () => void;
+	reconnectAgent?: () => void;
 }) {
 	const sessionManager = SessionManager.inMemory();
 	const messages: AgentMessage[] = [];
@@ -114,9 +118,9 @@ function createFixture(options: {
 		describeSummarizer: () => "test",
 		getExtensionRunner: () => extensionRunner,
 		isRawStream: () => false,
-		disconnectAgent: () => {},
-		reconnectAgent: () => {},
-		abortForeground: async () => {},
+		disconnectAgent: options.disconnectAgent ?? (() => {}),
+		reconnectAgent: options.reconnectAgent ?? (() => {}),
+		abortForeground: options.abortForeground ?? (async () => {}),
 		emit: (event) => events.push(event as unknown as Record<string, unknown>),
 		estimateCurrentContextTokens: () => options.estimatedContextTokens ?? 3_000,
 		buildPreDigest: () => undefined,
@@ -126,6 +130,7 @@ function createFixture(options: {
 		measureLiveContextTokens: options.measureLiveContextTokens,
 		runAutoCompaction,
 		compactWithRetry,
+		onCompactionSettled: options.onCompactionSettled,
 	};
 	controller = new CompactionController(deps);
 
@@ -341,5 +346,65 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 		expect(events.filter((event) => event.type === "compaction_start")).toHaveLength(1);
 		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(1);
+	});
+
+	it("notifies onCompactionSettled when compaction completes to unblock foreground waiters", async () => {
+		const onCompactionSettled = vi.fn();
+		const { controller } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			onCompactionSettled,
+		});
+
+		await controller.runAuto("threshold", false);
+		expect(onCompactionSettled).toHaveBeenCalledOnce();
+	});
+
+	it("notifies onCompactionSettled and restores state when manual compaction fails during abortForeground", async () => {
+		const onCompactionSettled = vi.fn();
+		const reconnectAgent = vi.fn();
+		const disconnectAgent = vi.fn();
+		const { controller } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			onCompactionSettled,
+			disconnectAgent,
+			reconnectAgent,
+			abortForeground: async () => {
+				throw new Error("abortForeground failed");
+			},
+		});
+
+		await expect(controller.compact()).rejects.toThrow("abortForeground failed");
+		expect(disconnectAgent).toHaveBeenCalledOnce();
+		expect(reconnectAgent).toHaveBeenCalledOnce();
+		expect(onCompactionSettled).toHaveBeenCalledOnce();
+		expect(controller.isCompacting).toBe(false);
+	});
+
+	it("rejects concurrent manual compact() invocations and preserves the active controller", async () => {
+		const onCompactionSettled = vi.fn();
+		let resolveCompaction!: (result: CompactionResult) => void;
+		const compactionPromise = new Promise<CompactionResult>((resolve) => {
+			resolveCompaction = resolve;
+		});
+
+		const { controller, entryIds } = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async () => compactionPromise,
+			onCompactionSettled,
+		});
+
+		const firstCompaction = controller.compact();
+		expect(controller.isCompacting).toBe(true);
+
+		// Concurrent manual call should immediately reject
+		await expect(controller.compact()).rejects.toThrow("Compaction already in progress");
+
+		// Original compaction completes cleanly
+		resolveCompaction(checkpoint(0, entryIds));
+		await expect(firstCompaction).resolves.toBeDefined();
+		expect(controller.isCompacting).toBe(false);
+		expect(onCompactionSettled).toHaveBeenCalledOnce();
 	});
 });

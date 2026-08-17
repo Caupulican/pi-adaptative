@@ -410,12 +410,173 @@ describe("Autonomy Gates", () => {
 		it("allows core harness tools with valid capabilities", () => {
 			const envelope: CapabilityEnvelope = {
 				...baseEnvelope,
-				capabilities: ["workflow.plan", "memory.mutate", "process.exec", "workflow.delegate", "filesystem.read"],
+				capabilities: [
+					"workflow.plan",
+					"memory.mutate",
+					"process.exec",
+					"workflow.delegate",
+					"filesystem.read",
+					"filesystem.write",
+					"worktree.mutate",
+				],
 			};
-			for (const toolName of ["task_steps", "pipeline", "tool_task", "ask_question", "artifact_retrieve"]) {
+			for (const toolName of [
+				"task_steps",
+				"pipeline",
+				"tool_task",
+				"ask_question",
+				"artifact_retrieve",
+				"worktree_sync",
+				"context_scout",
+				"improvement_loop",
+			]) {
 				const outcome = evaluateToolGate({ toolName, cwd: "/tmp", envelope });
 				expect(outcome.outcome).toBe("allow");
 			}
+		});
+
+		it("rejects mutating tools under read-only capability envelopes", () => {
+			const readOnlyEnvelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["filesystem.read", "worktree.read", "memory.query"],
+			};
+			const pipelineOutcome = evaluateToolGate({ toolName: "pipeline", cwd: "/tmp", envelope: readOnlyEnvelope });
+			expect(pipelineOutcome.outcome).toBe("block");
+			expect(pipelineOutcome.reasonCode).toBe("missing_capability");
+
+			const worktreeOutcome = evaluateToolGate({
+				toolName: "worktree_sync",
+				cwd: "/tmp",
+				envelope: readOnlyEnvelope,
+			});
+			expect(worktreeOutcome.outcome).toBe("block");
+			expect(worktreeOutcome.reasonCode).toBe("missing_capability");
+
+			const loopOutcome = evaluateToolGate({
+				toolName: "improvement_loop",
+				cwd: "/tmp",
+				envelope: readOnlyEnvelope,
+			});
+			expect(loopOutcome.outcome).toBe("block");
+			expect(loopOutcome.reasonCode).toBe("missing_capability");
+		});
+
+		it("resolves relative allowedPaths and deniedPaths against input.cwd rather than process cwd", () => {
+			const customCwd = "/tmp/sandbox-repo";
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["filesystem.read"],
+				allowedPaths: ["src", "docs"],
+				deniedPaths: ["src/secret"],
+			};
+
+			const allowed = evaluateToolGate({
+				toolName: "read",
+				args: { path: "src/main.ts" },
+				cwd: customCwd,
+				envelope,
+			});
+			expect(allowed.outcome).toBe("allow");
+
+			const outside = evaluateToolGate({
+				toolName: "read",
+				args: { path: "package.json" },
+				cwd: customCwd,
+				envelope,
+			});
+			expect(outside.outcome).toBe("block");
+			expect(outside.reasonCode).toBe("path_outside_allowed_roots");
+
+			const denied = evaluateToolGate({
+				toolName: "read",
+				args: { path: "src/secret/key.pem" },
+				cwd: customCwd,
+				envelope,
+			});
+			expect(denied.outcome).toBe("block");
+			expect(denied.reasonCode).toBe("path_denied");
+		});
+
+		it("enforces conjunctive capability requirements for mutating pipeline actions", () => {
+			const planOnlyEnvelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["workflow.plan"],
+			};
+			// Read actions allowed with workflow.plan alone
+			expect(
+				evaluateToolGate({
+					toolName: "pipeline",
+					args: { action: "list" },
+					cwd: "/tmp",
+					envelope: planOnlyEnvelope,
+				}).outcome,
+			).toBe("allow");
+			expect(
+				evaluateToolGate({
+					toolName: "pipeline",
+					args: { action: "status" },
+					cwd: "/tmp",
+					envelope: planOnlyEnvelope,
+				}).outcome,
+			).toBe("allow");
+
+			// Mutating actions require both workflow.plan AND (filesystem.write | worktree.mutate)
+			for (const action of ["start", "increment", "abandon"]) {
+				const outcome = evaluateToolGate({
+					toolName: "pipeline",
+					args: { action },
+					cwd: "/tmp",
+					envelope: planOnlyEnvelope,
+				});
+				expect(outcome.outcome).toBe("block");
+				expect(outcome.reasonCode).toBe("missing_capability");
+			}
+
+			// Full grant allows all actions
+			const fullEnvelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["workflow.plan", "filesystem.write"],
+			};
+			for (const action of ["start", "increment", "abandon", "list", "status"]) {
+				expect(
+					evaluateToolGate({
+						toolName: "pipeline",
+						args: { action },
+						cwd: "/tmp",
+						envelope: fullEnvelope,
+					}).outcome,
+				).toBe("allow");
+			}
+		});
+
+		it("enforces path gating on directory search tools and context_scout when path is omitted", () => {
+			const customCwd = "/tmp/sandbox-repo";
+			const scopedEnvelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["filesystem.read", "memory.query"],
+				allowedPaths: ["src"],
+			};
+
+			// Directory search tools default to root "." and are blocked if whole root is not in allowedPaths
+			for (const toolName of ["find", "grep", "ls", "context_scout"]) {
+				const outcome = evaluateToolGate({
+					toolName,
+					args: {},
+					cwd: customCwd,
+					envelope: scopedEnvelope,
+				});
+				expect(outcome.outcome).toBe("block");
+				expect(outcome.reasonCode).toBe("path_outside_allowed_roots");
+			}
+
+			// Explicitly pointing to allowed subpath succeeds
+			const allowedGrep = evaluateToolGate({
+				toolName: "grep",
+				args: { path: "src" },
+				cwd: customCwd,
+				envelope: scopedEnvelope,
+			});
+			expect(allowedGrep.outcome).toBe("allow");
 		});
 	});
 });

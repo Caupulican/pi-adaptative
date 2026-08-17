@@ -438,6 +438,8 @@ export interface OpenTaskStepRef {
 	content: string;
 	requirementIds?: readonly string[];
 	evidence?: readonly string[];
+	pipelineRunId?: string;
+	pipelineStageId?: string;
 }
 
 function findLinkedOpenTaskSteps(state: GoalState, openTaskSteps: readonly OpenTaskStepRef[] | undefined): string[] {

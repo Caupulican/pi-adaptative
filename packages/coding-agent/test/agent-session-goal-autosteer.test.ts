@@ -25,7 +25,7 @@ function activeSnapshot(): GoalRuntimeSnapshot {
 	};
 }
 
-function createController(snapshot: GoalRuntimeSnapshot) {
+function createController(snapshotOrGetter: GoalRuntimeSnapshot | (() => GoalRuntimeSnapshot)) {
 	const continuationOptions: Array<{
 		maxTurns?: number;
 		maxStallTurns: number;
@@ -41,15 +41,16 @@ function createController(snapshot: GoalRuntimeSnapshot) {
 			}) as never,
 		getGoalRuntimeSnapshot: (settings) => {
 			snapshotSettings.push(settings);
-			return snapshot;
+			return typeof snapshotOrGetter === "function" ? snapshotOrGetter() : snapshotOrGetter;
 		},
 		hasInFlightLaneForGoal: () => false,
 		continueGoalLoop: async (options) => {
 			continuationOptions.push(options);
+			const snap = typeof snapshotOrGetter === "function" ? snapshotOrGetter() : snapshotOrGetter;
 			return {
 				turnsSubmitted: 1,
 				stopReason: "max_turns_reached",
-				finalSnapshot: snapshot,
+				finalSnapshot: snap,
 			};
 		},
 		isForegroundBusy: () => false,
@@ -70,12 +71,29 @@ describe("GoalAutoContinueController idle autosteer", () => {
 	});
 
 	it("forwards the host-owned turn, stall, and wall-clock limits to one scheduled loop", async () => {
-		const { controller, continuationOptions, snapshotSettings } = createController(activeSnapshot());
+		let pass = 0;
+		const { controller, continuationOptions, snapshotSettings } = createController(() => {
+			pass++;
+			if (pass > 2) {
+				return {
+					...activeSnapshot(),
+					continuation: {
+						action: "stop",
+						reasonCode: "goal_completed",
+						message: "done",
+						openRequirementIds: [],
+						blockedRequirementIds: [],
+						satisfiedRequirementIds: ["req-1"],
+					},
+				};
+			}
+			return activeSnapshot();
+		});
 
 		controller.scheduleFromIdle();
 		await vi.runAllTimersAsync();
 
-		expect(snapshotSettings).toEqual([{ maxStallTurns: 3 }, { maxStallTurns: 3 }]);
+		expect(snapshotSettings).toEqual([{ maxStallTurns: 3 }, { maxStallTurns: 3 }, { maxStallTurns: 3 }]);
 		expect(continuationOptions).toEqual([
 			{
 				maxTurns: 5,
@@ -122,5 +140,67 @@ describe("GoalAutoContinueController idle autosteer", () => {
 
 		expect(snapshotSettings).toEqual([]);
 		expect(continuationOptions).toEqual([]);
+	});
+
+	it("re-arms scheduleFromIdle after a batch until the goal completes", async () => {
+		let callCount = 0;
+		const goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
+		const activeSnap: GoalRuntimeSnapshot = {
+			goalState,
+			workerClaims: [],
+			learningDecisions: [],
+			continuation: {
+				action: "continue",
+				reasonCode: "goal_active",
+				message: "active",
+				openRequirementIds: ["req-1"],
+				blockedRequirementIds: [],
+				satisfiedRequirementIds: [],
+			},
+		};
+		const completedSnap: GoalRuntimeSnapshot = {
+			goalState: { ...goalState, status: "completed" },
+			workerClaims: [],
+			learningDecisions: [],
+			continuation: {
+				action: "stop",
+				reasonCode: "goal_completed",
+				message: "done",
+				openRequirementIds: [],
+				blockedRequirementIds: [],
+				satisfiedRequirementIds: ["req-1"],
+			},
+		};
+
+		const continuationOptions: unknown[] = [];
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => AUTONOMY_SETTINGS,
+				}) as never,
+			getGoalRuntimeSnapshot: () => (callCount >= 2 ? completedSnap : activeSnap),
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async (options) => {
+				callCount++;
+				continuationOptions.push(options);
+				return {
+					turnsSubmitted: 5,
+					stopReason: "max_turns_reached",
+					finalSnapshot: callCount >= 2 ? completedSnap : activeSnap,
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.runAllTimersAsync();
+
+		expect(continuationOptions).toHaveLength(2);
+		expect(callCount).toBe(2);
 	});
 });

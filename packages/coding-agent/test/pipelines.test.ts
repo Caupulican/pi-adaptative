@@ -1,10 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createGoalState } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../src/core/goals/goal-tool-core.ts";
+import { advanceTaskSteps } from "../src/core/pipelines/increment.ts";
 import {
 	assembleStageContext,
 	discoverPipelineDefinitions,
@@ -17,6 +18,7 @@ import {
 	scanStageOutput,
 	stageOutputDir,
 } from "../src/core/pipelines/index.ts";
+import { createTaskStepsState } from "../src/core/tasks/task-state.ts";
 import { createPipelineToolDefinition } from "../src/core/tools/pipeline.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
@@ -221,5 +223,107 @@ describe("pipeline discovery and increment", () => {
 		expect(stored?.currentStageId).toBe("01_research");
 		const startText = started.content[0] && started.content[0].type === "text" ? started.content[0].text : "";
 		expect(startText).not.toContain("icm-architect");
+	});
+
+	it("does not block stage increment when open task steps reference a different stage", () => {
+		const cwd = tempDir();
+		const definitionRoot = join(cwd, ".pi", "pipelines", "research");
+		writeDefinition(definitionRoot);
+		const definition = loadPipelineDefinition(definitionRoot);
+		if (!definition) throw new Error("missing definition");
+		const run = instantiatePipelineRun({
+			definition,
+			runId: "run-stage-scope",
+			runRoot: join(cwd, ".pi", "pipeline-runs", "run-stage-scope"),
+			goalId: "g1",
+			now: "T0",
+		});
+		writeFileSync(join(stageOutputDir(run.runRoot, definition.stages[0]!), "research.md"), "facts\n");
+		let goal = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		const goalResult = applyGoalAction(
+			goal,
+			{ action: "add_requirement", requirementId: "r2", text: "Draft chapter" },
+			"T1",
+		);
+		if (!goalResult.ok) throw new Error(goalResult.error);
+		goal = goalResult.state;
+
+		// Task step with explicit pipelineStageId: "02_draft" (future stage), should not block 01_research increment
+		const advanced = incrementPipelineRun(definition, run, "T2", {
+			goal,
+			openTaskSteps: [
+				{ id: "step-draft", content: "Write chapter", pipelineRunId: run.runId, pipelineStageId: "02_draft" },
+			],
+		});
+		expect(advanced.result.from).toBe("01_research");
+		expect(advanced.result.to).toBe("02_draft");
+
+		// Task step with pipelineStageId: "02_draft" blocks advancing 02_draft
+		expect(() =>
+			incrementPipelineRun(definition, advanced.run, "T3", {
+				goal,
+				openTaskSteps: [
+					{ id: "step-draft", content: "Write chapter", pipelineRunId: run.runId, pipelineStageId: "02_draft" },
+				],
+			}),
+		).toThrow(PipelineIncrementError);
+	});
+
+	it("returns completed: false when advancing task steps with only blocked steps remaining", () => {
+		const state = {
+			...createTaskStepsState("T0"),
+			steps: [
+				{
+					id: "step-1",
+					status: "completed" as const,
+					content: "Step 1",
+					notes: [],
+					evidence: [],
+					createdAt: "T0",
+					updatedAt: "T0",
+				},
+				{
+					id: "step-2",
+					status: "blocked" as const,
+					content: "Step 2 blocked",
+					notes: [],
+					evidence: [],
+					createdAt: "T0",
+					updatedAt: "T0",
+				},
+			],
+		};
+		const advanced = advanceTaskSteps(state, "T0");
+		expect(advanced.result.completed).toBe(false);
+		expect(advanced.result.detail).toContain("all remaining steps are blocked");
+	});
+
+	it("bounds scanStageOutput and rejects symlinks pointing outside stage output root", () => {
+		const cwd = tempDir();
+		const stageOutput = join(cwd, "output");
+		mkdirSync(stageOutput, { recursive: true });
+		const secretDir = join(cwd, "secret");
+		mkdirSync(secretDir, { recursive: true });
+		writeFileSync(join(secretDir, "secret.txt"), "secret data");
+
+		// Suffix collision directory: /path/output-evil next to /path/output
+		const evilDir = join(cwd, "output-evil");
+		mkdirSync(evilDir, { recursive: true });
+		writeFileSync(join(evilDir, "evil.txt"), "evil data");
+
+		let symlinkCreated = false;
+		try {
+			symlinkSync(join(secretDir, "secret.txt"), join(stageOutput, "leak.txt"));
+			symlinkSync(join(evilDir, "evil.txt"), join(stageOutput, "leak-evil.txt"));
+			symlinkCreated = true;
+		} catch {
+			// Symlink creation unsupported in this environment
+		}
+
+		if (symlinkCreated) {
+			const scanned = scanStageOutput(stageOutput);
+			expect(scanned.outputFiles).not.toContain("leak.txt");
+			expect(scanned.outputFiles).not.toContain("leak-evil.txt");
+		}
 	});
 });

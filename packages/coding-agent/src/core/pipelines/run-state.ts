@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { projectPipelineRunsDir } from "./discover.ts";
@@ -14,35 +15,59 @@ import {
 } from "./types.ts";
 
 export const RUN_MANIFEST_NAME = "run.json";
+const MAX_STAGE_OUTPUT_SCAN_DEPTH = 16;
+const MAX_STAGE_OUTPUT_SCAN_FILES = 1000;
 
 function isRealOutputFile(name: string): boolean {
 	return name !== ".gitkeep" && name !== ".DS_Store" && !name.startsWith(".");
 }
 
-function collectOutputFiles(dir: string, relativePrefix = ""): string[] {
-	const results: string[] = [];
-	for (const entry of readdirSync(dir)) {
-		if (!isRealOutputFile(entry)) continue;
-		const fullPath = join(dir, entry);
+function collectOutputFiles(
+	baseDir: string,
+	currentDir: string,
+	relativePrefix = "",
+	depth = 0,
+	collected: string[] = [],
+): string[] {
+	if (depth > MAX_STAGE_OUTPUT_SCAN_DEPTH || collected.length >= MAX_STAGE_OUTPUT_SCAN_FILES) {
+		return collected;
+	}
+	let entries: string[];
+	try {
+		entries = readdirSync(currentDir);
+	} catch {
+		return collected;
+	}
+	for (const entry of entries) {
+		if (!isRealOutputFile(entry) || collected.length >= MAX_STAGE_OUTPUT_SCAN_FILES) continue;
+		const fullPath = join(currentDir, entry);
 		const relPath = relativePrefix ? `${relativePrefix}/${entry}` : entry;
 		try {
-			const stat = statSync(fullPath);
-			if (stat.isFile()) {
-				results.push(relPath);
-			} else if (stat.isDirectory()) {
-				results.push(...collectOutputFiles(fullPath, relPath));
+			const lstat = lstatSync(fullPath);
+			if (lstat.isSymbolicLink()) {
+				const real = safeRealpathSync(fullPath);
+				const realBase = safeRealpathSync(baseDir);
+				if (!isPathWithinScope(real, realBase)) continue;
+				const realStat = statSync(real);
+				if (realStat.isFile()) {
+					collected.push(relPath);
+				}
+			} else if (lstat.isFile()) {
+				collected.push(relPath);
+			} else if (lstat.isDirectory()) {
+				collectOutputFiles(baseDir, fullPath, relPath, depth + 1, collected);
 			}
 		} catch {
 			// Ignore unreadable entries
 		}
 	}
-	return results;
+	return collected;
 }
 
 export function scanStageOutput(outputDir: string): { status: StageDiskStatus; outputFiles: string[] } {
 	if (!existsSync(outputDir)) return { status: "empty", outputFiles: [] };
 	try {
-		const outputFiles = collectOutputFiles(outputDir).sort();
+		const outputFiles = collectOutputFiles(outputDir, outputDir).sort();
 		return { status: outputFiles.length > 0 ? "complete" : "empty", outputFiles };
 	} catch {
 		return { status: "empty", outputFiles: [] };

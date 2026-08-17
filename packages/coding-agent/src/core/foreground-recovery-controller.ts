@@ -178,6 +178,10 @@ export class ForegroundRecoveryController {
 		}
 	}
 
+	wakeIdleWaiters(): void {
+		this.resolveIdleWaiters();
+	}
+
 	async waitForIdle(): Promise<void> {
 		while (true) {
 			if (this.shutdownReason) return;

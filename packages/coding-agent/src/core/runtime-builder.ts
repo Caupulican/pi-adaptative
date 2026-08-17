@@ -45,7 +45,9 @@ import type {
 	IsolatedCompletionResult,
 	WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import type { WorkerClaim } from "./autonomy/contracts.ts";
+import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
+import { isPathWithinEnvelope } from "./autonomy/envelope-enforcement.ts";
+import { evaluateToolGate } from "./autonomy/gates.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { isCompletedBackgroundToolEvidence } from "./background-tool-task-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
@@ -178,6 +180,8 @@ export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefine
 		content: step.content,
 		...(step.requirementIds?.length ? { requirementIds: step.requirementIds } : {}),
 		...(step.evidence?.length ? { evidence: step.evidence } : {}),
+		...(step.pipelineRunId ? { pipelineRunId: step.pipelineRunId } : {}),
+		...(step.pipelineStageId ? { pipelineStageId: step.pipelineStageId } : {}),
 	}));
 }
 
@@ -261,6 +265,7 @@ export interface RuntimeBuilderDeps {
 	getToolProfileFilter(): Required<ResourceProfileFilterSettings> | undefined;
 	setToolProfileFilter(filter: Required<ResourceProfileFilterSettings> | undefined): void;
 	getAllowedToolNames(): Set<string> | undefined;
+	getCapabilityEnvelope?(): CapabilityEnvelope | undefined;
 	/** Immutable active orchestration profile; absent sessions never construct run_process. */
 	getOrchestrationProfile?(): OrchestrationProfile | undefined;
 	getExcludedToolNames(): Set<string> | undefined;
@@ -490,6 +495,7 @@ export class RuntimeBuilder {
 		artifactStore: ArtifactStore | undefined,
 	) {
 		const cwd = this.deps.getCwd();
+		const envelope = this.deps.getCapabilityEnvelope?.();
 		const controller = new ScoutController({
 			resolveScoutModel: async () =>
 				resolveScoutModel(
@@ -500,22 +506,69 @@ export class RuntimeBuilder {
 					resolveCurrentToolRepairSettings(this.deps.getSettingsManager().settings).textProtocol,
 				),
 			getCwd: () => cwd,
-			buildReadOnlyTools: (toolCwd) => [
-				wrapToolWithCredentialExposureGuard(createReadTool(toolCwd), toolCwd, this._credentialExposureBoundary),
-				wrapToolWithCredentialExposureGuard(
-					createGrepTool(toolCwd, { artifactStore }),
-					toolCwd,
-					this._credentialExposureBoundary,
-				),
-				wrapToolWithCredentialExposureGuard(
-					createFindTool(toolCwd, { artifactStore }),
-					toolCwd,
-					this._credentialExposureBoundary,
-				),
-			],
+			buildReadOnlyTools: (toolCwd) => {
+				const readTool = createReadTool(toolCwd);
+				const grepTool = createGrepTool(toolCwd, { artifactStore });
+				const findTool = createFindTool(toolCwd, { artifactStore });
+				const wrapWithGating = (tool: AgentTool<any>) => ({
+					...tool,
+					execute: async (toolCallId: string, input: any) => {
+						const currentEnvelope = this.deps.getCapabilityEnvelope?.();
+						if (
+							currentEnvelope &&
+							(currentEnvelope.allowedPaths?.length || currentEnvelope.deniedPaths?.length)
+						) {
+							const outcome = evaluateToolGate({
+								toolName: tool.name,
+								args: input,
+								cwd: toolCwd,
+								envelope: currentEnvelope,
+							});
+							if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
+								return {
+									content: [
+										{
+											type: "text" as const,
+											text: `Tool '${tool.name}' execution blocked by autonomy path gate: ${outcome.message}`,
+										},
+									],
+									details: undefined,
+									isError: true,
+								};
+							}
+						}
+						return tool.execute(toolCallId, input);
+					},
+				});
+				return [
+					wrapToolWithCredentialExposureGuard(wrapWithGating(readTool), toolCwd, this._credentialExposureBoundary),
+					wrapToolWithCredentialExposureGuard(wrapWithGating(grepTool), toolCwd, this._credentialExposureBoundary),
+					wrapToolWithCredentialExposureGuard(wrapWithGating(findTool), toolCwd, this._credentialExposureBoundary),
+				];
+			},
 			streamFn: this.deps.getAgent().streamFn,
-			fileExists: (path) => existsSync(resolveCwdPath(cwd, path)),
-			countLines: (path) => countFileLines(resolveCwdPath(cwd, path)),
+			fileExists: (path) => {
+				const target = resolveCwdPath(cwd, path);
+				if (
+					envelope &&
+					(envelope.allowedPaths?.length || envelope.deniedPaths?.length) &&
+					!isPathWithinEnvelope(envelope, target, cwd)
+				) {
+					return false;
+				}
+				return existsSync(target);
+			},
+			countLines: (path) => {
+				const target = resolveCwdPath(cwd, path);
+				if (
+					envelope &&
+					(envelope.allowedPaths?.length || envelope.deniedPaths?.length) &&
+					!isPathWithinEnvelope(envelope, target, cwd)
+				) {
+					return undefined;
+				}
+				return countFileLines(target);
+			},
 			// Lets the scout register itself in the reload-gate quiesce registry (see
 			// reload-blockers.ts) for its own agentDir — the same key `_assertReloadQuiescent` reads.
 			getAgentDir: () => this.deps.getAgentDir(),

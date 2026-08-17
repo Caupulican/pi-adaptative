@@ -5,7 +5,13 @@ import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import { type TaskStep, type TaskStepsState, updateTaskStep } from "../tasks/task-state.ts";
 import { currentPipelineStage } from "./context.ts";
 import { persistPipelineRun, scanStageOutput, stageOutputDir } from "./run-state.ts";
-import { type IncrementResult, isPipelineRunActive, type PipelineDefinition, type PipelineRun } from "./types.ts";
+import {
+	type IncrementResult,
+	isPipelineRunActive,
+	type PipelineDefinition,
+	type PipelineRun,
+	type PipelineStage,
+} from "./types.ts";
 
 export interface PipelineIncrementJoin {
 	goal?: GoalState;
@@ -25,11 +31,26 @@ function inFlightToolTasks(tasks: readonly BackgroundToolTaskRef[] | undefined):
 	return tasks.filter((task) => task.status === "running").map((task) => task.taskId);
 }
 
-function linkedOpenStepIds(join: PipelineIncrementJoin, run: PipelineRun): string[] {
-	if (!run.goalId || !join.goal || join.goal.goalId !== run.goalId) return [];
+function linkedOpenStepIds(
+	_definition: PipelineDefinition,
+	join: PipelineIncrementJoin,
+	run: PipelineRun,
+	stage?: PipelineStage,
+): string[] {
+	if (!stage) return [];
 	if (!join.openTaskSteps || join.openTaskSteps.length === 0) return [];
+
 	return join.openTaskSteps
-		.filter((step) => join.goal!.requirements.some((requirement) => taskStepReferencesRequirement(step, requirement)))
+		.filter((step) => {
+			if (step.pipelineRunId && step.pipelineRunId === run.runId) {
+				return step.pipelineStageId === stage.id;
+			}
+			if (step.pipelineStageId) {
+				return step.pipelineStageId === stage.id;
+			}
+			if (!run.goalId || !join.goal || join.goal.goalId !== run.goalId) return false;
+			return join.goal.requirements.some((requirement) => taskStepReferencesRequirement(step, requirement));
+		})
 		.map((step) => step.id);
 }
 
@@ -42,10 +63,14 @@ export function incrementPipelineRun(
 	if (!isPipelineRunActive(run)) {
 		throw new PipelineIncrementError(`Pipeline run '${run.runId}' is ${run.status}.`);
 	}
-	const linked = linkedOpenStepIds(join, run);
+	const stage = currentPipelineStage(definition, run);
+	if (!stage) {
+		throw new PipelineIncrementError(`Current stage '${run.currentStageId}' is missing from the definition.`);
+	}
+	const linked = linkedOpenStepIds(definition, join, run, stage);
 	if (linked.length > 0) {
 		throw new PipelineIncrementError(
-			`Cannot increment pipeline: open task_steps still reference the linked goal (${linked.join(", ")}).`,
+			`Cannot increment pipeline: open task_steps still reference current stage '${stage.id}' (${linked.join(", ")}).`,
 		);
 	}
 	const running = inFlightToolTasks(join.backgroundToolTasks);
@@ -53,10 +78,6 @@ export function incrementPipelineRun(
 		throw new PipelineIncrementError(
 			`Cannot increment pipeline: tool_task(s) still running (${running.join(", ")}). Wait once via tool_task.`,
 		);
-	}
-	const stage = currentPipelineStage(definition, run);
-	if (!stage) {
-		throw new PipelineIncrementError(`Current stage '${run.currentStageId}' is missing from the definition.`);
 	}
 	const scanned = scanStageOutput(stageOutputDir(run.runRoot, stage));
 	if (scanned.status !== "complete") {
@@ -107,6 +128,17 @@ export function advanceTaskSteps(
 		state.steps.find((step) => step.status === "in_progress") ??
 		state.steps.find((step) => step.status === "pending");
 	if (!current) {
+		const blocked = state.steps.filter((step) => step.status === "blocked");
+		if (blocked.length > 0) {
+			return {
+				state,
+				result: {
+					surface: "task_steps",
+					completed: false,
+					detail: `Cannot advance: all remaining steps are blocked (${blocked.map((step) => step.id).join(", ")}).`,
+				},
+			};
+		}
 		return {
 			state,
 			result: {

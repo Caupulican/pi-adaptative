@@ -648,4 +648,40 @@ describe("SessionRootMailbox", () => {
 		await expect(waiting).rejects.toThrow("owner cancelled wait");
 		expect(unsubscribe).toHaveBeenCalledOnce();
 	});
+
+	it("returns timedOut: false when trailing out-of-process replies are captured on timeout", async () => {
+		vi.useRealTimers();
+		const agentDir = root();
+		const mailbox = new SessionRootMailbox({ agentDir, parentSessionId: "parent-1" });
+		const mailboxPath = sessionRootMailboxFile(agentDir, "parent-1");
+
+		const waiting = mailbox.waitForReplies({ requestMessageId: "req-trail", timeoutMs: 50 });
+
+		// Direct disk write without in-memory notification
+		mkdirSync(dirname(mailboxPath), { recursive: true });
+		writeFileSync(
+			mailboxPath,
+			JSON.stringify({
+				version: 1,
+				parentSessionId: "parent-1",
+				replies: [
+					{
+						messageId: sessionRootReplyMessageId("parent-1", "worker-ext", "req-trail"),
+						sourceAgentId: "worker-ext",
+						requestMessageId: "req-trail",
+						content: "out of process evidence",
+						createdAt: "2026-08-17T00:00:00.000Z",
+						ackToken: "11111111-2222-4333-8444-555555555555",
+					},
+				],
+				replayReceipts: [],
+			}),
+			"utf-8",
+		);
+
+		const result = await waiting;
+		expect(result.timedOut).toBe(false);
+		expect(result.replies).toHaveLength(1);
+		expect(result.replies[0]?.content).toBe("out of process evidence");
+	});
 });
