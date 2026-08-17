@@ -151,13 +151,14 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// properties (providers whose function-declaration schema requires `type` per property,
 			// e.g. Google's OpenAPI subset, reject the whole tool list with a 400 otherwise — see
 			// compactRedundantEnumConstraints). Default surface now also includes skillify,
-			// skill_audit, improvement_loop, and the three lifecycle goal tools. Measured stable
-			// values: toolSchemaTokens 3701, delegate 844 (enum-heavy actions).
+			// skill_audit, improvement_loop, and the three lifecycle goal tools. Delegate's
+			// enum-heavy surface measures 844 tokens. task_steps measures 499 after adding
+			// authoritative pipeline linkage to both batch and single-step forms.
 			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_950);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
-			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(460);
+			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(510);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(280);
 			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);
