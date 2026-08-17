@@ -189,6 +189,19 @@ describe("tool-owned failure recovery contracts", () => {
 		expect(
 			edit.failureRecovery?.getFailureTargets?.(editInput, { failureCode: "edit_old_text_not_found" })?.[0],
 		).toMatchObject({ kind: FILE_CURRENT_TEXT_RECOVERY_TARGET_KIND, scope: join(cwd, "target.txt") });
+		expect(edit.failureRecovery?.exhaustionScope).toBe("operation");
+		expect(
+			edit.failureRecovery?.getFailureEvidence?.(editInput, {
+				failureCode: "edit_old_text_not_found",
+				message: "Could not find oldText. Current source sha256 abc: current text",
+			}),
+		).toContain("Current source sha256 abc");
+		expect(
+			edit.failureRecovery?.getFailureEvidence?.(editInput, {
+				failureCode: "permission_denied",
+				message: "Current source must not escape for unrelated failures",
+			}),
+		).toBeUndefined();
 	});
 
 	it("does not claim local recovery authority for custom operation adapters", async () => {

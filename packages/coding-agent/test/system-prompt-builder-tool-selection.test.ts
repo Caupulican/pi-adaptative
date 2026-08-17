@@ -7,6 +7,7 @@
  * an actual flip in the promoted tool may).
  */
 import { describe, expect, it } from "vitest";
+import type { Extension } from "../src/core/extensions/types.ts";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
@@ -63,6 +64,44 @@ const readHint: ToolSelectionHint = {
 };
 
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it("makes optional connector availability subordinate to current-task relevance", () => {
+		const trelloExtension = {
+			path: "/missing/trello/index.ts",
+			tools: new Map([["trello", {}]]),
+			commands: new Map(),
+		} as unknown as Extension;
+		const builder = new SystemPromptBuilder(
+			makeDeps({
+				getActiveExtensions: () => [trelloExtension],
+				getToolPromptSnippet: (name) => (name === "trello" ? "Project tracker" : undefined),
+				getToolPromptGuidelines: (name) =>
+					name === "trello" ? ["Project start/resume, MUST sweep every active list before work."] : undefined,
+			}),
+		);
+
+		const prompt = builder.rebuildSystemPrompt(["trello"]);
+		const connectorGuideline = prompt.indexOf("Project start/resume, MUST sweep");
+		const applicabilityRule = prompt.indexOf("PI TOOL APPLICABILITY");
+
+		expect(connectorGuideline).toBeGreaterThanOrEqual(0);
+		expect(applicabilityRule).toBeGreaterThan(connectorGuideline);
+		expect(prompt).toContain("active means available, not required");
+		expect(prompt).toContain("Missing optional credentials never block unrelated work");
+		expect(prompt).toContain("speculative secret_store use");
+		expect(builder.buildSystemPromptForToolNames(["read"])).not.toContain("PI TOOL APPLICABILITY");
+	});
+
+	it("applies the same relevance gate to the built-in credential surface", () => {
+		const prompt = new SystemPromptBuilder(
+			makeDeps({
+				getToolPromptSnippet: (name) => (name === "secret_store" ? "Credential activation" : undefined),
+			}),
+		).rebuildSystemPrompt(["secret_store"]);
+
+		expect(prompt).toContain("PI TOOL APPLICABILITY");
+		expect(prompt).toContain("optional credentials");
+	});
+
 	it("keeps skill metadata host-side for extensions without rendering a catalog", () => {
 		const skill = {
 			name: "secret-skill",

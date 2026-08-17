@@ -455,11 +455,16 @@ export function createEditToolDefinition(
 			"Call once with path/all replacements; harness owns preparation/stale checks.",
 			"Path failure with payloadRef: choose correct existing path, reuse reference; never regenerate edits.",
 			"oldText: exact/unique/minimal/from original. Include supplying read's inclusive lines when known; batch separate edits, merge overlaps.",
+			"oldText mismatch: use tool-owned current-source evidence or read a narrow range; change stale anchors, never replay them.",
+			"Successful edit already used locked current source and returns diff/contentRef; do not reread automatically.",
 		],
 		parameters: editSchema,
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
 		failureRecovery: {
+			exhaustionScope: "operation",
+			getFailureEvidence: (_params, failure) =>
+				failure.failureCode === "edit_old_text_not_found" ? failure.message : undefined,
 			getFailureTargets: (params, failure) => {
 				if (failure.failureCode === "mutation_retarget_required") {
 					return [

@@ -270,6 +270,77 @@ describe("tool failure memory", () => {
 		expect(sanitized.systemPrompt).not.toContain("<harness_tool_failures");
 	});
 
+	it("bounds tool-owned evidence and projects newest snapshots within one aggregate budget", () => {
+		const tracker = new Map();
+		const messages: AgentMessage[] = [];
+		for (let index = 0; index < 3; index++) {
+			const marker = `CURRENT_SOURCE_${index}`;
+			const failure = rememberToolFailure(
+				tracker,
+				"edit",
+				{ path: `subject-${index}.ts`, edits: [{ oldText: `stale-${index}` }] },
+				"failed",
+				"edit_old_text_not_found",
+				"Use the current source snapshot to construct changed exact anchors.",
+				undefined,
+				"execution",
+				`${marker}\0\n${String(index).repeat(4_000)}`,
+			);
+			expect(failure.evidence?.length).toBeLessThanOrEqual(1_600);
+			expect(failure.evidence).not.toContain("\0");
+			const result = createToolFailureResult(failure);
+			const callId = `edit-${index}`;
+			messages.push(
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: callId,
+							name: "edit",
+							arguments: { path: `subject-${index}.ts`, edits: [{ oldText: `stale-${index}` }] },
+						},
+					],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: index * 2 + 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: callId,
+					toolName: "edit",
+					content: result.content,
+					details: result.details,
+					isError: true,
+					timestamp: index * 2 + 2,
+				},
+			);
+		}
+
+		const nextRequest = sanitizeToolFailureContext(messages, "base");
+		const projectedRecords = nextRequest.systemPrompt
+			.split("\n")
+			.filter((line) => line.startsWith("{") && line.includes('"failure_key"'))
+			.map((line) => JSON.parse(line) as { evidence?: string });
+		const projectedEvidence = projectedRecords.flatMap((record) =>
+			record.evidence === undefined ? [] : [record.evidence],
+		);
+		expect(nextRequest.messages).toEqual([]);
+		expect(projectedEvidence.reduce((total, evidence) => total + evidence.length, 0)).toBeLessThanOrEqual(2_400);
+		expect(projectedEvidence.some((evidence) => evidence.startsWith("CURRENT_SOURCE_2"))).toBe(true);
+		expect(projectedEvidence.some((evidence) => evidence.startsWith("CURRENT_SOURCE_0"))).toBe(false);
+	});
+
 	it("fingerprints large operations without retaining or serializing their payload", () => {
 		const largeTail = "x".repeat(1024 * 1024);
 		const firstArgs = {
@@ -515,9 +586,10 @@ describe("tool failure memory", () => {
 
 	it("keeps a local exhausted operation blocked while directing independent work", () => {
 		const original = {
-			...record("failed", "credentials_missing"),
-			diagnostic: "Credential profile is unavailable.",
-			correction: "Connect the required credential profile.",
+			...record("failed", "edit_old_text_not_found"),
+			diagnostic: "The exact oldText anchor is absent.",
+			evidence: "Current source sha256 abcdef123456, lines 8-9:\n8 | current anchor",
+			correction: "Use current source to submit changed exact anchors.",
 		};
 
 		const exhausted = createToolFailureOperationExhaustedResult(
@@ -534,9 +606,11 @@ describe("tool failure memory", () => {
 		expect(text).toContain("The recovery guard prevented a loop; this is not harness failure");
 		expect(text).toContain("Use a different operation/tool or continue independent work");
 		expect(text).not.toContain("Stop retrying tools in this run");
+		expect(text).toContain("Current source sha256 abcdef123456");
 		expect(exhausted.details.piToolFailureMemory).toMatchObject({
-			failureCode: "credentials_missing",
+			failureCode: "edit_old_text_not_found",
 			diagnostic: original.diagnostic,
+			evidence: original.evidence,
 			correction: expect.stringContaining("OPERATION CLOSED"),
 			occurrence: 2,
 		});

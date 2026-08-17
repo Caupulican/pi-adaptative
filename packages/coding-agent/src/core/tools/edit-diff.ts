@@ -228,15 +228,56 @@ function mapFuzzySpanToOriginal(
 	return { index: originalStart, length: originalEnd - originalStart };
 }
 
-function getNotFoundError(path: string, editIndex: number, totalEdits: number, range?: EditRange): Error {
-	const rangeSuffix = range ? ` within lines ${range.startLine}-${range.endLine}` : "";
-	if (totalEdits === 1) {
-		return new Error(
-			`Could not find the exact text in ${path}${rangeSuffix}. The old text must match exactly including all whitespace and newlines.`,
-		);
+const EDIT_FAILURE_CONTEXT_LINES = 10;
+const EDIT_FAILURE_CONTEXT_CHARS = 1_000;
+
+function findEditFailureAnchorLine(contentLines: string[], oldText: string, range?: EditRange): number | undefined {
+	if (range) return Math.min(contentLines.length - 1, range.startLine - 1);
+	const oldLines = oldText
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.sort((left, right) => right.trim().length - left.trim().length);
+	for (const oldLine of oldLines) {
+		const exact = contentLines.indexOf(oldLine);
+		if (exact !== -1) return exact;
 	}
+	for (const oldLine of oldLines) {
+		const trimmed = oldLine.trim();
+		const normalized = contentLines.findIndex((line) => line.trim() === trimmed);
+		if (normalized !== -1) return normalized;
+	}
+	return undefined;
+}
+
+function formatEditFailureContext(content: string, oldText: string, range?: EditRange): string {
+	const contentLines = content.split("\n");
+	const anchorLine = findEditFailureAnchorLine(contentLines, oldText, range);
+	if (anchorLine === undefined) return "";
+	const start = Math.max(0, anchorLine - 2);
+	const end = Math.min(contentLines.length, start + EDIT_FAILURE_CONTEXT_LINES);
+	const numbered = contentLines.slice(start, end).map((line, index) => `${start + index + 1} | ${line}`);
+	const header = `Current source sha256 ${digestNormalizedEditSource(content).slice(0, 12)}, lines ${start + 1}-${end}:`;
+	const context = `${header}\n${numbered.join("\n")}`;
+	if (context.length <= EDIT_FAILURE_CONTEXT_CHARS) return context;
+	return `${context.slice(0, EDIT_FAILURE_CONTEXT_CHARS - 2)}\n…`;
+}
+
+function getNotFoundError(
+	path: string,
+	editIndex: number,
+	totalEdits: number,
+	content: string,
+	oldText: string,
+	range?: EditRange,
+): Error {
+	const rangeSuffix = range ? ` within lines ${range.startLine}-${range.endLine}` : "";
+	const mismatch =
+		totalEdits === 1
+			? `Could not find the exact text in ${path}${rangeSuffix}. The old text must match exactly including all whitespace and newlines.`
+			: `Could not find edits[${editIndex}] in ${path}${rangeSuffix}. The oldText must match exactly including all whitespace and newlines.`;
+	const currentContext = formatEditFailureContext(content, oldText, range);
 	return new Error(
-		`Could not find edits[${editIndex}] in ${path}${rangeSuffix}. The oldText must match exactly including all whitespace and newlines.`,
+		`${mismatch} The edit batch is atomic. No replacements were written.${currentContext ? `\n${currentContext}` : " Re-read the narrow target range before retrying."}`,
 	);
 }
 
@@ -358,7 +399,9 @@ export function planEditsToNormalizedContent(normalizedContent: string, edits: E
 				edits.length,
 			);
 			const fuzzyIndex = findWithin(fuzzyContent, fuzzyOldText, fuzzyWindow);
-			if (fuzzyIndex === -1) throw getNotFoundError(path, i, edits.length, sourceEdit.range);
+			if (fuzzyIndex === -1) {
+				throw getNotFoundError(path, i, edits.length, normalizedContent, oldText, sourceEdit.range);
+			}
 			occurrences = countExactOccurrences(fuzzyContent, fuzzyOldText);
 			const replacementSpan = mapFuzzySpanToOriginal(
 				normalizedContent,

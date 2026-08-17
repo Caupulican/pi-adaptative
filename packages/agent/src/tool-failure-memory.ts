@@ -18,6 +18,8 @@ const MAX_OPERATION_CHARS = 240;
 const MAX_FAILURE_CODE_CHARS = 48;
 const MAX_DIAGNOSTIC_CHARS = 240;
 const MAX_CORRECTION_CHARS = 320;
+const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
+const MAX_ACTIVE_FAILURE_EVIDENCE_CHARS = 2_400;
 const MAX_TOOL_NAME_CHARS = 64;
 const TOOL_SIGNATURE_HEX_CHARS = 32;
 const MAX_ACTIVE_FAILURES = 8;
@@ -46,6 +48,8 @@ export interface ToolFailureMemoryRecord {
 	phase: ToolFailurePhase;
 	failureCode: string;
 	diagnostic?: string;
+	/** Bounded tool-owned source evidence needed to construct a changed operation. */
+	evidence?: string;
 	correction: string;
 	attemptMemory?: "discard";
 }
@@ -94,6 +98,13 @@ function truncate(value: string, maxChars: number): string {
 	const code = value.charCodeAt(end - 1);
 	if (code >= 0xd800 && code <= 0xdbff) end--;
 	return `${value.slice(0, end)}…`;
+}
+
+/** Normalize and bound tool-owned evidence at every live and persisted ingress. */
+export function sanitizeToolFailureEvidence(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const sanitized = sanitizeBinaryOutput(value).trim();
+	return sanitized ? truncate(sanitized, MAX_TOOL_FAILURE_EVIDENCE_CHARS) : undefined;
 }
 
 function truncateMiddle(value: string, maxChars: number): string {
@@ -743,6 +754,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 	}
 	const diagnostic =
 		typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
+	const evidence = sanitizeToolFailureEvidence(candidate.evidence);
 	const retainedCorrection =
 		typeof candidate.correction === "string" ? truncate(candidate.correction, MAX_CORRECTION_CHARS) : undefined;
 	const correction =
@@ -771,6 +783,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		phase,
 		failureCode: boundedFailureCode(candidate.failureCode),
 		diagnostic,
+		evidence,
 		correction,
 	};
 }
@@ -928,6 +941,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				phase: retained?.phase ?? assessment?.phase ?? inferToolFailurePhase(state, "tool_error"),
 				failureCode: retained?.failureCode ?? assessment?.failureCode ?? "tool_error",
 				diagnostic: retained?.diagnostic ?? assessment?.diagnostic,
+				evidence: retained?.evidence,
 				correction:
 					retained?.correction ??
 					assessment?.guidance ??
@@ -1028,6 +1042,7 @@ export function rememberToolFailure(
 	correction: string,
 	diagnostic?: string,
 	phase: ToolFailurePhase = inferToolFailurePhase(state, failureCode),
+	evidence?: string,
 ): ToolFailureMemoryRecord {
 	let kindCount = 1;
 	for (const previous of tracker.values()) {
@@ -1035,50 +1050,40 @@ export function rememberToolFailure(
 			kindCount = Math.max(kindCount, (previous.kindMistakes ?? previous.occurrence) + 1);
 		}
 	}
-	if (getToolExecutionAttemptMemory(failureCode) === "discard") {
+	const isDiscard = getToolExecutionAttemptMemory(failureCode) === "discard";
+	if (isDiscard) {
 		for (const [failureKey, previous] of tracker) {
 			if (previous.tool === tool && previous.failureCode === failureCode) tracker.delete(failureKey);
 		}
-		return {
-			version: TOOL_FAILURE_MEMORY_VERSION,
-			failureKey: `directive:${boundedFailureCode(failureCode)}`,
-			[TOOL_FAILURE_EXECUTION_KEY]: getToolExecutionKey(tool, args),
-			tool: truncate(tool, MAX_TOOL_NAME_CHARS),
-			operation: "[discarded]",
-			occurrence: 1,
-			kindMistakes: kindCount,
-			mistakeKind: tool,
-			state,
-			phase,
-			failureCode: boundedFailureCode(failureCode),
-			diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
-			correction: truncate(correction, MAX_CORRECTION_CHARS),
-			attemptMemory: "discard",
-		};
 	}
-	const identity = operationIdentity(tool, args);
-	const previous = tracker.get(identity.failureKey);
+	const identity = isDiscard ? undefined : operationIdentity(tool, args);
+	const previous = identity ? tracker.get(identity.failureKey) : undefined;
 	const record: ToolFailureMemoryRecord = {
 		version: TOOL_FAILURE_MEMORY_VERSION,
-		failureKey: identity.failureKey,
-		[TOOL_FAILURE_EXECUTION_KEY]: identity.executionKey,
-		tool: identity.tool,
-		operation: identity.operation,
-		occurrence: (previous?.occurrence ?? 0) + 1,
+		failureKey: identity ? identity.failureKey : `directive:${boundedFailureCode(failureCode)}`,
+		[TOOL_FAILURE_EXECUTION_KEY]: identity ? identity.executionKey : getToolExecutionKey(tool, args),
+		tool: identity ? identity.tool : truncate(tool, MAX_TOOL_NAME_CHARS),
+		operation: identity ? identity.operation : "[discarded]",
+		occurrence: isDiscard ? 1 : (previous?.occurrence ?? 0) + 1,
 		kindMistakes: kindCount,
 		mistakeKind: tool,
 		state,
 		phase,
 		failureCode: boundedFailureCode(failureCode),
 		diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
+		evidence: sanitizeToolFailureEvidence(evidence),
 		correction: truncate(correction, MAX_CORRECTION_CHARS),
+		...(isDiscard ? { attemptMemory: "discard" as const } : {}),
 	};
-	tracker.delete(identity.failureKey);
-	tracker.set(identity.failureKey, record);
-	while (tracker.size > MAX_TRACKED_FAILURES) {
-		const oldest = tracker.keys().next().value;
-		if (oldest === undefined) break;
-		tracker.delete(oldest);
+	if (isDiscard) return record;
+	if (identity) {
+		tracker.delete(identity.failureKey);
+		tracker.set(identity.failureKey, record);
+		while (tracker.size > MAX_TRACKED_FAILURES) {
+			const oldest = tracker.keys().next().value;
+			if (oldest === undefined) break;
+			tracker.delete(oldest);
+		}
 	}
 	return record;
 }
@@ -1096,7 +1101,11 @@ function failureGuidance(record: ToolFailureMemoryRecord): { repair: string } | 
 		: { next_action: record.correction };
 }
 
-function formatRecordJson(record: ToolFailureMemoryRecord, includeOperation = false): string {
+function formatRecordJson(
+	record: ToolFailureMemoryRecord,
+	includeOperation = false,
+	evidence: string | null | undefined = record.evidence,
+): string {
 	const guidance = failureGuidance(record);
 	return JSON.stringify({
 		...mandatoryToolFailureRecoveryMetadata(),
@@ -1110,6 +1119,7 @@ function formatRecordJson(record: ToolFailureMemoryRecord, includeOperation = fa
 		...(includeOperation ? { operation: record.operation } : {}),
 		failure_code: record.failureCode,
 		...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
+		...(evidence ? { evidence } : {}),
 		...guidance,
 		...(record.attemptMemory === "discard" ? { attempt_memory: "discarded" } : {}),
 	});
@@ -1240,7 +1250,18 @@ export function sanitizeToolFailureContext(
 		.map(([kind, count]) => `${kind}:${count}`)
 		.join(", ");
 
-	const lines = records.map((record) => escapePromptData(formatRecordJson(record, true)));
+	let remainingEvidenceChars = MAX_ACTIVE_FAILURE_EVIDENCE_CHARS;
+	const evidenceByFailureKey = new Map<string, string>();
+	for (let index = records.length - 1; index >= 0 && remainingEvidenceChars > 1; index--) {
+		const record = records[index];
+		if (!record.evidence) continue;
+		const retained = truncate(record.evidence, remainingEvidenceChars);
+		evidenceByFailureKey.set(record.failureKey, retained);
+		remainingEvidenceChars -= retained.length;
+	}
+	const lines = records.map((record) =>
+		escapePromptData(formatRecordJson(record, true, evidenceByFailureKey.get(record.failureKey) ?? null)),
+	);
 	for (const directive of analysis.activeDirectives) {
 		lines.push(
 			escapePromptData(

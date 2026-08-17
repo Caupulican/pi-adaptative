@@ -41,6 +41,18 @@
 			"@caupulican/pi-agent-core/tool-failure-memory": [
 				"./packages/agent/src/tool-failure-memory.ts"
 			],
+			"@caupulican/pi-agent-core/provider-request-estimator": [
+				"./packages/agent/src/provider-request-estimator.ts"
+			],
+			"@caupulican/pi-agent-core/provider-request-image-budget": [
+				"./packages/agent/src/provider-request-image-budget.ts"
+			],
+			"@caupulican/pi-agent-core/provider-request-planner": [
+				"./packages/agent/src/provider-request-planner.ts"
+			],
+			"@caupulican/pi-agent-core/provider-tool-projection": [
+				"./packages/agent/src/provider-tool-projection.ts"
+			],
 			"@caupulican/pi-agent-core/truncate": ["./packages/agent/src/utils/truncate.ts"],
 			"@caupulican/pi-agent-core/types": ["./packages/agent/src/types.ts"],
 			"@caupulican/pi-agent-core/usage": ["./packages/agent/src/usage.ts"],

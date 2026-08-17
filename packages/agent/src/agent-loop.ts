@@ -708,6 +708,7 @@ async function prepareAndStartToolCall(
 			kind: "finalized",
 			finalized: finalizeRejectedToolCall(
 				toolCall,
+				execCtx.context.tools?.find((tool) => tool.name === toolCall.name),
 				preparation,
 				execCtx.toolFailureMemory,
 				execCtx.toolFailureRecoveryGate,
@@ -1213,6 +1214,7 @@ async function prepareToolCall(
 
 function finalizeRejectedToolCall(
 	toolCall: AgentToolCall,
+	tool: AgentTool<any> | undefined,
 	outcome: ImmediateToolCallOutcome,
 	tracker: ToolFailureMemoryTracker,
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
@@ -1236,6 +1238,7 @@ function finalizeRejectedToolCall(
 	);
 	const halt = toolFailureRecoveryGate.apply({
 		kind: "failure",
+		...(tool ? { tool } : {}),
 		record,
 		args: toolCall.arguments,
 		...(outcome.executionGateReservation ? { reservation: outcome.executionGateReservation } : {}),
@@ -1539,7 +1542,7 @@ async function finalizeExecutedToolCall(
 		const recoveryPlan = toolFailureRecoveryGate.planFailure(
 			prepared.tool,
 			prepared.args,
-			assessment.failureCode,
+			{ failureCode: assessment.failureCode, message: effectiveFailureMessage },
 			currentContext.tools ?? [],
 			prepared.executionGateReservation,
 		);
@@ -1552,9 +1555,11 @@ async function finalizeExecutedToolCall(
 			recoveryPlan.guidance,
 			assessment.diagnostic,
 			assessment.phase,
+			recoveryPlan.evidence,
 		);
 		executionGateEffect = {
 			kind: "failure",
+			tool: prepared.tool,
 			record,
 			args: prepared.args,
 			targets: recoveryPlan.targets,

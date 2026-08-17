@@ -407,6 +407,8 @@ describe("secret_store tool", () => {
 			expect(schema).not.toContain(forbidden);
 		}
 		expect(teachings).toContain("one masked BW_SESSION only");
+		expect(teachings).toContain("current task genuinely requires credentials");
+		expect(teachings).toContain("Never probe or activate for an optional integration");
 		expect(teachings).not.toContain("run /secrets");
 	});
 });

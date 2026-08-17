@@ -9,11 +9,13 @@ import {
 	isPromptScopedFailureCode,
 	readVisibleToolFailureCode,
 	restoreToolFailureRecord,
+	sanitizeToolFailureEvidence,
 	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
 import type {
 	AgentMessage,
 	AgentTool,
+	AgentToolFailureEvidenceContext,
 	AgentToolFailureRecoveryAuthority,
 	AgentToolFailureRecoveryTarget,
 	AgentToolResult,
@@ -41,11 +43,13 @@ export interface ToolFailureExecutionReservation {
 export interface ToolFailureRecoveryPlan {
 	targets: readonly AgentToolFailureRecoveryTarget[];
 	guidance: string;
+	evidence?: string;
 }
 
 export type ToolFailureRecoveryGateEffect =
 	| {
 			kind: "failure";
+			tool?: AgentTool<any>;
 			record: ToolFailureMemoryRecord;
 			args: unknown;
 			targets?: readonly AgentToolFailureRecoveryTarget[];
@@ -179,16 +183,23 @@ export class ToolFailureRecoveryGate {
 	planFailure(
 		failedTool: AgentTool<any>,
 		args: unknown,
-		failureCode: string,
+		failure: AgentToolFailureEvidenceContext,
 		availableTools: readonly AgentTool<any>[],
 		reservation: ToolFailureExecutionReservation | undefined,
 	): ToolFailureRecoveryPlan {
-		const targets = readFailureTargets(failedTool, args, failureCode);
+		const targets = readFailureTargets(failedTool, args, failure.failureCode);
 		const actions = readAvailableRecoveryActions(availableTools, targets);
-		const unchangedRetryRemaining = this.hasUnchangedRetryRemaining(failedTool, args, failureCode, reservation);
+		const unchangedRetryRemaining = this.hasUnchangedRetryRemaining(
+			failedTool,
+			args,
+			failure.failureCode,
+			reservation,
+		);
+		const evidence = readFailureEvidence(failedTool, args, failure);
 		return {
 			targets,
-			guidance: formatRecoveryGuidance(failureCode, actions, unchangedRetryRemaining),
+			guidance: formatRecoveryGuidance(failure.failureCode, actions, unchangedRetryRemaining),
+			...(evidence ? { evidence } : {}),
 		};
 	}
 
@@ -231,6 +242,10 @@ export class ToolFailureRecoveryGate {
 				state.blockedReplays = 0;
 				return { kind: "allowed", reservation: { executionKey } };
 			}
+			if (usesOperationLocalExhaustion(tool)) {
+				const diagnostic = `Operation recovery circuit remains closed after replay of ${state.record.failureCode}.`;
+				return { kind: "blocked", record: state.record, exhausted: true, scope: "operation", diagnostic };
+			}
 			const diagnostic = `Run recovery circuit opened after replay of an operation whose local circuit was already open for ${state.record.failureCode}.`;
 			this.halted = { record: state.record, diagnostic };
 			return { kind: "blocked", record: state.record, exhausted: true, scope: "run", diagnostic };
@@ -265,7 +280,7 @@ export class ToolFailureRecoveryGate {
 			this.observeSuccess(effect.tool, effect.args, effect.evidenceResult);
 			return undefined;
 		}
-		this.observeFailure(effect.record, effect.args, effect.targets ?? [], effect.reservation);
+		this.observeFailure(effect.tool, effect.record, effect.args, effect.targets ?? [], effect.reservation);
 		return this.halted;
 	}
 
@@ -306,6 +321,7 @@ export class ToolFailureRecoveryGate {
 	}
 
 	private observeFailure(
+		tool: AgentTool<any> | undefined,
 		record: ToolFailureMemoryRecord,
 		args: unknown,
 		targets: readonly AgentToolFailureRecoveryTarget[],
@@ -331,6 +347,10 @@ export class ToolFailureRecoveryGate {
 					MAX_RECOVERY_PROBES_PER_OPERATION
 				: MAX_REJECTIONS_PER_OPERATION;
 		if (state.failures >= operationFailureLimit) {
+			if (usesOperationLocalExhaustion(tool)) {
+				state.operationCircuitOpen = true;
+				return;
+			}
 			this.halted = {
 				record,
 				diagnostic: `Recovery circuit opened after ${state.failures} failed outcomes for one operation.`,
@@ -440,6 +460,26 @@ export class ToolFailureRecoveryGate {
 		next.reservedExecutions++;
 		next.failures++;
 		return { kind: "failed", state: next };
+	}
+}
+
+function usesOperationLocalExhaustion(tool: AgentTool<any> | undefined): boolean {
+	return tool?.failureRecovery?.exhaustionScope === "operation";
+}
+
+function readFailureEvidence(
+	tool: AgentTool<any>,
+	args: unknown,
+	failure: AgentToolFailureEvidenceContext,
+): string | undefined {
+	try {
+		const contract = tool.failureRecovery;
+		const getEvidence = contract?.getFailureEvidence;
+		if (!getEvidence) return undefined;
+		const evidence = Reflect.apply(getEvidence, contract, [args, failure]);
+		return sanitizeToolFailureEvidence(evidence);
+	} catch {
+		return undefined;
 	}
 }
 

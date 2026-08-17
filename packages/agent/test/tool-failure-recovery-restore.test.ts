@@ -146,6 +146,172 @@ const identityConverter = (messages: AgentMessage[]): Message[] =>
 	messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 
 describe("tool-failure recovery restore", () => {
+	it("keeps corrective operations available after an edit-local recovery circuit opens", () => {
+		const schema = Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String() })) });
+		const args = { path: "subject.ts", edits: [{ oldText: "stale anchor" }] };
+		const editTool: AgentTool<typeof schema> = {
+			name: "edit",
+			label: "edit",
+			description: "edit",
+			parameters: schema,
+			failureRecovery: { exhaustionScope: "operation" },
+			async execute() {
+				throw new Error("must not execute during admission");
+			},
+		};
+		const readTool: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "read",
+			parameters: Type.Object({ path: Type.String() }),
+			async execute() {
+				return { content: [{ type: "text", text: "current text" }], details: {} };
+			},
+		};
+		const tracker = new Map();
+		const record = rememberToolFailure(
+			tracker,
+			"edit",
+			args,
+			"failed",
+			"edit_old_text_not_found",
+			"Read current text and submit changed exact anchors.",
+		);
+		const gate = new ToolFailureRecoveryGate();
+		gate.apply({ kind: "failure", tool: editTool, record, args });
+
+		expect(gate.admit(editTool, args, record)).toMatchObject({ kind: "blocked", exhausted: false });
+		expect(gate.admit(editTool, args, record)).toMatchObject({
+			kind: "blocked",
+			exhausted: true,
+			scope: "operation",
+		});
+		expect(gate.admit(editTool, args, record)).toMatchObject({
+			kind: "blocked",
+			exhausted: true,
+			scope: "operation",
+		});
+		expect(gate.isHalted()).toBe(false);
+		expect(gate.admit(readTool, { path: "subject.ts" }, undefined).kind).toBe("allowed");
+	});
+
+	it("keeps repeated edit validation failures local so a corrective read can still run", async () => {
+		const editSchema = Type.Object({
+			path: Type.String(),
+			edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+		});
+		const editTool: AgentTool<typeof editSchema> = {
+			name: "edit",
+			label: "edit",
+			description: "edit",
+			parameters: editSchema,
+			failureRecovery: { exhaustionScope: "operation" },
+			async execute() {
+				throw new Error("invalid arguments must not execute");
+			},
+		};
+		let reads = 0;
+		const readTool: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "read",
+			parameters: Type.Object({ path: Type.String() }),
+			async execute() {
+				reads++;
+				return { content: [{ type: "text", text: "current source" }], details: {} };
+			},
+		};
+		let turns = 0;
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "repair the stale edit", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [editTool, readTool] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				() => {
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turns++;
+						const message =
+							turns <= 4
+								? assistantCall(`invalid-edit-${turns}`, "edit", {
+										path: "subject.ts",
+										edits: "not-an-array",
+									})
+								: turns === 5
+									? assistantCall("corrective-read", "read", { path: "subject.ts" })
+									: assistantMessage([{ type: "text", text: "current source recovered" }], "stop");
+						stream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		expect(turns).toBe(6);
+		expect(reads).toBe(1);
+	});
+
+	it("delivers bounded tool-owned evidence from the failed execution", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		const evidence = `Could not find oldText.\nCurrent source sha256 abcdef123456, lines 8-9:\n8 | current anchor`;
+		const failingTool: AgentTool<typeof schema> = {
+			name: "edit_like",
+			label: "edit-like",
+			description: "edit-like",
+			parameters: schema,
+			failureRecovery: {
+				getFailureEvidence: (_params, failure) => failure.message,
+			},
+			async execute() {
+				throw new Error(evidence);
+			},
+		};
+		let providerTurns = 0;
+		const providerPrompts: string[] = [];
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "edit the file", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [failingTool] },
+				{ model: createModel(), convertToLlm: identityConverter },
+				undefined,
+				(_model, providerContext) => {
+					providerPrompts.push(providerContext.systemPrompt ?? "");
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						providerTurns++;
+						stream.push({
+							type: "done",
+							reason: providerTurns === 1 ? "toolUse" : "stop",
+							message:
+								providerTurns === 1
+									? assistantCall("edit-1", "edit_like", { path: "subject.ts" })
+									: assistantMessage([{ type: "text", text: "I will use the current anchor." }], "stop"),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+		const failure = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		if (!failure || failure.type !== "message_end" || failure.message.role !== "toolResult") {
+			throw new Error("Expected failed tool result");
+		}
+		const text = failure.message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(text).toContain('"evidence"');
+		expect(text).toContain("Current source sha256 abcdef123456");
+		expect(text).toContain("8 | current anchor");
+		expect(providerPrompts[1]).toContain("Current source sha256 abcdef123456");
+		expect(providerPrompts[1]).toContain("8 | current anchor");
+	});
+
 	it("blocks the exhausted identical operation after a JSON-roundtripped transcript", () => {
 		const messages = JSON.parse(JSON.stringify(createExhaustedListListsTranscript())) as AgentMessage[];
 		const gate = new ToolFailureRecoveryGate();
@@ -162,6 +328,59 @@ describe("tool-failure recovery restore", () => {
 		expect(admission.kind).toBe("blocked");
 		if (admission.kind !== "blocked") return;
 		expect(admission.exhausted).toBe(true);
+	});
+
+	it("restores an edit-local closed circuit without turning it into a run halt", () => {
+		const schema = Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String() })) });
+		const args = { path: "subject.ts", edits: [{ oldText: "stale anchor" }] };
+		const tracker = new Map();
+		const record = rememberToolFailure(
+			tracker,
+			"edit",
+			args,
+			"failed",
+			"edit_old_text_not_found",
+			"Use current source to submit changed exact anchors.",
+			undefined,
+			"execution",
+			"Current source sha256 abcdef123456, lines 8-9:\n8 | current anchor",
+		);
+		const closed = createToolFailureOperationExhaustedResult(record, "edit operation closed");
+		const messages = JSON.parse(
+			JSON.stringify([
+				assistantCall("edit-closed", "edit", args),
+				toolResultMessage("edit-closed", "edit", closed, true),
+			]),
+		) as AgentMessage[];
+		const editTool: AgentTool<typeof schema> = {
+			name: "edit",
+			label: "edit",
+			description: "edit",
+			parameters: schema,
+			failureRecovery: { exhaustionScope: "operation" },
+			async execute() {
+				throw new Error("must not execute during admission");
+			},
+		};
+		const readTool: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "read",
+			parameters: Type.Object({ path: Type.String() }),
+			async execute() {
+				return { content: [{ type: "text", text: "current text" }], details: {} };
+			},
+		};
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(messages);
+
+		expect(gate.admit(editTool, args, undefined, messages)).toMatchObject({
+			kind: "blocked",
+			exhausted: true,
+			scope: "operation",
+		});
+		expect(gate.isHalted()).toBe(false);
+		expect(gate.admit(readTool, { path: "subject.ts" }, undefined, messages).kind).toBe("allowed");
 	});
 
 	it("reconstructs an evicted exact operation without blocking cache-miss work", () => {

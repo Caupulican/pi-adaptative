@@ -239,7 +239,8 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 			"Migrate accessible credentials into Bitwarden, activate project credentials; never expose values.",
 		promptGuidelines: [
 			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
-			"Credentials needed: call secret_store. If disconnected, TUI asks for one masked BW_SESSION only; never request chat/setup work.",
+			"Only when the current task genuinely requires credentials: call secret_store. Never probe or activate for an optional integration; its absence does not block unrelated work.",
+			"If required credentials are disconnected, TUI asks for one masked BW_SESSION only; never request chat/setup work.",
 			"activate before credential work; TUI/print/RPC return metadata only.",
 			"One project binding: omit profile. Multiple: use list, select authorized profile.",
 			"Never request credentials in chat/tool arguments.",

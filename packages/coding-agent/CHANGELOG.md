@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Made active extension/project/account tools explicitly on-demand: availability, wildcard profiles, repository context, prior sessions, or tool guidance alone no longer establish relevance, and optional credential gaps do not trigger speculative `secret_store` use.
+
+### Fixed
+
+- Made stale `edit` anchors return a bounded digest-qualified snapshot from the exact current source checked by the atomic matcher, while keeping exhausted edit operations local so corrective reads and changed edits remain available without redundant post-success rereads.
+
 ## [0.93.3] - 2026-08-17
 
 ### Changed

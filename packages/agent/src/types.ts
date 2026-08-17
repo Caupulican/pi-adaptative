@@ -630,6 +630,11 @@ export interface AgentToolFailureRecoveryContext {
 	failureCode: string;
 }
 
+/** Ephemeral live failure context available only while tool-owned evidence is projected. */
+export interface AgentToolFailureEvidenceContext extends AgentToolFailureRecoveryContext {
+	message: string;
+}
+
 /**
  * One action a tool can actually perform for a declared failure target.
  *
@@ -653,11 +658,18 @@ export type AgentToolFailureRecoveryAction<TParameters extends TSchema, TDetails
 
 /** Tool-owned failure targets and recovery actions. Undeclared behavior has no recovery authority. */
 export interface AgentToolFailureRecoveryContract<TParameters extends TSchema, TDetails> {
+	/** Keep exhaustion local to this operation when another operation can still correct it. Defaults to run. */
+	exhaustionScope?: "operation" | "run";
 	/** Derive exact recovery requirements from validated arguments and a classified failure. */
 	getFailureTargets?: (
 		params: Static<TParameters>,
 		failure: AgentToolFailureRecoveryContext,
 	) => readonly AgentToolFailureRecoveryTarget[];
+	/**
+	 * Return tool-owned evidence needed to construct a changed operation. The harness sanitizes and
+	 * caps this text before exposing it beside the normalized failure record.
+	 */
+	getFailureEvidence?: (params: Static<TParameters>, failure: AgentToolFailureEvidenceContext) => string | undefined;
 	/** Actions this tool can perform when it is present in the active tool surface. */
 	actions?: readonly AgentToolFailureRecoveryAction<TParameters, TDetails>[];
 }

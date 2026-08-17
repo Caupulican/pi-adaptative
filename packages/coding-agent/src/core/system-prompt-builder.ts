@@ -167,6 +167,26 @@ export class SystemPromptBuilder {
 		return formatToolSelectionHints(this.deps.getToolSelectionHints?.() ?? []);
 	}
 
+	private _buildToolApplicabilityPrompt(
+		validToolNames: readonly string[],
+		activeExtensions: ReadonlyArray<Extension>,
+	): string | undefined {
+		const activeNames = new Set(validToolNames);
+		if (!activeNames.has("secret_store")) {
+			let hasActiveExtensionTool = false;
+			for (const extension of activeExtensions) {
+				for (const name of extension.tools.keys()) {
+					if (!activeNames.has(name)) continue;
+					hasActiveExtensionTool = true;
+					break;
+				}
+				if (hasActiveExtensionTool) break;
+			}
+			if (!hasActiveExtensionTool) return undefined;
+		}
+		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools only when the current request explicitly asks for them or genuinely depends on their data/action; cwd, repository, prior session, wildcard profile, or tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
+	}
+
 	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
 		const autoLearn = this.deps.getSettingsManager().getAutoLearnSettings();
 		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
@@ -216,6 +236,7 @@ export class SystemPromptBuilder {
 
 		const loaderSystemPrompt = this.deps.getResourceLoader().getSystemPrompt();
 		const loaderAppendSystemPrompt = this.deps.getResourceLoader().getAppendSystemPrompt();
+		const activeExtensions = this.deps.getActiveExtensions();
 		const appendSystemPromptParts = [
 			// R6: situational soul — the active profile's identity prefix, switched atomically with the
 			// profile's capabilities/model. Most prominent, so it comes first.
@@ -227,6 +248,7 @@ export class SystemPromptBuilder {
 			this._buildDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(),
+			this._buildToolApplicabilityPrompt(validToolNames, activeExtensions),
 			// Memory subsystem: static, frozen-per-session block (e.g. file-store MEMORY.md/USER.md).
 			this._buildStaticMemoryPrompt(modelCapability),
 			...loaderAppendSystemPrompt,
@@ -245,7 +267,7 @@ export class SystemPromptBuilder {
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
-			extensions: [...this.deps.getActiveExtensions()],
+			extensions: [...activeExtensions],
 		};
 	}
 

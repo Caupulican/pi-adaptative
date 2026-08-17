@@ -10,6 +10,71 @@ function sourceLines(count: number, targetLine: number, target: string): string 
 }
 
 describe("edit match plans", () => {
+	it("returns bounded current-source evidence for the first stale block without applying the batch", () => {
+		const content = [
+			"import {",
+			"\tActiveZoneMapper,",
+			"\tHandMouseEngine,",
+			'} from "../src/hand_mouse.ts";',
+			"const stable = true;",
+		].join("\n");
+		let message = "";
+
+		try {
+			planEditsToNormalizedContent(
+				content,
+				[
+					{ oldText: "const stable = true;", newText: "const stable = false;" },
+					{
+						oldText: [
+							"import {",
+							"\tREQUIRED_HAND_GESTURES,",
+							"\tHandMouseEngine,",
+							'} from "../src/hand_mouse.ts";',
+						].join("\n"),
+						newText: "replacement",
+					},
+				],
+				"tests/test_hand_mouse.ts",
+			);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain("Could not find edits[1]");
+		expect(message).toContain("No replacements were written");
+		expect(message).toContain("2 | \tActiveZoneMapper,");
+		expect(message).toContain("3 | \tHandMouseEngine,");
+		expect(message).toContain('4 | } from "../src/hand_mouse.ts";');
+		expect(message.length).toBeLessThanOrEqual(1_600);
+		expect(content).toContain("const stable = true;");
+	});
+
+	it("anchors stale-source evidence on a distinctive surviving line instead of generic syntax", () => {
+		const content = [
+			"const unrelated = {",
+			"\tvalue: true,",
+			"};",
+			"",
+			"function targetWorkflow() {",
+			'\treturn "current implementation";',
+			"}",
+		].join("\n");
+
+		expect(() =>
+			planEditsToNormalizedContent(
+				content,
+				[
+					{
+						oldText: ["{", "function targetWorkflow() {", '\treturn "stale implementation";', "}"].join("\n"),
+						newText: "replacement",
+					},
+				],
+				"target.ts",
+			),
+		).toThrow(/4 \| \n5 \| function targetWorkflow\(\) \{/);
+	});
+
 	it("uses an explicit read range without accepting the same anchor elsewhere", () => {
 		const content = sourceLines(5_000, 3_500, "const bounded_target = true;");
 		const plan = planEditsToNormalizedContent(
