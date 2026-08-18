@@ -590,22 +590,64 @@ describe("tool failure memory", () => {
 		expect(retainedAfterFirst).toMatchObject({
 			failureCode: "invalid_option",
 			diagnostic: original.diagnostic,
-			correction: expect.stringContaining("SAME OPERATION BLOCKED"),
+			correction: original.correction,
 			occurrence: 2,
 		});
 		expect(retainedAfterSecond).toMatchObject({
 			failureCode: "invalid_option",
 			diagnostic: original.diagnostic,
-			correction: expect.stringContaining("SAME OPERATION BLOCKED"),
+			correction: original.correction,
 			occurrence: 3,
 		});
 		expect(secondText).toContain('"failure_code":"repeated_failed_operation"');
-		expect(secondText).toContain("Unchanged replay blocked after invalid_option");
+		expect(secondText).toContain('"diagnostic":"svn: invalid option: --stat"');
+		expect(secondText).toContain(
+			'"note":"The unchanged operation was not executed. Unchanged replay blocked after invalid_option"',
+		);
 		expect(secondText.match(/Unchanged replay blocked/g)).toHaveLength(1);
 		expect(secondText.match(/The unchanged operation was not executed\./g)).toHaveLength(1);
 	});
 
-	it("replaces spent recovery permission with one retained caveman no-replay directive", () => {
+	it("leads a blocked replay with the retained root-cause diagnostic and keeps the replay notice as a note", () => {
+		const original = {
+			...record("failed", "file_not_found"),
+			diagnostic: "ENOENT: no such file or directory, open '/repo/docs/missing.txt'",
+			correction: "Path not found. List parent directory or re-read path before retry.",
+		};
+
+		const blocked = createRepeatedToolFailureResult(original);
+		const text = blocked.content[0]?.type === "text" ? blocked.content[0].text : "";
+
+		expect(text).toContain('"failure_code":"repeated_failed_operation"');
+		expect(text).toContain("ENOENT: no such file or directory, open '/repo/docs/missing.txt'");
+		expect(text).toContain(
+			'"note":"The unchanged operation was not executed. Unchanged replay blocked after file_not_found"',
+		);
+		expect(text).toContain('"next_action":"Path not found. List parent directory or re-read path before retry."');
+		expect(text).not.toContain("CAVEMAN");
+		expect(blocked.details.piToolFailureMemory).toMatchObject({
+			failureCode: "file_not_found",
+			diagnostic: original.diagnostic,
+			correction: original.correction,
+			occurrence: 2,
+		});
+	});
+
+	it("keeps the replay notice as the diagnostic when no root-cause diagnostic was retained", () => {
+		const blocked = createRepeatedToolFailureResult(record("failed"));
+		const text = blocked.content[0]?.type === "text" ? blocked.content[0].text : "";
+
+		expect(text).toContain(
+			'"diagnostic":"The unchanged operation was not executed. Unchanged replay blocked after exit_1"',
+		);
+		expect(text).not.toContain('"note":');
+		expect(text).toContain(
+			'"next_action":"Blocked: this exact operation will not run again this session — change the operation or continue other work."',
+		);
+		expect(blocked.details.piToolFailureMemory.correction).toBe("Use the contract guidance.");
+	});
+
+	it("keeps the retained policy correction and root diagnostic across a blocked replay", () => {
 		const original = {
 			...record("failed", "exit_101"),
 			diagnostic: "error[E0433]: cannot find `windows` in `os`",
@@ -618,13 +660,14 @@ describe("tool failure memory", () => {
 		expect(retained).toMatchObject({
 			failureCode: "exit_101",
 			diagnostic: original.diagnostic,
-			correction: expect.stringContaining("CAVEMAN MODE - MANDATORY"),
+			correction: original.correction,
 		});
-		expect(retained.correction).toContain("SAME OPERATION BLOCKED");
-		expect(retained.correction).toContain("NEVER call it again with the same arguments in this run");
-		expect(retained.correction).toContain("not a harness loop or failure");
-		expect(retained.correction).not.toContain("grants 1 probe");
+		expect(text).toContain('"diagnostic":"error[E0433]: cannot find `windows` in `os`"');
+		expect(text).toContain(
+			'"note":"The unchanged operation was not executed. Unchanged replay blocked after exit_101"',
+		);
 		expect(text).toContain(retained.correction);
+		expect(text).not.toContain("CAVEMAN");
 
 		const nextRequest = sanitizeToolFailureContext(
 			[
@@ -659,7 +702,7 @@ describe("tool failure memory", () => {
 		);
 
 		expect(nextRequest.systemPrompt).toContain(retained.correction);
-		expect(nextRequest.systemPrompt).not.toContain("grants 1 probe");
+		expect(nextRequest.systemPrompt).toContain("error[E0433]: cannot find `windows` in `os`");
 	});
 
 	it("keeps a local exhausted operation blocked while directing independent work", () => {
@@ -678,18 +721,19 @@ describe("tool failure memory", () => {
 
 		expect(exhausted.terminate).toBe(false);
 		expect(text).toContain('"failure_code":"operation_recovery_exhausted"');
-		expect(text).toContain("CAVEMAN MODE - MANDATORY");
-		expect(text).toContain("OPERATION CLOSED");
-		expect(text).toContain("NEVER call it again with the same arguments in this run");
-		expect(text).toContain("The recovery guard prevented a loop; this is not harness failure");
-		expect(text).toContain("Use a different operation/tool or continue independent work");
+		expect(text).toContain('"diagnostic":"The exact oldText anchor is absent."');
+		expect(text).toContain('"note":"Operation recovery circuit opened after two blocked replays."');
+		expect(text).toContain(
+			"Closed: this exact operation was not executed and will not run again this session — use a different operation or continue other work.",
+		);
+		expect(text).not.toContain("CAVEMAN");
 		expect(text).not.toContain("Stop retrying tools in this run");
 		expect(text).toContain("Current source sha256 abcdef123456");
 		expect(exhausted.details.piToolFailureMemory).toMatchObject({
 			failureCode: "edit_old_text_not_found",
 			diagnostic: original.diagnostic,
 			evidence: original.evidence,
-			correction: expect.stringContaining("OPERATION CLOSED"),
+			correction: expect.stringContaining("will not run again this session"),
 			occurrence: 2,
 		});
 	});
@@ -709,6 +753,8 @@ describe("tool failure memory", () => {
 
 		expect(exhausted.terminate).toBe(true);
 		expect(text).toContain('"failure_code":"recovery_exhausted"');
+		expect(text).toContain('"diagnostic":"ENOENT: missing.txt"');
+		expect(text).toContain('"note":"Recovery circuit opened after two blocked replays."');
 		expect(text).toContain("Stop retrying tools in this run");
 		expect(exhausted.details.piToolFailureMemory).toMatchObject({
 			failureCode: "file_not_found",

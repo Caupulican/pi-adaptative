@@ -139,7 +139,7 @@ describe("SkillVaultController", () => {
 		expect(vault.status().slots.map((slot) => slot.state)).toEqual(["active", "active"]);
 	});
 
-	it("evicts the least-recently-used slot beyond the slot cap and reports it", () => {
+	it("evicts the oldest-loaded slot beyond the slot cap and reports it", () => {
 		const skills = createSkills([
 			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
 			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
@@ -311,6 +311,176 @@ describe("SkillVaultController", () => {
 		const projected = vault.commitSystemPromptSection();
 		expect(projected).toContain("HARNESS-ADAPTATION-BODY");
 		expect(projected).toContain("AUTONOMOUS-EXECUTION-BODY");
+	});
+
+	it("keeps a pinned skill resident when a fourth load overflows the slot cap", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+			{ name: "charlie", description: "Charlie guidance.", body: "CHARLIE-BODY" },
+			{ name: "delta", description: "Delta guidance.", body: "DELTA-BODY" },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now });
+		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		now = 2_000;
+		vault.load("bravo", "model");
+		now = 3_000;
+		vault.load("charlie", "model");
+		now = 4_000;
+
+		const result = vault.load("delta", "model");
+
+		expect(result).toMatchObject({ ok: true, state: "loaded_pending", evicted: ["bravo"] });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "charlie", "delta"]);
+		const projected = vault.commitSystemPromptSection();
+		expect(projected).toContain("ALPHA-BODY");
+		expect(projected).not.toContain("BRAVO-BODY");
+	});
+
+	it("enforces the pin limit without mutating vault state and permits re-pinning", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+			{ name: "charlie", description: "Charlie guidance.", body: "CHARLIE-BODY" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		expect(vault.load("bravo", "model", true)).toMatchObject({ ok: true, pinned: true });
+		const revision = vault.getContextRevision();
+
+		expect(vault.load("charlie", "model", true)).toMatchObject({ ok: false, reason: "pin_limit" });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "bravo"]);
+		expect(vault.getContextRevision()).toBe(revision);
+
+		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		expect(vault.load("charlie", "model")).toMatchObject({ ok: true, pinned: false });
+	});
+
+	it("idle-expires a pinned slot like any other", () => {
+		const skills = createSkills([{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" }]);
+		let now = 10_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, idleTimeoutMs: 1_000 });
+		vault.load("alpha", "model", true);
+		vault.commitSystemPromptSection();
+
+		now = 11_000;
+
+		expect(vault.commitSystemPromptSection()).toBeUndefined();
+		expect(vault.status()).toMatchObject({ slots: [], reason: "idle_expired" });
+	});
+
+	it("evicts the oldest pinned slot on load only when no unpinned slot remains and reports it", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "a".repeat(600) },
+			{ name: "bravo", description: "Bravo guidance.", body: "b".repeat(600) },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, getMaxBodyBytes: () => 1_024 });
+		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		now = 2_000;
+
+		const result = vault.load("bravo", "model", true);
+
+		expect(result).toMatchObject({ ok: true, pinned: true, evicted: ["alpha"] });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["bravo"]);
+	});
+
+	it("shrinks an all-pinned vault by evicting the oldest pinned slot on reconcile", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "a".repeat(600) },
+			{ name: "bravo", description: "Bravo guidance.", body: "b".repeat(600) },
+		]);
+		let now = 1_000;
+		let bodyLimit = 2_048;
+		const vault = new SkillVaultController({
+			getSkills: () => skills,
+			now: () => now,
+			getMaxBodyBytes: () => bodyLimit,
+		});
+		vault.load("alpha", "model", true);
+		now = 2_000;
+		vault.load("bravo", "model", true);
+		vault.commitSystemPromptSection();
+
+		bodyLimit = 1_024;
+
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["bravo"]);
+		vault.unload();
+		expect(vault.status()).toMatchObject({ slots: [], reason: "explicit" });
+	});
+
+	it("evicts unpinned slots in load order even when every slot was used on the last request", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+			{ name: "charlie", description: "Charlie guidance.", body: "CHARLIE-BODY" },
+			{ name: "delta", description: "Delta guidance.", body: "DELTA-BODY" },
+			{ name: "echo", description: "Echo guidance.", body: "ECHO-BODY" },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now });
+		vault.load("alpha", "model");
+		now = 2_000;
+		vault.load("bravo", "model");
+		now = 3_000;
+		vault.load("charlie", "model");
+		now = 4_000;
+		vault.commitSystemPromptSection();
+
+		now = 5_000;
+		expect(vault.load("delta", "model")).toMatchObject({ ok: true, evicted: ["alpha"] });
+		now = 6_000;
+		vault.commitSystemPromptSection();
+		now = 7_000;
+		expect(vault.load("echo", "model")).toMatchObject({ ok: true, evicted: ["bravo"] });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["charlie", "delta", "echo"]);
+	});
+
+	it("refreshes pin state in both directions on reload", () => {
+		const skills = createSkills([{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" }]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+
+		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		expect(vault.status().slots).toMatchObject([{ name: "alpha", pinned: true }]);
+
+		expect(vault.load("alpha", "model")).toMatchObject({ ok: true, pinned: false });
+		expect(vault.status().slots).toMatchObject([{ name: "alpha", pinned: false }]);
+
+		expect(vault.load("alpha", "model", true)).toMatchObject({ ok: true, pinned: true });
+		expect(vault.status().slots).toMatchObject([{ name: "alpha", pinned: true }]);
+	});
+
+	it("shows the pin marker in load and status tool text", async () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+		const tool = createSkillVaultToolDefinition(vault);
+
+		const pinned = await tool.execute(
+			"load-alpha",
+			{ action: "load", name: "alpha", pin: true },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(pinned.content[0]?.type === "text" ? pinned.content[0].text : "").toContain("alpha (pinned)");
+
+		const plain = await tool.execute(
+			"load-bravo",
+			{ action: "load", name: "bravo" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(plain.content[0]?.type === "text" ? plain.content[0].text : "").not.toContain("(pinned)");
+
+		const status = await tool.execute("status", { action: "status" }, undefined, undefined, undefined as never);
+		const statusLines = status.content[0]?.type === "text" ? status.content[0].text : "";
+		expect(statusLines).toContain("alpha (pinned)");
+		expect(statusLines).not.toContain("bravo (pinned)");
 	});
 
 	it("refreshes a reloaded skill in place without evicting it", () => {
@@ -537,7 +707,7 @@ describe("SkillVaultController", () => {
 
 		const primer = generateTextToolProtocolPrimer(projectToolsForProvider([tool]));
 
-		expect(primer).toContain("skill(action:search|load|unload|status, query:string?, name:string?)");
+		expect(primer).toContain("skill(action:search|load|unload|status, query:string?, name:string?, pin:bool?)");
 		expect(primer).not.toContain("filePath");
 	});
 

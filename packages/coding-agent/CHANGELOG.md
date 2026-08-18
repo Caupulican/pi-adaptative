@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Skill vault loads accept an optional pin (up to two): pinned skills are protected from eviction while loaded, still expire idle and count against the slot and byte budgets, and eviction now honestly selects the oldest-loaded unpinned skill (per-skill use is unobservable, so the previous least-recently-used ordering was effectively load order).
+
+### Fixed
+
+- Blocked-replay and circuit-exhaustion failure records now lead with the retained root-cause diagnostic and carry the replay or circuit notice in a separate note field, and the all-caps recovery corrections were replaced with one calm actionable sentence each — anti-replay semantics, thresholds, and termination unchanged.
+
 ## [0.93.5] - 2026-08-17
 
 ### Changed

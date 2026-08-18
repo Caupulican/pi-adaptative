@@ -153,10 +153,12 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// compactRedundantEnumConstraints). Default surface now also includes skillify,
 			// skill_audit, improvement_loop, and the three lifecycle goal tools. Delegate's
 			// enum-heavy surface measures 844 tokens. task_steps measures 499 after adding
-			// authoritative pipeline linkage to both batch and single-step forms.
+			// authoritative pipeline linkage to both batch and single-step forms. skill grew to 74
+			// with the pin parameter (a bare boolean in the projected schema; annotations are
+			// stripped at the provider boundary, so there is no prose to trim).
 			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_950);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
-			expect(toolTokens.get("skill")).toBeLessThanOrEqual(70);
+			expect(toolTokens.get("skill")).toBeLessThanOrEqual(74);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(510);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);

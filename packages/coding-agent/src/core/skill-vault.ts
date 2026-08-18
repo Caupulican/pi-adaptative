@@ -10,6 +10,7 @@ export const DEFAULT_SKILL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_ACTIVE_SKILL_BODY_BYTES = 64 * 1024;
 export const MIN_ACTIVE_SKILL_BODY_BYTES = 4 * 1024;
 export const MAX_LOADED_SKILLS = 3;
+export const MAX_PINNED_SKILLS = 2;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_SEARCH_DESCRIPTION_CHARS = 240;
 
@@ -21,6 +22,7 @@ interface LoadedSkill {
 	bodyBytes: number;
 	systemPromptSection: string;
 	requester: SkillVaultRequester;
+	pinned: boolean;
 	loadedAtMs: number;
 	fileDevice: number;
 	fileInode: number;
@@ -36,6 +38,7 @@ type SkillSlotState =
 export interface SkillSlotStatus {
 	state: SkillSlotState["state"];
 	name: string;
+	pinned: boolean;
 	loadedAtMs: number;
 	lastUsedAtMs?: number;
 	idleForMs?: number;
@@ -54,8 +57,12 @@ export interface SkillSearchResult {
 }
 
 export type SkillLoadResult =
-	| { ok: true; state: "loaded_pending"; name: string; baseDir: string; evicted?: string[] }
-	| { ok: false; reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed"; message: string };
+	| { ok: true; state: "loaded_pending"; name: string; baseDir: string; pinned: boolean; evicted?: string[] }
+	| {
+			ok: false;
+			reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed" | "pin_limit";
+			message: string;
+	  };
 
 export interface SkillVaultControllerOptions {
 	getSkills(): readonly Skill[];
@@ -101,18 +108,20 @@ function aggregateBodyBytes(slots: ReadonlyMap<string, SkillSlotState>): number 
 	return total;
 }
 
-function leastRecentlyUsedName(slots: ReadonlyMap<string, SkillSlotState>, excludeName?: string): string | undefined {
-	let lruName: string | undefined;
-	let lruUsedAtMs = Number.POSITIVE_INFINITY;
+/** Per-skill use is unobservable host-side (every loaded body rides every request), so eviction is honest FIFO by loadedAtMs: oldest unpinned first, oldest pinned only once no unpinned slot remains. */
+function evictionVictimName(slots: ReadonlyMap<string, SkillSlotState>, excludeName?: string): string | undefined {
+	let victim: { name: string; pinned: boolean; loadedAtMs: number } | undefined;
 	for (const [name, slot] of slots) {
 		if (name === excludeName) continue;
-		const usedAtMs = slotLastUsedAtMs(slot);
-		if (usedAtMs < lruUsedAtMs) {
-			lruUsedAtMs = usedAtMs;
-			lruName = name;
+		if (
+			victim === undefined ||
+			(victim.pinned && !slot.pinned) ||
+			(victim.pinned === slot.pinned && slot.loadedAtMs < victim.loadedAtMs)
+		) {
+			victim = { name, pinned: slot.pinned, loadedAtMs: slot.loadedAtMs };
 		}
 	}
-	return lruName;
+	return victim?.name;
 }
 
 /** Reserve at most roughly one context token's worth of bytes per advertised context token. */
@@ -159,7 +168,7 @@ export class SkillVaultController {
 		return { candidates };
 	}
 
-	load(name: string, requester: SkillVaultRequester): SkillLoadResult {
+	load(name: string, requester: SkillVaultRequester, pin = false): SkillLoadResult {
 		const now = this.now();
 		this.reconcile(now);
 		const skill = this.getSkills().find(
@@ -167,6 +176,19 @@ export class SkillVaultController {
 		);
 		if (!skill) {
 			return { ok: false, reason: "not_found", message: `No eligible skill named ${JSON.stringify(name)}.` };
+		}
+		if (pin) {
+			let pinnedCount = 0;
+			for (const [slotName, slot] of this.slots) {
+				if (slotName !== skill.name && slot.pinned) pinnedCount++;
+			}
+			if (pinnedCount >= MAX_PINNED_SKILLS) {
+				return {
+					ok: false,
+					reason: "pin_limit",
+					message: `At most ${MAX_PINNED_SKILLS} skills can be pinned; unload a pinned skill or reload it without pin first.`,
+				};
+			}
 		}
 		const maxBodyBytes = this.resolveMaxBodyBytes();
 		let before: ReturnType<typeof statSync>;
@@ -222,6 +244,7 @@ export class SkillVaultController {
 			bodyBytes,
 			systemPromptSection: activeSkillContext(skill, body),
 			requester,
+			pinned: pin,
 			loadedAtMs: now,
 			fileDevice: file.dev,
 			fileInode: file.ino,
@@ -231,7 +254,7 @@ export class SkillVaultController {
 		});
 		const evicted: string[] = [];
 		while (next.size > MAX_LOADED_SKILLS || aggregateBodyBytes(next) > maxBodyBytes) {
-			const victim = leastRecentlyUsedName(next, skill.name);
+			const victim = evictionVictimName(next, skill.name);
 			if (!victim) break;
 			next.delete(victim);
 			evicted.push(victim);
@@ -242,6 +265,7 @@ export class SkillVaultController {
 			state: "loaded_pending",
 			name: skill.name,
 			baseDir: skill.baseDir,
+			pinned: pin,
 			...(evicted.length > 0 ? { evicted } : {}),
 		};
 	}
@@ -320,12 +344,13 @@ export class SkillVaultController {
 
 	private slotStatus(slot: SkillSlotState, now: number): SkillSlotStatus {
 		if (slot.state === "loaded_pending") {
-			return { state: "loaded_pending", name: slot.skill.name, loadedAtMs: slot.loadedAtMs };
+			return { state: "loaded_pending", name: slot.skill.name, pinned: slot.pinned, loadedAtMs: slot.loadedAtMs };
 		}
 		const idleForMs = Math.max(0, now - slot.lastUsedAtMs);
 		return {
 			state: "active",
 			name: slot.skill.name,
+			pinned: slot.pinned,
 			loadedAtMs: slot.loadedAtMs,
 			lastUsedAtMs: slot.lastUsedAtMs,
 			idleForMs,
@@ -348,7 +373,7 @@ export class SkillVaultController {
 			}
 		}
 		while (aggregateBodyBytes(next) > maxBodyBytes) {
-			const victim = leastRecentlyUsedName(next);
+			const victim = evictionVictimName(next);
 			if (!victim) break;
 			next.delete(victim);
 			reason = "budget_exceeded";

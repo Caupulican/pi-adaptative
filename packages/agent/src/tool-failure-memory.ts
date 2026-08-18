@@ -28,9 +28,9 @@ const REPAIRABLE_REJECTION_CODES = new Set(["invalid_arguments", "malformed_call
 const LEGACY_GENERIC_EXECUTION_CORRECTION =
 	"Change the arguments or approach before retrying; do not resend the unchanged operation.";
 const BLOCKED_REPLAY_CAVEMAN_CORRECTION =
-	"CAVEMAN MODE - MANDATORY. SAME OPERATION BLOCKED. Do not repeat an unchanged operation. NEVER call it again with the same arguments in this run. This is not a harness loop or failure.";
+	"Blocked: this exact operation will not run again this session — change the operation or continue other work.";
 const CLOSED_OPERATION_CAVEMAN_CORRECTION =
-	"CAVEMAN MODE - MANDATORY: OPERATION CLOSED; not executed. Do not repeat an unchanged operation. NEVER call it again with the same arguments in this run. Use a different operation/tool or continue independent work. The recovery guard prevented a loop; this is not harness failure.";
+	"Closed: this exact operation was not executed and will not run again this session — use a different operation or continue other work.";
 
 export type ToolFailureState = "failed" | "rejected";
 
@@ -48,6 +48,8 @@ export interface ToolFailureMemoryRecord {
 	phase: ToolFailurePhase;
 	failureCode: string;
 	diagnostic?: string;
+	/** Bounded result-scoped harness notice (replay block, circuit state); never displaces the retained diagnostic. */
+	note?: string;
 	/** Bounded tool-owned source evidence needed to construct a changed operation. */
 	evidence?: string;
 	correction: string;
@@ -802,6 +804,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 	}
 	const diagnostic =
 		typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
+	const note = typeof candidate.note === "string" ? truncate(candidate.note, MAX_DIAGNOSTIC_CHARS) : undefined;
 	const evidence = sanitizeToolFailureEvidence(candidate.evidence);
 	const retainedCorrection =
 		typeof candidate.correction === "string" ? truncate(candidate.correction, MAX_CORRECTION_CHARS) : undefined;
@@ -831,6 +834,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		phase,
 		failureCode: boundedFailureCode(candidate.failureCode),
 		diagnostic,
+		note,
 		evidence,
 		correction,
 	};
@@ -1167,6 +1171,7 @@ function formatRecordJson(
 		...(includeOperation ? { operation: record.operation } : {}),
 		failure_code: record.failureCode,
 		...(record.diagnostic ? { diagnostic: record.diagnostic } : {}),
+		...(record.note ? { note: record.note } : {}),
 		...(evidence ? { evidence } : {}),
 		...guidance,
 		...(record.attemptMemory === "discard" ? { attempt_memory: "discarded" } : {}),
@@ -1204,11 +1209,8 @@ export function createToolFailureResult(
 export function createRepeatedToolFailureResult(
 	record: ToolFailureMemoryRecord,
 ): AgentToolResult<ToolFailureMemoryDetails> {
-	const retainedRecord = {
-		...retainBlockedToolFailure(record),
-		correction: BLOCKED_REPLAY_CAVEMAN_CORRECTION,
-	};
-	const diagnostic = truncateMiddle(
+	const retainedRecord = retainBlockedToolFailure(record);
+	const replayNotice = truncateMiddle(
 		`The unchanged operation was not executed. Unchanged replay blocked after ${record.failureCode}`,
 		MAX_DIAGNOSTIC_CHARS,
 	);
@@ -1216,20 +1218,22 @@ export function createRepeatedToolFailureResult(
 		...retainedRecord,
 		state: "rejected",
 		failureCode: "repeated_failed_operation",
-		diagnostic,
-		correction: retainedRecord.correction,
+		...(retainedRecord.diagnostic
+			? { note: replayNotice }
+			: { diagnostic: replayNotice, correction: BLOCKED_REPLAY_CAVEMAN_CORRECTION }),
 	});
 	return {
 		...blockedResult,
-		// The visible result describes this rejected replay, while retained memory keeps the
-		// authoritative cause so later blocks do not recursively wrap synthetic failures.
+		// The visible result leads with the retained root cause and carries the replay notice as a
+		// note, while retained memory keeps the authoritative cause so later blocks do not
+		// recursively wrap synthetic failures.
 		details: { piToolFailureMemory: retainedRecord },
 	};
 }
 
 export function createToolFailureRecoveryExhaustedResult(
 	record: ToolFailureMemoryRecord,
-	diagnostic: string,
+	note: string,
 ): AgentToolResult<ToolFailureMemoryDetails> {
 	const retainedRecord = retainBlockedToolFailure(record);
 	const exhaustedResult = createToolFailureResult(
@@ -1237,7 +1241,7 @@ export function createToolFailureRecoveryExhaustedResult(
 			...retainedRecord,
 			state: "rejected",
 			failureCode: "recovery_exhausted",
-			diagnostic: truncateMiddle(diagnostic, MAX_DIAGNOSTIC_CHARS),
+			note: truncateMiddle(note, MAX_DIAGNOSTIC_CHARS),
 			correction:
 				"Stop retrying tools in this run. Report the unresolved failure and the user or environment action required to continue.",
 		},
@@ -1251,7 +1255,7 @@ export function createToolFailureRecoveryExhaustedResult(
 
 export function createToolFailureOperationExhaustedResult(
 	record: ToolFailureMemoryRecord,
-	diagnostic: string,
+	note: string,
 ): AgentToolResult<ToolFailureMemoryDetails> {
 	const retainedRecord = {
 		...retainBlockedToolFailure(record),
@@ -1262,7 +1266,7 @@ export function createToolFailureOperationExhaustedResult(
 			...retainedRecord,
 			state: "rejected",
 			failureCode: "operation_recovery_exhausted",
-			diagnostic: truncateMiddle(diagnostic, MAX_DIAGNOSTIC_CHARS),
+			note: truncateMiddle(note, MAX_DIAGNOSTIC_CHARS),
 		},
 		false,
 	);

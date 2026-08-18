@@ -366,8 +366,10 @@ describe("mandatory tool failure recovery protocol", () => {
 		expect(providerTurns).toBe(5);
 		expect(providerContexts[3]?.tools?.map((tool) => tool.name)).toEqual(["trello", "read_repo"]);
 		expect(providerContexts[3]?.systemPrompt).not.toContain("MANDATORY TOOL FAILURE DELIVERY");
-		expect(providerContexts[3]?.systemPrompt).toContain("OPERATION CLOSED");
-		expect(providerContexts[3]?.systemPrompt).toContain("not harness failure");
+		expect(providerContexts[3]?.systemPrompt).toContain(
+			"Closed: this exact operation was not executed and will not run again this session",
+		);
+		expect(providerContexts[3]?.systemPrompt).toContain("Trello credentials not found.");
 		expect(providerContexts[3]?.systemPrompt).not.toContain("Stop retrying tools in this run");
 		expect(
 			events.some(

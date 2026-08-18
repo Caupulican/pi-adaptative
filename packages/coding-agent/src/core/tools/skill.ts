@@ -10,6 +10,7 @@ const skillSchema = Type.Object(
 		),
 		query: Type.Optional(Type.String({ description: "search query" })),
 		name: Type.Optional(Type.String({ description: "exact skill name; unload without it unloads all" })),
+		pin: Type.Optional(Type.Boolean({ description: "protect from eviction while loaded; max 2" })),
 	},
 	{ additionalProperties: false },
 );
@@ -27,18 +28,20 @@ function searchText(result: SkillSearchResult): string {
 }
 
 function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {
+	const pin = result.pinned ? " (pinned)" : "";
 	const evicted = result.evicted ? `; EVICTED: ${result.evicted.join(", ")}` : "";
-	return `skill loaded_pending: ${result.name} (base ${result.baseDir}), activates next request; expires when idle${evicted}`;
+	return `skill loaded_pending: ${result.name}${pin} (base ${result.baseDir}), activates next request; expires when idle${evicted}`;
 }
 
 function statusText(result: SkillVaultStatus): string {
 	if (result.slots.length === 0) return `skill state: unloaded${result.reason ? `, ${result.reason}` : ""}`;
 	return result.slots
-		.map((slot) =>
-			slot.state === "loaded_pending"
-				? `skill state: loaded_pending, ${slot.name}, activates next request`
-				: `skill state: active, ${slot.name}, idle ${Math.round(slot.idleForMs ?? 0)}ms, expires ${Math.round(slot.expiresInMs ?? 0)}ms`,
-		)
+		.map((slot) => {
+			const pin = slot.pinned ? " (pinned)" : "";
+			return slot.state === "loaded_pending"
+				? `skill state: loaded_pending, ${slot.name}${pin}, activates next request`
+				: `skill state: active, ${slot.name}${pin}, idle ${Math.round(slot.idleForMs ?? 0)}ms, expires ${Math.round(slot.expiresInMs ?? 0)}ms`;
+		})
 		.join("\n");
 }
 
@@ -49,7 +52,7 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 		label: "Skill",
 		toolGroup: "skills",
 		description:
-			"Skill vault, up to 3 concurrent skills under one byte budget. Specialist guidance useful: search, load exact name before work. Load may evict the least-recently-used skill and reports it. Host injects bodies transiently starting next request, expires idle; unload one name or all.",
+			"Skill vault, up to 3 concurrent skills under one byte budget. Specialist guidance useful: search, load exact name before work. Load may evict the oldest-loaded unpinned skill and reports it; pin protects up to 2 task-critical skills from eviction (they still expire idle). Host injects bodies transiently starting next request, expires idle; unload one name or all.",
 		promptSnippet: "Search/load skill.",
 		parameters: skillSchema,
 		async execute(_toolCallId, input) {
@@ -71,7 +74,7 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 				}
 				case "load": {
 					const result: SkillLoadResult = input.name?.trim()
-						? vault.load(input.name.trim(), "model")
+						? vault.load(input.name.trim(), "model", input.pin === true)
 						: { ok: false, reason: "not_found", message: "skill load requires exact name" };
 					return {
 						content: [

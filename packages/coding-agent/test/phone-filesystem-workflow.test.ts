@@ -476,7 +476,8 @@ describe("non-native phone filesystem workflow", () => {
 
 			expect(blockedContext).toContain('"failure_code":"file_not_found"');
 			expect(blockedContext).toContain('"occ":2');
-			expect(blockedContext).toContain("Do not repeat an unchanged operation");
+			expect(blockedContext).toContain("never repeat the same call");
+			expect(blockedContext).toContain("If the goal requires this exact missing file and its content is known");
 			expect(blockedContext).not.toContain('"failure_code":"repeated_failed_operation"');
 			expect(harness.responseIndex).toBe(responses.length);
 			expect(await readFile(unrelatedPath, "utf8")).toBe("unrelated");
