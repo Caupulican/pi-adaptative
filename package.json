@@ -49,6 +49,7 @@
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
 		"release:promote": "node scripts/release.mjs promote",
+		"release:repair": "node scripts/release.mjs repair",
 		"prepare": "husky"
 	},
 	"devDependencies": {

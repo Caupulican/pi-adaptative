@@ -8,7 +8,9 @@ import {
 	parsePorcelainPath,
 	partitionReleaseChanges,
 	interpretHeadWorkflow,
+	matchesReleaseCandidateSubject,
 	pickWorkflowConclusion,
+	stripEmptyUnreleasedSection,
 } from "./release-staging.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -83,4 +85,31 @@ test("interpretHeadWorkflow refuses prepare unless HEAD CI already succeeded", (
 	const missing = interpretHeadWorkflow({ state: "missing" }, sha, "ci.yml");
 	assert.equal(missing.ok, false);
 	assert.match(missing.error, /has no ci.yml run/);
+});
+
+test("release candidate subjects include an explicit repair without matching unrelated commits", () => {
+	assert.equal(matchesReleaseCandidateSubject("Release v0.93.6", "0.93.6"), true);
+	assert.equal(matchesReleaseCandidateSubject("Repair release v0.93.6", "0.93.6"), true);
+	assert.equal(matchesReleaseCandidateSubject("Add [Unreleased] section for next cycle", "0.93.6"), false);
+	assert.equal(matchesReleaseCandidateSubject("Repair release v0.93.7", "0.93.6"), false);
+});
+
+test("release repair removes only an empty next-cycle section", () => {
+	assert.equal(
+		stripEmptyUnreleasedSection("## [Unreleased]\n\n## [0.93.6] - 2026-08-18\n\n### Fixed\n"),
+		"## [0.93.6] - 2026-08-18\n\n### Fixed\n",
+	);
+	assert.equal(
+		stripEmptyUnreleasedSection("# Changelog\n\n## [Unreleased]\n\n## [0.93.6] - 2026-08-18\n"),
+		"# Changelog\n\n## [0.93.6] - 2026-08-18\n",
+	);
+	assert.throws(
+		() => stripEmptyUnreleasedSection("## [Unreleased]\n\n### Fixed\n\n- New work.\n\n## [0.93.6]\n"),
+		/contains release notes/,
+	);
+	assert.throws(() => stripEmptyUnreleasedSection("## [0.93.6]\n"), /has no \"## \[Unreleased\]\" section/);
+	assert.throws(
+		() => stripEmptyUnreleasedSection("## [0.93.6]\n\n## [Unreleased]\n\n## [0.93.5]\n"),
+		/first version section/,
+	);
 });

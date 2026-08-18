@@ -284,6 +284,7 @@ test("the release command requires exact-HEAD GitHub CI before version mutation 
 	assert.equal(packageJson.scripts["release:minor"], "node scripts/release.mjs minor");
 	assert.equal(packageJson.scripts["release:major"], "node scripts/release.mjs major");
 	assert.equal(packageJson.scripts["release:promote"], "node scripts/release.mjs promote");
+	assert.equal(packageJson.scripts["release:repair"], "node scripts/release.mjs repair");
 });
 
 function createReleaseExecutionProofFixture(context, ciConclusion) {
@@ -331,20 +332,25 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 	chmodSync(testShPath, 0o755);
 
 	git(["init", "--initial-branch=main"]);
+	git(["config", "core.autocrlf", "false"]);
 	git(["add", "-A"]);
 	git(["commit", "-m", "initial fixture commit"]);
 	git(["remote", "add", "origin", originDir]);
 	git(["push", "-u", "origin", "main"]);
 
-	const headSha = git(["rev-parse", "HEAD"]).trim();
 	const fakeGhPath = join(fakeBin, "gh");
-	writeFileSync(
-		fakeGhPath,
-		`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(
-			JSON.stringify([{ headSha, status: "completed", conclusion: ciConclusion }]),
-		)});\n`,
-	);
-	chmodSync(fakeGhPath, 0o755);
+	const setCiConclusion = (conclusion) => {
+		const sha = git(["rev-parse", "HEAD"]).trim();
+		writeFileSync(
+			fakeGhPath,
+			`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(
+				JSON.stringify([{ headSha: sha, status: "completed", conclusion }]),
+			)});\n`,
+		);
+		chmodSync(fakeGhPath, 0o755);
+		return sha;
+	};
+	const headSha = setCiConclusion(ciConclusion);
 
 	const fakeNpmPath = join(fakeBin, "npm");
 	writeFileSync(
@@ -360,7 +366,7 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 		PI_RELEASE_TEST_SH_CAPTURE: testShCapture,
 	};
 
-	return { root, workDir, originDir, git, releaseEnv, headSha, npmCapture, testShCapture };
+	return { root, workDir, originDir, git, releaseEnv, headSha, npmCapture, setCiConclusion, testShCapture };
 }
 
 test(
@@ -428,6 +434,42 @@ test(
 			.split("\n")
 			.map((line) => JSON.parse(line));
 		assert.deepEqual(npmCalls, [["run", "version:patch"]]);
+	},
+);
+
+test(
+	"release.mjs repairs an untagged prepared version without another version bump (execution proof)",
+	{ skip: process.platform === "win32" },
+	(context) => {
+		const fixture = createReleaseExecutionProofFixture(context, "success");
+		const changelogPath = join(fixture.workDir, "packages", "ai", "CHANGELOG.md");
+		writeFileSync(changelogPath, "## [1.0.0] - 2026-08-18\n");
+		fixture.git(["add", "packages/ai/CHANGELOG.md"]);
+		fixture.git(["commit", "-m", "Release v1.0.0"]);
+		fixture.git(["push", "origin", "main"]);
+		const nextCycleContent = "## [Unreleased]\n\n## [1.0.0] - 2026-08-18\n";
+		writeFileSync(changelogPath, nextCycleContent);
+		fixture.git(["add", "packages/ai/CHANGELOG.md"]);
+		fixture.git(["commit", "-m", "Add [Unreleased] section for next cycle"]);
+		fixture.git(["push", "origin", "main"]);
+		const repairHeadSha = fixture.setCiConclusion("success");
+
+		const result = spawnSync(process.execPath, [releasePath, "repair"], {
+			cwd: fixture.workDir,
+			encoding: "utf8",
+			env: fixture.releaseEnv,
+		});
+
+		assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stdout, new RegExp(`HEAD ${repairHeadSha} already has a successful ci\\.yml run`));
+		assert.match(result.stdout, /Repairing prepared version 1\.0\.0 without another version bump/);
+		assert.equal(existsSync(fixture.testShCapture), false, "repair must not invoke local ./test.sh");
+		const npmCalls = readFileSync(fixture.npmCapture, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		assert.deepEqual(npmCalls, [["run", "check"]]);
+		assert.equal(readFileSync(changelogPath, "utf8"), nextCycleContent, "failed repair must roll back its edits");
 	},
 );
 

@@ -113,6 +113,36 @@ export function interpretHeadWorkflow(match, sha, workflow) {
 	};
 }
 
+export function matchesReleaseCandidateSubject(subject, version) {
+	return subject === `Release v${version}` || subject === `Repair release v${version}`;
+}
+
+/** Remove the next-cycle marker only when it contains no release notes. */
+export function stripEmptyUnreleasedSection(content) {
+	const marker = /^## \[Unreleased\][ \t]*\r?$/m.exec(content);
+	if (!marker || marker.index === undefined) {
+		throw new Error('has no "## [Unreleased]" section');
+	}
+	const firstVersionHeading = /^## \[[^\r\n]+\][^\r\n]*\r?$/m.exec(content);
+	if (!firstVersionHeading || firstVersionHeading.index !== marker.index) {
+		throw new Error('does not have "## [Unreleased]" as its first version section');
+	}
+
+	const bodyStart = marker.index + marker[0].length;
+	const nextHeading = /\r?\n## \[[^\r\n]+\]/.exec(content.slice(bodyStart));
+	if (!nextHeading || nextHeading.index === undefined) {
+		throw new Error('has no released version section after "## [Unreleased]"');
+	}
+
+	const nextHeadingStart = bodyStart + nextHeading.index;
+	if (content.slice(bodyStart, nextHeadingStart).trim().length > 0) {
+		throw new Error('the "## [Unreleased]" section contains release notes');
+	}
+
+	const headingOffset = content.startsWith("\r\n", nextHeadingStart) ? 2 : 1;
+	return content.slice(0, marker.index) + content.slice(nextHeadingStart + headingOffset);
+}
+
 export function partitionReleaseChanges(statusOutput, repoRoot = ".") {
 	const allowlist = computeReleaseAllowlist(repoRoot);
 	const changedPaths = collectChangedPaths(statusOutput);

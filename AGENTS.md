@@ -168,7 +168,7 @@ Attribution:
    ```bash
    npm run release:promote
    ```
-   This is also how to resume if the `promote` step's CI poll times out or the local process is interrupted after prepare succeeded. Do not rerun `release:patch`/`release:minor`/`release:major` for the same version once its release commit has been pushed - that would bump the version again.
+   This is also how to resume if the `promote` step's CI poll times out or the local process is interrupted after prepare succeeded. If a failed gate requires a committed fix, commit and push the fix, wait for successful exact-HEAD `ci.yml`, then run `npm run release:repair`. Repair requires the tag to remain free and every next-cycle `[Unreleased]` section to remain empty; it removes only those empty markers, creates and pushes `Repair release vX.Y.Z` without another version bump, restores the markers, and promotes the repaired exact SHA through CI and destructive gates. Do not rerun `release:patch`/`release:minor`/`release:major` for the same version once its release commit has been pushed - that would bump the version again.
 
 5. **CI publishes npm packages**: the `vX.Y.Z` tag (pushed only after CI succeeds on the release commit) triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
 

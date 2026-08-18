@@ -5,6 +5,7 @@
  * Usage:
  *   node scripts/release.mjs <major|minor|patch>
  *   node scripts/release.mjs <x.y.z>
+ *   node scripts/release.mjs repair
  *   node scripts/release.mjs promote
  *
  * The release flow is split into two gated phases so a CI failure never costs a version number:
@@ -24,6 +25,13 @@
  * 8. Add new [Unreleased] sections to changelogs, commit, and push main again.
  * Any failure during steps 3-8 resets the local tree back to the preflight commit.
  *
+ * REPAIR - recover an untagged prepared version after a gate exposed a required fix:
+ * - Require successful exact-HEAD CI, the original Release commit in current main's ancestry,
+ *   a free version tag, and empty next-cycle changelog sections.
+ * - Remove only those empty sections, commit "Repair release vX.Y.Z", and push it as the new
+ *   release candidate without another version bump. Restore the next-cycle sections afterward.
+ * - Promote the repaired candidate through exact-SHA CI and destructive gates normally.
+ *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
  * 9. Locate the "Release vX.Y.Z" commit and poll GitHub Actions (workflow ci.yml) for its
  *    conclusion on that exact SHA.
@@ -40,17 +48,20 @@ import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import {
 	interpretHeadWorkflow,
+	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
 	pickWorkflowConclusion,
+	stripEmptyUnreleasedSection,
 } from "./release-staging.mjs";
 
 const RELEASE_TARGET = process.argv[2];
 const BUMP_TYPES = new Set(["major", "minor", "patch"]);
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const isPrepareTarget = BUMP_TYPES.has(RELEASE_TARGET) || SEMVER_RE.test(RELEASE_TARGET);
+const isRepairTarget = RELEASE_TARGET === "repair";
 
-if (RELEASE_TARGET !== "promote" && !isPrepareTarget) {
-	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|promote>");
+if (RELEASE_TARGET !== "promote" && !isPrepareTarget && !isRepairTarget) {
+	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|promote>");
 	process.exit(1);
 }
 
@@ -203,6 +214,24 @@ function addUnreleasedSection() {
 	}
 }
 
+function removeEmptyUnreleasedSections(version) {
+	const updates = getChangelogs().map((changelog) => {
+		const content = readFileSync(changelog, "utf-8");
+		if (!content.includes(`## [${version}]`)) {
+			throw new Error(`${changelog} has no section for prepared version ${version}.`);
+		}
+		try {
+			return { changelog, content: stripEmptyUnreleasedSection(content) };
+		} catch (error) {
+			throw new Error(`${changelog} ${error instanceof Error ? error.message : String(error)}; refusing release repair.`);
+		}
+	});
+	for (const update of updates) {
+		writeFileSync(update.changelog, update.content);
+		console.log(`  Removed empty [Unreleased] from ${update.changelog}`);
+	}
+}
+
 function computeProspectiveVersion() {
 	const currentVersion = getVersion();
 	if (BUMP_TYPES.has(RELEASE_TARGET)) {
@@ -230,7 +259,7 @@ function assertTagIsFree(version) {
 }
 
 // All preflight checks are read-only (no local or remote mutation), so failures exit directly.
-function preflight() {
+function preflight(prospectiveVersion) {
 	console.log("Running preflight checks...");
 
 	const branch = run("git rev-parse --abbrev-ref HEAD", { silent: true }).trim();
@@ -258,7 +287,6 @@ function preflight() {
 		process.exit(1);
 	}
 
-	const prospectiveVersion = computeProspectiveVersion();
 	assertTagIsFree(prospectiveVersion);
 
 	const preflightSha = run("git rev-parse HEAD", { silent: true }).trim();
@@ -292,7 +320,8 @@ function rollbackToPreflightSha(preflightSha) {
 
 function prepareRelease() {
 	console.log("\n=== Preparing release ===\n");
-	const preflightSha = preflight();
+	const prospectiveVersion = computeProspectiveVersion();
+	const preflightSha = preflight(prospectiveVersion);
 
 	try {
 		// 2. Exact-HEAD CI is the only full-suite authority. Preflight fails closed unless that
@@ -354,19 +383,72 @@ function prepareRelease() {
 	}
 }
 
-function findReleaseCommitSha(version) {
+function findReleaseCandidateSha(version, includeRepairs = true) {
 	run("git fetch origin --tags", { silent: true });
-	const message = `Release v${version}`;
-	const log = run("git log --all --format=%H%x1f%s", { silent: true }) || "";
+	const log = run("git log origin/main --format=%H%x1f%s", { silent: true }) || "";
 	for (const line of log.split("\n")) {
 		if (!line) continue;
 		const separatorIndex = line.indexOf("\x1f");
 		if (separatorIndex === -1) continue;
 		const sha = line.slice(0, separatorIndex);
 		const subject = line.slice(separatorIndex + 1);
-		if (subject === message) return sha;
+		if (includeRepairs ? matchesReleaseCandidateSubject(subject, version) : subject === `Release v${version}`) return sha;
 	}
 	return undefined;
+}
+
+function prepareReleaseRepair() {
+	console.log("\n=== Repairing untagged release ===\n");
+	const version = getVersion();
+	const preflightSha = preflight(version);
+	const originalReleaseSha = findReleaseCandidateSha(version, false);
+	if (!originalReleaseSha) {
+		throw new Error(`Could not find the original "Release v${version}" commit; refusing release repair.`);
+	}
+	const isAncestor = run(`git merge-base --is-ancestor ${shellQuote(originalReleaseSha)} HEAD`, {
+		silent: true,
+		ignoreError: true,
+	});
+	if (isAncestor === null) {
+		throw new Error(`Original release commit ${originalReleaseSha} is not an ancestor of HEAD; refusing release repair.`);
+	}
+
+	try {
+		console.log(`Repairing prepared version ${version} without another version bump...`);
+		removeEmptyUnreleasedSections(version);
+		console.log();
+
+		console.log("Running checks...");
+		run("npm run check");
+		console.log();
+
+		console.log("Committing repaired release candidate...");
+		stageChangedFiles();
+		run(`git commit -m "Repair release v${version}"`);
+		console.log();
+
+		console.log("Pushing repaired release candidate to origin/main...");
+		run("git push origin main");
+		console.log();
+
+		console.log("Adding [Unreleased] sections for next cycle...");
+		addUnreleasedSection();
+		console.log();
+
+		console.log("Committing changelog updates...");
+		stageChangedFiles();
+		run('git commit -m "Add [Unreleased] section for next cycle"');
+		console.log();
+
+		console.log("Pushing next-cycle commit to origin/main...");
+		run("git push origin main");
+		console.log();
+
+		return version;
+	} catch (error) {
+		rollbackToPreflightSha(preflightSha);
+		throw error;
+	}
 }
 
 async function waitForWorkflow(sha, workflow, options = {}) {
@@ -449,14 +531,14 @@ async function promoteRelease(versionArg) {
 		return;
 	}
 
-	const releaseSha = findReleaseCommitSha(version);
+	const releaseSha = findReleaseCandidateSha(version);
 	if (!releaseSha) {
 		throw new Error(
-			`Could not find a commit titled "Release v${version}" in any ref (local or origin). Run ` +
-				'"npm run release:patch|minor|major" to prepare the release first.',
+			`Could not find a release candidate for v${version} in any ref (local or origin). Run ` +
+				'"npm run release:patch|minor|major" to prepare it, or "npm run release:repair" after a corrected failed gate.',
 		);
 	}
-	console.log(`  Release commit: ${releaseSha}`);
+	console.log(`  Release candidate: ${releaseSha}`);
 
 	const conclusion = await waitForCi(releaseSha);
 	if (conclusion !== "success") {
@@ -495,6 +577,9 @@ console.log("\n=== Release Script ===\n");
 try {
 	if (RELEASE_TARGET === "promote") {
 		await promoteRelease();
+	} else if (isRepairTarget) {
+		const version = prepareReleaseRepair();
+		await promoteRelease(version);
 	} else {
 		const version = prepareRelease();
 		await promoteRelease(version);
