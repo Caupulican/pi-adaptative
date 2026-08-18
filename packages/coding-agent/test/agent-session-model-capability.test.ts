@@ -292,12 +292,18 @@ describe("model capability auto-detection", () => {
 		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
 		let harness: Harness | undefined;
 		try {
-			harness = await createHarness({
-				models: [{ id: "mid-model", contextWindow: 16_384 }],
-				settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
-			});
-			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
-			expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
+			try {
+				harness = await createHarness({
+					models: [{ id: "mid-model", contextWindow: 16_384 }],
+					settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
+				});
+				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
+				expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
+			} finally {
+				if (harness) {
+					await harness.cleanup();
+				}
+			}
 		} finally {
 			platformSpy.mockRestore();
 			if (prevTemp === undefined) delete process.env.TEMP;
@@ -307,9 +313,6 @@ describe("model capability auto-detection", () => {
 			if (prevTmpdir === undefined) delete process.env.TMPDIR;
 			else process.env.TMPDIR = prevTmpdir;
 
-			if (harness) {
-				await harness.cleanup();
-			}
 			if (existsSync(longTempRoot)) {
 				rmSync(longTempRoot, { recursive: true, force: true });
 			}
