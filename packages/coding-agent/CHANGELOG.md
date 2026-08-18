@@ -1,11 +1,20 @@
 ## [Unreleased]
 
+### Security
+
+- Shell commands now project their statically recognizable filesystem operands (absolute, home-anchored, dot-relative, embedded-traversal, flag-value, and redirect-target paths) into the shared path-projection owner, and process-launching tools carry path-scope enforcement with an execute access class bound to the union of granted read and write scopes — closing two holes where autonomy gates and the capability gateway never path-checked bash commands at all.
+
 ### Changed
 
+- Context GC keeps investigations intact: the recency window default rose from 8 to 24 messages, tool results referenced in recent assistant turns are protected from packing (superseded reads still pack), and packed stubs now cite retrieval as an imperative `read <path>` call.
 - Skill vault loads accept an optional pin (up to two): pinned skills are protected from eviction while loaded, still expire idle and count against the slot and byte budgets, and eviction now honestly selects the oldest-loaded unpinned skill (per-skill use is unobservable, so the previous least-recently-used ordering was effectively load order).
+- The standing system prompt slimmed down: the N+2 architecture and evidence-gate statutes moved out of the full core into on-demand skills (new bundled `n-plus-2-architecture`; existing `evidence-gated-tdd`) behind one pointer line, and the contract gained explicit precedence (current-turn user instructions override standing style, never security) and answer-shape rules (analysis asks get complete answers; harness protocol text is never restated as an answer).
 
 ### Fixed
 
+- Same-batch edits to one file no longer collide: an identity change observed at execution triggers a bounded re-read and anchor revalidation (twice at most) with the write bound atomically to the revalidated version, and a stale anchor caused by this run's own earlier mutation says so; external-change race protection is unchanged.
+- Policy rejections that teach no longer lose their lesson to diagnostic truncation: broad-search blocks resolve through a catalogue entry whose guidance carries the narrow-form advice and the `broadSearch="route-to-file"` escape route un-truncated.
+- Tests spawning the CLI as a child process now pass the suite's `pi-source` resolution condition, so a stale gitignored `dist` build can no longer crash the child at startup and fail six startup tests with unrelated assertions.
 - Blocked-replay and circuit-exhaustion failure records now lead with the retained root-cause diagnostic and carry the replay or circuit notice in a separate note field, and the all-caps recovery corrections were replaced with one calm actionable sentence each — anti-replay semantics, thresholds, and termination unchanged.
 
 ## [0.93.5] - 2026-08-17

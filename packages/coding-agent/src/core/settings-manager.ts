@@ -66,7 +66,7 @@ export interface SemanticMemoryGcSettings {
 
 export interface ContextGcSettings {
 	enabled?: boolean; // default: true
-	preserveRecentMessages?: number; // default: 8
+	preserveRecentMessages?: number; // default: 24 -- see context-gc.ts DEFAULT_CONTEXT_GC_SETTINGS (canonical)
 	minToolResultChars?: number; // default: 1200
 	tools?: string[]; // default: read,bash,rg,grep,context_headroom_retrieve,headroom_retrieve
 	semanticMemory?: SemanticMemoryGcSettings;

@@ -385,7 +385,7 @@ describe("file mutation preflight", () => {
 		expect(readFileSync(path, "utf8")).toBe("won by another process");
 	});
 
-	it("rechecks edit identity after preflight and rejects an externally changed target", async () => {
+	it("rechecks edit identity after preflight and rejects an externally changed target whose anchor is gone", async () => {
 		const path = join(testDir, "stale.txt");
 		writeFileSync(path, "alpha\nbeta\n", "utf8");
 		let targetInspections = 0;
@@ -409,10 +409,13 @@ describe("file mutation preflight", () => {
 			intentController,
 		});
 
-		await expect(
+		const failure = await rejectionMessage(
 			tool.execute("edit-stale", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
-		).rejects.toThrow(/changed|stale/i);
-		expect(targetInspections).toBe(2);
+		);
+		expect(failure).toMatch(/could not find the exact text/i);
+		expect(failure).not.toMatch(/changed during edit execution/i);
+		expect(failure).not.toContain("produced by an earlier mutation in this run");
+		expect(targetInspections).toBe(4);
 		expect(writeCalls).toBe(0);
 		expect(readFileSync(path, "utf8")).toBe("external change\n");
 	});
@@ -420,11 +423,13 @@ describe("file mutation preflight", () => {
 	it("rechecks edit identity immediately before writing and preserves a concurrent external change", async () => {
 		const path = join(testDir, "changed-after-read.txt");
 		writeFileSync(path, "alpha\nbeta\n", "utf8");
+		let readCalls = 0;
 		let writeCalls = 0;
 		const intentController = new FileMutationIntentController();
 		const tool = createEditTool(testDir, {
 			operations: {
 				readFile: async (target) => {
+					readCalls++;
 					const original = readFileSync(target);
 					writeFileSync(target, "external change after read\n", "utf8");
 					return original;
@@ -436,11 +441,173 @@ describe("file mutation preflight", () => {
 			intentController,
 		});
 
-		await expect(
+		const failure = await rejectionMessage(
 			tool.execute("edit-changed-after-read", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
-		).rejects.toThrow(/changed during edit execution/i);
+		);
+		expect(failure).toMatch(/could not find the exact text/i);
+		expect(failure).not.toMatch(/changed during edit execution/i);
+		expect(readCalls).toBe(2);
 		expect(writeCalls).toBe(0);
 		expect(readFileSync(path, "utf8")).toBe("external change after read\n");
+	});
+
+	it("applies an edit after an external change that kept its anchor intact", async () => {
+		const path = join(testDir, "external-anchor-survives.txt");
+		writeFileSync(path, "alpha\nbeta\n", "utf8");
+		let targetInspections = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && ++targetInspections === 2) writeFileSync(path, "intro\nalpha\nbeta\n", "utf8");
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createEditTool(testDir, { intentController });
+
+		await tool.execute("edit-external-anchor", {
+			path,
+			edits: [{ oldText: "alpha", newText: "ALPHA-changed" }],
+		});
+
+		expect(readFileSync(path, "utf8")).toBe("intro\nALPHA-changed\nbeta\n");
+	});
+
+	it("applies both same-batch edits to one file when the second anchor survives the first replacement", async () => {
+		const path = join(testDir, "same-batch-disjoint.txt");
+		writeFileSync(path, "alpha\nbeta\ngamma\n", "utf8");
+		const bothPreflightsReached = createDeferred();
+		let preflightInspections = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && preflightInspections < 2) {
+						preflightInspections++;
+						if (preflightInspections === 2) bothPreflightsReached.resolve();
+						await bothPreflightsReached.promise;
+					}
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createEditTool(testDir, { intentController });
+
+		await Promise.all([
+			tool.execute("edit-batch-first", { path, edits: [{ oldText: "alpha", newText: "ALPHA-changed" }] }),
+			tool.execute("edit-batch-second", { path, edits: [{ oldText: "gamma", newText: "GAMMA-changed" }] }),
+		]);
+
+		expect(readFileSync(path, "utf8")).toBe("ALPHA-changed\nbeta\nGAMMA-changed\n");
+	});
+
+	it("applies every edit of a larger same-batch to one file when anchors stay disjoint", async () => {
+		const path = join(testDir, "same-batch-three.txt");
+		writeFileSync(path, "alpha\nbeta\ngamma\ndelta\n", "utf8");
+		const allPreflightsReached = createDeferred();
+		let preflightInspections = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && preflightInspections < 3) {
+						preflightInspections++;
+						if (preflightInspections === 3) allPreflightsReached.resolve();
+						await allPreflightsReached.promise;
+					}
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createEditTool(testDir, { intentController });
+
+		await Promise.all([
+			tool.execute("edit-three-first", { path, edits: [{ oldText: "alpha", newText: "ALPHA-changed" }] }),
+			tool.execute("edit-three-second", { path, edits: [{ oldText: "gamma", newText: "GAMMA-changed" }] }),
+			tool.execute("edit-three-third", { path, edits: [{ oldText: "delta", newText: "DELTA-changed" }] }),
+		]);
+
+		expect(readFileSync(path, "utf8")).toBe("ALPHA-changed\nbeta\nGAMMA-changed\nDELTA-changed\n");
+	});
+
+	it("reports a stale anchor naming this run's own mutation when same-batch edits overlap", async () => {
+		const path = join(testDir, "same-batch-overlap.txt");
+		writeFileSync(path, "alpha\nbeta\ngamma\n", "utf8");
+		const bothPreflightsReached = createDeferred();
+		let preflightInspections = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path && preflightInspections < 2) {
+						preflightInspections++;
+						if (preflightInspections === 2) bothPreflightsReached.resolve();
+						await bothPreflightsReached.promise;
+					}
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createEditTool(testDir, { intentController });
+
+		const outcomes = await Promise.allSettled([
+			tool.execute("edit-overlap-first", {
+				path,
+				edits: [{ oldText: "alpha\nbeta", newText: "ONE-replaced\nbeta" }],
+			}),
+			tool.execute("edit-overlap-second", {
+				path,
+				edits: [{ oldText: "alpha\nbeta", newText: "TWO-replaced\nbeta" }],
+			}),
+		]);
+
+		expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+		const rejection = outcomes.find((outcome) => outcome.status === "rejected");
+		if (!rejection || rejection.status !== "rejected") throw new Error("Expected one same-batch edit to reject.");
+		const message = rejection.reason instanceof Error ? rejection.reason.message : String(rejection.reason);
+		expect(message).toContain("produced by an earlier mutation in this run");
+		expect(message).toMatch(/could not find/i);
+		expect(message).toContain("Current source sha256");
+		expect(message).not.toMatch(/changed during edit execution/i);
+		expect(readFileSync(path, "utf8")).toMatch(/^(ONE|TWO)-replaced\nbeta\ngamma\n$/);
+	});
+
+	it("fails after bounded identity refreshes when the target keeps changing during execution", async () => {
+		const path = join(testDir, "churning.txt");
+		writeFileSync(path, "alpha\nbeta\n", "utf8");
+		let targetInspections = 0;
+		let readCalls = 0;
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					if (target === path) {
+						targetInspections++;
+						writeFileSync(path, "churn\n".repeat(targetInspections), "utf8");
+					}
+					return localFileMutationIntentOperations.inspect(target, followSymlinks);
+				},
+			},
+		});
+		const tool = createEditTool(testDir, {
+			operations: {
+				readFile: async (target) => {
+					readCalls++;
+					return readFileSync(target);
+				},
+				writeFile: async () => {
+					throw new Error("The edit must not write while the target keeps changing.");
+				},
+			},
+			intentController,
+		});
+
+		await expect(
+			tool.execute("edit-churn", { path, edits: [{ oldText: "alpha", newText: "ALPHA-changed" }] }),
+		).rejects.toThrow(/changed during edit execution/i);
+		expect(targetInspections).toBe(6);
+		expect(readCalls).toBe(0);
 	});
 
 	it("uses the preflight authority as the only edit access-check path", async () => {

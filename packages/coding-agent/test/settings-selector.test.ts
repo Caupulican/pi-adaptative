@@ -497,7 +497,7 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r"); // open submenu
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Prompt policy enforcement"
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Preserve recent messages"
-		selector.getSettingsList().handleInput("\r"); // cycle 8 -> 16 (next in ["2","4","8","16","32"])
+		selector.getSettingsList().handleInput("\r"); // cycle 8 -> 16 (next in ["2","4","8","16","24","32"])
 
 		expect(onContextPolicyEnforcementChange).toHaveBeenLastCalledWith(
 			{ enabled: true, preserveRecentMessages: 16, minChars: 1200 },
@@ -516,7 +516,7 @@ describe("settings selector", () => {
 		// free-text path for these numbers, so an invalid/out-of-range value can't be typed.
 		for (const call of onContextPolicyEnforcementChange.mock.calls) {
 			const [settings] = call;
-			expect(["2", "4", "8", "16", "32"]).toContain(String(settings.preserveRecentMessages));
+			expect(["2", "4", "8", "16", "24", "32"]).toContain(String(settings.preserveRecentMessages));
 			expect(["300", "600", "1200", "2400", "4800"]).toContain(String(settings.minChars));
 		}
 	});

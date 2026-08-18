@@ -85,6 +85,15 @@ export class FileMutationPreflightError extends Error {
 	}
 }
 
+export class FileMutationIdentityError extends Error {
+	constructor(displayPath: string) {
+		super(
+			`Could not edit file: ${displayPath}. The file changed during edit execution; read it again before retrying.`,
+		);
+		this.name = "FileMutationIdentityError";
+	}
+}
+
 interface ContentReferenceRecord {
 	contentRef: string;
 	sourcePath: string;
@@ -387,9 +396,7 @@ export class FileMutationIntentController {
 			throw new Error(`Could not edit file: ${lease.displayPath}. The target no longer exists after preflight.`);
 		}
 		if (!identitiesMatch(lease.identity, current.identity)) {
-			throw new Error(
-				`Could not edit file: ${lease.displayPath}. The file changed during edit execution; read it again before retrying.`,
-			);
+			throw new FileMutationIdentityError(lease.displayPath);
 		}
 		try {
 			await this.operations.access(lease.path, constants.R_OK | constants.W_OK);
@@ -399,9 +406,36 @@ export class FileMutationIntentController {
 		}
 	}
 
+	/**
+	 * Re-anchor an edit lease to the file's current identity after an observed change.
+	 * The caller must then re-read and re-validate its content against that same version;
+	 * the next assertCurrent binds any write to it.
+	 */
+	async refreshIdentity(lease: FileMutationLease, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) throw new Error("Operation aborted");
+		if (lease.kind !== "edit") {
+			throw new Error(`Could not refresh file identity for ${lease.displayPath}: only edit leases track one.`);
+		}
+		const current = await this.operations.inspect(lease.path, true);
+		if (!current || current.kind !== "file") {
+			throw new Error(`Could not edit file: ${lease.displayPath}. The target no longer exists after preflight.`);
+		}
+		lease.identity = current.identity;
+	}
+
 	rememberContent(sourcePath: string, content: string): FileContentReference {
 		const digest = createHash("sha256").update(content, "utf8").digest("hex");
 		return this.rememberContentDigest(sourcePath, digest, Buffer.byteLength(content, "utf8"));
+	}
+
+	/** True when this session's own earlier mutation produced exactly this content at this path. */
+	hasProducedContent(sourcePath: string, content: string): boolean {
+		this.pruneExpired();
+		const digest = createHash("sha256").update(content, "utf8").digest("hex");
+		for (const record of this.contentReferences.values()) {
+			if (record.sourcePath === sourcePath && record.digest === digest) return true;
+		}
+		return false;
 	}
 
 	async retainMutationPayload(

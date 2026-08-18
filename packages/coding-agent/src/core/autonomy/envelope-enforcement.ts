@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { extractShellCommandPaths, type ShellCommandDialect } from "../tools/shell-command-parser.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
@@ -13,6 +14,11 @@ import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
 const PATH_ARGUMENT_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
 const PATH_LIST_ARGUMENT_KEYS = ["paths", "files"] as const;
+const SHELL_COMMAND_TOOL_DIALECTS = new Map<string, ShellCommandDialect>([
+	["bash", "posix"],
+	["shell", "posix"],
+	["powershell", "powershell"],
+]);
 
 export function extractPathArguments(params: unknown): string[] {
 	if (!params || typeof params !== "object") return [];
@@ -46,6 +52,11 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
 				if (typeof sourcePath === "string" && sourcePath.trim()) paths.push(sourcePath.trim());
 			}
 		}
+	}
+	const shellDialect = SHELL_COMMAND_TOOL_DIALECTS.get(normalizedToolName);
+	if (shellDialect && params && typeof params === "object") {
+		const command = (params as Record<string, unknown>).command;
+		if (typeof command === "string") paths.push(...extractShellCommandPaths(command, shellDialect));
 	}
 	if (
 		paths.length === 0 &&

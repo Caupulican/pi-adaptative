@@ -70,12 +70,12 @@ const RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES = ["0", "30000", "60000", "120000",
 const RESEARCH_LANE_IDLE_DELAY_MS_VALUES = ["0", "250", "1000", "5000", "30000", "60000"];
 const RESEARCH_LANE_MAX_RUNS_PER_SESSION_VALUES = ["0", "1", "3", "5", "10", "25", "50"];
 
-const CONTEXT_POLICY_PRESERVE_RECENT_MESSAGES_VALUES = ["2", "4", "8", "16", "32"];
+const CONTEXT_POLICY_PRESERVE_RECENT_MESSAGES_VALUES = ["2", "4", "8", "16", "24", "32"];
 const CONTEXT_POLICY_MIN_CHARS_VALUES = ["300", "600", "1200", "2400", "4800"];
 
 const CONTEXT_POLICY_ENFORCEMENT_DEFAULTS = {
 	enabled: false,
-	preserveRecentMessages: 8,
+	preserveRecentMessages: 24,
 	minChars: 1200,
 } as const;
 

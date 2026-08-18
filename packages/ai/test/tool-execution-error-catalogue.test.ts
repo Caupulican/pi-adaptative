@@ -11,6 +11,8 @@ import {
 describe("tool execution error catalogue", () => {
 	it("has a trigger-class fixture for every catalogue entry", () => {
 		const fixtures: Record<(typeof TOOL_EXECUTION_ERROR_CATALOGUE)[number]["name"], string> = {
+			broadSearchRejected:
+				'PI_TOOL_OPERATION_REJECTED: Broad search blocked before execution: find would enumerate the whole working tree without a narrow path or name/path predicate. Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="route-to-file"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.',
 			operationRejected: "PI_TOOL_OPERATION_REJECTED: broad search blocked before execution",
 			commandNotFound: "spawn rg ENOENT",
 			bashNoOutput: "(no output)",
@@ -172,6 +174,7 @@ describe("tool execution error catalogue", () => {
 		].join("\n");
 
 		expect(getToolExecutionErrorPolicy(message)?.name).not.toBe("operationRejected");
+		expect(getToolExecutionErrorPolicy(message)?.name).not.toBe("broadSearchRejected");
 	});
 
 	it("classifies the marker only at its tool-owned position, the start of bash.ts's thrown message", () => {
@@ -179,6 +182,38 @@ describe("tool execution error catalogue", () => {
 			getToolExecutionErrorPolicy(
 				`PI_TOOL_OPERATION_REJECTED: Broad search blocked before execution: reason. Narrow the call.`,
 			),
+		).toMatchObject({ name: "broadSearchRejected", failureCode: "operation_rejected" });
+		expect(
+			getToolExecutionErrorPolicy(`PI_TOOL_OPERATION_REJECTED: unsupported operation for this tool.`),
 		).toMatchObject({ name: "operationRejected", failureCode: "operation_rejected" });
+	});
+
+	it("keeps the broadSearch escape route un-truncated in the broad-search rejection guidance", () => {
+		const rejection =
+			'PI_TOOL_OPERATION_REJECTED: Broad search blocked before execution: find would enumerate the whole working tree without a narrow path or name/path predicate. Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="route-to-file"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.';
+		const policy = getToolExecutionErrorPolicy(rejection);
+		expect(policy).toMatchObject({
+			name: "broadSearchRejected",
+			phase: "policy",
+			failureCode: "operation_rejected",
+			attemptMemory: "discard",
+			retainDiagnostic: true,
+		});
+		expect(policy?.guidance).toContain('retry with broadSearch="route-to-file"');
+		expect(policy?.guidance).toContain("prefer the grep/find tool with explicit path/glob/limit");
+		expect(policy?.guidance).not.toContain("…");
+	});
+
+	it("classifies every broad-search reason variant emitted by the shell search guard", () => {
+		const reasons = [
+			"rg would search the whole working tree without a narrow path, glob, or type filter",
+			"recursive grep would scan the whole working tree without a narrow path or include filter",
+			"find would enumerate the whole working tree without a narrow path or name/path predicate",
+			"fd would enumerate the whole working tree without a narrow pattern, path, glob, extension, or type",
+		];
+		for (const reason of reasons) {
+			const rejection = `PI_TOOL_OPERATION_REJECTED: Broad search blocked before execution: ${reason}. If an exhaustive scan is required, retry with broadSearch="route-to-file"; Pi will keep its output out of context and return a managed file path for bounded read or search follow-up.`;
+			expect(getToolExecutionErrorPolicy(rejection)?.name).toBe("broadSearchRejected");
+		}
 	});
 });

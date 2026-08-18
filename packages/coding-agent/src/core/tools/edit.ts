@@ -6,6 +6,7 @@ import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
+	type AppliedEditsResult,
 	applyEditMatchPlan,
 	applyEditsToNormalizedContent,
 	computeEditsPlannedDiff,
@@ -32,6 +33,7 @@ import {
 	workspaceRecoveryScope,
 } from "./file-failure-recovery.ts";
 import {
+	FileMutationIdentityError,
 	FileMutationIntentController,
 	type FileMutationLease,
 	FileMutationPreflightError,
@@ -42,6 +44,11 @@ import { renderToolPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 type EditPreview = EditDiffResult | EditDiffError;
+
+// An identity mismatch at execution is not failure by itself: the edit re-reads and
+// re-validates its anchors against the current content, once, plus at most once more
+// when the file changes again before the write is bound to the re-read version.
+const MAX_STALE_LEASE_REFRESHES = 2;
 
 type EditRenderState = {
 	callComponent?: EditCallRenderComponent;
@@ -549,47 +556,101 @@ export function createEditToolDefinition(
 						JSON.parse(await intentController.readMutationPayload(payloadRef, "edit", signal)),
 					);
 				}
-				await intentController.assertCurrent(lease, signal);
-				throwIfAborted();
+				let staleLeaseRefreshes = 0;
+				const confirmLeaseOrRefresh = async (): Promise<boolean> => {
+					try {
+						await intentController.assertCurrent(lease, signal);
+						return true;
+					} catch (error) {
+						if (
+							!(error instanceof FileMutationIdentityError) ||
+							staleLeaseRefreshes >= MAX_STALE_LEASE_REFRESHES
+						) {
+							throw error;
+						}
+						staleLeaseRefreshes++;
+						await intentController.refreshIdentity(lease, signal);
+						return false;
+					}
+				};
 
-				// Read the file.
-				const buffer = await ops.readFile(absolutePath);
-				if (!isValidUTF8(buffer)) {
-					throw new Error(
-						`PI_FILE_ENCODING_CORRUPTION: ${path} is not valid UTF-8 text; exact text replacement is unsafe and could corrupt its bytes.`,
-					);
-				}
-				const rawContent = buffer.toString("utf-8");
-				throwIfAborted();
+				// One round reads content bracketed by two matching identity checks against the
+				// lease, so the write is atomic with respect to the version whose anchors matched.
+				const runEditRound = async (): Promise<
+					| {
+							baseContent: string;
+							newContent: string;
+							finalContent: string;
+							matchPlanReused: boolean;
+							diffResult: { diff: string; firstChangedLine: number | undefined };
+					  }
+					| undefined
+				> => {
+					if (!(await confirmLeaseOrRefresh())) return undefined;
+					throwIfAborted();
 
-				// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-				const { bom, text: content } = stripBom(rawContent);
-				const originalEnding = detectLineEnding(content);
-				const normalizedContent = normalizeToLF(content);
-				const cachedForInput =
-					cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
-						? cachedMatchPlan
-						: undefined;
-				if (cachedForInput) cachedMatchPlan = undefined;
-				const matchPlanReused =
-					cachedForInput !== undefined &&
-					cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
-				const { baseContent, newContent } = matchPlanReused
-					? applyEditMatchPlan(normalizedContent, cachedForInput.plan, path)
-					: applyEditsToNormalizedContent(normalizedContent, edits, path);
-				throwIfAborted();
+					// Read the file.
+					const buffer = await ops.readFile(absolutePath);
+					if (!isValidUTF8(buffer)) {
+						throw new Error(
+							`PI_FILE_ENCODING_CORRUPTION: ${path} is not valid UTF-8 text; exact text replacement is unsafe and could corrupt its bytes.`,
+						);
+					}
+					const rawContent = buffer.toString("utf-8");
+					throwIfAborted();
 
-				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-				await intentController.assertCurrent(lease, signal);
-				throwIfAborted();
-				await ops.writeFile(absolutePath, finalContent);
-				throwIfAborted();
+					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+					const { bom, text: content } = stripBom(rawContent);
+					const originalEnding = detectLineEnding(content);
+					const normalizedContent = normalizeToLF(content);
+					const cachedForInput =
+						cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
+							? cachedMatchPlan
+							: undefined;
+					if (cachedForInput) cachedMatchPlan = undefined;
+					const matchPlanReused =
+						cachedForInput !== undefined &&
+						cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
+					let applied: AppliedEditsResult;
+					try {
+						applied = matchPlanReused
+							? applyEditMatchPlan(normalizedContent, cachedForInput.plan, path)
+							: applyEditsToNormalizedContent(normalizedContent, edits, path);
+					} catch (error) {
+						throw error instanceof Error && intentController.hasProducedContent(absolutePath, rawContent)
+							? new Error(
+									`The current content of ${path} was produced by an earlier mutation in this run; re-match oldText against it. ${error.message}`,
+								)
+							: error;
+					}
+					throwIfAborted();
+
+					const finalContent = bom + restoreLineEndings(applied.newContent, originalEnding);
+					if (!(await confirmLeaseOrRefresh())) return undefined;
+					throwIfAborted();
+					await ops.writeFile(absolutePath, finalContent);
+					throwIfAborted();
+					return {
+						baseContent: applied.baseContent,
+						newContent: applied.newContent,
+						finalContent,
+						matchPlanReused,
+						diffResult:
+							matchPlanReused && cachedForInput
+								? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
+								: generateDiffString(applied.baseContent, applied.newContent),
+					};
+				};
+
+				let completedRound: Awaited<ReturnType<typeof runEditRound>>;
+				do {
+					completedRound = await runEditRound();
+				} while (completedRound === undefined);
+				const { finalContent, matchPlanReused, diffResult, baseContent, newContent } = completedRound;
+
 				const contentReference = intentController.rememberContent(absolutePath, finalContent);
 				if (payloadRef) await intentController.discardMutationPayload(payloadRef);
 
-				const diffResult = matchPlanReused
-					? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
-					: generateDiffString(baseContent, newContent);
 				const patch = generateUnifiedPatch(path, baseContent, newContent);
 				return {
 					content: [

@@ -54,7 +54,10 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
 	);
 
 	return await new Promise((resolvePromise, reject) => {
-		const child = spawn(process.execPath, [cliPath, ...args], {
+		// Match the vitest worker's --conditions=pi-source (vitest.config.ts execArgv) so the child
+		// resolves workspace deps from source; the default import condition links the gitignored
+		// dist/, and a stale local build crashes startup before the behavior under test.
+		const child = spawn(process.execPath, ["--conditions=pi-source", cliPath, ...args], {
 			cwd: projectDir,
 			env: {
 				...process.env,

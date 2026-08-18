@@ -38,6 +38,7 @@ describe("bundled skills discovery", () => {
 		const secureAgentToolSurfaces = skills.find((s) => s.name === "secure-agent-tool-surfaces");
 		const workerProfileWriter = skills.find((s) => s.name === "worker-profile-writer");
 		const icmArchitect = skills.find((s) => s.name === "icm-architect");
+		const nPlus2Architecture = skills.find((s) => s.name === "n-plus-2-architecture");
 
 		expect(skillArchitect).toBeDefined();
 		expect(skillCreator).toBeDefined();
@@ -49,6 +50,7 @@ describe("bundled skills discovery", () => {
 		expect(secureAgentToolSurfaces).toBeDefined();
 		expect(workerProfileWriter).toBeDefined();
 		expect(icmArchitect).toBeDefined();
+		expect(nPlus2Architecture).toBeDefined();
 
 		// Verify bundled skills have correct source info
 		if (skillArchitect) {
@@ -95,6 +97,38 @@ describe("bundled skills discovery", () => {
 			expect(workerProfileWriter.sourceInfo?.source).toBe("local");
 			expect(workerProfileWriter.sourceInfo?.scope).toBe("temporary");
 		}
+
+		if (nPlus2Architecture) {
+			expect(nPlus2Architecture.sourceInfo?.source).toBe("local");
+			expect(nPlus2Architecture.sourceInfo?.scope).toBe("temporary");
+		}
+	});
+
+	it("ships the N+2 architecture statutes verbatim as an on-demand skill", async () => {
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+
+		const skill = loader.getSkills().skills.find((candidate) => candidate.name === "n-plus-2-architecture");
+		expect(skill).toBeDefined();
+		if (!skill) return;
+
+		expect(skill.description).toContain("architecture");
+		expect(skill.description).toContain("performance");
+		expect(skill.description).toContain("allocation");
+
+		const content = readFileSync(skill.filePath, "utf8");
+		expect(existsSync(join(dirname(skill.filePath), "agents", "openai.yaml"))).toBe(false);
+		expect(content.split("\n").length).toBeLessThan(500);
+		expect(content).toContain("Language-agnostic principles:");
+		expect(content).toContain("1. Bounded flat arenas/pools/rings/chunks, batch recycle.");
+		expect(content).toContain("2. Safe zero/default data/state, no hidden allocation, one activation owner.");
+		expect(content).toContain(
+			"3. Validate trust boundary once; internal miss gets safe stub/default, external failure explicit.",
+		);
+		expect(content).toContain("4. Stable IDs/indexes/buffers/batches; avoid pointer graphs/dispatch/fallback.");
+		expect(content).toContain(
+			"5. Never concatenate growing prefixes, prepend, rescan consumed input, serialize unchanged history, rebuild incremental state; materialize once.",
+		);
 	});
 
 	it("ships session-scoped worker profile composition without provider metadata", async () => {

@@ -163,7 +163,7 @@ describe("task_steps_context GC eligibility", () => {
 				);
 			const messages: AgentMessage[] = [
 				page("old", 1),
-				...Array.from({ length: 12 }, (_, index) => user(`noise ${index}`)),
+				...Array.from({ length: 28 }, (_, index) => user(`noise ${index}`)),
 				page("recent", 2),
 			];
 			const session = harness.session as unknown as {

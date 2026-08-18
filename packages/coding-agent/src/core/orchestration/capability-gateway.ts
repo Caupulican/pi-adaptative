@@ -386,7 +386,14 @@ export class CapabilityGateway {
 		) {
 			const isWrite =
 				pathAccess === "write" || callCapabilities.some((capability) => WRITE_CAPABILITIES.has(capability));
-			const allowedPaths = isWrite ? this.grant.writePaths : this.grant.readPaths;
+			// A launched process may both read and write, so its projected command paths must stay
+			// inside the union of granted scopes; direction-specific grants keep their own lists.
+			const allowedPaths =
+				pathAccess === "execute"
+					? [...this.grant.readPaths, ...this.grant.writePaths]
+					: isWrite
+						? this.grant.writePaths
+						: this.grant.readPaths;
 			if (paths.length === 0) {
 				this.deny(toolName, "path_argument_required", `Tool '${toolName}' requires an explicit path argument.`);
 			}

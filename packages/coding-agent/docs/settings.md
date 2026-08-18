@@ -361,7 +361,7 @@ Context GC only rewrites the provider-bound context view. It does not delete or 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `contextGc.enabled` | boolean | `true` | Enable provider-context packing for stale bulky context |
-| `contextGc.preserveRecentMessages` | number | `12` | Recent messages kept verbatim |
+| `contextGc.preserveRecentMessages` | number | `24` | Recent messages kept verbatim |
 | `contextGc.minToolResultChars` | number | `2500` | Minimum stale tool-result size before packing |
 | `contextGc.tools` | string[] | `read`, `bash`, `python`, `powershell`, `rg`, `grep`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
 | `contextGc.semanticMemory.enabled` | boolean | `true` | Pack stale Automata/Mind semantic context pages from provider context |
@@ -375,7 +375,7 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
 {
   "contextGc": {
     "enabled": true,
-    "preserveRecentMessages": 12,
+    "preserveRecentMessages": 24,
     "semanticMemory": {
       "enabled": true,
       "preserveRecentPages": 2

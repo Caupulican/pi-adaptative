@@ -208,6 +208,29 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("allow");
 		});
 
+		it("returns block for bash that reads outside allowed root", () => {
+			const outsideFile = path.join(outsideRoot, "data.txt");
+			fs.writeFileSync(outsideFile, "outside data", "utf-8");
+			const envelope: CapabilityEnvelope = { ...emptyEnvelope, allowedPaths: [allowedRoot] };
+
+			const outcome = evaluateToolGate({
+				toolName: "bash",
+				args: { command: `cat ${outsideFile}` },
+				cwd: tempDir,
+				envelope,
+			});
+			expect(outcome.outcome).toBe("block");
+			expect(outcome.reasonCode).toBe("path_outside_allowed_roots");
+
+			const inside = evaluateToolGate({
+				toolName: "bash",
+				args: { command: `cat ${path.join(allowedRoot, "notes.txt")}` },
+				cwd: tempDir,
+				envelope,
+			});
+			expect(inside.outcome).toBe("allow");
+		});
+
 		it("returns ask-user or block for bash mutating/destructive command", () => {
 			const outcome = evaluateToolGate({
 				toolName: "bash",

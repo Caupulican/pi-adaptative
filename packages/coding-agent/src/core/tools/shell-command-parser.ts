@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 export type ShellTokenKind = "arg" | "operator" | "pipe" | "redirect";
 
 export interface ShellToken {
@@ -167,4 +170,59 @@ export function parseCommandPrefixes(
 
 export function isComplexShellCommand(command: string): boolean {
 	return /[|><&;\n\r$`()*?[\]#]/u.test(command);
+}
+
+const FLAG_VALUE_RE = /^--?[^=\s]+=(.+)$/su;
+const EMBEDDED_TRAVERSAL_RE = /(^|[\\/])\.\.($|[\\/])/u;
+const DESCRIPTOR_REDIRECT_RE = /&[\d-]*$/u;
+
+function isPathShapedToken(value: string): boolean {
+	if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) return true;
+	if (value === "." || value === "..") return true;
+	if (value === "~" || value.startsWith("~/")) return true;
+	if (hasWindowsPathPrefix(value)) return true;
+	return /[\\/]/u.test(value) && EMBEDDED_TRAVERSAL_RE.test(value);
+}
+
+function expandHomePrefix(value: string): string {
+	if (value === "~") return homedir();
+	if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+	return value;
+}
+
+/**
+ * Statically recognizable filesystem operands of one shell command: absolute, home-anchored,
+ * dot-relative, and traversal-embedding tokens (including long-flag `=` values), plus file
+ * redirect targets. Bare cwd-relative words stay unprojected — treating every separator-bearing
+ * word as a path would misfire on sed/regex/URL arguments — and dynamic constructs (variables,
+ * substitutions, globs) cannot be resolved statically; the risk gate owns those. A command the
+ * tokenizer cannot parse projects nothing.
+ */
+export function extractShellCommandPaths(
+	command: string,
+	dialect: ShellCommandDialect = defaultShellCommandDialect(),
+): string[] {
+	const tokens = tokenizeShellCommand(command, dialect);
+	if (!tokens) return [];
+	const paths: string[] = [];
+	let expectRedirectTarget = false;
+	for (const token of tokens) {
+		if (token.kind === "redirect") {
+			// Heredoc openers (<<) and descriptor duplications (>&1, 2>&-) take no file operand.
+			expectRedirectTarget = !token.value.includes("<<") && !DESCRIPTOR_REDIRECT_RE.test(token.value);
+			continue;
+		}
+		if (token.kind !== "arg") {
+			expectRedirectTarget = false;
+			continue;
+		}
+		if (expectRedirectTarget) {
+			expectRedirectTarget = false;
+			if (!token.value.startsWith("$")) paths.push(expandHomePrefix(token.value));
+			continue;
+		}
+		const candidate = token.value.match(FLAG_VALUE_RE)?.[1] ?? token.value;
+		if (isPathShapedToken(candidate)) paths.push(expandHomePrefix(candidate));
+	}
+	return [...new Set(paths)];
 }

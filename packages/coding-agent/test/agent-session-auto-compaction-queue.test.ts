@@ -310,7 +310,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			stopReason: "stop",
 			timestamp: at,
 		};
-		// Old, packable bash output (well past the default 8-message preserve-recent window) --
+		// Old, packable bash output (well past the default 24-message preserve-recent window) --
 		// context-gc packs this down to a small stub. Alone it is larger than the 7500-token
 		// hard trigger (contextWindow 10000 - 25%-capped reserve 2500).
 		const staleToolResult = {
@@ -321,7 +321,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			isError: false,
 			timestamp: at + 1,
 		};
-		const filler: Message[] = Array.from({ length: 9 }, (_, i) => ({
+		const filler: Message[] = Array.from({ length: 25 }, (_, i) => ({
 			role: "user" as const,
 			content: [{ type: "text" as const, text: `filler ${i}` }],
 			timestamp: at + 2 + i,
@@ -370,13 +370,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			isError: false,
 			timestamp: at + 1,
 		};
-		const filler: Message[] = Array.from({ length: 7 }, (_, i) => ({
+		const filler: Message[] = Array.from({ length: 23 }, (_, i) => ({
 			role: "user" as const,
 			content: [{ type: "text" as const, text: `filler ${i}` }],
 			timestamp: at + 2 + i,
 		}));
 		// ...but a SECOND, equally large bash output sits inside the preserve-recent window (the last
-		// 8 messages), so context-gc protects it -- this turn's projected savings are real but not
+		// 24 messages), so context-gc protects it -- this turn's projected savings are real but not
 		// enough to fall back under the threshold, and compaction is still needed.
 		const recentToolResult = {
 			role: "toolResult" as const,

@@ -101,7 +101,7 @@ describe("withFileMutationQueue", () => {
 });
 
 describe("built-in edit and write tools", () => {
-	it("fails closed when two concurrently preflighted edits race on the same file", async () => {
+	it("applies both concurrently preflighted edits to the same file by re-anchoring the second", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "parallel-edit.txt");
 		await writeFile(filePath, "alpha\nbeta\ngamma\n", "utf8");
@@ -122,15 +122,13 @@ describe("built-in edit and write tools", () => {
 			intentController,
 		});
 
-		const outcomes = await Promise.allSettled([
+		await Promise.all([
 			editTool.execute("call-1", { path: filePath, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
 			editTool.execute("call-2", { path: filePath, edits: [{ oldText: "beta", newText: "BETA" }] }),
 		]);
 
-		expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
-		expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
 		const content = await readFile(filePath, "utf8");
-		expect(["ALPHA\nbeta\ngamma\n", "alpha\nBETA\ngamma\n"]).toContain(content);
+		expect(content).toBe("ALPHA\nBETA\ngamma\n");
 	});
 
 	it("rejects write preflight while an edit owns an existing target", async () => {
@@ -248,19 +246,15 @@ describe("built-in edit and write tools", () => {
 		await firstWriteStarted.promise;
 		controller.abort();
 
-		const staleSecondEdit = editTool.execute("call-2", {
+		const queuedSecondEdit = editTool.execute("call-2", {
 			path: filePath,
 			edits: [{ oldText: "beta", newText: "BETA" }],
 		});
-		expect(await resolvesWithin(staleSecondEdit, 20)).toBe(false);
+		expect(await resolvesWithin(queuedSecondEdit, 20)).toBe(false);
 
 		finishFirstWrite.resolve();
 		await expect(firstEdit).rejects.toThrow("Operation aborted");
-		await expect(staleSecondEdit).rejects.toThrow(/changed|stale/i);
-		await editTool.execute("call-3", {
-			path: filePath,
-			edits: [{ oldText: "beta", newText: "BETA" }],
-		});
+		await queuedSecondEdit;
 
 		const content = await readFile(filePath, "utf8");
 		expect(content).toBe("ALPHA\nBETA\n");

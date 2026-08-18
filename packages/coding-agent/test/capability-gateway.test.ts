@@ -88,6 +88,14 @@ const secretStoreManifest: ToolCapabilityManifest = {
 	enforcements: ["service-proxy", "path-scope"],
 };
 
+const bashManifest: ToolCapabilityManifest = {
+	toolName: "bash",
+	moduleSpecifier: "./tools/bash.ts",
+	capabilities: ["process.exec"],
+	roles: ["explorer"],
+	enforcements: ["process-launcher", "path-scope"],
+};
+
 function fixedStoreReadManifest(toolName: "artifact_retrieve" | "context_scout"): ToolCapabilityManifest {
 	return {
 		toolName,
@@ -288,6 +296,40 @@ describe("CapabilityGateway", () => {
 				{ action: "migrate", sources: [{ kind: "file", path: fixture.outside }] },
 				() => "no",
 			),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+	});
+
+	it("denies bash that reads or writes outside grant path scope", async () => {
+		const fixture = createFixture();
+		const bashGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["process.exec"],
+			allowedTools: ["bash"],
+			readPaths: [join(fixture.cwd, "src")],
+			writePaths: [join(fixture.cwd, "src")],
+		};
+		const gateway = new CapabilityGateway({ grant: bashGrant, cwd: fixture.cwd });
+
+		await expect(
+			gateway.execute(bashManifest, "bash", { command: `cat ${join(fixture.cwd, "src", "file.ts")}` }, () => "read"),
+		).resolves.toBe("read");
+		await expect(gateway.execute(bashManifest, "bash", { command: "ls -la" }, () => "listed")).resolves.toBe(
+			"listed",
+		);
+
+		await expect(
+			gateway.execute(bashManifest, "bash", { command: `cat ${join(fixture.outside, "secret.txt")}` }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+		await expect(
+			gateway.execute(
+				bashManifest,
+				"bash",
+				{ command: `echo pwned > ${join(fixture.outside, "pwned.txt")}` },
+				() => "no",
+			),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+		await expect(
+			gateway.execute(bashManifest, "bash", { command: "cat src/../../outside/secret.txt" }, () => "no"),
 		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
 	});
 

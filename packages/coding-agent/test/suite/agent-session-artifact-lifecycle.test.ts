@@ -73,9 +73,9 @@ describe("D2b-2: artifact reference release + cleanup tied to context-gc evictio
 		expect(storeRightAfterPack.referenceCount(artifactId!)).toBeGreaterThan(0);
 
 		// Drive enough additional plain (non-tool) turns for the grep tool result to fall
-		// outside context-gc's preserveRecentMessages window (default 8), so context-gc's
+		// outside context-gc's preserveRecentMessages window (default 24), so context-gc's
 		// own per-turn packing pass actually evicts it from live context.
-		const plainResponses = Array.from({ length: 6 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
+		const plainResponses = Array.from({ length: 14 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
 		harness.setResponses(plainResponses);
 		for (let i = 0; i < plainResponses.length; i++) {
 			await harness.session.prompt(`continue ${i}`);

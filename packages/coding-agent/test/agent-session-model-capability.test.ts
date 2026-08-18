@@ -69,7 +69,7 @@ describe("model capability auto-detection", () => {
 			expect(profile.class).toBe("minimal");
 			expect(profile.backgroundLanesEnabled).toBe(false);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
-			expect(harness.session.systemPrompt).not.toContain("N+2 ARCHITECTURE");
+			expect(harness.session.systemPrompt).not.toContain("n-plus-2-architecture");
 			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
 			const composition = harness.session.getContextCompositionReport();
 			expect(composition.systemPromptTokens + composition.toolSchemaTokens).toBeLessThanOrEqual(
@@ -173,7 +173,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("full");
 			expect(harness.session.getActiveToolNames()).toContain("goal");
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
-			expect(harness.session.systemPrompt).toContain("N+2 ARCHITECTURE");
+			expect(harness.session.systemPrompt).toContain("n-plus-2-architecture");
 		} finally {
 			harness.cleanup();
 		}

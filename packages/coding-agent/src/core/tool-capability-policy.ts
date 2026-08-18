@@ -8,7 +8,8 @@ export interface ToolCapabilityPolicy {
 	enforcements: readonly CapabilityEnforcementKind[];
 }
 
-export type ToolPathAccess = "none" | "read" | "write";
+/** "execute": a launched process may both read and write its projected command paths. */
+export type ToolPathAccess = "none" | "read" | "write" | "execute";
 
 const READ_PATH_CAPABILITIES: ReadonlySet<HarnessCapability> = new Set([
 	"filesystem.read",
@@ -35,7 +36,7 @@ function policy(
 
 const READ_POLICY = policy([["filesystem.read", "worktree.read"]], "path-scope");
 const WRITE_POLICY = policy([["filesystem.write", "worktree.mutate"]], "path-scope");
-const PROCESS_POLICY = policy([["process.exec", "tests.execute"]], "process-launcher");
+const PROCESS_POLICY = policy([["process.exec", "tests.execute"]], ["process-launcher", "path-scope"]);
 const NETWORK_POLICY = policy([["network.http", "service.mcp"]], "service-proxy");
 const DELEGATE_POLICY = policy([["workflow.delegate"]], "control-plane");
 
@@ -182,6 +183,7 @@ export function resolveToolCallPathAccess(
 				: undefined;
 		return action === "migrate" ? "read" : "none";
 	}
+	if (selected.includes("process.exec") || selected.includes("tests.execute")) return "execute";
 	return resolveCapabilityPathAccess(selected) ?? "none";
 }
 

@@ -70,9 +70,19 @@ describe("delegate context GC", () => {
 			expect(existsSync(storagePath!)).toBe(true);
 			expect(readFileSync(storagePath!, "utf8")).toBe(staleText);
 			expect(messageText(result.messages[0]!)).toContain("Context GC packed stale tool result");
-			expect(messageText(result.messages[0]!)).toContain(storagePath!);
+			expect(messageText(result.messages[0]!)).toContain(`exact old text: read ${storagePath}`);
 			expect(messageText(result.messages[1]!)).toBe(recentText);
 			expect(messageText(messages[0]!)).toBe(staleText);
+
+			// BUG E cache stability: re-rendering the same unchanged record yields byte-identical stub text.
+			const rerender = applyContextGc(messages, {
+				...getContextGcSettings(),
+				cwd: "/repo",
+				storageDir: dir,
+				preserveRecentMessages: 1,
+				writePayloads: true,
+			});
+			expect(messageText(rerender.messages[0]!)).toBe(messageText(result.messages[0]!));
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

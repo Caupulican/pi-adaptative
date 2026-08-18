@@ -44,7 +44,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toContain("read each relevant listed file completely before any mutation");
 		expect(prompt).toContain("On failure, read error, expected shape");
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
-		expect(prompt).not.toContain("N+2 ARCHITECTURE");
+		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt.length).toBeLessThanOrEqual(4_096);
 	});
 
@@ -52,7 +52,7 @@ describe("capability-shaped system prompts", () => {
 		const prompt = buildForCapability("full");
 
 		expect(prompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
-		expect(prompt).toContain("N+2 ARCHITECTURE");
+		expect(prompt).toContain("n-plus-2-architecture");
 		expect(prompt).toContain(OVERSIZED_CONTEXT_TAIL);
 	});
 
@@ -62,7 +62,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toMatch(/^Pi-Adaptative bounded coding agent\./);
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
-		expect(prompt).not.toContain("N+2 ARCHITECTURE");
+		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt.length).toBeLessThanOrEqual(8_192);
 	});
 
@@ -73,7 +73,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toContain("No execution tools are active");
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
-		expect(prompt).not.toContain("N+2 ARCHITECTURE");
+		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt.length).toBeLessThanOrEqual(2_048);
 	});
 

@@ -62,7 +62,7 @@ const manifests: ToolCapabilityManifest[] = [
 		moduleSpecifier: "./tools/run-process.ts",
 		capabilities: ["process.exec"],
 		roles: ["operator"],
-		enforcements: ["process-launcher"],
+		enforcements: ["process-launcher", "path-scope"],
 	},
 ];
 

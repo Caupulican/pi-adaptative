@@ -110,6 +110,48 @@ describe("envelope path scope", () => {
 				sources: [{ path: " first.env " }, { path: "second.env" }],
 			}),
 		).toEqual(["first.env", "second.env"]);
+
+		let ran = 0;
+		const runCounter = { content: [{ type: "text", text: "ok" }] };
+		const scoped = envelope({ allowedPaths: ["src"] });
+		const wrappedSearch = wrapToolWithEnvelopeScope(
+			{ name: "grep", execute: (..._args: unknown[]) => runCounter },
+			scoped,
+			"/repo",
+		);
+		const implicitDenied = wrappedSearch.execute("tc-implicit", {}) as {
+			isError?: boolean;
+			details?: { outcome?: string; path?: string };
+		};
+		expect(implicitDenied.isError).toBe(true);
+		expect(implicitDenied.details?.outcome).toBe("envelope_path_denied");
+		expect(implicitDenied.details?.path).toBe(".");
+
+		const wrappedStore = wrapToolWithEnvelopeScope(
+			{
+				name: "secret_store",
+				execute: (..._args: unknown[]) => {
+					ran++;
+					return runCounter;
+				},
+			},
+			scoped,
+			"/repo",
+		);
+		const nestedDenied = wrappedStore.execute("tc-nested", {
+			action: "migrate",
+			sources: [{ path: "/etc/creds.env" }],
+		}) as { isError?: boolean; details?: { outcome?: string; path?: string } };
+		expect(nestedDenied.isError).toBe(true);
+		expect(nestedDenied.details?.path).toBe("/etc/creds.env");
+		expect(ran).toBe(0);
+
+		const nestedAllowed = wrappedStore.execute("tc-nested-in-scope", {
+			action: "migrate",
+			sources: [{ path: "src/creds.env" }],
+		}) as { isError?: boolean };
+		expect(nestedAllowed.isError).toBeUndefined();
+		expect(ran).toBe(1);
 	});
 });
 

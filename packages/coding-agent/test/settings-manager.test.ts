@@ -604,7 +604,7 @@ describe("SettingsManager", () => {
 
 			expect(manager.getContextPromptEnforcementSettings()).toEqual({
 				enabled: false,
-				preserveRecentMessages: 8,
+				preserveRecentMessages: 24,
 				minChars: 1200,
 			});
 		});
@@ -782,7 +782,7 @@ describe("SettingsManager", () => {
 			// enabled/preserveRecentMessages/tools were never configured -- they still resolve to the
 			// canonical default, not `undefined`.
 			expect(resolved.enabled).toBe(true);
-			expect(resolved.preserveRecentMessages).toBe(8);
+			expect(resolved.preserveRecentMessages).toBe(24);
 			expect(resolved.tools).toEqual(DEFAULT_CONTEXT_GC_SETTINGS.tools);
 		});
 

@@ -152,7 +152,7 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 		]);
 		await harness.session.prompt("search for needle occurrences");
 
-		const plainResponses = Array.from({ length: 6 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
+		const plainResponses = Array.from({ length: 14 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
 		harness.setResponses(plainResponses);
 		for (let i = 0; i < plainResponses.length; i++) {
 			await harness.session.prompt(`continue ${i}`);
@@ -216,8 +216,8 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal", "grep"],
 			settings: {
-				// Default context-gc window (8) left untouched so gc packs the stale result
-				// itself, first -- exactly the same 6-plain-turn scenario the lifecycle/gc
+				// Default context-gc window (24) left untouched so gc packs the stale result
+				// itself, first -- exactly the same plain-turn scenario the lifecycle/gc
 				// tests use. Enforcement is enabled with its own small window so it WOULD
 				// otherwise consider this item eligible too, if gc had not already acted.
 				contextPolicy: { enforcement: { enabled: true, preserveRecentMessages: 2, minChars: 10 } },
@@ -237,7 +237,7 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 		const toolCallId = firstToolResultToolCallId(harness);
 		expect(toolCallId).toBeDefined();
 
-		const plainResponses = Array.from({ length: 5 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
+		const plainResponses = Array.from({ length: 13 }, (_, i) => fauxAssistantMessage(`ok ${i}`));
 		harness.setResponses(plainResponses);
 		for (let i = 0; i < plainResponses.length; i++) {
 			await harness.session.prompt(`continue ${i}`);

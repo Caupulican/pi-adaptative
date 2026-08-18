@@ -151,6 +151,15 @@ export const TOOL_OPERATION_REJECTED_MARKER = "PI_TOOL_OPERATION_REJECTED";
  * cannot masquerade as a tool-owned rejection.
  */
 const TOOL_OPERATION_REJECTED_LINE_PATTERN = new RegExp(`^${TOOL_OPERATION_REJECTED_MARKER}:`, "m");
+/**
+ * Head of bash.ts's broad-search rejection. The head text and the `route-to-file` literal in the
+ * entry's guidance mirror bash.ts's search guard (`BROAD_SEARCH_OUTPUT_ROUTE`), which this package
+ * cannot import; changing either side requires changing both.
+ */
+const BROAD_SEARCH_REJECTED_LINE_PATTERN = new RegExp(
+	`^${TOOL_OPERATION_REJECTED_MARKER}: Broad search blocked before execution:`,
+	"m",
+);
 
 interface ToolExecutionErrorCatalogueEntry {
 	name: string;
@@ -165,6 +174,18 @@ interface ToolExecutionErrorCatalogueEntry {
 }
 
 export const TOOL_EXECUTION_ERROR_CATALOGUE = [
+	{
+		name: "broadSearchRejected",
+		phase: "policy",
+		failureCode: "operation_rejected",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance:
+			'Narrow the path, glob, type, or pattern; prefer the grep/find tool with explicit path/glob/limit. If an exhaustive scan is required, retry with broadSearch="route-to-file".',
+		matches(message: string): boolean {
+			return BROAD_SEARCH_REJECTED_LINE_PATTERN.test(message);
+		},
+	},
 	{
 		name: "operationRejected",
 		phase: "policy",
