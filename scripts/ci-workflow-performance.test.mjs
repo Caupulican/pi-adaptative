@@ -50,11 +50,21 @@ function withInstallerHarness(options, fn) {
 		writeFileSync(rgPath, options.rgScript ?? "#!/usr/bin/env bash\nexit 0\n");
 		chmodSync(rgPath, 0o755);
 
+		// Create explicit mock test seams for OS-release and keyring to decouple tests from host distro
+		const mockKeyringPath = join(stateDir, "ubuntu-archive-keyring.gpg");
+		writeFileSync(mockKeyringPath, "MOCK_KEYRING_GPG");
+
+		const mockOsReleasePath = join(stateDir, "os-release");
+		writeFileSync(mockOsReleasePath, "UBUNTU_CODENAME=noble\nVERSION_CODENAME=noble\n");
+
 		const start = Date.now();
 		const res = spawnSync(installScriptPath, [], {
 			env: {
 				...process.env,
 				PATH: `${binDir}:${process.env.PATH}`,
+				CI_UBUNTU_CODENAME: "noble",
+				CI_OS_RELEASE_PATH: mockOsReleasePath,
+				CI_KEYRING_PATH: mockKeyringPath,
 				CI_APT_UPDATE_TIMEOUT: "1s",
 				CI_APT_DOWNLOAD_TIMEOUT: "1s",
 				CI_APT_INSTALL_TIMEOUT: "1s",
@@ -70,6 +80,7 @@ function withInstallerHarness(options, fn) {
 			res,
 			elapsed,
 			stateDir,
+			mockKeyringPath,
 			readState: (filename) => {
 				const p = join(stateDir, filename);
 				return readFileSync(p, "utf8");
@@ -116,7 +127,11 @@ test("CI jobs share the bounded Linux dependency installation script without dup
 	assert.doesNotMatch(workflow, /apt-get install/u);
 });
 
-test("bounded Linux dependency installer configures kill-after timeouts, split download/apply, and package verification", () => {
+test("bounded Linux dependency installer configures owned HTTPS sources, kill-after timeouts, and verification", () => {
+	assert.match(installScript, /Dir::Etc::sourcelist=/u);
+	assert.match(installScript, /Dir::Etc::sourceparts=/u);
+	assert.match(installScript, /https:\/\/archive\.ubuntu\.com\/ubuntu\//u);
+	assert.match(installScript, /https:\/\/security\.ubuntu\.com\/ubuntu\//u);
 	assert.match(installScript, /Acquire::http::Timeout=15/u);
 	assert.match(installScript, /Acquire::https::Timeout=15/u);
 	assert.match(installScript, /Acquire::Retries=3/u);
@@ -126,16 +141,28 @@ test("bounded Linux dependency installer configures kill-after timeouts, split d
 	assert.match(installScript, /dpkg-query -W -f='\$\{Status\}\\n'/u);
 	assert.match(installScript, /for tool in fd rg pkg-config; do/u);
 	assert.match(installScript, /for mod in cairo pango librsvg-2\.0; do/u);
+	assert.match(installScript, /trap 'rm -rf "\$\{TMP_DIR\}"' EXIT/u);
 });
 
 test(
-	"behavioral harness: network fetch stall is forcibly killed with kill-after, retries, and succeeds within bounds",
+	"behavioral harness: network fetch stall is forcibly killed, retries, and passes owned HTTPS sources to every phase",
 	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
 	() => {
 		withInstallerHarness(
 			{
 				aptScript: (stateDir) => `#!/usr/bin/env bash
 echo "$@" >> "${stateDir}/apt.log"
+
+# Capture the generated sources list on first inspection
+for arg in "$@"; do
+  if [[ "$arg" == *"Dir::Etc::sourcelist="* ]]; then
+    src="\${arg#*Dir::Etc::sourcelist=}"
+    if [ -f "$src" ] && [ ! -f "${stateDir}/captured-sources.list" ]; then
+      cp "$src" "${stateDir}/captured-sources.list"
+    fi
+  fi
+done
+
 if [ "$1" = "update" ]; then
   count_file="${stateDir}/update.count"
   count=1
@@ -160,11 +187,32 @@ fi
 exit 0
 `,
 			},
-			({ res, elapsed, readState }) => {
+			({ res, elapsed, readState, mockKeyringPath }) => {
 				assert.equal(res.status, 0, `Expected exit 0, got ${res.status}: ${res.stderr}`);
 				assert(elapsed >= 1500 && elapsed < 8000, `Expected bounded wall time between 1.5s and 8s, got ${elapsed}ms`);
 				const updateCount = parseInt(readState("update.count").trim(), 10);
 				assert.equal(updateCount, 2, "Expected exactly 2 update attempts (1 killed, 1 successful retry)");
+
+				const aptLog = readState("apt.log");
+				const lines = aptLog.trim().split("\n");
+				assert.equal(lines.length, 4, "Expected 4 apt invocations: 2 update attempts + 1 download-only + 1 no-download");
+
+				for (const line of lines) {
+					assert.match(line, /-o Dir::Etc::sourcelist=/u, "Every apt invocation must receive CI-owned sourcelist");
+					assert.match(line, /-o Dir::Etc::sourceparts=/u, "Every apt invocation must disable runner sourceparts");
+				}
+
+				const capturedSources = readState("captured-sources.list");
+				assert.match(capturedSources, new RegExp(`\\[signed-by=${mockKeyringPath.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&")}\\]`, "u"));
+				assert.match(capturedSources, /https:\/\/archive\.ubuntu\.com\/ubuntu\/ noble main universe/u);
+				assert.match(capturedSources, /https:\/\/archive\.ubuntu\.com\/ubuntu\/ noble-updates main universe/u);
+				assert.match(capturedSources, /https:\/\/security\.ubuntu\.com\/ubuntu\/ noble-security main universe/u);
+				assert.doesNotMatch(capturedSources, /azure\.archive\.ubuntu\.com/u, "Must exclude runner Azure mirrorlist");
+				assert.doesNotMatch(
+					capturedSources,
+					/microsoft|google|github|nodesource|docker/iu,
+					"Must exclude 3rd-party repositories",
+				);
 			},
 		);
 	},

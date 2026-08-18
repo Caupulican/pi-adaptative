@@ -2,17 +2,88 @@
 set -euo pipefail
 
 # Bounded Linux system dependency installer for CI workflows.
+# Generates and enforces a minimal, CI-owned Ubuntu HTTPS repository source definition,
+# bypassing unresponsive runner Azure mirrorlists and third-party package repositories.
 # Separates retriable network downloads from a single local package installation.
 # Enforces hard process-tree termination via timeout --kill-after.
 
-UPDATE_TIMEOUT="${CI_APT_UPDATE_TIMEOUT:-45s}"
-DOWNLOAD_TIMEOUT="${CI_APT_DOWNLOAD_TIMEOUT:-90s}"
-INSTALL_TIMEOUT="${CI_APT_INSTALL_TIMEOUT:-120s}"
+UPDATE_TIMEOUT="${CI_APT_UPDATE_TIMEOUT:-40s}"
+DOWNLOAD_TIMEOUT="${CI_APT_DOWNLOAD_TIMEOUT:-60s}"
+INSTALL_TIMEOUT="${CI_APT_INSTALL_TIMEOUT:-90s}"
 KILL_AFTER="${CI_APT_KILL_AFTER:-5s}"
-MAX_ATTEMPTS="${CI_APT_MAX_ATTEMPTS:-3}"
-RETRY_DELAY="${CI_APT_RETRY_DELAY:-2}"
+MAX_ATTEMPTS="${CI_APT_MAX_ATTEMPTS:-2}"
+RETRY_DELAY="${CI_APT_RETRY_DELAY:-1}"
+
+# Set up clean temporary directory for CI-owned sources definition
+TMP_DIR=$(mktemp -d "/tmp/ci-apt-sources-XXXXXX")
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+SOURCES_FILE="${TMP_DIR}/ci-sources.list"
+SOURCES_PARTS_DIR="${TMP_DIR}/sources.list.d"
+mkdir -p "${SOURCES_PARTS_DIR}"
+
+# Detect and validate OS codename
+get_distro_codename() {
+	if [ -n "${CI_UBUNTU_CODENAME:-}" ]; then
+		echo "${CI_UBUNTU_CODENAME}"
+		return 0
+	fi
+	local os_release_file="${CI_OS_RELEASE_PATH:-/etc/os-release}"
+	if [ -f "${os_release_file}" ]; then
+		local codename
+		codename=$(. "${os_release_file}" && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")
+		if [ -n "${codename}" ]; then
+			echo "${codename}"
+			return 0
+		fi
+	fi
+	if command -v lsb_release >/dev/null 2>&1; then
+		lsb_release -cs
+		return 0
+	fi
+	echo "noble"
+}
+
+# Detect optional keyring
+get_keyring_option() {
+	if [ -n "${CI_KEYRING_PATH:-}" ]; then
+		if [ "${CI_KEYRING_PATH}" = "none" ]; then
+			echo ""
+			return 0
+		fi
+		if [ -f "${CI_KEYRING_PATH}" ]; then
+			echo "[signed-by=${CI_KEYRING_PATH}] "
+			return 0
+		fi
+	fi
+	for kr in /usr/share/keyrings/ubuntu-archive-keyring.gpg /etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg /usr/share/keyrings/debian-archive-keyring.gpg; do
+		if [ -f "${kr}" ]; then
+			echo "[signed-by=${kr}] "
+			return 0
+		fi
+	done
+	echo ""
+}
+
+CODENAME=$(get_distro_codename)
+KEYRING_PREFIX=$(get_keyring_option)
+
+# Generate minimal, clean, official HTTPS sources definition
+cat <<EOF > "${SOURCES_FILE}"
+deb ${KEYRING_PREFIX}https://archive.ubuntu.com/ubuntu/ ${CODENAME} main universe
+deb ${KEYRING_PREFIX}https://archive.ubuntu.com/ubuntu/ ${CODENAME}-updates main universe
+deb ${KEYRING_PREFIX}https://security.ubuntu.com/ubuntu/ ${CODENAME}-security main universe
+EOF
+
+# Assert generated sources contain no Azure mirrors or third-party repositories
+if grep -Eqi '(azure|microsoft|google|github|nodesource|docker|datadog)' "${SOURCES_FILE}"; then
+	echo "Error: CI sources definition contains forbidden azure or third-party mirrors." >&2
+	exit 1
+fi
 
 APT_OPTS=(
+	-o "Dir::Etc::sourcelist=${SOURCES_FILE}"
+	-o "Dir::Etc::sourceparts=${SOURCES_PARTS_DIR}"
 	-o "Acquire::http::Timeout=15"
 	-o "Acquire::https::Timeout=15"
 	-o "Acquire::Retries=3"
@@ -31,7 +102,7 @@ PACKAGES=(
 )
 
 # Phase 1: Bounded / retriable package list update
-echo "==> [Phase 1/3] Updating package lists with bounded retries..."
+echo "==> [Phase 1/3] Updating package lists with bounded retries via official HTTPS mirrors..."
 update_ok=0
 for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
 	echo "--> apt-get update (attempt ${attempt}/${MAX_ATTEMPTS})..."
