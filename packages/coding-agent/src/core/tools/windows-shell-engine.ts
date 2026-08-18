@@ -214,11 +214,6 @@ class PersistentWindowsShellEngineSession {
 		this.coordinator.dispose();
 	}
 
-	disposeAndWait(timeoutMs?: number): Promise<void> {
-		this.dispose();
-		return this.coordinator.disposeAndWait(timeoutMs);
-	}
-
 	private async execNow(
 		command: string,
 		cwd: string,
@@ -474,17 +469,8 @@ export function disposeWindowsShellEngineSession(key: string): Promise<void> {
 	const session = engineSessions.get(key);
 	if (!session) return Promise.resolve();
 	engineSessions.delete(key);
-	const terminalPromise = session.terminalPromise;
 	session.dispose();
-	return terminalPromise;
-}
-
-/** Awaitable disposal that guarantees the engine child process has closed before resolving. */
-export function disposeWindowsShellEngineSessionAndWait(key: string, timeoutMs?: number): Promise<void> {
-	const session = engineSessions.get(key);
-	if (!session) return Promise.resolve();
-	engineSessions.delete(key);
-	return session.disposeAndWait(timeoutMs);
+	return session.terminalPromise;
 }
 
 /** Create the Python-engine tier for one bash-tool session. */

@@ -317,11 +317,6 @@ export class PersistentShellSession {
 		this.resetChildState();
 	}
 
-	disposeAndWait(timeoutMs?: number): Promise<void> {
-		this.dispose();
-		return this.coordinator.disposeAndWait(timeoutMs);
-	}
-
 	private async execNow(
 		command: string,
 		cwd: string,
@@ -685,12 +680,29 @@ export class PersistentShellSession {
 }
 
 const shellSessions = new Map<string, PersistentShellSession>();
+const retiredShellSessionTerminals = new Map<string, Promise<void>>();
+
+function retainShellSessionTerminal(key: string, terminalPromise: Promise<void>): Promise<void> {
+	const previous = retiredShellSessionTerminals.get(key);
+	const combined = Promise.all([previous ?? Promise.resolve(), terminalPromise])
+		.then(() => undefined)
+		.finally(() => {
+			if (retiredShellSessionTerminals.get(key) === combined) {
+				retiredShellSessionTerminals.delete(key);
+			}
+		});
+	retiredShellSessionTerminals.set(key, combined);
+	return combined;
+}
 
 /** Get or lazily create the persistent session for a key. A kind change replaces the session. */
 export function acquirePersistentShellSession(key: string, kind: PlatformShellToolName): PersistentShellSession {
 	const existing = shellSessions.get(key);
 	if (existing && existing.sessionKind === kind) return existing;
-	existing?.dispose();
+	if (existing) {
+		existing.dispose();
+		retainShellSessionTerminal(key, existing.terminalPromise);
+	}
 	const session = new PersistentShellSession(key, kind);
 	shellSessions.set(key, session);
 	return session;
@@ -699,17 +711,8 @@ export function acquirePersistentShellSession(key: string, kind: PlatformShellTo
 /** Kill and forget a session (agent teardown). Safe to call for keys that never spawned. */
 export function disposePersistentShellSession(key: string): Promise<void> {
 	const session = shellSessions.get(key);
-	if (!session) return Promise.resolve();
+	if (!session) return retiredShellSessionTerminals.get(key) ?? Promise.resolve();
 	shellSessions.delete(key);
-	const terminalPromise = session.terminalPromise;
 	session.dispose();
-	return terminalPromise;
-}
-
-/** Awaitable disposal that guarantees child processes have closed before resolving. */
-export function disposePersistentShellSessionAndWait(key: string, timeoutMs?: number): Promise<void> {
-	const session = shellSessions.get(key);
-	if (!session) return Promise.resolve();
-	shellSessions.delete(key);
-	return session.disposeAndWait(timeoutMs);
+	return retainShellSessionTerminal(key, session.terminalPromise);
 }

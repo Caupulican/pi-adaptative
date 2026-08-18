@@ -183,6 +183,7 @@ import { RuntimeBuilder } from "./runtime-builder.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionImageStore } from "./session-image-store.ts";
+import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
@@ -2132,21 +2133,7 @@ export class AgentSession {
 	dispose(): void {
 		if (this._disposed) return;
 		this._disposed = true;
-		const shutdowns: Promise<unknown>[] = [];
-		const safely = (action: () => void): void => {
-			try {
-				action();
-			} catch {
-				// Every independent cleanup remains best-effort; one failure cannot skip the rest.
-			}
-		};
-		const track = (action: () => Promise<unknown>): void => {
-			try {
-				shutdowns.push(action());
-			} catch {
-				// A synchronously throwing async-resource adapter cannot skip the remaining shutdowns.
-			}
-		};
+		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
@@ -2156,7 +2143,7 @@ export class AgentSession {
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
 		safely(() => this._skillVault.unload());
-		track(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
+		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
 		safely(() => this._cancelPrefixWarm());
 		safely(() => this.agent.abort());
 		track(() => this._gatewayRegistry.stop());
@@ -2191,7 +2178,7 @@ export class AgentSession {
 		// resolvable if the same session is resumed later. It does not sweep OTHER
 		// sessions' artifact directories.
 		safely(() => this._pipeline.cleanupToolArtifactStoreOnDispose());
-		this._disposeCompletion = Promise.allSettled(shutdowns).then(() => undefined);
+		this._disposeCompletion = finish();
 	}
 
 	/** Dispose synchronously-visible state, then await all session-owned asynchronous shutdowns. */

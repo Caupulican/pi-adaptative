@@ -40,6 +40,7 @@ interface Harness {
 	root: string;
 	repo: string;
 	deps: WorktreeSyncEngineDeps;
+	initialized: boolean;
 }
 
 const activeHarnesses: Harness[] = [];
@@ -52,38 +53,71 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 	return result.stdout.trim();
 }
 
+function canonicalPath(path: string): string {
+	let resolved = path;
+	try {
+		resolved = realpathSync.native(path);
+	} catch {
+		// Cleanup must also compare paths whose targets have already disappeared.
+	}
+	const normalized = resolved.replaceAll("\\", "/");
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function throwCleanupErrors(errors: unknown[], subject: string): void {
+	if (errors.length === 0) return;
+	if (errors.length === 1) throw errors[0];
+	throw new AggregateError(errors, `Failed to clean ${subject}`);
+}
+
 async function cleanupHarness(harness: Harness): Promise<void> {
-	if (existsSync(harness.repo)) {
-		const raw = await git(harness.repo, "worktree", "list", "--porcelain");
-		const canonicalRepo = realpathSync.native(harness.repo).toLowerCase();
-		const lines = raw.split("\n");
-		for (const line of lines) {
-			if (line.startsWith("worktree ")) {
-				const wtPath = line.slice("worktree ".length).trim();
-				if (!wtPath) continue;
-				let canonicalWt = wtPath;
+	const errors: unknown[] = [];
+	if (harness.initialized && existsSync(harness.repo)) {
+		let worktreeList: string | undefined;
+		try {
+			worktreeList = await git(harness.repo, "worktree", "list", "--porcelain");
+		} catch (error) {
+			errors.push(error);
+		}
+		if (worktreeList !== undefined) {
+			const canonicalRepo = canonicalPath(harness.repo);
+			for (const line of worktreeList.split("\n")) {
+				if (!line.startsWith("worktree ")) continue;
+				const worktreePath = line.slice("worktree ".length).trim();
+				if (!worktreePath || canonicalPath(worktreePath) === canonicalRepo || !existsSync(worktreePath)) continue;
 				try {
-					canonicalWt = realpathSync.native(wtPath).toLowerCase();
-				} catch {
-					canonicalWt = wtPath.replaceAll("\\", "/").toLowerCase();
-				}
-				if (canonicalWt !== canonicalRepo && existsSync(wtPath)) {
-					await git(harness.repo, "worktree", "remove", "--force", wtPath);
+					await git(harness.repo, "worktree", "remove", "--force", worktreePath);
+				} catch (error) {
+					errors.push(error);
 				}
 			}
 		}
-		await git(harness.repo, "worktree", "prune");
+		try {
+			await git(harness.repo, "worktree", "prune");
+		} catch (error) {
+			errors.push(error);
+		}
 	}
-	if (existsSync(harness.root)) {
-		rmSync(harness.root, { recursive: true, force: true });
+	try {
+		if (existsSync(harness.root)) rmSync(harness.root, { recursive: true, force: true });
+	} catch (error) {
+		errors.push(error);
 	}
+	throwCleanupErrors(errors, `worktree harness ${harness.root}`);
 }
 
 afterEach(async () => {
+	const errors: unknown[] = [];
 	while (activeHarnesses.length > 0) {
 		const harness = activeHarnesses.pop();
-		if (harness) await cleanupHarness(harness);
+		if (!harness) continue;
+		try {
+			await cleanupHarness(harness);
+		} catch (error) {
+			errors.push(error);
+		}
 	}
+	throwCleanupErrors(errors, "worktree integration harnesses");
 });
 
 async function initRepo(): Promise<Harness> {
@@ -96,10 +130,11 @@ async function initRepo(): Promise<Harness> {
 		options: { maxLanes: 8 },
 		sessionId: "it-session",
 	};
-	const harness: Harness = { root, repo, deps };
+	const harness: Harness = { root, repo, deps, initialized: false };
 	activeHarnesses.push(harness);
 
 	await git(root, "init", "-b", "main", repo);
+	harness.initialized = true;
 	await git(repo, "config", "user.email", "it@example.invalid");
 	await git(repo, "config", "user.name", "worktree-sync-it");
 	await git(repo, "config", "commit.gpgsign", "false");

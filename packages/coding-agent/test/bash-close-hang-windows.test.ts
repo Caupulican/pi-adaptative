@@ -129,8 +129,8 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 			expect(getTextOutput(result)).toContain("child-exiting");
 		} finally {
 			controller.abort();
-			await disposeShellExecutionSessionAndWait(sessionKey);
 			cleanupDetachedChild(pidFile);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 });

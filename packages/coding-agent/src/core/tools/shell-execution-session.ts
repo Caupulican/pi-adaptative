@@ -1,6 +1,5 @@
 /** One production lifecycle boundary for every process/state resource owned by a shell session. */
 
-import { PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS } from "./persistent-process-coordinator.ts";
 import { disposePersistentShellSession } from "./shell-session.ts";
 import { disposeWindowsShellEngineSession } from "./windows-shell-engine.ts";
 import { disposeWindowsShellState } from "./windows-shell-state.ts";
@@ -8,11 +7,11 @@ import { disposeWindowsShellState } from "./windows-shell-state.ts";
 const inFlightTerminalPromises = new Map<string, Promise<void>>();
 const inFlightDisposalWaits = new Map<string, Promise<void>>();
 
+export const SHELL_EXECUTION_DISPOSAL_WATCHDOG_MS = 5_000;
+
 /** Synchronously dispose both execution tiers and their shared authoritative Windows state. */
 export function disposeShellExecutionSession(sessionKey: string): void {
-	if (!inFlightTerminalPromises.has(sessionKey)) {
-		disposeWindowsShellState(sessionKey);
-	}
+	disposeWindowsShellState(sessionKey);
 	const p1 = disposeWindowsShellEngineSession(sessionKey);
 	const p2 = disposePersistentShellSession(sessionKey);
 
@@ -28,6 +27,14 @@ export function disposeShellExecutionSession(sessionKey: string): void {
 	inFlightTerminalPromises.set(sessionKey, combined);
 }
 
+async function drainTerminalPromises(sessionKey: string): Promise<void> {
+	while (true) {
+		const terminalPromise = inFlightTerminalPromises.get(sessionKey);
+		if (!terminalPromise) return;
+		await terminalPromise;
+	}
+}
+
 /**
  * Awaitable disposal that guarantees child processes in both execution tiers have reached
  * physical terminal close before resolving. Concurrent callers for the same sessionKey share
@@ -35,13 +42,11 @@ export function disposeShellExecutionSession(sessionKey: string): void {
  */
 export function disposeShellExecutionSessionAndWait(
 	sessionKey: string,
-	timeoutMs: number = PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS,
+	timeoutMs: number = SHELL_EXECUTION_DISPOSAL_WATCHDOG_MS,
 ): Promise<void> {
+	disposeShellExecutionSession(sessionKey);
 	const existing = inFlightDisposalWaits.get(sessionKey);
 	if (existing) return existing;
-
-	disposeShellExecutionSession(sessionKey);
-	const terminalPromise = inFlightTerminalPromises.get(sessionKey) ?? Promise.resolve();
 
 	let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
 	const watchdogPromise = new Promise<void>((_, reject) => {
@@ -57,7 +62,7 @@ export function disposeShellExecutionSessionAndWait(
 		}
 	});
 
-	const waitPromise = Promise.race([terminalPromise, watchdogPromise])
+	const waitPromise = Promise.race([drainTerminalPromises(sessionKey), watchdogPromise])
 		.then(() => undefined)
 		.finally(() => {
 			if (watchdogTimer) clearTimeout(watchdogTimer);

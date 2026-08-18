@@ -4,13 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS,
-	PersistentProcessCoordinator,
-} from "../src/core/tools/persistent-process-coordinator.ts";
+import { PersistentProcessCoordinator } from "../src/core/tools/persistent-process-coordinator.ts";
 import {
 	disposeShellExecutionSession,
 	disposeShellExecutionSessionAndWait,
+	SHELL_EXECUTION_DISPOSAL_WATCHDOG_MS,
 } from "../src/core/tools/shell-execution-session.ts";
 import {
 	acquirePersistentShellSession,
@@ -20,6 +18,7 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	type ShellSessionExecOptions,
 } from "../src/core/tools/shell-session.ts";
+import { getOrCreateWindowsShellState } from "../src/core/tools/windows-shell-state.ts";
 import { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -601,121 +600,139 @@ describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live gran
 	});
 });
 
+function createFakeChild(): ChildProcess {
+	const child = new EventEmitter() as ChildProcess;
+	child.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+	child.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+	child.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+	child.kill = vi.fn() as unknown as ChildProcess["kill"];
+	return child;
+}
+
+function attachFakeChild(coordinator: PersistentProcessCoordinator, child: ChildProcess): void {
+	coordinator.attach(child, {
+		onStdout: () => {},
+		onStderr: () => {},
+		onError: () => {},
+		onClose: () => {},
+	});
+}
+
+function attachFakeSessionChild(session: PersistentShellSession, child: ChildProcess): void {
+	(session as unknown as { attachReadyChild: (ownedChild: ChildProcess) => void }).attachReadyChild(child);
+}
+
+async function waitOneEventLoopTurn(): Promise<void> {
+	await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 	it("negative control: disposal barrier does not resolve on exit alone and requires child close event", async () => {
 		vi.useFakeTimers();
 		try {
 			const coordinator = new PersistentProcessCoordinator();
-			const fakeChild = new EventEmitter() as ChildProcess;
+			const fakeChild = createFakeChild();
 			let childCloseFired = false;
 			fakeChild.on("close", () => {
 				childCloseFired = true;
 			});
-
-			coordinator.attach(fakeChild, {
-				onStdout: () => {},
-				onStderr: () => {},
-				onError: () => {},
-				onClose: () => {},
-			});
+			attachFakeChild(coordinator, fakeChild);
 
 			let disposalResolved = false;
-			let disposalRejected = false;
-			const disposalPromise = coordinator.disposeAndWait().then(
-				() => {
-					disposalResolved = true;
-				},
-				() => {
-					disposalRejected = true;
-				},
-			);
+			coordinator.dispose();
+			const disposalPromise = coordinator.terminalPromise.then(() => {
+				disposalResolved = true;
+			});
 
 			await Promise.resolve();
 			expect(disposalResolved).toBe(false);
-			expect(disposalRejected).toBe(false);
 			expect(childCloseFired).toBe(false);
 
-			// Child process exits, but stdio / child handle has not closed yet (e.g. held by grandchildren).
-			// Advance fake timers beyond the 2s command fallback timer.
 			fakeChild.emit("exit", 0);
 			await vi.advanceTimersByTimeAsync(3_000);
 			expect(disposalResolved).toBe(false);
-			expect(disposalRejected).toBe(false);
 			expect(childCloseFired).toBe(false);
 
-			// Emit the terminal close event on the child process
 			fakeChild.emit("close", 0);
 
 			await disposalPromise;
 			expect(disposalResolved).toBe(true);
-			expect(disposalRejected).toBe(false);
 			expect(childCloseFired).toBe(true);
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	it("negative control: repeated disposeAndWait calls share the identical pending barrier promise", async () => {
+	it("tracks an older child through a respawn until both generations close", async () => {
 		const coordinator = new PersistentProcessCoordinator();
-		const fakeChild = new EventEmitter() as ChildProcess;
+		const firstChild = createFakeChild();
+		const secondChild = createFakeChild();
+		attachFakeChild(coordinator, firstChild);
+		coordinator.kill();
+		attachFakeChild(coordinator, secondChild);
+		coordinator.dispose();
 
-		coordinator.attach(fakeChild, {
-			onStdout: () => {},
-			onStderr: () => {},
-			onError: () => {},
-			onClose: () => {},
-		});
-
-		const barrier1 = coordinator.disposeAndWait();
-		const barrier2 = coordinator.disposeAndWait();
-		expect(barrier1).toBe(barrier2);
-
-		let resolvedCount = 0;
-		barrier1.then(() => {
-			resolvedCount++;
-		});
-		barrier2.then(() => {
-			resolvedCount++;
+		let settled = false;
+		const terminal = coordinator.terminalPromise.then(() => {
+			settled = true;
 		});
 
 		await Promise.resolve();
-		expect(resolvedCount).toBe(0);
-
-		fakeChild.emit("close", 0);
-		await Promise.all([barrier1, barrier2]);
-		expect(resolvedCount).toBe(2);
+		expect(settled).toBe(false);
+		secondChild.emit("close", 0);
+		await waitOneEventLoopTurn();
+		expect(settled).toBe(false);
+		firstChild.emit("close", 0);
+		await terminal;
+		expect(settled).toBe(true);
 	});
 
-	it("negative control: disposeAndWait watchdog rejects when child close never arrives", async () => {
-		vi.useFakeTimers();
-		try {
-			const coordinator = new PersistentProcessCoordinator();
-			const fakeChild = new EventEmitter() as ChildProcess;
+	it("does not treat an error from a spawned child as physical terminal release", async () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const fakeChild = createFakeChild();
+		Object.defineProperty(fakeChild, "pid", { value: 999_999 });
+		attachFakeChild(coordinator, fakeChild);
+		const terminal = coordinator.terminalPromise;
+		let settled = false;
+		terminal.then(() => {
+			settled = true;
+		});
 
-			coordinator.attach(fakeChild, {
-				onStdout: () => {},
-				onStderr: () => {},
-				onError: () => {},
-				onClose: () => {},
-			});
+		fakeChild.emit("error", new Error("runtime failure"));
+		await waitOneEventLoopTurn();
+		expect(settled).toBe(false);
+		fakeChild.emit("close", 1);
+		await terminal;
+		expect(settled).toBe(true);
+		coordinator.dispose();
+	});
 
-			const disposalPromise = coordinator.disposeAndWait();
-			let rejectedError: Error | null = null;
-			disposalPromise.catch((err) => {
-				rejectedError = err;
-			});
+	it("awaits a child admitted by serialized work before disposal completed", async () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const fakeChild = createFakeChild();
+		let releaseTask: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			releaseTask = resolve;
+		});
+		const task = coordinator.runSerialized(async () => {
+			await gate;
+			attachFakeChild(coordinator, fakeChild);
+		});
 
-			// Advance by partial time (e.g. 2_000ms) - should still be pending
-			await vi.advanceTimersByTimeAsync(2_000);
-			expect(rejectedError).toBeNull();
+		coordinator.dispose();
+		const terminal = coordinator.terminalPromise;
+		releaseTask?.();
+		await expect(task).rejects.toThrow("is disposed");
 
-			// Advance beyond watchdog threshold
-			await vi.advanceTimersByTimeAsync(PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS);
-			expect(rejectedError).not.toBeNull();
-			expect((rejectedError as unknown as Error).message).toContain("Persistent process terminal release timed out");
-		} finally {
-			vi.useRealTimers();
-		}
+		let settled = false;
+		terminal.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		fakeChild.emit("close", 0);
+		await terminal;
+		expect(settled).toBe(true);
 	});
 
 	it("keyed owner: sync disposal first then strict wait remains pending through exit/fallback and settles on close", async () => {
@@ -723,18 +740,10 @@ describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 		try {
 			const sessionKey = "test-sync-first-key";
 			const session = acquirePersistentShellSession(sessionKey, "bash");
-			const fakeChild = new EventEmitter() as ChildProcess;
-			fakeChild.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
-			fakeChild.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
-			fakeChild.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
-			fakeChild.kill = vi.fn() as unknown as ChildProcess["kill"];
+			const fakeChild = createFakeChild();
+			attachFakeSessionChild(session, fakeChild);
 
-			(session as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild);
-
-			// Call synchronous disposal first
 			disposeShellExecutionSession(sessionKey);
-
-			// Call strict awaitable disposal second
 			const strictPromise = disposeShellExecutionSessionAndWait(sessionKey);
 			let settled = false;
 			strictPromise.then(() => {
@@ -744,14 +753,9 @@ describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 			await Promise.resolve();
 			expect(settled).toBe(false);
 
-			// Child emits exit event (fallback timeout triggers)
 			fakeChild.emit("exit", 0, null);
-
-			// Advance fake timers by 3s (beyond the 2s exit fallback)
 			await vi.advanceTimersByTimeAsync(3_000);
 			expect(settled).toBe(false);
-
-			// Close event arrives
 			fakeChild.emit("close", 0);
 			await strictPromise;
 			expect(settled).toBe(true);
@@ -760,31 +764,51 @@ describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 		}
 	});
 
+	it("keyed owner: repeated strict disposal calls share one pending watchdog barrier", async () => {
+		const sessionKey = "test-shared-strict-barrier-key";
+		const session = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild = createFakeChild();
+		attachFakeSessionChild(session, fakeChild);
+
+		const first = disposeShellExecutionSessionAndWait(sessionKey);
+		const second = disposeShellExecutionSessionAndWait(sessionKey);
+		expect(first).toBe(second);
+		fakeChild.emit("close", 0);
+		await Promise.all([first, second]);
+	});
+
+	it("keyed owner: watchdog rejects when a child never reaches close", async () => {
+		vi.useFakeTimers();
+		const sessionKey = "test-shell-watchdog-key";
+		const session = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild = createFakeChild();
+		attachFakeSessionChild(session, fakeChild);
+		try {
+			const strictWait = disposeShellExecutionSessionAndWait(sessionKey);
+			const rejection = strictWait.catch((error: unknown) => error);
+			await vi.advanceTimersByTimeAsync(SHELL_EXECUTION_DISPOSAL_WATCHDOG_MS - 1);
+			expect(await Promise.race([rejection, Promise.resolve("pending")])).toBe("pending");
+			await vi.advanceTimersByTimeAsync(1);
+			const error = await rejection;
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain("Shell execution session terminal release timed out");
+		} finally {
+			fakeChild.emit("close", 0);
+			vi.useRealTimers();
+		}
+	});
+
 	it("keyed owner: two overlapping generations under one session key are both awaited", async () => {
 		const sessionKey = "test-overlapping-generations-key";
 
-		// Generation 1
 		const session1 = acquirePersistentShellSession(sessionKey, "bash");
-		const fakeChild1 = new EventEmitter() as ChildProcess;
-		fakeChild1.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
-		fakeChild1.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
-		fakeChild1.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
-		fakeChild1.kill = vi.fn() as unknown as ChildProcess["kill"];
-		(session1 as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild1);
-
-		// Synchronous disposal of Generation 1 begins
+		const fakeChild1 = createFakeChild();
+		attachFakeSessionChild(session1, fakeChild1);
 		disposeShellExecutionSession(sessionKey);
 
-		// Generation 2 spawns under the SAME sessionKey before Gen 1 has physically closed
 		const session2 = acquirePersistentShellSession(sessionKey, "bash");
-		const fakeChild2 = new EventEmitter() as ChildProcess;
-		fakeChild2.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
-		fakeChild2.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
-		fakeChild2.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
-		fakeChild2.kill = vi.fn() as unknown as ChildProcess["kill"];
-		(session2 as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild2);
-
-		// Strict awaitable disposal of the sessionKey
+		const fakeChild2 = createFakeChild();
+		attachFakeSessionChild(session2, fakeChild2);
 		const strictWait = disposeShellExecutionSessionAndWait(sessionKey);
 
 		let settled = false;
@@ -795,14 +819,78 @@ describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 		await Promise.resolve();
 		expect(settled).toBe(false);
 
-		// Close Gen 1 child only - strict wait must remain pending because Gen 2 is still open
 		fakeChild1.emit("close", 0);
-		await Promise.resolve();
+		await waitOneEventLoopTurn();
 		expect(settled).toBe(false);
-
-		// Close Gen 2 child - strict wait now settles
 		fakeChild2.emit("close", 0);
 		await strictWait;
 		expect(settled).toBe(true);
+	});
+
+	it("keyed owner: a generation disposed after strict waiting begins joins that same barrier", async () => {
+		const sessionKey = "test-late-overlapping-generation-key";
+		const session1 = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild1 = createFakeChild();
+		attachFakeSessionChild(session1, fakeChild1);
+		const strictWait = disposeShellExecutionSessionAndWait(sessionKey);
+
+		const session2 = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild2 = createFakeChild();
+		attachFakeSessionChild(session2, fakeChild2);
+		disposeShellExecutionSession(sessionKey);
+
+		let settled = false;
+		strictWait.then(() => {
+			settled = true;
+		});
+		fakeChild1.emit("close", 0);
+		await waitOneEventLoopTurn();
+		expect(settled).toBe(false);
+		fakeChild2.emit("close", 0);
+		await strictWait;
+		expect(settled).toBe(true);
+	});
+
+	it("shell registry: a kind replacement retains the retired child's terminal", async () => {
+		const sessionKey = "test-kind-replacement-terminal-key";
+		const firstSession = acquirePersistentShellSession(sessionKey, "bash");
+		const firstChild = createFakeChild();
+		attachFakeSessionChild(firstSession, firstChild);
+
+		const replacementSession = acquirePersistentShellSession(sessionKey, "powershell");
+		const replacementChild = createFakeChild();
+		attachFakeSessionChild(replacementSession, replacementChild);
+		const terminal = disposePersistentShellSession(sessionKey);
+		let settled = false;
+		terminal.then(() => {
+			settled = true;
+		});
+
+		replacementChild.emit("close", 0);
+		await waitOneEventLoopTurn();
+		expect(settled).toBe(false);
+		firstChild.emit("close", 0);
+		await terminal;
+		expect(settled).toBe(true);
+	});
+
+	it("keyed owner: each disposed generation receives fresh Windows state", async () => {
+		const sessionKey = "test-gen2-state-isolation-key";
+		const session1 = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild1 = createFakeChild();
+		attachFakeSessionChild(session1, fakeChild1);
+		disposeShellExecutionSession(sessionKey);
+
+		const stateGen2 = getOrCreateWindowsShellState(sessionKey);
+		stateGen2.cwd = "C:\\some\\mutated\\dir";
+		stateGen2.envDelta.FOO = "bar";
+		disposeShellExecutionSession(sessionKey);
+
+		const freshState = getOrCreateWindowsShellState(sessionKey);
+		expect(freshState.cwd).toBe("");
+		expect(freshState.envDelta).toEqual({});
+		disposeShellExecutionSession(sessionKey);
+		fakeChild1.emit("close", 0);
+		await disposeShellExecutionSessionAndWait(sessionKey);
 	});
 });

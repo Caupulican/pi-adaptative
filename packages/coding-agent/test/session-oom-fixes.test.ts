@@ -1,12 +1,16 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { SHELL_EXECUTION_DISPOSAL_WATCHDOG_MS } from "../src/core/tools/shell-execution-session.ts";
+import { acquirePersistentShellSession } from "../src/core/tools/shell-session.ts";
 
 /**
  * Long-session stability fixes (OOM hunt): dispose must release the agent hooks it installed (Bug #20)
@@ -85,5 +89,33 @@ describe("session dispose releases long-session resources", () => {
 		session.addSpawnedUsage(usage, { label: "b" });
 		expect(session.getSpawnedUsage().cost).toBeCloseTo(0.1, 10);
 		session.dispose();
+	});
+
+	it("disposeAndWait reports a shell terminal-release watchdog failure", async () => {
+		const session = await newSession();
+		const sessionKey = (session as unknown as { _shellSessionKey: string })._shellSessionKey;
+		const shell = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild = new EventEmitter() as ChildProcess;
+		fakeChild.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+		fakeChild.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+		fakeChild.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+		fakeChild.kill = vi.fn() as unknown as ChildProcess["kill"];
+		(shell as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild);
+
+		vi.useFakeTimers();
+		try {
+			const disposal = session.disposeAndWait();
+			const outcome = disposal.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			await vi.advanceTimersByTimeAsync(SHELL_EXECUTION_DISPOSAL_WATCHDOG_MS);
+			const error = await outcome;
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain("Shell execution session terminal release timed out");
+		} finally {
+			fakeChild.emit("close", 0);
+			vi.useRealTimers();
+		}
 	});
 });
