@@ -610,6 +610,78 @@ describe("file mutation preflight", () => {
 		expect(readCalls).toBe(0);
 	});
 
+	it("detects a sub-millisecond rewrite that leaves every millisecond stat field identical", async () => {
+		const path = join(testDir, "subms.txt");
+		writeFileSync(path, "alpha\nbeta\n", "utf8");
+		let identityStamp = 0;
+		const millisecondViews: string[] = [];
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					const inspection = await localFileMutationIntentOperations.inspect(target, followSymlinks);
+					if (target !== path || !inspection?.identity) return inspection;
+					// Same size and millisecond timestamps, different nanoseconds: the shape a same-size
+					// in-place rewrite completing inside one millisecond produces.
+					identityStamp++;
+					const { dev, ino, mode, size, mtimeMs, ctimeMs } = inspection.identity;
+					millisecondViews.push([dev, ino, mode, size, mtimeMs, ctimeMs].join("|"));
+					return {
+						...inspection,
+						identity: { ...inspection.identity, mtimeNs: `1787017242670${identityStamp}` },
+					};
+				},
+			},
+		});
+		const tool = createEditTool(testDir, {
+			operations: {
+				readFile: async (target) => readFileSync(target),
+				writeFile: async () => {
+					throw new Error("The edit must not write over a sub-millisecond external rewrite.");
+				},
+			},
+			intentController,
+		});
+
+		await expect(
+			tool.execute("edit-subms", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
+		).rejects.toThrow(/changed during edit execution/i);
+		expect(readFileSync(path, "utf8")).toBe("alpha\nbeta\n");
+		// The premise the rejection rests on: every observation agreed on all millisecond-granularity
+		// fields, so nothing but the nanosecond timestamp can account for it.
+		expect(millisecondViews.length).toBeGreaterThan(1);
+		expect(new Set(millisecondViews).size).toBe(1);
+	});
+
+	it("still matches identities whose nanosecond timestamps agree", async () => {
+		const path = join(testDir, "stable-ns.txt");
+		writeFileSync(path, "alpha\nbeta\n", "utf8");
+		const intentController = new FileMutationIntentController({
+			operations: {
+				...localFileMutationIntentOperations,
+				inspect: async (target, followSymlinks) => {
+					const inspection = await localFileMutationIntentOperations.inspect(target, followSymlinks);
+					if (target !== path || !inspection?.identity) return inspection;
+					// Pinned so the nanosecond field cannot be what admits the edit.
+					return {
+						...inspection,
+						identity: { ...inspection.identity, mtimeNs: "1787017242670530976" },
+					};
+				},
+			},
+		});
+		const tool = createEditTool(testDir, {
+			operations: {
+				readFile: async (target) => readFileSync(target),
+				writeFile: async (target, content) => writeFileSync(target, content, "utf8"),
+			},
+			intentController,
+		});
+
+		await tool.execute("edit-stable-ns", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] });
+		expect(readFileSync(path, "utf8")).toBe("ALPHA\nbeta\n");
+	});
+
 	it("uses the preflight authority as the only edit access-check path", async () => {
 		const path = join(testDir, "single-access-owner.txt");
 		writeFileSync(path, "alpha\n", "utf8");

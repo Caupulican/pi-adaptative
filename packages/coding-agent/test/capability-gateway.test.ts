@@ -317,8 +317,8 @@ describe("CapabilityGateway", () => {
 			...grant(fixture.cwd),
 			capabilities: ["process.exec"],
 			allowedTools: ["bash"],
-			readPaths: [join(fixture.cwd, "src")],
-			writePaths: [join(fixture.cwd, "src")],
+			readPaths: [fixture.cwd],
+			writePaths: [fixture.cwd],
 		};
 		const gateway = new CapabilityGateway({ grant: bashGrant, cwd: fixture.cwd });
 
@@ -343,13 +343,93 @@ describe("CapabilityGateway", () => {
 		await expect(
 			gateway.execute(bashManifest, "bash", { command: "cat src/../../outside/secret.txt" }, () => "no"),
 		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+		await expect(
+			gateway.execute(
+				bashManifest,
+				"bash",
+				{ command: `gcc -I${fixture.outside} ${join("src", "x.c")}` },
+				() => "no",
+			),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
 
 		await expect(
 			gateway.execute(bashManifest, "bash", { command: "cat src/file.ts" }, () => "relative"),
 		).resolves.toBe("relative");
 		await expect(
-			gateway.execute(bashManifest, "bash", { command: "cat packages/agent/package.json" }, () => "no"),
+			gateway.execute(bashManifest, "bash", { command: `gcc -I${fixture.inside} src/x.c` }, () => "flag-in-scope"),
+		).resolves.toBe("flag-in-scope");
+
+		// A separator-bearing relative operand resolves against the working directory, so it escapes
+		// a scope narrower than the repository even without traversal syntax.
+		const narrowGateway = new CapabilityGateway({
+			grant: { ...bashGrant, readPaths: [fixture.inside], writePaths: [fixture.inside] },
+			cwd: fixture.inside,
+		});
+		await expect(
+			narrowGateway.execute(bashManifest, "bash", { command: "cat ../packages/agent/package.json" }, () => "no"),
 		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+	});
+
+	it("denies an execute-class call whose working directory is outside grant path scope", async () => {
+		const fixture = createFixture();
+		const bashGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["process.exec"],
+			allowedTools: ["bash", "python", "run_process"],
+			readPaths: [fixture.inside],
+			writePaths: [fixture.inside],
+		};
+
+		// Zero projected paths is not a free pass: the process would inherit an unscoped working
+		// directory, and every bare relative operand it names resolves there.
+		const outsideCwd = new CapabilityGateway({ grant: bashGrant, cwd: fixture.cwd });
+		for (const command of ["cat package.json", "cat Makefile", "npm test"]) {
+			await expect(outsideCwd.execute(bashManifest, "bash", { command }, () => "no")).rejects.toMatchObject({
+				reasonCode: "cwd_outside_scope",
+			});
+		}
+		await expect(
+			outsideCwd.execute(
+				runProcessManifest,
+				"run_process",
+				{ executable: "cat", args: ["package.json"] },
+				() => "no",
+			),
+		).rejects.toMatchObject({ reasonCode: "cwd_outside_scope" });
+		await expect(
+			outsideCwd.execute(pythonManifest, "python", { code: "open('data.csv').read()" }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "cwd_outside_scope" });
+		// Even an in-scope operand cannot buy back an unscoped working directory.
+		await expect(
+			outsideCwd.execute(bashManifest, "bash", { command: `cat ${join(fixture.inside, "file.ts")}` }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "cwd_outside_scope" });
+
+		// Inside the granted scope the same bare operands are in scope by construction.
+		const insideCwd = new CapabilityGateway({ grant: bashGrant, cwd: fixture.inside });
+		await expect(insideCwd.execute(bashManifest, "bash", { command: "cat package.json" }, () => "ok")).resolves.toBe(
+			"ok",
+		);
+		await expect(
+			insideCwd.execute(
+				runProcessManifest,
+				"run_process",
+				{ executable: "cat", args: ["package.json"] },
+				() => "ok",
+			),
+		).resolves.toBe("ok");
+		await expect(
+			insideCwd.execute(pythonManifest, "python", { code: "open('data.csv').read()" }, () => "ok"),
+		).resolves.toBe("ok");
+
+		// Path-scoped read tools keep their own lane: no working-directory requirement, and an empty
+		// projection still denies rather than defaulting to the working directory.
+		const readGateway = new CapabilityGateway({ grant: grant(fixture.cwd), cwd: fixture.cwd });
+		await expect(
+			readGateway.execute(readManifest, "read", { path: join(fixture.inside, "file.ts") }, () => "ok"),
+		).resolves.toBe("ok");
+		await expect(readGateway.execute(readManifest, "read", {}, () => "no")).rejects.toMatchObject({
+			reasonCode: "path_argument_required",
+		});
 	});
 
 	it("denies interpreter code, scriptPath, and argv paths outside grant path scope", async () => {
@@ -358,12 +438,14 @@ describe("CapabilityGateway", () => {
 			...grant(fixture.cwd),
 			capabilities: ["process.exec"],
 			allowedTools: ["python", "run_process"],
-			readPaths: [join(fixture.cwd, "src")],
-			writePaths: [join(fixture.cwd, "src")],
+			readPaths: [fixture.cwd],
+			writePaths: [fixture.cwd],
 		};
 		const gateway = new CapabilityGateway({ grant: processGrant, cwd: fixture.cwd });
 		const insideFile = join(fixture.cwd, "src", "file.ts");
 		const outsideFile = join(fixture.outside, "secret.txt");
+		// Hex-encode every separator so the literal only becomes a path once the escapes are decoded.
+		const encodeSeparators = (value: string) => value.replaceAll("\\", "\\x5c").replaceAll("/", "\\x2f");
 
 		await expect(
 			gateway.execute(pythonManifest, "python", { code: `print(open("${insideFile}").read())` }, () => "ok"),
@@ -395,6 +477,23 @@ describe("CapabilityGateway", () => {
 				() => "no",
 			),
 		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+
+		await expect(
+			gateway.execute(
+				pythonManifest,
+				"python",
+				{ code: `print(open('${encodeSeparators(outsideFile)}').read())` },
+				() => "no",
+			),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+		await expect(
+			gateway.execute(
+				pythonManifest,
+				"python",
+				{ code: `print(open('${encodeSeparators(insideFile)}').read())` },
+				() => "ok",
+			),
+		).resolves.toBe("ok");
 	});
 
 	it("does not invent path arguments for fixed-store and composite read tools", async () => {

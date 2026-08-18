@@ -378,7 +378,7 @@ Semantic memory packing only targets tool results and Automata/Mind custom conte
     "preserveRecentMessages": 24,
     "semanticMemory": {
       "enabled": true,
-      "preserveRecentPages": 2
+      "preserveRecentPages": 1
     }
   }
 }

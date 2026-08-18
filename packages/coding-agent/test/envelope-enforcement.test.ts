@@ -115,6 +115,27 @@ describe("envelope path scope", () => {
 		expect(extractToolPathArguments("bash", { command: "git clone git+ssh://host/repo.git" })).toEqual([]);
 		expect(extractToolPathArguments("bash", { command: "ls -la --color=auto" })).toEqual([]);
 
+		// A single-dash flag may carry its value attached; the shortest flag prefix leaving a
+		// path-shaped remainder wins, so the projected value keeps its first path segment.
+		expect(extractToolPathArguments("bash", { command: "gcc -I/etc/include x.c" })).toEqual(["/etc/include"]);
+		expect(extractToolPathArguments("bash", { command: "ld -L/usr/lib main.o" })).toEqual(["/usr/lib"]);
+		expect(extractToolPathArguments("bash", { command: "gcc -o/tmp/out x.c" })).toEqual(["/tmp/out"]);
+		expect(extractToolPathArguments("bash", { command: "gcc -Isrc/include x.c" })).toEqual(["src/include"]);
+		expect(extractToolPathArguments("run_process", { executable: "gcc", args: ["-I/etc/include"] })).toEqual([
+			"/etc/include",
+		]);
+		// A value in a separate token projects from that token; clustered flags and a long flag
+		// without `=` carry no attached value.
+		expect(extractToolPathArguments("bash", { command: "gcc -o /tmp/out x.c" })).toEqual(["/tmp/out"]);
+		expect(extractToolPathArguments("bash", { command: "grep -rn pattern" })).toEqual([]);
+		expect(extractToolPathArguments("bash", { command: "app --long/path" })).toEqual([]);
+		expect(extractToolPathArguments("bash", { command: "find . -name x.ts" })).toEqual(["."]);
+
+		// Bare single-segment operands still project nothing: they are statically indistinguishable
+		// from non-path words, and the effective working directory is what bounds them.
+		expect(extractToolPathArguments("bash", { command: "cat package.json" })).toEqual([]);
+		expect(extractToolPathArguments("run_process", { executable: "cat", args: ["package.json"] })).toEqual([]);
+
 		expect(
 			extractToolPathArguments("python", { code: 'data = open("/etc/passwd").read()\nrel = open("data.csv")' }),
 		).toEqual(["/etc/passwd"]);
@@ -127,6 +148,25 @@ describe("envelope path scope", () => {
 				args: ["--level=3", "conf/settings.toml"],
 			}),
 		).toEqual(["./bin/tool", "conf/settings.toml"]);
+	});
+
+	it("decodes interpreter string escapes before shape-testing the literal", () => {
+		// An encoded separator must not hide an absolute path from the shape test.
+		expect(extractToolPathArguments("python", { code: "open('\\x2fetc\\x2fpasswd')" })).toEqual(["/etc/passwd"]);
+		expect(extractToolPathArguments("python", { code: "open('\\u002fetc\\u002fshadow')" })).toEqual(["/etc/shadow"]);
+		expect(extractToolPathArguments("python", { code: "open('\\u{2f}etc\\u{2f}shadow')" })).toEqual(["/etc/shadow"]);
+
+		// A decoded literal carries the characters the interpreter opens, not the source escapes.
+		expect(extractToolPathArguments("python", { code: "open('/etc/pas\\'swd')" })).toEqual(["/etc/pas'swd"]);
+		expect(extractToolPathArguments("python", { code: 'open("C:\\\\Users\\\\x")' })).toEqual(["C:\\Users\\x"]);
+		expect(extractToolPathArguments("python", { code: 'open("/tmp/a\\tb")' })).toEqual(["/tmp/a\tb"]);
+
+		// Unknown and truncated sequences stay literal text and are still shape-tested.
+		expect(extractToolPathArguments("python", { code: "open('/tmp/a\\q/b')" })).toEqual(["/tmp/a\\q/b"]);
+		expect(extractToolPathArguments("python", { code: "open('/tmp/a\\x2/b')" })).toEqual(["/tmp/a\\x2/b"]);
+		expect(extractToolPathArguments("python", { code: "open('/tmp/a\\u{ffffff}/b')" })).toEqual([
+			"/tmp/a\\u{ffffff}/b",
+		]);
 	});
 
 	it("projects implicit and nested tool paths through the shared path owner", () => {

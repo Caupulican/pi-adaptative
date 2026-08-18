@@ -173,8 +173,18 @@ export function isComplexShellCommand(command: string): boolean {
 }
 
 const FLAG_VALUE_RE = /^--?[^=\s]+=(.+)$/su;
+const SHORT_FLAG_BODY_RE = /^-(?!-)([A-Za-z].*)$/su;
 const EMBEDDED_TRAVERSAL_RE = /(^|[\\/])\.\.($|[\\/])/u;
 const DESCRIPTOR_REDIRECT_RE = /&[\d-]*$/u;
+const STRING_ESCAPE_RE = /\\(u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)/gsu;
+const SIMPLE_ESCAPE_VALUES = new Map<string, string>([
+	["\\", "\\"],
+	["'", "'"],
+	['"', '"'],
+	["n", "\n"],
+	["t", "\t"],
+]);
+const MAX_CODE_POINT = 0x10ffff;
 
 function isPathShapedToken(value: string): boolean {
 	if (value.startsWith("-")) return false;
@@ -192,29 +202,72 @@ function expandHomePrefix(value: string): string {
 }
 
 /**
- * Project one already-isolated argument (an argv element, or a token the shell tokenizer
- * produced) as a filesystem operand: the expanded path when the value — or its long-flag `=`
- * value — is path-shaped, undefined otherwise. Path-shaped means dot or home anchored,
- * Windows-prefixed, or bearing a path separator — except flags (leading `-`) and URL-like
- * values (`://`). Bare single-segment words stay unprojected; a false projection can only fail
- * closed, and only when the resolved path leaves the granted scope.
+ * Value carried inline by a single-dash short flag (`-I/etc/include`, `-o/tmp/out`). Which
+ * letters take an attached value is per-tool knowledge no static reader has, so every split of
+ * the leading letter run is tested and the shortest flag prefix whose remainder is path-shaped
+ * wins — `-Isrc/lib` projects `src/lib`, not `/lib`. A clustered flag (`-la`) leaves no
+ * path-shaped remainder at any split and projects nothing, as does a flag whose value is a
+ * separate following token (`-o /tmp/out`, projected from that token instead). A double dash
+ * without `=` is a long flag, never a flag-value form.
  */
-export function projectPathShapedArgument(value: string): string | undefined {
-	const candidate = value.match(FLAG_VALUE_RE)?.[1] ?? value;
-	return isPathShapedToken(candidate) ? expandHomePrefix(candidate) : undefined;
+function projectAttachedShortFlagValue(value: string): string | undefined {
+	const body = value.match(SHORT_FLAG_BODY_RE)?.[1];
+	if (body === undefined) return undefined;
+	for (let index = 1; index <= body.length && /^[A-Za-z]+$/u.test(body.slice(0, index)); index++) {
+		const candidate = body.slice(index);
+		if (isPathShapedToken(candidate)) return expandHomePrefix(candidate);
+	}
+	return undefined;
 }
 
 /**
- * Bounded static scan of an interpreter code payload (not shell): quoted string literals that
- * are absolute, home-anchored (~ expanded), Windows-prefixed, or embed parent-directory
- * traversal project as filesystem operands. Plain relative literals stay unprojected —
- * interpreter code is dominated by non-path strings — and computed paths (concatenation,
+ * Project one already-isolated argument (an argv element, or a token the shell tokenizer
+ * produced) as a filesystem operand: the expanded path when the value — or its long-flag `=`
+ * value, or a short flag's attached value — is path-shaped, undefined otherwise. Path-shaped
+ * means dot or home anchored, Windows-prefixed, or bearing a path separator — except flags
+ * (leading `-`) and URL-like values (`://`). Bare single-segment words stay unprojected; a false
+ * projection can only fail closed, and only when the resolved path leaves the granted scope.
+ */
+export function projectPathShapedArgument(value: string): string | undefined {
+	const flagValue = value.match(FLAG_VALUE_RE)?.[1];
+	if (flagValue !== undefined) {
+		return isPathShapedToken(flagValue) ? expandHomePrefix(flagValue) : undefined;
+	}
+	if (isPathShapedToken(value)) return expandHomePrefix(value);
+	return projectAttachedShortFlagValue(value);
+}
+
+/**
+ * Decode the escape sequences a source literal carries so the shape test reads the string the
+ * interpreter will actually open: `'\x2fetc\x2fpasswd'` is /etc/passwd, and `'/etc/pas\'swd'`
+ * carries no backslash. An unrecognized or truncated sequence stays literal text and is still
+ * shape-tested, so an undecodable literal can never drop out of the projection.
+ */
+function decodeStringLiteralEscapes(literal: string): string {
+	return literal.replace(STRING_ESCAPE_RE, (match, sequence: string) => {
+		const simple = SIMPLE_ESCAPE_VALUES.get(sequence);
+		if (simple !== undefined) return simple;
+		if (sequence.startsWith("x") || sequence.startsWith("u")) {
+			const digits = sequence.startsWith("u{") ? sequence.slice(2, -1) : sequence.slice(1);
+			const codePoint = Number.parseInt(digits, 16);
+			if (Number.isInteger(codePoint) && codePoint <= MAX_CODE_POINT) return String.fromCodePoint(codePoint);
+		}
+		return match;
+	});
+}
+
+/**
+ * Bounded static scan of an interpreter code payload (not shell): quoted string literals are
+ * escape-decoded first — an encoded separator (`'\x2fetc\x2fpasswd'`) must not hide the shape —
+ * and those that are absolute, home-anchored (~ expanded), Windows-prefixed, or embed
+ * parent-directory traversal project as filesystem operands. Plain relative literals stay
+ * unprojected — interpreter code is dominated by non-path strings — and computed paths (concatenation,
  * f-strings, os.path.join) cannot be resolved statically; the risk gate owns those.
  */
 export function extractCodeStaticPaths(code: string): string[] {
 	const paths: string[] = [];
 	for (const match of code.matchAll(/(['"])((?:\\.|(?!\1).)*?)\1/gsu)) {
-		const value = match[2];
+		const value = decodeStringLiteralEscapes(match[2]);
 		if (!value || value.includes("://")) continue;
 		if (
 			value.startsWith("/") ||

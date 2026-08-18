@@ -39,6 +39,9 @@ export interface FilePathIdentity {
 	size: string;
 	mtimeMs: string;
 	ctimeMs: string;
+	// Optional so identities produced elsewhere (or before this field existed) still compare.
+	mtimeNs?: string;
+	ctimeNs?: string;
 }
 
 export interface FilePathInspection {
@@ -151,6 +154,8 @@ function normalizedIdentity(value: {
 	size: number | bigint;
 	mtimeMs: number | bigint;
 	ctimeMs: number | bigint;
+	mtimeNs?: number | bigint;
+	ctimeNs?: number | bigint;
 }): FilePathIdentity {
 	return {
 		dev: String(value.dev),
@@ -159,6 +164,10 @@ function normalizedIdentity(value: {
 		size: String(value.size),
 		mtimeMs: String(value.mtimeMs),
 		ctimeMs: String(value.ctimeMs),
+		// stat({ bigint: true }) already reports these; without them a same-size in-place rewrite
+		// completing inside one millisecond is invisible to identitiesMatch.
+		...(value.mtimeNs === undefined ? {} : { mtimeNs: String(value.mtimeNs) }),
+		...(value.ctimeNs === undefined ? {} : { ctimeNs: String(value.ctimeNs) }),
 	};
 }
 
@@ -171,8 +180,16 @@ function identitiesMatch(left: FilePathIdentity | undefined, right: FilePathIden
 		left.mode === right.mode &&
 		left.size === right.size &&
 		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
+		left.ctimeMs === right.ctimeMs &&
+		nanosecondFieldsMatch(left, right)
 	);
+}
+
+/** Nanosecond fields decide only when both identities carry them; otherwise milliseconds stand. */
+function nanosecondFieldsMatch(left: FilePathIdentity, right: FilePathIdentity): boolean {
+	if (left.mtimeNs !== undefined && right.mtimeNs !== undefined && left.mtimeNs !== right.mtimeNs) return false;
+	if (left.ctimeNs !== undefined && right.ctimeNs !== undefined && left.ctimeNs !== right.ctimeNs) return false;
+	return true;
 }
 
 async function inspectLocalPath(path: string, followSymlinks: boolean): Promise<FilePathInspection | undefined> {
@@ -409,7 +426,10 @@ export class FileMutationIntentController {
 	/**
 	 * Re-anchor an edit lease to the file's current identity after an observed change.
 	 * The caller must then re-read and re-validate its content against that same version;
-	 * the next assertCurrent re-verifies it immediately before any write.
+	 * the next assertCurrent re-verifies that identity immediately before the caller writes.
+	 * That re-verification is a point-in-time observation, not a hold on the file: a write by
+	 * another process landing between it and the caller's write is neither detected nor
+	 * preserved — the caller's buffer overwrites it and nothing observes the loss afterwards.
 	 */
 	async refreshIdentity(lease: FileMutationLease, signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) throw new Error("Operation aborted");

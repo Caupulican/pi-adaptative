@@ -200,4 +200,45 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(effective.writePaths).toEqual([]);
 		expect(effective.deniedPaths).toEqual([resolve("/repo/private"), resolve("/repo/new-private")]);
 	});
+
+	it("scopes an execute-capable lane to its working directory even without read tools", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "shell-only",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["process.exec"],
+			toolNames: ["bash"],
+		});
+		const plan = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+
+		// The lane holds no read tool, but its process reads through the working directory, so that
+		// directory is the scope the path gates enforce against.
+		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["bash"]);
+		expect(plan.requiredCapabilities).toEqual(["process.exec"]);
+		expect(plan.processEnabled).toBe(true);
+		expect(plan.readPaths).toEqual([resolve("/repo")]);
+		expect(plan.writePaths).toEqual([]);
+
+		const narrowed = narrowWorkerExecutionPlan(workerExecutionAuthorityFromPlan(plan), plan);
+		expect(narrowed.readPaths).toEqual([resolve("/repo")]);
+
+		const managed = compileManagedProcessExecutionGrant({
+			target: { objectiveId: "objective-1", taskId: "task-1", attemptId: "attempt-1" },
+			laneId: "lane-1",
+			authorizationId: "auth-1",
+			role: profile.role,
+			allowedTools: ["bash"],
+			writePaths: [],
+			cwd: "/repo",
+			deniedPaths: [],
+			budget: {},
+		});
+		if (!managed.ok) throw new Error(`Expected a managed process grant: ${managed.reasonCodes.join(", ")}`);
+		expect(managed.grant.readPaths).toEqual([resolve("/repo")]);
+	});
 });
