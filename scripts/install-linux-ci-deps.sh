@@ -17,26 +17,35 @@ RETRY_DELAY="${CI_APT_RETRY_DELAY:-1}"
 
 # OS-release and keyring validation
 OS_RELEASE_FILE="${CI_OS_RELEASE_PATH:-/etc/os-release}"
-if [ ! -r "${OS_RELEASE_FILE}" ]; then
+if [ ! -f "${OS_RELEASE_FILE}" ] || [ ! -r "${OS_RELEASE_FILE}" ]; then
 	echo "Error: os-release file '${OS_RELEASE_FILE}' is missing or unreadable." >&2
 	exit 1
 fi
 
-# Parse os-release
-OS_ID=$(. "${OS_RELEASE_FILE}" && echo "${ID:-}")
+# Clear inherited values and source the trusted os-release file once
+unset ID UBUNTU_CODENAME VERSION_CODENAME
+# shellcheck source=/dev/null
+. "${OS_RELEASE_FILE}"
+
+OS_ID="${ID:-}"
 if [ "${OS_ID}" != "ubuntu" ]; then
 	echo "Error: unsupported Linux distribution '${OS_ID}'. This installer requires Ubuntu (ID=ubuntu)." >&2
 	exit 1
 fi
 
-CODENAME=$(. "${OS_RELEASE_FILE}" && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")
+CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
 if [[ -z "${CODENAME}" || ! "${CODENAME}" =~ ^[a-z]+$ ]]; then
 	echo "Error: invalid or missing Ubuntu codename '${CODENAME}'. Expected a single lowercase token (e.g. noble, jammy)." >&2
 	exit 1
 fi
 
 KEYRING_FILE="${CI_KEYRING_PATH:-/usr/share/keyrings/ubuntu-archive-keyring.gpg}"
-if [ ! -r "${KEYRING_FILE}" ] || [ ! -s "${KEYRING_FILE}" ]; then
+if [[ ! "${KEYRING_FILE}" =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
+	echo "Error: invalid keyring path '${KEYRING_FILE}'. Expected an absolute single-token path without whitespace, brackets, or special characters." >&2
+	exit 1
+fi
+
+if [ ! -f "${KEYRING_FILE}" ] || [ ! -r "${KEYRING_FILE}" ] || [ ! -s "${KEYRING_FILE}" ]; then
 	echo "Error: Ubuntu archive keyring '${KEYRING_FILE}' is missing, empty, or unreadable." >&2
 	exit 1
 fi

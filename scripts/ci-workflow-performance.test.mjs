@@ -132,6 +132,7 @@ test("CI jobs share the bounded Linux dependency installation script without dup
 });
 
 test("bounded Linux dependency installer configures owned HTTPS sources, kill-after timeouts, and verification", () => {
+	assert.match(installScript, /unset ID UBUNTU_CODENAME VERSION_CODENAME/u);
 	assert.match(installScript, /ID=ubuntu/u);
 	assert.match(installScript, /Dir::Etc::sourcelist=/u);
 	assert.match(installScript, /Dir::Etc::sourceparts=/u);
@@ -242,6 +243,29 @@ test(
 );
 
 test(
+	"behavioral harness: negative control - missing fields in os-release cannot inherit values from environment",
+	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
+	() => {
+		withInstallerHarness(
+			{
+				osReleaseContent: 'NAME="Custom Linux"\nPRETTY_NAME="Custom Linux 1.0"\n',
+				env: {
+					ID: "ubuntu",
+					UBUNTU_CODENAME: "noble",
+					VERSION_CODENAME: "noble",
+				},
+				aptScript: (stateDir) => `#!/usr/bin/env bash\necho "$@" >> "${stateDir}/apt.log"\nexit 0\n`,
+			},
+			({ res, hasState }) => {
+				assert.notEqual(res.status, 0);
+				assert.match(res.stderr, /unsupported Linux distribution ''|invalid or missing Ubuntu codename ''/u);
+				assert.equal(hasState("apt.log"), false, "apt must never be invoked when os-release lacks fields despite inherited env");
+			},
+		);
+	},
+);
+
+test(
 	"behavioral harness: negative control - invalid or missing codename fails fast before apt invocation",
 	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
 	() => {
@@ -254,6 +278,24 @@ test(
 				assert.notEqual(res.status, 0);
 				assert.match(res.stderr, /invalid or missing Ubuntu codename/u);
 				assert.equal(hasState("apt.log"), false, "apt must never be invoked with invalid codename");
+			},
+		);
+	},
+);
+
+test(
+	"behavioral harness: negative control - relative or malformed keyring path fails fast before apt invocation",
+	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
+	() => {
+		withInstallerHarness(
+			{
+				keyringPath: "relative/keyring.gpg",
+				aptScript: (stateDir) => `#!/usr/bin/env bash\necho "$@" >> "${stateDir}/apt.log"\nexit 0\n`,
+			},
+			({ res, hasState }) => {
+				assert.notEqual(res.status, 0);
+				assert.match(res.stderr, /invalid keyring path 'relative\/keyring\.gpg'/u);
+				assert.equal(hasState("apt.log"), false, "apt must never be invoked with relative/malformed keyring path");
 			},
 		);
 	},
