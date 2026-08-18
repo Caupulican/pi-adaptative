@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -50,21 +50,20 @@ function withInstallerHarness(options, fn) {
 		writeFileSync(rgPath, options.rgScript ?? "#!/usr/bin/env bash\nexit 0\n");
 		chmodSync(rgPath, 0o755);
 
-		// Create explicit mock test seams for OS-release and keyring to decouple tests from host distro
+		// Create default mock test seams for Ubuntu OS-release and keyring
 		const mockKeyringPath = join(stateDir, "ubuntu-archive-keyring.gpg");
 		writeFileSync(mockKeyringPath, "MOCK_KEYRING_GPG");
 
 		const mockOsReleasePath = join(stateDir, "os-release");
-		writeFileSync(mockOsReleasePath, "UBUNTU_CODENAME=noble\nVERSION_CODENAME=noble\n");
+		writeFileSync(mockOsReleasePath, options.osReleaseContent ?? 'ID=ubuntu\nVERSION_CODENAME=noble\n');
 
 		const start = Date.now();
 		const res = spawnSync(installScriptPath, [], {
 			env: {
 				...process.env,
 				PATH: `${binDir}:${process.env.PATH}`,
-				CI_UBUNTU_CODENAME: "noble",
-				CI_OS_RELEASE_PATH: mockOsReleasePath,
-				CI_KEYRING_PATH: mockKeyringPath,
+				CI_OS_RELEASE_PATH: options.osReleasePath ?? mockOsReleasePath,
+				CI_KEYRING_PATH: options.keyringPath ?? mockKeyringPath,
 				CI_APT_UPDATE_TIMEOUT: "1s",
 				CI_APT_DOWNLOAD_TIMEOUT: "1s",
 				CI_APT_INSTALL_TIMEOUT: "1s",
@@ -81,9 +80,14 @@ function withInstallerHarness(options, fn) {
 			elapsed,
 			stateDir,
 			mockKeyringPath,
+			mockOsReleasePath,
 			readState: (filename) => {
 				const p = join(stateDir, filename);
 				return readFileSync(p, "utf8");
+			},
+			hasState: (filename) => {
+				const p = join(stateDir, filename);
+				return existsSync(p);
 			},
 		});
 	} finally {
@@ -128,6 +132,7 @@ test("CI jobs share the bounded Linux dependency installation script without dup
 });
 
 test("bounded Linux dependency installer configures owned HTTPS sources, kill-after timeouts, and verification", () => {
+	assert.match(installScript, /ID=ubuntu/u);
 	assert.match(installScript, /Dir::Etc::sourcelist=/u);
 	assert.match(installScript, /Dir::Etc::sourceparts=/u);
 	assert.match(installScript, /https:\/\/archive\.ubuntu\.com\/ubuntu\//u);
@@ -213,6 +218,60 @@ exit 0
 					/microsoft|google|github|nodesource|docker/iu,
 					"Must exclude 3rd-party repositories",
 				);
+			},
+		);
+	},
+);
+
+test(
+	"behavioral harness: negative control - non-Ubuntu OS distribution fails fast before apt invocation",
+	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
+	() => {
+		withInstallerHarness(
+			{
+				osReleaseContent: "ID=debian\nVERSION_CODENAME=trixie\n",
+				aptScript: (stateDir) => `#!/usr/bin/env bash\necho "$@" >> "${stateDir}/apt.log"\nexit 0\n`,
+			},
+			({ res, hasState }) => {
+				assert.notEqual(res.status, 0);
+				assert.match(res.stderr, /unsupported Linux distribution 'debian'/u);
+				assert.equal(hasState("apt.log"), false, "apt must never be invoked on non-Ubuntu OS");
+			},
+		);
+	},
+);
+
+test(
+	"behavioral harness: negative control - invalid or missing codename fails fast before apt invocation",
+	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
+	() => {
+		withInstallerHarness(
+			{
+				osReleaseContent: "ID=ubuntu\nVERSION_CODENAME=invalid/codename!\n",
+				aptScript: (stateDir) => `#!/usr/bin/env bash\necho "$@" >> "${stateDir}/apt.log"\nexit 0\n`,
+			},
+			({ res, hasState }) => {
+				assert.notEqual(res.status, 0);
+				assert.match(res.stderr, /invalid or missing Ubuntu codename/u);
+				assert.equal(hasState("apt.log"), false, "apt must never be invoked with invalid codename");
+			},
+		);
+	},
+);
+
+test(
+	"behavioral harness: negative control - missing or unreadable keyring fails fast before apt invocation",
+	{ skip: process.platform !== "linux" && "Linux-only GNU timeout/sudo/apt boundary" },
+	() => {
+		withInstallerHarness(
+			{
+				keyringPath: "/tmp/nonexistent-keyring-" + Date.now() + ".gpg",
+				aptScript: (stateDir) => `#!/usr/bin/env bash\necho "$@" >> "${stateDir}/apt.log"\nexit 0\n`,
+			},
+			({ res, hasState }) => {
+				assert.notEqual(res.status, 0);
+				assert.match(res.stderr, /Ubuntu archive keyring .* is missing, empty, or unreadable/u);
+				assert.equal(hasState("apt.log"), false, "apt must never be invoked with missing keyring");
 			},
 		);
 	},

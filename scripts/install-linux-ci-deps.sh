@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bounded Linux system dependency installer for CI workflows.
+# Bounded Linux system dependency installer for Ubuntu CI workflows.
+# Strictly validates Ubuntu OS identity, codename, and trusted archive keyring.
 # Generates and enforces a minimal, CI-owned Ubuntu HTTPS repository source definition,
 # bypassing unresponsive runner Azure mirrorlists and third-party package repositories.
 # Separates retriable network downloads from a single local package installation.
@@ -14,6 +15,32 @@ KILL_AFTER="${CI_APT_KILL_AFTER:-5s}"
 MAX_ATTEMPTS="${CI_APT_MAX_ATTEMPTS:-2}"
 RETRY_DELAY="${CI_APT_RETRY_DELAY:-1}"
 
+# OS-release and keyring validation
+OS_RELEASE_FILE="${CI_OS_RELEASE_PATH:-/etc/os-release}"
+if [ ! -r "${OS_RELEASE_FILE}" ]; then
+	echo "Error: os-release file '${OS_RELEASE_FILE}' is missing or unreadable." >&2
+	exit 1
+fi
+
+# Parse os-release
+OS_ID=$(. "${OS_RELEASE_FILE}" && echo "${ID:-}")
+if [ "${OS_ID}" != "ubuntu" ]; then
+	echo "Error: unsupported Linux distribution '${OS_ID}'. This installer requires Ubuntu (ID=ubuntu)." >&2
+	exit 1
+fi
+
+CODENAME=$(. "${OS_RELEASE_FILE}" && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")
+if [[ -z "${CODENAME}" || ! "${CODENAME}" =~ ^[a-z]+$ ]]; then
+	echo "Error: invalid or missing Ubuntu codename '${CODENAME}'. Expected a single lowercase token (e.g. noble, jammy)." >&2
+	exit 1
+fi
+
+KEYRING_FILE="${CI_KEYRING_PATH:-/usr/share/keyrings/ubuntu-archive-keyring.gpg}"
+if [ ! -r "${KEYRING_FILE}" ] || [ ! -s "${KEYRING_FILE}" ]; then
+	echo "Error: Ubuntu archive keyring '${KEYRING_FILE}' is missing, empty, or unreadable." >&2
+	exit 1
+fi
+
 # Set up clean temporary directory for CI-owned sources definition
 TMP_DIR=$(mktemp -d "/tmp/ci-apt-sources-XXXXXX")
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -22,57 +49,11 @@ SOURCES_FILE="${TMP_DIR}/ci-sources.list"
 SOURCES_PARTS_DIR="${TMP_DIR}/sources.list.d"
 mkdir -p "${SOURCES_PARTS_DIR}"
 
-# Detect and validate OS codename
-get_distro_codename() {
-	if [ -n "${CI_UBUNTU_CODENAME:-}" ]; then
-		echo "${CI_UBUNTU_CODENAME}"
-		return 0
-	fi
-	local os_release_file="${CI_OS_RELEASE_PATH:-/etc/os-release}"
-	if [ -f "${os_release_file}" ]; then
-		local codename
-		codename=$(. "${os_release_file}" && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")
-		if [ -n "${codename}" ]; then
-			echo "${codename}"
-			return 0
-		fi
-	fi
-	if command -v lsb_release >/dev/null 2>&1; then
-		lsb_release -cs
-		return 0
-	fi
-	echo "noble"
-}
-
-# Detect optional keyring
-get_keyring_option() {
-	if [ -n "${CI_KEYRING_PATH:-}" ]; then
-		if [ "${CI_KEYRING_PATH}" = "none" ]; then
-			echo ""
-			return 0
-		fi
-		if [ -f "${CI_KEYRING_PATH}" ]; then
-			echo "[signed-by=${CI_KEYRING_PATH}] "
-			return 0
-		fi
-	fi
-	for kr in /usr/share/keyrings/ubuntu-archive-keyring.gpg /etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg /usr/share/keyrings/debian-archive-keyring.gpg; do
-		if [ -f "${kr}" ]; then
-			echo "[signed-by=${kr}] "
-			return 0
-		fi
-	done
-	echo ""
-}
-
-CODENAME=$(get_distro_codename)
-KEYRING_PREFIX=$(get_keyring_option)
-
 # Generate minimal, clean, official HTTPS sources definition
 cat <<EOF > "${SOURCES_FILE}"
-deb ${KEYRING_PREFIX}https://archive.ubuntu.com/ubuntu/ ${CODENAME} main universe
-deb ${KEYRING_PREFIX}https://archive.ubuntu.com/ubuntu/ ${CODENAME}-updates main universe
-deb ${KEYRING_PREFIX}https://security.ubuntu.com/ubuntu/ ${CODENAME}-security main universe
+deb [signed-by=${KEYRING_FILE}] https://archive.ubuntu.com/ubuntu/ ${CODENAME} main universe
+deb [signed-by=${KEYRING_FILE}] https://archive.ubuntu.com/ubuntu/ ${CODENAME}-updates main universe
+deb [signed-by=${KEYRING_FILE}] https://security.ubuntu.com/ubuntu/ ${CODENAME}-security main universe
 EOF
 
 # Assert generated sources contain no Azure mirrors or third-party repositories
