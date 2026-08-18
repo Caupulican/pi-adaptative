@@ -602,9 +602,17 @@ describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live gran
 
 function createFakeChild(): ChildProcess {
 	const child = new EventEmitter() as ChildProcess;
-	child.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
-	child.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
-	child.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+	child.stdout = Object.assign(new EventEmitter(), {
+		ref: vi.fn(),
+		unref: vi.fn(),
+	}) as unknown as ChildProcess["stdout"];
+	child.stderr = Object.assign(new EventEmitter(), {
+		ref: vi.fn(),
+		unref: vi.fn(),
+	}) as unknown as ChildProcess["stderr"];
+	child.stdin = { write: vi.fn(), ref: vi.fn(), unref: vi.fn() } as unknown as ChildProcess["stdin"];
+	child.ref = vi.fn() as unknown as ChildProcess["ref"];
+	child.unref = vi.fn() as unknown as ChildProcess["unref"];
 	child.kill = vi.fn() as unknown as ChildProcess["kill"];
 	return child;
 }
@@ -627,6 +635,24 @@ async function waitOneEventLoopTurn(): Promise<void> {
 }
 
 describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
+	it("re-arms an idle child's terminal handles before initiating teardown", () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const fakeChild = createFakeChild();
+		attachFakeChild(coordinator, fakeChild);
+		coordinator.setLoopRef(false);
+
+		coordinator.dispose();
+
+		expect(fakeChild.ref).toHaveBeenCalledTimes(1);
+		for (const stream of [fakeChild.stdin, fakeChild.stdout, fakeChild.stderr] as unknown as Array<{
+			ref: ReturnType<typeof vi.fn>;
+		}>) {
+			expect(stream.ref).toHaveBeenCalledTimes(1);
+		}
+		expect(fakeChild.ref).toHaveBeenCalledBefore(fakeChild.kill as ReturnType<typeof vi.fn>);
+		fakeChild.emit("close", 0);
+	});
+
 	it("negative control: disposal barrier does not resolve on exit alone and requires child close event", async () => {
 		vi.useFakeTimers();
 		try {

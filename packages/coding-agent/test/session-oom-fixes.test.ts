@@ -96,9 +96,17 @@ describe("session dispose releases long-session resources", () => {
 		const sessionKey = (session as unknown as { _shellSessionKey: string })._shellSessionKey;
 		const shell = acquirePersistentShellSession(sessionKey, "bash");
 		const fakeChild = new EventEmitter() as ChildProcess;
-		fakeChild.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
-		fakeChild.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
-		fakeChild.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+		fakeChild.stdout = Object.assign(new EventEmitter(), {
+			ref: vi.fn(),
+			unref: vi.fn(),
+		}) as unknown as ChildProcess["stdout"];
+		fakeChild.stderr = Object.assign(new EventEmitter(), {
+			ref: vi.fn(),
+			unref: vi.fn(),
+		}) as unknown as ChildProcess["stderr"];
+		fakeChild.stdin = { write: vi.fn(), ref: vi.fn(), unref: vi.fn() } as unknown as ChildProcess["stdin"];
+		fakeChild.ref = vi.fn() as unknown as ChildProcess["ref"];
+		fakeChild.unref = vi.fn() as unknown as ChildProcess["unref"];
 		fakeChild.kill = vi.fn() as unknown as ChildProcess["kill"];
 		(shell as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild);
 

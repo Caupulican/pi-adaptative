@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native Windows RPC shutdown after a persistent PowerShell command by re-arming child terminal observation before teardown.
+
 ## [0.93.6] - 2026-08-18
 
 ### Changed

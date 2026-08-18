@@ -60,12 +60,7 @@ export class PersistentProcessCoordinator {
 	attach(child: ChildProcess, handlers: PersistentChildHandlers): void {
 		if (this.disposed) {
 			this.trackTerminal(child);
-			if (child.pid) killProcessTree(child.pid);
-			try {
-				child.kill();
-			} catch {
-				// Process already dead
-			}
+			this.terminateChild(child);
 			throw new Error("Persistent process coordinator is disposed");
 		}
 		if (this.currentChild) throw new Error("Persistent process coordinator already owns a child");
@@ -109,6 +104,14 @@ export class PersistentProcessCoordinator {
 		const child = this.currentChild;
 		if (!child) return;
 		this.clear(child);
+		this.terminateChild(child);
+	}
+
+	private terminateChild(child: ChildProcess): void {
+		// Bun's Windows child-process bridge can stop publishing terminal events after every
+		// handle has been unref'd. Re-arm the already-installed close observer before killing so
+		// strict teardown can distinguish physical handle release from process exit.
+		setChildProcessLoopRef(child, true);
 		if (child.pid) killProcessTree(child.pid);
 		try {
 			child.kill();
