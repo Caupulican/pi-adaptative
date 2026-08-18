@@ -1,10 +1,5 @@
 ## [Unreleased]
 
-### Security
-
-- Shell commands now project their statically recognizable filesystem operands (absolute, home-anchored, dot-relative, separator-bearing relative, embedded-traversal, flag-value, and redirect-target paths; URLs and flags excluded) into the shared path-projection owner — as do python `scriptPath`/`code` string literals and run_process argv elements — and process-launching tools carry path-scope enforcement with an execute access class bound to the union of granted read and write scopes. Closes the holes where autonomy gates and the capability gateway never path-checked bash commands or interpreter payloads at all.
-- Process-launching calls now also enforce their effective working directory against the granted scope at both the autonomy gate and the capability gateway, so an operand the command text does not statically reveal can no longer escape: an in-scope working directory keeps bare relative operands in scope by construction, and an out-of-scope one is denied outright. Interpreter string literals are unescaped before they are examined, and paths attached directly to short flags are recognized.
-
 ### Changed
 
 - Context GC keeps investigations intact: the recency window default rose from 8 to 24 messages, tool results referenced in recent assistant turns are protected from packing (superseded reads still pack), and packed stubs now cite retrieval as an imperative `read <path>` call.

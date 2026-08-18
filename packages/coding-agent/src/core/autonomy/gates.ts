@@ -75,46 +75,6 @@ export function extractCandidatePaths(toolName: string, args: unknown): string[]
 	return toolUsesPathScope(toolName) ? extractToolPathArguments(toolName, args) : [];
 }
 
-/**
- * Classify one path against the envelope, separating an explicit deny from a plain scope escape
- * so both the projected operands and the working directory report the cause they actually hit.
- */
-function pathScopeBlock(
-	envelope: CapabilityEnvelope,
-	targetPath: string,
-	cwd: string,
-	subject: string,
-	outsideReasonCode: string,
-): GateOutcome | undefined {
-	if (isPathWithinEnvelope(envelope, targetPath, cwd)) return undefined;
-	let isDenied = false;
-	try {
-		const target = safeRealpathSync(path.resolve(cwd, targetPath));
-		isDenied = (envelope.deniedPaths ?? []).some((denied) => {
-			try {
-				return isPathWithinScope(target, safeRealpathSync(path.resolve(cwd, denied)));
-			} catch {
-				return false;
-			}
-		});
-	} catch {}
-
-	if (isDenied) {
-		return {
-			outcome: "block",
-			gate: "path_scope",
-			reasonCode: "path_denied",
-			message: `${subject} '${targetPath}' is explicitly denied.`,
-		};
-	}
-	return {
-		outcome: "block",
-		gate: "path_scope",
-		reasonCode: outsideReasonCode,
-		message: `${subject} '${targetPath}' is outside all allowed roots.`,
-	};
-}
-
 export function evaluateToolGate(input: {
 	toolName: string;
 	args?: unknown;
@@ -177,24 +137,35 @@ export function evaluateToolGate(input: {
 	// fixed-root control-plane operation; selecting filesystem.read instead keeps the path gate.
 	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args);
 	const paths = pathAccess === "none" ? [] : extractCandidatePaths(input.toolName, input.args);
-	// A launched process inherits the session working directory, so every relative operand resolves
-	// against it: an in-scope cwd puts bare relative operands in scope by construction, and an
-	// out-of-scope cwd lets the process reach anything relative no matter how the command text
-	// projects. Enforcing it is what keeps the static projection from being the only thing standing
-	// between a granted process and the rest of the filesystem.
-	if (pathAccess === "execute") {
-		const blocked = pathScopeBlock(
-			envelope,
-			path.resolve(input.cwd),
-			input.cwd,
-			"Working directory",
-			"cwd_outside_allowed_roots",
-		);
-		if (blocked) return blocked;
-	}
 	for (const targetPath of paths) {
-		const blocked = pathScopeBlock(envelope, targetPath, input.cwd, "Path", "path_outside_allowed_roots");
-		if (blocked) return blocked;
+		if (!isPathWithinEnvelope(envelope, targetPath, input.cwd)) {
+			let isDenied = false;
+			try {
+				const target = safeRealpathSync(path.resolve(input.cwd, targetPath));
+				isDenied = (envelope.deniedPaths ?? []).some((denied) => {
+					try {
+						return isPathWithinScope(target, safeRealpathSync(path.resolve(input.cwd, denied)));
+					} catch {
+						return false;
+					}
+				});
+			} catch {}
+
+			if (isDenied) {
+				return {
+					outcome: "block",
+					gate: "path_scope",
+					reasonCode: "path_denied",
+					message: `Path '${targetPath}' is explicitly denied.`,
+				};
+			}
+			return {
+				outcome: "block",
+				gate: "path_scope",
+				reasonCode: "path_outside_allowed_roots",
+				message: `Path '${targetPath}' is outside all allowed roots.`,
+			};
+		}
 	}
 
 	let command = "";

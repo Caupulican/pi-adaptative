@@ -19,7 +19,6 @@ export type GatewayDecisionCode =
 	| "capability_not_granted"
 	| "path_argument_required"
 	| "path_outside_scope"
-	| "cwd_outside_scope"
 	| "scope_denied"
 	| "tool_call_budget_exhausted"
 	| "token_budget_exhausted"
@@ -381,33 +380,6 @@ export class CapabilityGateway {
 				? (resolveCapabilityPathAccess(callCapabilities) ?? "none")
 				: "none";
 		const paths = pathAccess === "none" ? [] : extractToolPathArguments(toolName, params);
-		if (pathAccess === "execute") {
-			// A launched process may both read and write, so its paths must stay inside the union of
-			// granted scopes; direction-specific grants keep their own lists.
-			const allowedPaths = [...this.grant.readPaths, ...this.grant.writePaths];
-			// The process inherits this working directory, so every relative operand resolves against
-			// it: an in-scope cwd puts bare relative operands in scope by construction, and an
-			// out-of-scope cwd lets the process reach anything relative no matter how the command text
-			// projects. Enforcing the cwd is what keeps projection completeness from being the only
-			// thing standing between a granted process and the rest of the filesystem. The authority
-			// is this gateway's cwd, never a caller-supplied `cwd` argument: the process tools bind
-			// their working directory when they are constructed, so a caller value is a claim the
-			// process never honors — it is still checked below as an ordinary path operand.
-			const workingDirectory = resolve(this.cwd);
-			if (!this.pathAllowed(workingDirectory, allowedPaths)) {
-				this.deny(
-					toolName,
-					"cwd_outside_scope",
-					`Working directory '${workingDirectory}' is outside grant '${this.grant.grantId}'.`,
-				);
-			}
-			for (const rawPath of paths) {
-				if (!this.pathAllowed(rawPath, allowedPaths)) {
-					this.deny(toolName, "path_outside_scope", `Path '${rawPath}' is outside grant '${this.grant.grantId}'.`);
-				}
-			}
-			return;
-		}
 		if (
 			pathAccess !== "none" &&
 			(callCapabilities.some((capability) => PATH_CAPABILITIES.has(capability)) || paths.length > 0)

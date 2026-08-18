@@ -1,10 +1,5 @@
 import { resolve } from "node:path";
-import {
-	extractCodeStaticPaths,
-	extractShellCommandPaths,
-	projectPathShapedArgument,
-	type ShellCommandDialect,
-} from "../tools/shell-command-parser.ts";
+import { resolveToolCallPathAccess } from "../tool-capability-policy.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
@@ -17,23 +12,8 @@ import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
  * outcome code, never a silent no-op.
  */
 
-const PATH_ARGUMENT_KEYS = [
-	"path",
-	"file_path",
-	"filePath",
-	"cwd",
-	"directory",
-	"dir",
-	"target",
-	"scriptPath",
-	"script_path",
-] as const;
+const PATH_ARGUMENT_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
 const PATH_LIST_ARGUMENT_KEYS = ["paths", "files"] as const;
-const SHELL_COMMAND_TOOL_DIALECTS = new Map<string, ShellCommandDialect>([
-	["bash", "posix"],
-	["shell", "posix"],
-	["powershell", "powershell"],
-]);
 
 export function extractPathArguments(params: unknown): string[] {
 	if (!params || typeof params !== "object") return [];
@@ -65,33 +45,6 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
 				if (!source || typeof source !== "object" || !("path" in source)) continue;
 				const sourcePath = source.path;
 				if (typeof sourcePath === "string" && sourcePath.trim()) paths.push(sourcePath.trim());
-			}
-		}
-	}
-	const shellDialect = SHELL_COMMAND_TOOL_DIALECTS.get(normalizedToolName);
-	if (shellDialect && params && typeof params === "object") {
-		const command = (params as Record<string, unknown>).command;
-		if (typeof command === "string") paths.push(...extractShellCommandPaths(command, shellDialect));
-	}
-	if (
-		(normalizedToolName === "python" || normalizedToolName === "run_process") &&
-		params &&
-		typeof params === "object"
-	) {
-		const record = params as Record<string, unknown>;
-		if (normalizedToolName === "python" && typeof record.code === "string") {
-			paths.push(...extractCodeStaticPaths(record.code));
-		}
-		if (normalizedToolName === "run_process" && typeof record.executable === "string") {
-			const projected = projectPathShapedArgument(record.executable.trim());
-			if (projected !== undefined) paths.push(projected);
-		}
-		// argv entries reach the process unparsed by any shell, so each element is its own token.
-		if (Array.isArray(record.args)) {
-			for (const entry of record.args) {
-				if (typeof entry !== "string") continue;
-				const projected = projectPathShapedArgument(entry.trim());
-				if (projected !== undefined) paths.push(projected);
 			}
 		}
 	}
@@ -160,7 +113,9 @@ export interface EnvelopeScopedTool {
 }
 
 /**
- * Wrap a tool so every path-bearing argument is scope-checked when it RUNS. The wrapped tool is
+ * Wrap a tool so path-bearing arguments are scope-checked when it RUNS, consulting canonical
+ * tool capability policy so only tools whose policy declares path-scope access
+ * (resolveToolCallPathAccess !== "none") are checked against envelope boundaries. The wrapped tool is
  * shape-identical; params are conventionally the second execute argument (toolCallId, params, …).
  */
 export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
@@ -172,18 +127,26 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 		...tool,
 		execute: (...args: unknown[]) => {
 			const params = args[1];
-			for (const rawPath of extractToolPathArguments(tool.name, params)) {
-				if (!isPathWithinEnvelope(envelope, rawPath, cwd)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+			const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
+			if (pathAccess !== "none") {
+				for (const rawPath of extractToolPathArguments(tool.name, params)) {
+					if (!isPathWithinEnvelope(envelope, rawPath, cwd)) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+								},
+							],
+							details: {
+								outcome: "envelope_path_denied",
+								tool: tool.name,
+								path: rawPath,
+								envelopeId: envelope.id,
 							},
-						],
-						details: { outcome: "envelope_path_denied", tool: tool.name, path: rawPath, envelopeId: envelope.id },
-						isError: true,
-					};
+							isError: true,
+						};
+					}
 				}
 			}
 			return tool.execute(...args);

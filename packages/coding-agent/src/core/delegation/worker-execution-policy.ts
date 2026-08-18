@@ -72,13 +72,10 @@ export function narrowWorkerExecutionPlan(
 	);
 	const requiredCapabilities = [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))];
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
+	const readEnabled = requiredCapabilities.some(
+		(capability) => capability === "filesystem.read" || capability === "worktree.read",
+	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
-	const processEnabled = grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME);
-	// A launched process reads through its working directory, so an execute-capable lane keeps the
-	// read scope that bounds it even when every read tool has been revoked.
-	const readEnabled =
-		processEnabled ||
-		requiredCapabilities.some((capability) => capability === "filesystem.read" || capability === "worktree.read");
 	return {
 		toolManifests,
 		requiredCapabilities,
@@ -87,7 +84,7 @@ export function narrowWorkerExecutionPlan(
 		deniedPaths: [...new Set([...admitted.deniedPaths, ...current.deniedPaths].map((entry) => path.resolve(entry)))],
 		readMemory: grantedTools.has("memory"),
 		writeEnabled,
-		processEnabled,
+		processEnabled: grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME),
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
 	};
 }
@@ -140,16 +137,12 @@ export function buildWorkerExecutionPlan(args: {
 		});
 	}
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
+	const readEnabled = toolManifests.some((manifest) =>
+		manifest.capabilities.some((capability) => capability === "filesystem.read" || capability === "worktree.read"),
+	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	const readMemory = grantedTools.has("memory");
 	const processEnabled = grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME);
-	// A launched process reads through its working directory whether or not a read tool is granted,
-	// so an execute-capable lane needs that directory as a stated, enforceable scope.
-	const readEnabled =
-		processEnabled ||
-		toolManifests.some((manifest) =>
-			manifest.capabilities.some((capability) => capability === "filesystem.read" || capability === "worktree.read"),
-		);
 	const budget = intersectRiskBudgets(
 		args.profile.budget,
 		...(args.settings.maxUsd > 0 ? [{ maxCostUsd: args.settings.maxUsd }] : []),
@@ -247,13 +240,7 @@ export function compileManagedProcessExecutionGrant(args: {
 	if (unknownTools.length > 0) return { ok: false, reasonCodes: unknownTools.map((name) => `unknown_tool:${name}`) };
 	const capabilities = [...new Set(manifests.flatMap((manifest) => manifest.capabilities))];
 	const readEnabled = capabilities.some(
-		(capability) =>
-			capability === "filesystem.read" ||
-			capability === "worktree.read" ||
-			// A launched process reads through its working directory whether or not a read tool is
-			// granted, so an execute-capable lane needs that directory as a stated, enforceable scope.
-			capability === "process.exec" ||
-			capability === "tests.execute",
+		(capability) => capability === "filesystem.read" || capability === "worktree.read",
 	);
 	const compiled = new ExecutionPolicyCompiler().compile({
 		...args.target,

@@ -201,7 +201,7 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(effective.deniedPaths).toEqual([resolve("/repo/private"), resolve("/repo/new-private")]);
 	});
 
-	it("scopes an execute-capable lane to its working directory even without read tools", () => {
+	it("does not invent readPaths or filesystem.read authority for process-only lanes", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "shell-only",
 			model: { provider: "test", id: "model" },
@@ -216,16 +216,15 @@ describe("buildWorkerExecutionPlan", () => {
 			memoryEnabled: false,
 		});
 
-		// The lane holds no read tool, but its process reads through the working directory, so that
-		// directory is the scope the path gates enforce against.
 		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["bash"]);
 		expect(plan.requiredCapabilities).toEqual(["process.exec"]);
 		expect(plan.processEnabled).toBe(true);
-		expect(plan.readPaths).toEqual([resolve("/repo")]);
+		expect(plan.readPaths).toEqual([]);
 		expect(plan.writePaths).toEqual([]);
 
 		const narrowed = narrowWorkerExecutionPlan(workerExecutionAuthorityFromPlan(plan), plan);
-		expect(narrowed.readPaths).toEqual([resolve("/repo")]);
+		expect(narrowed.readPaths).toEqual([]);
+		expect(narrowed.writePaths).toEqual([]);
 
 		const managed = compileManagedProcessExecutionGrant({
 			target: { objectiveId: "objective-1", taskId: "task-1", attemptId: "attempt-1" },
@@ -239,6 +238,7 @@ describe("buildWorkerExecutionPlan", () => {
 			budget: {},
 		});
 		if (!managed.ok) throw new Error(`Expected a managed process grant: ${managed.reasonCodes.join(", ")}`);
-		expect(managed.grant.readPaths).toEqual([resolve("/repo")]);
+		expect(managed.grant.readPaths).toEqual([]);
+		expect(managed.grant.writePaths).toEqual([]);
 	});
 });

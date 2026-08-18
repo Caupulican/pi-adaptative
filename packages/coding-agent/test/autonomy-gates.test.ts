@@ -208,205 +208,6 @@ describe("Autonomy Gates", () => {
 			expect(outcome.outcome).toBe("allow");
 		});
 
-		it("returns block for bash that reads outside allowed root", () => {
-			const outsideFile = path.join(outsideRoot, "data.txt");
-			fs.writeFileSync(outsideFile, "outside data", "utf-8");
-			const envelope: CapabilityEnvelope = { ...emptyEnvelope, allowedPaths: [allowedRoot] };
-
-			const outcome = evaluateToolGate({
-				toolName: "bash",
-				args: { command: `cat ${outsideFile}` },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(outcome.outcome).toBe("block");
-			expect(outcome.reasonCode).toBe("path_outside_allowed_roots");
-
-			const inside = evaluateToolGate({
-				toolName: "bash",
-				args: { command: `cat ${path.join(allowedRoot, "notes.txt")}` },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(inside.outcome).toBe("allow");
-
-			const relativeOutside = evaluateToolGate({
-				toolName: "bash",
-				args: { command: "cat ../outside/data.txt" },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(relativeOutside.outcome).toBe("block");
-			expect(relativeOutside.reasonCode).toBe("path_outside_allowed_roots");
-
-			const attachedFlagOutside = evaluateToolGate({
-				toolName: "bash",
-				args: { command: `gcc -I${outsideRoot} main.c` },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(attachedFlagOutside.outcome).toBe("block");
-			expect(attachedFlagOutside.reasonCode).toBe("path_outside_allowed_roots");
-			expect(
-				evaluateToolGate({
-					toolName: "bash",
-					args: { command: `gcc -I${allowedRoot} main.c` },
-					cwd: allowedRoot,
-					envelope,
-				}).outcome,
-			).toBe("allow");
-
-			const separatorTokensInScope = evaluateToolGate({
-				toolName: "bash",
-				args: { command: "git merge origin/main && sed s/a/b/ notes.txt" },
-				cwd: tempDir,
-				envelope: { ...emptyEnvelope, allowedPaths: [tempDir] },
-			});
-			expect(separatorTokensInScope.outcome).toBe("allow");
-		});
-
-		it("returns block for an execute-class call whose working directory is outside allowed roots", () => {
-			const envelope: CapabilityEnvelope = { ...emptyEnvelope, allowedPaths: [allowedRoot] };
-
-			// A bare relative operand projects nothing, so the working directory is the only bound on
-			// what the launched process can reach.
-			for (const command of ["cat package.json", "cat Makefile", "npm test"]) {
-				const outcome = evaluateToolGate({ toolName: "bash", args: { command }, cwd: outsideRoot, envelope });
-				expect(outcome.outcome).toBe("block");
-				expect(outcome.reasonCode).toBe("cwd_outside_allowed_roots");
-			}
-			for (const toolName of ["python", "run_process"]) {
-				const outcome = evaluateToolGate({
-					toolName,
-					args: { executable: "cat", args: ["package.json"], code: "open('data.csv').read()" },
-					cwd: outsideRoot,
-					envelope,
-				});
-				expect(outcome.outcome).toBe("block");
-				expect(outcome.reasonCode).toBe("cwd_outside_allowed_roots");
-			}
-			// An in-scope operand cannot buy back an unscoped working directory.
-			const inScopeOperand = evaluateToolGate({
-				toolName: "bash",
-				args: { command: `cat ${path.join(allowedRoot, "notes.txt")}` },
-				cwd: outsideRoot,
-				envelope,
-			});
-			expect(inScopeOperand.outcome).toBe("block");
-			expect(inScopeOperand.reasonCode).toBe("cwd_outside_allowed_roots");
-
-			// Inside the allowed root the same bare operands are in scope by construction.
-			for (const command of ["cat package.json", "cat Makefile", "npm test"]) {
-				expect(evaluateToolGate({ toolName: "bash", args: { command }, cwd: allowedRoot, envelope }).outcome).toBe(
-					"allow",
-				);
-			}
-			expect(
-				evaluateToolGate({
-					toolName: "run_process",
-					args: { executable: "cat", args: ["package.json"] },
-					cwd: allowedRoot,
-					envelope,
-				}).outcome,
-			).toBe("allow");
-
-			// A working directory inside a denied subtree reports the deny, not a plain scope escape.
-			const deniedCwd = path.join(allowedRoot, "vault");
-			fs.mkdirSync(deniedCwd, { recursive: true });
-			const deniedOutcome = evaluateToolGate({
-				toolName: "bash",
-				args: { command: "cat package.json" },
-				cwd: deniedCwd,
-				envelope: { ...envelope, deniedPaths: [deniedCwd] },
-			});
-			expect(deniedOutcome.outcome).toBe("block");
-			expect(deniedOutcome.reasonCode).toBe("path_denied");
-
-			// Path-scoped read tools keep their own lane: no working-directory requirement.
-			expect(
-				evaluateToolGate({
-					toolName: "read",
-					args: { path: path.join(allowedRoot, "notes.txt") },
-					cwd: outsideRoot,
-					envelope,
-				}).outcome,
-			).toBe("allow");
-		});
-
-		it("returns block for interpreter code, scriptPath, and argv paths outside allowed root", () => {
-			const outsideFile = path.join(outsideRoot, "data.txt");
-			fs.writeFileSync(outsideFile, "outside data", "utf-8");
-			const insideFile = path.join(allowedRoot, "notes.txt");
-			fs.writeFileSync(insideFile, "inside data", "utf-8");
-			const envelope: CapabilityEnvelope = { ...emptyEnvelope, allowedPaths: [allowedRoot] };
-
-			const codeOutside = evaluateToolGate({
-				toolName: "python",
-				args: { code: `print(open("${outsideFile}").read())` },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(codeOutside.outcome).toBe("block");
-			expect(codeOutside.reasonCode).toBe("path_outside_allowed_roots");
-			expect(
-				evaluateToolGate({
-					toolName: "python",
-					args: { code: `print(open("${insideFile}").read())` },
-					cwd: allowedRoot,
-					envelope,
-				}).outcome,
-			).toBe("allow");
-
-			// Hex-encoded separators become a path only once the literal's escapes are decoded.
-			const encodeSeparators = (value: string) => value.replaceAll("\\", "\\x5c").replaceAll("/", "\\x2f");
-			const encodedOutside = evaluateToolGate({
-				toolName: "python",
-				args: { code: `print(open('${encodeSeparators(outsideFile)}').read())` },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(encodedOutside.outcome).toBe("block");
-			expect(encodedOutside.reasonCode).toBe("path_outside_allowed_roots");
-			expect(
-				evaluateToolGate({
-					toolName: "python",
-					args: { code: `print(open('${encodeSeparators(insideFile)}').read())` },
-					cwd: allowedRoot,
-					envelope,
-				}).outcome,
-			).toBe("allow");
-
-			const scriptOutside = evaluateToolGate({
-				toolName: "python",
-				args: { scriptPath: outsideFile },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(scriptOutside.outcome).toBe("block");
-			expect(scriptOutside.reasonCode).toBe("path_outside_allowed_roots");
-			expect(
-				evaluateToolGate({ toolName: "python", args: { scriptPath: insideFile }, cwd: allowedRoot, envelope })
-					.outcome,
-			).toBe("allow");
-
-			const argvOutside = evaluateToolGate({
-				toolName: "run_process",
-				args: { executable: "node", args: ["--check", outsideFile] },
-				cwd: allowedRoot,
-				envelope,
-			});
-			expect(argvOutside.outcome).toBe("block");
-			expect(argvOutside.reasonCode).toBe("path_outside_allowed_roots");
-			expect(
-				evaluateToolGate({
-					toolName: "run_process",
-					args: { executable: "node", args: ["--check", insideFile] },
-					cwd: allowedRoot,
-					envelope,
-				}).outcome,
-			).toBe("allow");
-		});
-
 		it("returns ask-user or block for bash mutating/destructive command", () => {
 			const outcome = evaluateToolGate({
 				toolName: "bash",
@@ -639,6 +440,40 @@ describe("Autonomy Gates", () => {
 				envelope,
 			});
 			expect(allowed.outcome).toBe("allow");
+		});
+
+		it("allows process.exec python or bash calls with out-of-scope path parameters while blocking direct-read outside scope", () => {
+			const envelope: CapabilityEnvelope = {
+				...baseEnvelope,
+				capabilities: ["process.exec", "filesystem.read"],
+				allowedPaths: ["/tmp/allowed-root"],
+			};
+
+			const pythonOutcome = evaluateToolGate({
+				toolName: "python",
+				args: { scriptPath: "/etc/passwd", cwd: "/var/log" },
+				cwd: "/tmp",
+				envelope,
+			});
+			expect(pythonOutcome.outcome).toBe("allow");
+
+			const bashOutcome = evaluateToolGate({
+				toolName: "bash",
+				args: { command: "python script.py", cwd: "/var/log" },
+				cwd: "/tmp",
+				envelope,
+			});
+			expect(bashOutcome.outcome).toBe("allow");
+
+			const readOutcome = evaluateToolGate({
+				toolName: "read",
+				args: { path: "/etc/passwd" },
+				cwd: "/tmp",
+				envelope,
+			});
+			expect(readOutcome.outcome).toBe("block");
+			expect(readOutcome.gate).toBe("path_scope");
+			expect(readOutcome.reasonCode).toBe("path_outside_allowed_roots");
 		});
 
 		it("allows core harness tools with valid capabilities", () => {

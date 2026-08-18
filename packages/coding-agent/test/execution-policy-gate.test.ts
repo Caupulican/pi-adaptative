@@ -64,7 +64,7 @@ describe("ExecutionPolicyGate", () => {
 					moduleSpecifier: "./run-process.ts",
 					capabilities: ["process.exec"] as const,
 					roles: ["operator"] as const,
-					enforcements: ["process-launcher", "path-scope"] as const,
+					enforcements: ["process-launcher"] as const,
 				},
 			],
 			policyVersion: "test-v1",

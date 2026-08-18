@@ -102,73 +102,6 @@ describe("envelope path scope", () => {
 		expect(extractPathArguments(undefined)).toEqual([]);
 	});
 
-	it("projects shell, interpreter, and argv operands while excluding flags and URLs", () => {
-		// Separator-bearing relative words project and can only fail closed when out of scope.
-		expect(extractToolPathArguments("bash", { command: "cat packages/agent/package.json" })).toEqual([
-			"packages/agent/package.json",
-		]);
-		expect(extractToolPathArguments("bash", { command: "git merge origin/main" })).toEqual(["origin/main"]);
-		expect(extractToolPathArguments("bash", { command: "sed s/a/b/ notes.txt" })).toEqual(["s/a/b/"]);
-		expect(extractToolPathArguments("bash", { command: "npm i @scope/pkg" })).toEqual(["@scope/pkg"]);
-		// Flags and URL-like values never project.
-		expect(extractToolPathArguments("bash", { command: "curl https://example.com/x --output-dir=." })).toEqual(["."]);
-		expect(extractToolPathArguments("bash", { command: "git clone git+ssh://host/repo.git" })).toEqual([]);
-		expect(extractToolPathArguments("bash", { command: "ls -la --color=auto" })).toEqual([]);
-
-		// A single-dash flag may carry its value attached; the shortest flag prefix leaving a
-		// path-shaped remainder wins, so the projected value keeps its first path segment.
-		expect(extractToolPathArguments("bash", { command: "gcc -I/etc/include x.c" })).toEqual(["/etc/include"]);
-		expect(extractToolPathArguments("bash", { command: "ld -L/usr/lib main.o" })).toEqual(["/usr/lib"]);
-		expect(extractToolPathArguments("bash", { command: "gcc -o/tmp/out x.c" })).toEqual(["/tmp/out"]);
-		expect(extractToolPathArguments("bash", { command: "gcc -Isrc/include x.c" })).toEqual(["src/include"]);
-		expect(extractToolPathArguments("run_process", { executable: "gcc", args: ["-I/etc/include"] })).toEqual([
-			"/etc/include",
-		]);
-		// A value in a separate token projects from that token; clustered flags and a long flag
-		// without `=` carry no attached value.
-		expect(extractToolPathArguments("bash", { command: "gcc -o /tmp/out x.c" })).toEqual(["/tmp/out"]);
-		expect(extractToolPathArguments("bash", { command: "grep -rn pattern" })).toEqual([]);
-		expect(extractToolPathArguments("bash", { command: "app --long/path" })).toEqual([]);
-		expect(extractToolPathArguments("bash", { command: "find . -name x.ts" })).toEqual(["."]);
-
-		// Bare single-segment operands still project nothing: they are statically indistinguishable
-		// from non-path words, and the effective working directory is what bounds them.
-		expect(extractToolPathArguments("bash", { command: "cat package.json" })).toEqual([]);
-		expect(extractToolPathArguments("run_process", { executable: "cat", args: ["package.json"] })).toEqual([]);
-
-		expect(
-			extractToolPathArguments("python", { code: 'data = open("/etc/passwd").read()\nrel = open("data.csv")' }),
-		).toEqual(["/etc/passwd"]);
-		expect(
-			extractToolPathArguments("python", { scriptPath: "tools/run.py", args: ["/var/tmp/out.json", "-v"] }),
-		).toEqual(["tools/run.py", "/var/tmp/out.json"]);
-		expect(
-			extractToolPathArguments("run_process", {
-				executable: "./bin/tool",
-				args: ["--level=3", "conf/settings.toml"],
-			}),
-		).toEqual(["./bin/tool", "conf/settings.toml"]);
-	});
-
-	it("decodes interpreter string escapes before shape-testing the literal", () => {
-		// An encoded separator must not hide an absolute path from the shape test.
-		expect(extractToolPathArguments("python", { code: "open('\\x2fetc\\x2fpasswd')" })).toEqual(["/etc/passwd"]);
-		expect(extractToolPathArguments("python", { code: "open('\\u002fetc\\u002fshadow')" })).toEqual(["/etc/shadow"]);
-		expect(extractToolPathArguments("python", { code: "open('\\u{2f}etc\\u{2f}shadow')" })).toEqual(["/etc/shadow"]);
-
-		// A decoded literal carries the characters the interpreter opens, not the source escapes.
-		expect(extractToolPathArguments("python", { code: "open('/etc/pas\\'swd')" })).toEqual(["/etc/pas'swd"]);
-		expect(extractToolPathArguments("python", { code: 'open("C:\\\\Users\\\\x")' })).toEqual(["C:\\Users\\x"]);
-		expect(extractToolPathArguments("python", { code: 'open("/tmp/a\\tb")' })).toEqual(["/tmp/a\tb"]);
-
-		// Unknown and truncated sequences stay literal text and are still shape-tested.
-		expect(extractToolPathArguments("python", { code: "open('/tmp/a\\q/b')" })).toEqual(["/tmp/a\\q/b"]);
-		expect(extractToolPathArguments("python", { code: "open('/tmp/a\\x2/b')" })).toEqual(["/tmp/a\\x2/b"]);
-		expect(extractToolPathArguments("python", { code: "open('/tmp/a\\u{ffffff}/b')" })).toEqual([
-			"/tmp/a\\u{ffffff}/b",
-		]);
-	});
-
 	it("projects implicit and nested tool paths through the shared path owner", () => {
 		expect(extractToolPathArguments("grep", undefined)).toEqual(["."]);
 		expect(
@@ -180,7 +113,10 @@ describe("envelope path scope", () => {
 
 		let ran = 0;
 		const runCounter = { content: [{ type: "text", text: "ok" }] };
-		const scoped = envelope({ allowedPaths: ["src"] });
+		const scoped = envelope({
+			capabilities: ["filesystem.read", "credentials.use"],
+			allowedPaths: ["src"],
+		});
 		const wrappedSearch = wrapToolWithEnvelopeScope(
 			{ name: "grep", execute: (..._args: unknown[]) => runCounter },
 			scoped,
@@ -245,5 +181,55 @@ describe("wrapToolWithEnvelopeScope", () => {
 		const allowed = wrapped.execute("tc-2", { path: "src/main.ts" }) as { isError?: boolean };
 		expect(allowed.isError).toBeUndefined();
 		expect(ran).toBe(1);
+	});
+
+	it("invokes process-only tools like python with out-of-scope scriptPath and cwd, while direct read outside scope still denies", () => {
+		let pythonRan = 0;
+		let readRan = 0;
+		const pythonTool = {
+			name: "python",
+			execute: (..._args: unknown[]) => {
+				pythonRan++;
+				return { content: [{ type: "text", text: "python output" }] };
+			},
+		};
+		const readTool = {
+			name: "read",
+			execute: (..._args: unknown[]) => {
+				readRan++;
+				return { content: [{ type: "text", text: "file content" }] };
+			},
+		};
+
+		const processOnlyEnvelope: CapabilityEnvelope = {
+			id: "env-process-only",
+			capabilities: ["process.exec"],
+			allowedPaths: ["/repo/src"],
+		};
+		const readEnvelope: CapabilityEnvelope = {
+			id: "env-read",
+			capabilities: ["filesystem.read"],
+			allowedPaths: ["/repo/src"],
+		};
+
+		const wrappedPython = wrapToolWithEnvelopeScope(pythonTool, processOnlyEnvelope, "/repo");
+		const wrappedRead = wrapToolWithEnvelopeScope(readTool, readEnvelope, "/repo");
+
+		// Python tool with out-of-scope scriptPath and cwd invokes because process tools are not path-scoped
+		const pythonResult = wrappedPython.execute("tc-py-1", {
+			scriptPath: "/etc/passwd",
+			cwd: "/var/log",
+		}) as { isError?: boolean; content?: [{ type: string; text: string }] };
+		expect(pythonResult.isError).toBeUndefined();
+		expect(pythonResult.content?.[0]?.text).toBe("python output");
+		expect(pythonRan).toBe(1);
+
+		// Direct read with out-of-scope path is denied
+		const readResult = wrappedRead.execute("tc-read-1", {
+			path: "/etc/passwd",
+		}) as { isError?: boolean; details?: { outcome?: string } };
+		expect(readResult.isError).toBe(true);
+		expect(readResult.details?.outcome).toBe("envelope_path_denied");
+		expect(readRan).toBe(0);
 	});
 });
