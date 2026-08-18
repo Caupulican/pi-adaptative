@@ -56,7 +56,7 @@ if (RELEASE_TARGET !== "promote" && !isPrepareTarget) {
 const CI_WORKFLOW = "ci.yml";
 const DESTRUCTIVE_WORKFLOW = "destructive.yml";
 const CI_POLL_INTERVAL_MS = 20_000;
-const CI_POLL_TIMEOUT_MS = 60 * 60_000; // ci.yml's own per-OS job timeout is 45m; leave headroom for runner queueing.
+const CI_POLL_TIMEOUT_MS = 60 * 60_000; // ci.yml's own per-OS job timeout is 20m; leave headroom for runner queueing.
 
 class ReleaseCommandError extends Error {}
 
