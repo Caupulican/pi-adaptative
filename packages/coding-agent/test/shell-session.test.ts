@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type SpawnOptions, spawn, spawnSync } from "child_process";
@@ -200,6 +200,113 @@ process.stdin.on("data", (chunk) => {
 	});
 });
 
+describe("PersistentShellSession sentinel cwd parsing", () => {
+	function makeFixtureSession(fixture: string, key: string): PersistentShellSession {
+		return new PersistentShellSession(key, "powershell", {
+			resolvePowerShellCandidates: () => [{ shell: "fixture-powershell", args: [] }],
+			spawn: (_command: string, args: string[], options: SpawnOptions) =>
+				spawn(process.execPath, [fixture, ...args], options),
+			startupTimeoutMs: 2_000,
+		});
+	}
+
+	it("degrades a missing or empty cwd segment to undefined without failing the exec", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-shell-cwd-degrade-"));
+		const fixture = join(directory, "degrade-fixture.mjs");
+		writeFileSync(
+			fixture,
+			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
+process.stderr.write(stderrMarker);
+process.stdout.write(marker);
+let commands = 0;
+let pending = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	pending += chunk;
+	let newline = pending.indexOf("\\n");
+	while (newline !== -1) {
+		const line = pending.slice(0, newline);
+		pending = pending.slice(newline + 1);
+		const separator = line.indexOf(" ");
+		const nonce = line.slice(0, separator);
+		commands += 1;
+		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
+		const payload = commands === 1 ? ":5" : ":0:";
+		process.stdout.write("data\\n\\n\\x1e" + nonce + payload + "\\x1e");
+		newline = pending.indexOf("\\n");
+	}
+});
+`,
+		);
+		const session = makeFixtureSession(fixture, "cwd-degrade");
+		try {
+			const missing = await session.exec("first", process.cwd(), { onData: () => {} });
+			expect(missing.exitCode).toBe(5);
+			expect(missing.cwd).toBeUndefined();
+			const empty = await session.exec("second", process.cwd(), { onData: () => {} });
+			expect(empty.exitCode).toBe(0);
+			expect(empty.cwd).toBeUndefined();
+		} finally {
+			session.dispose();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("reassembles a sentinel with a long colon-and-multibyte cwd split across chunks", async () => {
+		const expectedCwd = `/tmp/pi split:colon é${"x".repeat(2000)}`;
+		const directory = mkdtempSync(join(tmpdir(), "pi-shell-cwd-split-"));
+		const fixture = join(directory, "split-fixture.mjs");
+		writeFileSync(
+			fixture,
+			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
+process.stderr.write(stderrMarker);
+process.stdout.write(marker);
+const cwdBytes = Buffer.from(${JSON.stringify(expectedCwd)}, "utf8");
+let pending = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	pending += chunk;
+	let newline = pending.indexOf("\\n");
+	while (newline !== -1) {
+		const line = pending.slice(0, newline);
+		pending = pending.slice(newline + 1);
+		const separator = line.indexOf(" ");
+		const nonce = line.slice(0, separator);
+		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
+		process.stdout.write("head ");
+		setImmediate(() => {
+			process.stdout.write("output\\n");
+			setImmediate(() => {
+				process.stdout.write("\\n\\x1e" + nonce.slice(0, 6));
+				setImmediate(() => {
+					// Split inside the nonce, at a colon, and mid-multibyte-character.
+					process.stdout.write(
+						Buffer.concat([Buffer.from(nonce.slice(6) + ":3:", "utf8"), cwdBytes.subarray(0, 21)]),
+					);
+					setImmediate(() => process.stdout.write(Buffer.concat([cwdBytes.subarray(21), Buffer.from("\\x1e", "latin1")])));
+				});
+			});
+		});
+		newline = pending.indexOf("\\n");
+	}
+});
+`,
+		);
+		const session = makeFixtureSession(fixture, "cwd-split");
+		try {
+			const chunks: Buffer[] = [];
+			const result = await session.exec("go", process.cwd(), { onData: (data) => chunks.push(data) });
+			expect(result).toEqual({ exitCode: 3, cwd: expectedCwd });
+			expect(Buffer.concat(chunks).toString("utf8")).toBe("head output\n");
+		} finally {
+			session.dispose();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
 describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 	const cwd = process.cwd();
 
@@ -248,6 +355,57 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		const bad = await run(session, "if then fi", cwd);
 		expect(bad.exitCode).not.toBe(0);
 		expect((await run(session, "echo recovered", cwd)).output.trim()).toBe("recovered");
+	});
+
+	it("reports the shell-reported cwd with the exit code after an in-session cd", async () => {
+		const session = makeSession("bash");
+		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-cwd-")));
+		try {
+			const result = await session.exec(`cd '${tempDir}' && false`, cwd, { onData: () => {} });
+			expect(result).toEqual({ exitCode: 1, cwd: tempDir });
+			// An unchanged host cwd preserves the in-session cd; the report follows it.
+			const followUp = await session.exec("(exit 7)", cwd, { onData: () => {} });
+			expect(followUp).toEqual({ exitCode: 7, cwd: tempDir });
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("parses a cwd containing colons whole", async () => {
+		const session = makeSession("bash");
+		const base = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-colon-")));
+		const colonDir = join(base, "a:b:c");
+		mkdirSync(colonDir);
+		try {
+			const result = await session.exec(`cd '${colonDir}' && (exit 4)`, cwd, { onData: () => {} });
+			expect(result).toEqual({ exitCode: 4, cwd: colonDir });
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	it("reports the stale $PWD when the current directory was deleted before a failure", async () => {
+		const session = makeSession("bash");
+		const doomed = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-doomed-")));
+		const result = await session.exec(`cd '${doomed}' && rmdir '${doomed}' && false`, cwd, { onData: () => {} });
+		expect(result).toEqual({ exitCode: 1, cwd: doomed });
+	});
+
+	it("passes nonce-like fake sentinels through as data and still parses the real one", async () => {
+		const session = makeSession("bash");
+		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-fake-")));
+		try {
+			const chunks: Buffer[] = [];
+			const result = await session.exec(
+				`printf '\\n\\0360123456789abcdef:999:/bogus\\036\\n'; cd '${tempDir}' && false`,
+				cwd,
+				{ onData: (data) => chunks.push(data) },
+			);
+			expect(result).toEqual({ exitCode: 1, cwd: tempDir });
+			expect(Buffer.concat(chunks).toString("utf8")).toContain("\x1e0123456789abcdef:999:/bogus\x1e");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("handles hostile quoting, multi-line commands, and sentinel-byte output", async () => {
@@ -335,8 +493,8 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		const started = new Promise<void>((resolve) => {
 			reportStarted = resolve;
 		});
-		// The protocol intentionally retains a 64-byte suffix while scanning for its
-		// sentinel, so emit enough data for the start marker to stream immediately.
+		// The protocol retains only a sentinel-consistent tail while scanning; this
+		// newline-free marker therefore streams immediately.
 		const active = session.exec("printf 'started%080d' 0; sleep 30", cwd, {
 			onData: (data) => {
 				if (data.includes("started")) reportStarted?.();

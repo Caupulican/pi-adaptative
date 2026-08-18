@@ -121,7 +121,8 @@ export interface BashOperations {
 	 * @param command The command to execute
 	 * @param cwd Working directory
 	 * @param options Execution options
-	 * @returns Promise resolving to exit code (null if killed)
+	 * @returns Promise resolving to exit code (null if killed) plus, when the backend tracks it,
+	 * the shell-reported working directory after the command ran
 	 */
 	exec: (
 		command: string,
@@ -132,7 +133,7 @@ export interface BashOperations {
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
 		},
-	) => Promise<{ exitCode: number | null }>;
+	) => Promise<{ exitCode: number | null; cwd?: string }>;
 }
 
 function createLocalShellOperations(
@@ -566,8 +567,8 @@ function createShellToolDefinition(
 		});
 	}
 	const contractDescription = routesWindowsContract
-		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
-		: "Execute a Bash command in a persistent per-agent shell session: the current directory and environment variables persist across calls, and a timed-out or aborted command resets the session.";
+		? "Execute Pi's stable Bash-like command contract in a persistent per-agent shell session (starts at the project working directory; current directory and environment variables persist across calls, including across the PowerShell and Python engine tiers; a failed command reports its effective cwd on a final `cwd:` line). On Windows, a deterministic router converts simple commands directly to PowerShell and routes word-list and arithmetic for loops, break/continue, portable builtins such as printf, pipelines, redirection, expansion, chaining, and state-mutating commands (cd/export/unset) through a bundled Python engine that implements the supported Bash grammar; named unsupported constructs (job control, process substitution, heredocs, nested shells, and similar) fail closed instead of being guessed."
+		: "Execute a Bash command in a persistent per-agent shell session that starts at the project working directory: `cd` and environment variables persist across calls, a failed command reports its effective cwd on a final `cwd:` line, and a timed-out or aborted command resets the session.";
 	return {
 		name: toolName,
 		label: toolName,
@@ -847,7 +848,10 @@ function createShellToolDefinition(
 							const snapshot = await finishOutput();
 							if (res.exitCode !== 0) {
 								const { text: rawOutputText } = formatOutput(snapshot);
-								throw new Error(appendStatus(rawOutputText, `Command exited with code ${res.exitCode}`));
+								// executeFilteredGit runs at the host cwd by construction.
+								throw new Error(
+									appendStatus(rawOutputText, `Command exited with code ${res.exitCode}\ncwd: ${cwd}`),
+								);
 							}
 							const details = snapshot.truncation.truncated
 								? {
@@ -889,6 +893,7 @@ function createShellToolDefinition(
 				}
 
 				let exitCode: number | null;
+				let sessionCwd: string | undefined;
 				try {
 					// Shell commands cannot statically declare which files they mutate, so the
 					// actual execution takes the coarse exclusive barrier: it waits for
@@ -906,6 +911,7 @@ function createShellToolDefinition(
 						),
 					);
 					exitCode = result.exitCode;
+					sessionCwd = result.cwd;
 				} catch (err) {
 					const snapshot = await finishOutput();
 					const { text } = formatOutput(snapshot, "");
@@ -953,7 +959,13 @@ function createShellToolDefinition(
 							details,
 						};
 					}
-					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
+					// The true directory the command ran in: the session-reported $PWD on POSIX,
+					// the state-tracked effective cwd on the Windows contract (the runner protocol
+					// does not report one), or the host-requested cwd for per-command backends.
+					const reportedCwd = routesWindowsContract
+						? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
+						: (sessionCwd ?? spawnContext.cwd);
+					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}\ncwd: ${reportedCwd}`));
 				}
 				return { content: [{ type: "text", text: outputText }], details };
 			} finally {

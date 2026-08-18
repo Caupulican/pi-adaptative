@@ -109,7 +109,7 @@ describe("provider request compaction integration", () => {
 			expect(JSON.stringify(delivered.messages)).not.toContain(bodyMarker);
 			expect(JSON.stringify(delivered.messages)).not.toContain("ORIGINAL-HISTORY");
 		}
-		expect(internals._skillVault.status()).toMatchObject({ state: "active", useCount: 2 });
+		expect(internals._skillVault.status()).toMatchObject({ slots: [{ state: "active", useCount: 2 }] });
 	});
 
 	it("admits production-sized image history by semantic tokens instead of base64 characters", async () => {

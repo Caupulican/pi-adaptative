@@ -49,4 +49,54 @@ describe("process-exit failure diagnostics", () => {
 
 		expect(assessment.failureCode).toBe("exit_1");
 	});
+
+	it("keeps the exit classification and routes the appended cwd line through evidence, never diagnostic", () => {
+		const assessment = assessToolFailure(
+			["probe output tail", "", "Command exited with code 3", "cwd: /home/user/project/packages/agent"].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_3");
+		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.evidence).toBe(["probe output tail", "cwd: /home/user/project/packages/agent"].join("\n"));
+	});
+
+	it("never lets a cwd path that contains error-like words displace a real diagnostic", () => {
+		const assessment = assessToolFailure(
+			[
+				"ls: cannot access '/repo/missing': No such file or directory",
+				"",
+				"Command exited with code 2",
+				"cwd: /home/user/error-cases",
+			].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("file_not_found");
+		expect(assessment.diagnostic).toBe("ls: cannot access '/repo/missing': No such file or directory");
+		expect(assessment.evidence).toBe(
+			["ls: cannot access '/repo/missing': No such file or directory", "cwd: /home/user/error-cases"].join("\n"),
+		);
+	});
+
+	it("keeps the cwd line out of the weak stderr diagnostic fallback", () => {
+		const assessment = assessToolFailure(
+			[
+				"stdout:",
+				"doing the thing",
+				"stderr:",
+				"mv: cannot stat 'src/a.txt': No such file or directory",
+				"Command exited with code 1",
+				"cwd: /work/error-handling",
+			].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("file_not_found");
+		expect(assessment.diagnostic).toBe("mv: cannot stat 'src/a.txt': No such file or directory");
+		expect(assessment.diagnostic).not.toContain("cwd:");
+	});
 });

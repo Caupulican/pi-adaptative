@@ -384,12 +384,15 @@ describe("tool failure memory", () => {
 			"Error",
 		);
 
-		expect(assessment).toEqual({
+		expect(assessment).toMatchObject({
 			failureCode: "invalid_option",
 			phase: "execution",
 			diagnostic: "svn: invalid option: --stat",
 			guidance: "Option rejected. Read command help; remove/replace option before retry.",
+			policyGuidance: "Option rejected. Read command help; remove/replace option before retry.",
 		});
+		expect(assessment.evidence?.length).toBeLessThanOrEqual(1_600);
+		expect(assessment.evidence?.endsWith("svn: invalid option: --stat")).toBe(true);
 	});
 
 	it("states when execution supplied no diagnostic instead of fabricating a repair", () => {
@@ -398,6 +401,8 @@ describe("tool failure memory", () => {
 		expect(assessment.failureCode).toBe("exit_1");
 		expect(assessment.phase).toBe("execution");
 		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.evidence).toBeUndefined();
+		expect(assessment.policyGuidance).toBeUndefined();
 		expect(assessment.guidance).toBe(
 			"No diagnostic output. Inspect tool contract or request bounded diagnostic before retry.",
 		);
@@ -441,7 +446,9 @@ describe("tool failure memory", () => {
 			failureCode: "invalid_option",
 			phase: "execution",
 			diagnostic: "configdelphi: unknown option --auto",
+			evidence: "configdelphi: unknown option --auto",
 			guidance: "Option rejected. Read command help; remove/replace option before retry.",
+			policyGuidance: "Option rejected. Read command help; remove/replace option before retry.",
 		});
 	});
 
@@ -472,6 +479,9 @@ describe("tool failure memory", () => {
 		expect(assessment.failureCode).toBe("exit_1");
 		expect(assessment.diagnostic).toBeUndefined();
 		expect(assessment.guidance).toContain("No diagnostic output");
+		expect(assessment.evidence).toBe(
+			["doing the thing", "no matches found", "retrying is not supported here"].join("\n"),
+		);
 	});
 
 	it("still surfaces a strong stderr diagnostic when one is present", () => {
@@ -485,15 +495,70 @@ describe("tool failure memory", () => {
 
 		expect(assessment.failureCode).toBe("exit_1");
 		expect(assessment.diagnostic).toBe("error: invalid configuration");
+		expect(assessment.evidence).toBe(["doing the thing", "error: invalid configuration"].join("\n"));
 	});
 
-	it("uses catalogued recovery guidance without retaining redundant raw errors", () => {
-		const assessment = assessToolFailure("ENOENT: no such file or directory, open 'missing.txt'", "failed", "Error");
+	it("keeps the raw output tail as evidence when an exit failure has no classifiable diagnostic", () => {
+		const grepHits = [
+			"packages/first/src/registry.ts:42:const entry = catalogue.find((candidate) => candidate.matches(text));",
+			"packages/second/src/loop.ts:120:const outcome = await runStep(call);",
+		];
+		const assessment = assessToolFailure([...grepHits, "Command exited with code 2"].join("\n"), "failed", "Error");
+
+		expect(assessment.failureCode).toBe("exit_2");
+		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.evidence).toBe(grepHits.join("\n"));
+	});
+
+	it("bounds exit-failure evidence and strips binary bytes while excluding status markers", () => {
+		const bulk = Array.from({ length: 200 }, (_, index) => `chunk-${index} ${"x".repeat(20)}`);
+		const assessment = assessToolFailure(
+			[
+				"outcome: failed",
+				...bulk,
+				"payload\0tail",
+				"stderr: (empty)",
+				"Command exited with code 1",
+				"exitCode: 1",
+			].join("\n"),
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_1");
+		expect(assessment.evidence?.length).toBeLessThanOrEqual(1_600);
+		expect(assessment.evidence).not.toContain("\0");
+		expect(assessment.evidence).toContain("payload");
+		expect(assessment.evidence).not.toMatch(/^outcome:/im);
+		expect(assessment.evidence).not.toMatch(/^exitcode:/im);
+		expect(assessment.evidence).not.toMatch(/^stderr:/im);
+		expect(assessment.evidence).not.toMatch(/^command exited/im);
+	});
+
+	it("retains the catalogued missing-path diagnostic naming the exact path", () => {
+		const assessment = assessToolFailure(
+			"ENOENT: no such file or directory, open '/repo/docs/missing.txt'",
+			"failed",
+			"Error",
+		);
 
 		expect(assessment.failureCode).toBe("file_not_found");
 		expect(assessment.phase).toBe("execution");
-		expect(assessment.diagnostic).toBeUndefined();
+		expect(assessment.diagnostic).toContain("/repo/docs/missing.txt");
+		expect(assessment.evidence).toBeUndefined();
 		expect(assessment.guidance).toContain("List parent directory or re-read path");
+		expect(assessment.policyGuidance).toBe("Path not found. List parent directory or re-read path before retry.");
+	});
+
+	it("caps remembered corrections at 480 characters", () => {
+		const tracker = new Map();
+		const overlong = rememberToolFailure(tracker, "bash", { command: "long" }, "failed", "exit_1", "g".repeat(481));
+		expect(overlong.correction.length).toBe(480);
+		expect(overlong.correction.endsWith("…")).toBe(true);
+
+		const exact = "g".repeat(480);
+		const kept = rememberToolFailure(tracker, "bash", { command: "exact" }, "failed", "exit_1", exact);
+		expect(kept.correction).toBe(exact);
 	});
 
 	it("preserves the original failure evidence across repeated blocked replays", () => {
@@ -686,6 +751,8 @@ describe("tool failure memory", () => {
 			failureCode: "encoding_corruption",
 			phase: "execution",
 			guidance:
+				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
+			policyGuidance:
 				"Change approach: exact UTF-8 replacement unsafe. Use encoding-aware/byte-safe tool; never replay text edit.",
 			attemptMemory: "discard",
 		});

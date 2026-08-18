@@ -17,7 +17,7 @@ const TOOL_FAILURE_EXECUTION_KEY = Symbol("ToolFailureExecutionKey");
 const MAX_OPERATION_CHARS = 240;
 const MAX_FAILURE_CODE_CHARS = 48;
 const MAX_DIAGNOSTIC_CHARS = 240;
-const MAX_CORRECTION_CHARS = 320;
+const MAX_CORRECTION_CHARS = 480;
 const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
 const MAX_ACTIVE_FAILURE_EVIDENCE_CHARS = 2_400;
 const MAX_TOOL_NAME_CHARS = 64;
@@ -565,6 +565,23 @@ function boundedFailureCode(value: string): string {
  */
 const EXIT_STATUS_LINE_PATTERN = /^(?:\S+\s+)?(?:exit(?:ed)?(?:\s+with)?(?:\s+code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i;
 
+/**
+ * bash.ts appends `cwd: <dir>` after its exit trailer on failures. The line is harness status, not
+ * a cause: it must never displace a real diagnostic (a path may contain words like "error"), and it
+ * reaches the model through the process-exit evidence tail instead.
+ */
+const CWD_STATUS_LINE_PATTERN = /^cwd:\s/i;
+
+/** Tool-owned status/marker lines that carry no cause and never belong in diagnostic or evidence. */
+function isFailureStatusLine(line: string): boolean {
+	return (
+		/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line) ||
+		/^outcome:\s*(?:failed|aborted|timeout|output_limit)\b/i.test(line) ||
+		/^exitcode:\s*-?\d+\b/i.test(line) ||
+		/^(?:stdout|stderr):(?:\s*\(empty\))?$/i.test(line)
+	);
+}
+
 function processExitFailureCode(message: string): string | undefined {
 	const lines = message.split(/\r\n|\n/);
 	for (let index = lines.length - 1; index >= 0; index--) {
@@ -660,7 +677,9 @@ function extractFailureDiagnostic(
 			.map((line) => line.trim())
 			.filter(
 				(line) =>
-					line.length > 0 && !/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line),
+					line.length > 0 &&
+					!/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line) &&
+					!CWD_STATUS_LINE_PATTERN.test(line),
 			);
 		if (stderrLines.length > 0) {
 			const classified = stderrLines.find((line) => strongDiagnosticPattern.test(line));
@@ -677,14 +696,7 @@ function extractFailureDiagnostic(
 	}
 	const lines = rawLines
 		.map((line) => line.trim())
-		.filter(
-			(line) =>
-				line.length > 0 &&
-				!/^command (?:exited with code|timed out after|aborted|killed after)\b/i.test(line) &&
-				!/^outcome:\s*(?:failed|aborted|timeout|output_limit)\b/i.test(line) &&
-				!/^exitcode:\s*-?\d+\b/i.test(line) &&
-				!/^(?:stdout|stderr):(?:\s*\(empty\))?$/i.test(line),
-		);
+		.filter((line) => line.length > 0 && !isFailureStatusLine(line) && !CWD_STATUS_LINE_PATTERN.test(line));
 	if (lines.length === 0) return undefined;
 	const diagnosticPattern = requireStrongSignal
 		? strongDiagnosticPattern
@@ -696,11 +708,36 @@ function extractFailureDiagnostic(
 	return diagnostic ? truncateMiddle(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
 }
 
+/**
+ * Bounded raw-output tail of an executed process-exit failure. Evidence is the raw-data channel:
+ * it keeps the trailing lines that strong-signal diagnostic classification refuses to promote, so
+ * strictness never destroys the output needed to construct a changed operation.
+ */
+function extractProcessExitEvidence(message: string): string | undefined {
+	const lines = sanitizeBinaryOutput(message)
+		.replaceAll("\r\n", "\n")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !isFailureStatusLine(line));
+	if (lines.length === 0) return undefined;
+	let start = lines.length - 1;
+	let retainedChars = lines[start].length;
+	while (start > 0 && retainedChars + 1 + lines[start - 1].length <= MAX_TOOL_FAILURE_EVIDENCE_CHARS) {
+		start--;
+		retainedChars += 1 + lines[start].length;
+	}
+	return sanitizeToolFailureEvidence(lines.slice(start).join("\n"));
+}
+
 export interface ToolFailureAssessment {
 	failureCode: string;
 	phase: ToolFailurePhase;
 	diagnostic?: string;
+	/** Bounded raw-output tail of an executed process-exit failure. */
+	evidence?: string;
 	guidance: string;
+	/** Catalogued per-error guidance; set only when a registry policy matched the failure message. */
+	policyGuidance?: string;
 	attemptMemory?: "discard";
 }
 
@@ -720,14 +757,18 @@ export function assessToolFailure(
 					exitFailureCode !== undefined && !retainPolicyDiagnostic,
 				)
 			: undefined;
+	const evidence =
+		state === "failed" && exitFailureCode !== undefined ? extractProcessExitEvidence(message) : undefined;
 	const failureCode = policy?.failureCode ?? classifyToolFailure(message, errorClass);
 	return {
 		failureCode,
 		phase: policy?.phase ?? inferToolFailurePhase(state, failureCode),
 		...(diagnostic ? { diagnostic } : {}),
+		...(evidence ? { evidence } : {}),
 		guidance: policy
 			? truncate(policy.guidance, MAX_CORRECTION_CHARS)
 			: fallbackFailureGuidance(state, diagnostic !== undefined, inferToolFailurePhase(state, failureCode)),
+		...(policy ? { policyGuidance: truncate(policy.guidance, MAX_CORRECTION_CHARS) } : {}),
 		...(policy?.attemptMemory === "discard" ? { attemptMemory: "discard" as const } : {}),
 	};
 }

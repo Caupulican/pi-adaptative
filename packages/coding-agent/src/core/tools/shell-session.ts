@@ -7,7 +7,8 @@
  * commands; each key gets an isolated session so concurrently running agents never share state.
  *
  * Protocol: commands stream to the session over stdin and are terminated by a per-command
- * sentinel carrying a random nonce and the exit code. Bash wraps commands in an eval of a quoted
+ * sentinel carrying a random nonce, the exit code, and (bash) the shell's `$PWD` so failures can
+ * report where the command actually ran. Bash wraps commands in an eval of a quoted
  * heredoc (arbitrary content stays data; syntax errors stay contained in eval); PowerShell runs a
  * ReadLine loop decoding base64 lines (no external binaries involved). On bash, command stderr is
  * merged into stdout at the shell so sentinel ordering is guaranteed on one pipe.
@@ -63,8 +64,12 @@ export {
 } from "../../utils/powershell-session-protocol.ts";
 
 const SENTINEL_BYTE = 0x1e;
-/** Longest possible sentinel: "\n" + 0x1e + 16-hex nonce + ":" + exit code digits + 0x1e. */
-const SENTINEL_HOLDBACK_BYTES = 64;
+/**
+ * Longest possible sentinel: "\n" + 0x1e + 16-hex nonce + ":" + exit code digits + ":" + $PWD
+ * bytes + 0x1e. The cwd segment is PATH_MAX-bounded (4096 bytes on Linux); the margin covers the
+ * fixed protocol overhead around it.
+ */
+const SENTINEL_HOLDBACK_BYTES = 4096 + 64;
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const POWERSHELL_SESSION_READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
 const POWERSHELL_SESSION_STDERR_READY_BYTES = Buffer.from(POWERSHELL_SESSION_STDERR_READY_MARKER, "latin1");
@@ -106,7 +111,7 @@ export function buildBashWire(command: string, nonce: string, cdTo: string | nul
 		body,
 		`PI_EOF_${nonce}`,
 		`)"; } < /dev/null 2>&1`,
-		`printf '\\n\\036%s:%s\\036' '${nonce}' "$?"`,
+		`printf '\\n\\036%s:%s:%s\\036' '${nonce}' "$?" "$PWD"`,
 		"",
 	].join("\n");
 }
@@ -189,7 +194,11 @@ export class PersistentShellSession {
 	}
 
 	/** Serialized: one command at a time per session, later calls queue behind earlier ones. */
-	exec(command: string, cwd: string, options: ShellSessionExecOptions): Promise<{ exitCode: number | null }> {
+	exec(
+		command: string,
+		cwd: string,
+		options: ShellSessionExecOptions,
+	): Promise<{ exitCode: number | null; cwd?: string }> {
 		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
 	}
 
@@ -235,7 +244,7 @@ export class PersistentShellSession {
 		command: string,
 		cwd: string,
 		{ onData, signal, timeoutSeconds, silenceMs, env }: ShellSessionExecOptions,
-	): Promise<{ exitCode: number | null }> {
+	): Promise<{ exitCode: number | null; cwd?: string }> {
 		if (this.disposed) throw new Error(`Shell session "${this.key}" is disposed`);
 		if (signal?.aborted) throw new Error("aborted");
 
@@ -281,11 +290,12 @@ export class PersistentShellSession {
 
 		this.coordinator.setLoopRef(true);
 		try {
-			return await new Promise<{ exitCode: number | null }>((resolve, reject) => {
+			return await new Promise<{ exitCode: number | null; cwd?: string }>((resolve, reject) => {
 				let settled = false;
 				let stdoutPending: Buffer = Buffer.alloc(0);
 				let stderrPending: Buffer = Buffer.alloc(0);
 				let commandExitCode: number | null | undefined;
+				let commandCwd: string | undefined;
 				let stderrBarrierSeen = this.kind !== "powershell";
 				let timeoutTimer: NodeJS.Timeout | undefined;
 
@@ -328,7 +338,23 @@ export class PersistentShellSession {
 				const resolveWhenComplete = () => {
 					const exitCode = commandExitCode;
 					if (exitCode === undefined || !stderrBarrierSeen) return;
-					settle(() => resolve({ exitCode }));
+					settle(() => resolve({ exitCode, cwd: commandCwd }));
+				};
+				// Retain only a tail that could still be a sentinel in progress: a sentinel starts
+				// with "\n" + 0x1e + nonce, so anything whose suffix is inconsistent with that
+				// prefix streams through immediately. The scan window bounds the payload a real
+				// sentinel can carry (the cwd segment is PATH_MAX-bounded).
+				const sentinelHoldback = (): number => {
+					const scanFrom = Math.max(0, stdoutPending.length - SENTINEL_HOLDBACK_BYTES);
+					for (let index = scanFrom; index < stdoutPending.length; index++) {
+						if (stdoutPending[index] !== 0x0a) continue;
+						if (index + 1 < stdoutPending.length && stdoutPending[index + 1] !== SENTINEL_BYTE) continue;
+						const length = Math.min(stdoutPending.length - index, sentinelPrefix.length);
+						if (stdoutPending.compare(sentinelPrefix, 0, length, index, index + length) === 0) {
+							return stdoutPending.length - index;
+						}
+					}
+					return 0;
 				};
 
 				this.activeExec = {
@@ -343,20 +369,29 @@ export class PersistentShellSession {
 						if (prefixIndex !== -1) {
 							const closeIndex = stdoutPending.indexOf(SENTINEL_BYTE, prefixIndex + sentinelPrefix.length);
 							if (closeIndex !== -1) {
-								const codeText = stdoutPending
-									.subarray(prefixIndex + sentinelPrefix.length, closeIndex)
-									.toString("latin1");
+								const payload = stdoutPending.subarray(prefixIndex + sentinelPrefix.length, closeIndex);
 								emitStdoutPending(prefixIndex);
 								stdoutPending = stdoutPending.subarray(closeIndex - prefixIndex + 1);
 								emitStdoutPending(stdoutPending.length);
+								// Split at the FIRST colon: exit code, then the whole remainder as
+								// the cwd (paths may contain ":"; a path cannot contain 0x1e). An
+								// absent or empty cwd segment degrades to undefined.
+								const separatorIndex = payload.indexOf(0x3a);
+								const codeText = (
+									separatorIndex === -1 ? payload : payload.subarray(0, separatorIndex)
+								).toString("latin1");
 								const parsed = Number.parseInt(codeText, 10);
 								commandExitCode = Number.isNaN(parsed) ? null : parsed;
+								commandCwd =
+									separatorIndex !== -1 && separatorIndex < payload.length - 1
+										? payload.subarray(separatorIndex + 1).toString("utf8")
+										: undefined;
 								resolveWhenComplete();
 								return;
 							}
 						}
-						// Stream promptly but retain a tail large enough to hold any split sentinel.
-						emitStdoutPending(stdoutPending.length - SENTINEL_HOLDBACK_BYTES);
+						// Stream promptly but retain any tail that could be a split sentinel.
+						emitStdoutPending(stdoutPending.length - sentinelHoldback());
 					},
 					onStderr: (data) => {
 						silenceWatchdog?.touch();

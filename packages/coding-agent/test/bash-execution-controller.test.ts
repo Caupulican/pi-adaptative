@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BashExecutionController } from "../src/core/bash-execution-controller.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
+import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
 
 const originalBitwardenSession = process.env.BW_SESSION;
 
@@ -152,6 +156,32 @@ describe("BashExecutionController", () => {
 			expect(result.output).toMatch(/^v?\d+\.\d+\.\d+/);
 		});
 	}
+
+	it.skipIf(process.platform === "win32")(
+		"persists an in-session cd across owner commands without adding cwd lines to output",
+		async () => {
+			const sessionKey = `controller-cwd-${Math.random().toString(36).slice(2)}`;
+			const controller = new BashExecutionController({
+				getAgent: () => ({ state: { messages: [] } }) as never,
+				getSessionManager: () => ({ getCwd: () => process.cwd(), appendMessage: () => undefined }) as never,
+				getSettingsManager: () =>
+					({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+				isStreaming: () => false,
+				getShellSessionKey: () => sessionKey,
+			});
+			const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-controller-cwd-")));
+			try {
+				const failed = await controller.executeBash(`cd '${tempDir}' && false`, undefined, { platform: "linux" });
+				expect(failed.exitCode).toBe(1);
+				expect(failed.output).not.toContain("cwd:");
+				const persisted = await controller.executeBash("pwd", undefined, { platform: "linux" });
+				expect(persisted.output.trim()).toBe(tempDir);
+			} finally {
+				disposeShellExecutionSession(sessionKey);
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("aborts all overlapping bash executions", async () => {
 		const controller = makeController();

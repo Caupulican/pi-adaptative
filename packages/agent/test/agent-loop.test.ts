@@ -837,7 +837,7 @@ describe("agentLoop with AgentMessage", () => {
 			events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
 		).toHaveLength(4);
 		expect(JSON.stringify(failedResults)).not.toContain("RAW_FAILURE_OUTPUT");
-		expect(JSON.stringify(failedResults).length).toBeLessThan(2_500);
+		expect(JSON.stringify(failedResults).length).toBeLessThan(3_000);
 		expect(failedResults[1]?.content).toEqual([
 			expect.objectContaining({
 				type: "text",
@@ -1163,9 +1163,10 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResult?.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"file_not_found"') }),
 		]);
-		expect(JSON.stringify(toolResult)).toContain("No loaded tool declares recovery");
-		expect(JSON.stringify(toolResult)).not.toContain("list the parent directory or re-read the path");
-		expect(JSON.stringify(toolResult)).not.toContain("no such file or directory");
+		expect(JSON.stringify(toolResult)).toContain(
+			"Path not found. List parent directory or re-read path before retry. No loaded tool declares recovery",
+		);
+		expect(JSON.stringify(toolResult)).toContain("ENOENT: no such file or directory, open 'missing.txt'");
 	});
 
 	it("routes phone argument repairs through shared teaching and execution telemetry without argument values", async () => {

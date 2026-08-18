@@ -9,7 +9,7 @@ const skillSchema = Type.Object(
 			{ description: "search | load | unload | status" },
 		),
 		query: Type.Optional(Type.String({ description: "search query" })),
-		name: Type.Optional(Type.String({ description: "exact load name" })),
+		name: Type.Optional(Type.String({ description: "exact skill name; unload without it unloads all" })),
 	},
 	{ additionalProperties: false },
 );
@@ -18,7 +18,7 @@ export type SkillToolInput = Static<typeof skillSchema>;
 export type SkillToolDetails =
 	| { action: "search"; result: SkillSearchResult }
 	| { action: "load"; result: SkillLoadResult }
-	| { action: "unload"; result: { ok: true; unloaded?: string } }
+	| { action: "unload"; result: { ok: true; unloaded: string[] } }
 	| { action: "status"; result: SkillVaultStatus };
 
 function searchText(result: SkillSearchResult): string {
@@ -26,10 +26,20 @@ function searchText(result: SkillSearchResult): string {
 	return result.candidates.map((candidate) => `${candidate.name}: ${candidate.description}`).join("\n");
 }
 
+function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {
+	const evicted = result.evicted ? `; EVICTED: ${result.evicted.join(", ")}` : "";
+	return `skill loaded_pending: ${result.name} (base ${result.baseDir}), activates next request; expires when idle${evicted}`;
+}
+
 function statusText(result: SkillVaultStatus): string {
-	if (result.state === "unloaded") return `skill state: unloaded${result.reason ? `, ${result.reason}` : ""}`;
-	if (result.state === "loaded_pending") return `skill state: loaded_pending, ${result.name}, activates next request`;
-	return `skill state: active, ${result.name}, idle ${Math.round(result.idleForMs ?? 0)}ms, expires ${Math.round(result.expiresInMs ?? 0)}ms`;
+	if (result.slots.length === 0) return `skill state: unloaded${result.reason ? `, ${result.reason}` : ""}`;
+	return result.slots
+		.map((slot) =>
+			slot.state === "loaded_pending"
+				? `skill state: loaded_pending, ${slot.name}, activates next request`
+				: `skill state: active, ${slot.name}, idle ${Math.round(slot.idleForMs ?? 0)}ms, expires ${Math.round(slot.expiresInMs ?? 0)}ms`,
+		)
+		.join("\n");
 }
 
 /** One compact agent surface over the host-owned skill lifecycle. */
@@ -39,7 +49,7 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 		label: "Skill",
 		toolGroup: "skills",
 		description:
-			"Skill vault. Specialist guidance useful: search, load exact name before work. Host injects body transiently, expires idle; unload optional.",
+			"Skill vault, up to 3 concurrent skills under one byte budget. Specialist guidance useful: search, load exact name before work. Load may evict the least-recently-used skill and reports it. Host injects bodies transiently starting next request, expires idle; unload one name or all.",
 		promptSnippet: "Search/load skill.",
 		parameters: skillSchema,
 		async execute(_toolCallId, input) {
@@ -67,9 +77,7 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 						content: [
 							{
 								type: "text" as const,
-								text: result.ok
-									? `skill loaded: ${result.name}, active across requests until idle expiry`
-									: `skill load failed: ${result.message}`,
+								text: result.ok ? loadText(result) : `skill load failed: ${result.message}`,
 							},
 						],
 						details: { action: "load" as const, result },
@@ -77,9 +85,14 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 					};
 				}
 				case "unload": {
-					const result = vault.unload();
+					const result = vault.unload(input.name?.trim() || undefined);
 					return {
-						content: [{ type: "text" as const, text: `skill unloaded: ${result.unloaded ?? "none"}` }],
+						content: [
+							{
+								type: "text" as const,
+								text: `skill unloaded: ${result.unloaded.length > 0 ? result.unloaded.join(", ") : "none"}`,
+							},
+						],
 						details: { action: "unload" as const, result },
 					};
 				}

@@ -352,10 +352,12 @@ export {
 export {
 	DEFAULT_SKILL_IDLE_TIMEOUT_MS,
 	MAX_ACTIVE_SKILL_BODY_BYTES,
+	MAX_LOADED_SKILLS,
 	MIN_ACTIVE_SKILL_BODY_BYTES,
 	resolveActiveSkillBodyByteLimit,
 	type SkillLoadResult,
 	type SkillSearchResult,
+	type SkillSlotStatus,
 	SkillVaultController,
 	type SkillVaultControllerOptions,
 	type SkillVaultStatus,

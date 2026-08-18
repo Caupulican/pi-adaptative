@@ -273,6 +273,7 @@ export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 		name: "fileNotFound",
 		phase: "execution",
 		failureCode: "file_not_found",
+		retainDiagnostic: true,
 		guidance: "Path not found. List parent directory or re-read path before retry.",
 		matches(message: string): boolean {
 			return (

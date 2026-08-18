@@ -86,8 +86,12 @@ describe("SkillVaultController", () => {
 			idleTimeoutMs: 5_000,
 			onSkillUsed: used,
 		});
-		expect(vault.load("frontend-motion", "model")).toMatchObject({ ok: true, state: "loaded_pending" });
-		expect(vault.status()).toMatchObject({ state: "loaded_pending", name: "frontend-motion" });
+		expect(vault.load("frontend-motion", "model")).toMatchObject({
+			ok: true,
+			state: "loaded_pending",
+			baseDir: join(root, "frontend-motion"),
+		});
+		expect(vault.status()).toMatchObject({ slots: [{ state: "loaded_pending", name: "frontend-motion" }] });
 
 		const preview = vault.previewSystemPromptSection();
 		const projected = vault.commitSystemPromptSection();
@@ -97,14 +101,232 @@ describe("SkillVaultController", () => {
 		expect(projected).toContain("Use interruptible transforms.");
 		expect(projected).not.toContain("resource-profile");
 		expect(projected).not.toContain("<skill");
-		expect(vault.status()).toMatchObject({ state: "active", name: "frontend-motion", lastUsedAtMs: 1_000 });
+		expect(vault.status()).toMatchObject({
+			slots: [{ state: "active", name: "frontend-motion", lastUsedAtMs: 1_000 }],
+		});
 		expect(used).toHaveBeenCalledTimes(1);
 
 		now = 2_000;
 		const projectedAgain = vault.commitSystemPromptSection();
 		expect(projectedAgain).toBe(projected);
-		expect(vault.status()).toMatchObject({ state: "active", lastUsedAtMs: 2_000 });
+		expect(vault.status()).toMatchObject({ slots: [{ state: "active", lastUsedAtMs: 2_000 }] });
 		expect(used).toHaveBeenCalledTimes(1);
+	});
+
+	it("composes every loaded slot in load order for the next request", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+		]);
+		let now = 1_000;
+		const used = vi.fn();
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, onSkillUsed: used });
+
+		expect(vault.load("alpha", "model")).toMatchObject({ ok: true, state: "loaded_pending" });
+		now = 2_000;
+		expect(vault.load("bravo", "model")).not.toHaveProperty("evicted");
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "bravo"]);
+
+		const preview = vault.previewSystemPromptSection();
+		const projected = vault.commitSystemPromptSection();
+
+		expect(projected).toBe(preview);
+		expect(projected).toContain("ALPHA-BODY");
+		expect(projected).toContain("BRAVO-BODY");
+		expect(projected?.indexOf("ALPHA-BODY")).toBeLessThan(projected?.indexOf("BRAVO-BODY") ?? -1);
+		expect(projected).toContain("\n\n");
+		expect(used).toHaveBeenCalledTimes(2);
+		expect(vault.status().slots.map((slot) => slot.state)).toEqual(["active", "active"]);
+	});
+
+	it("evicts the least-recently-used slot beyond the slot cap and reports it", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+			{ name: "charlie", description: "Charlie guidance.", body: "CHARLIE-BODY" },
+			{ name: "delta", description: "Delta guidance.", body: "DELTA-BODY" },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now });
+		vault.load("alpha", "model");
+		now = 2_000;
+		vault.load("bravo", "model");
+		now = 3_000;
+		vault.load("charlie", "model");
+		now = 4_000;
+
+		const result = vault.load("delta", "model");
+
+		expect(result).toMatchObject({ ok: true, state: "loaded_pending", evicted: ["alpha"] });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["bravo", "charlie", "delta"]);
+		const projected = vault.commitSystemPromptSection();
+		expect(projected).not.toContain("ALPHA-BODY");
+		expect(projected).toContain("BRAVO-BODY");
+		expect(projected).toContain("CHARLIE-BODY");
+		expect(projected).toContain("DELTA-BODY");
+	});
+
+	it("evicts by byte budget before loading and rejects single over-budget bodies without eviction", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "a".repeat(600) },
+			{ name: "bravo", description: "Bravo guidance.", body: "b".repeat(600) },
+			{ name: "huge", description: "Huge guidance.", body: "h".repeat(2_000) },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, getMaxBodyBytes: () => 1_024 });
+
+		expect(vault.load("alpha", "model")).not.toHaveProperty("evicted");
+		now = 2_000;
+		expect(vault.load("bravo", "model")).toMatchObject({ ok: true, evicted: ["alpha"] });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["bravo"]);
+
+		const revision = vault.getContextRevision();
+		expect(vault.load("huge", "model")).toMatchObject({ ok: false, reason: "body_too_large" });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["bravo"]);
+		expect(vault.getContextRevision()).toBe(revision);
+	});
+
+	it("reports pending state, base dir, and evictions truthfully in the load tool text", async () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "a".repeat(600) },
+			{ name: "bravo", description: "Bravo guidance.", body: "b".repeat(600) },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, getMaxBodyBytes: () => 1_024 });
+		const tool = createSkillVaultToolDefinition(vault);
+
+		const first = await tool.execute(
+			"load-alpha",
+			{ action: "load", name: "alpha" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		const firstText = first.content[0]?.type === "text" ? first.content[0].text : "";
+		expect(firstText).toContain("loaded_pending");
+		expect(firstText).toContain(join(root, "alpha"));
+		expect(firstText).toContain("activates next request");
+		expect(firstText).not.toMatch(/\bactive\b/);
+		expect(firstText).not.toContain("EVICTED");
+
+		now = 2_000;
+		const second = await tool.execute(
+			"load-bravo",
+			{ action: "load", name: "bravo" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		const secondText = second.content[0]?.type === "text" ? second.content[0].text : "";
+		expect(secondText).toContain("loaded_pending");
+		expect(secondText).toContain("EVICTED: alpha");
+		expect(secondText).not.toMatch(/\bactive\b/);
+	});
+
+	it("expires only the stale slot on idle timeout", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, idleTimeoutMs: 5_000 });
+		vault.load("alpha", "model");
+		vault.commitSystemPromptSection();
+		now = 4_000;
+		vault.load("bravo", "model");
+
+		expect(vault.status().slots).toMatchObject([
+			{ state: "active", name: "alpha", lastUsedAtMs: 1_000 },
+			{ state: "loaded_pending", name: "bravo" },
+		]);
+
+		now = 6_500;
+		expect(vault.status().slots).toMatchObject([{ state: "loaded_pending", name: "bravo" }]);
+		const projected = vault.commitSystemPromptSection();
+		expect(projected).toContain("BRAVO-BODY");
+		expect(projected).not.toContain("ALPHA-BODY");
+	});
+
+	it("unloads one named slot or every slot and lists the names", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+		vault.load("alpha", "model");
+		vault.load("bravo", "model");
+
+		expect(vault.unload("alpha")).toEqual({ ok: true, unloaded: ["alpha"] });
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["bravo"]);
+
+		vault.load("alpha", "model");
+		expect(vault.unload()).toEqual({ ok: true, unloaded: ["bravo", "alpha"] });
+		expect(vault.status()).toMatchObject({ slots: [], reason: "explicit" });
+		expect(vault.unload("missing")).toEqual({ ok: true, unloaded: [] });
+	});
+
+	it("bumps the context revision on every slot change and composes byte-identical strings", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+		]);
+		let now = 1_000;
+		const vault = new SkillVaultController({ getSkills: () => skills, now: () => now, idleTimeoutMs: 5_000 });
+
+		const initial = vault.getContextRevision();
+		vault.load("alpha", "model");
+		const afterAlpha = vault.getContextRevision();
+		expect(afterAlpha).toBeGreaterThan(initial);
+		vault.load("bravo", "model");
+		const afterBravo = vault.getContextRevision();
+		expect(afterBravo).toBeGreaterThan(afterAlpha);
+
+		const preview = vault.previewSystemPromptSection();
+		const committed = vault.commitSystemPromptSection();
+		expect(committed).toBe(preview);
+		expect(vault.previewSystemPromptSection()).toBe(committed);
+		expect(vault.getContextRevision()).toBe(afterBravo);
+
+		vault.unload("alpha");
+		const afterUnload = vault.getContextRevision();
+		expect(afterUnload).toBeGreaterThan(afterBravo);
+
+		now = 7_000;
+		expect(vault.getContextRevision()).toBeGreaterThan(afterUnload);
+		expect(vault.status()).toMatchObject({ slots: [], reason: "idle_expired" });
+	});
+
+	it("keeps the motivating trace's two skills co-resident without eviction", () => {
+		const skills = createSkills([
+			{ name: "harness-self-adaptation", description: "Harness adaptation.", body: "HARNESS-ADAPTATION-BODY" },
+			{ name: "autonomous-execution", description: "Autonomous execution.", body: "AUTONOMOUS-EXECUTION-BODY" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+
+		expect(vault.load("harness-self-adaptation", "model")).toMatchObject({ ok: true });
+		const second = vault.load("autonomous-execution", "model");
+
+		expect(second).toMatchObject({ ok: true, state: "loaded_pending" });
+		expect(second).not.toHaveProperty("evicted");
+		const projected = vault.commitSystemPromptSection();
+		expect(projected).toContain("HARNESS-ADAPTATION-BODY");
+		expect(projected).toContain("AUTONOMOUS-EXECUTION-BODY");
+	});
+
+	it("refreshes a reloaded skill in place without evicting it", () => {
+		const skills = createSkills([
+			{ name: "alpha", description: "Alpha guidance.", body: "ALPHA-BODY" },
+			{ name: "bravo", description: "Bravo guidance.", body: "BRAVO-BODY" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+		vault.load("alpha", "model");
+		vault.load("bravo", "model");
+
+		const reloaded = vault.load("alpha", "model");
+
+		expect(reloaded).toMatchObject({ ok: true, state: "loaded_pending" });
+		expect(reloaded).not.toHaveProperty("evicted");
+		expect(vault.status().slots.map((slot) => slot.name)).toEqual(["alpha", "bravo"]);
 	});
 
 	it("keeps usage telemetry best-effort when its callback fails", () => {
@@ -120,7 +342,7 @@ describe("SkillVaultController", () => {
 
 		expect(() => vault.load("frontend-motion", "model")).not.toThrow();
 		expect(() => vault.commitSystemPromptSection()).not.toThrow();
-		expect(vault.status().state).toBe("active");
+		expect(vault.status().slots[0]?.state).toBe("active");
 	});
 
 	it("previews request cost without activating or refreshing the skill", () => {
@@ -132,11 +354,11 @@ describe("SkillVaultController", () => {
 		vault.load("frontend-motion", "model");
 
 		expect(vault.previewSystemPromptSection()).toContain("Use transforms.");
-		expect(vault.status().state).toBe("loaded_pending");
+		expect(vault.status().slots[0]?.state).toBe("loaded_pending");
 		vault.commitSystemPromptSection();
 		now = 2_000;
 		expect(vault.previewSystemPromptSection()).toContain("Use transforms.");
-		expect(vault.status()).toMatchObject({ state: "active", lastUsedAtMs: 1_000, idleForMs: 1_000 });
+		expect(vault.status()).toMatchObject({ slots: [{ state: "active", lastUsedAtMs: 1_000, idleForMs: 1_000 }] });
 	});
 
 	it("expires idle skills in the harness before the next model request", () => {
@@ -152,7 +374,7 @@ describe("SkillVaultController", () => {
 		const projected = vault.commitSystemPromptSection();
 
 		expect(projected).toBeUndefined();
-		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "idle_expired" });
+		expect(vault.status()).toMatchObject({ slots: [], reason: "idle_expired" });
 	});
 
 	it("expires a pending load that never reaches a model request", () => {
@@ -165,7 +387,7 @@ describe("SkillVaultController", () => {
 
 		now = 11_001;
 
-		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "idle_expired" });
+		expect(vault.status()).toMatchObject({ slots: [], reason: "idle_expired" });
 	});
 
 	it("counts host-observed work as use so a long tool execution does not evict its skill", () => {
@@ -180,7 +402,7 @@ describe("SkillVaultController", () => {
 		now = 15_000;
 		vault.noteActivity();
 
-		expect(vault.status()).toMatchObject({ state: "active", lastUsedAtMs: 15_000, idleForMs: 0 });
+		expect(vault.status()).toMatchObject({ slots: [{ state: "active", lastUsedAtMs: 15_000, idleForMs: 0 }] });
 	});
 
 	it("invalidates a loaded skill when its active resource grant disappears", () => {
@@ -192,7 +414,7 @@ describe("SkillVaultController", () => {
 		skills = [];
 
 		expect(vault.commitSystemPromptSection()).toBeUndefined();
-		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "resource_unavailable" });
+		expect(vault.status()).toMatchObject({ slots: [], reason: "resource_unavailable" });
 	});
 
 	it("keeps model-disabled skills hidden from the agent but permits explicit user loading", () => {
@@ -218,9 +440,9 @@ describe("SkillVaultController", () => {
 		const vault = new SkillVaultController({ getSkills: () => skills });
 		vault.load("frontend-motion", "model");
 
-		expect(vault.unload()).toMatchObject({ ok: true, unloaded: "frontend-motion" });
+		expect(vault.unload()).toEqual({ ok: true, unloaded: ["frontend-motion"] });
 		expect(vault.commitSystemPromptSection()).toBeUndefined();
-		expect(vault.status().state).toBe("unloaded");
+		expect(vault.status().slots).toEqual([]);
 	});
 
 	it("rejects an activation body over the current model budget without truncating it", () => {
@@ -228,7 +450,7 @@ describe("SkillVaultController", () => {
 		const vault = new SkillVaultController({ getSkills: () => skills, getMaxBodyBytes: () => 1_024 });
 
 		expect(vault.load("large-skill", "model")).toMatchObject({ ok: false, reason: "body_too_large" });
-		expect(vault.status().state).toBe("unloaded");
+		expect(vault.status().slots).toEqual([]);
 	});
 
 	it("invalidates an active body when a model switch reduces its context budget", () => {
@@ -241,7 +463,7 @@ describe("SkillVaultController", () => {
 		bodyLimit = 4_096;
 
 		expect(vault.commitSystemPromptSection()).toBeUndefined();
-		expect(vault.status()).toMatchObject({ state: "unloaded", reason: "budget_exceeded" });
+		expect(vault.status()).toMatchObject({ slots: [], reason: "budget_exceeded" });
 	});
 
 	it("exposes the same lifecycle through one compact tool", async () => {
@@ -270,7 +492,16 @@ describe("SkillVaultController", () => {
 			undefined,
 			undefined as never,
 		);
-		expect(vault.status().state).toBe("loaded_pending");
+		expect(vault.status().slots[0]?.state).toBe("loaded_pending");
+
+		const unloaded = await tool.execute(
+			"unload-call",
+			{ action: "unload" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(unloaded.content[0]?.type === "text" ? unloaded.content[0].text : "").toContain("frontend-motion");
 	});
 
 	it("marks malformed and rejected loads as tool errors for unchanged-failure gating", async () => {
@@ -317,6 +548,6 @@ describe("SkillVaultController", () => {
 		const vault = new SkillVaultController({ getSkills: () => skills });
 		const status: SkillVaultStatus = vault.status();
 
-		expect(status).toEqual({ state: "unloaded", idleTimeoutMs: expect.any(Number) });
+		expect(status).toEqual({ idleTimeoutMs: expect.any(Number), slots: [] });
 	});
 });

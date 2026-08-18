@@ -17,6 +17,7 @@ import {
 } from "../src/tool-failure-memory.ts";
 import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../src/tool-failure-recovery-protocol.ts";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "../src/types.ts";
+import { createAgentToolFailureRecoveryAuthority } from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -96,6 +97,35 @@ async function drain(stream: ReturnType<typeof agentLoop>): Promise<AgentEvent[]
 	const events: AgentEvent[] = [];
 	for await (const event of stream) events.push(event);
 	return events;
+}
+
+function failureRecordOf(message: AgentMessage | undefined): ToolFailureMemoryRecord {
+	const details = message?.role === "toolResult" ? message.details : undefined;
+	const record = (details as { piToolFailureMemory?: ToolFailureMemoryRecord } | undefined)?.piToolFailureMemory;
+	if (!record) throw new Error("Expected a retained failure record");
+	return record;
+}
+
+function singleFailureTurnStream(toolName: string, args: Record<string, unknown>) {
+	let providerTurns = 0;
+	return () => {
+		const stream = new MockAssistantStream();
+		queueMicrotask(() => {
+			providerTurns++;
+			stream.push({
+				type: "done",
+				reason: providerTurns === 1 ? "toolUse" : "stop",
+				message:
+					providerTurns === 1
+						? assistantMessage(
+								[{ type: "toolCall", id: `${toolName}-1`, name: toolName, arguments: args }],
+								"toolUse",
+							)
+						: assistantMessage([{ type: "text", text: "reported" }], "stop"),
+			});
+		});
+		return stream;
+	};
 }
 
 describe("mandatory tool failure recovery protocol", () => {
@@ -430,5 +460,172 @@ describe("mandatory tool failure recovery protocol", () => {
 					),
 			),
 		).toBe(true);
+	});
+
+	it("leads with catalogued policy guidance before the gate's loaded actions", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		const targetKind = "test.file.exists";
+		const authority = createAgentToolFailureRecoveryAuthority();
+		const tool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			failureRecovery: {
+				getFailureTargets: (params) => [{ authority, kind: targetKind, scope: params.path }],
+				actions: [
+					{ kind: "correct", authority, targetKind, instruction: "Probe the parent listing with the stat tool." },
+				],
+			},
+			async execute() {
+				throw new Error("ENOENT: no such file or directory, open '/repo/missing.txt'");
+			},
+		};
+
+		const stream = agentLoop(
+			[{ role: "user", content: "read it", timestamp: 1 }],
+			{ systemPrompt: "base", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+			undefined,
+			singleFailureTurnStream("read_like", { path: "/repo/missing.txt" }),
+		);
+		await drain(stream);
+		const messages = await stream.result();
+
+		const record = failureRecordOf(messages.find((message) => message.role === "toolResult"));
+		expect(record.failureCode).toBe("file_not_found");
+		expect(record.diagnostic).toContain("/repo/missing.txt");
+		expect(record.correction.startsWith("Path not found. List parent directory or re-read path before retry. ")).toBe(
+			true,
+		);
+		expect(record.correction).toContain(
+			"Loaded actions: read_like correct: Probe the parent listing with the stat tool.",
+		);
+	});
+
+	it("keeps the gate guidance as the whole correction when no catalogued policy matches", async () => {
+		const schema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof schema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe the backend",
+			parameters: schema,
+			async execute() {
+				throw new Error("backend handshake rejected the session token\nCommand exited with code 7");
+			},
+		};
+
+		const stream = agentLoop(
+			[{ role: "user", content: "probe", timestamp: 1 }],
+			{ systemPrompt: "base", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+			undefined,
+			singleFailureTurnStream("probe", { value: "same" }),
+		);
+		await drain(stream);
+		const messages = await stream.result();
+
+		const record = failureRecordOf(messages.find((message) => message.role === "toolResult"));
+		expect(record.failureCode).toBe("exit_7");
+		expect(record.correction).toBe(
+			"No loaded tool declares recovery. Never retry unchanged. Use materially different operation justified by diagnostic/schema, or report blocker.",
+		);
+		expect(record.evidence).toBe("backend handshake rejected the session token");
+	});
+
+	it("keeps gate-derived repair evidence ahead of the raw output tail", async () => {
+		const schema = Type.Object({ path: Type.String() });
+		const authority = createAgentToolFailureRecoveryAuthority();
+		const tool: AgentTool<typeof schema> = {
+			name: "read_like",
+			label: "Read-like",
+			description: "Read a path",
+			parameters: schema,
+			failureRecovery: {
+				getFailureTargets: (params) => [{ authority, kind: "test.file.exists", scope: params.path }],
+				getFailureEvidence: () => "CONTRACT_EVIDENCE: current backend snapshot",
+			},
+			async execute() {
+				throw new Error("probe output line\nCommand exited with code 3");
+			},
+		};
+
+		const stream = agentLoop(
+			[{ role: "user", content: "read it", timestamp: 1 }],
+			{ systemPrompt: "base", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+			undefined,
+			singleFailureTurnStream("read_like", { path: "/repo/present.txt" }),
+		);
+		await drain(stream);
+		const messages = await stream.result();
+
+		const record = failureRecordOf(messages.find((message) => message.role === "toolResult"));
+		expect(record.evidence).toBe("CONTRACT_EVIDENCE: current backend snapshot");
+		expect(record.evidence).not.toContain("probe output line");
+	});
+
+	it("does not grant fresh evidence to a blocked unchanged replay", async () => {
+		const schema = Type.Object({ value: Type.String() });
+		let executions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe the backend",
+			parameters: schema,
+			async execute() {
+				executions++;
+				throw new Error("probe tail alpha\nprobe tail beta\nCommand exited with code 2");
+			},
+		};
+		let providerTurns = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				stream.push({
+					type: "done",
+					reason: providerTurns <= 2 ? "toolUse" : "stop",
+					message:
+						providerTurns <= 2
+							? assistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: `probe-${providerTurns}`,
+											name: "probe",
+											arguments: { value: "same" },
+										},
+									],
+									"toolUse",
+								)
+							: assistantMessage([{ type: "text", text: "reported" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[{ role: "user", content: "probe", timestamp: 1 }],
+			{ systemPrompt: "base", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+			undefined,
+			streamFn,
+		);
+		await drain(stream);
+		const messages = await stream.result();
+
+		const failedResults = messages.filter((message) => message.role === "toolResult" && message.isError === true);
+		expect(executions).toBe(1);
+		expect(failedResults).toHaveLength(2);
+		const first = failureRecordOf(failedResults[0]);
+		const second = failureRecordOf(failedResults[1]);
+		expect(first.evidence).toBe("probe tail alpha\nprobe tail beta");
+		expect(second.evidence).toBe(first.evidence);
+		const secondText =
+			failedResults[1]?.role === "toolResult"
+				? (failedResults[1].content.find((block) => block.type === "text")?.text ?? "")
+				: "";
+		expect(secondText).toContain('"failure_code":"repeated_failed_operation"');
 	});
 });

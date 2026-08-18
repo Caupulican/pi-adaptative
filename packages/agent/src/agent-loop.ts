@@ -1546,16 +1546,19 @@ async function finalizeExecutedToolCall(
 			currentContext.tools ?? [],
 			prepared.executionGateReservation,
 		);
+		const correction = assessment.policyGuidance
+			? `${assessment.policyGuidance} ${recoveryPlan.guidance}`
+			: recoveryPlan.guidance;
 		const record = rememberToolFailure(
 			toolFailureMemory,
 			prepared.toolCall.name,
 			prepared.args,
 			"failed",
 			assessment.failureCode,
-			recoveryPlan.guidance,
+			correction,
 			assessment.diagnostic,
 			assessment.phase,
-			recoveryPlan.evidence,
+			recoveryPlan.evidence ?? assessment.evidence,
 		);
 		executionGateEffect = {
 			kind: "failure",

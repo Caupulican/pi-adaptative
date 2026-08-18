@@ -9,6 +9,7 @@ import { readBoundedTextFileSync, sameFileVersion } from "./util/bounded-file.ts
 export const DEFAULT_SKILL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_ACTIVE_SKILL_BODY_BYTES = 64 * 1024;
 export const MIN_ACTIVE_SKILL_BODY_BYTES = 4 * 1024;
+export const MAX_LOADED_SKILLS = 3;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_SEARCH_DESCRIPTION_CHARS = 240;
 
@@ -28,20 +29,23 @@ interface LoadedSkill {
 	fileChangedAtMs: number;
 }
 
-type SkillVaultState =
-	| { state: "unloaded"; reason?: SkillVaultUnloadReason }
+type SkillSlotState =
 	| ({ state: "loaded_pending" } & LoadedSkill)
 	| ({ state: "active"; lastUsedAtMs: number; useCount: number } & LoadedSkill);
 
-export interface SkillVaultStatus {
-	state: SkillVaultState["state"];
-	idleTimeoutMs: number;
-	name?: string;
-	loadedAtMs?: number;
+export interface SkillSlotStatus {
+	state: SkillSlotState["state"];
+	name: string;
+	loadedAtMs: number;
 	lastUsedAtMs?: number;
 	idleForMs?: number;
 	expiresInMs?: number;
 	useCount?: number;
+}
+
+export interface SkillVaultStatus {
+	idleTimeoutMs: number;
+	slots: SkillSlotStatus[];
 	reason?: SkillVaultUnloadReason;
 }
 
@@ -50,7 +54,7 @@ export interface SkillSearchResult {
 }
 
 export type SkillLoadResult =
-	| { ok: true; state: "loaded_pending"; name: string; replaced?: string }
+	| { ok: true; state: "loaded_pending"; name: string; baseDir: string; evicted?: string[] }
 	| { ok: false; reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed"; message: string };
 
 export interface SkillVaultControllerOptions {
@@ -87,6 +91,30 @@ function activeSkillContext(skill: Skill, body: string): string {
 	return [`ACTIVE SKILL ${skill.name}`, `BASE ${skill.baseDir}`, "NON-NEGOTIABLE WHILE ACTIVE:", body].join("\n");
 }
 
+function slotLastUsedAtMs(slot: SkillSlotState): number {
+	return slot.state === "loaded_pending" ? slot.loadedAtMs : slot.lastUsedAtMs;
+}
+
+function aggregateBodyBytes(slots: ReadonlyMap<string, SkillSlotState>): number {
+	let total = 0;
+	for (const slot of slots.values()) total += slot.bodyBytes;
+	return total;
+}
+
+function leastRecentlyUsedName(slots: ReadonlyMap<string, SkillSlotState>, excludeName?: string): string | undefined {
+	let lruName: string | undefined;
+	let lruUsedAtMs = Number.POSITIVE_INFINITY;
+	for (const [name, slot] of slots) {
+		if (name === excludeName) continue;
+		const usedAtMs = slotLastUsedAtMs(slot);
+		if (usedAtMs < lruUsedAtMs) {
+			lruUsedAtMs = usedAtMs;
+			lruName = name;
+		}
+	}
+	return lruName;
+}
+
 /** Reserve at most roughly one context token's worth of bytes per advertised context token. */
 export function resolveActiveSkillBodyByteLimit(contextWindow: number | undefined): number {
 	if (contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) {
@@ -102,7 +130,8 @@ export class SkillVaultController {
 	private readonly idleTimeoutMs: number;
 	private readonly getMaxBodyBytes: () => number;
 	private readonly onSkillUsed: ((skill: Skill, usedAtMs: number) => void) | undefined;
-	private current: SkillVaultState = { state: "unloaded" };
+	private slots = new Map<string, SkillSlotState>();
+	private unloadReason: SkillVaultUnloadReason | undefined;
 	private contextRevision = 0;
 
 	constructor(options: SkillVaultControllerOptions) {
@@ -131,6 +160,8 @@ export class SkillVaultController {
 	}
 
 	load(name: string, requester: SkillVaultRequester): SkillLoadResult {
+		const now = this.now();
+		this.reconcile(now);
 		const skill = this.getSkills().find(
 			(candidate) => candidate.name === name && (requester === "user" || !candidate.disableModelInvocation),
 		);
@@ -184,82 +215,86 @@ export class SkillVaultController {
 		if (!sameFileVersion(before, file)) {
 			return { ok: false, reason: "read_failed", message: "Skill changed while it was being loaded." };
 		}
-		const replaced = this.current.state === "unloaded" ? undefined : this.current.skill.name;
-		this.replaceState({
+		const next = new Map(this.slots);
+		next.set(skill.name, {
 			state: "loaded_pending",
 			skill,
 			bodyBytes,
 			systemPromptSection: activeSkillContext(skill, body),
 			requester,
-			loadedAtMs: this.now(),
+			loadedAtMs: now,
 			fileDevice: file.dev,
 			fileInode: file.ino,
 			fileSize: file.size,
 			fileModifiedAtMs: file.mtimeMs,
 			fileChangedAtMs: file.ctimeMs,
 		});
-		return { ok: true, state: "loaded_pending", name: skill.name, ...(replaced ? { replaced } : {}) };
+		const evicted: string[] = [];
+		while (next.size > MAX_LOADED_SKILLS || aggregateBodyBytes(next) > maxBodyBytes) {
+			const victim = leastRecentlyUsedName(next, skill.name);
+			if (!victim) break;
+			next.delete(victim);
+			evicted.push(victim);
+		}
+		this.replaceState(next);
+		return {
+			ok: true,
+			state: "loaded_pending",
+			name: skill.name,
+			baseDir: skill.baseDir,
+			...(evicted.length > 0 ? { evicted } : {}),
+		};
 	}
 
-	unload(): { ok: true; unloaded?: string } {
-		const unloaded = this.current.state === "unloaded" ? undefined : this.current.skill.name;
-		this.replaceState({ state: "unloaded", reason: "explicit" });
-		return { ok: true, ...(unloaded ? { unloaded } : {}) };
+	unload(name?: string): { ok: true; unloaded: string[] } {
+		this.reconcile(this.now());
+		const target = name?.trim();
+		const unloaded = !target ? [...this.slots.keys()] : this.slots.has(target) ? [target] : [];
+		if (unloaded.length > 0) {
+			const next = new Map(this.slots);
+			for (const slotName of unloaded) next.delete(slotName);
+			this.replaceState(next, "explicit");
+		}
+		return { ok: true, unloaded };
 	}
 
 	status(): SkillVaultStatus {
 		const now = this.now();
 		this.reconcile(now);
-		if (this.current.state === "unloaded") {
-			return {
-				state: "unloaded",
-				idleTimeoutMs: this.idleTimeoutMs,
-				...(this.current.reason ? { reason: this.current.reason } : {}),
-			};
-		}
-		if (this.current.state === "loaded_pending") {
-			return {
-				state: "loaded_pending",
-				idleTimeoutMs: this.idleTimeoutMs,
-				name: this.current.skill.name,
-				loadedAtMs: this.current.loadedAtMs,
-			};
-		}
-		const idleForMs = Math.max(0, now - this.current.lastUsedAtMs);
+		const slots = [...this.slots.values()].map((slot) => this.slotStatus(slot, now));
 		return {
-			state: "active",
 			idleTimeoutMs: this.idleTimeoutMs,
-			name: this.current.skill.name,
-			loadedAtMs: this.current.loadedAtMs,
-			lastUsedAtMs: this.current.lastUsedAtMs,
-			idleForMs,
-			expiresInMs: Math.max(0, this.idleTimeoutMs - idleForMs),
-			useCount: this.current.useCount,
+			slots,
+			...(slots.length === 0 && this.unloadReason ? { reason: this.unloadReason } : {}),
 		};
 	}
 
 	commitSystemPromptSection(): string | undefined {
 		const now = this.now();
 		this.reconcile(now);
-		if (this.current.state === "unloaded") return undefined;
-		const loaded = this.current;
-		const firstUse = loaded.state === "loaded_pending";
-		const useCount = firstUse ? 1 : loaded.useCount + 1;
-		this.current = { ...loaded, state: "active", lastUsedAtMs: now, useCount };
-		if (firstUse) {
-			try {
-				this.onSkillUsed?.(loaded.skill, now);
-			} catch {
-				// Usage telemetry must never block skill application.
+		if (this.slots.size === 0) return undefined;
+		const sections: string[] = [];
+		for (const [name, slot] of this.slots) {
+			sections.push(slot.systemPromptSection);
+			const firstUse = slot.state === "loaded_pending";
+			const useCount = firstUse ? 1 : slot.useCount + 1;
+			this.slots.set(name, { ...slot, state: "active", lastUsedAtMs: now, useCount });
+			if (firstUse) {
+				try {
+					this.onSkillUsed?.(slot.skill, now);
+				} catch {
+					// Usage telemetry must never block skill application.
+				}
 			}
 		}
-		return loaded.systemPromptSection;
+		return sections.join("\n\n");
 	}
 
 	/** Model the next request's transient system cost without treating a diagnostic read as use. */
 	previewSystemPromptSection(): string | undefined {
 		this.reconcile(this.now());
-		return this.current.state === "unloaded" ? undefined : this.current.systemPromptSection;
+		if (this.slots.size === 0) return undefined;
+		return [...this.slots.values()].map((slot) => slot.systemPromptSection).join("\n\n");
 	}
 
 	/** Compose the exact provider system prompt for read-only diagnostics. */
@@ -276,59 +311,88 @@ export class SkillVaultController {
 	/** Record host-observed work derived from an active skill, independent of agent cooperation. */
 	noteActivity(): void {
 		const now = this.now();
-		if (this.current.state === "active") {
-			this.current = { ...this.current, lastUsedAtMs: now };
+		for (const [name, slot] of this.slots) {
+			if (slot.state === "active") {
+				this.slots.set(name, { ...slot, lastUsedAtMs: now });
+			}
 		}
+	}
+
+	private slotStatus(slot: SkillSlotState, now: number): SkillSlotStatus {
+		if (slot.state === "loaded_pending") {
+			return { state: "loaded_pending", name: slot.skill.name, loadedAtMs: slot.loadedAtMs };
+		}
+		const idleForMs = Math.max(0, now - slot.lastUsedAtMs);
+		return {
+			state: "active",
+			name: slot.skill.name,
+			loadedAtMs: slot.loadedAtMs,
+			lastUsedAtMs: slot.lastUsedAtMs,
+			idleForMs,
+			expiresInMs: Math.max(0, this.idleTimeoutMs - idleForMs),
+			useCount: slot.useCount,
+		};
 	}
 
 	private reconcile(now: number): void {
-		if (!this.reconcileResource()) return;
-		const current = this.current;
-		if (current.state === "unloaded") return;
-		const lastUsedAtMs = current.state === "loaded_pending" ? current.loadedAtMs : current.lastUsedAtMs;
-		if (now - lastUsedAtMs >= this.idleTimeoutMs) {
-			this.replaceState({ state: "unloaded", reason: "idle_expired" });
+		if (this.slots.size === 0) return;
+		const maxBodyBytes = this.resolveMaxBodyBytes();
+		const skills = this.getSkills();
+		const next = new Map(this.slots);
+		let reason: SkillVaultUnloadReason | undefined;
+		for (const [name, slot] of this.slots) {
+			const slotReason = this.reconcileSlot(slot, skills, maxBodyBytes, now);
+			if (slotReason !== undefined) {
+				next.delete(name);
+				reason = slotReason;
+			}
+		}
+		while (aggregateBodyBytes(next) > maxBodyBytes) {
+			const victim = leastRecentlyUsedName(next);
+			if (!victim) break;
+			next.delete(victim);
+			reason = "budget_exceeded";
+		}
+		if (next.size !== this.slots.size) {
+			this.replaceState(next, reason);
 		}
 	}
 
-	private reconcileResource(): boolean {
-		if (this.current.state === "unloaded") return false;
-		const loaded = this.current;
-		if (loaded.bodyBytes > this.resolveMaxBodyBytes()) {
-			this.replaceState({ state: "unloaded", reason: "budget_exceeded" });
-			return false;
-		}
-		const currentSkill = this.getSkills().find(
+	private reconcileSlot(
+		slot: SkillSlotState,
+		skills: readonly Skill[],
+		maxBodyBytes: number,
+		now: number,
+	): SkillVaultUnloadReason | undefined {
+		if (slot.bodyBytes > maxBodyBytes) return "budget_exceeded";
+		const currentSkill = skills.find(
 			(skill) =>
-				skill.name === loaded.skill.name &&
-				skill.filePath === loaded.skill.filePath &&
-				(loaded.requester === "user" || !skill.disableModelInvocation),
+				skill.name === slot.skill.name &&
+				skill.filePath === slot.skill.filePath &&
+				(slot.requester === "user" || !skill.disableModelInvocation),
 		);
-		if (!currentSkill) {
-			this.replaceState({ state: "unloaded", reason: "resource_unavailable" });
-			return false;
-		}
+		if (!currentSkill) return "resource_unavailable";
 		try {
-			const file = statSync(loaded.skill.filePath);
+			const file = statSync(slot.skill.filePath);
 			if (
-				file.dev !== loaded.fileDevice ||
-				file.ino !== loaded.fileInode ||
-				file.size !== loaded.fileSize ||
-				file.mtimeMs !== loaded.fileModifiedAtMs ||
-				file.ctimeMs !== loaded.fileChangedAtMs
+				file.dev !== slot.fileDevice ||
+				file.ino !== slot.fileInode ||
+				file.size !== slot.fileSize ||
+				file.mtimeMs !== slot.fileModifiedAtMs ||
+				file.ctimeMs !== slot.fileChangedAtMs
 			) {
-				this.replaceState({ state: "unloaded", reason: "resource_unavailable" });
-				return false;
+				return "resource_unavailable";
 			}
 		} catch {
-			this.replaceState({ state: "unloaded", reason: "resource_unavailable" });
-			return false;
+			return "resource_unavailable";
 		}
-		return true;
+		if (now - slotLastUsedAtMs(slot) >= this.idleTimeoutMs) return "idle_expired";
+		return undefined;
 	}
 
-	private replaceState(state: SkillVaultState): void {
-		this.current = state;
+	private replaceState(slots: Map<string, SkillSlotState>, unloadReason?: SkillVaultUnloadReason): void {
+		this.slots = slots;
+		if (unloadReason !== undefined) this.unloadReason = unloadReason;
 		this.contextRevision++;
 	}
 
