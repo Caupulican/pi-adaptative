@@ -138,12 +138,11 @@ describe("destructive/chaos: budgeted goal loop against ChaosProvider (INV-L1)",
 				leaseLeaked: !probeSettled,
 			};
 
-			// Dispose explicitly, still under fake timers and with virtual time available, rather than
-			// leaving it to the harness's own onTestFinished-registered cleanup (test/suite/harness.ts)
-			// to run after this test body returns with no one left driving its timers.
-			const disposal = harness.cleanup();
-			await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-			await disposal;
+			// The chaos loop is virtual-time-owned, but physical child termination is an OS event. Return
+			// to real timers before cleanup so advancing the fake clock cannot fire the strict release
+			// watchdog before Linux has a chance to deliver the child's close event.
+			vi.useRealTimers();
+			await harness.cleanup();
 
 			assertInvL1({ loopRun: world }, repro);
 		}, 30_000);
