@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Classified broad-search policy rejections before the generic operation-rejected entry so recovery guidance retains the exact broadSearch="route-to-file" escape route for every emitted reason variant.
+
 ## [0.93.5] - 2026-08-17
 
 ### Fixed

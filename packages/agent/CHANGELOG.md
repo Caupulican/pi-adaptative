@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Kept the original tool-failure diagnostic as the leading recovery cause when unchanged replay or recovery exhaustion adds harness context, separating that context into a bounded note without changing the exact-operation circuit.
+
 ## [0.93.5] - 2026-08-17
 
 ### Fixed
