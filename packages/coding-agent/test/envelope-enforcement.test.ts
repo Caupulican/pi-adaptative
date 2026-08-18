@@ -102,6 +102,33 @@ describe("envelope path scope", () => {
 		expect(extractPathArguments(undefined)).toEqual([]);
 	});
 
+	it("projects shell, interpreter, and argv operands while excluding flags and URLs", () => {
+		// Separator-bearing relative words project and can only fail closed when out of scope.
+		expect(extractToolPathArguments("bash", { command: "cat packages/agent/package.json" })).toEqual([
+			"packages/agent/package.json",
+		]);
+		expect(extractToolPathArguments("bash", { command: "git merge origin/main" })).toEqual(["origin/main"]);
+		expect(extractToolPathArguments("bash", { command: "sed s/a/b/ notes.txt" })).toEqual(["s/a/b/"]);
+		expect(extractToolPathArguments("bash", { command: "npm i @scope/pkg" })).toEqual(["@scope/pkg"]);
+		// Flags and URL-like values never project.
+		expect(extractToolPathArguments("bash", { command: "curl https://example.com/x --output-dir=." })).toEqual(["."]);
+		expect(extractToolPathArguments("bash", { command: "git clone git+ssh://host/repo.git" })).toEqual([]);
+		expect(extractToolPathArguments("bash", { command: "ls -la --color=auto" })).toEqual([]);
+
+		expect(
+			extractToolPathArguments("python", { code: 'data = open("/etc/passwd").read()\nrel = open("data.csv")' }),
+		).toEqual(["/etc/passwd"]);
+		expect(
+			extractToolPathArguments("python", { scriptPath: "tools/run.py", args: ["/var/tmp/out.json", "-v"] }),
+		).toEqual(["tools/run.py", "/var/tmp/out.json"]);
+		expect(
+			extractToolPathArguments("run_process", {
+				executable: "./bin/tool",
+				args: ["--level=3", "conf/settings.toml"],
+			}),
+		).toEqual(["./bin/tool", "conf/settings.toml"]);
+	});
+
 	it("projects implicit and nested tool paths through the shared path owner", () => {
 		expect(extractToolPathArguments("grep", undefined)).toEqual(["."]);
 		expect(

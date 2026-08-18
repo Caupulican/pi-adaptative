@@ -229,6 +229,77 @@ describe("Autonomy Gates", () => {
 				envelope,
 			});
 			expect(inside.outcome).toBe("allow");
+
+			const relativeOutside = evaluateToolGate({
+				toolName: "bash",
+				args: { command: "cat outside/data.txt" },
+				cwd: tempDir,
+				envelope,
+			});
+			expect(relativeOutside.outcome).toBe("block");
+			expect(relativeOutside.reasonCode).toBe("path_outside_allowed_roots");
+
+			const separatorTokensInScope = evaluateToolGate({
+				toolName: "bash",
+				args: { command: "git merge origin/main && sed s/a/b/ notes.txt" },
+				cwd: tempDir,
+				envelope: { ...emptyEnvelope, allowedPaths: [tempDir] },
+			});
+			expect(separatorTokensInScope.outcome).toBe("allow");
+		});
+
+		it("returns block for interpreter code, scriptPath, and argv paths outside allowed root", () => {
+			const outsideFile = path.join(outsideRoot, "data.txt");
+			fs.writeFileSync(outsideFile, "outside data", "utf-8");
+			const insideFile = path.join(allowedRoot, "notes.txt");
+			fs.writeFileSync(insideFile, "inside data", "utf-8");
+			const envelope: CapabilityEnvelope = { ...emptyEnvelope, allowedPaths: [allowedRoot] };
+
+			const codeOutside = evaluateToolGate({
+				toolName: "python",
+				args: { code: `print(open("${outsideFile}").read())` },
+				cwd: tempDir,
+				envelope,
+			});
+			expect(codeOutside.outcome).toBe("block");
+			expect(codeOutside.reasonCode).toBe("path_outside_allowed_roots");
+			expect(
+				evaluateToolGate({
+					toolName: "python",
+					args: { code: `print(open("${insideFile}").read())` },
+					cwd: tempDir,
+					envelope,
+				}).outcome,
+			).toBe("allow");
+
+			const scriptOutside = evaluateToolGate({
+				toolName: "python",
+				args: { scriptPath: outsideFile },
+				cwd: tempDir,
+				envelope,
+			});
+			expect(scriptOutside.outcome).toBe("block");
+			expect(scriptOutside.reasonCode).toBe("path_outside_allowed_roots");
+			expect(
+				evaluateToolGate({ toolName: "python", args: { scriptPath: insideFile }, cwd: tempDir, envelope }).outcome,
+			).toBe("allow");
+
+			const argvOutside = evaluateToolGate({
+				toolName: "run_process",
+				args: { executable: "node", args: ["--check", outsideFile] },
+				cwd: tempDir,
+				envelope,
+			});
+			expect(argvOutside.outcome).toBe("block");
+			expect(argvOutside.reasonCode).toBe("path_outside_allowed_roots");
+			expect(
+				evaluateToolGate({
+					toolName: "run_process",
+					args: { executable: "node", args: ["--check", insideFile] },
+					cwd: tempDir,
+					envelope,
+				}).outcome,
+			).toBe("allow");
 		});
 
 		it("returns ask-user or block for bash mutating/destructive command", () => {

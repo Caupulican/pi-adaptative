@@ -47,7 +47,7 @@ type EditPreview = EditDiffResult | EditDiffError;
 
 // An identity mismatch at execution is not failure by itself: the edit re-reads and
 // re-validates its anchors against the current content, once, plus at most once more
-// when the file changes again before the write is bound to the re-read version.
+// when the file changes again before the pre-write identity check passes.
 const MAX_STALE_LEASE_REFRESHES = 2;
 
 type EditRenderState = {
@@ -574,8 +574,10 @@ export function createEditToolDefinition(
 					}
 				};
 
-				// One round reads content bracketed by two matching identity checks against the
-				// lease, so the write is atomic with respect to the version whose anchors matched.
+				// One round reads content bracketed by two matching identity observations of the
+				// lease version and re-checks that identity immediately before writing. Same-process
+				// mutations are serialized by the file mutation queue; an external writer landing in
+				// the assert-to-write window is detected at the next observation, not excluded.
 				const runEditRound = async (): Promise<
 					| {
 							baseContent: string;

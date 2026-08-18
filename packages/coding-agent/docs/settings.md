@@ -362,11 +362,11 @@ Context GC only rewrites the provider-bound context view. It does not delete or 
 |---------|------|---------|-------------|
 | `contextGc.enabled` | boolean | `true` | Enable provider-context packing for stale bulky context |
 | `contextGc.preserveRecentMessages` | number | `24` | Recent messages kept verbatim |
-| `contextGc.minToolResultChars` | number | `2500` | Minimum stale tool-result size before packing |
-| `contextGc.tools` | string[] | `read`, `bash`, `python`, `powershell`, `rg`, `grep`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
+| `contextGc.minToolResultChars` | number | `1200` | Minimum stale tool-result size before packing |
+| `contextGc.tools` | string[] | `read`, `bash`, `python`, `powershell`, `rg`, `grep`, `find`, `run_toolkit_script`, `ls`, `skill_open`, `automata_graph_status`, `automata_graph_search`, `automata_graph_query`, `automata_graph_neighbors`, `automata_graph_path`, `automata_graph_pointer_pack`, `learning_query_memory`, `subagent`, `delegate`, `task_steps`, `pipeline`, `task_background`, `task_goal`, `run_ledger`, `context_headroom_retrieve`, `headroom_retrieve` | Tool results eligible for stale-output packing |
 | `contextGc.semanticMemory.enabled` | boolean | `true` | Pack stale Automata/Mind semantic context pages from provider context |
-| `contextGc.semanticMemory.preserveRecentPages` | number | `2` | Newest semantic memory pages kept verbatim |
-| `contextGc.semanticMemory.minChars` | number | `1200` | Minimum semantic page size before packing |
+| `contextGc.semanticMemory.preserveRecentPages` | number | `1` | Newest semantic memory pages kept verbatim |
+| `contextGc.semanticMemory.minChars` | number | `900` | Minimum semantic page size before packing |
 | `contextGc.semanticMemory.markers` | string[] | Automata/Mind XML-ish tags | Markers used to identify deterministic memory pages |
 
 Semantic memory packing only targets tool results and Automata/Mind custom context messages; normal user prompts are preserved even if they contain matching marker text.

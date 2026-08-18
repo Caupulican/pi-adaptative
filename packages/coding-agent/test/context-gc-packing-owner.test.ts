@@ -202,6 +202,72 @@ describe("context GC reference protection (ledger #144)", () => {
 		expect(result.messages[3]).toBe(messages[3]);
 	});
 
+	it("keeps a python code result whose code is cited by recent assistant text while packing an uncited sibling", () => {
+		const messages: AgentMessage[] = [
+			assistantToolCall("py-cited", "python", {
+				code: "manifest = load_manifest()\nprint(manifest.total_bytes)",
+			}),
+			toolResult("py-cited", "python", bulky("CITED PYTHON")),
+			assistantToolCall("py-uncited", "python", { code: "cache.purge()\nprint(cache.stats())" }),
+			toolResult("py-uncited", "python", bulky("UNCITED PYTHON")),
+			assistantText("The manifest totals confirm the size regression."),
+		];
+
+		const result = applyContextGc(messages, {
+			cwd: "/repo",
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			writePayloads: false,
+		});
+
+		expect(packedIds(result)).toEqual(["py-uncited"]);
+		expect(result.messages[1]).toBe(messages[1]);
+	});
+
+	it("keeps a python script result whose scriptPath is cited by recent assistant text while packing an uncited sibling", () => {
+		const messages: AgentMessage[] = [
+			assistantToolCall("script-cited", "python", { scriptPath: "tools/build_report.py" }),
+			toolResult("script-cited", "python", bulky("CITED SCRIPT")),
+			assistantToolCall("script-uncited", "python", { scriptPath: "tools/cleanup_cache.py" }),
+			toolResult("script-uncited", "python", bulky("UNCITED SCRIPT")),
+			assistantText("Per build_report.py the nightly job regressed."),
+		];
+
+		const result = applyContextGc(messages, {
+			cwd: "/repo",
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			writePayloads: false,
+		});
+
+		expect(packedIds(result)).toEqual(["script-uncited"]);
+		expect(result.messages[1]).toBe(messages[1]);
+	});
+
+	it("keeps a run_process result whose argv is cited by recent assistant text while packing an uncited sibling", () => {
+		const messages: AgentMessage[] = [
+			assistantToolCall("proc-cited", "run_process", {
+				executable: "cargo",
+				args: ["build", "--release", "--target-dir", "out/release-build"],
+			}),
+			toolResult("proc-cited", "run_process", bulky("CITED PROCESS")),
+			assistantToolCall("proc-uncited", "run_process", { executable: "7zip", args: ["a", "backup.zip"] }),
+			toolResult("proc-uncited", "run_process", bulky("UNCITED PROCESS")),
+			assistantText("The cargo build output pins the failure to the linker step."),
+		];
+
+		const result = applyContextGc(messages, {
+			cwd: "/repo",
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			tools: ["run_process"],
+			writePayloads: false,
+		});
+
+		expect(packedIds(result)).toEqual(["proc-uncited"]);
+		expect(result.messages[1]).toBe(messages[1]);
+	});
+
 	it("stops protecting once the citation falls outside the last 8 assistant messages", () => {
 		const messages: AgentMessage[] = [
 			assistantToolCall("bash-once-cited", "bash", { command: "git log --oneline -30" }),

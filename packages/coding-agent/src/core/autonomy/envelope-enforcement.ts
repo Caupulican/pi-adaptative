@@ -1,5 +1,10 @@
 import { resolve } from "node:path";
-import { extractShellCommandPaths, type ShellCommandDialect } from "../tools/shell-command-parser.ts";
+import {
+	extractCodeStaticPaths,
+	extractShellCommandPaths,
+	projectPathShapedArgument,
+	type ShellCommandDialect,
+} from "../tools/shell-command-parser.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
@@ -12,7 +17,17 @@ import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
  * outcome code, never a silent no-op.
  */
 
-const PATH_ARGUMENT_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
+const PATH_ARGUMENT_KEYS = [
+	"path",
+	"file_path",
+	"filePath",
+	"cwd",
+	"directory",
+	"dir",
+	"target",
+	"scriptPath",
+	"script_path",
+] as const;
 const PATH_LIST_ARGUMENT_KEYS = ["paths", "files"] as const;
 const SHELL_COMMAND_TOOL_DIALECTS = new Map<string, ShellCommandDialect>([
 	["bash", "posix"],
@@ -57,6 +72,28 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
 	if (shellDialect && params && typeof params === "object") {
 		const command = (params as Record<string, unknown>).command;
 		if (typeof command === "string") paths.push(...extractShellCommandPaths(command, shellDialect));
+	}
+	if (
+		(normalizedToolName === "python" || normalizedToolName === "run_process") &&
+		params &&
+		typeof params === "object"
+	) {
+		const record = params as Record<string, unknown>;
+		if (normalizedToolName === "python" && typeof record.code === "string") {
+			paths.push(...extractCodeStaticPaths(record.code));
+		}
+		if (normalizedToolName === "run_process" && typeof record.executable === "string") {
+			const projected = projectPathShapedArgument(record.executable.trim());
+			if (projected !== undefined) paths.push(projected);
+		}
+		// argv entries reach the process unparsed by any shell, so each element is its own token.
+		if (Array.isArray(record.args)) {
+			for (const entry of record.args) {
+				if (typeof entry !== "string") continue;
+				const projected = projectPathShapedArgument(entry.trim());
+				if (projected !== undefined) paths.push(projected);
+			}
+		}
 	}
 	if (
 		paths.length === 0 &&

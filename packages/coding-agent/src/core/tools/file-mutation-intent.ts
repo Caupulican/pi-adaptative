@@ -409,7 +409,7 @@ export class FileMutationIntentController {
 	/**
 	 * Re-anchor an edit lease to the file's current identity after an observed change.
 	 * The caller must then re-read and re-validate its content against that same version;
-	 * the next assertCurrent binds any write to it.
+	 * the next assertCurrent re-verifies it immediately before any write.
 	 */
 	async refreshIdentity(lease: FileMutationLease, signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) throw new Error("Operation aborted");

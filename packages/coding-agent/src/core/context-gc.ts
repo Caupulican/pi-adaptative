@@ -396,11 +396,38 @@ function collectCommandReferenceFragments(fragments: string[], command: string):
 		}
 	}
 	for (const token of command.split(/\s+/)) {
+		if (fragments.length >= REFERENCE_FRAGMENT_MAX_COUNT) break;
 		const word = stripTokenWrappers(token);
 		if (isDistinctiveCommandWord(word)) pushReferenceFragment(fragments, word);
 		const base = lastPathSegment(word);
 		if (base !== word && !base.startsWith("-") && base.length >= 4) pushReferenceFragment(fragments, base);
 	}
+}
+
+/**
+ * Review finding (ledger #144 follow-up): `args.path`/`args.command` are not the only citable
+ * evidence carriers -- python results carry `scriptPath` (path-shaped) or inline `code`, and
+ * run_process results carry `executable` + `args` argv (joined with spaces). Widen ONLY the
+ * reference check's inputs through the existing path/command-fragment rules and bounds; the
+ * packed record's own `path`/`command` fields stay exactly what the tool args named.
+ */
+function referenceEvidenceInputs(
+	cwd: string,
+	call: ToolCallMeta | undefined,
+	path: string | undefined,
+	command: string | undefined,
+): { path: string | undefined; command: string | undefined } {
+	const scriptPath = normalizeToolPath(cwd, call?.args.scriptPath ?? call?.args.script_path);
+	const code = typeof call?.args.code === "string" ? call.args.code : undefined;
+	const executable = typeof call?.args.executable === "string" ? call.args.executable : undefined;
+	const argv =
+		executable !== undefined && Array.isArray(call?.args.args)
+			? [executable, ...call.args.args.filter((entry): entry is string => typeof entry === "string")].join(" ")
+			: undefined;
+	const commandText = [command, code, argv]
+		.filter((entry): entry is string => entry !== undefined && entry.length > 0)
+		.join("\n");
+	return { path: path ?? scriptPath, command: commandText.length > 0 ? commandText : undefined };
 }
 
 function referenceFragmentsFor(path: string | undefined, command: string | undefined): string[] {
@@ -640,7 +667,8 @@ export function applyContextGc(
 		}
 		if (reason === "stale-tool-result") {
 			recentAssistantText ??= collectRecentAssistantText(messages);
-			if (isReferencedByRecentAssistantText(recentAssistantText, path, command)) continue;
+			const reference = referenceEvidenceInputs(options.cwd, call, path, command);
+			if (isReferencedByRecentAssistantText(recentAssistantText, reference.path, reference.command)) continue;
 		}
 
 		const originalTokens = estimateTokens(message);

@@ -177,11 +177,12 @@ const EMBEDDED_TRAVERSAL_RE = /(^|[\\/])\.\.($|[\\/])/u;
 const DESCRIPTOR_REDIRECT_RE = /&[\d-]*$/u;
 
 function isPathShapedToken(value: string): boolean {
-	if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) return true;
+	if (value.startsWith("-")) return false;
+	if (value.includes("://")) return false;
 	if (value === "." || value === "..") return true;
 	if (value === "~" || value.startsWith("~/")) return true;
 	if (hasWindowsPathPrefix(value)) return true;
-	return /[\\/]/u.test(value) && EMBEDDED_TRAVERSAL_RE.test(value);
+	return /[\\/]/u.test(value);
 }
 
 function expandHomePrefix(value: string): string {
@@ -191,12 +192,51 @@ function expandHomePrefix(value: string): string {
 }
 
 /**
- * Statically recognizable filesystem operands of one shell command: absolute, home-anchored,
- * dot-relative, and traversal-embedding tokens (including long-flag `=` values), plus file
- * redirect targets. Bare cwd-relative words stay unprojected — treating every separator-bearing
- * word as a path would misfire on sed/regex/URL arguments — and dynamic constructs (variables,
- * substitutions, globs) cannot be resolved statically; the risk gate owns those. A command the
- * tokenizer cannot parse projects nothing.
+ * Project one already-isolated argument (an argv element, or a token the shell tokenizer
+ * produced) as a filesystem operand: the expanded path when the value — or its long-flag `=`
+ * value — is path-shaped, undefined otherwise. Path-shaped means dot or home anchored,
+ * Windows-prefixed, or bearing a path separator — except flags (leading `-`) and URL-like
+ * values (`://`). Bare single-segment words stay unprojected; a false projection can only fail
+ * closed, and only when the resolved path leaves the granted scope.
+ */
+export function projectPathShapedArgument(value: string): string | undefined {
+	const candidate = value.match(FLAG_VALUE_RE)?.[1] ?? value;
+	return isPathShapedToken(candidate) ? expandHomePrefix(candidate) : undefined;
+}
+
+/**
+ * Bounded static scan of an interpreter code payload (not shell): quoted string literals that
+ * are absolute, home-anchored (~ expanded), Windows-prefixed, or embed parent-directory
+ * traversal project as filesystem operands. Plain relative literals stay unprojected —
+ * interpreter code is dominated by non-path strings — and computed paths (concatenation,
+ * f-strings, os.path.join) cannot be resolved statically; the risk gate owns those.
+ */
+export function extractCodeStaticPaths(code: string): string[] {
+	const paths: string[] = [];
+	for (const match of code.matchAll(/(['"])((?:\\.|(?!\1).)*?)\1/gsu)) {
+		const value = match[2];
+		if (!value || value.includes("://")) continue;
+		if (
+			value.startsWith("/") ||
+			value === "~" ||
+			value.startsWith("~/") ||
+			hasWindowsPathPrefix(value) ||
+			EMBEDDED_TRAVERSAL_RE.test(value)
+		) {
+			paths.push(expandHomePrefix(value));
+		}
+	}
+	return [...new Set(paths)];
+}
+
+/**
+ * Statically recognizable filesystem operands of one shell command: every path-shaped token per
+ * {@link projectPathShapedArgument} (long-flag `=` values included) plus file redirect targets.
+ * Separator-bearing relative words project even when they may not be paths (sed patterns, git
+ * refs): resolution against a granted scope makes a false projection fail closed only when it
+ * leaves that scope. Bare single-segment words stay unprojected, and dynamic constructs
+ * (variables, substitutions, globs) cannot be resolved statically; the risk gate owns those. A
+ * command the tokenizer cannot parse projects nothing.
  */
 export function extractShellCommandPaths(
 	command: string,
@@ -221,8 +261,8 @@ export function extractShellCommandPaths(
 			if (!token.value.startsWith("$")) paths.push(expandHomePrefix(token.value));
 			continue;
 		}
-		const candidate = token.value.match(FLAG_VALUE_RE)?.[1] ?? token.value;
-		if (isPathShapedToken(candidate)) paths.push(expandHomePrefix(candidate));
+		const projected = projectPathShapedArgument(token.value);
+		if (projected !== undefined) paths.push(projected);
 	}
 	return [...new Set(paths)];
 }

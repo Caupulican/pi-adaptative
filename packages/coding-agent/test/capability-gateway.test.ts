@@ -96,6 +96,18 @@ const bashManifest: ToolCapabilityManifest = {
 	enforcements: ["process-launcher", "path-scope"],
 };
 
+const pythonManifest: ToolCapabilityManifest = {
+	...bashManifest,
+	toolName: "python",
+	moduleSpecifier: "./tools/python.ts",
+};
+
+const runProcessManifest: ToolCapabilityManifest = {
+	...bashManifest,
+	toolName: "run_process",
+	moduleSpecifier: "./tools/run-process.ts",
+};
+
 function fixedStoreReadManifest(toolName: "artifact_retrieve" | "context_scout"): ToolCapabilityManifest {
 	return {
 		toolName,
@@ -330,6 +342,58 @@ describe("CapabilityGateway", () => {
 		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
 		await expect(
 			gateway.execute(bashManifest, "bash", { command: "cat src/../../outside/secret.txt" }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+
+		await expect(
+			gateway.execute(bashManifest, "bash", { command: "cat src/file.ts" }, () => "relative"),
+		).resolves.toBe("relative");
+		await expect(
+			gateway.execute(bashManifest, "bash", { command: "cat packages/agent/package.json" }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+	});
+
+	it("denies interpreter code, scriptPath, and argv paths outside grant path scope", async () => {
+		const fixture = createFixture();
+		const processGrant: ExecutionGrant = {
+			...grant(fixture.cwd),
+			capabilities: ["process.exec"],
+			allowedTools: ["python", "run_process"],
+			readPaths: [join(fixture.cwd, "src")],
+			writePaths: [join(fixture.cwd, "src")],
+		};
+		const gateway = new CapabilityGateway({ grant: processGrant, cwd: fixture.cwd });
+		const insideFile = join(fixture.cwd, "src", "file.ts");
+		const outsideFile = join(fixture.outside, "secret.txt");
+
+		await expect(
+			gateway.execute(pythonManifest, "python", { code: `print(open("${insideFile}").read())` }, () => "ok"),
+		).resolves.toBe("ok");
+		await expect(
+			gateway.execute(pythonManifest, "python", { code: `print(open("${outsideFile}").read())` }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+
+		await expect(gateway.execute(pythonManifest, "python", { scriptPath: insideFile }, () => "ok")).resolves.toBe(
+			"ok",
+		);
+		await expect(
+			gateway.execute(pythonManifest, "python", { scriptPath: outsideFile }, () => "no"),
+		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
+
+		await expect(
+			gateway.execute(
+				runProcessManifest,
+				"run_process",
+				{ executable: "node", args: ["--check", insideFile] },
+				() => "ok",
+			),
+		).resolves.toBe("ok");
+		await expect(
+			gateway.execute(
+				runProcessManifest,
+				"run_process",
+				{ executable: "node", args: ["--check", outsideFile] },
+				() => "no",
+			),
 		).rejects.toMatchObject({ reasonCode: "path_outside_scope" });
 	});
 

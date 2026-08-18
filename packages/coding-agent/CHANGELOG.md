@@ -2,7 +2,7 @@
 
 ### Security
 
-- Shell commands now project their statically recognizable filesystem operands (absolute, home-anchored, dot-relative, embedded-traversal, flag-value, and redirect-target paths) into the shared path-projection owner, and process-launching tools carry path-scope enforcement with an execute access class bound to the union of granted read and write scopes — closing two holes where autonomy gates and the capability gateway never path-checked bash commands at all.
+- Shell commands now project their statically recognizable filesystem operands (absolute, home-anchored, dot-relative, separator-bearing relative, embedded-traversal, flag-value, and redirect-target paths; URLs and flags excluded) into the shared path-projection owner — as do python `scriptPath`/`code` string literals and run_process argv elements — and process-launching tools carry path-scope enforcement with an execute access class bound to the union of granted read and write scopes. Closes the holes where autonomy gates and the capability gateway never path-checked bash commands or interpreter payloads at all; bare single-segment words and computed paths remain the risk gate's lane.
 
 ### Changed
 
@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Same-batch edits to one file no longer collide: an identity change observed at execution triggers a bounded re-read and anchor revalidation (twice at most) with the write bound atomically to the revalidated version, and a stale anchor caused by this run's own earlier mutation says so; external-change race protection is unchanged.
+- Same-batch edits to one file no longer collide: an identity change observed at execution triggers a bounded re-read and anchor revalidation (twice at most), with the write serialized against this process's mutation queue and bracketed by identity observations of the revalidated version (external writers in the assert-to-write window remain detected, not excluded — unchanged from before), and a stale anchor caused by this run's own earlier mutation says so.
 - Policy rejections that teach no longer lose their lesson to diagnostic truncation: broad-search blocks resolve through a catalogue entry whose guidance carries the narrow-form advice and the `broadSearch="route-to-file"` escape route un-truncated.
 - Tests spawning the CLI as a child process now pass the suite's `pi-source` resolution condition, so a stale gitignored `dist` build can no longer crash the child at startup and fail six startup tests with unrelated assertions.
 - Blocked-replay and circuit-exhaustion failure records now lead with the retained root-cause diagnostic and carry the replay or circuit notice in a separate note field, and the all-caps recovery corrections were replaced with one calm actionable sentence each — anti-replay semantics, thresholds, and termination unchanged.
