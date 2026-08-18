@@ -267,19 +267,16 @@ test("the mandatory root check owns the isolated release-test harness contract",
 	assert.equal(packageJson.scripts.test, "node scripts/run-workspace-tests.mjs");
 });
 
-test("the release command runs the full isolated suite before version mutation", () => {
+test("the release command requires exact-HEAD GitHub CI before version mutation without a local full suite", () => {
 	const source = readFileSync(releasePath, "utf8");
 	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
-	const fullSuiteCall = 'run("./test.sh");';
-	const executableFullSuiteCall = /^\s*run\("\.\/test\.sh"\);\s*$/m;
 	const cleanWorktreeCheck = 'const status = run("git status --porcelain", { silent: true });';
+	const exactHeadCiCheck = "assertHeadCiSucceeded(preflightSha);";
 	const versionMutation = "const version = bumpOrSetVersion(RELEASE_TARGET);";
 
-	assert.equal(source.split(fullSuiteCall).length - 1, 1, "release must own exactly one full-suite invocation");
-	assert.match(source, executableFullSuiteCall, "the full-suite invocation must be executable, not commented out");
-	const fullSuiteCallIndex = source.search(executableFullSuiteCall);
-	assert.ok(source.indexOf(cleanWorktreeCheck) < fullSuiteCallIndex, "cleanliness must be checked first");
-	assert.ok(fullSuiteCallIndex < source.indexOf(versionMutation), "tests must precede version mutation");
+	assert.doesNotMatch(source, /run\("\.\/test\.sh"\)/, "release preparation must never run the full suite locally");
+	assert.ok(source.indexOf(cleanWorktreeCheck) < source.indexOf(exactHeadCiCheck), "cleanliness must be checked first");
+	assert.ok(source.indexOf(exactHeadCiCheck) < source.indexOf(versionMutation), "exact-HEAD CI must precede version mutation");
 
 	// Lexical pins: these fast checks are a backstop alongside the execution-proof test below,
 	// which is what actually defeats remapping/wrapper/run()-weakening bypasses of this gate.
@@ -289,14 +286,18 @@ test("the release command runs the full isolated suite before version mutation",
 	assert.equal(packageJson.scripts["release:promote"], "node scripts/release.mjs promote");
 });
 
-function createReleaseExecutionProofFixture(context) {
+function createReleaseExecutionProofFixture(context, ciConclusion) {
 	const root = mkdtempSync(join(tmpdir(), "pi-release-exec-proof-"));
 	context.after(() => rmSync(root, { recursive: true, force: true }));
 
 	const originDir = join(root, "origin.git");
 	const workDir = join(root, "work");
+	const fakeBin = join(root, "bin");
+	const npmCapture = join(root, "npm-calls.jsonl");
+	const testShCapture = join(root, "test-sh-called");
 	mkdirSync(originDir, { recursive: true });
 	mkdirSync(workDir, { recursive: true });
+	mkdirSync(fakeBin, { recursive: true });
 
 	const gitEnv = {
 		...process.env,
@@ -326,7 +327,7 @@ function createReleaseExecutionProofFixture(context) {
 		`${JSON.stringify({ name: "fixture", private: true, version: "0.0.0", scripts: {} }, null, "\t")}\n`,
 	);
 	const testShPath = join(workDir, "test.sh");
-	writeFileSync(testShPath, "#!/usr/bin/env bash\nexit 1\n");
+	writeFileSync(testShPath, '#!/usr/bin/env bash\nprintf "called\\n" >> "$PI_RELEASE_TEST_SH_CAPTURE"\nexit 86\n');
 	chmodSync(testShPath, 0o755);
 
 	git(["init", "--initial-branch=main"]);
@@ -335,35 +336,51 @@ function createReleaseExecutionProofFixture(context) {
 	git(["remote", "add", "origin", originDir]);
 	git(["push", "-u", "origin", "main"]);
 
-	return { root, workDir, originDir, git, gitEnv };
+	const headSha = git(["rev-parse", "HEAD"]).trim();
+	const fakeGhPath = join(fakeBin, "gh");
+	writeFileSync(
+		fakeGhPath,
+		`#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(
+			JSON.stringify([{ headSha, status: "completed", conclusion: ciConclusion }]),
+		)});\n`,
+	);
+	chmodSync(fakeGhPath, 0o755);
+
+	const fakeNpmPath = join(fakeBin, "npm");
+	writeFileSync(
+		fakeNpmPath,
+		`#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\nappendFileSync(process.env.PI_RELEASE_NPM_CAPTURE, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.exit(71);\n`,
+	);
+	chmodSync(fakeNpmPath, 0o755);
+
+	const releaseEnv = {
+		...gitEnv,
+		PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+		PI_RELEASE_NPM_CAPTURE: npmCapture,
+		PI_RELEASE_TEST_SH_CAPTURE: testShCapture,
+	};
+
+	return { root, workDir, originDir, git, releaseEnv, headSha, npmCapture, testShCapture };
 }
 
 test(
-	"release.mjs aborts before any mutation when the test gate fails (execution proof)",
+	"release.mjs aborts before mutation when exact-HEAD GitHub CI is red (execution proof)",
 	{ skip: process.platform === "win32" },
 	(context) => {
-		// This is the backstop the lexical asserts above cannot provide: it does not care how
-		// release.mjs is implemented internally (conditional wrappers, a weakened run() helper, a
-		// remapped package.json entry are all still exercised here) - it only observes real,
-		// externally verifiable outcomes of actually running the script end to end. The fixture's
-		// own test.sh (not a PATH shim) plays the role of "PATH-shimmed ./test.sh that exits 1":
-		// release.mjs always resolves "./test.sh" relative to its cwd, so placing the failing
-		// script there is an equivalent, simpler way to force the same failure.
-		const fixture = createReleaseExecutionProofFixture(context);
+		const fixture = createReleaseExecutionProofFixture(context, "failure");
 		const aiPackagePath = join(fixture.workDir, "packages", "ai", "package.json");
 		const versionBefore = JSON.parse(readFileSync(aiPackagePath, "utf8")).version;
 
 		const result = spawnSync(process.execPath, [releasePath, "patch"], {
 			cwd: fixture.workDir,
 			encoding: "utf8",
-			env: fixture.gitEnv,
+			env: fixture.releaseEnv,
 		});
 
-		assert.notEqual(
-			result.status,
-			0,
-			`release.mjs must exit non-zero when the test gate fails:\n${result.stdout}\n${result.stderr}`,
-		);
+		assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stderr, new RegExp(`HEAD ${fixture.headSha} ci\\.yml concluded failure`));
+		assert.equal(existsSync(fixture.testShCapture), false, "red CI must stop before any local test command");
+		assert.equal(existsSync(fixture.npmCapture), false, "red CI must stop before version mutation");
 
 		const localTags = fixture.git(["tag", "-l"]).trim();
 		assert.equal(localTags, "", "no tag may be created locally when the test gate fails");
@@ -371,14 +388,14 @@ test(
 		const originTags = spawnSync("git", ["tag", "-l"], {
 			cwd: fixture.originDir,
 			encoding: "utf8",
-			env: fixture.gitEnv,
+			env: fixture.releaseEnv,
 		}).stdout.trim();
 		assert.equal(originTags, "", "no tag may be pushed to origin when the test gate fails");
 
 		const originLog = spawnSync("git", ["log", "--oneline", "main"], {
 			cwd: fixture.originDir,
 			encoding: "utf8",
-			env: fixture.gitEnv,
+			env: fixture.releaseEnv,
 		}).stdout.trim();
 		assert.equal(
 			originLog.split("\n").length,
@@ -388,6 +405,29 @@ test(
 
 		const versionAfter = JSON.parse(readFileSync(aiPackagePath, "utf8")).version;
 		assert.equal(versionAfter, versionBefore, "version must not be bumped when the test gate fails");
+	},
+);
+
+test(
+	"release.mjs delegates the full suite to successful exact-HEAD GitHub CI (execution proof)",
+	{ skip: process.platform === "win32" },
+	(context) => {
+		const fixture = createReleaseExecutionProofFixture(context, "success");
+		const result = spawnSync(process.execPath, [releasePath, "patch"], {
+			cwd: fixture.workDir,
+			encoding: "utf8",
+			env: fixture.releaseEnv,
+		});
+
+		assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stdout, new RegExp(`HEAD ${fixture.headSha} already has a successful ci\\.yml run`));
+		assert.match(result.stdout, /GitHub Actions is the full-suite authority/);
+		assert.equal(existsSync(fixture.testShCapture), false, "release preparation must not invoke local ./test.sh");
+		const npmCalls = readFileSync(fixture.npmCapture, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		assert.deepEqual(npmCalls, [["run", "version:patch"]]);
 	},
 );
 

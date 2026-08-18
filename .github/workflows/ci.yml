@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       skip_tests:
-        description: Skip npm test; local ./test.sh and HEAD CI already passed
+        description: Skip tests; exact-preflight-HEAD GitHub CI already passed the complete suite
         required: false
         type: boolean
         default: false

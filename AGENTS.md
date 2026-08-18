@@ -31,9 +31,9 @@
 ## Commands
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Never run `npm run build` or `npm test` unless requested by the user. The one standing exception is the mandatory pre-release full-suite run in the Releasing section.
+- Never run `npm run build` or `npm test` unless requested by the user. Release verification delegates the full suite to GitHub Actions; the local release smoke below may build its unpublished artifacts but must not run the full suite.
 - While developing, run only the targeted tests specific to the code you touched: `./test.sh <specific-test-path>` or from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`. Do not run the full suite to iterate on a change.
-- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. The full non-e2e suite run (`./test.sh` with no arguments) is strictly gated for automated git workflows (pre-release gate / CI) or explicit user requests.
+- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. The full non-e2e suite is owned by GitHub Actions; local `./test.sh` with no arguments is forbidden unless the user explicitly requests it.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
@@ -128,7 +128,7 @@ Attribution:
 
 1. **Update CHANGELOGs**: audit the latest commit on `main` yourself before releasing. Do not ask the user to run `/cl`; use git diff/log and the changelog rules above to update each affected package's `[Unreleased]` section, then validate and commit the changelog update before running the release script.
 
-2. **Full test suite (mandatory)**: run `./test.sh` from the repo root and get it fully green. This is the only routine full-suite run; targeted tests during development do not substitute for it. Failures are release blockers unless the user explicitly accepts the risk.
+2. **GitHub full test suite (mandatory)**: push the exact committed release candidate and require its `ci.yml` run to finish fully green. Inspect every matrix job; targeted local tests do not substitute for it. Never run `./test.sh` locally as part of release preparation. Missing, pending, skipped unexpectedly, or failed GitHub evidence blocks the release unless the user explicitly accepts the risk.
 
 3. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
    ```bash
@@ -159,7 +159,7 @@ Attribution:
    No env flags are required for the normal case: `scripts/check-lockfile-commit.mjs` already auto-allows a `package-lock.json` diff that only touches workspace-package metadata (the usual outcome of a lockstep version bump), and `npm_config_min_release_age=0` is scoped inside `scripts/release.mjs` to just the lockfile-refresh command it runs, not exported for the whole release. If the pre-commit lockfile guard blocks a release for a real reason (external dependency changes bundled into the same commit), stop and review the diff rather than bypassing it - that's the guard doing its job.
 
    `release:patch`/`release:minor`/`release:major` run **prepare** then automatically chain into **promote**:
-   - Prepare: preflight (on `main`, clean tree, `origin/main` is an ancestor of `HEAD`, prospective tag unused, **HEAD already has a successful `ci.yml` run**) -> full isolated test suite (`./test.sh`, stops at the first failing package/file) -> version bump -> changelogs -> shrinkwrap regen -> `npm run check` -> commit `Release vX.Y.Z` -> push `main` -> add fresh `## [Unreleased]` sections -> commit `Add [Unreleased] section for next cycle` -> push `main`. Preflight refuses immediately if HEAD CI is missing, pending, or red. The Release commit's CI skips `npm test` and the Windows runner; local `./test.sh` plus HEAD CI already paid for the suite. A failure anywhere after preflight resets the local tree back to the preflight commit; nothing is tagged.
+   - Prepare: preflight (on `main`, clean tree, `origin/main` is an ancestor of `HEAD`, prospective tag unused, **HEAD already has a successful complete `ci.yml` run**) -> version bump -> changelogs -> shrinkwrap regen -> `npm run check` -> commit `Release vX.Y.Z` -> push `main` -> add fresh `## [Unreleased]` sections -> commit `Add [Unreleased] section for next cycle` -> push `main`. Preflight refuses immediately if exact-HEAD CI is missing, pending, or red. The release command never runs the full suite locally. The metadata-only Release commit's CI skips tests and the Windows runner because exact-preflight-HEAD GitHub CI already proved the complete suite. A failure anywhere after preflight resets the local tree back to the preflight commit; nothing is tagged.
    - Promote: finds the `Release vX.Y.Z` commit, polls GitHub Actions (`ci.yml`) then `destructive.yml` for their conclusions on that exact commit SHA (dispatching a destructive run if none exists), and only on success of both creates and pushes the `vX.Y.Z` tag (which triggers `.github/workflows/build-binaries.yml`).
 
    Review any lockfile or shrinkwrap diffs the release creates before push. Model catalogs (`packages/ai/src/*.generated.ts`) are never regenerated by the release script - it's a pure function of the already-committed, already-tested tree; catalog freshness is governed separately by the weekly `check:model-catalog` workflow.

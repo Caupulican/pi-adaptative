@@ -5,6 +5,7 @@
 - Context GC keeps investigations intact: the recency window default rose from 8 to 24 messages, tool results referenced in recent assistant turns are protected from packing (superseded reads still pack), and packed stubs now cite retrieval as an imperative `read <path>` call.
 - Skill vault loads accept an optional pin (up to two): pinned skills are protected from eviction while loaded, still expire idle and count against the slot and byte budgets, and eviction now honestly selects the oldest-loaded unpinned skill (per-skill use is unobservable, so the previous least-recently-used ordering was effectively load order).
 - The standing system prompt slimmed down: the N+2 architecture and evidence-gate statutes moved out of the full core into on-demand skills (new bundled `n-plus-2-architecture`; existing `evidence-gated-tdd`) behind one pointer line, and the contract gained explicit precedence (current-turn user instructions override standing style, never security) and answer-shape rules (analysis asks get complete answers; harness protocol text is never restated as an answer).
+- Release preparation now delegates mandatory full-suite validation exclusively to successful GitHub Actions CI on the exact preflight HEAD; local release commands never run the full suite.
 
 ### Fixed
 

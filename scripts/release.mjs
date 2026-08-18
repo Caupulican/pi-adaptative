@@ -13,13 +13,14 @@
  * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused,
  *    and HEAD already has a successful ci.yml run. Refuse immediately if CI is missing, pending,
  *    or red — do not buy a second full matrix by bumping a tree Windows has not already passed.
- * 2. Run the full isolated test suite.
+ * 2. Treat successful exact-HEAD GitHub CI as the full-suite authority. The release command
+ *    never runs the full suite locally.
  * 3. Bump version via npm run version:xxx or set an explicit version.
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date.
  * 5. Regenerate the coding-agent shrinkwrap.
  * 6. Run checks.
  * 7. Commit "Release vX.Y.Z" and push main. CI on that commit is build+check only;
- *    tests already ran locally and on the preflight SHA.
+ *    the complete suite already ran on the preflight SHA in GitHub Actions.
  * 8. Add new [Unreleased] sections to changelogs, commit, and push main again.
  * Any failure during steps 3-8 resets the local tree back to the preflight commit.
  *
@@ -294,10 +295,9 @@ function prepareRelease() {
 	const preflightSha = preflight();
 
 	try {
-		// 2. Run the full suite before any version, changelog, artifact, commit, or push mutation.
-		console.log("Running full release test suite...");
-		run("./test.sh");
-		console.log();
+		// 2. Exact-HEAD CI is the only full-suite authority. Preflight fails closed unless that
+		// immutable tree succeeded, so no local full-suite process can be hidden in release prepare.
+		console.log(`GitHub Actions is the full-suite authority for exact HEAD ${preflightSha}; no local suite is run.\n`);
 
 		// 3. Bump or set version
 		const version = bumpOrSetVersion(RELEASE_TARGET);
