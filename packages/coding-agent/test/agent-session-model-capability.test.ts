@@ -1,5 +1,8 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -274,6 +277,42 @@ describe("model capability auto-detection", () => {
 			expect(seenMaxTokens).toBe(2_048);
 		} finally {
 			harness.cleanup();
+		}
+	});
+
+	it("keeps Windows lean model session system prompt within the 8192-char budget even with a long working directory", async () => {
+		const longTempRoot = mkdtempSync(join(tmpdir(), "pi-windows-long-temp-root-runneradmin-appdata-local-temp-"));
+		const prevTemp = process.env.TEMP;
+		const prevTmp = process.env.TMP;
+		const prevTmpdir = process.env.TMPDIR;
+		process.env.TEMP = longTempRoot;
+		process.env.TMP = longTempRoot;
+		process.env.TMPDIR = longTempRoot;
+
+		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		let harness: Harness | undefined;
+		try {
+			harness = await createHarness({
+				models: [{ id: "mid-model", contextWindow: 16_384 }],
+				settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
+			});
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
+			expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
+		} finally {
+			platformSpy.mockRestore();
+			if (prevTemp === undefined) delete process.env.TEMP;
+			else process.env.TEMP = prevTemp;
+			if (prevTmp === undefined) delete process.env.TMP;
+			else process.env.TMP = prevTmp;
+			if (prevTmpdir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = prevTmpdir;
+
+			if (harness) {
+				await harness.cleanup();
+			}
+			if (existsSync(longTempRoot)) {
+				rmSync(longTempRoot, { recursive: true, force: true });
+			}
 		}
 	});
 });

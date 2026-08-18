@@ -22,10 +22,12 @@ function withImageTerminal<T>(fn: () => T): T {
 	const prevTermProgram = process.env.TERM_PROGRAM;
 	const prevTerm = process.env.TERM;
 	const prevGhosttyResourcesDir = process.env.GHOSTTY_RESOURCES_DIR;
+	const prevTmux = process.env.TMUX;
 
 	process.env.TERM_PROGRAM = "ghostty";
 	delete process.env.TERM;
 	delete process.env.GHOSTTY_RESOURCES_DIR;
+	delete process.env.TMUX;
 	resetCapabilitiesCache();
 
 	try {
@@ -37,6 +39,8 @@ function withImageTerminal<T>(fn: () => T): T {
 		else process.env.TERM = prevTerm;
 		if (prevGhosttyResourcesDir === undefined) delete process.env.GHOSTTY_RESOURCES_DIR;
 		else process.env.GHOSTTY_RESOURCES_DIR = prevGhosttyResourcesDir;
+		if (prevTmux === undefined) delete process.env.TMUX;
+		else process.env.TMUX = prevTmux;
 		resetCapabilitiesCache();
 	}
 }

@@ -579,11 +579,10 @@ function createShellToolDefinition(
 		promptGuidelines: routesWindowsContract
 			? [
 					"On Windows, use Bash-like commands; never write PowerShell/ask owner to choose shell.",
-					"Supports for, break/continue, printf, pipes/redirection, variable/command/glob expansion, chaining, cd/export/unset.",
-					"Arithmetic outside for, job control, process substitution, heredocs, nested shells fail closed.",
+					"Supports for, break/continue, printf, pipes/redirection, expansions, chaining; unhandled syntax fails closed.",
 					"cd/export/unset state persists across bash calls and PowerShell/Python tiers.",
 					"File commands use literal paths; verify targets before recursive rm/cp/mv.",
-					`Bash timeout values are seconds, not milliseconds; omit timeout to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
+					`Bash timeout values are seconds; omit to use the ${DEFAULT_COMMAND_TIMEOUT_SECONDS}s default.`,
 					`Search narrowly: root/filters, prefer grep/find. Broad scans fail; unavoidable scan: broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}", then inspect narrowly.`,
 				]
 			: [

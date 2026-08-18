@@ -64,10 +64,10 @@ const PI_ADAPTATIVE_LEAN_CORE_SECTION = `
 OPERATING CONTRACT
 
 - Complete current goal within scope, granted authority; keep progress, evidence concise.
-- Inspect relevant files, project instructions before mutation; make smallest coherent change, run focused checks.
+- Inspect relevant files and instructions before editing; make minimal coherent change, run focused checks.
 - Use active tools, exact schemas. On failure, read error, expected shape, correct call; never repeat unchanged failure.
 - Batch independent reads, order mutations; report real output, unresolved failures.
-- Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, material scope expansion.
+- Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, scope expansion.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
 const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `

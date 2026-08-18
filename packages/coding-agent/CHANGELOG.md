@@ -13,6 +13,7 @@
 - Policy rejections that teach no longer lose their lesson to diagnostic truncation: broad-search blocks resolve through a catalogue entry whose guidance carries the narrow-form advice and the `broadSearch="route-to-file"` escape route un-truncated.
 - Tests spawning the CLI as a child process now pass the suite's `pi-source` resolution condition, so a stale gitignored `dist` build can no longer crash the child at startup and fail six startup tests with unrelated assertions.
 - Blocked-replay and circuit-exhaustion failure records now lead with the retained root-cause diagnostic and carry the replay or circuit notice in a separate note field, and the all-caps recovery corrections were replaced with one calm actionable sentence each — anti-replay semantics, thresholds, and termination unchanged.
+- Compacted lean and constrained system-prompt guidance: streamlined Windows bash tool guidelines, tightened the lean operating contract, and eliminated duplicate batch-read rules so 16k context-window models stay within the 8192-character capability budget under representative Windows runner working directory paths.
 
 ## [0.93.5] - 2026-08-17
 
