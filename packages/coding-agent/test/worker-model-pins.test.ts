@@ -1,6 +1,6 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
@@ -25,6 +25,23 @@ const modelRegistry = {
 
 const luna = { provider: "faux", modelId: "pinned", thinkingLevel: "high" as const };
 const terra = { provider: "faux", modelId: "requested", thinkingLevel: "medium" as const };
+
+interface BackgroundLanesControl {
+	startWorkerAgentTask(
+		agentId: string,
+		message: string,
+		options: { idempotencyKey: string },
+	): { started: boolean; skipReason?: string };
+	waitForWorkerAgent(agentId: string, timeoutMs?: number): Promise<{ status: string; timedOut: boolean }>;
+}
+
+function getBackgroundControl(session: unknown): BackgroundLanesControl {
+	const control = (session as { _backgroundLanes?: BackgroundLanesControl })._backgroundLanes;
+	if (!control || typeof control.waitForWorkerAgent !== "function") {
+		throw new Error("Expected _backgroundLanes with worker control methods on session.");
+	}
+	return control;
+}
 
 function workerProfile(modelId: string, overrides: Partial<OrchestrationProfile> = {}): OrchestrationProfile {
 	const now = new Date().toISOString();
@@ -340,22 +357,14 @@ describe("worker model pin lifecycle", () => {
 				orchestrationProfile: "model-pin-worker",
 				modelPins: { roles: { implementer: terra } },
 			});
-			const control = (
-				harness.session as unknown as {
-					_backgroundLanes: {
-						startWorkerAgentTask(
-							agentId: string,
-							message: string,
-							options: { idempotencyKey: string },
-						): { started: boolean; skipReason?: string };
-					};
-				}
-			)._backgroundLanes;
+			const control = getBackgroundControl(harness.session);
 			const reused = control.startWorkerAgentTask(initial.record.laneId, "Continue on the admitted contract.", {
 				idempotencyKey: "model-pin-reuse-after-settings-change",
 			});
 			expect(reused.started, reused.skipReason).toBe(true);
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2));
+			const waitResult = await control.waitForWorkerAgent(initial.record.laneId);
+			expect(waitResult.timedOut).toBe(false);
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
 
 			const fresh = await harness.session.runWorkerDelegationOnce({ instructions: "Create a fresh specialist." });
 			expect(fresh.started).toBe(true);
@@ -498,18 +507,44 @@ describe("worker model pin lifecycle", () => {
 			if (!run.started || !run.record) {
 				throw new Error(`Expected the implementation worker to start: ${run.skipReason ?? "unknown"}`);
 			}
+			const initialLaneId = run.record.laneId;
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
-			const implementationAttemptId = snapshot.tasks[run.record.laneId]?.attemptIds.at(-1);
+			const implementationAttemptId = snapshot.tasks[initialLaneId]?.attemptIds.at(-1);
 			const contract = implementationAttemptId
 				? snapshot.attempts[implementationAttemptId]?.dispatch.executionContract
 				: undefined;
 			expect(contract?.worker.modelBinding).toEqual(luna);
 			expect(contract?.verifier?.modelBinding).toEqual(terra);
 
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots().length).toBeGreaterThanOrEqual(2));
+			const control = getBackgroundControl(harness.session);
+			const implWait = await control.waitForWorkerAgent(initialLaneId);
+			expect(implWait.timedOut).toBe(false);
+
+			const lifecycle = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			});
+			const updatedSnapshot = lifecycle.getTaskRuntimeSnapshot();
+			const verifierTaskState = Object.values(updatedSnapshot.tasks).find(
+				(candidate) => candidate.task.verificationOfTaskId === initialLaneId,
+			);
+			if (!verifierTaskState) {
+				throw new Error(`Expected verifier task linked to implementation task '${initialLaneId}'.`);
+			}
+			const verifierAttemptId = verifierTaskState.attemptIds.at(-1);
+			if (!verifierAttemptId) {
+				throw new Error(`Expected verifier attempt for verifier task '${verifierTaskState.task.taskId}'.`);
+			}
+			const verifierAttempt = updatedSnapshot.attempts[verifierAttemptId];
+			if (!verifierAttempt?.agentId) {
+				throw new Error(`Expected verifier agentId on attempt '${verifierAttemptId}'.`);
+			}
+			const verifierWait = await control.waitForWorkerAgent(verifierAttempt.agentId);
+			expect(verifierWait.timedOut).toBe(false);
+			expect(harness.session.getWorkerClaimSnapshots().length).toBeGreaterThanOrEqual(2);
 			expect(observedModelIds).toEqual(["pinned", "requested"]);
 			expect(harness.session.getLaneRecords()).toEqual(
 				expect.arrayContaining([
@@ -566,8 +601,28 @@ describe("worker model pin lifecycle", () => {
 			]);
 
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Delegate one nested inspection." });
-			expect(run.started).toBe(true);
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots().length).toBeGreaterThanOrEqual(2));
+			if (!run.started || !run.record) {
+				throw new Error(`Expected root worker to start: ${run.skipReason ?? "unknown"}`);
+			}
+			const parentLaneId = run.record.laneId;
+			const control = getBackgroundControl(harness.session);
+			const parentWait = await control.waitForWorkerAgent(parentLaneId);
+			expect(parentWait.timedOut).toBe(false);
+
+			const lifecycle = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			});
+			const snapshot = lifecycle.getTaskRuntimeSnapshot();
+			const childAgents = Object.values(snapshot.agents).filter((agent) => agent.parentAgentId === parentLaneId);
+			if (childAgents.length !== 1) {
+				throw new Error(
+					`Expected exactly one child agent with parentAgentId '${parentLaneId}', got ${childAgents.length}.`,
+				);
+			}
+			const childWait = await control.waitForWorkerAgent(childAgents[0].agentId);
+			expect(childWait.timedOut).toBe(false);
+			expect(harness.session.getWorkerClaimSnapshots().length).toBeGreaterThanOrEqual(2);
 			expect(observedModelIds).toHaveLength(3);
 			expect(observedModelIds.filter((modelId) => modelId === "pinned")).toHaveLength(2);
 			expect(observedModelIds.filter((modelId) => modelId === "requested")).toHaveLength(1);

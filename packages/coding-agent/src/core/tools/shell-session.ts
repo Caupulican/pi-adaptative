@@ -304,6 +304,10 @@ export class PersistentShellSession {
 		});
 	}
 
+	get terminalPromise(): Promise<void> {
+		return this.coordinator.terminalPromise;
+	}
+
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
@@ -311,6 +315,11 @@ export class PersistentShellSession {
 		this.activeExec?.fail(new Error(`Shell session "${this.key}" is disposed`));
 		this.coordinator.dispose();
 		this.resetChildState();
+	}
+
+	disposeAndWait(timeoutMs?: number): Promise<void> {
+		this.dispose();
+		return this.coordinator.disposeAndWait(timeoutMs);
 	}
 
 	private async execNow(
@@ -688,9 +697,19 @@ export function acquirePersistentShellSession(key: string, kind: PlatformShellTo
 }
 
 /** Kill and forget a session (agent teardown). Safe to call for keys that never spawned. */
-export function disposePersistentShellSession(key: string): void {
+export function disposePersistentShellSession(key: string): Promise<void> {
 	const session = shellSessions.get(key);
-	if (!session) return;
+	if (!session) return Promise.resolve();
 	shellSessions.delete(key);
+	const terminalPromise = session.terminalPromise;
 	session.dispose();
+	return terminalPromise;
+}
+
+/** Awaitable disposal that guarantees child processes have closed before resolving. */
+export function disposePersistentShellSessionAndWait(key: string, timeoutMs?: number): Promise<void> {
+	const session = shellSessions.get(key);
+	if (!session) return Promise.resolve();
+	shellSessions.delete(key);
+	return session.disposeAndWait(timeoutMs);
 }

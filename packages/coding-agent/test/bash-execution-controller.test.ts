@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BashExecutionController } from "../src/core/bash-execution-controller.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
-import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 
 const originalBitwardenSession = process.env.BW_SESSION;
 
@@ -177,7 +177,7 @@ describe("BashExecutionController", () => {
 				const persisted = await controller.executeBash("pwd", undefined, { platform: "linux" });
 				expect(persisted.output.trim()).toBe(tempDir);
 			} finally {
-				disposeShellExecutionSession(sessionKey);
+				await disposeShellExecutionSessionAndWait(sessionKey);
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		},

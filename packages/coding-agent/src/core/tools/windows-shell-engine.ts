@@ -202,12 +202,21 @@ class PersistentWindowsShellEngineSession {
 		return this.coordinator.runSerialized(() => this.execNow(command, cwd, options));
 	}
 
+	get terminalPromise(): Promise<void> {
+		return this.coordinator.terminalPromise;
+	}
+
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
 		const active = this.activeExec;
-		this.coordinator.dispose();
 		active?.fail(new Error(`Windows shell engine session "${this.key}" is disposed`));
+		this.coordinator.dispose();
+	}
+
+	disposeAndWait(timeoutMs?: number): Promise<void> {
+		this.dispose();
+		return this.coordinator.disposeAndWait(timeoutMs);
 	}
 
 	private async execNow(
@@ -461,11 +470,21 @@ function acquireWindowsShellEngineSession(
 }
 
 /** Kill and forget a Python coordinator. The next call for this key starts a clean process. */
-export function disposeWindowsShellEngineSession(key: string): void {
+export function disposeWindowsShellEngineSession(key: string): Promise<void> {
 	const session = engineSessions.get(key);
-	if (!session) return;
+	if (!session) return Promise.resolve();
 	engineSessions.delete(key);
+	const terminalPromise = session.terminalPromise;
 	session.dispose();
+	return terminalPromise;
+}
+
+/** Awaitable disposal that guarantees the engine child process has closed before resolving. */
+export function disposeWindowsShellEngineSessionAndWait(key: string, timeoutMs?: number): Promise<void> {
+	const session = engineSessions.get(key);
+	if (!session) return Promise.resolve();
+	engineSessions.delete(key);
+	return session.disposeAndWait(timeoutMs);
 }
 
 /** Create the Python-engine tier for one bash-tool session. */

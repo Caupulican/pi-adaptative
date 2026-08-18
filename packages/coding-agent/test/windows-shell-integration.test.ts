@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
-import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 
 /**
  * Cross-tier integration (WP-F §3): drives the REAL `bash` tool created by
@@ -43,7 +43,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			// output is not expected to be pre-trimmed.
 			expect(content.text).toBe("two\nthree\n");
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 
@@ -63,7 +63,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			// spelling. `realpathSync.native` resolves both to one canonical form.
 			expect(realpathSync.native(content.text.trim()).toLowerCase()).toBe(realpathSync.native(sub).toLowerCase());
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 
@@ -89,7 +89,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			if (content?.type !== "text") throw new Error("expected text output");
 			expect(content.text.trim()).toBe("carried");
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 
@@ -127,7 +127,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				tool.execute("call-d", { command: "if true; then echo hi; fi" }, undefined, undefined, undefined as never),
 			).rejects.toThrow(/control-flow|not supported|if\/while/i);
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 
@@ -167,7 +167,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				),
 			).rejects.toThrow(/Windows shell engine \(Python\) is unavailable/);
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 
@@ -205,7 +205,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 			expect(captured.match(/stderr:value with spaces/gu)).toHaveLength(1);
 			expect(captured).not.toContain("WinError 193");
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -262,7 +262,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				tool.execute("call-g4", { command: `rg '(' '${source}'` }, undefined, undefined, undefined as never),
 			).rejects.toThrow("Command exited with code 2");
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -312,7 +312,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 				),
 			).rejects.toThrow("Command exited with code 1");
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

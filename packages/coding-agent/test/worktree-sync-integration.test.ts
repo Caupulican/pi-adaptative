@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,14 +36,13 @@ import {
  * unit suites cover refusal-code breadth; this suite proves the git mechanics.
  */
 
-const cleanups: string[] = [];
+interface Harness {
+	root: string;
+	repo: string;
+	deps: WorktreeSyncEngineDeps;
+}
 
-afterEach(() => {
-	while (cleanups.length > 0) {
-		const dir = cleanups.pop();
-		if (dir) rmSync(dir, { recursive: true, force: true });
-	}
-});
+const activeHarnesses: Harness[] = [];
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
 	const result = await execCommand("git", args, cwd);
@@ -53,15 +52,53 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 	return result.stdout.trim();
 }
 
-interface Harness {
-	repo: string;
-	deps: WorktreeSyncEngineDeps;
+async function cleanupHarness(harness: Harness): Promise<void> {
+	if (existsSync(harness.repo)) {
+		const raw = await git(harness.repo, "worktree", "list", "--porcelain");
+		const canonicalRepo = realpathSync.native(harness.repo).toLowerCase();
+		const lines = raw.split("\n");
+		for (const line of lines) {
+			if (line.startsWith("worktree ")) {
+				const wtPath = line.slice("worktree ".length).trim();
+				if (!wtPath) continue;
+				let canonicalWt = wtPath;
+				try {
+					canonicalWt = realpathSync.native(wtPath).toLowerCase();
+				} catch {
+					canonicalWt = wtPath.replaceAll("\\", "/").toLowerCase();
+				}
+				if (canonicalWt !== canonicalRepo && existsSync(wtPath)) {
+					await git(harness.repo, "worktree", "remove", "--force", wtPath);
+				}
+			}
+		}
+		await git(harness.repo, "worktree", "prune");
+	}
+	if (existsSync(harness.root)) {
+		rmSync(harness.root, { recursive: true, force: true });
+	}
 }
 
+afterEach(async () => {
+	while (activeHarnesses.length > 0) {
+		const harness = activeHarnesses.pop();
+		if (harness) await cleanupHarness(harness);
+	}
+});
+
 async function initRepo(): Promise<Harness> {
-	const root = mkdtempSync(join(tmpdir(), "pi-wt-sync-it-"));
-	cleanups.push(root);
+	const root = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-wt-sync-it-"));
 	const repo = join(root, "repo");
+	const deps: WorktreeSyncEngineDeps = {
+		exec: createDefaultWorktreeSyncExec(),
+		cwd: repo,
+		worktreesBaseDir: join(root, "worktrees"),
+		options: { maxLanes: 8 },
+		sessionId: "it-session",
+	};
+	const harness: Harness = { root, repo, deps };
+	activeHarnesses.push(harness);
+
 	await git(root, "init", "-b", "main", repo);
 	await git(repo, "config", "user.email", "it@example.invalid");
 	await git(repo, "config", "user.name", "worktree-sync-it");
@@ -72,14 +109,7 @@ async function initRepo(): Promise<Harness> {
 	writeFileSync(join(repo, "README.md"), "line1\n", "utf-8");
 	await git(repo, "add", "-A");
 	await git(repo, "commit", "-m", "base");
-	const deps: WorktreeSyncEngineDeps = {
-		exec: createDefaultWorktreeSyncExec(),
-		cwd: repo,
-		worktreesBaseDir: join(root, "worktrees"),
-		options: { maxLanes: 8 },
-		sessionId: "it-session",
-	};
-	return { repo, deps };
+	return harness;
 }
 
 async function laneCommit(worktreePath: string, file: string, content: string, message: string): Promise<string> {

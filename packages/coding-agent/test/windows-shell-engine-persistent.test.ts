@@ -2,7 +2,7 @@ import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "node:chi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { createWindowsShellEngineOperations } from "../src/core/tools/windows-shell-engine.ts";
 
 const ENGINE_MAIN = join(
@@ -72,7 +72,7 @@ describe("persistent Windows shell engine coordinator", () => {
 			expect(spawnCount).toBe(1);
 			expect(runtimeResolutionCount).toBe(1);
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 });

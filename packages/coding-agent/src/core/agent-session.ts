@@ -197,7 +197,7 @@ import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
-import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -2156,7 +2156,7 @@ export class AgentSession {
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
 		safely(() => this._skillVault.unload());
-		safely(() => disposeShellExecutionSession(this._shellSessionKey));
+		track(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
 		safely(() => this._cancelPrefixWarm());
 		safely(() => this.agent.abort());
 		track(() => this._gatewayRegistry.stop());

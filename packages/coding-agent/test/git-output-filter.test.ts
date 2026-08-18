@@ -11,7 +11,7 @@ import {
 	isComplexShellCommand,
 	tokenizeCommand,
 } from "../src/core/tools/git-filter.ts";
-import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -93,8 +93,8 @@ describe("Git Output Filter - Subcommands", () => {
 		execSync('git commit -m "Initial commit"', { cwd: testRepoDir });
 	});
 
-	afterEach(() => {
-		disposeShellExecutionSession(shellSessionKey);
+	afterEach(async () => {
+		await disposeShellExecutionSessionAndWait(shellSessionKey);
 		rmSync(testRepoDir, { recursive: true, force: true });
 	});
 

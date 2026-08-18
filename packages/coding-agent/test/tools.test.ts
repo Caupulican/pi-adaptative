@@ -16,7 +16,7 @@ import {
 	FileMutationIntentController,
 	localFileMutationIntentOperations,
 } from "../src/core/tools/file-mutation-intent.ts";
-import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -73,10 +73,10 @@ describe("Coding Agent Tools", () => {
 		mkdirSync(testDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		// Dispose any persistent shell sessions this test spawned before removing the directory
 		// they were rooted in (see `bashToolFor` above for why this ordering matters on Windows).
-		for (const key of activeShellSessionKeys.splice(0)) disposeShellExecutionSession(key);
+		for (const key of activeShellSessionKeys.splice(0)) await disposeShellExecutionSessionAndWait(key);
 		// Clean up test directory
 		rmSync(testDir, { recursive: true, force: true });
 		vi.clearAllMocks();

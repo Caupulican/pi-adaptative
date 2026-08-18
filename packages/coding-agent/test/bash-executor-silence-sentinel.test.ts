@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations, setCommandSilenceMsForTests } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
-import { disposeShellExecutionSession } from "../src/core/tools/shell-execution-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 
 describe("bash-executor silence sentinel mapping", () => {
 	it("maps the raw silence:<secs> sentinel to the friendly message instead of leaking it", async () => {
@@ -47,7 +47,7 @@ describe.skipIf(process.platform === "win32")("bash tool cwd reporting", () => {
 			expect(caught).toBeInstanceOf(Error);
 			expect((caught as Error).message.endsWith(`Command exited with code 1\ncwd: ${tempDir}`)).toBe(true);
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -61,13 +61,14 @@ describe.skipIf(process.platform === "win32")("bash tool cwd reporting", () => {
 			expect(text).toContain("ok");
 			expect(text).not.toMatch(/^cwd: /m);
 		} finally {
-			disposeShellExecutionSession(sessionKey);
+			await disposeShellExecutionSessionAndWait(sessionKey);
 		}
 	});
 
 	it("reports the host cwd on a filtered git failure", async () => {
+		const sessionKey = `bash-cwd-fail-${Math.random().toString(36).slice(2)}`;
 		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-git-cwd-")));
-		const tool = createBashTool(tempDir);
+		const tool = createBashTool(tempDir, { sessionKey });
 		try {
 			let caught: unknown;
 			try {
@@ -79,6 +80,7 @@ describe.skipIf(process.platform === "win32")("bash tool cwd reporting", () => {
 			expect((caught as Error).message).toMatch(/Command exited with code \d+\ncwd: /);
 			expect((caught as Error).message.endsWith(`\ncwd: ${tempDir}`)).toBe(true);
 		} finally {
+			await disposeShellExecutionSessionAndWait(sessionKey);
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

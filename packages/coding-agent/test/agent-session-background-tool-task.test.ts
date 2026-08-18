@@ -18,7 +18,12 @@ describe("AgentSession background tool tasks", () => {
 		const slowCompletion = new Promise<void>((resolve) => {
 			releaseSlow = resolve;
 		});
+		let markStarted: (() => void) | undefined;
+		const toolStarted = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
 		const execute = vi.fn(async () => {
+			markStarted?.();
 			await slowCompletion;
 			return { content: [{ type: "text" as const, text: "slow result" }], details: {} };
 		});
@@ -65,11 +70,11 @@ describe("AgentSession background tool tasks", () => {
 		});
 
 		try {
-			const promptOutcome = await Promise.race([
-				harness.session.prompt("run the slow tool").then(() => "completed" as const),
-				new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 250)),
-			]);
-			expect(promptOutcome).toBe("completed");
+			const promptPromise = harness.session.prompt("run the slow tool");
+			await toolStarted;
+			const handoffCount = harness.session.backgroundRunningToolCalls("slow-call");
+			expect(handoffCount).toBe(1);
+			await promptPromise;
 			expect(execute).toHaveBeenCalledOnce();
 			expect(harness.faux.callCount).toBe(2);
 

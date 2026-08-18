@@ -28,10 +28,14 @@ function installExitHook(): void {
 	});
 }
 
+export const PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS = 5_000;
+
 export class PersistentProcessCoordinator {
 	private currentChild: ChildProcess | null = null;
+	private currentTerminalPromise: Promise<void> | null = null;
 	private queue: Promise<void> = Promise.resolve();
 	private disposed = false;
+	private disposalWaitPromise: Promise<void> | null = null;
 
 	constructor() {
 		installExitHook();
@@ -40,6 +44,10 @@ export class PersistentProcessCoordinator {
 
 	get child(): ChildProcess | null {
 		return this.currentChild;
+	}
+
+	get terminalPromise(): Promise<void> {
+		return this.currentTerminalPromise ?? Promise.resolve();
 	}
 
 	runSerialized<T>(task: () => Promise<T>): Promise<T> {
@@ -60,6 +68,19 @@ export class PersistentProcessCoordinator {
 		this.currentChild = child;
 		if (child.pid) trackDetachedChildPid(child.pid);
 
+		let resolveTerminal: () => void;
+		const terminalPromise = new Promise<void>((resolve) => {
+			resolveTerminal = resolve;
+		});
+		this.currentTerminalPromise = terminalPromise;
+
+		const settleTerminal = () => {
+			if (this.currentTerminalPromise === terminalPromise) {
+				this.currentTerminalPromise = null;
+			}
+			resolveTerminal();
+		};
+
 		child.stdout?.on("data", (data: Buffer) => {
 			if (this.currentChild === child) handlers.onStdout(data);
 		});
@@ -67,6 +88,7 @@ export class PersistentProcessCoordinator {
 			if (this.currentChild === child) handlers.onStderr(data);
 		});
 		child.on("error", (error) => {
+			settleTerminal();
 			if (!this.clear(child)) return;
 			handlers.onError(error instanceof Error ? error : new Error(String(error)));
 		});
@@ -87,6 +109,7 @@ export class PersistentProcessCoordinator {
 
 		child.on("close", (code) => {
 			if (fallbackTimer) clearTimeout(fallbackTimer);
+			settleTerminal();
 			if (!this.clear(child)) return;
 			handlers.onClose(code ?? exitCode);
 		});
@@ -97,6 +120,11 @@ export class PersistentProcessCoordinator {
 		if (!child) return;
 		this.clear(child);
 		if (child.pid) killProcessTree(child.pid);
+		try {
+			child.kill();
+		} catch {
+			// Process already dead
+		}
 	}
 
 	dispose(): void {
@@ -104,6 +132,31 @@ export class PersistentProcessCoordinator {
 		this.disposed = true;
 		liveCoordinators.delete(this);
 		this.kill();
+	}
+
+	disposeAndWait(timeoutMs: number = PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS): Promise<void> {
+		if (this.disposalWaitPromise) return this.disposalWaitPromise;
+		const terminalPromise = this.currentTerminalPromise ?? Promise.resolve();
+		this.dispose();
+
+		let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+		const watchdogPromise = new Promise<void>((_, reject) => {
+			watchdogTimer = setTimeout(() => {
+				reject(
+					new Error(`Persistent process terminal release timed out after ${timeoutMs}ms before child close event`),
+				);
+			}, timeoutMs);
+			if (typeof watchdogTimer === "object" && watchdogTimer && "unref" in watchdogTimer) {
+				watchdogTimer.unref();
+			}
+		});
+
+		const waitPromise = Promise.race([terminalPromise, watchdogPromise]).finally(() => {
+			if (watchdogTimer) clearTimeout(watchdogTimer);
+		});
+
+		this.disposalWaitPromise = waitPromise;
+		return waitPromise;
 	}
 
 	/** Synchronous best-effort tree kill for the process exit hook. */

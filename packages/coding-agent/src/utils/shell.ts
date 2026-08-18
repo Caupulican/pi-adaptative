@@ -191,16 +191,13 @@ export function killTrackedDetachedChildren(): void {
 /**
  * Kill a process and all its children (cross-platform).
  *
- * Windows uses `spawnSync` (not `spawn`) deliberately: callers rely on this function returning
- * only once the tree is actually gone (e.g. before removing a directory that was the killed
- * process's cwd — a directory Windows keeps locked until every handle into it, including a
- * live process's cwd handle, is released). A fire-and-forget async `taskkill` would return before
- * termination completed, leaving a race where the directory is still locked.
+ * Windows dispatches tree kill via synchronous `taskkill /F /T /PID <pid>`. Callers awaiting
+ * full directory/handle release must still synchronize on the child process's terminal `close`
+ * event to ensure Node and OS handles have completed teardown before directory removal.
  */
 export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
-		// Use taskkill on Windows to kill process tree; spawnSync blocks until taskkill itself
-		// (and therefore the termination it requested) has finished.
+		// Use taskkill on Windows to kill process tree synchronously.
 		try {
 			spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
 				stdio: "ignore",

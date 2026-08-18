@@ -14,6 +14,7 @@
 - Tests spawning the CLI as a child process now pass the suite's `pi-source` resolution condition, so a stale gitignored `dist` build can no longer crash the child at startup and fail six startup tests with unrelated assertions.
 - Blocked-replay and circuit-exhaustion failure records now lead with the retained root-cause diagnostic and carry the replay or circuit notice in a separate note field, and the all-caps recovery corrections were replaced with one calm actionable sentence each — anti-replay semantics, thresholds, and termination unchanged.
 - Compacted lean system-prompt guidance: streamlined Windows bash tool guidelines and tightened the lean operating contract so 16k context-window models stay within the 8192-character capability budget under representative Windows runner working directory paths.
+- Hardened Windows process lifecycle and worktree cleanup synchronization: separated synchronous best-effort process termination from an awaitable, watchdog-bounded physical release barrier in `PersistentProcessCoordinator`, keyed async shell disposal so concurrent test and teardown callers share one wait promise before directory removal, enforced canonical native realpaths for linked worktree prune in integration tests, synchronized worker model pin tests through authoritative event-driven agent completion without arbitrary polling, and added a deterministic tool-start barrier for background tool handoff.
 
 ## [0.93.5] - 2026-08-17
 

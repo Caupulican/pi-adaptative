@@ -1,8 +1,17 @@
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type SpawnOptions, spawn, spawnSync } from "child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS,
+	PersistentProcessCoordinator,
+} from "../src/core/tools/persistent-process-coordinator.ts";
+import {
+	disposeShellExecutionSession,
+	disposeShellExecutionSessionAndWait,
+} from "../src/core/tools/shell-execution-session.ts";
 import {
 	acquirePersistentShellSession,
 	disposePersistentShellSession,
@@ -589,5 +598,211 @@ describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live gran
 		const elapsedMs = Date.now() - start;
 		expect(result.exitCode).toBe(3);
 		expect(elapsedMs).toBeLessThan(5_000);
+	});
+});
+
+describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
+	it("negative control: disposal barrier does not resolve on exit alone and requires child close event", async () => {
+		vi.useFakeTimers();
+		try {
+			const coordinator = new PersistentProcessCoordinator();
+			const fakeChild = new EventEmitter() as ChildProcess;
+			let childCloseFired = false;
+			fakeChild.on("close", () => {
+				childCloseFired = true;
+			});
+
+			coordinator.attach(fakeChild, {
+				onStdout: () => {},
+				onStderr: () => {},
+				onError: () => {},
+				onClose: () => {},
+			});
+
+			let disposalResolved = false;
+			let disposalRejected = false;
+			const disposalPromise = coordinator.disposeAndWait().then(
+				() => {
+					disposalResolved = true;
+				},
+				() => {
+					disposalRejected = true;
+				},
+			);
+
+			await Promise.resolve();
+			expect(disposalResolved).toBe(false);
+			expect(disposalRejected).toBe(false);
+			expect(childCloseFired).toBe(false);
+
+			// Child process exits, but stdio / child handle has not closed yet (e.g. held by grandchildren).
+			// Advance fake timers beyond the 2s command fallback timer.
+			fakeChild.emit("exit", 0);
+			await vi.advanceTimersByTimeAsync(3_000);
+			expect(disposalResolved).toBe(false);
+			expect(disposalRejected).toBe(false);
+			expect(childCloseFired).toBe(false);
+
+			// Emit the terminal close event on the child process
+			fakeChild.emit("close", 0);
+
+			await disposalPromise;
+			expect(disposalResolved).toBe(true);
+			expect(disposalRejected).toBe(false);
+			expect(childCloseFired).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("negative control: repeated disposeAndWait calls share the identical pending barrier promise", async () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const fakeChild = new EventEmitter() as ChildProcess;
+
+		coordinator.attach(fakeChild, {
+			onStdout: () => {},
+			onStderr: () => {},
+			onError: () => {},
+			onClose: () => {},
+		});
+
+		const barrier1 = coordinator.disposeAndWait();
+		const barrier2 = coordinator.disposeAndWait();
+		expect(barrier1).toBe(barrier2);
+
+		let resolvedCount = 0;
+		barrier1.then(() => {
+			resolvedCount++;
+		});
+		barrier2.then(() => {
+			resolvedCount++;
+		});
+
+		await Promise.resolve();
+		expect(resolvedCount).toBe(0);
+
+		fakeChild.emit("close", 0);
+		await Promise.all([barrier1, barrier2]);
+		expect(resolvedCount).toBe(2);
+	});
+
+	it("negative control: disposeAndWait watchdog rejects when child close never arrives", async () => {
+		vi.useFakeTimers();
+		try {
+			const coordinator = new PersistentProcessCoordinator();
+			const fakeChild = new EventEmitter() as ChildProcess;
+
+			coordinator.attach(fakeChild, {
+				onStdout: () => {},
+				onStderr: () => {},
+				onError: () => {},
+				onClose: () => {},
+			});
+
+			const disposalPromise = coordinator.disposeAndWait();
+			let rejectedError: Error | null = null;
+			disposalPromise.catch((err) => {
+				rejectedError = err;
+			});
+
+			// Advance by partial time (e.g. 2_000ms) - should still be pending
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(rejectedError).toBeNull();
+
+			// Advance beyond watchdog threshold
+			await vi.advanceTimersByTimeAsync(PERSISTENT_PROCESS_DISPOSAL_WATCHDOG_MS);
+			expect(rejectedError).not.toBeNull();
+			expect((rejectedError as unknown as Error).message).toContain("Persistent process terminal release timed out");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keyed owner: sync disposal first then strict wait remains pending through exit/fallback and settles on close", async () => {
+		vi.useFakeTimers();
+		try {
+			const sessionKey = "test-sync-first-key";
+			const session = acquirePersistentShellSession(sessionKey, "bash");
+			const fakeChild = new EventEmitter() as ChildProcess;
+			fakeChild.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+			fakeChild.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+			fakeChild.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+			fakeChild.kill = vi.fn() as unknown as ChildProcess["kill"];
+
+			(session as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild);
+
+			// Call synchronous disposal first
+			disposeShellExecutionSession(sessionKey);
+
+			// Call strict awaitable disposal second
+			const strictPromise = disposeShellExecutionSessionAndWait(sessionKey);
+			let settled = false;
+			strictPromise.then(() => {
+				settled = true;
+			});
+
+			await Promise.resolve();
+			expect(settled).toBe(false);
+
+			// Child emits exit event (fallback timeout triggers)
+			fakeChild.emit("exit", 0, null);
+
+			// Advance fake timers by 3s (beyond the 2s exit fallback)
+			await vi.advanceTimersByTimeAsync(3_000);
+			expect(settled).toBe(false);
+
+			// Close event arrives
+			fakeChild.emit("close", 0);
+			await strictPromise;
+			expect(settled).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keyed owner: two overlapping generations under one session key are both awaited", async () => {
+		const sessionKey = "test-overlapping-generations-key";
+
+		// Generation 1
+		const session1 = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild1 = new EventEmitter() as ChildProcess;
+		fakeChild1.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+		fakeChild1.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+		fakeChild1.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+		fakeChild1.kill = vi.fn() as unknown as ChildProcess["kill"];
+		(session1 as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild1);
+
+		// Synchronous disposal of Generation 1 begins
+		disposeShellExecutionSession(sessionKey);
+
+		// Generation 2 spawns under the SAME sessionKey before Gen 1 has physically closed
+		const session2 = acquirePersistentShellSession(sessionKey, "bash");
+		const fakeChild2 = new EventEmitter() as ChildProcess;
+		fakeChild2.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+		fakeChild2.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+		fakeChild2.stdin = { write: vi.fn() } as unknown as ChildProcess["stdin"];
+		fakeChild2.kill = vi.fn() as unknown as ChildProcess["kill"];
+		(session2 as unknown as { attachReadyChild: (child: ChildProcess) => void }).attachReadyChild(fakeChild2);
+
+		// Strict awaitable disposal of the sessionKey
+		const strictWait = disposeShellExecutionSessionAndWait(sessionKey);
+
+		let settled = false;
+		strictWait.then(() => {
+			settled = true;
+		});
+
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		// Close Gen 1 child only - strict wait must remain pending because Gen 2 is still open
+		fakeChild1.emit("close", 0);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		// Close Gen 2 child - strict wait now settles
+		fakeChild2.emit("close", 0);
+		await strictWait;
+		expect(settled).toBe(true);
 	});
 });
