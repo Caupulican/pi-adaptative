@@ -64,12 +64,7 @@ export {
 } from "../../utils/powershell-session-protocol.ts";
 
 const SENTINEL_BYTE = 0x1e;
-/**
- * Longest possible sentinel: "\n" + 0x1e + 16-hex nonce + ":" + exit code digits + ":" + $PWD
- * bytes + 0x1e. The cwd segment is PATH_MAX-bounded (4096 bytes on Linux); the margin covers the
- * fixed protocol overhead around it.
- */
-const SENTINEL_HOLDBACK_BYTES = 4096 + 64;
+const BASH_SENTINEL_PAYLOAD_PREFIX = Buffer.from("v1:", "latin1");
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const POWERSHELL_SESSION_READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
 const POWERSHELL_SESSION_STDERR_READY_BYTES = Buffer.from(POWERSHELL_SESSION_STDERR_READY_MARKER, "latin1");
@@ -111,9 +106,87 @@ export function buildBashWire(command: string, nonce: string, cdTo: string | nul
 		body,
 		`PI_EOF_${nonce}`,
 		`)"; } < /dev/null 2>&1`,
-		`printf '\\n\\036%s:%s:%s\\036' '${nonce}' "$?" "$PWD"`,
+		// Version and byte length make the frame unambiguous even when a legal POSIX path contains
+		// the record-separator byte used to terminate the sentinel. The subshell keeps its status
+		// scratch variable and LC_ALL change out of the persistent caller session.
+		`(__pi_status=$?; LC_ALL=C; printf '\\n\\036%s:v1:%s:%s:%s\\036' '${nonce}' "$__pi_status" "\${#PWD}" "$PWD")`,
 		"",
 	].join("\n");
+}
+
+interface ParsedShellSentinel {
+	closeIndex: number;
+	exitCode: number | null;
+	cwd?: string;
+}
+
+/** Parse the versioned bash frame plus the legacy exit-only/exit+cwd PowerShell test frames. */
+function parseShellSentinel(buffer: Buffer, payloadStart: number): ParsedShellSentinel | undefined {
+	const available = buffer.length - payloadStart;
+	const prefixComparisonLength = Math.min(available, BASH_SENTINEL_PAYLOAD_PREFIX.length);
+	const couldBeVersioned =
+		prefixComparisonLength > 0 &&
+		buffer.compare(
+			BASH_SENTINEL_PAYLOAD_PREFIX,
+			0,
+			prefixComparisonLength,
+			payloadStart,
+			payloadStart + prefixComparisonLength,
+		) === 0;
+	if (couldBeVersioned && available < BASH_SENTINEL_PAYLOAD_PREFIX.length) return undefined;
+
+	if (
+		available >= BASH_SENTINEL_PAYLOAD_PREFIX.length &&
+		buffer.compare(
+			BASH_SENTINEL_PAYLOAD_PREFIX,
+			0,
+			BASH_SENTINEL_PAYLOAD_PREFIX.length,
+			payloadStart,
+			payloadStart + BASH_SENTINEL_PAYLOAD_PREFIX.length,
+		) === 0
+	) {
+		const exitStart = payloadStart + BASH_SENTINEL_PAYLOAD_PREFIX.length;
+		const exitEnd = buffer.indexOf(0x3a, exitStart);
+		if (exitEnd === -1) return undefined;
+		const lengthEnd = buffer.indexOf(0x3a, exitEnd + 1);
+		if (lengthEnd === -1) return undefined;
+		const exitCodeText = buffer.subarray(exitStart, exitEnd).toString("latin1");
+		const cwdLengthText = buffer.subarray(exitEnd + 1, lengthEnd).toString("latin1");
+		const cwdByteLength = /^\d+$/.test(cwdLengthText) ? Number.parseInt(cwdLengthText, 10) : Number.NaN;
+		if (Number.isSafeInteger(cwdByteLength)) {
+			const cwdStart = lengthEnd + 1;
+			const closeIndex = cwdStart + cwdByteLength;
+			if (buffer.length <= closeIndex) return undefined;
+			if (buffer[closeIndex] === SENTINEL_BYTE) {
+				const parsedExitCode = Number.parseInt(exitCodeText, 10);
+				return {
+					closeIndex,
+					exitCode: Number.isNaN(parsedExitCode) ? null : parsedExitCode,
+					...(cwdByteLength > 0 ? { cwd: buffer.subarray(cwdStart, closeIndex).toString("utf8") } : {}),
+				};
+			}
+		}
+		// A corrupt versioned payload must still settle like the legacy parser: retain the exit
+		// classification when possible and degrade only the cwd field.
+		const closeIndex = buffer.indexOf(SENTINEL_BYTE, lengthEnd + 1);
+		if (closeIndex === -1) return undefined;
+		const parsedExitCode = Number.parseInt(exitCodeText, 10);
+		return { closeIndex, exitCode: Number.isNaN(parsedExitCode) ? null : parsedExitCode };
+	}
+
+	const closeIndex = buffer.indexOf(SENTINEL_BYTE, payloadStart);
+	if (closeIndex === -1) return undefined;
+	const payload = buffer.subarray(payloadStart, closeIndex);
+	const separatorIndex = payload.indexOf(0x3a);
+	const exitCodeText = (separatorIndex === -1 ? payload : payload.subarray(0, separatorIndex)).toString("latin1");
+	const parsedExitCode = Number.parseInt(exitCodeText, 10);
+	return {
+		closeIndex,
+		exitCode: Number.isNaN(parsedExitCode) ? null : parsedExitCode,
+		...(separatorIndex !== -1 && separatorIndex < payload.length - 1
+			? { cwd: payload.subarray(separatorIndex + 1).toString("utf8") }
+			: {}),
+	};
 }
 
 /** One protocol line: `<nonce> <base64(utf8 command)>`. Base64 keeps arbitrary multi-line commands line-safe. */
@@ -342,11 +415,10 @@ export class PersistentShellSession {
 				};
 				// Retain only a tail that could still be a sentinel in progress: a sentinel starts
 				// with "\n" + 0x1e + nonce, so anything whose suffix is inconsistent with that
-				// prefix streams through immediately. The scan window bounds the payload a real
-				// sentinel can carry (the cwd segment is PATH_MAX-bounded).
+				// prefix streams through immediately. Once the random prefix matches, retain the
+				// complete length-framed cwd rather than imposing a false filesystem path bound.
 				const sentinelHoldback = (): number => {
-					const scanFrom = Math.max(0, stdoutPending.length - SENTINEL_HOLDBACK_BYTES);
-					for (let index = scanFrom; index < stdoutPending.length; index++) {
+					for (let index = 0; index < stdoutPending.length; index++) {
 						if (stdoutPending[index] !== 0x0a) continue;
 						if (index + 1 < stdoutPending.length && stdoutPending[index + 1] !== SENTINEL_BYTE) continue;
 						const length = Math.min(stdoutPending.length - index, sentinelPrefix.length);
@@ -367,25 +439,13 @@ export class PersistentShellSession {
 						stdoutPending = stdoutPending.length === 0 ? data : Buffer.concat([stdoutPending, data]);
 						const prefixIndex = stdoutPending.indexOf(sentinelPrefix);
 						if (prefixIndex !== -1) {
-							const closeIndex = stdoutPending.indexOf(SENTINEL_BYTE, prefixIndex + sentinelPrefix.length);
-							if (closeIndex !== -1) {
-								const payload = stdoutPending.subarray(prefixIndex + sentinelPrefix.length, closeIndex);
+							const parsed = parseShellSentinel(stdoutPending, prefixIndex + sentinelPrefix.length);
+							if (parsed) {
 								emitStdoutPending(prefixIndex);
-								stdoutPending = stdoutPending.subarray(closeIndex - prefixIndex + 1);
+								stdoutPending = stdoutPending.subarray(parsed.closeIndex - prefixIndex + 1);
 								emitStdoutPending(stdoutPending.length);
-								// Split at the FIRST colon: exit code, then the whole remainder as
-								// the cwd (paths may contain ":"; a path cannot contain 0x1e). An
-								// absent or empty cwd segment degrades to undefined.
-								const separatorIndex = payload.indexOf(0x3a);
-								const codeText = (
-									separatorIndex === -1 ? payload : payload.subarray(0, separatorIndex)
-								).toString("latin1");
-								const parsed = Number.parseInt(codeText, 10);
-								commandExitCode = Number.isNaN(parsed) ? null : parsed;
-								commandCwd =
-									separatorIndex !== -1 && separatorIndex < payload.length - 1
-										? payload.subarray(separatorIndex + 1).toString("utf8")
-										: undefined;
+								commandExitCode = parsed.exitCode;
+								commandCwd = parsed.cwd;
 								resolveWhenComplete();
 								return;
 							}

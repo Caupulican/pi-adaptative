@@ -253,8 +253,8 @@ process.stdin.on("data", (chunk) => {
 		}
 	});
 
-	it("reassembles a sentinel with a long colon-and-multibyte cwd split across chunks", async () => {
-		const expectedCwd = `/tmp/pi split:colon é${"x".repeat(2000)}`;
+	it("reassembles a length-framed sentinel with separator bytes and multibyte cwd split across chunks", async () => {
+		const expectedCwd = `/tmp/pi split:colon \u001e é${"x".repeat(2000)}`;
 		const directory = mkdtempSync(join(tmpdir(), "pi-shell-cwd-split-"));
 		const fixture = join(directory, "split-fixture.mjs");
 		writeFileSync(
@@ -283,7 +283,10 @@ process.stdin.on("data", (chunk) => {
 				setImmediate(() => {
 					// Split inside the nonce, at a colon, and mid-multibyte-character.
 					process.stdout.write(
-						Buffer.concat([Buffer.from(nonce.slice(6) + ":3:", "utf8"), cwdBytes.subarray(0, 21)]),
+						Buffer.concat([
+							Buffer.from(nonce.slice(6) + ":v1:3:" + cwdBytes.length + ":", "utf8"),
+							cwdBytes.subarray(0, 21),
+						]),
 					);
 					setImmediate(() => process.stdout.write(Buffer.concat([cwdBytes.subarray(21), Buffer.from("\\x1e", "latin1")])));
 				});
@@ -371,10 +374,10 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 		}
 	});
 
-	it("parses a cwd containing colons whole", async () => {
+	it("parses a cwd containing colons and the sentinel delimiter whole", async () => {
 		const session = makeSession("bash");
 		const base = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-colon-")));
-		const colonDir = join(base, "a:b:c");
+		const colonDir = join(base, "a:b\u001ec");
 		mkdirSync(colonDir);
 		try {
 			const result = await session.exec(`cd '${colonDir}' && (exit 4)`, cwd, { onData: () => {} });

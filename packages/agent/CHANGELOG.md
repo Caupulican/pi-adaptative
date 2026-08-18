@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved path-bearing diagnostics and a bounded true tail of executed process output in tool-failure records, and made catalogued error guidance lead recovery-gate actions without weakening replay blocking.
+
 ## [0.93.4] - 2026-08-17
 
 ### Added

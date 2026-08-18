@@ -3,7 +3,7 @@
 ### Changed
 
 - Made the skill vault multi-slot: up to three concurrent skills share one byte budget with least-recently-used eviction, load results state the pending activation, base directory, and any evicted skills instead of claiming immediate activation, and unload/status operate per slot.
-- Bash failure results now report the effective working directory the command ran in on a final `cwd:` line — shell-reported `$PWD` from the persistent POSIX session's extended exit sentinel, the state-tracked effective cwd on the Windows contract — and the tool description states the persistent-cwd contract.
+- Bash failure results now report the effective working directory the command ran in on a final `cwd:` line — shell-reported `$PWD` from a collision-safe length-framed POSIX exit sentinel, or the state-tracked effective cwd on the Windows contract — and the tool description states the persistent-cwd contract.
 
 ### Fixed
 

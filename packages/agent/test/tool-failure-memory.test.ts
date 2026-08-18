@@ -535,6 +535,19 @@ describe("tool failure memory", () => {
 		expect(assessment.evidence).not.toMatch(/^command exited/im);
 	});
 
+	it("keeps the tail rather than the head of one oversized process-output line", () => {
+		const assessment = assessToolFailure(
+			`HEAD_MARKER_${"x".repeat(2_000)}_TAIL_MARKER\nCommand exited with code 9`,
+			"failed",
+			"Error",
+		);
+
+		expect(assessment.failureCode).toBe("exit_9");
+		expect(assessment.evidence?.length).toBeLessThanOrEqual(1_600);
+		expect(assessment.evidence).not.toContain("HEAD_MARKER");
+		expect(assessment.evidence).toContain("TAIL_MARKER");
+	});
+
 	it("retains the catalogued missing-path diagnostic naming the exact path", () => {
 		const assessment = assessToolFailure(
 			"ENOENT: no such file or directory, open '/repo/docs/missing.txt'",

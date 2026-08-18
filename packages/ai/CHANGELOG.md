@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Marked catalogued file-not-found failures to retain their path-bearing diagnostic for agent recovery.
+
 ## [0.93.4] - 2026-08-17
 
 ## [0.93.3] - 2026-08-17

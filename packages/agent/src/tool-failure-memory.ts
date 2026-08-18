@@ -726,7 +726,14 @@ function extractProcessExitEvidence(message: string): string | undefined {
 		start--;
 		retainedChars += 1 + lines[start].length;
 	}
-	return sanitizeToolFailureEvidence(lines.slice(start).join("\n"));
+	let tail = lines.slice(start).join("\n");
+	if (tail.length > MAX_TOOL_FAILURE_EVIDENCE_CHARS) {
+		let tailStart = tail.length - MAX_TOOL_FAILURE_EVIDENCE_CHARS;
+		const firstCode = tail.charCodeAt(tailStart);
+		if (firstCode >= 0xdc00 && firstCode <= 0xdfff) tailStart++;
+		tail = tail.slice(tailStart);
+	}
+	return sanitizeToolFailureEvidence(tail);
 }
 
 export interface ToolFailureAssessment {
