@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added `ToolErrorKind` and an optional `errorKind` on `ToolResultMessage`, so a persisted transcript distinguishes a tool that could not run from one that ran and reported a negative operation status. Absent is read as `tool_failure`.
+
 ## [0.93.8] - 2026-08-19
 
 ## [0.93.7] - 2026-08-18

@@ -826,11 +826,15 @@ function createShellToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
+			// The shell ran the command to completion and is reporting the process's own status. That is
+			// the observation the caller asked for — a red test run, a search that matched nothing, a
+			// false predicate — so it is an operation outcome, never a failure of this tool.
 			const createExitError = (text: string, exitCode: number, effectiveCwd: string) =>
 				new AgentToolExecutionError(
 					appendStatus(text, `Command exited with code ${exitCode}\ncwd: ${effectiveCwd}`),
 					`exit_${exitCode}`,
 					output.getOutputSignature(),
+					"operation_outcome",
 				);
 			const effectiveTimeoutSeconds =
 				typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0

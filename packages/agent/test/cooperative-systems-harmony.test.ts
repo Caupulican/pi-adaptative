@@ -64,17 +64,22 @@ describe("Cooperative Systems & Tool Call Optimization Harmony Suite", () => {
 
 		const sanitized = sanitizeToolFailureContext(messages, "Base prompt");
 
-		// 1. Failure turns must be stripped from message trajectory and summarized into harness context
+		// 1. Failure turns are summarized into harness context, and stay in the trajectory: the agent's
+		// record of what it actually ran is never erased.
 		expect(sanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:2");
 		expect(sanitized.systemPrompt).toContain('"kind_mistakes":2');
+		expect(sanitized.messages.filter((message) => message.role === "toolResult")).toHaveLength(3);
 
 		// 2. Earlier duplicate payload (call_read_1) must be superseded by call_view_1
-		expect(sanitized.messages).toHaveLength(2);
-		expect(sanitized.messages[0]).toMatchObject({
+		expect(sanitized.messages).toHaveLength(6);
+		expect(
+			sanitized.messages.some((message) => message.role === "toolResult" && message.toolCallId === "call_read_1"),
+		).toBe(false);
+		expect(sanitized.messages.at(-2)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "toolCall", id: "call_view_1" }],
 		});
-		expect(sanitized.messages[1]).toMatchObject({
+		expect(sanitized.messages.at(-1)).toMatchObject({
 			role: "toolResult",
 			toolCallId: "call_view_1",
 		});

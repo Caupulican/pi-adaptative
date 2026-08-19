@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- A shell command that runs to completion and exits non-zero is now reported as an operation outcome rather than a tool failure, so a red test baseline, a search that matched nothing, or a false predicate reaches the model as its own verbatim output and no longer consumes recovery budget. Timeouts and blocked broad searches remain tool failures.
+- Removed the task-step "recovery exhausted" guidance branch. Task context is only ever injected alongside a user prompt, and a user turn already re-admits the operation, so that branch could only ever describe a refusal that had just been cleared.
+- Aligned lean and minimal system prompts with the agent package's shared retry rule: an unchanged operation is not replayed immediately and is readmitted after another successful tool call or a new user turn.
+
 ## [0.93.8] - 2026-08-19
 
 ### Fixed

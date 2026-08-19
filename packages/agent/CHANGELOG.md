@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Changed
+
+- Tool failure recovery no longer ends a run. Refusal is always local to one exact operation: it can never deny an unrelated tool, terminate a tool batch, or stop the agent. Repeated unproductive work remains bounded by `maxStallTurns` and `maxProviderTurns`.
+- A `maxStallTurns` stop now spends one final provider request with no tools and a request-local factual-closing instruction, through the same planned provider boundary as every other request, so the run closes in the model's own words. Native or terminal rendered tool calls in that response become empty protocol errors and never execute, including calls to unloaded tools. The request cannot open a tool batch or re-enter the loop; it is skipped when the run is aborted or `maxProviderTurns` leaves no budget, and a provider error keeps its own error message. The harness never fabricates model text in place of any of these.
+- Replaced per-operation attempt counts, probe quotas, and session-long circuits with a single admission rule: an exact operation whose last run was unproductive is admitted again once the world has moved — any successful tool call, or a new user turn. Corrective work therefore re-admits the operation it repaired however many times the agent needs it, and error classes the catalogue marks transient keep their immediate identical retry.
+- Errored tool results now declare an `errorKind`. `operation_outcome` means the tool ran the operation to completion and is reporting its own negative status, such as a non-zero process exit; those results keep the tool's own output untouched and never enter failure memory. `tool_failure` (the default, including for results written before this field existed) keeps the bounded harness record.
+- Removed `exhaustionScope` and repair-action `getEvidence` from the tool failure-recovery contract. Declared targets and actions are now teaching only; they no longer grant execution budget.
+
+### Fixed
+
+- Stopped erasing an agent's own tool call from the transcript when its operation failed, which left corrections like "use a different operation" unactionable because the operation had been replaced by a 96-character middle-truncated preview. Failed calls and their bounded records now stay where they happened. Two cases still drop the call: a superseded successful call whose newer identical call remains, and a discard-attempt directive, where the harness owns the attempt and its arguments must not reappear — a retarget holds the payload by reference, and a corrupt payload must never be replayed. Unbounded failure results from older transcripts are bounded in place rather than removed.
+- A completed operation reporting a non-zero status now clears any earlier failure recorded for that same operation, so a session resumed across this change cannot keep an obsolete `ACTIVE TOOL FAILURES` entry alive for an operation that has since run.
+- Removed `transcriptHasBlockedToolOperation` and the task-step guidance branch it fed. Its only consumer injected task context alongside a user prompt, and a user turn already re-admits the operation, so the branch could only ever describe a refusal that had just been cleared.
+- Rewrote the mandatory recovery standing prompt to the world-cursor rule; it no longer teaches permission, one-probe evidence, operation exhaustion, or run-ending consequences.
+- Stopped a repaired-but-still-failing operation from ending the run on its second identical outcome, which previously depended on tool output being nondeterministic to avoid firing.
+- Stopped the provider-turn fuse from opening an unmatched `turn_start` after its last admitted request; the fuse now ends the run without inventing an assistant turn or message.
+
 ## [0.93.8] - 2026-08-19
 
 ### Fixed

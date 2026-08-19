@@ -11,7 +11,6 @@ import {
 	withStreamIdleWatchdog,
 } from "@caupulican/pi-agent-core/reliability";
 import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
-import { transcriptHasClosedToolOperation } from "@caupulican/pi-agent-core/tool-failure-memory";
 import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
 import type {
 	AgentContext,
@@ -2768,9 +2767,7 @@ export class AgentSession {
 			}
 
 			const taskStepsState = options?.internalContextType ? undefined : this.getTaskStepsStateSnapshot();
-			const taskStepsContext = taskStepsState
-				? formatTaskStepsContext(taskStepsState, 12, transcriptHasClosedToolOperation(this.agent.state.messages))
-				: undefined;
+			const taskStepsContext = taskStepsState ? formatTaskStepsContext(taskStepsState, 12) : undefined;
 			if (taskStepsState && taskStepsContext) {
 				messages.push(
 					createCustomMessage(

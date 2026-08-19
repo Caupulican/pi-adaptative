@@ -6,12 +6,9 @@ import { agentLoop } from "../src/agent-loop.ts";
 import {
 	createRepeatedToolFailureResult,
 	createToolFailureMemoryTracker,
-	createToolFailureOperationExhaustedResult,
-	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	getUnresolvedToolFailure,
 	rememberToolFailure,
-	transcriptHasClosedToolOperation,
 } from "../src/tool-failure-memory.ts";
 import { ToolFailureRecoveryGate } from "../src/tool-failure-recovery-gate.ts";
 import {
@@ -108,7 +105,7 @@ function createTrelloTool(onExecute: () => void): AgentTool<typeof trelloSchema>
 	};
 }
 
-function createExhaustedListListsTranscript(): AgentMessage[] {
+function createBlockedListListsTranscript(): AgentMessage[] {
 	const tracker = new Map();
 	const failed = rememberToolFailure(
 		tracker,
@@ -121,14 +118,7 @@ function createExhaustedListListsTranscript(): AgentMessage[] {
 	);
 	const executed = createToolFailureResult(failed);
 	const blocked = createRepeatedToolFailureResult(failed);
-	const operationExhausted = createToolFailureOperationExhaustedResult(
-		blocked.details.piToolFailureMemory,
-		"Operation recovery circuit opened after 2 blocked replays of error.",
-	);
-	const runExhausted = createToolFailureRecoveryExhaustedResult(
-		operationExhausted.details.piToolFailureMemory,
-		"Run recovery circuit opened after replay of an operation whose local circuit was already open for error.",
-	);
+	const blockedAgain = createRepeatedToolFailureResult(blocked.details.piToolFailureMemory);
 	return [
 		{ role: "user", content: "review the QA card", timestamp: 1 },
 		assistantCall("trello-1", "trello", listListsArgs),
@@ -136,9 +126,7 @@ function createExhaustedListListsTranscript(): AgentMessage[] {
 		assistantCall("trello-2", "trello", listListsArgs),
 		toolResultMessage("trello-2", "trello", blocked, true),
 		assistantCall("trello-3", "trello", listListsArgs),
-		toolResultMessage("trello-3", "trello", operationExhausted, true),
-		assistantCall("trello-4", "trello", listListsArgs),
-		toolResultMessage("trello-4", "trello", runExhausted, true),
+		toolResultMessage("trello-3", "trello", blockedAgain, true),
 	];
 }
 
@@ -151,8 +139,132 @@ async function drain(stream: ReturnType<typeof agentLoop>) {
 const identityConverter = (messages: AgentMessage[]): Message[] =>
 	messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 
+function resultContainsFailureCode(result: AgentToolResult<unknown>, failureCode: string): boolean {
+	return result.content.some(
+		(block) => block.type === "text" && block.text.includes(`"failure_code":"${failureCode}"`),
+	);
+}
+
 describe("tool-failure recovery restore", () => {
-	it("halts only when an exact operation repeats the same tool code and output", () => {
+	// Session 01a019b7 (GazeIntent, 2026-08-19): an agent reproducing a red test baseline ran
+	// `python -m unittest`, which exited 1 because the tests failed — the observation it wanted. It
+	// then re-sent the identical command three times. The harness answered the fourth with
+	// `recovery_exhausted` and ended the run, and the user saw only "Tool recovery stopped for bash".
+	it("keeps the run alive when a red test baseline is replayed to death", async () => {
+		const schema = Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number()) });
+		const command = "cd /repo && PYTHONPATH=src python3 -m unittest tests.test_head_aim -v";
+		const testOutput = "FAILED (errors=2)\nValueError: head-aim freshness/stability windows are invalid";
+		let executions = 0;
+		let reads = 0;
+		const bash: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "Run a shell command",
+			parameters: schema,
+			async execute() {
+				executions++;
+				// A completed process reporting a non-zero exit, exactly as the real bash tool reports it.
+				throw new AgentToolExecutionError(
+					`${testOutput}\n\nCommand exited with code 1\ncwd: /repo`,
+					"exit_1",
+					"a".repeat(43),
+					"operation_outcome",
+				);
+			},
+		};
+		const read: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "Read a file",
+			parameters: Type.Object({ path: Type.String() }),
+			async execute() {
+				reads++;
+				return { content: [{ type: "text", text: "def head_aim(): ..." }], details: {} };
+			},
+		};
+		let turn = 0;
+		const providerMessages: string[] = [];
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "fix the failing head-aim tests", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [bash, read] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				undefined,
+				(_model, providerContext) => {
+					providerMessages.push(JSON.stringify(providerContext.messages));
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turn++;
+						// Four identical replays, exactly as the reported session did, then a corrective read.
+						const message =
+							turn <= 4
+								? assistantCall(`bash-${turn}`, "bash", { command, timeout: 60 })
+								: turn === 5
+									? assistantCall("read-1", "read", { path: "src/head_aim.py" })
+									: assistantMessage([{ type: "text", text: "Windows are inverted; fixing now." }], "stop");
+						stream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		// The run reaches the model's own closing turn instead of being cut short by the harness.
+		expect(turn).toBe(6);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.content.some(
+						(block) => block.type === "text" && block.text === "Windows are inverted; fixing now.",
+					),
+			),
+		).toBe(true);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.content.some(
+						(block) => block.type === "text" && block.text.includes("Tool recovery stopped"),
+					),
+			),
+		).toBe(false);
+
+		// The command ran once; the replays were refused, and the unrelated read stayed available.
+		expect(executions).toBe(1);
+		expect(reads).toBe(1);
+		expect(
+			events.filter(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toHaveLength(3);
+
+		// The failing run is data, not a harness failure record: its own output reaches the model
+		// verbatim, and the agent can still see the exact command it sent.
+		const firstResult = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+		if (!firstResult || firstResult.type !== "message_end" || firstResult.message.role !== "toolResult") {
+			throw new Error("Expected a tool result");
+		}
+		expect(firstResult.message.errorKind).toBe("operation_outcome");
+		const firstText = firstResult.message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		expect(firstText).toContain("ValueError: head-aim freshness/stability windows are invalid");
+		expect(firstText).not.toContain("[harness]");
+		expect(providerMessages[1]).toContain("ValueError: head-aim freshness/stability windows are invalid");
+		expect(providerMessages[1]).toContain(command);
+	});
+
+	it("re-admits a failed operation once anything else succeeds, however often it has failed", () => {
 		const schema = Type.Object({ command: Type.String() });
 		const args = { command: "run focused tests" };
 		const tool: AgentTool<typeof schema> = {
@@ -164,74 +276,64 @@ describe("tool-failure recovery restore", () => {
 				throw new Error("must not execute during recovery-state testing");
 			},
 		};
-		const applyPair = (secondCode: string, secondOutput: string) => {
-			const tracker = new Map();
-			const gate = new ToolFailureRecoveryGate();
-			const first = rememberToolFailure(
-				tracker,
-				"bash",
-				args,
-				"failed",
-				"exit_1",
-				"Repair the workspace before retrying.",
-				undefined,
-				"execution",
-				undefined,
-				{ output: "FAILED tests.test_head_aim import error" },
-			);
-			expect(gate.apply({ kind: "failure", tool, record: first, args })).toBeUndefined();
-			const second = rememberToolFailure(
-				tracker,
-				"bash",
-				args,
-				"failed",
-				secondCode,
-				"Repair the workspace before retrying.",
-				undefined,
-				"execution",
-				undefined,
-				{ output: secondOutput },
-			);
-			return gate.apply({ kind: "failure", tool, record: second, args });
+		const otherTool: AgentTool = {
+			name: "edit",
+			label: "edit",
+			description: "edit",
+			parameters: Type.Object({ path: Type.String() }),
+			async execute() {
+				throw new Error("must not execute during recovery-state testing");
+			},
 		};
+		const tracker = new Map();
+		const gate = new ToolFailureRecoveryGate();
+		const fail = (output: string) =>
+			gate.apply({
+				kind: "unproductive",
+				tool,
+				args,
+				record: rememberToolFailure(
+					tracker,
+					"bash",
+					args,
+					"failed",
+					"exit_1",
+					"Repair the workspace before retrying.",
+					undefined,
+					"execution",
+					undefined,
+					{ output },
+				),
+			});
 
-		expect(applyPair("exit_2", "FAILED tests.test_head_aim import error")).toBeUndefined();
-		expect(applyPair("exit_1", "FAILED test_latest_is_uncalibrated_never_webcam")).toBeUndefined();
-		expect(applyPair("exit_1", "FAILED tests.test_head_aim import error")).toMatchObject({
-			diagnostic: "Recovery circuit opened after 2 failed outcomes for one operation.",
-		});
+		// Ten identical failures with byte-identical output. The old design killed the run on the
+		// second; the operation is simply refused while nothing has changed, and never more than that.
+		for (let attempt = 0; attempt < 10; attempt++) {
+			fail("FAILED tests.test_head_aim import error");
+			expect(gate.admit(tool, args, undefined, [])).toMatchObject({ kind: "blocked" });
+			// The refusal is local: an unrelated operation is admitted throughout.
+			expect(gate.admit(otherTool, { path: "subject.ts" }, undefined, [])).toEqual({ kind: "allowed" });
+			// One success anywhere makes the failed operation worth attempting again.
+			gate.apply({ kind: "success", tool: otherTool, args: { path: "subject.ts" } });
+			expect(gate.admit(tool, args, undefined, [])).toEqual({ kind: "allowed" });
+		}
 	});
 
-	it("restores changed outputs as separate recovery episodes", () => {
+	it("restores a refused operation from the transcript and re-admits it after a later success", () => {
 		const args = { command: "run focused tests" };
 		const tracker = new Map();
-		const outputs = [
-			"FAILED tests.test_head_aim import error",
-			"FAILED test_latest_is_uncalibrated_never_webcam",
-			"FAILED test_right_turn_moves_aim_right",
-		];
-		const records = outputs.map((output) =>
-			rememberToolFailure(
-				tracker,
-				"bash",
-				args,
-				"failed",
-				"exit_1",
-				"Repair the workspace before retrying.",
-				undefined,
-				"execution",
-				undefined,
-				{ output },
-			),
+		const record = rememberToolFailure(
+			tracker,
+			"bash",
+			args,
+			"failed",
+			"exit_1",
+			"Repair the workspace before retrying.",
+			undefined,
+			"execution",
+			undefined,
+			{ output: "FAILED tests.test_head_aim import error" },
 		);
-		const messages: AgentMessage[] = [
-			assistantCall("bash-1", "bash", args),
-			toolResultMessage("bash-1", "bash", createToolFailureResult(records[0]), true),
-			assistantCall("bash-2", "bash", args),
-			toolResultMessage("bash-2", "bash", createToolFailureResult(records[1]), true),
-		];
-		const gate = new ToolFailureRecoveryGate();
-		gate.restoreFromMessages(JSON.parse(JSON.stringify(messages)) as AgentMessage[]);
 		const tool: AgentTool = {
 			name: "bash",
 			label: "bash",
@@ -241,9 +343,23 @@ describe("tool-failure recovery restore", () => {
 				throw new Error("must not execute during recovery-state testing");
 			},
 		};
+		const failedOnly: AgentMessage[] = [
+			assistantCall("bash-1", "bash", args),
+			toolResultMessage("bash-1", "bash", createToolFailureResult(record), true),
+		];
+		const blockedGate = new ToolFailureRecoveryGate();
+		blockedGate.restoreFromMessages(JSON.parse(JSON.stringify(failedOnly)) as AgentMessage[]);
+		expect(blockedGate.admit(tool, args, undefined, failedOnly)).toMatchObject({ kind: "blocked" });
 
-		expect(gate.apply({ kind: "failure", tool, record: records[2], args })).toBeUndefined();
-		expect(gate.isHalted()).toBe(false);
+		// The same transcript plus one later success: the world moved, so the replay is worth running.
+		const afterSuccess: AgentMessage[] = [
+			...failedOnly,
+			assistantCall("edit-1", "edit", { path: "subject.ts" }),
+			toolResultMessage("edit-1", "edit", { content: [{ type: "text", text: "edited" }], details: {} }, false),
+		];
+		const resumedGate = new ToolFailureRecoveryGate();
+		resumedGate.restoreFromMessages(JSON.parse(JSON.stringify(afterSuccess)) as AgentMessage[]);
+		expect(resumedGate.admit(tool, args, undefined, afterSuccess)).toEqual({ kind: "allowed" });
 	});
 
 	it("returns a changed tool-owned output signature from an exact parallel replay to the agent", async () => {
@@ -306,7 +422,7 @@ describe("tool-failure recovery restore", () => {
 		).toBe(true);
 	});
 
-	it("keeps corrective operations available after an edit-local recovery circuit opens", () => {
+	it("keeps corrective operations available while a failed edit stays refused", () => {
 		const schema = Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String() })) });
 		const args = { path: "subject.ts", edits: [{ oldText: "stale anchor" }] };
 		const editTool: AgentTool<typeof schema> = {
@@ -314,7 +430,6 @@ describe("tool-failure recovery restore", () => {
 			label: "edit",
 			description: "edit",
 			parameters: schema,
-			failureRecovery: { exhaustionScope: "operation" },
 			async execute() {
 				throw new Error("must not execute during admission");
 			},
@@ -338,21 +453,18 @@ describe("tool-failure recovery restore", () => {
 			"Read current text and submit changed exact anchors.",
 		);
 		const gate = new ToolFailureRecoveryGate();
-		gate.apply({ kind: "failure", tool: editTool, record, args });
+		gate.apply({ kind: "unproductive", tool: editTool, record, args });
 
-		expect(gate.admit(editTool, args, record)).toMatchObject({ kind: "blocked", exhausted: false });
-		expect(gate.admit(editTool, args, record)).toMatchObject({
-			kind: "blocked",
-			exhausted: true,
-			scope: "operation",
-		});
-		expect(gate.admit(editTool, args, record)).toMatchObject({
-			kind: "blocked",
-			exhausted: true,
-			scope: "operation",
-		});
-		expect(gate.isHalted()).toBe(false);
-		expect(gate.admit(readTool, { path: "subject.ts" }, undefined).kind).toBe("allowed");
+		// However many times the agent re-sends it, the answer stays the same shape: refused, never
+		// escalating into anything that could deny the corrective read alongside it.
+		for (let attempt = 0; attempt < 3; attempt++) {
+			expect(gate.admit(editTool, args, record)).toMatchObject({ kind: "blocked" });
+			expect(gate.admit(readTool, { path: "subject.ts" }, undefined).kind).toBe("allowed");
+		}
+
+		// The corrective read succeeding is what makes the edit worth attempting again.
+		gate.apply({ kind: "success", tool: readTool, args: { path: "subject.ts" } });
+		expect(gate.admit(editTool, args, record).kind).toBe("allowed");
 	});
 
 	it("keeps repeated edit validation failures local so a corrective read can still run", async () => {
@@ -365,7 +477,6 @@ describe("tool-failure recovery restore", () => {
 			label: "edit",
 			description: "edit",
 			parameters: editSchema,
-			failureRecovery: { exhaustionScope: "operation" },
 			async execute() {
 				throw new Error("invalid arguments must not execute");
 			},
@@ -433,6 +544,7 @@ describe("tool-failure recovery restore", () => {
 		};
 		let providerTurns = 0;
 		const providerPrompts: string[] = [];
+		const providerMessages: string[] = [];
 		const events = await drain(
 			agentLoop(
 				[{ role: "user", content: "edit the file", timestamp: 1 }],
@@ -441,6 +553,7 @@ describe("tool-failure recovery restore", () => {
 				undefined,
 				(_model, providerContext) => {
 					providerPrompts.push(providerContext.systemPrompt ?? "");
+					providerMessages.push(JSON.stringify(providerContext.messages));
 					const stream = new MockAssistantStream();
 					queueMicrotask(() => {
 						providerTurns++;
@@ -468,17 +581,18 @@ describe("tool-failure recovery restore", () => {
 		expect(text).toContain('"evidence"');
 		expect(text).toContain("Current source sha256 abcdef123456");
 		expect(text).toContain("8 | current anchor");
-		expect(providerPrompts[1]).toContain("Current source sha256 abcdef123456");
-		expect(providerPrompts[1]).toContain("8 | current anchor");
+		// Evidence reaches the next request through the retained result itself, not by being copied
+		// into the ledger, so the agent reads it once beside the call that produced it.
+		expect(providerPrompts[1]).not.toContain("Current source sha256 abcdef123456");
+		expect(providerMessages[1]).toContain("Current source sha256 abcdef123456");
+		expect(providerMessages[1]).toContain("8 | current anchor");
 	});
 
-	it("blocks the exhausted identical operation after a JSON-roundtripped transcript", () => {
-		const messages = JSON.parse(JSON.stringify(createExhaustedListListsTranscript())) as AgentMessage[];
+	it("keeps refusing the identical operation after a JSON-roundtripped transcript", () => {
+		const messages = JSON.parse(JSON.stringify(createBlockedListListsTranscript())) as AgentMessage[];
 		const gate = new ToolFailureRecoveryGate();
 		gate.restoreFromMessages(messages);
 		expect(gate.isEmpty()).toBe(false);
-		expect(gate.isHalted()).toBe(false);
-		expect(transcriptHasClosedToolOperation(messages)).toBe(true);
 
 		const tool = createTrelloTool(() => {
 			throw new Error("execute must not run");
@@ -486,11 +600,9 @@ describe("tool-failure recovery restore", () => {
 		const memory = createToolFailureMemoryTracker(messages);
 		const admission = gate.admit(tool, listListsArgs, getUnresolvedToolFailure(memory, "trello", listListsArgs));
 		expect(admission.kind).toBe("blocked");
-		if (admission.kind !== "blocked") return;
-		expect(admission.exhausted).toBe(true);
 	});
 
-	it("restores an edit-local closed circuit without turning it into a run halt", () => {
+	it("restores a refused edit from the transcript without denying anything else", () => {
 		const schema = Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String() })) });
 		const args = { path: "subject.ts", edits: [{ oldText: "stale anchor" }] };
 		const tracker = new Map();
@@ -505,7 +617,7 @@ describe("tool-failure recovery restore", () => {
 			"execution",
 			"Current source sha256 abcdef123456, lines 8-9:\n8 | current anchor",
 		);
-		const closed = createToolFailureOperationExhaustedResult(record, "edit operation closed");
+		const closed = createRepeatedToolFailureResult(record);
 		const messages = JSON.parse(
 			JSON.stringify([
 				assistantCall("edit-closed", "edit", args),
@@ -517,7 +629,6 @@ describe("tool-failure recovery restore", () => {
 			label: "edit",
 			description: "edit",
 			parameters: schema,
-			failureRecovery: { exhaustionScope: "operation" },
 			async execute() {
 				throw new Error("must not execute during admission");
 			},
@@ -534,12 +645,7 @@ describe("tool-failure recovery restore", () => {
 		const gate = new ToolFailureRecoveryGate();
 		gate.restoreFromMessages(messages);
 
-		expect(gate.admit(editTool, args, undefined, messages)).toMatchObject({
-			kind: "blocked",
-			exhausted: true,
-			scope: "operation",
-		});
-		expect(gate.isHalted()).toBe(false);
+		expect(gate.admit(editTool, args, undefined, messages)).toMatchObject({ kind: "blocked" });
 		expect(gate.admit(readTool, { path: "subject.ts" }, undefined, messages).kind).toBe("allowed");
 	});
 
@@ -573,8 +679,6 @@ describe("tool-failure recovery restore", () => {
 		});
 		const replay = gate.admit(tool, firstArgs, undefined, messages);
 		expect(replay.kind).toBe("blocked");
-		if (replay.kind !== "blocked") return;
-		expect(replay.exhausted).toBe(false);
 
 		const newOperation = gate.admit(tool, { ...listListsArgs, boardId: "brand-new-board" }, undefined, messages);
 		expect(newOperation.kind).toBe("allowed");
@@ -604,14 +708,27 @@ describe("tool-failure recovery restore", () => {
 		const tool = createTrelloTool(() => {
 			throw new Error("execute must not run during admission");
 		});
-		const success = { content: [{ type: "text" as const, text: "board resolved" }], details: {} };
-		gate.apply({ kind: "success", tool, args: listListsArgs, evidenceResult: success });
+		// Without that success, the transcript alone still refuses both operations.
+		const staleGate = new ToolFailureRecoveryGate();
+		staleGate.restoreFromMessages(JSON.parse(JSON.stringify(messages)) as AgentMessage[]);
+		expect(staleGate.admit(tool, listListsArgs, undefined, messages).kind).toBe("blocked");
+		expect(staleGate.admit(tool, otherArgs, undefined, messages).kind).toBe("blocked");
 
+		gate.apply({ kind: "success", tool, args: listListsArgs });
+
+		// The success is not yet in the transcript snapshot below, so only the live overlay can know
+		// this exact operation now succeeds rather than matching its stale recorded failure.
 		expect(gate.admit(tool, listListsArgs, undefined, messages).kind).toBe("allowed");
-		expect(gate.admit(tool, otherArgs, undefined, messages).kind).toBe("blocked");
 
 		messages.push(assistantCall("successful-retry", "trello", listListsArgs));
-		messages.push(toolResultMessage("successful-retry", "trello", success, false));
+		messages.push(
+			toolResultMessage(
+				"successful-retry",
+				"trello",
+				{ content: [{ type: "text", text: "board resolved" }], details: {} },
+				false,
+			),
+		);
 		expect(gate.admit(tool, listListsArgs, undefined, messages).kind).toBe("allowed");
 	});
 
@@ -655,7 +772,7 @@ describe("tool-failure recovery restore", () => {
 		expect(admission.kind).toBe("allowed");
 	});
 
-	it("does not re-execute an exhausted list_lists after a new user turn", async () => {
+	it("runs a failing list_lists once per prompt, and gives it one fresh attempt on a new user turn", async () => {
 		let executions = 0;
 		const failingTool = createTrelloTool(() => {
 			executions++;
@@ -693,26 +810,28 @@ describe("tool-failure recovery restore", () => {
 			streamFn,
 			initialState: { model: createModel(), systemPrompt: "", tools: [failingTool] },
 		});
-		agent.maxStallTurns = 0;
+		agent.maxStallTurns = 3;
 		await agent.prompt("review the QA card");
+		// One execution for the whole prompt; the identical replays never reached the tool. The stall
+		// stop then spends one tool-free request so the model closes the prompt itself.
 		expect(executions).toBe(1);
-		expect(toolFreeProviderTurns).toBe(0);
+		expect(toolFreeProviderTurns).toBe(1);
 
+		// A new user turn can have changed authority, files, or environment, so the operation is worth
+		// exactly one more attempt — and again only one, however many times the model re-sends it.
 		await agent.prompt("looks like you are stuck in a loop there");
-		expect(executions).toBe(1);
-		expect(toolFreeProviderTurns).toBe(0);
+		expect(executions).toBe(2);
+		expect(toolFreeProviderTurns).toBe(2);
 		expect(
 			agent.state.messages.some(
 				(message) =>
 					message.role === "assistant" &&
-					message.content.some(
-						(block) => block.type === "text" && block.text.includes("Tool recovery stopped for trello"),
-					),
+					message.content.some((block) => block.type === "text" && block.text.includes("Tool recovery stopped")),
 			),
-		).toBe(true);
+		).toBe(false);
 	});
 
-	it("does not re-execute after session resume from serialized messages", async () => {
+	it("carries refusal state across a session resume from serialized messages", async () => {
 		let executions = 0;
 		const failingTool = createTrelloTool(() => {
 			executions++;
@@ -745,7 +864,7 @@ describe("tool-failure recovery restore", () => {
 			streamFn,
 			initialState: { model: createModel(), systemPrompt: "", tools: [failingTool] },
 		});
-		first.maxStallTurns = 0;
+		first.maxStallTurns = 3;
 		await first.prompt("review the QA card");
 		expect(executions).toBe(1);
 
@@ -758,9 +877,11 @@ describe("tool-failure recovery restore", () => {
 				messages: JSON.parse(JSON.stringify(first.state.messages)) as AgentMessage[],
 			},
 		});
-		resumed.maxStallTurns = 0;
+		resumed.maxStallTurns = 3;
 		await resumed.prompt("stuck in a loop");
-		expect(executions).toBe(1);
+		// The resumed session reconstructs the same accounting from the transcript: the new user turn
+		// buys exactly one attempt, not one per replay.
+		expect(executions).toBe(2);
 	});
 
 	it("still executes a changed operation after the previous identity is closed", async () => {
@@ -791,7 +912,7 @@ describe("tool-failure recovery restore", () => {
 				}
 				calls++;
 				const args =
-					calls <= 4 ? listListsArgs : { action: "list_lists", envFile: "/tmp/trello.env", boardId: "grimdex" };
+					calls <= 3 ? listListsArgs : { action: "list_lists", envFile: "/tmp/trello.env", boardId: "grimdex" };
 				stream.push({
 					type: "done",
 					reason: "toolUse",
@@ -807,15 +928,16 @@ describe("tool-failure recovery restore", () => {
 			streamFn,
 			initialState: { model: createModel(), systemPrompt: "", tools: [failingTool] },
 		});
-		agent.maxStallTurns = 0;
+		agent.maxStallTurns = 3;
 		await agent.prompt("review the QA card");
 		expect(executions).toBe(1);
+		// A materially changed operation is a different identity and was never refused in the first place.
 		await agent.prompt("pass boardId this time");
 		expect(seen).toEqual(["missing", "grimdex"]);
 		expect(executions).toBe(2);
 	});
 
-	it("does not grant a free execution after a single unresolved failure on a new prompt", async () => {
+	it("grants a new user turn exactly one attempt at a previously failed operation", async () => {
 		let executions = 0;
 		const failingTool = createTrelloTool(() => {
 			executions++;
@@ -873,20 +995,30 @@ describe("tool-failure recovery restore", () => {
 		});
 		second.maxStallTurns = 0;
 		await second.prompt("try again");
-		expect(executions).toBe(1);
+		// The user may have fixed the environment between turns, and the harness cannot know either
+		// way; what it can guarantee is that the turn buys one attempt, never an open-ended retry loop.
+		expect(executions).toBe(2);
 	});
 
-	it("emits the mandatory diagnostic when delivery text ignores the halt", async () => {
+	it("executes a wedged operation once and leaves the stop to the runaway backstop", async () => {
 		let executions = 0;
 		const failingTool = createTrelloTool(() => {
 			executions++;
 		});
 		let calls = 0;
+		const runawayStops: string[] = [];
 		const events = await drain(
 			agentLoop(
 				[{ role: "user", content: "go", timestamp: 1 }],
 				{ systemPrompt: "", messages: [], tools: [failingTool] },
-				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 3,
+					onRunawayStop: ({ reason }) => {
+						runawayStops.push(reason);
+					},
+				},
 				undefined,
 				(_model, providerContext) => {
 					const stream = new MockAssistantStream();
@@ -917,16 +1049,19 @@ describe("tool-failure recovery restore", () => {
 			),
 		);
 
+		// The operation ran once; every replay was refused without executing it again. Nothing the
+		// recovery gate does ends the run, so the cost guard is what finally stops the wedged model.
 		expect(executions).toBe(1);
+		expect(runawayStops).toEqual(["repeated_tool_call"]);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "message_end" &&
 					event.message.role === "assistant" &&
 					event.message.content.some(
-						(block) => block.type === "text" && block.text.includes("Tool recovery stopped for trello"),
+						(block) => block.type === "text" && block.text.includes("Tool recovery stopped"),
 					),
 			),
-		).toBe(true);
+		).toBe(false);
 	});
 });

@@ -452,7 +452,7 @@ describe("non-native phone filesystem workflow", () => {
 		}
 	});
 
-	it("blocks a phone read retry after unrelated-path write success", async () => {
+	it("re-admits one phone read retry after unrelated-path write success", async () => {
 		const cwd = join(root, "project");
 		const agentDir = join(root, "agent");
 		const missingPath = join(cwd, "still-missing.txt");
@@ -476,7 +476,10 @@ describe("non-native phone filesystem workflow", () => {
 
 			expect(blockedContext).toContain('"failure_code":"file_not_found"');
 			expect(blockedContext).toContain('"occ":2');
-			expect(blockedContext).toContain("never repeat the same call");
+			expect(blockedContext).toContain(
+				"Do not immediately replay the unchanged operation. The operation is readmitted after another tool succeeds or a new user turn.",
+			);
+			expect(blockedContext).not.toContain("never repeat the same call");
 			expect(blockedContext).toContain("If the goal requires this exact missing file and its content is known");
 			expect(blockedContext).not.toContain('"failure_code":"repeated_failed_operation"');
 			expect(harness.responseIndex).toBe(responses.length);
@@ -492,7 +495,7 @@ describe("non-native phone filesystem workflow", () => {
 					.join("\n"),
 			);
 			expect(readResultTexts[0]).toContain('"failure_code":"file_not_found"');
-			expect(readResultTexts[1]).toContain('"failure_code":"repeated_failed_operation"');
+			expect(readResultTexts[1]).toContain('"failure_code":"file_not_found"');
 		} finally {
 			await harness.dispose();
 		}

@@ -8,6 +8,8 @@ import {
 } from "../src/core/background-tool-task-controller.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
+import { appendTaskStepsStateSnapshot } from "../src/core/tasks/session-task-state.ts";
+import { createTaskStepsState, setTaskSteps } from "../src/core/tasks/task-state.ts";
 import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
 
 const slowParameters = Type.Object({});
@@ -368,7 +370,74 @@ describe("AgentSession background tool tasks", () => {
 		}
 	});
 
-	it("blocks goal continuation locally after a failed durable task wait exhausts recovery", async () => {
+	it("gives a resumed session normal task guidance, because the new user prompt already cleared the refusal", async () => {
+		const sessionManager = SessionManager.inMemory();
+		appendTaskStepsStateSnapshot(
+			sessionManager,
+			setTaskSteps(
+				createTaskStepsState("T0"),
+				[{ content: "Resolve the QA card", activeForm: "Resolving the QA card", status: "in_progress" }],
+				"T1",
+			),
+		);
+		// Persist the refused pair before constructing the resumed session. Loading through
+		// buildSessionContext mirrors the SDK's restore boundary; no live-state seeding is allowed.
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "npm test" } }],
+			api: "openai-completions",
+			provider: "test",
+			model: "faux",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "bash-1",
+			toolName: "bash",
+			content: [{ type: "text", text: '[harness] {"failure_code":"repeated_failed_operation"}' }],
+			isError: true,
+			timestamp: 2,
+		});
+		const restoredMessages = sessionManager.buildSessionContext().messages;
+		const harness = createHarness({ sessionManager, responses: ["acknowledged"] });
+		harness.agent.state.messages = restoredMessages;
+		try {
+			expect(harness.agent.state.messages.at(-1)).toMatchObject({
+				role: "toolResult",
+				toolCallId: "bash-1",
+			});
+
+			await harness.session.prompt("carry on");
+
+			const taskContext = harness.agent.state.messages.flatMap((message) =>
+				message.role === "custom" && typeof message.content === "string" && message.content.includes("TASK STEPS")
+					? [message.content]
+					: [],
+			);
+
+			expect(taskContext).toHaveLength(1);
+			// The prompt that carries this guidance is itself the world advance that re-admits the
+			// operation, so guidance must never describe it as still refused.
+			for (const text of taskContext) {
+				expect(text).toContain("FIRST: continue in_progress step: Resolving the QA card");
+				expect(text).not.toContain("refused");
+				expect(text).not.toContain("replay");
+			}
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("refuses repeated durable-task waits and still lets the model close out the goal turn", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const failedTask: BackgroundToolTaskRecord = {
 			sessionId: sessionManager.getSessionId(),
@@ -415,15 +484,15 @@ describe("AgentSession background tool tasks", () => {
 						: [],
 				)
 				.join("\n");
-			// Terminal recovery is host-delivered: do not buy the queued provider-authored wrap-up.
-			expect(harness.faux.callCount).toBe(4);
-			expect(assistantText).toContain("Tool recovery stopped for tool_task");
-			expect(assistantText).not.toContain("The background task failure requires owner action.");
-			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
-				goalId: "goal-task-wait",
-				status: "blocked",
-				blockedReason: expect.stringContaining("terminal_tool_failure: tool_task"),
-			});
+			// The three identical replays are refused without executing anything, and the model keeps its
+			// turn: the wrap-up is authored by the model rather than substituted by the harness.
+			expect(harness.faux.callCount).toBe(5);
+			expect(assistantText).not.toContain("Tool recovery stopped");
+			expect(assistantText).toContain("The background task failure requires owner action.");
+			// An ordinary repeated tool failure is not a terminal outcome and must not block the goal.
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({ goalId: "goal-task-wait" });
+			expect(harness.session.getGoalStateSnapshot()?.status).not.toBe("blocked");
+			expect(harness.session.getGoalStateSnapshot()?.blockedReason ?? "").not.toContain("terminal_tool_failure");
 		} finally {
 			harness.cleanup();
 		}

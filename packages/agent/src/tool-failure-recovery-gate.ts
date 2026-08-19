@@ -1,32 +1,25 @@
 import { getToolExecutionUnchangedRetryLimit } from "@caupulican/pi-ai/tool-repair-registry";
-import type { ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
-	forEachPairedToolResult,
 	getToolExecutionKey,
 	getToolExecutionKeyHashParts,
 	getToolFailureRecordExecutionKey,
-	isClosedOperationFailureCode,
 	isPromptScopedFailureCode,
 	readVisibleToolFailureCode,
 	restoreToolFailureRecord,
 	sanitizeToolFailureEvidence,
 	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
+import { TOOL_FAILURE_READMISSION_RULE } from "./tool-failure-recovery-protocol.ts";
 import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolFailureEvidenceContext,
-	AgentToolFailureRecoveryAuthority,
+	AgentToolFailureRecoveryAction,
 	AgentToolFailureRecoveryTarget,
-	AgentToolResult,
 } from "./types.ts";
 import { isAgentToolFailureRecoveryAuthority } from "./types.ts";
 
-const MAX_BLOCKED_REPLAYS_PER_FAILURE = 2;
-const BASE_FAILURE_EXECUTIONS_PER_OPERATION = 1;
-const MAX_RECOVERY_PROBES_PER_OPERATION = 1;
-const MAX_REJECTIONS_PER_OPERATION = 4;
-const MAX_HOT_RECOVERY_STATES = 64;
+const MAX_TRACKED_OPERATIONS = 64;
 const SEEN_EXECUTION_FILTER_BYTES = 64 * 1024;
 const MAX_RECOVERY_TARGETS = 8;
 const MAX_RECOVERY_ACTIONS = 8;
@@ -36,10 +29,6 @@ const MAX_ACTION_INSTRUCTION_CHARS = 160;
 const MAX_RECOVERY_GUIDANCE_CHARS = 320;
 const TARGET_KIND_PATTERN = /^[a-z0-9][a-z0-9._:-]*$/;
 
-export interface ToolFailureExecutionReservation {
-	executionKey: string;
-}
-
 export interface ToolFailureRecoveryPlan {
 	targets: readonly AgentToolFailureRecoveryTarget[];
 	guidance: string;
@@ -48,41 +37,32 @@ export interface ToolFailureRecoveryPlan {
 
 export type ToolFailureRecoveryGateEffect =
 	| {
-			kind: "failure";
+			kind: "unproductive";
 			tool?: AgentTool<any>;
 			record: ToolFailureMemoryRecord;
 			args: unknown;
-			targets?: readonly AgentToolFailureRecoveryTarget[];
-			reservation?: ToolFailureExecutionReservation;
 	  }
-	| { kind: "success"; tool: AgentTool<any>; args: unknown; evidenceResult: AgentToolResult<any> };
+	| { kind: "success"; tool: AgentTool<any>; args: unknown };
 
-export type ToolFailureRecoveryAdmission =
-	| { kind: "allowed"; reservation?: ToolFailureExecutionReservation }
-	| { kind: "blocked"; record: ToolFailureMemoryRecord; exhausted: false; diagnostic?: string }
-	| {
-			kind: "blocked";
-			record: ToolFailureMemoryRecord;
-			exhausted: true;
-			scope: "operation" | "run";
-			diagnostic?: string;
-	  };
+export type ToolFailureRecoveryAdmission = { kind: "allowed" } | { kind: "blocked"; record: ToolFailureMemoryRecord };
 
-interface FailureRecoveryState {
+/**
+ * What is known about one exact operation the last time it ran to completion.
+ *
+ * `unproductive` marks an execution that produced nothing the agent can build on — the tool failed,
+ * or it completed and reported a negative operation status. Either way, running the identical
+ * operation again before anything else has changed cannot yield different information.
+ */
+interface OperationState {
 	record: ToolFailureMemoryRecord;
-	recoveryTargets: readonly AgentToolFailureRecoveryTarget[];
-	reservedExecutions: number;
-	failures: number;
-	recoveryProbes: number;
-	blockedReplays: number;
-	recoveryAvailable: boolean;
-	operationCircuitOpen: boolean;
+	worldCursorAtLastExecution: number;
+	/**
+	 * Immediate identical retries this failure class still allows, from the execution-error catalogue.
+	 * Some classes are transient by nature — a timeout, a throttled backend — and repeating the exact
+	 * call really can return something new. Spending these does not depend on the world moving.
+	 */
+	unchangedRetriesRemaining: number;
 }
-
-type TranscriptRecoveryReduction =
-	| { kind: "resolved" }
-	| { kind: "ignored"; state: FailureRecoveryState | undefined }
-	| { kind: "failed"; state: FailureRecoveryState };
 
 interface AvailableRecoveryAction {
 	toolName: string;
@@ -90,26 +70,13 @@ interface AvailableRecoveryAction {
 	instruction: string;
 }
 
-interface ParsedRecoveryAction {
-	kind: "correct" | "repair";
-	authority: AgentToolFailureRecoveryAuthority;
-	targetKind: string;
-	instruction: string;
-	getEvidence?: (params: unknown, result: AgentToolResult<unknown>) => unknown;
-}
-
-export interface ToolFailureRecoveryHalt {
-	record: ToolFailureMemoryRecord;
-	diagnostic: string;
-}
-
 /**
  * Bounded negative lookup for exact execution identities.
  *
- * A miss proves the operation has not failed while this gate has been alive. A hit only means
- * "possibly seen" and must be verified against the transcript, so collisions can cost a scan but
- * can never deny an execution. Keeping this separate from the hot state cache lets old exact
- * circuits survive eviction without retaining one live object graph per historical operation.
+ * A miss proves the operation has not been unproductive while this gate has been alive. A hit only
+ * means "possibly seen" and must be verified against the transcript, so collisions can cost a scan
+ * but can never deny an execution. Keeping this separate from the hot state cache lets old
+ * operations survive eviction without retaining one live object graph per historical operation.
  */
 class SeenExecutionFilter {
 	private readonly bits = new Uint8Array(SEEN_EXECUTION_FILTER_BYTES);
@@ -137,47 +104,64 @@ class SeenExecutionFilter {
 }
 
 /**
- * Owns execution admission and bounded unresolved-failure budgets.
+ * Admission governor for exact tool operations.
  *
- * Recovery authority is exact and tool-owned. A failed tool declares opaque backend-specific targets;
- * a loaded recovery tool may teach actions only for the same authority and target kind. Only raw
- * successful repair evidence with byte-exact scope can reopen one probe. Argument text and hooks have
- * no recovery authority.
+ * It answers exactly one question: can repeating this identical operation, right now, tell the agent
+ * anything it does not already know? An operation whose last execution was unproductive is admitted
+ * again once the world has moved — that is, once any tool has succeeded, or the user has spoken,
+ * since that operation last ran. Until then the replay is refused, because its result is already in
+ * the transcript.
  *
- * Run-level halt stays on the current run, but admission is never denied because unrelated operations
- * happened to fail. A bounded hot cache carries active per-operation state. A fixed-size negative
- * lookup sends an evicted exact replay back to the transcript for authoritative reconstruction, so
- * cache pressure cannot either stop new work or reopen an already-exhausted operation.
+ * The world cursor is the whole budget. There are no per-operation attempt counts, no probe quotas,
+ * and no circuits that stay open for the rest of the session: correct repair work always re-admits
+ * the operation it repaired, however many times the agent needs it.
+ *
+ * Refusal is always local to one operation. This gate cannot deny an unrelated tool, cannot
+ * terminate a tool batch, and cannot end a run — a stuck agent is the runaway-loop backstop's
+ * problem (`maxStallTurns`), and reporting a dead end is the model's own job.
  */
 export class ToolFailureRecoveryGate {
-	private readonly statesByExecutionKey = new Map<string, FailureRecoveryState>();
-	private readonly seenFailedExecutions = new SeenExecutionFilter();
+	private readonly statesByExecutionKey = new Map<string, OperationState>();
+	private readonly seenUnproductiveExecutions = new SeenExecutionFilter();
 	/** Exact successes not yet present in the transcript snapshot consulted by admission. */
 	private readonly resolvedBeforeTranscriptCommit = new Set<string>();
 	private transcriptMessages: readonly AgentMessage[] = [];
 	private transcriptLength = 0;
 	private transcriptTail: AgentMessage | undefined;
 	private restoredFromTranscript = false;
-	private halted: ToolFailureRecoveryHalt | undefined;
+	private worldCursor = 0;
 
 	isEmpty(): boolean {
-		return this.statesByExecutionKey.size === 0 && this.halted === undefined;
+		return this.statesByExecutionKey.size === 0;
 	}
 
 	restoreFromMessages(messages: readonly AgentMessage[]): void {
 		this.trackTranscript(messages);
 		if (this.restoredFromTranscript || !this.isEmpty()) return;
 		this.restoredFromTranscript = true;
-		forEachPairedToolResult(messages, ({ tool, args, executionKey, result }) => {
-			const reduction = this.reduceTranscriptResult(this.statesByExecutionKey.get(executionKey), tool, args, result);
-			if (reduction.kind === "resolved") {
-				this.clearResolvedState(executionKey);
+		this.worldCursor = walkTranscript(messages, (event) => {
+			if (event.kind === "resolved") {
+				this.statesByExecutionKey.delete(event.executionKey);
 				return;
 			}
-			if (reduction.kind === "ignored") return;
-			this.seenFailedExecutions.add(executionKey);
-			this.retainHotState(executionKey, reduction.state);
+			this.seenUnproductiveExecutions.add(event.executionKey);
+			// A restored state starts with no transient-retry allowance: the transcript already shows the
+			// attempts that were made, and the new user turn that triggers a restore has itself moved the
+			// world, which is the broader permission anyway.
+			this.retainState(event.executionKey, {
+				record: event.record,
+				worldCursorAtLastExecution: event.worldCursor,
+				unchangedRetriesRemaining: 0,
+			});
 		});
+	}
+
+	/**
+	 * Record that the world moved for a reason other than a tool result — a new user turn. Authority,
+	 * intent, and files can all change across one, so every operation becomes worth attempting again.
+	 */
+	noteWorldAdvance(): void {
+		this.worldCursor++;
 	}
 
 	planFailure(
@@ -185,22 +169,32 @@ export class ToolFailureRecoveryGate {
 		args: unknown,
 		failure: AgentToolFailureEvidenceContext,
 		availableTools: readonly AgentTool<any>[],
-		reservation: ToolFailureExecutionReservation | undefined,
 	): ToolFailureRecoveryPlan {
 		const targets = readFailureTargets(failedTool, args, failure.failureCode);
 		const actions = readAvailableRecoveryActions(availableTools, targets);
-		const unchangedRetryRemaining = this.hasUnchangedRetryRemaining(
-			failedTool,
-			args,
-			failure.failureCode,
-			reservation,
-		);
 		const evidence = readFailureEvidence(failedTool, args, failure);
 		return {
 			targets,
-			guidance: formatRecoveryGuidance(failure.failureCode, actions, unchangedRetryRemaining),
+			guidance: formatRecoveryGuidance(
+				actions,
+				this.transientRetryStanding(getToolExecutionKey(failedTool.name, args), failure.failureCode),
+			),
 			...(evidence ? { evidence } : {}),
 		};
+	}
+
+	/**
+	 * Whether this failure class allows an immediate identical retry, and whether one survives the
+	 * failure about to be recorded. Read before that failure is observed, so it mirrors exactly what
+	 * `observeUnproductive` is about to leave behind.
+	 */
+	private transientRetryStanding(executionKey: string, failureCode: string): TransientRetryStanding {
+		const retryLimit = getToolExecutionUnchangedRetryLimit(failureCode);
+		if (retryLimit === 0) return "none";
+		const state = this.statesByExecutionKey.get(executionKey);
+		const remaining =
+			!state || state.worldCursorAtLastExecution !== this.worldCursor ? retryLimit : state.unchangedRetriesRemaining;
+		return remaining > 0 ? "available" : "spent";
 	}
 
 	admit(
@@ -210,180 +204,68 @@ export class ToolFailureRecoveryGate {
 		messages: readonly AgentMessage[] = this.transcriptMessages,
 	): ToolFailureRecoveryAdmission {
 		this.trackTranscript(messages);
-		const runHalt = this.halted;
-		if (runHalt) {
-			return {
-				kind: "blocked",
-				record: runHalt.record,
-				exhausted: true,
-				scope: "run",
-				diagnostic: runHalt.diagnostic,
-			};
-		}
-
 		const executionKey = getToolExecutionKey(tool.name, args);
 		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) return { kind: "allowed" };
 		let state = this.getHotState(executionKey);
-		if (!state && this.seenFailedExecutions.mightContain(executionKey)) {
+		if (!state && this.seenUnproductiveExecutions.mightContain(executionKey)) {
 			state = this.restoreOperationFromTranscript(executionKey);
 		}
-		if (!state && record && getToolFailureRecordExecutionKey(record) === executionKey) {
-			state = this.getOrCreateState(executionKey, record, readFailureTargets(tool, args, record.failureCode));
+		if (
+			!state &&
+			record &&
+			getToolFailureRecordExecutionKey(record) === executionKey &&
+			// A prompt-scoped block is cleared by a new owner prompt, never by the agent. It is not a
+			// repetition state, so it must not become one through the caller's failure memory either.
+			!isPromptScopedFailureCode(record.failureCode)
+		) {
+			state = { record, worldCursorAtLastExecution: this.worldCursor, unchangedRetriesRemaining: 0 };
+			this.retainState(executionKey, state);
 		}
 		if (!state) return { kind: "allowed" };
-
 		if (record && getToolFailureRecordExecutionKey(record) === executionKey) state.record = record;
-		if (state.operationCircuitOpen) {
-			if (state.recoveryAvailable && state.recoveryProbes < MAX_RECOVERY_PROBES_PER_OPERATION) {
-				state.operationCircuitOpen = false;
-				state.recoveryAvailable = false;
-				state.recoveryProbes++;
-				state.reservedExecutions++;
-				state.blockedReplays = 0;
-				return { kind: "allowed", reservation: { executionKey } };
-			}
-			if (usesOperationLocalExhaustion(tool)) {
-				const diagnostic = `Operation recovery circuit remains closed after replay of ${state.record.failureCode}.`;
-				return { kind: "blocked", record: state.record, exhausted: true, scope: "operation", diagnostic };
-			}
-			const diagnostic = `Run recovery circuit opened after replay of an operation whose local circuit was already open for ${state.record.failureCode}.`;
-			this.halted = { record: state.record, diagnostic };
-			return { kind: "blocked", record: state.record, exhausted: true, scope: "run", diagnostic };
+		if (this.worldCursor > state.worldCursorAtLastExecution) return { kind: "allowed" };
+		if (state.unchangedRetriesRemaining > 0) {
+			state.unchangedRetriesRemaining--;
+			return { kind: "allowed" };
 		}
-		const automaticExecutionLimit =
-			BASE_FAILURE_EXECUTIONS_PER_OPERATION + getToolExecutionUnchangedRetryLimit(state.record.failureCode);
-		if (state.reservedExecutions < automaticExecutionLimit) {
-			state.reservedExecutions++;
-			state.blockedReplays = 0;
-			return { kind: "allowed", reservation: { executionKey } };
-		}
-		if (state.recoveryAvailable && state.recoveryProbes < MAX_RECOVERY_PROBES_PER_OPERATION) {
-			state.recoveryAvailable = false;
-			state.recoveryProbes++;
-			state.reservedExecutions++;
-			state.blockedReplays = 0;
-			return { kind: "allowed", reservation: { executionKey } };
-		}
-
-		state.blockedReplays++;
-		if (state.blockedReplays >= MAX_BLOCKED_REPLAYS_PER_FAILURE) {
-			state.operationCircuitOpen = true;
-			const diagnostic = `Operation recovery circuit opened after ${state.blockedReplays} blocked replays of ${state.record.failureCode}.`;
-			return { kind: "blocked", record: state.record, exhausted: true, scope: "operation", diagnostic };
-		}
-		return { kind: "blocked", record: state.record, exhausted: false };
+		return { kind: "blocked", record: state.record };
 	}
 
-	apply(effect: ToolFailureRecoveryGateEffect | undefined): ToolFailureRecoveryHalt | undefined {
-		if (!effect || this.halted) return undefined;
+	apply(effect: ToolFailureRecoveryGateEffect | undefined): void {
+		if (!effect) return;
 		if (effect.kind === "success") {
-			this.observeSuccess(effect.tool, effect.args, effect.evidenceResult);
-			return undefined;
+			this.observeSuccess(effect.tool, effect.args);
+			return;
 		}
-		this.observeFailure(effect.tool, effect.record, effect.args, effect.targets ?? [], effect.reservation);
-		return this.halted;
+		this.observeUnproductive(effect.record, effect.args);
 	}
 
-	isHalted(): boolean {
-		return this.halted !== undefined;
-	}
-
-	getHalt(): ToolFailureRecoveryHalt | undefined {
-		return this.halted;
-	}
-
-	private hasUnchangedRetryRemaining(
-		tool: AgentTool<any>,
-		args: unknown,
-		failureCode: string,
-		reservation: ToolFailureExecutionReservation | undefined,
-	): boolean {
-		const retryLimit = getToolExecutionUnchangedRetryLimit(failureCode);
-		if (retryLimit === 0) return false;
-		const executionKey = getToolExecutionKey(tool.name, args);
-		const state = this.statesByExecutionKey.get(executionKey);
-		const executionsIncludingCurrent = state
-			? state.reservedExecutions + (reservation?.executionKey === executionKey ? 0 : 1)
-			: 1;
-		return executionsIncludingCurrent < BASE_FAILURE_EXECUTIONS_PER_OPERATION + retryLimit;
-	}
-
-	private getOrCreateState(
-		executionKey: string,
-		record: ToolFailureMemoryRecord,
-		targets: readonly AgentToolFailureRecoveryTarget[],
-	): FailureRecoveryState {
-		const existing = this.getHotState(executionKey);
-		if (existing) return existing;
-		const state = createFailureRecoveryState(record, targets);
-		this.retainHotState(executionKey, state);
-		return state;
-	}
-
-	private observeFailure(
-		tool: AgentTool<any> | undefined,
-		record: ToolFailureMemoryRecord,
-		args: unknown,
-		targets: readonly AgentToolFailureRecoveryTarget[],
-		reservation: ToolFailureExecutionReservation | undefined,
-	): void {
+	private observeUnproductive(record: ToolFailureMemoryRecord, args: unknown): void {
 		const executionKey = getToolExecutionKey(record.tool, args);
 		this.resolvedBeforeTranscriptCommit.delete(executionKey);
-		this.seenFailedExecutions.add(executionKey);
-		const state = this.getOrCreateState(executionKey, record, targets);
-		if (this.halted) return;
-		const startsNewEpisode = state.failures > 0 && !sameFailureOutcome(state.record, record);
-		if (startsNewEpisode) resetFailureEpisode(state);
-		state.record = record;
-		state.recoveryTargets = targets;
-		state.recoveryAvailable = false;
-		state.blockedReplays = 0;
-		if (startsNewEpisode || reservation?.executionKey !== executionKey) state.reservedExecutions++;
-
-		state.failures++;
-
-		const operationFailureLimit =
-			record.state === "failed"
-				? BASE_FAILURE_EXECUTIONS_PER_OPERATION +
-					getToolExecutionUnchangedRetryLimit(record.failureCode) +
-					MAX_RECOVERY_PROBES_PER_OPERATION
-				: MAX_REJECTIONS_PER_OPERATION;
-		if (state.failures >= operationFailureLimit) {
-			if (usesOperationLocalExhaustion(tool)) {
-				state.operationCircuitOpen = true;
-				return;
-			}
-			this.halted = {
-				record,
-				diagnostic: `Recovery circuit opened after ${state.failures} failed outcomes for one operation.`,
-			};
-		}
+		this.seenUnproductiveExecutions.add(executionKey);
+		const previous = this.statesByExecutionKey.get(executionKey);
+		// The transient-retry allowance belongs to one episode: it refills when the world has moved
+		// since this operation last ran, and is otherwise spent down so a transient class cannot
+		// bankroll an unbounded run of identical calls.
+		const startsFreshEpisode = !previous || previous.worldCursorAtLastExecution !== this.worldCursor;
+		this.retainState(executionKey, {
+			record,
+			worldCursorAtLastExecution: this.worldCursor,
+			unchangedRetriesRemaining: startsFreshEpisode
+				? getToolExecutionUnchangedRetryLimit(record.failureCode)
+				: previous.unchangedRetriesRemaining,
+		});
 	}
 
-	private observeSuccess(tool: AgentTool<any>, args: unknown, result: AgentToolResult<any>): void {
-		const successfulExecutionKey = getToolExecutionKey(tool.name, args);
+	private observeSuccess(tool: AgentTool<any>, args: unknown): void {
+		const executionKey = getToolExecutionKey(tool.name, args);
 		// Tool results are appended to the transcript after the current execution batch completes.
 		// Until then the last persisted failure is stale authority: remember the exact success so a
 		// later sequential call in this same batch cannot resurrect that failure from the transcript.
-		this.resolvedBeforeTranscriptCommit.add(successfulExecutionKey);
-		const evidenceTargets = readRecoveryEvidenceTargets(tool, args, result);
-		for (const [executionKey, state] of this.statesByExecutionKey) {
-			if (executionKey === successfulExecutionKey) {
-				this.clearResolvedState(executionKey);
-				continue;
-			}
-			if (
-				state.recoveryProbes < MAX_RECOVERY_PROBES_PER_OPERATION &&
-				hasSharedRecoveryTarget(state.recoveryTargets, evidenceTargets)
-			) {
-				state.recoveryAvailable = true;
-				state.blockedReplays = 0;
-			}
-		}
-	}
-
-	private clearResolvedState(executionKey: string): void {
+		this.resolvedBeforeTranscriptCommit.add(executionKey);
 		this.statesByExecutionKey.delete(executionKey);
+		this.worldCursor++;
 	}
 
 	private trackTranscript(messages: readonly AgentMessage[]): void {
@@ -402,7 +284,7 @@ export class ToolFailureRecoveryGate {
 		this.transcriptTail = tail;
 	}
 
-	private getHotState(executionKey: string): FailureRecoveryState | undefined {
+	private getHotState(executionKey: string): OperationState | undefined {
 		const state = this.statesByExecutionKey.get(executionKey);
 		if (!state) return undefined;
 		this.statesByExecutionKey.delete(executionKey);
@@ -410,83 +292,76 @@ export class ToolFailureRecoveryGate {
 		return state;
 	}
 
-	private retainHotState(executionKey: string, state: FailureRecoveryState): void {
+	private retainState(executionKey: string, state: OperationState): void {
 		this.statesByExecutionKey.delete(executionKey);
 		this.statesByExecutionKey.set(executionKey, state);
-		while (this.statesByExecutionKey.size > MAX_HOT_RECOVERY_STATES) {
+		while (this.statesByExecutionKey.size > MAX_TRACKED_OPERATIONS) {
 			const oldest = this.statesByExecutionKey.keys().next().value;
 			if (oldest === undefined) break;
 			this.statesByExecutionKey.delete(oldest);
 		}
 	}
 
-	private restoreOperationFromTranscript(executionKey: string): FailureRecoveryState | undefined {
-		let restoredState: FailureRecoveryState | undefined;
-		forEachPairedToolResult(this.transcriptMessages, ({ tool, args, executionKey: candidateKey, result }) => {
-			if (candidateKey !== executionKey) return;
-			const reduction = this.reduceTranscriptResult(restoredState, tool, args, result);
-			if (reduction.kind === "resolved") {
-				restoredState = undefined;
-				return;
-			}
-			if (reduction.kind === "failed") restoredState = reduction.state;
+	private restoreOperationFromTranscript(executionKey: string): OperationState | undefined {
+		let restored: OperationState | undefined;
+		walkTranscript(this.transcriptMessages, (event) => {
+			if (event.executionKey !== executionKey) return;
+			restored =
+				event.kind === "resolved"
+					? undefined
+					: { record: event.record, worldCursorAtLastExecution: event.worldCursor, unchangedRetriesRemaining: 0 };
 		});
-		if (restoredState) this.retainHotState(executionKey, restoredState);
-		return restoredState;
-	}
-
-	private reduceTranscriptResult(
-		state: FailureRecoveryState | undefined,
-		tool: string,
-		args: unknown,
-		result: ToolResultMessage,
-	): TranscriptRecoveryReduction {
-		if (!result.isError) return { kind: "resolved" };
-		const record = restoreToolFailureRecord(result, tool, args);
-		const visibleCode = readVisibleToolFailureCode(result);
-		if (isPromptScopedFailureCode(visibleCode) || isPromptScopedFailureCode(record.failureCode)) {
-			return { kind: "ignored", state };
-		}
-		const next = state ?? createFailureRecoveryState(record, []);
-		if (isClosedOperationFailureCode(visibleCode)) {
-			next.record = record;
-			next.operationCircuitOpen = true;
-			next.blockedReplays = MAX_BLOCKED_REPLAYS_PER_FAILURE;
-			next.recoveryAvailable = false;
-			return { kind: "failed", state: next };
-		}
-		if (visibleCode === "repeated_failed_operation") {
-			next.record = record;
-			next.blockedReplays++;
-			return { kind: "failed", state: next };
-		}
-		if (next.failures > 0 && !sameFailureOutcome(next.record, record)) resetFailureEpisode(next);
-		next.record = record;
-		next.reservedExecutions++;
-		next.failures++;
-		return { kind: "failed", state: next };
+		if (restored) this.retainState(executionKey, restored);
+		return restored;
 	}
 }
 
-function usesOperationLocalExhaustion(tool: AgentTool<any> | undefined): boolean {
-	return tool?.failureRecovery?.exhaustionScope === "operation";
-}
+type TranscriptEvent =
+	| { kind: "resolved"; executionKey: string; worldCursor: number }
+	| { kind: "unproductive"; executionKey: string; worldCursor: number; record: ToolFailureMemoryRecord };
 
-function sameFailureOutcome(left: ToolFailureMemoryRecord, right: ToolFailureMemoryRecord): boolean {
-	return (
-		left.failureCode === right.failureCode &&
-		left.outputSignature !== undefined &&
-		left.outputSignature === right.outputSignature
-	);
-}
-
-function resetFailureEpisode(state: FailureRecoveryState): void {
-	state.reservedExecutions = 0;
-	state.failures = 0;
-	state.recoveryProbes = 0;
-	state.blockedReplays = 0;
-	state.recoveryAvailable = false;
-	state.operationCircuitOpen = false;
+/**
+ * Replay a transcript's world advances in order, reporting each completed operation with the cursor
+ * value that was current when it ran. Advances are counted exactly as the live gate counts them —
+ * every successful tool result, plus every user turn — so a resumed session admits precisely what an
+ * uninterrupted one would. Returns the final cursor.
+ */
+function walkTranscript(messages: readonly AgentMessage[], visit: (event: TranscriptEvent) => void): number {
+	const callsById = new Map<string, { name: string; args: unknown }>();
+	let worldCursor = 0;
+	for (const message of messages) {
+		if (message.role === "user") {
+			worldCursor++;
+			continue;
+		}
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "toolCall") callsById.set(block.id, { name: block.name, args: block.arguments });
+			}
+			continue;
+		}
+		if (message.role !== "toolResult") continue;
+		const call = callsById.get(message.toolCallId);
+		if (!call) continue;
+		callsById.delete(message.toolCallId);
+		const executionKey = getToolExecutionKey(call.name, call.args);
+		if (!message.isError) {
+			worldCursor++;
+			visit({ kind: "resolved", executionKey, worldCursor });
+			continue;
+		}
+		const record = restoreToolFailureRecord(message, call.name, call.args);
+		// A prompt-scoped block is cleared by a new owner prompt, not by anything the agent can do, so
+		// it never becomes a repetition state.
+		if (
+			isPromptScopedFailureCode(readVisibleToolFailureCode(message)) ||
+			isPromptScopedFailureCode(record.failureCode)
+		) {
+			continue;
+		}
+		visit({ kind: "unproductive", executionKey, worldCursor, record });
+	}
+	return worldCursor;
 }
 
 function readFailureEvidence(
@@ -503,22 +378,6 @@ function readFailureEvidence(
 	} catch {
 		return undefined;
 	}
-}
-
-function createFailureRecoveryState(
-	record: ToolFailureMemoryRecord,
-	recoveryTargets: readonly AgentToolFailureRecoveryTarget[],
-): FailureRecoveryState {
-	return {
-		record,
-		recoveryTargets,
-		reservedExecutions: 0,
-		failures: 0,
-		recoveryProbes: 0,
-		blockedReplays: 0,
-		recoveryAvailable: false,
-		operationCircuitOpen: false,
-	};
 }
 
 function readFailureTargets(
@@ -609,7 +468,7 @@ function readDeclaredRecoveryActions(tool: AgentTool<any>): readonly unknown[] {
 	}
 }
 
-function parseRecoveryAction(value: unknown): ParsedRecoveryAction | undefined {
+function parseRecoveryAction(value: unknown): AgentToolFailureRecoveryAction | undefined {
 	try {
 		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 		const candidate = value as {
@@ -617,89 +476,47 @@ function parseRecoveryAction(value: unknown): ParsedRecoveryAction | undefined {
 			authority?: unknown;
 			targetKind?: unknown;
 			instruction?: unknown;
-			getEvidence?: unknown;
 		};
 		if (
+			(candidate.kind !== "correct" && candidate.kind !== "repair") ||
 			!isAgentToolFailureRecoveryAuthority(candidate.authority) ||
 			!validTargetKind(candidate.targetKind) ||
 			typeof candidate.instruction !== "string"
 		) {
 			return undefined;
 		}
-		if (candidate.kind === "correct") {
-			return {
-				kind: candidate.kind,
-				authority: candidate.authority,
-				targetKind: candidate.targetKind,
-				instruction: candidate.instruction,
-			};
-		}
-		if (candidate.kind !== "repair" || typeof candidate.getEvidence !== "function") return undefined;
-		const getEvidence = candidate.getEvidence;
 		return {
 			kind: candidate.kind,
 			authority: candidate.authority,
 			targetKind: candidate.targetKind,
 			instruction: candidate.instruction,
-			getEvidence: (params, result) => Reflect.apply(getEvidence, value, [params, result]),
 		};
 	} catch {
 		return undefined;
 	}
 }
 
-function readRecoveryEvidenceTargets(
-	tool: AgentTool<any>,
-	args: unknown,
-	result: AgentToolResult<any>,
-): readonly AgentToolFailureRecoveryTarget[] {
-	const targets: AgentToolFailureRecoveryTarget[] = [];
-	for (const candidate of readDeclaredRecoveryActions(tool)) {
-		const action = parseRecoveryAction(candidate);
-		if (targets.length >= MAX_RECOVERY_TARGETS || !action || action.kind !== "repair" || !action.getEvidence) {
-			continue;
-		}
-		let scopes: unknown;
-		try {
-			scopes = action.getEvidence(args, result);
-		} catch {
-			continue;
-		}
-		if (!Array.isArray(scopes)) continue;
-		for (const scope of scopes) {
-			if (targets.length >= MAX_RECOVERY_TARGETS) break;
-			if (!validTargetScope(scope)) continue;
-			const target = { authority: action.authority, kind: action.targetKind, scope };
-			if (!targets.some((candidate) => sameRecoveryTarget(candidate, target))) targets.push(target);
-		}
-	}
-	return targets;
-}
+type TransientRetryStanding = "none" | "available" | "spent";
 
+/**
+ * The admission rule comes first and is never the part that truncates: a model that reads only the
+ * opening clause still learns exactly what makes this operation runnable again.
+ */
 function formatRecoveryGuidance(
-	failureCode: string,
 	actions: readonly AvailableRecoveryAction[],
-	unchangedRetryRemaining: boolean,
+	transientRetry: TransientRetryStanding,
 ): string {
-	const hasTimeoutRetryPolicy = getToolExecutionUnchangedRetryLimit(failureCode) > 0;
-	const timeoutPolicy = hasTimeoutRetryPolicy
-		? unchangedRetryRemaining
-			? "Timeout policy allows 1 unchanged retry; if it fails, never retry unchanged."
-			: "Timeout unchanged retry exhausted; never retry unchanged."
-		: undefined;
+	const rule =
+		transientRetry === "available"
+			? `This failure class allows 1 immediate unchanged retry. ${TOOL_FAILURE_READMISSION_RULE}`
+			: transientRetry === "spent"
+				? `Unchanged retry spent. ${TOOL_FAILURE_READMISSION_RULE}`
+				: TOOL_FAILURE_READMISSION_RULE;
 	if (actions.length === 0) {
-		if (timeoutPolicy) return `${timeoutPolicy} Change/narrow operation, or report blocker.`;
-		return "No loaded tool declares recovery. Never retry unchanged. Use materially different operation justified by diagnostic/schema, or report blocker.";
+		return `${rule} Do the corrective work first, or use a materially different operation justified by the diagnostic.`;
 	}
 	const available = actions.map((action) => `${action.toolName} ${action.kind}: ${action.instruction}`).join(" ");
-	const hasRepair = actions.some((action) => action.kind === "repair");
-	const authority = hasRepair
-		? "Only exact matching repair evidence grants 1 probe; else change operation."
-		: "Actions require changed operation; unchanged remains blocked.";
-	return truncate(
-		`${timeoutPolicy ? `${timeoutPolicy} ` : ""}Loaded actions: ${available} ${authority}`,
-		MAX_RECOVERY_GUIDANCE_CHARS,
-	);
+	return truncate(`${rule} Loaded actions: ${available}`, MAX_RECOVERY_GUIDANCE_CHARS);
 }
 
 function truncate(value: string, maxChars: number): string {
@@ -709,12 +526,4 @@ function truncate(value: string, maxChars: number): string {
 
 function sameRecoveryTarget(left: AgentToolFailureRecoveryTarget, right: AgentToolFailureRecoveryTarget): boolean {
 	return left.authority === right.authority && left.kind === right.kind && left.scope === right.scope;
-}
-
-function hasSharedRecoveryTarget(
-	left: readonly AgentToolFailureRecoveryTarget[],
-	right: readonly AgentToolFailureRecoveryTarget[],
-): boolean {
-	if (left.length > right.length) return hasSharedRecoveryTarget(right, left);
-	return left.some((target) => right.some((candidate) => sameRecoveryTarget(target, candidate)));
 }

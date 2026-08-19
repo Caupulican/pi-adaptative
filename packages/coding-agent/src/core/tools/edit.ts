@@ -30,7 +30,6 @@ import {
 	fileRecoveryTarget,
 	selectFileFailureRecoveryAuthority,
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
-	workspaceRecoveryScope,
 } from "./file-failure-recovery.ts";
 import {
 	FileMutationIdentityError,
@@ -471,7 +470,6 @@ export function createEditToolDefinition(
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
 		failureRecovery: {
-			exhaustionScope: "operation",
 			getFailureEvidence: (_params, failure) =>
 				failure.failureCode === "edit_old_text_not_found" ? failure.message : undefined,
 			getFailureTargets: (params, failure) => {
@@ -511,11 +509,7 @@ export function createEditToolDefinition(
 								authority: failureRecoveryAuthority.contractAuthority,
 								targetKind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 								instruction:
-									"When a command failed because workspace contents need repair, edit the existing file and rerun that exact command once.",
-								getEvidence: (_params: EditToolInput, result: { details?: EditToolDetails }) =>
-									result.details?.phase === "edited"
-										? [workspaceRecoveryScope(failureRecoveryAuthority, cwd)]
-										: [],
+									"When a command failed because workspace contents need repair, edit the existing file and rerun that exact command.",
 							},
 						]
 					: []),

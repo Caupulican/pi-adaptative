@@ -375,6 +375,16 @@ export interface AssistantMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/**
+ * Why an errored tool result is an error.
+ *
+ * `tool_failure` — the tool could not perform the operation. `operation_outcome` — the tool ran the
+ * operation to completion and is reporting its negative status (a process exit code, an empty match).
+ * Absent means `tool_failure`, so results written before a tool classified itself are never mistaken
+ * for completed operations.
+ */
+export type ToolErrorKind = "tool_failure" | "operation_outcome";
+
 export interface ToolResultMessage<TDetails = any> {
 	role: "toolResult";
 	toolCallId: string;
@@ -384,6 +394,8 @@ export interface ToolResultMessage<TDetails = any> {
 	/** Provider usage spent inside a model-backed tool, when reported by that tool. */
 	usage?: Usage;
 	isError: boolean;
+	/** Only meaningful when `isError`; absent is read as `tool_failure`. */
+	errorKind?: ToolErrorKind;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

@@ -470,7 +470,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Optional compatibility shim to prepare raw tool call arguments before schema validation. Must return an object conforming to TParams. */
 	prepareArguments?: (args: unknown) => Static<TParams>;
 	/** Explicit tool-owned failure targets, corrective actions, and exact recovery evidence. */
-	failureRecovery?: AgentToolFailureRecoveryContract<TParams, TDetails>;
+	failureRecovery?: AgentToolFailureRecoveryContract<TParams>;
 
 	/**
 	 * Per-tool execution mode override.

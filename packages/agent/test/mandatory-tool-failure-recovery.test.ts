@@ -10,7 +10,6 @@ import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";
 import {
 	createRepeatedToolFailureResult,
-	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	sanitizeToolFailureContext,
 	type ToolFailureMemoryRecord,
@@ -132,7 +131,7 @@ describe("mandatory tool failure recovery protocol", () => {
 	it("keeps the mandatory standing template compact", () => {
 		expect(MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT.length).toBeLessThan(650);
 	});
-	it("uses one explicit mandatory template for repair, execution, blocked, and exhausted failures", () => {
+	it("uses one explicit mandatory template for repair, execution, and blocked failures", () => {
 		const record = failureRecord();
 		const repairRecord: ToolFailureMemoryRecord = {
 			...record,
@@ -145,7 +144,6 @@ describe("mandatory tool failure recovery protocol", () => {
 			textPayload(createToolFailureResult(repairRecord)),
 			textPayload(createToolFailureResult(record)),
 			textPayload(createRepeatedToolFailureResult(record)),
-			textPayload(createToolFailureRecoveryExhaustedResult(record, "Recovery circuit opened.")),
 		];
 
 		for (const payload of payloads) {
@@ -184,16 +182,34 @@ describe("mandatory tool failure recovery protocol", () => {
 
 		expect(sanitized.systemPrompt).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
 		expect(sanitized.systemPrompt).toContain("MANDATORY AND NON-NEGOTIABLE");
-		expect(sanitized.systemPrompt).toContain(
-			"CAVEMAN MODE - MANDATORY: blocked/rejected means not executed; never repeat the same call",
-		);
+		expect(sanitized.systemPrompt).toContain("MANDATORY: blocked/rejected means not executed");
 		expect(sanitized.systemPrompt).toContain("Irrelevant argument changes never recover it");
 		expect(sanitized.systemPrompt).toContain("blocked call preserves tool-result pairing but runs no hook/tool code");
 		expect(sanitized.systemPrompt).toContain('"MUST":true');
 		expect(sanitized.systemPrompt).not.toContain("<mandatory_tool_failure");
+
+		// The standing prompt must teach the world-cursor rule and nothing that outlived it.
+		expect(sanitized.systemPrompt).toContain(
+			"Do not immediately replay the unchanged operation. The operation is readmitted after another tool succeeds or a new user turn.",
+		);
+		expect(sanitized.systemPrompt).toContain("Refusal is only ever this one operation");
+		for (const removed of [
+			"never repeat the same call",
+			"before another tool call",
+			"permission",
+			"one probe",
+			"probe",
+			"exhaustion",
+			"exhausted",
+			"ends the run",
+			"exact scope",
+			"backend authority",
+		]) {
+			expect(MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT).not.toContain(removed);
+		}
 	});
 
-	it("emits a local terminal diagnostic without paying for another provider turn", async () => {
+	it("keeps refusing one unchanged operation while the model keeps its own turn to report", async () => {
 		const schema = Type.Object({ action: Type.String(), project: Type.String() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof schema> = {
@@ -259,22 +275,35 @@ describe("mandatory tool failure recovery protocol", () => {
 			),
 		);
 
+		// The operation ran once; every identical replay was refused without executing anything. The
+		// harness never took the turn away, so the model reached its own closing message.
 		expect(executions).toBe(1);
-		expect(providerTurns).toBe(4);
-		expect(providerContexts).toHaveLength(4);
+		expect(providerTurns).toBe(5);
+		expect(providerContexts).toHaveLength(5);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "message_end" &&
 					event.message.role === "assistant" &&
 					event.message.content.some(
-						(block) => block.type === "text" && block.text.includes("Tool recovery stopped for trello"),
+						(block) =>
+							block.type === "text" && block.text === "Trello is blocked until its credentials are connected.",
 					),
 			),
 		).toBe(true);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.content.some(
+						(block) => block.type === "text" && block.text.includes("Tool recovery stopped"),
+					),
+			),
+		).toBe(false);
 	});
 
-	it("keeps unrelated tools available when one exact operation exhausts recovery", async () => {
+	it("keeps unrelated tools available while one exact operation stays refused", async () => {
 		const trelloSchema = Type.Object({ action: Type.String(), project: Type.String() });
 		const readSchema = Type.Object({ path: Type.String() });
 		let trelloExecutions = 0;
@@ -366,11 +395,9 @@ describe("mandatory tool failure recovery protocol", () => {
 		expect(providerTurns).toBe(5);
 		expect(providerContexts[3]?.tools?.map((tool) => tool.name)).toEqual(["trello", "read_repo"]);
 		expect(providerContexts[3]?.systemPrompt).not.toContain("MANDATORY TOOL FAILURE DELIVERY");
-		expect(providerContexts[3]?.systemPrompt).toContain(
-			"Closed: this exact operation was not executed and will not run again this session",
-		);
 		expect(providerContexts[3]?.systemPrompt).toContain("Trello credentials not found.");
 		expect(providerContexts[3]?.systemPrompt).not.toContain("Stop retrying tools in this run");
+		expect(providerContexts[3]?.systemPrompt).not.toContain("will not run again this session");
 		expect(
 			events.some(
 				(event) =>
@@ -378,17 +405,17 @@ describe("mandatory tool failure recovery protocol", () => {
 					event.message.role === "toolResult" &&
 					event.message.toolCallId === "trello-3" &&
 					event.message.content.some(
-						(block) =>
-							block.type === "text" && block.text.includes('"failure_code":"operation_recovery_exhausted"'),
+						(block) => block.type === "text" && block.text.includes('"failure_code":"repeated_failed_operation"'),
 					),
 			),
 		).toBe(true);
 	});
 
-	it("never opens a provider turn that could hallucinate another tool call after recovery halts", async () => {
+	it("runs a refused replay through neither the tool nor its hooks, and leaves stopping to the runaway backstop", async () => {
 		const schema = Type.Object({ value: Type.String() });
 		let executions = 0;
 		let beforeCalls = 0;
+		const runawayStops: string[] = [];
 		const failingTool: AgentTool<typeof schema> = {
 			name: "probe",
 			label: "Probe",
@@ -430,10 +457,13 @@ describe("mandatory tool failure recovery protocol", () => {
 				{
 					model: createModel(),
 					convertToLlm: identityConverter,
-					maxStallTurns: 0,
+					maxStallTurns: 3,
 					beforeToolCall: async () => {
 						beforeCalls++;
 						return undefined;
+					},
+					onRunawayStop: ({ reason }) => {
+						runawayStops.push(reason);
 					},
 				},
 				undefined,
@@ -441,27 +471,23 @@ describe("mandatory tool failure recovery protocol", () => {
 			),
 		);
 
+		// One execution, one hook call: every later replay is refused before any tool or hook code runs.
+		// The fourth request is the tool-free closing turn the stall stop spends.
 		expect(providerTurns).toBe(4);
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
-		expect(
-			events.some(
-				(event) =>
-					event.type === "message_end" &&
-					event.message.role === "toolResult" &&
-					event.message.toolCallId === "delivery-violation",
-			),
-		).toBe(false);
+		// The recovery gate never ends a run. A model wedged on one action is the cost guard's job.
+		expect(runawayStops).toEqual(["repeated_tool_call"]);
 		expect(
 			events.some(
 				(event) =>
 					event.type === "message_end" &&
 					event.message.role === "assistant" &&
 					event.message.content.some(
-						(block) => block.type === "text" && block.text.includes("Tool recovery stopped for probe"),
+						(block) => block.type === "text" && block.text.includes("Tool recovery stopped"),
 					),
 			),
-		).toBe(true);
+		).toBe(false);
 	});
 
 	it("leads with catalogued policy guidance before the gate's loaded actions", async () => {
@@ -530,7 +556,7 @@ describe("mandatory tool failure recovery protocol", () => {
 		const record = failureRecordOf(messages.find((message) => message.role === "toolResult"));
 		expect(record.failureCode).toBe("exit_7");
 		expect(record.correction).toBe(
-			"No loaded tool declares recovery. Never retry unchanged. Use materially different operation justified by diagnostic/schema, or report blocker.",
+			"The operation is readmitted after another tool succeeds or a new user turn. Do the corrective work first, or use a materially different operation justified by the diagnostic.",
 		);
 		expect(record.evidence).toBe("backend handshake rejected the session token");
 	});

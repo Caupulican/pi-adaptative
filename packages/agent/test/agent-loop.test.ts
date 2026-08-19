@@ -736,8 +736,6 @@ describe("agentLoop with AgentMessage", () => {
 						authority: recoveryAuthority,
 						targetKind,
 						instruction: "Run the declared shell recovery check.",
-						getEvidence: (params, result) =>
-							params.command === recoveryCommand && result.details.command === recoveryCommand ? [command] : [],
 					},
 				],
 			},
@@ -823,7 +821,9 @@ describe("agentLoop with AgentMessage", () => {
 		expect(providerContexts[1]?.systemPrompt).not.toContain('"repair":');
 		expect(providerContexts[1]?.systemPrompt).not.toContain("Change the arguments or approach before retrying");
 		expect(JSON.stringify(providerContexts[1])).not.toContain("RAW_FAILURE_OUTPUT");
-		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
+		// The call the agent made and its bounded record both stay in the transcript: the ledger
+		// summarizes what is unresolved, it does not replace the agent's record of its own actions.
+		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(true);
 		expect(providerContexts[2]?.systemPrompt).toContain('"occ":2');
 		expect(providerContexts[2]?.systemPrompt.match(/failure_key/g) ?? []).toHaveLength(1);
 		expect(providerContexts[3]?.systemPrompt).toContain('"occ":2');
@@ -877,8 +877,6 @@ describe("agentLoop with AgentMessage", () => {
 						authority: recoveryAuthority,
 						targetKind,
 						instruction: "Run the constrained repair check.",
-						getEvidence: (params, result) =>
-							params.command === "repair check" && result.details.exitCode === 0 ? ["check"] : [],
 					},
 				],
 			},
@@ -982,7 +980,7 @@ describe("agentLoop with AgentMessage", () => {
 		});
 		expect(JSON.stringify(toolResults[0])).not.toContain("stdout: (empty)");
 		expect(providerContexts[1]?.systemPrompt).toContain('"diagnostic":"error: repair marker"');
-		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
+		expect(providerContexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(true);
 		expect(providerContexts[2]?.systemPrompt).toContain('"diagnostic":"error: repair marker"');
 		expect(providerContexts[3]?.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
 		expect(toolResults[1]).toMatchObject({ isError: false, usage });
@@ -1103,8 +1101,9 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(providerContext?.systemPrompt).toContain("ACTIVE TOOL FAILURES");
 		expect(providerContext?.systemPrompt).toContain("legacy command");
+		// The unbounded legacy result is bounded in place; the call that produced it still stands.
 		expect(JSON.stringify(providerContext)).not.toContain("LEGACY_RAW_OUTPUT");
-		expect(providerContext?.messages.some((message) => message.role === "toolResult")).toBe(false);
+		expect(providerContext?.messages.some((message) => message.role === "toolResult")).toBe(true);
 		expect(JSON.stringify(transformInput)).not.toContain("LEGACY_RAW_OUTPUT");
 	});
 
@@ -1164,7 +1163,7 @@ describe("agentLoop with AgentMessage", () => {
 			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"file_not_found"') }),
 		]);
 		expect(JSON.stringify(toolResult)).toContain(
-			"Path not found. List parent directory or re-read path before retry. No loaded tool declares recovery",
+			"Path not found. List parent directory or re-read path before retry. The operation is readmitted after another tool succeeds or a new user turn",
 		);
 		expect(JSON.stringify(toolResult)).toContain("ENOENT: no such file or directory, open 'missing.txt'");
 	});

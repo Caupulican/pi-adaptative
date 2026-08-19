@@ -244,7 +244,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
-	it("blocks an active goal when the tool-failure recovery circuit terminates the run", async () => {
+	it("keeps an active goal open when one unchanged failed operation is repeatedly refused", async () => {
 		let executions = 0;
 		const failingTool: AgentTool = {
 			name: "failing_tool",
@@ -274,13 +274,62 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			await harness.session.prompt("go", { autoContinueGoal: false });
 
 			expect(executions).toBe(1);
-			// Terminal recovery is delivered locally; the queued provider-authored wrap-up is never
-			// purchased after the circuit has already proved that the operation cannot recover.
+			expect(harness.getPendingResponseCount()).toBe(0);
+			const assistantText = harness.session.messages
+				.flatMap((message) =>
+					message.role === "assistant"
+						? message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+						: [],
+				)
+				.join("\n");
+			expect(assistantText).toContain("The tool failure requires owner action.");
+			const goal = harness.session.getGoalStateSnapshot();
+			expect(goal).toMatchObject({ goalId: "goal-recovery" });
+			expect(goal?.status).not.toBe("blocked");
+			expect(goal?.blockedReason ?? "").not.toContain("terminal_tool_failure");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("still blocks an active goal when a tool explicitly terminates with an error", async () => {
+		let executions = 0;
+		const terminalTool: AgentTool = {
+			name: "terminal_tool",
+			label: "Terminal Tool",
+			description: "Explicitly terminates the current tool batch",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				return {
+					content: [{ type: "text", text: "backend revoked this session" }],
+					details: {},
+					isError: true,
+					terminate: true,
+				};
+			},
+		};
+		const harness = await createHarness({ tools: [terminalTool] });
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-terminal", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			harness.session.agent.maxStallTurns = 0;
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("terminal_tool", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage("unreachable wrap-up"),
+			]);
+
+			await harness.session.prompt("go", { autoContinueGoal: false });
+
+			expect(executions).toBe(1);
 			expect(harness.getPendingResponseCount()).toBe(1);
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
-				goalId: "goal-recovery",
+				goalId: "goal-terminal",
 				status: "blocked",
-				blockedReason: expect.stringContaining("terminal_tool_failure: failing_tool"),
+				blockedReason: expect.stringContaining("terminal_tool_failure: terminal_tool"),
 			});
 		} finally {
 			harness.cleanup();

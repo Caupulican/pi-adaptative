@@ -182,18 +182,6 @@ describe("task step state", () => {
 		expect(state.steps[0]).not.toHaveProperty("pipelineStageId");
 	});
 
-	it("does not tell the model to continue an in_progress step after recovery exhaustion", () => {
-		const state = setTaskSteps(
-			createTaskStepsState("T0"),
-			[{ content: "Resolve Trello QA card", activeForm: "Resolving Trello QA card", status: "in_progress" }],
-			"T1",
-		);
-		const context = formatTaskStepsContext(state, 12, true);
-		expect(context).toContain("recovery exhausted");
-		expect(context).toContain("Do not repeat that call");
-		expect(context).not.toContain("continue in_progress step");
-	});
-
 	it("dedupes a duplicate open add but still allows a terminal same-content re-add", () => {
 		const state = addTaskStep(createTaskStepsState("T0"), { content: "Inspect behavior" }, "T1");
 

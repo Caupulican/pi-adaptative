@@ -9,11 +9,9 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import {
 	FILE_EXISTS_RECOVERY_TARGET_KIND,
 	type FileFailureRecoveryAuthority,
-	fileRecoveryScope,
 	selectFileFailureRecoveryAuthority,
 	WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 	WRITE_RETARGET_RECOVERY_TARGET_KIND,
-	workspaceRecoveryScope,
 } from "./file-failure-recovery.ts";
 import {
 	type FileContentReference,
@@ -356,21 +354,13 @@ export function createWriteToolDefinition(
 								targetKind: FILE_EXISTS_RECOVERY_TARGET_KIND,
 								instruction:
 									"If the goal requires this exact missing file and its content is known, create it with write.",
-								getEvidence: (params: WriteToolInput, result: { details: WriteToolDetails }) =>
-									result.details.phase === "written"
-										? [fileRecoveryScope(failureRecoveryAuthority, params.path, cwd)]
-										: [],
 							},
 							{
 								kind: "repair" as const,
 								authority: failureRecoveryAuthority.contractAuthority,
 								targetKind: WORKSPACE_MUTATED_RECOVERY_TARGET_KIND,
 								instruction:
-									"When a command failed because workspace contents need repair, create the required file and rerun that exact command once.",
-								getEvidence: (_params: WriteToolInput, result: { details: WriteToolDetails }) =>
-									result.details.phase === "written"
-										? [workspaceRecoveryScope(failureRecoveryAuthority, cwd)]
-										: [],
+									"When a command failed because workspace contents need repair, create the required file and rerun that exact command.",
 							},
 						]
 					: []),

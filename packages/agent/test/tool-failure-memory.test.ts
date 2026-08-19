@@ -2,15 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	assessToolFailure,
 	createRepeatedToolFailureResult,
-	createToolFailureOperationExhaustedResult,
-	createToolFailureRecoveryExhaustedResult,
 	createToolFailureResult,
 	getToolExecutionKey,
 	normalizeToolSignature,
 	rememberToolFailure,
 	sanitizeToolFailureContext,
 	type ToolFailureMemoryRecord,
-	transcriptHasClosedToolOperation,
 } from "../src/tool-failure-memory.ts";
 import type { AgentMessage } from "../src/types.ts";
 
@@ -266,11 +263,13 @@ describe("tool failure memory", () => {
 
 		expect(sanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
 		expect(sanitized.systemPrompt).toContain('"kind_mistakes":1');
-		expect(sanitized.systemPrompt).toContain("matching backend authority, target kind, and exact scope");
+		expect(sanitized.systemPrompt).toContain(
+			"The operation is readmitted after another tool succeeds or a new user turn",
+		);
 		expect(sanitized.systemPrompt).not.toContain("<harness_tool_failures");
 	});
 
-	it("bounds tool-owned evidence and projects newest snapshots within one aggregate budget", () => {
+	it("bounds tool-owned evidence per record and keeps it in the transcript instead of the ledger", () => {
 		const tracker = new Map();
 		const messages: AgentMessage[] = [];
 		for (let index = 0; index < 3; index++) {
@@ -332,13 +331,20 @@ describe("tool failure memory", () => {
 			.split("\n")
 			.filter((line) => line.startsWith("{") && line.includes('"failure_key"'))
 			.map((line) => JSON.parse(line) as { evidence?: string });
-		const projectedEvidence = projectedRecords.flatMap((record) =>
-			record.evidence === undefined ? [] : [record.evidence],
+		// Every call the agent made, and the bounded record it got back, stay exactly where they happened.
+		expect(nextRequest.messages).toEqual(messages);
+		expect(projectedRecords).toHaveLength(3);
+		// The ledger names what is unresolved; it never re-sends evidence already sitting in the transcript.
+		expect(projectedRecords.every((record) => record.evidence === undefined)).toBe(true);
+		expect(nextRequest.systemPrompt).not.toContain("CURRENT_SOURCE_");
+		const transcriptEvidence = messages.flatMap((message) =>
+			message.role === "toolResult" && message.content[0]?.type === "text" ? [message.content[0].text] : [],
 		);
-		expect(nextRequest.messages).toEqual([]);
-		expect(projectedEvidence.reduce((total, evidence) => total + evidence.length, 0)).toBeLessThanOrEqual(2_400);
-		expect(projectedEvidence.some((evidence) => evidence.startsWith("CURRENT_SOURCE_2"))).toBe(true);
-		expect(projectedEvidence.some((evidence) => evidence.startsWith("CURRENT_SOURCE_0"))).toBe(false);
+		expect(transcriptEvidence).toHaveLength(3);
+		for (const [index, text] of transcriptEvidence.entries()) {
+			expect(text).toContain(`CURRENT_SOURCE_${index}`);
+			expect(text.length).toBeLessThanOrEqual(2_400);
+		}
 	});
 
 	it("fingerprints large operations without retaining or serializing their payload", () => {
@@ -602,10 +608,9 @@ describe("tool failure memory", () => {
 		expect(secondText).toContain('"failure_code":"repeated_failed_operation"');
 		expect(secondText).toContain('"diagnostic":"svn: invalid option: --stat"');
 		expect(secondText).toContain(
-			'"note":"The unchanged operation was not executed. Unchanged replay blocked after invalid_option"',
+			'"note":"Not executed: unchanged. The operation is readmitted after another tool succeeds or a new user turn."',
 		);
-		expect(secondText.match(/Unchanged replay blocked/g)).toHaveLength(1);
-		expect(secondText.match(/The unchanged operation was not executed\./g)).toHaveLength(1);
+		expect(secondText.match(/Not executed: unchanged/g)).toHaveLength(1);
 	});
 
 	it("leads a blocked replay with the retained root-cause diagnostic and keeps the replay notice as a note", () => {
@@ -621,7 +626,7 @@ describe("tool failure memory", () => {
 		expect(text).toContain('"failure_code":"repeated_failed_operation"');
 		expect(text).toContain("ENOENT: no such file or directory, open '/repo/docs/missing.txt'");
 		expect(text).toContain(
-			'"note":"The unchanged operation was not executed. Unchanged replay blocked after file_not_found"',
+			'"note":"Not executed: unchanged. The operation is readmitted after another tool succeeds or a new user turn."',
 		);
 		expect(text).toContain('"next_action":"Path not found. List parent directory or re-read path before retry."');
 		expect(text).not.toContain("CAVEMAN");
@@ -638,11 +643,11 @@ describe("tool failure memory", () => {
 		const text = blocked.content[0]?.type === "text" ? blocked.content[0].text : "";
 
 		expect(text).toContain(
-			'"diagnostic":"The unchanged operation was not executed. Unchanged replay blocked after exit_1"',
+			'"diagnostic":"Not executed: unchanged. The operation is readmitted after another tool succeeds or a new user turn."',
 		);
 		expect(text).not.toContain('"note":');
 		expect(text).toContain(
-			'"next_action":"Blocked: this exact operation will not run again this session — change the operation or continue other work."',
+			'"next_action":"Not executed: its last result is already above. Do corrective work or use a different operation. The operation is readmitted after another tool succeeds or a new user turn."',
 		);
 		expect(blocked.details.piToolFailureMemory.correction).toBe("Use the contract guidance.");
 	});
@@ -664,7 +669,7 @@ describe("tool failure memory", () => {
 		});
 		expect(text).toContain('"diagnostic":"error[E0433]: cannot find `windows` in `os`"');
 		expect(text).toContain(
-			'"note":"The unchanged operation was not executed. Unchanged replay blocked after exit_101"',
+			'"note":"Not executed: unchanged. The operation is readmitted after another tool succeeds or a new user turn."',
 		);
 		expect(text).toContain(retained.correction);
 		expect(text).not.toContain("CAVEMAN");
@@ -705,7 +710,7 @@ describe("tool failure memory", () => {
 		expect(nextRequest.systemPrompt).toContain("error[E0433]: cannot find `windows` in `os`");
 	});
 
-	it("keeps a local exhausted operation blocked while directing independent work", () => {
+	it("refuses an unchanged replay without terminating, and without paying for the same evidence twice", () => {
 		const original = {
 			...record("failed", "edit_old_text_not_found"),
 			diagnostic: "The exact oldText anchor is absent.",
@@ -713,91 +718,89 @@ describe("tool failure memory", () => {
 			correction: "Use current source to submit changed exact anchors.",
 		};
 
-		const exhausted = createToolFailureOperationExhaustedResult(
-			original,
-			"Operation recovery circuit opened after two blocked replays.",
-		);
-		const text = exhausted.content[0]?.type === "text" ? exhausted.content[0].text : "";
+		const blocked = createRepeatedToolFailureResult(original);
+		const text = blocked.content[0]?.type === "text" ? blocked.content[0].text : "";
 
-		expect(exhausted.terminate).toBe(false);
-		expect(text).toContain('"failure_code":"operation_recovery_exhausted"');
+		// Refusing one replay never ends anything: no terminate flag, and no instruction to stop.
+		expect(blocked.terminate).toBeUndefined();
+		expect(text).toContain('"failure_code":"repeated_failed_operation"');
 		expect(text).toContain('"diagnostic":"The exact oldText anchor is absent."');
-		expect(text).toContain('"note":"Operation recovery circuit opened after two blocked replays."');
-		expect(text).toContain(
-			"Closed: this exact operation was not executed and will not run again this session — use a different operation or continue other work.",
-		);
-		expect(text).not.toContain("CAVEMAN");
+		expect(text).toContain("Not executed: unchanged");
+		expect(text).toContain("The operation is readmitted after another tool succeeds or a new user turn");
+		// The retained root-cause correction stays the actionable next_action.
+		expect(text).toContain('"next_action":"Use current source to submit changed exact anchors."');
 		expect(text).not.toContain("Stop retrying tools in this run");
-		expect(text).toContain("Current source sha256 abcdef123456");
-		expect(exhausted.details.piToolFailureMemory).toMatchObject({
+		expect(text).not.toContain("will not run again this session");
+		// Nothing executed, so this result restates no evidence; the prior run's copy still stands in
+		// the transcript, and retained memory keeps it for the next block.
+		expect(text).not.toContain("Current source sha256 abcdef123456");
+		expect(blocked.details.piToolFailureMemory).toMatchObject({
 			failureCode: "edit_old_text_not_found",
 			diagnostic: original.diagnostic,
 			evidence: original.evidence,
-			correction: expect.stringContaining("will not run again this session"),
 			occurrence: 2,
 		});
 	});
 
-	it("terminates a run-wide exhausted recovery circuit without replacing its root evidence", () => {
-		const original = {
-			...record("failed", "file_not_found"),
-			diagnostic: "ENOENT: missing.txt",
-			correction: "Create or retarget the missing path.",
-		};
-
-		const exhausted = createToolFailureRecoveryExhaustedResult(
-			original,
-			"Recovery circuit opened after two blocked replays.",
+	it("clears an earlier failure once the same operation runs and reports its own status", () => {
+		const tracker = new Map();
+		const args = { command: "python3 -m unittest tests.test_head_aim" };
+		const failed = rememberToolFailure(
+			tracker,
+			"bash",
+			args,
+			"failed",
+			"command_not_found",
+			"Install python3 before retrying.",
+			"python3: command not found",
 		);
-		const text = exhausted.content[0]?.type === "text" ? exhausted.content[0].text : "";
-
-		expect(exhausted.terminate).toBe(true);
-		expect(text).toContain('"failure_code":"recovery_exhausted"');
-		expect(text).toContain('"diagnostic":"ENOENT: missing.txt"');
-		expect(text).toContain('"note":"Recovery circuit opened after two blocked replays."');
-		expect(text).toContain("Stop retrying tools in this run");
-		expect(exhausted.details.piToolFailureMemory).toMatchObject({
-			failureCode: "file_not_found",
-			diagnostic: original.diagnostic,
-			correction: original.correction,
-			occurrence: 2,
-		});
-	});
-
-	it("detects a closed identical operation from persisted recovery_exhausted results", () => {
-		const original = record("failed", "error");
-		const exhausted = createToolFailureRecoveryExhaustedResult(original, "run circuit opened");
-		const args = { action: "list_lists", envFile: "/tmp/trello.env" };
-		const messages: AgentMessage[] = [
-			{
-				role: "assistant",
-				content: [{ type: "toolCall", id: "trello-1", name: "trello", arguments: args }],
-				api: "openai-responses",
-				provider: "openai",
-				model: "mock",
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "toolUse",
-				timestamp: 1,
+		const assistant = (id: string): AgentMessage => ({
+			role: "assistant",
+			content: [{ type: "toolCall", id, name: "bash", arguments: args }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		});
+		// A pre-fix transcript: the tool genuinely could not run, recorded as a harness failure. Then,
+		// after this change, the same operation runs to completion and reports a non-zero exit.
+		const messages: AgentMessage[] = [
+			assistant("bash-1"),
 			{
 				role: "toolResult",
-				toolCallId: "trello-1",
-				toolName: "trello",
-				content: exhausted.content,
-				details: exhausted.details,
+				toolCallId: "bash-1",
+				toolName: "bash",
+				content: createToolFailureResult(failed).content,
+				details: createToolFailureResult(failed).details,
 				isError: true,
-				timestamp: 1,
+				timestamp: 2,
+			},
+			assistant("bash-2"),
+			{
+				role: "toolResult",
+				toolCallId: "bash-2",
+				toolName: "bash",
+				content: [{ type: "text", text: "FAILED (errors=2)\n\nCommand exited with code 1" }],
+				isError: true,
+				errorKind: "operation_outcome",
+				timestamp: 3,
 			},
 		];
-		expect(transcriptHasClosedToolOperation(messages)).toBe(true);
-		expect(transcriptHasClosedToolOperation(JSON.parse(JSON.stringify(messages)) as AgentMessage[])).toBe(true);
+
+		const sanitized = sanitizeToolFailureContext(messages, "base");
+		expect(sanitized.systemPrompt).toBe("base");
+		expect(sanitized.systemPrompt).not.toContain("ACTIVE TOOL FAILURES");
+		expect(sanitized.systemPrompt).not.toContain("command_not_found");
+		expect(sanitized.messages).toEqual(messages);
 	});
 
 	it("forgets an encoding-corrupt attempt after one change-approach directive", () => {
@@ -968,6 +971,7 @@ describe("tool failure memory", () => {
 			],
 			"base",
 		);
+		// A discard-attempt directive hands the agent a payloadRef, so the original call comes out.
 		expect(nextRequest.messages).toEqual([]);
 		expect(nextRequest.systemPrompt).toContain(payloadRef);
 		expect(nextRequest.systemPrompt).not.toContain("GENERATED_CONTENT_MUST_NOT_SURVIVE");
@@ -1041,7 +1045,7 @@ describe("tool failure memory", () => {
 
 		const sanitized = sanitizeToolFailureContext(messages, "base");
 
-		expect(sanitized.messages).toEqual([]);
+		expect(sanitized.messages).toEqual(messages);
 		expect(sanitized.systemPrompt).toContain('"next_action":');
 		expect(sanitized.systemPrompt).toContain("No diagnostic output");
 		expect(sanitized.systemPrompt).not.toContain("Change the arguments or approach");

@@ -122,6 +122,30 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(prompt).not.toContain("wildcard profile");
 	});
 
+	it.each(["lean", "minimal"] as const)(
+		"teaches the world-cursor retry rule to the %s execution profile",
+		(capabilityClass) => {
+			const prompt = new SystemPromptBuilder(
+				makeDeps({
+					getModelCapabilityProfile: () => ({
+						class: capabilityClass,
+						contextWindow: 16_384,
+						reasonCode: "test",
+						systemPromptMaxChars: 8_192,
+						backgroundLanesEnabled: true,
+						laneMaxOutputTokens: 2_048,
+					}),
+				}),
+			).rebuildSystemPrompt(["read"]);
+
+			expect(prompt).toContain(
+				"Do not immediately replay the unchanged operation. The operation is readmitted after another tool succeeds or a new user turn.",
+			);
+			expect(prompt).not.toContain("never repeat unchanged failure");
+			expect(prompt).not.toContain("never repeat the same call");
+		},
+	);
+
 	it("keeps skill metadata host-side for extensions without rendering a catalog", () => {
 		const skill = {
 			name: "secret-skill",

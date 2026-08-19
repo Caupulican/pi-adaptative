@@ -3,6 +3,7 @@
  */
 
 import { dirname } from "node:path";
+import { TOOL_FAILURE_RETRY_MODEL_RULE } from "@caupulican/pi-agent-core";
 import { getReadmePath } from "../config.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { Extension } from "./extensions/types.ts";
@@ -65,7 +66,7 @@ OPERATING CONTRACT
 
 - Complete current goal within scope, granted authority; keep progress, evidence concise.
 - Inspect relevant files and instructions before editing; make minimal coherent change, run focused checks.
-- Use active tools, exact schemas. On failure, read error, expected shape, correct call; never repeat unchanged failure.
+- Use active tools, exact schemas. On failure, read error, expected shape, correct call. ${TOOL_FAILURE_RETRY_MODEL_RULE}
 - Batch independent reads, order mutations; report real output, unresolved failures.
 - Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, scope expansion.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
@@ -75,7 +76,7 @@ const PI_ADAPTATIVE_MINIMAL_CORE_SECTION = `
 EXECUTION RULES
 
 - Work one scoped task. Inspect before editing, make small coherent change, run narrowest useful check.
-- Use listed tools, exact schemas. On failure, read error, expected shape, correct call; never repeat unchanged failure.
+- Use listed tools, exact schemas. On failure, read error, expected shape, correct call. ${TOOL_FAILURE_RETRY_MODEL_RULE}
 - Batch independent reads, order mutations. Report actual results; never claim incomplete action.
 - Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, material scope change.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;

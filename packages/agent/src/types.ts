@@ -11,6 +11,7 @@ import type {
 	TextContent,
 	Tool,
 	ToolArgumentValidationTelemetryEvent,
+	ToolErrorKind,
 	ToolResultMessage,
 	Usage,
 } from "@caupulican/pi-ai";
@@ -378,8 +379,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Optional provider-request fuse for one logical prompt, including host continuations.
 	 * Unlike {@link maxStallTurns}, this also catches varied tool churn that never repeats an exact
-	 * signature. The loop emits a local terminal diagnostic before another provider request. Positive
-	 * values explicitly enable the fuse; `0` disables it. Default: {@link DEFAULT_MAX_PROVIDER_TURNS}.
+	 * signature. The loop stops before another provider request without fabricating an assistant
+	 * message. Positive values explicitly enable the fuse; `0` disables it. Default:
+	 * {@link DEFAULT_MAX_PROVIDER_TURNS}.
 	 */
 	maxProviderTurns?: number;
 
@@ -568,20 +570,46 @@ export interface AgentState {
 export type AgentMessageOrigin = "local";
 
 /**
+ * Why an errored tool result is an error. These are different events and the harness treats them differently.
+ *
+ * `tool_failure` — the tool could not perform the operation at all: rejected arguments, denied
+ * authority, a timeout, a crash. The operation never happened, the harness owns the diagnostic it
+ * shows the model, and it replaces the result with a bounded failure record.
+ *
+ * `operation_outcome` — the tool performed the operation completely and is reporting the
+ * operation's own negative status: a process exit code, a search that matched nothing, a predicate
+ * that answered false. Nothing failed; this is the observation the agent asked for. The harness
+ * leaves the tool's own output exactly as returned and never rewrites it into a failure record.
+ *
+ * Both are unproductive to repeat while nothing else has changed, so both are observed by the
+ * repetition governor in {@link "./tool-failure-recovery-gate.ts"}. Neither may ever end a run.
+ */
+export type AgentToolErrorKind = ToolErrorKind;
+
+/**
  * Structured execution failure emitted by a tool when recovery identity must not depend on rendered diagnostics.
  *
  * `failureCode` identifies the tool-owned terminal outcome. `outputSignature` identifies the complete raw
- * operation output, including bytes omitted from bounded model-facing previews.
+ * operation output, including bytes omitted from bounded model-facing previews. `errorKind` says whether the
+ * tool failed or completed and reported a negative operation status; it defaults to `tool_failure` so a tool
+ * that has not classified itself is never mistaken for a completed operation.
  */
 export class AgentToolExecutionError extends Error {
 	readonly failureCode: string;
 	readonly outputSignature: string;
+	readonly errorKind: AgentToolErrorKind;
 
-	constructor(message: string, failureCode: string, outputSignature: string) {
+	constructor(
+		message: string,
+		failureCode: string,
+		outputSignature: string,
+		errorKind: AgentToolErrorKind = "tool_failure",
+	) {
 		super(message);
 		this.name = "AgentToolExecutionError";
 		this.failureCode = failureCode;
 		this.outputSignature = outputSignature;
+		this.errorKind = errorKind;
 	}
 }
 
@@ -599,6 +627,11 @@ export interface AgentToolResult<T> {
 	 * record. Throwing remains valid for exceptional execution failures.
 	 */
 	isError?: boolean;
+	/**
+	 * Classifies an errored result. Defaults to `tool_failure`; set `operation_outcome` when the tool
+	 * ran the operation to completion and `isError` only reports the operation's own negative status.
+	 */
+	errorKind?: AgentToolErrorKind;
 	/** Provider usage spent inside this tool, for durable budget and cost accounting. */
 	usage?: Usage;
 	/**
@@ -656,28 +689,22 @@ export interface AgentToolFailureEvidenceContext extends AgentToolFailureRecover
 /**
  * One action a tool can actually perform for a declared failure target.
  *
- * A `correct` action teaches a materially changed operation and never unlocks an unchanged retry.
- * A `repair` action must emit exact evidence after success; only that evidence may unlock one probe.
+ * Actions are teaching only: they name the corrective work that makes a retry worth attempting. They
+ * do not grant execution budget — admission is governed solely by whether anything has succeeded
+ * since the operation last ran (see `ToolFailureRecoveryGate`).
+ *
+ * A `correct` action teaches a materially changed operation. A `repair` action teaches corrective
+ * work on the state the failed operation depends on, after which the same operation is worth rerunning.
  */
-export type AgentToolFailureRecoveryAction<TParameters extends TSchema, TDetails> =
-	| {
-			kind: "correct";
-			authority: AgentToolFailureRecoveryAuthority;
-			targetKind: string;
-			instruction: string;
-	  }
-	| {
-			kind: "repair";
-			authority: AgentToolFailureRecoveryAuthority;
-			targetKind: string;
-			instruction: string;
-			getEvidence: (params: Static<TParameters>, result: AgentToolResult<TDetails>) => readonly string[];
-	  };
+export type AgentToolFailureRecoveryAction = {
+	kind: "correct" | "repair";
+	authority: AgentToolFailureRecoveryAuthority;
+	targetKind: string;
+	instruction: string;
+};
 
 /** Tool-owned failure targets and recovery actions. Undeclared behavior has no recovery authority. */
-export interface AgentToolFailureRecoveryContract<TParameters extends TSchema, TDetails> {
-	/** Keep exhaustion local to this operation when another operation can still correct it. Defaults to run. */
-	exhaustionScope?: "operation" | "run";
+export interface AgentToolFailureRecoveryContract<TParameters extends TSchema> {
 	/** Derive exact recovery requirements from validated arguments and a classified failure. */
 	getFailureTargets?: (
 		params: Static<TParameters>,
@@ -689,7 +716,7 @@ export interface AgentToolFailureRecoveryContract<TParameters extends TSchema, T
 	 */
 	getFailureEvidence?: (params: Static<TParameters>, failure: AgentToolFailureEvidenceContext) => string | undefined;
 	/** Actions this tool can perform when it is present in the active tool surface. */
-	actions?: readonly AgentToolFailureRecoveryAction<TParameters, TDetails>[];
+	actions?: readonly AgentToolFailureRecoveryAction[];
 }
 
 /** Tool definition used by the agent runtime. */
@@ -704,7 +731,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
 	/** Explicit failure-recovery authority; the agent loop never infers recovery from argument text. */
-	failureRecovery?: AgentToolFailureRecoveryContract<TParameters, TDetails>;
+	failureRecovery?: AgentToolFailureRecoveryContract<TParameters>;
 	/**
 	 * Execute the tool call. Throw for exceptional execution failures, or return
 	 * `{ isError: true }` with bounded diagnostic content for an expected

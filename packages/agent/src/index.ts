@@ -17,6 +17,8 @@ export * from "./reliability/index.ts";
 export * from "./session/message-retention.ts";
 // Provider-neutral failed tool-call context boundary
 export * from "./tool-failure-memory.ts";
+// Shared model-facing recovery doctrine
+export * from "./tool-failure-recovery-protocol.ts";
 // Native tool-call markup that escaped as assistant text
 export * from "./tool-protocol-residue.ts";
 // Types

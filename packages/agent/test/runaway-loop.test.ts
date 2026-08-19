@@ -48,7 +48,10 @@ function createModel() {
 	};
 }
 
-function assistantMessage(content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"]) {
+function assistantMessage<TStopReason extends AssistantMessage["stopReason"]>(
+	content: AssistantMessage["content"],
+	stopReason: TStopReason,
+) {
 	return {
 		role: "assistant" as const,
 		content,
@@ -230,13 +233,15 @@ describe("runaway-loop backstop", () => {
 		await agent.continue();
 
 		expect(stalls).toEqual([expect.objectContaining({ repeats: 4 })]);
-		expect(providerCalls).toBe(5);
+		// Four looping turns plus the one tool-free request that lets the model close.
+		expect(providerCalls).toBe(6);
 	});
 
 	it("retains an explicit provider-turn fuse across a host continuation", async () => {
 		let providerCalls = 0;
 		const stalls: Array<{ reason?: string; signature: string; repeats: number }> = [];
 		const localTerminalMessages: AssistantMessage[] = [];
+		const events: AgentEvent[] = [];
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
@@ -268,6 +273,7 @@ describe("runaway-loop backstop", () => {
 		});
 		agent.maxStallTurns = 0;
 		agent.subscribe((event) => {
+			events.push(event);
 			if (event.type === "message_end" && event.origin === "local" && event.message.role === "assistant") {
 				localTerminalMessages.push(event.message);
 			}
@@ -287,11 +293,13 @@ describe("runaway-loop backstop", () => {
 		expect(stalls).toEqual([
 			expect.objectContaining({ reason: "provider_turn_limit", signature: "provider_turn_limit", repeats: 3 }),
 		]);
-		expect(localTerminalMessages).toHaveLength(1);
-		expect(localTerminalMessages[0]?.role).toBe("assistant");
-		expect(localTerminalMessages[0]?.content).toEqual([
-			expect.objectContaining({ type: "text", text: expect.stringContaining("Configured provider turn limit (3)") }),
-		]);
+		expect(localTerminalMessages).toEqual([]);
+		expect(JSON.stringify(agent.state.messages)).not.toContain("Configured provider turn limit");
+		// A provider-limit stop is not an assistant turn, so removing the old synthetic assistant must
+		// not leave an unmatched turn_start behind for extensions or UI state machines.
+		expect(events.filter((event) => event.type === "turn_start")).toHaveLength(3);
+		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(3);
+		expect(events.at(-1)?.type).toBe("agent_end");
 	});
 
 	it("does not accumulate changed-operation failures across a host continuation", async () => {
@@ -404,7 +412,7 @@ describe("runaway-loop backstop", () => {
 		// Backstop tripped exactly at the limit and ended the run.
 		expect(stalls).toHaveLength(1);
 		expect(stalls[0].repeats).toBe(4);
-		expect(toolCalls).toBe(4); // did not run beyond the limit
+		expect(toolCalls).toBe(5); // four looping turns, then one tool-free closing request
 		expect(executions).toBe(1); // repeated phone calls teach without replaying the successful operation
 		const rejectedRepeats = events.filter((event) => event.type === "tool_execution_end" && event.isError);
 		expect(rejectedRepeats).toHaveLength(3);
@@ -764,13 +772,17 @@ describe("runaway-loop backstop", () => {
 					)?.text ?? "",
 			);
 
+		// Reordered argument keys are the same operation, so only the first call ever executes. Every
+		// later replay gets the same refusal — it never escalates into a different, harsher code.
 		expect(executions).toBe(1);
 		expect(toolEndMessages).toHaveLength(4);
-		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
-		expect(toolEndMessages[2]).toContain('"failure_code":"operation_recovery_exhausted"');
-		expect(toolEndMessages[3]).toContain('"failure_code":"recovery_exhausted"');
-		expect(stalls).toHaveLength(0);
-		expect(toolFreeProviderTurns).toBe(0);
+		for (const message of toolEndMessages.slice(1)) {
+			expect(message).toContain('"failure_code":"repeated_failed_operation"');
+		}
+		// The wedged model is stopped by the cost guard, which is the only thing here that ends a run.
+		expect(stalls).toHaveLength(1);
+		// The stall stop spends exactly one tool-free request so the model closes in its own words.
+		expect(toolFreeProviderTurns).toBe(1);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
@@ -838,7 +850,216 @@ describe("runaway-loop backstop", () => {
 
 		expect(executions).toBe(1);
 		expect(toolEndMessages[1]).toContain('"failure_code":"repeated_failed_operation"');
-		expect(deliveryTurns).toBe(0);
+		expect(deliveryTurns).toBe(1);
+	});
+
+	it("closes a stalled run with exactly one tool-free provider request and no further tool work", async () => {
+		let executions = 0;
+		const stalls: Array<{ reason?: string }> = [];
+		const toolCounts: number[] = [];
+		const systemPrompts: string[] = [];
+		let turns = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [createEchoTool(() => executions++)] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 3,
+					onRunawayStop: (info) => stalls.push(info),
+				},
+				undefined,
+				(_model, providerContext: { systemPrompt?: string; tools?: readonly unknown[] }) => {
+					toolCounts.push(providerContext.tools?.length ?? -1);
+					systemPrompts.push(providerContext.systemPrompt ?? "");
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turns++;
+						// The normal closing response follows the request-local instruction and returns text.
+						stream.push(
+							providerContext.tools?.length === 0
+								? {
+										type: "done",
+										reason: "stop",
+										message: assistantMessage(
+											[{ type: "text", text: "Stuck on one call; stopping." }],
+											"stop",
+										),
+									}
+								: {
+										type: "done",
+										reason: "toolUse",
+										message: assistantMessage(
+											[
+												{
+													type: "toolCall",
+													id: `echo-${turns}`,
+													name: "echo",
+													arguments: { value: "stuck" },
+												},
+											],
+											"toolUse",
+										),
+									},
+						);
+					});
+					return stream;
+				},
+			),
+		);
+
+		expect(stalls).toEqual([expect.objectContaining({ reason: "repeated_tool_call" })]);
+		// Three looping requests carried tools; exactly one closing request carried none.
+		expect(toolCounts).toEqual([1, 1, 1, 0]);
+		expect(systemPrompts[3]).toContain("RUNAWAY STOP CLOSING TURN");
+		expect(systemPrompts[3]).toContain("Do not emit a tool call or tool-call markup");
+		// The tool ran for the three admitted calls and never for the closing turn.
+		expect(executions).toBe(3);
+		expect(
+			events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
+		).toHaveLength(3);
+		// The model authored the closing text; the harness added none of its own.
+		const assistantTexts = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "assistant"
+				? event.message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+				: [],
+		);
+		expect(assistantTexts).toContain("Stuck on one call; stopping.");
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(events.at(-1)?.type).toBe("agent_end");
+	});
+
+	it.each([
+		{
+			kind: "native",
+			closingMessage: () =>
+				assistantMessage(
+					[{ type: "toolCall", id: "closing-native", name: "echo", arguments: { value: "stuck" } }],
+					"toolUse",
+				),
+		},
+		{
+			kind: "rendered",
+			closingMessage: () =>
+				assistantMessage([{ type: "text", text: 'to=functions.echo code\n{"value":"stuck"}' }], "stop"),
+		},
+		{
+			kind: "rendered unavailable-tool",
+			closingMessage: () =>
+				assistantMessage([{ type: "text", text: 'to=functions.not_loaded code\n{"value":"stuck"}' }], "stop"),
+		},
+	])("rejects a $kind tool call from the tool-free closing response", async ({ closingMessage }) => {
+		let executions = 0;
+		const toolCounts: number[] = [];
+		const systemPrompts: string[] = [];
+		let turns = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "base", messages: [], tools: [createEchoTool(() => executions++)] },
+				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 2 },
+				undefined,
+				(_model, providerContext: { systemPrompt?: string; tools?: readonly unknown[] }) => {
+					toolCounts.push(providerContext.tools?.length ?? -1);
+					systemPrompts.push(providerContext.systemPrompt ?? "");
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turns++;
+						if (providerContext.tools?.length === 0) {
+							const closing = closingMessage();
+							const reason = closing.stopReason;
+							if (reason !== "length" && reason !== "stop" && reason !== "toolUse") {
+								throw new Error(`Invalid completed closing response: ${reason}`);
+							}
+							stream.push({ type: "done", reason, message: closing });
+							return;
+						}
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: assistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: `echo-${turns}`,
+										name: "echo",
+										arguments: { value: "stuck" },
+									},
+								],
+								"toolUse",
+							),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		expect(toolCounts).toEqual([1, 1, 0]);
+		expect(systemPrompts[2]).toContain("RUNAWAY STOP CLOSING TURN");
+		expect(executions).toBe(2);
+		expect(
+			events.filter((event) => event.type === "message_end" && event.message.role === "toolResult"),
+		).toHaveLength(2);
+		const finalAssistant = events.findLast(
+			(event): event is Extract<AgentEvent, { type: "message_end" }> & { message: AssistantMessage } =>
+				event.type === "message_end" && event.message.role === "assistant",
+		)?.message;
+		expect(finalAssistant).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("tool_free_response_tool_call"),
+		});
+		expect(finalAssistant?.content.some((block) => block.type === "toolCall")).toBe(false);
+		expect(finalAssistant?.content.some((block) => block.type === "text" && block.text.length > 0)).toBe(false);
+		expect(events.at(-1)?.type).toBe("agent_end");
+	});
+
+	it("skips the closing request when the provider-turn limit leaves no budget", async () => {
+		const stalls: Array<{ reason?: string }> = [];
+		const toolCounts: number[] = [];
+		let turns = 0;
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [createEchoTool()] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 3,
+					maxProviderTurns: 3,
+					onRunawayStop: (info) => stalls.push(info),
+				},
+				undefined,
+				(_model, providerContext: { tools?: readonly unknown[] }) => {
+					toolCounts.push(providerContext.tools?.length ?? -1);
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						turns++;
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: assistantMessage(
+								[{ type: "toolCall", id: `echo-${turns}`, name: "echo", arguments: { value: "stuck" } }],
+								"toolUse",
+							),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		// The hard provider limit wins: three requests, none of them tool-free, and no fabricated close.
+		expect(stalls).toEqual([expect.objectContaining({ reason: "repeated_tool_call" })]);
+		expect(toolCounts).toEqual([1, 1, 1]);
+		const assistantTexts = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "assistant"
+				? event.message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+				: [],
+		);
+		expect(assistantTexts.filter((text) => text.length > 0)).toEqual([]);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
 	it("does not treat changed volatile-looking arguments as an unchanged operation", async () => {
@@ -978,23 +1199,13 @@ describe("runaway-loop backstop", () => {
 			(event) =>
 				event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "repeated_failed_operation"),
 		);
-		const exhausted = events.filter(
-			(event) =>
-				event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
-		);
-		const operationExhausted = events.filter(
-			(event) =>
-				event.type === "tool_execution_end" &&
-				resultContainsFailureCode(event.result, "operation_recovery_exhausted"),
-		);
-
+		// One execution and one hook call: a refused replay reaches neither the tool nor beforeToolCall,
+		// and a replaced context does not lose that state.
 		expect(executions).toBe(1);
 		expect(beforeCalls).toBe(1);
-		expect(deliveryTurns).toBe(0);
+		expect(deliveryTurns).toBe(1);
 		expect(toolResultIds).toEqual(["refresh-1", "refresh-2", "refresh-3", "refresh-4"]);
-		expect(blocked).toHaveLength(1);
-		expect(operationExhausted).toHaveLength(1);
-		expect(exhausted).toHaveLength(1);
+		expect(blocked).toHaveLength(3);
 	});
 
 	it("keeps run-scoped failure authority when a replacement context omits the failure transcript", async () => {
@@ -1105,7 +1316,6 @@ describe("runaway-loop backstop", () => {
 						authority: TEST_RECOVERY_AUTHORITY,
 						targetKind,
 						instruction: "Use repair_like on the failed target.",
-						getEvidence: (params, result) => (result.details.repaired ? [params.target] : []),
 					},
 				],
 			},
@@ -1165,6 +1375,8 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
+		// Two refused replays while nothing had changed, then the repair succeeds and the same
+		// operation runs again — and keeps running, because success clears its state outright.
 		expect(targetExecutions).toBe(3);
 		expect(repairExecutions).toBe(1);
 		expect(
@@ -1173,14 +1385,7 @@ describe("runaway-loop backstop", () => {
 					event.type === "tool_execution_end" &&
 					resultContainsFailureCode(event.result, "repeated_failed_operation"),
 			),
-		).toHaveLength(1);
-		expect(
-			events.filter(
-				(event) =>
-					event.type === "tool_execution_end" &&
-					resultContainsFailureCode(event.result, "operation_recovery_exhausted"),
-			),
-		).toHaveLength(1);
+		).toHaveLength(2);
 		expect(
 			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-5"),
 		).toMatchObject({
@@ -1195,7 +1400,7 @@ describe("runaway-loop backstop", () => {
 		});
 	});
 
-	it("does not infer recovery from matching-looking arguments without declared evidence", async () => {
+	it("re-admits a failed operation after any unrelated success, then refuses it again immediately", async () => {
 		const targetSchema = Type.Object({ path: Type.String() });
 		const unrelatedSchema = Type.Object({ value: Type.String() });
 		let targetExecutions = 0;
@@ -1270,7 +1475,12 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(targetExecutions).toBe(1);
+		// Deliberate trade: admission is governed by whether the world moved, not by a declared
+		// evidence handshake between two specific tools. An unrelated success re-admits the failed
+		// operation, which costs at most one execution — and the operation that fails again is refused
+		// again at once. The alternative, requiring exact declared evidence, is what left operations
+		// permanently dead when no loaded tool could supply it.
+		expect(targetExecutions).toBe(2);
 		expect(unrelatedExecutions).toBe(1);
 		expect(
 			events.find((event) => event.type === "tool_execution_end" && event.toolCallId === "target-3"),
@@ -1280,12 +1490,12 @@ describe("runaway-loop backstop", () => {
 				(event) =>
 					event.type === "tool_execution_end" &&
 					event.toolCallId === "target-3" &&
-					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+					resultContainsFailureCode(event.result, "file_not_found"),
 			),
 		).toBe(true);
 	});
 
-	it("does not reopen for throwing or non-matching repair evidence", async () => {
+	it("does not re-admit a failed operation when the intervening repair also failed", async () => {
 		const targetSchema = Type.Object({ path: Type.String() });
 		const repairSchema = Type.Object({ target: Type.String() });
 		const targetKind = "test.file.exists";
@@ -1317,24 +1527,17 @@ describe("runaway-loop backstop", () => {
 						authority: TEST_RECOVERY_AUTHORITY,
 						targetKind,
 						instruction: "Exercise a broken evidence callback.",
-						getEvidence: () => {
-							throw new Error("broken recovery evidence");
-						},
 					},
 					{
 						kind: "repair",
 						authority: TEST_RECOVERY_AUTHORITY,
 						targetKind,
 						instruction: "Use repair_like on the failed target.",
-						getEvidence: (params, result) => (result.details.repaired ? [params.target] : ["different.txt"]),
 					},
 				],
 			},
 			async execute() {
-				return {
-					content: [{ type: "text", text: "no repair was performed" }],
-					details: { repaired: false },
-				};
+				throw new Error("repair backend refused the request");
 			},
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, repairTool] };
@@ -1391,6 +1594,7 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
+		// Nothing succeeded between the two attempts, so the world never moved and the replay is refused.
 		expect(targetExecutions).toBe(1);
 		expect(
 			events.some(
@@ -1432,7 +1636,6 @@ describe("runaway-loop backstop", () => {
 						authority: TEST_RECOVERY_AUTHORITY,
 						targetKind,
 						instruction: "Create the missing target with loaded_repair.",
-						getEvidence: () => [],
 					},
 				],
 			},
@@ -1512,7 +1715,6 @@ describe("runaway-loop backstop", () => {
 						authority: otherAuthority,
 						targetKind: "test.file.exists",
 						instruction: "Repair with the other backend.",
-						getEvidence: (params) => [params.path],
 					},
 				],
 			},
@@ -1575,12 +1777,14 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(providerPrompts[1]).toContain("No loaded tool declares recovery");
+		expect(providerPrompts[1]).toContain(
+			"The operation is readmitted after another tool succeeds or a new user turn",
+		);
 		expect(providerPrompts[1]).not.toContain("Repair with the other backend.");
 		expect(providerPrompts[1]).not.toContain("list the parent directory or re-read the path");
 	});
 
-	it("halts after one failed recovery probe instead of alternating forever", async () => {
+	it("lets the runaway backstop catch an endless repair/replay alternation", async () => {
 		const targetSchema = Type.Object({ path: Type.String() });
 		const recoverySchema = Type.Object({ target: Type.String() });
 		const targetKind = "test.file.exists";
@@ -1613,7 +1817,6 @@ describe("runaway-loop backstop", () => {
 						authority: TEST_RECOVERY_AUTHORITY,
 						targetKind,
 						instruction: "Attempt the declared repair.",
-						getEvidence: (params, result) => (result.details.repaired ? [params.target] : []),
 					},
 				],
 			},
@@ -1623,6 +1826,7 @@ describe("runaway-loop backstop", () => {
 			},
 		};
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [targetTool, recoveryTool] };
+		const stalls: Array<{ reason: string }> = [];
 		let turns = 0;
 		let deliveryTurns = 0;
 		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
@@ -1633,7 +1837,8 @@ describe("runaway-loop backstop", () => {
 					return;
 				}
 				turns++;
-				if (turns <= 6) {
+				// Unbounded on purpose: nothing in this stream ever stops, so only a backstop can end it.
+				if (turns > 0) {
 					const recoveryTurn = turns % 2 === 0;
 					stream.push({
 						type: "done",
@@ -1671,26 +1876,29 @@ describe("runaway-loop backstop", () => {
 			agentLoop(
 				[{ role: "user", content: "go", timestamp: 1 }],
 				context,
-				{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 0 },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 4,
+					onRunawayStop: (info) => stalls.push(info),
+				},
 				undefined,
 				streamFn,
 			),
 		);
 
-		expect(turns).toBe(3);
-		expect(deliveryTurns).toBe(0);
-		expect(targetExecutions).toBe(2);
-		expect(recoveryExecutions).toBe(1);
-		expect(
-			events.some(
-				(event) =>
-					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
-			),
-		).toBe(true);
+		// Each successful repair genuinely moves the world, so each replay is genuinely admitted. That
+		// is correct per call and still unproductive in aggregate, which is exactly what the cost guard
+		// is for — the recovery gate itself never ends a run.
+		expect(turns).toBe(7);
+		expect(deliveryTurns).toBe(1);
+		expect(targetExecutions).toBe(4);
+		expect(recoveryExecutions).toBe(3);
+		expect(stalls).toMatchObject([{ reason: "repeated_tool_call" }]);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("halts repeated blocked replays even when the generic stall detector is disabled", async () => {
+	it("refuses repeated replays without ending the run when the stall detector is disabled", async () => {
 		const schema = Type.Object({ path: Type.String() });
 		let executions = 0;
 		const failingTool: AgentTool<typeof schema> = {
@@ -1750,13 +1958,24 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(turns).toBe(4);
+		// With every backstop off, the gate refuses all seven replays and executes none of them, and the
+		// run still reaches the model's own closing turn rather than being cut short by the harness.
+		expect(turns).toBe(9);
 		expect(deliveryTurns).toBe(0);
 		expect(executions).toBe(1);
 		expect(
+			events.filter(
+				(event) =>
+					event.type === "tool_execution_end" &&
+					resultContainsFailureCode(event.result, "repeated_failed_operation"),
+			),
+		).toHaveLength(7);
+		expect(
 			events.some(
 				(event) =>
-					event.type === "tool_execution_end" && resultContainsFailureCode(event.result, "recovery_exhausted"),
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.content.some((block) => block.type === "text" && block.text === "should not be reached"),
 			),
 		).toBe(true);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
@@ -2136,8 +2355,8 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(providerPrompts[1]).toContain("Timeout policy allows 1 unchanged retry");
-		expect(providerPrompts[2]).toContain("Timeout unchanged retry exhausted");
+		expect(providerPrompts[1]).toContain("This failure class allows 1 immediate unchanged retry");
+		expect(providerPrompts[2]).toContain("Unchanged retry spent");
 	});
 
 	it("reserves one timeout retry across parallel duplicates and blocks the excess call", async () => {
@@ -2320,7 +2539,6 @@ describe("runaway-loop backstop", () => {
 						authority: TEST_RECOVERY_AUTHORITY,
 						targetKind,
 						instruction: "Repair the matching resource.",
-						getEvidence: (params, result) => (result.details.repaired ? [params.value] : []),
 					},
 				],
 			},

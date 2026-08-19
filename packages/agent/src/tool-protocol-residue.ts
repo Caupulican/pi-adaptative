@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import type { AgentTool } from "./types.ts";
 
 export const NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR = "native_tool_protocol_residue";
+export const TOOL_FREE_RESPONSE_TOOL_CALL_ERROR = "tool_free_response_tool_call";
 
 /**
  * Marks which lines fall inside a genuinely closed ```/~~~ fence (open and matching close both
@@ -37,7 +38,7 @@ function isJsonPayload(text: string): boolean {
 	}
 }
 
-function findRenderedToolMarker(text: string, toolNames: ReadonlySet<string>): string | undefined {
+function findRenderedToolMarker(text: string, toolNames?: ReadonlySet<string>): string | undefined {
 	const lines = text.split(/\r?\n/);
 	const fenced = computeFencedLines(lines);
 	for (let index = 0; index < lines.length; index++) {
@@ -46,7 +47,7 @@ function findRenderedToolMarker(text: string, toolNames: ReadonlySet<string>): s
 		if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) continue;
 		const match = /^to=functions\.([A-Za-z][A-Za-z0-9_-]{0,63})\s+code$/.exec(trimmed);
 		const toolName = match?.[1];
-		if (!toolName || !toolNames.has(toolName)) continue;
+		if (!toolName || (toolNames && !toolNames.has(toolName))) continue;
 
 		let payloadIndex = index + 1;
 		while (payloadIndex < lines.length && lines[payloadIndex].trim() === "") payloadIndex++;
@@ -102,5 +103,30 @@ export function rejectNativeToolProtocolResidue(
 		],
 		stopReason: "error",
 		errorMessage: `${NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR}: functions.${toolName} was rendered as text`,
+	};
+}
+
+/**
+ * A provider request with no tools must never leave a tool call in the transcript. Providers can
+ * still return a native call or render their internal call syntax despite the empty tool surface,
+ * so validate both shapes regardless of whether that tool was loaded in the surrounding run. The
+ * provider response is retained as an explicit protocol error with no synthetic prose and no
+ * executable call block.
+ */
+export function rejectToolCallsFromToolFreeResponse(message: AssistantMessage): AssistantMessage {
+	if (message.stopReason === "error" || message.stopReason === "aborted") return message;
+	const nativeToolCall = message.content.find((block) => block.type === "toolCall");
+	const text = message.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+	const renderedToolName = text ? findRenderedToolMarker(text) : undefined;
+	const toolName = nativeToolCall?.name ?? renderedToolName;
+	if (!toolName) return message;
+	return {
+		...message,
+		content: [{ type: "text", text: "" }],
+		stopReason: "error",
+		errorMessage: `${TOOL_FREE_RESPONSE_TOOL_CALL_ERROR}: provider returned ${toolName} while tools were disabled`,
 	};
 }

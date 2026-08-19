@@ -7,6 +7,7 @@ import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/type
 import {
 	MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT,
 	mandatoryToolFailureRecoveryMetadata,
+	TOOL_FAILURE_READMISSION_RULE,
 } from "./tool-failure-recovery-protocol.ts";
 import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
@@ -19,7 +20,6 @@ const MAX_FAILURE_CODE_CHARS = 48;
 const MAX_DIAGNOSTIC_CHARS = 240;
 const MAX_CORRECTION_CHARS = 480;
 const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
-const MAX_ACTIVE_FAILURE_EVIDENCE_CHARS = 2_400;
 const MAX_TOOL_NAME_CHARS = 64;
 const TOOL_SIGNATURE_HEX_CHARS = 32;
 const TOOL_FALLBACK_OUTPUT_SIGNATURE_BASE62_CHARS = 22;
@@ -30,10 +30,7 @@ const MAX_TRACKED_FAILURES = 64;
 const REPAIRABLE_REJECTION_CODES = new Set(["invalid_arguments", "malformed_call", "unknown_tool"]);
 const LEGACY_GENERIC_EXECUTION_CORRECTION =
 	"Change the arguments or approach before retrying; do not resend the unchanged operation.";
-const BLOCKED_REPLAY_CAVEMAN_CORRECTION =
-	"Blocked: this exact operation will not run again this session — change the operation or continue other work.";
-const CLOSED_OPERATION_CAVEMAN_CORRECTION =
-	"Closed: this exact operation was not executed and will not run again this session — use a different operation or continue other work.";
+const BLOCKED_REPLAY_CORRECTION = `Not executed: its last result is already above. Do corrective work or use a different operation. ${TOOL_FAILURE_READMISSION_RULE}`;
 
 export type ToolFailureState = "failed" | "rejected";
 
@@ -495,10 +492,6 @@ export function readVisibleToolFailureCode(result: ToolResultMessage): string | 
 	return undefined;
 }
 
-export function isClosedOperationFailureCode(code: string | undefined): boolean {
-	return code === "operation_recovery_exhausted" || code === "recovery_exhausted";
-}
-
 /** Failures that only a new owner prompt can clear. Do not restore their circuit across user turns. */
 export function isPromptScopedFailureCode(code: string | undefined): boolean {
 	return code === "owner_authorization_required";
@@ -518,6 +511,10 @@ export function restoreToolFailureRecord(
 		};
 	}
 	const identity = operationIdentity(tool, args);
+	// A completed operation that reported a negative status keeps its own raw output, so there is no
+	// harness record to read back. Recover its terminal status from that output rather than flattening
+	// every such result to a generic `tool_error`.
+	const visibleCode = readVisibleToolFailureCode(result);
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		failureKey: identity.failureKey,
@@ -527,7 +524,7 @@ export function restoreToolFailureRecord(
 		occurrence: 1,
 		state: "failed",
 		phase: "execution",
-		failureCode: boundedFailureCode(readVisibleToolFailureCode(result) ?? "tool_error"),
+		failureCode: boundedFailureCode(visibleCode ?? classifyToolFailure(firstText(result))),
 		correction: fallbackFailureGuidance("failed", false, "execution"),
 	};
 }
@@ -567,20 +564,6 @@ export function forEachPairedToolResult(
 			return;
 		}
 	}
-}
-
-export function transcriptHasClosedToolOperation(messages: readonly AgentMessage[]): boolean {
-	const closedByExecutionKey = new Map<string, true>();
-	forEachPairedToolResult(messages, ({ executionKey, result }) => {
-		if (!result.isError) {
-			closedByExecutionKey.delete(executionKey);
-			return;
-		}
-		if (isClosedOperationFailureCode(readVisibleToolFailureCode(result))) {
-			closedByExecutionKey.set(executionKey, true);
-		}
-	});
-	return closedByExecutionKey.size > 0;
 }
 
 function boundedFailureCode(value: string): string {
@@ -961,8 +944,18 @@ function fastTextSignature(text: string): string {
 
 function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnalysis {
 	const callById = new Map<string, AgentToolCall>();
+	/**
+	 * A call the agent made is erased only in two cases: a superseded success, whose newer identical
+	 * call is still present, and a discard-attempt directive, where the harness has taken ownership of
+	 * the attempt and the original arguments must not come back — either because it holds the payload
+	 * by reference (a retarget) or because replaying those bytes is itself the hazard (an encoding
+	 * corruption). Never for an ordinary failure: being told to change an operation is unactionable
+	 * once the operation itself is gone.
+	 */
 	const omittedCallIds = new Set<string>();
-	const orphanFailedResults = new Set<ToolResultMessage>();
+	const omittedResults = new Set<ToolResultMessage>();
+	/** Unbounded failure results to replace in place with their bounded record. */
+	const boundedReplacements = new Map<ToolResultMessage, ToolFailureMemoryRecord>();
 	const active = new Map<string, ActiveFailure>();
 	const activeDirectives = new Map<string, ToolFailureDirectiveDetails["piToolFailureDirective"]>();
 	let sequence = 0;
@@ -988,8 +981,17 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 		const call = callById.get(message.toolCallId);
 		callById.delete(message.toolCallId);
 		const textPayload = firstText(message);
-		const isFailure = message.isError === true || textPayload.startsWith("[harness] ");
-		if (isFailure) {
+		// A completed operation reporting its own negative status is evidence, not a mistake: it never
+		// enters the ledger and its output stays exactly as the tool wrote it. It does resolve any
+		// earlier failure recorded for the same operation, though — a tool that could not run before
+		// has now run — so a transcript that predates this classification cannot keep an obsolete
+		// record active across the boundary.
+		if (message.errorKind === "operation_outcome") {
+			if (call) active.delete(getToolFailureKey(call.name, call.arguments));
+			continue;
+		}
+		const isHarnessFailure = message.isError === true || textPayload.startsWith("[harness] ");
+		if (isHarnessFailure) {
 			const toolName = call?.name ?? message.toolName;
 			const kindCount = (kindMistakesMap.get(toolName) ?? 0) + 1;
 			kindMistakesMap.set(toolName, kindCount);
@@ -998,8 +1000,11 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 			if (directive) {
 				activeDirectives.delete(directive.failureCode);
 				activeDirectives.set(directive.failureCode, directive);
+				// The harness has taken ownership of this attempt: the directive replaces it, and the
+				// original arguments must not reappear — a retarget keeps the payload by reference, and a
+				// corrupt payload must never be replayed at all. Either way the call comes out.
 				if (call) omittedCallIds.add(call.id);
-				else orphanFailedResults.add(message);
+				else omittedResults.add(message);
 				continue;
 			}
 			const retained = readFailureRecord(message.details);
@@ -1055,8 +1060,11 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				if (oldest === undefined) break;
 				active.delete(oldest);
 			}
-			if (call) omittedCallIds.add(call.id);
-			else orphanFailedResults.add(message);
+			// A failure result written before this harness bounded its own output — a legacy transcript,
+			// or a host that set isError directly — can carry unbounded raw text. Bounding it in place
+			// is the same treatment createToolFailureResult gives a fresh failure, applied late; the
+			// call that produced it still stands.
+			if (!retained) boundedReplacements.set(message, record);
 			continue;
 		}
 
@@ -1078,17 +1086,29 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 	}
 
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
+	const activeRecords = [...active.values()]
+		.sort((left, right) => left.sequence - right.sequence)
+		.map(({ record }) => record);
 
-	if (omittedCallIds.size === 0 && orphanFailedResults.size === 0) {
-		return { messages, activeRecords: [], activeDirectives: [], kindMistakesSummary };
+	if (omittedCallIds.size === 0 && omittedResults.size === 0 && boundedReplacements.size === 0) {
+		return { messages, activeRecords, activeDirectives: [...activeDirectives.values()], kindMistakesSummary };
 	}
 
 	const filteredMessages: AgentMessage[] = [];
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		if (message.role === "toolResult") {
-			if (omittedCallIds.has(message.toolCallId) || orphanFailedResults.has(message)) continue;
-			filteredMessages.push(message);
+			if (omittedCallIds.has(message.toolCallId) || omittedResults.has(message)) continue;
+			const bounded = boundedReplacements.get(message);
+			filteredMessages.push(
+				bounded
+					? {
+							...message,
+							content: [{ type: "text", text: `[harness] ${formatRecordJson(bounded, false)}` }],
+							details: { piToolFailureMemory: bounded } satisfies ToolFailureMemoryDetails,
+						}
+					: message,
+			);
 			continue;
 		}
 		if (message.role !== "assistant") {
@@ -1119,9 +1139,6 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 			filteredMessages.push({ ...message, content: retainedContent } satisfies AssistantMessage);
 		}
 	}
-	const activeRecords = [...active.values()]
-		.sort((left, right) => left.sequence - right.sequence)
-		.map(({ record }) => record);
 	return {
 		messages: filteredMessages,
 		activeRecords,
@@ -1191,6 +1208,35 @@ export function rememberToolFailure(
 		}
 	}
 	return record;
+}
+
+/**
+ * Describe a completed operation that reported a negative status, without recording it as a mistake.
+ *
+ * The tool did its job, so nothing enters failure memory, nothing rewrites the tool's output, and no
+ * correction is owed. The record exists only so the repetition governor can name the operation if the
+ * agent replays it while nothing has changed.
+ */
+export function describeOperationOutcome(
+	tool: string,
+	args: unknown,
+	failureCode: string,
+	diagnostic: string | undefined,
+): ToolFailureMemoryRecord {
+	const identity = operationIdentity(tool, args);
+	return {
+		version: TOOL_FAILURE_MEMORY_VERSION,
+		failureKey: identity.failureKey,
+		[TOOL_FAILURE_EXECUTION_KEY]: identity.executionKey,
+		tool: identity.tool,
+		operation: identity.operation,
+		occurrence: 1,
+		state: "failed",
+		phase: "execution",
+		failureCode: boundedFailureCode(failureCode),
+		...(diagnostic ? { diagnostic: truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) } : {}),
+		correction: BLOCKED_REPLAY_CORRECTION,
+	};
 }
 
 export function clearToolFailure(tracker: ToolFailureMemoryTracker, tool: string, args: unknown): void {
@@ -1263,68 +1309,28 @@ export function createRepeatedToolFailureResult(
 	record: ToolFailureMemoryRecord,
 ): AgentToolResult<ToolFailureMemoryDetails> {
 	const retainedRecord = retainBlockedToolFailure(record);
+	// The note states why this call did not run and what makes it runnable again; the retained
+	// root-cause correction stays the next_action, because that is the actionable half. Evidence is
+	// left out: nothing executed, so there is none — the prior run's evidence is still in the
+	// transcript, and repeating it here would only pay for the same bytes twice.
 	const replayNotice = truncateMiddle(
-		`The unchanged operation was not executed. Unchanged replay blocked after ${record.failureCode}`,
+		`Not executed: unchanged. ${TOOL_FAILURE_READMISSION_RULE}`,
 		MAX_DIAGNOSTIC_CHARS,
 	);
 	const blockedResult = createToolFailureResult({
 		...retainedRecord,
+		evidence: undefined,
 		state: "rejected",
 		failureCode: "repeated_failed_operation",
 		...(retainedRecord.diagnostic
 			? { note: replayNotice }
-			: { diagnostic: replayNotice, correction: BLOCKED_REPLAY_CAVEMAN_CORRECTION }),
+			: { diagnostic: replayNotice, correction: BLOCKED_REPLAY_CORRECTION }),
 	});
 	return {
 		...blockedResult,
 		// The visible result leads with the retained root cause and carries the replay notice as a
 		// note, while retained memory keeps the authoritative cause so later blocks do not
 		// recursively wrap synthetic failures.
-		details: { piToolFailureMemory: retainedRecord },
-	};
-}
-
-export function createToolFailureRecoveryExhaustedResult(
-	record: ToolFailureMemoryRecord,
-	note: string,
-): AgentToolResult<ToolFailureMemoryDetails> {
-	const retainedRecord = retainBlockedToolFailure(record);
-	const exhaustedResult = createToolFailureResult(
-		{
-			...retainedRecord,
-			state: "rejected",
-			failureCode: "recovery_exhausted",
-			note: truncateMiddle(note, MAX_DIAGNOSTIC_CHARS),
-			correction:
-				"Stop retrying tools in this run. Report the unresolved failure and the user or environment action required to continue.",
-		},
-		true,
-	);
-	return {
-		...exhaustedResult,
-		details: { piToolFailureMemory: retainedRecord },
-	};
-}
-
-export function createToolFailureOperationExhaustedResult(
-	record: ToolFailureMemoryRecord,
-	note: string,
-): AgentToolResult<ToolFailureMemoryDetails> {
-	const retainedRecord = {
-		...retainBlockedToolFailure(record),
-		correction: CLOSED_OPERATION_CAVEMAN_CORRECTION,
-	};
-	const exhaustedResult = createToolFailureResult(
-		{
-			...retainedRecord,
-			state: "rejected",
-			failureCode: "operation_recovery_exhausted",
-			note: truncateMiddle(note, MAX_DIAGNOSTIC_CHARS),
-		},
-		false,
-	);
-	return {
-		...exhaustedResult,
 		details: { piToolFailureMemory: retainedRecord },
 	};
 }
@@ -1355,18 +1361,9 @@ export function sanitizeToolFailureContext(
 		.map(([kind, count]) => `${kind}:${count}`)
 		.join(", ");
 
-	let remainingEvidenceChars = MAX_ACTIVE_FAILURE_EVIDENCE_CHARS;
-	const evidenceByFailureKey = new Map<string, string>();
-	for (let index = records.length - 1; index >= 0 && remainingEvidenceChars > 1; index--) {
-		const record = records[index];
-		if (!record.evidence) continue;
-		const retained = truncate(record.evidence, remainingEvidenceChars);
-		evidenceByFailureKey.set(record.failureKey, retained);
-		remainingEvidenceChars -= retained.length;
-	}
-	const lines = records.map((record) =>
-		escapePromptData(formatRecordJson(record, true, evidenceByFailureKey.get(record.failureKey) ?? null)),
-	);
+	// Evidence is not repeated here: the failed call and its bounded record both remain in the
+	// transcript, so the ledger only has to name what is still unresolved and what to do about it.
+	const lines = records.map((record) => escapePromptData(formatRecordJson(record, true, null)));
 	for (const directive of analysis.activeDirectives) {
 		lines.push(
 			escapePromptData(
