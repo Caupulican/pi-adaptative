@@ -2104,11 +2104,17 @@ describe("AgentSession worker delegation", () => {
 				timestamp: 2,
 			});
 
+			let recoveredToolCalls: string[] = [];
 			let recoveredToolResults: string[] = [];
 			let recoveredSystemPrompt = "";
 			harness.setResponses([
 				(context) => {
 					recoveredSystemPrompt = context.systemPrompt ?? "";
+					recoveredToolCalls = context.messages.flatMap((message) =>
+						message.role === "assistant"
+							? message.content.filter((content) => content.type === "toolCall").map((content) => content.id)
+							: [],
+					);
 					recoveredToolResults = context.messages
 						.filter((message) => message.role === "toolResult")
 						.map((message) => message.toolCallId);
@@ -2122,9 +2128,10 @@ describe("AgentSession worker delegation", () => {
 				}
 			)._backgroundLanes.drainQueuedWorkerDelegations();
 			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1));
-			// The durable transcript retains the unknown result, while the provider-facing repair layer
-			// replaces failed calls/results with its bounded failure record. The completed sibling stays.
-			expect(recoveredToolResults).toEqual([first]);
+			// Recovery retains both calls and results. The unmatched sibling is represented by its bounded
+			// unknown-outcome failure record, while the completed sibling remains unchanged.
+			expect(recoveredToolCalls).toEqual([first, second]);
+			expect(recoveredToolResults).toEqual([first, second]);
 			expect(recoveredSystemPrompt).toContain("ACTIVE TOOL FAILURES");
 			expect(recoveredSystemPrompt).toContain('"tool":"read"');
 			expect(recoveredSystemPrompt).toContain("Execution outcome is unknown");

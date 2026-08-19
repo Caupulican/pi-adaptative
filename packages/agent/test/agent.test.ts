@@ -532,6 +532,9 @@ describe("Agent", () => {
 		// AgentLoopConfig, so the runaway-loop backstop (see runaway-loop.test.ts, which covers the
 		// loop's own trip logic) always stopped silently through the Agent class. This mirrors that
 		// same scenario through Agent#prompt to confirm the forwarding itself.
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		const providerToolCounts: number[] = [];
+		let toolExecutions = 0;
 		const echoParams = Type.Object({ value: Type.String() });
 		const echoTool: AgentTool<typeof echoParams, { value: string }> = {
 			name: "echo",
@@ -539,23 +542,29 @@ describe("Agent", () => {
 			description: "Echo tool",
 			parameters: echoParams,
 			async execute(_id, params) {
+				toolExecutions++;
 				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
 			},
 		};
-		const stalls: Array<{ signature: string; repeats: number }> = [];
-		let toolCalls = 0;
 
 		const agent = new Agent({
 			initialState: { tools: [echoTool] },
 			maxStallTurns: 2,
 			onRunawayStop: (info) => stalls.push(info),
-			streamFn: () => {
+			streamFn: (_model, context) => {
 				const stream = new MockAssistantStream();
+				const providerTurn = providerToolCounts.length + 1;
+				const toolCount = context.tools?.length ?? 0;
+				providerToolCounts.push(toolCount);
 				queueMicrotask(() => {
-					toolCalls++;
+					if (toolCount === 0) {
+						const message = createAssistantMessage("summarized after stall");
+						stream.push({ type: "done", reason: "stop", message });
+						return;
+					}
 					const message: AssistantMessage = {
 						role: "assistant",
-						content: [{ type: "toolCall", id: `t${toolCalls}`, name: "echo", arguments: { value: "stuck" } }],
+						content: [{ type: "toolCall", id: `t${providerTurn}`, name: "echo", arguments: { value: "stuck" } }],
 						api: "openai-responses",
 						provider: "openai",
 						model: "mock",
@@ -580,6 +589,7 @@ describe("Agent", () => {
 
 		expect(stalls).toHaveLength(1);
 		expect(stalls[0].repeats).toBe(2);
-		expect(toolCalls).toBe(2); // stopped at the limit, did not run beyond it
+		expect(providerToolCounts).toEqual([1, 1, 0]);
+		expect(toolExecutions).toBe(2); // the closing request cannot execute another tool
 	});
 });

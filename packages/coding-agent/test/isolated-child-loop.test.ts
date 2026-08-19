@@ -413,7 +413,7 @@ describe("isolated child tool loop", () => {
 			harness.setResponses([
 				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
 				fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
-				fauxAssistantMessage("must remain queued"),
+				fauxAssistantMessage("stall summary"),
 			]);
 
 			const result = await harness.session.runIsolatedCompletion({
@@ -424,8 +424,9 @@ describe("isolated child tool loop", () => {
 			});
 
 			expect(execute).toHaveBeenCalledTimes(2);
-			expect(result.stopReason).toBe("toolUse");
-			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(result.stopReason).toBe("stop");
+			expect(result.text).toBe("stall summary");
+			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			harness.cleanup();
 		}
@@ -537,7 +538,7 @@ describe("isolated child tool loop", () => {
 				description: "Failing test probe",
 				parameters: Type.Object({}),
 				execute: async () => ({
-					content: [{ type: "text" as const, text: "raw failed output must not survive" }],
+					content: [{ type: "text" as const, text: "bounded failed diagnostic survives" }],
 					details: {},
 					isError: true,
 				}),
@@ -594,10 +595,26 @@ describe("isolated child tool loop", () => {
 			expect(streamOptions.map((options) => options?.maxTokens)).toEqual([16, 8]);
 			expect(transformedRoles).toHaveLength(2);
 			expect(preflightContexts).toHaveLength(2);
-			expect(contexts[1]?.messages.some((message) => message.role === "toolResult")).toBe(false);
-			expect(contexts[1]?.messages.some((message) => message.role === "assistant")).toBe(false);
+			expect(contexts[1]?.messages.map((message) => message.role)).toEqual([
+				"user",
+				"assistant",
+				"toolResult",
+				"user",
+			]);
+			expect(contexts[1]?.messages.find((message) => message.role === "assistant")).toMatchObject({
+				role: "assistant",
+				content: [{ type: "toolCall", name: "probe" }],
+			});
+			const retainedFailure = contexts[1]?.messages.find((message) => message.role === "toolResult");
+			expect(retainedFailure).toMatchObject({ role: "toolResult", toolName: "probe", isError: true });
+			if (retainedFailure?.role === "toolResult") {
+				expect(retainedFailure.content[0]).toMatchObject({
+					type: "text",
+					text: expect.stringContaining("[harness]"),
+				});
+			}
 			expect(contexts[1]?.systemPrompt).toContain("ACTIVE TOOL FAILURES");
-			expect(JSON.stringify(contexts[1]?.messages)).not.toContain("raw failed output must not survive");
+			expect(JSON.stringify(contexts[1]?.messages)).toContain("bounded failed diagnostic survives");
 		} finally {
 			harness.cleanup();
 		}
