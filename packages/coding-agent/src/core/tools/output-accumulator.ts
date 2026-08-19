@@ -146,7 +146,7 @@ export class OutputAccumulator {
 			return;
 		}
 		this.finished = true;
-		this.outputSignature = this.outputHash.digest("hex");
+		this.outputSignature = this.outputHash.digest("base64url");
 		this.appendDecodedText(this.decoder.decode());
 		if (this.shouldUseTempFile()) {
 			this.tryEnsureTempFile();

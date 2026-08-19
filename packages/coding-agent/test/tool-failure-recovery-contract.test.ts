@@ -56,7 +56,7 @@ describe("tool-owned failure recovery contracts", () => {
 		const changed = await run(`${sharedHead}second failing assertion\n${sharedTail}`);
 
 		expect(first.failureCode).toBe("exit_1");
-		expect(first.outputSignature).toMatch(/^[0-9a-f]{64}$/);
+		expect(first.outputSignature).toMatch(/^[A-Za-z0-9_-]{43}$/);
 		expect(repeated.outputSignature).toBe(first.outputSignature);
 		expect(changed.outputSignature).not.toBe(first.outputSignature);
 	});

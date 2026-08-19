@@ -22,7 +22,9 @@ const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
 const MAX_ACTIVE_FAILURE_EVIDENCE_CHARS = 2_400;
 const MAX_TOOL_NAME_CHARS = 64;
 const TOOL_SIGNATURE_HEX_CHARS = 32;
-const TOOL_OUTPUT_SIGNATURE_HEX_CHARS = 64;
+const TOOL_FALLBACK_OUTPUT_SIGNATURE_BASE62_CHARS = 22;
+const TOOL_OUTPUT_SIGNATURE_BASE64URL_CHARS = 43;
+const LEGACY_TOOL_OUTPUT_SIGNATURE_HEX_CHARS = 64;
 const MAX_ACTIVE_FAILURES = 8;
 const MAX_TRACKED_FAILURES = 64;
 const REPAIRABLE_REJECTION_CODES = new Set(["invalid_arguments", "malformed_call", "unknown_tool"]);
@@ -268,7 +270,23 @@ function renderSignatureHash(hash: SignatureHash): string {
 		.join("");
 }
 
-function structuredHash(value: unknown, normalizeVolatile: boolean): string {
+const COMPACT_SIGNATURE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+function renderCompactSignatureHash(hash: SignatureHash): string {
+	let remaining =
+		(BigInt(hash.first >>> 0) << 96n) |
+		(BigInt(hash.second >>> 0) << 64n) |
+		(BigInt(hash.third >>> 0) << 32n) |
+		BigInt(hash.fourth >>> 0);
+	let output = "";
+	for (let index = 0; index < TOOL_FALLBACK_OUTPUT_SIGNATURE_BASE62_CHARS; index++) {
+		output = COMPACT_SIGNATURE_ALPHABET[Number(remaining % 62n)] + output;
+		remaining /= 62n;
+	}
+	return output;
+}
+
+function calculateStructuredHash(value: unknown, normalizeVolatile: boolean): SignatureHash {
 	const hash = createSignatureHash();
 	updateStructuredHash(
 		hash,
@@ -277,7 +295,15 @@ function structuredHash(value: unknown, normalizeVolatile: boolean): string {
 		0,
 		normalizeVolatile ? updateNormalizedHashString : updateExactHashString,
 	);
-	return renderSignatureHash(hash);
+	return hash;
+}
+
+function structuredHash(value: unknown, normalizeVolatile: boolean): string {
+	return renderSignatureHash(calculateStructuredHash(value, normalizeVolatile));
+}
+
+function structuredOutputSignature(output: string): string {
+	return renderCompactSignatureHash(calculateStructuredHash(output, false));
 }
 
 function boundedJsonPreview(value: unknown, maxChars: number): string {
@@ -797,9 +823,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isOutputSignature(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	if (value.length === TOOL_FALLBACK_OUTPUT_SIGNATURE_BASE62_CHARS) return /^[0-9A-Za-z]+$/.test(value);
+	if (value.length === TOOL_OUTPUT_SIGNATURE_BASE64URL_CHARS) return /^[A-Za-z0-9_-]+$/.test(value);
 	return (
-		typeof value === "string" &&
-		(value.length === TOOL_SIGNATURE_HEX_CHARS || value.length === TOOL_OUTPUT_SIGNATURE_HEX_CHARS) &&
+		(value.length === TOOL_SIGNATURE_HEX_CHARS || value.length === LEGACY_TOOL_OUTPUT_SIGNATURE_HEX_CHARS) &&
 		/^[0-9a-f]+$/.test(value)
 	);
 }
@@ -1012,7 +1040,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				state,
 				phase: retained?.phase ?? assessment?.phase ?? inferToolFailurePhase(state, "tool_error"),
 				failureCode: retained?.failureCode ?? assessment?.failureCode ?? "tool_error",
-				outputSignature: retained ? retained.outputSignature : structuredHash(textPayload, false),
+				outputSignature: retained ? retained.outputSignature : structuredOutputSignature(textPayload),
 				diagnostic: retained?.diagnostic ?? assessment?.diagnostic,
 				evidence: retained?.evidence,
 				correction:
@@ -1146,7 +1174,7 @@ export function rememberToolFailure(
 		failureCode: boundedFailureCode(failureCode),
 		outputSignature: isOutputSignature(outputIdentity?.outputSignature)
 			? outputIdentity.outputSignature
-			: structuredHash(outputIdentity?.output ?? "", false),
+			: structuredOutputSignature(outputIdentity?.output ?? ""),
 		diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 		evidence: sanitizeToolFailureEvidence(evidence),
 		correction: truncate(correction, MAX_CORRECTION_CHARS),
