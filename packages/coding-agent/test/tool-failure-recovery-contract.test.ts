@@ -19,6 +19,7 @@ import {
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { createLsTool } from "../src/core/tools/ls.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
+import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 
 const temporaryRoots: string[] = [];
@@ -350,131 +351,140 @@ describe("tool-owned failure recovery contracts", () => {
 	// behavior is proven separately by the built-runtime smoke, not here.
 	it("carries a real non-zero shell exit through the agent loop as an operation outcome", async () => {
 		const cwd = await createTemporaryRoot("pi-shell-operation-outcome-");
-		const bash = createBashTool(cwd, { outputDirectory: cwd });
+		const shellSessionKey = `tool-failure-operation-outcome:${cwd}`;
+		const bash = createBashTool(cwd, { outputDirectory: cwd, sessionKey: shellSessionKey });
 		const command = `node -e "console.log('FAILED (errors=2)'); process.exit(3)"`;
+		try {
+			// 1. The tool itself classifies a completed process that exited non-zero.
+			const thrown = await bash.execute("shell-outcome", { command }).then(
+				() => undefined,
+				(error: unknown) => error as { failureCode?: string; errorKind?: string; message?: string },
+			);
+			expect(thrown?.failureCode).toBe("exit_3");
+			expect(thrown?.errorKind).toBe("operation_outcome");
+			expect(thrown?.message).toContain("FAILED (errors=2)");
 
-		// 1. The tool itself classifies a completed process that exited non-zero.
-		const thrown = await bash.execute("shell-outcome", { command }).then(
-			() => undefined,
-			(error: unknown) => error as { failureCode?: string; errorKind?: string; message?: string },
-		);
-		expect(thrown?.failureCode).toBe("exit_3");
-		expect(thrown?.errorKind).toBe("operation_outcome");
-		expect(thrown?.message).toContain("FAILED (errors=2)");
-
-		// 2. The same tool driven by the real loop, replayed exactly as the reported session did.
-		let turn = 0;
-		const events: AgentEvent[] = [];
-		const stream = agentLoop(
-			[{ role: "user", content: "reproduce the red baseline", timestamp: 1 }],
-			{ systemPrompt: "", messages: [], tools: [bash] },
-			{
-				model: {
-					id: "mock",
-					name: "mock",
-					api: "openai-responses",
-					provider: "openai",
-					baseUrl: "https://example.invalid",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 8192,
-					maxTokens: 2048,
-				},
-				convertToLlm: (messages: AgentMessage[]) =>
-					messages.filter(
-						(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
-					) as Message[],
-			},
-			undefined,
-			() => {
-				const mock = new EventStream<AssistantMessageEvent, AssistantMessage>(
-					(event) => event.type === "done" || event.type === "error",
-					(event) => {
-						if (event.type === "done") return event.message;
-						if (event.type === "error") return event.error;
-						throw new Error("Unexpected event type");
-					},
-				);
-				queueMicrotask(() => {
-					turn++;
-					const base = {
-						role: "assistant" as const,
-						api: "openai-responses" as const,
+			// 2. The same tool driven by the real loop, replayed exactly as the reported session did.
+			let turn = 0;
+			const events: AgentEvent[] = [];
+			const stream = agentLoop(
+				[{ role: "user", content: "reproduce the red baseline", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [bash] },
+				{
+					model: {
+						id: "mock",
+						name: "mock",
+						api: "openai-responses",
 						provider: "openai",
-						model: "mock",
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						baseUrl: "https://example.invalid",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 8192,
+						maxTokens: 2048,
+					},
+					convertToLlm: (messages: AgentMessage[]) =>
+						messages.filter(
+							(message) =>
+								message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+						) as Message[],
+				},
+				undefined,
+				() => {
+					const mock = new EventStream<AssistantMessageEvent, AssistantMessage>(
+						(event) => event.type === "done" || event.type === "error",
+						(event) => {
+							if (event.type === "done") return event.message;
+							if (event.type === "error") return event.error;
+							throw new Error("Unexpected event type");
 						},
-						timestamp: 1,
-					};
-					mock.push(
-						turn <= 4
-							? {
-									type: "done",
-									reason: "toolUse",
-									message: {
-										...base,
-										content: [{ type: "toolCall", id: `bash-${turn}`, name: "bash", arguments: { command } }],
-										stopReason: "toolUse",
-									},
-								}
-							: {
-									type: "done",
-									reason: "stop",
-									message: {
-										...base,
-										content: [{ type: "text", text: "Red baseline reproduced; two errors to fix." }],
-										stopReason: "stop",
-									},
-								},
 					);
-				});
-				return mock;
-			},
-		);
-		for await (const event of stream) events.push(event);
+					queueMicrotask(() => {
+						turn++;
+						const base = {
+							role: "assistant" as const,
+							api: "openai-responses" as const,
+							provider: "openai",
+							model: "mock",
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							timestamp: 1,
+						};
+						mock.push(
+							turn <= 4
+								? {
+										type: "done",
+										reason: "toolUse",
+										message: {
+											...base,
+											content: [
+												{ type: "toolCall", id: `bash-${turn}`, name: "bash", arguments: { command } },
+											],
+											stopReason: "toolUse",
+										},
+									}
+								: {
+										type: "done",
+										reason: "stop",
+										message: {
+											...base,
+											content: [{ type: "text", text: "Red baseline reproduced; two errors to fix." }],
+											stopReason: "stop",
+										},
+									},
+						);
+					});
+					return mock;
+				},
+			);
+			for await (const event of stream) events.push(event);
 
-		const toolResults = events.flatMap((event) =>
-			event.type === "message_end" && event.message.role === "toolResult" ? [event.message] : [],
-		);
-		// The run survived all four calls and reached the model's own closing turn.
-		expect(turn).toBe(5);
-		expect(toolResults).toHaveLength(4);
-		expect(
-			events.some(
-				(event) =>
-					event.type === "message_end" &&
-					event.message.role === "assistant" &&
-					event.message.content.some(
-						(block) => block.type === "text" && block.text === "Red baseline reproduced; two errors to fix.",
-					),
-			),
-		).toBe(true);
+			const toolResults = events.flatMap((event) =>
+				event.type === "message_end" && event.message.role === "toolResult" ? [event.message] : [],
+			);
+			// The run survived all four calls and reached the model's own closing turn.
+			expect(turn).toBe(5);
+			expect(toolResults).toHaveLength(4);
+			expect(
+				events.some(
+					(event) =>
+						event.type === "message_end" &&
+						event.message.role === "assistant" &&
+						event.message.content.some(
+							(block) => block.type === "text" && block.text === "Red baseline reproduced; two errors to fix.",
+						),
+				),
+			).toBe(true);
 
-		// The executed call kept the command's own output verbatim, with no harness record over it.
-		const firstText = toolResults[0].content
-			.filter((block) => block.type === "text")
-			.map((block) => block.text)
-			.join("\n");
-		expect(toolResults[0].errorKind).toBe("operation_outcome");
-		expect(firstText).toContain("FAILED (errors=2)");
-		expect(firstText).toContain("Command exited with code 3");
-		expect(firstText).not.toContain("[harness]");
-
-		// The three replays were refused, never executed, and never escalated past a refusal.
-		for (const replay of toolResults.slice(1)) {
-			const text = replay.content
+			// The executed call kept the command's own output verbatim, with no harness record over it.
+			const firstText = toolResults[0].content
 				.filter((block) => block.type === "text")
 				.map((block) => block.text)
 				.join("\n");
-			expect(text).toContain('"failure_code":"repeated_failed_operation"');
-			expect(text).not.toContain("recovery_exhausted");
+			expect(toolResults[0].errorKind).toBe("operation_outcome");
+			expect(firstText).toContain("FAILED (errors=2)");
+			expect(firstText).toContain("Command exited with code 3");
+			expect(firstText).not.toContain("[harness]");
+
+			// The three replays were refused, never executed, and never escalated past a refusal.
+			for (const replay of toolResults.slice(1)) {
+				const text = replay.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n");
+				expect(text).toContain('"failure_code":"repeated_failed_operation"');
+				expect(text).not.toContain("recovery_exhausted");
+			}
+		} finally {
+			// Windows keeps a process's working directory locked until the persistent shell has reached
+			// physical terminal close. Release that owned process before afterEach removes the fixture.
+			await disposeShellExecutionSessionAndWait(shellSessionKey);
 		}
 	});
 });

@@ -99,7 +99,9 @@ async function cleanupHarness(harness: Harness): Promise<void> {
 		}
 	}
 	try {
-		if (existsSync(harness.root)) rmSync(harness.root, { recursive: true, force: true });
+		if (existsSync(harness.root)) {
+			rmSync(harness.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+		}
 	} catch (error) {
 		errors.push(error);
 	}
