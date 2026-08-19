@@ -54,7 +54,7 @@ import type {
 	StreamFn,
 	ToolCallRepairInfo,
 } from "./types.ts";
-import { DEFAULT_MAX_PROVIDER_TURNS, DEFAULT_MAX_STALL_TURNS } from "./types.ts";
+import { AgentToolExecutionError, DEFAULT_MAX_PROVIDER_TURNS, DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 
 export {
@@ -853,6 +853,8 @@ type ExecutedToolCallOutcome = {
 	isError: boolean;
 	errorClass?: string;
 	failureMessage?: string;
+	failureCode?: string;
+	outputSignature?: string;
 };
 
 type FinalizedToolCallOutcome = {
@@ -1235,6 +1237,13 @@ function finalizeRejectedToolCall(
 		outcome.correction,
 		outcome.diagnostic,
 		outcome.phase,
+		undefined,
+		{
+			output: outcome.result.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n"),
+		},
 	);
 	const halt = toolFailureRecoveryGate.apply({
 		kind: "failure",
@@ -1448,11 +1457,13 @@ async function executePreparedToolCall(
 	} catch (error) {
 		await Promise.all(updateEvents);
 		const message = error instanceof Error ? error.message : String(error);
+		const toolFailure = error instanceof AgentToolExecutionError ? error : undefined;
 		return {
 			result: createErrorToolResult(message),
 			isError: true,
 			errorClass: error instanceof Error ? error.name : typeof error,
 			failureMessage: message,
+			...(toolFailure ? { failureCode: toolFailure.failureCode, outputSignature: toolFailure.outputSignature } : {}),
 		};
 	}
 }
@@ -1502,6 +1513,8 @@ async function finalizeExecutedToolCall(
 	let isError = executed.isError;
 	let failureMessage = executed.failureMessage ?? "";
 	let errorClass = executed.errorClass;
+	let failureCode = executed.failureCode;
+	let outputSignature = executed.outputSignature;
 	let executionGateEffect: ToolFailureRecoveryGateEffect | undefined;
 
 	if (config.afterToolCall) {
@@ -1529,6 +1542,8 @@ async function finalizeExecutedToolCall(
 		} catch (error) {
 			failureMessage = error instanceof Error ? error.message : String(error);
 			errorClass = error instanceof Error ? error.name : typeof error;
+			failureCode = undefined;
+			outputSignature = undefined;
 			result = { ...createErrorToolResult(failureMessage), usage: result.usage };
 			isError = true;
 		}
@@ -1536,13 +1551,21 @@ async function finalizeExecutedToolCall(
 
 	if (isError) {
 		const usage = result.usage;
+		const failureOutput =
+			failureMessage ||
+			result.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n") ||
+			"Tool execution failed";
 		const effectiveFailureMessage =
 			failureMessage || result.content.find((block) => block.type === "text")?.text || "Tool execution failed";
 		const assessment = assessToolFailure(effectiveFailureMessage, "failed", errorClass);
+		const effectiveFailureCode = failureCode ?? assessment.failureCode;
 		const recoveryPlan = toolFailureRecoveryGate.planFailure(
 			prepared.tool,
 			prepared.args,
-			{ failureCode: assessment.failureCode, message: effectiveFailureMessage },
+			{ failureCode: effectiveFailureCode, message: effectiveFailureMessage },
 			currentContext.tools ?? [],
 			prepared.executionGateReservation,
 		);
@@ -1554,11 +1577,12 @@ async function finalizeExecutedToolCall(
 			prepared.toolCall.name,
 			prepared.args,
 			"failed",
-			assessment.failureCode,
+			effectiveFailureCode,
 			correction,
 			assessment.diagnostic,
 			assessment.phase,
 			recoveryPlan.evidence ?? assessment.evidence,
+			{ output: failureOutput, outputSignature },
 		);
 		executionGateEffect = {
 			kind: "failure",

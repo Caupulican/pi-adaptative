@@ -332,11 +332,13 @@ export class ToolFailureRecoveryGate {
 		this.seenFailedExecutions.add(executionKey);
 		const state = this.getOrCreateState(executionKey, record, targets);
 		if (this.halted) return;
+		const startsNewEpisode = state.failures > 0 && !sameFailureOutcome(state.record, record);
+		if (startsNewEpisode) resetFailureEpisode(state);
 		state.record = record;
 		state.recoveryTargets = targets;
 		state.recoveryAvailable = false;
 		state.blockedReplays = 0;
-		if (reservation?.executionKey !== executionKey) state.reservedExecutions++;
+		if (startsNewEpisode || reservation?.executionKey !== executionKey) state.reservedExecutions++;
 
 		state.failures++;
 
@@ -446,17 +448,20 @@ export class ToolFailureRecoveryGate {
 			return { kind: "ignored", state };
 		}
 		const next = state ?? createFailureRecoveryState(record, []);
-		next.record = record;
 		if (isClosedOperationFailureCode(visibleCode)) {
+			next.record = record;
 			next.operationCircuitOpen = true;
 			next.blockedReplays = MAX_BLOCKED_REPLAYS_PER_FAILURE;
 			next.recoveryAvailable = false;
 			return { kind: "failed", state: next };
 		}
 		if (visibleCode === "repeated_failed_operation") {
+			next.record = record;
 			next.blockedReplays++;
 			return { kind: "failed", state: next };
 		}
+		if (next.failures > 0 && !sameFailureOutcome(next.record, record)) resetFailureEpisode(next);
+		next.record = record;
 		next.reservedExecutions++;
 		next.failures++;
 		return { kind: "failed", state: next };
@@ -465,6 +470,23 @@ export class ToolFailureRecoveryGate {
 
 function usesOperationLocalExhaustion(tool: AgentTool<any> | undefined): boolean {
 	return tool?.failureRecovery?.exhaustionScope === "operation";
+}
+
+function sameFailureOutcome(left: ToolFailureMemoryRecord, right: ToolFailureMemoryRecord): boolean {
+	return (
+		left.failureCode === right.failureCode &&
+		left.outputSignature !== undefined &&
+		left.outputSignature === right.outputSignature
+	);
+}
+
+function resetFailureEpisode(state: FailureRecoveryState): void {
+	state.reservedExecutions = 0;
+	state.failures = 0;
+	state.recoveryProbes = 0;
+	state.blockedReplays = 0;
+	state.recoveryAvailable = false;
+	state.operationCircuitOpen = false;
 }
 
 function readFailureEvidence(

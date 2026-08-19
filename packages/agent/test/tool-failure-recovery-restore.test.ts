@@ -14,7 +14,13 @@ import {
 	transcriptHasClosedToolOperation,
 } from "../src/tool-failure-memory.ts";
 import { ToolFailureRecoveryGate } from "../src/tool-failure-recovery-gate.ts";
-import type { AgentEvent, AgentMessage, AgentTool, AgentToolResult } from "../src/types.ts";
+import {
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTool,
+	AgentToolExecutionError,
+	type AgentToolResult,
+} from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -146,6 +152,160 @@ const identityConverter = (messages: AgentMessage[]): Message[] =>
 	messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 
 describe("tool-failure recovery restore", () => {
+	it("halts only when an exact operation repeats the same tool code and output", () => {
+		const schema = Type.Object({ command: Type.String() });
+		const args = { command: "run focused tests" };
+		const tool: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "bash",
+			parameters: schema,
+			async execute() {
+				throw new Error("must not execute during recovery-state testing");
+			},
+		};
+		const applyPair = (secondCode: string, secondOutput: string) => {
+			const tracker = new Map();
+			const gate = new ToolFailureRecoveryGate();
+			const first = rememberToolFailure(
+				tracker,
+				"bash",
+				args,
+				"failed",
+				"exit_1",
+				"Repair the workspace before retrying.",
+				undefined,
+				"execution",
+				undefined,
+				{ output: "FAILED tests.test_head_aim import error" },
+			);
+			expect(gate.apply({ kind: "failure", tool, record: first, args })).toBeUndefined();
+			const second = rememberToolFailure(
+				tracker,
+				"bash",
+				args,
+				"failed",
+				secondCode,
+				"Repair the workspace before retrying.",
+				undefined,
+				"execution",
+				undefined,
+				{ output: secondOutput },
+			);
+			return gate.apply({ kind: "failure", tool, record: second, args });
+		};
+
+		expect(applyPair("exit_2", "FAILED tests.test_head_aim import error")).toBeUndefined();
+		expect(applyPair("exit_1", "FAILED test_latest_is_uncalibrated_never_webcam")).toBeUndefined();
+		expect(applyPair("exit_1", "FAILED tests.test_head_aim import error")).toMatchObject({
+			diagnostic: "Recovery circuit opened after 2 failed outcomes for one operation.",
+		});
+	});
+
+	it("restores changed outputs as separate recovery episodes", () => {
+		const args = { command: "run focused tests" };
+		const tracker = new Map();
+		const outputs = [
+			"FAILED tests.test_head_aim import error",
+			"FAILED test_latest_is_uncalibrated_never_webcam",
+			"FAILED test_right_turn_moves_aim_right",
+		];
+		const records = outputs.map((output) =>
+			rememberToolFailure(
+				tracker,
+				"bash",
+				args,
+				"failed",
+				"exit_1",
+				"Repair the workspace before retrying.",
+				undefined,
+				"execution",
+				undefined,
+				{ output },
+			),
+		);
+		const messages: AgentMessage[] = [
+			assistantCall("bash-1", "bash", args),
+			toolResultMessage("bash-1", "bash", createToolFailureResult(records[0]), true),
+			assistantCall("bash-2", "bash", args),
+			toolResultMessage("bash-2", "bash", createToolFailureResult(records[1]), true),
+		];
+		const gate = new ToolFailureRecoveryGate();
+		gate.restoreFromMessages(JSON.parse(JSON.stringify(messages)) as AgentMessage[]);
+		const tool: AgentTool = {
+			name: "bash",
+			label: "bash",
+			description: "bash",
+			parameters: Type.Object({ command: Type.String() }),
+			async execute() {
+				throw new Error("must not execute during recovery-state testing");
+			},
+		};
+
+		expect(gate.apply({ kind: "failure", tool, record: records[2], args })).toBeUndefined();
+		expect(gate.isHalted()).toBe(false);
+	});
+
+	it("returns a changed tool-owned output signature from an exact parallel replay to the agent", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		let executions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "bash",
+			description: "bash",
+			parameters: schema,
+			async execute() {
+				executions++;
+				const outputSignature = executions === 1 ? "a".repeat(64) : "b".repeat(64);
+				throw new AgentToolExecutionError(
+					"same bounded shell preview\nCommand exited with code 1",
+					"exit_1",
+					outputSignature,
+				);
+			},
+		};
+		let providerTurns = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					providerTurns++;
+					stream.push({
+						type: "done",
+						reason: providerTurns === 1 ? "toolUse" : "stop",
+						message:
+							providerTurns === 1
+								? assistantMessage(
+										[
+											{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "test" } },
+											{ type: "toolCall", id: "bash-2", name: "bash", arguments: { command: "test" } },
+										],
+										"toolUse",
+									)
+								: assistantMessage([{ type: "text", text: "continued with the new failure evidence" }], "stop"),
+					});
+				});
+				return stream;
+			},
+			initialState: { model: createModel(), systemPrompt: "", tools: [tool] },
+		});
+		agent.maxStallTurns = 0;
+
+		await agent.prompt("run the focused test");
+
+		expect(executions).toBe(2);
+		expect(providerTurns).toBe(2);
+		expect(
+			agent.state.messages.some(
+				(message) =>
+					message.role === "assistant" &&
+					message.content.some(
+						(block) => block.type === "text" && block.text === "continued with the new failure evidence",
+					),
+			),
+		).toBe(true);
+	});
+
 	it("keeps corrective operations available after an edit-local recovery circuit opens", () => {
 		const schema = Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String() })) });
 		const args = { path: "subject.ts", edits: [{ oldText: "stale anchor" }] };

@@ -567,6 +567,24 @@ export interface AgentState {
 /** Provenance marker for messages synthesized by the host instead of a provider transport. */
 export type AgentMessageOrigin = "local";
 
+/**
+ * Structured execution failure emitted by a tool when recovery identity must not depend on rendered diagnostics.
+ *
+ * `failureCode` identifies the tool-owned terminal outcome. `outputSignature` identifies the complete raw
+ * operation output, including bytes omitted from bounded model-facing previews.
+ */
+export class AgentToolExecutionError extends Error {
+	readonly failureCode: string;
+	readonly outputSignature: string;
+
+	constructor(message: string, failureCode: string, outputSignature: string) {
+		super(message);
+		this.name = "AgentToolExecutionError";
+		this.failureCode = failureCode;
+		this.outputSignature = outputSignature;
+	}
+}
+
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
 	/** Text or image content returned to the model. */

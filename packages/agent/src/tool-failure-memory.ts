@@ -22,6 +22,7 @@ const MAX_TOOL_FAILURE_EVIDENCE_CHARS = 1_600;
 const MAX_ACTIVE_FAILURE_EVIDENCE_CHARS = 2_400;
 const MAX_TOOL_NAME_CHARS = 64;
 const TOOL_SIGNATURE_HEX_CHARS = 32;
+const TOOL_OUTPUT_SIGNATURE_HEX_CHARS = 64;
 const MAX_ACTIVE_FAILURES = 8;
 const MAX_TRACKED_FAILURES = 64;
 const REPAIRABLE_REJECTION_CODES = new Set(["invalid_arguments", "malformed_call", "unknown_tool"]);
@@ -47,6 +48,8 @@ export interface ToolFailureMemoryRecord {
 	state: ToolFailureState;
 	phase: ToolFailurePhase;
 	failureCode: string;
+	/** Tool-owned full-output digest, or a fallback result-text digest; used only to distinguish recovery episodes. */
+	outputSignature?: string;
 	diagnostic?: string;
 	/** Bounded result-scoped harness notice (replay block, circuit state); never displaces the retained diagnostic. */
 	note?: string;
@@ -54,6 +57,13 @@ export interface ToolFailureMemoryRecord {
 	evidence?: string;
 	correction: string;
 	attemptMemory?: "discard";
+}
+
+export interface ToolFailureOutputIdentity {
+	/** Complete tool output when available, otherwise the complete bounded result returned to the agent. */
+	output: string;
+	/** Optional tool-owned digest of output that was not retained in the bounded result. */
+	outputSignature?: string;
 }
 
 export interface ToolFailureMemoryDetails {
@@ -786,6 +796,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isOutputSignature(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		(value.length === TOOL_SIGNATURE_HEX_CHARS || value.length === TOOL_OUTPUT_SIGNATURE_HEX_CHARS) &&
+		/^[0-9a-f]+$/.test(value)
+	);
+}
+
 function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefined {
 	if (!isRecord(details) || !isRecord(details.piToolFailureMemory)) return undefined;
 	const candidate = details.piToolFailureMemory;
@@ -804,6 +822,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 	}
 	const diagnostic =
 		typeof candidate.diagnostic === "string" ? truncate(candidate.diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined;
+	const outputSignature = isOutputSignature(candidate.outputSignature) ? candidate.outputSignature : undefined;
 	const note = typeof candidate.note === "string" ? truncate(candidate.note, MAX_DIAGNOSTIC_CHARS) : undefined;
 	const evidence = sanitizeToolFailureEvidence(candidate.evidence);
 	const retainedCorrection =
@@ -833,6 +852,7 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 		state: candidate.state,
 		phase,
 		failureCode: boundedFailureCode(candidate.failureCode),
+		outputSignature,
 		diagnostic,
 		note,
 		evidence,
@@ -992,6 +1012,7 @@ function analyzeToolFailureContext(messages: AgentMessage[]): FailureContextAnal
 				state,
 				phase: retained?.phase ?? assessment?.phase ?? inferToolFailurePhase(state, "tool_error"),
 				failureCode: retained?.failureCode ?? assessment?.failureCode ?? "tool_error",
+				outputSignature: retained ? retained.outputSignature : structuredHash(textPayload, false),
 				diagnostic: retained?.diagnostic ?? assessment?.diagnostic,
 				evidence: retained?.evidence,
 				correction:
@@ -1095,6 +1116,7 @@ export function rememberToolFailure(
 	diagnostic?: string,
 	phase: ToolFailurePhase = inferToolFailurePhase(state, failureCode),
 	evidence?: string,
+	outputIdentity?: ToolFailureOutputIdentity,
 ): ToolFailureMemoryRecord {
 	let kindCount = 1;
 	for (const previous of tracker.values()) {
@@ -1122,6 +1144,9 @@ export function rememberToolFailure(
 		state,
 		phase,
 		failureCode: boundedFailureCode(failureCode),
+		outputSignature: isOutputSignature(outputIdentity?.outputSignature)
+			? outputIdentity.outputSignature
+			: structuredHash(outputIdentity?.output ?? "", false),
 		diagnostic: diagnostic ? truncate(diagnostic, MAX_DIAGNOSTIC_CHARS) : undefined,
 		evidence: sanitizeToolFailureEvidence(evidence),
 		correction: truncate(correction, MAX_CORRECTION_CHARS),

@@ -8,7 +8,7 @@ import {
 	formatSize,
 	type TruncationResult,
 } from "@caupulican/pi-agent-core/truncate";
-import type { AgentTool } from "@caupulican/pi-agent-core/types";
+import { type AgentTool, AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { TOOL_OPERATION_REJECTED_MARKER } from "@caupulican/pi-ai/tool-repair-registry";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
@@ -826,6 +826,12 @@ function createShellToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
+			const createExitError = (text: string, exitCode: number, effectiveCwd: string) =>
+				new AgentToolExecutionError(
+					appendStatus(text, `Command exited with code ${exitCode}\ncwd: ${effectiveCwd}`),
+					`exit_${exitCode}`,
+					output.getOutputSignature(),
+				);
 			const effectiveTimeoutSeconds =
 				typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0
 					? resolveCommandTimeoutSeconds(timeout)
@@ -848,9 +854,7 @@ function createShellToolDefinition(
 							if (res.exitCode !== 0) {
 								const { text: rawOutputText } = formatOutput(snapshot);
 								// executeFilteredGit runs at the host cwd by construction.
-								throw new Error(
-									appendStatus(rawOutputText, `Command exited with code ${res.exitCode}\ncwd: ${cwd}`),
-								);
+								throw createExitError(rawOutputText, res.exitCode, cwd);
 							}
 							const details = snapshot.truncation.truncated
 								? {
@@ -964,7 +968,7 @@ function createShellToolDefinition(
 					const reportedCwd = routesWindowsContract
 						? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
 						: (sessionCwd ?? spawnContext.cwd);
-					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}\ncwd: ${reportedCwd}`));
+					throw createExitError(outputText, exitCode, reportedCwd);
 				}
 				return { content: [{ type: "text", text: outputText }], details };
 			} finally {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Recovery circuits now count only repeated exact-operation outcomes with the same failure code and output signature, so changed failure evidence returns control to the agent instead of opening the circuit.
+
 ## [0.93.7] - 2026-08-18
 
 ## [0.93.6] - 2026-08-18

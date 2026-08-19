@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Bash failures now carry the exit code and a stable SHA-256 digest of the complete raw output, independent of bounded previews and managed output paths.
+
 ## [0.93.7] - 2026-08-18
 
 ### Fixed

@@ -30,6 +30,37 @@ afterEach(async () => {
 });
 
 describe("tool-owned failure recovery contracts", () => {
+	it("emits stable failure identity from the complete shell output", async () => {
+		const cwd = await createTemporaryRoot("pi-shell-failure-identity-");
+		const run = async (...outputChunks: string[]) => {
+			const bash = createBashTool(cwd, {
+				operations: {
+					exec: async (_command, _cwd, options) => {
+						for (const chunk of outputChunks) options.onData(Buffer.from(chunk));
+						return { exitCode: 1 };
+					},
+				},
+				outputDirectory: cwd,
+			});
+			try {
+				await bash.execute("shell-failure", { command: "run focused tests" });
+			} catch (error) {
+				return error as Error & { failureCode?: string; outputSignature?: string };
+			}
+			throw new Error("Expected shell failure");
+		};
+		const sharedHead = "same head\n".repeat(2_500);
+		const sharedTail = "same tail\n".repeat(2_500);
+		const first = await run(`${sharedHead}first failing assertion\n${sharedTail}`);
+		const repeated = await run(sharedHead, "first failing assertion\n", sharedTail);
+		const changed = await run(`${sharedHead}second failing assertion\n${sharedTail}`);
+
+		expect(first.failureCode).toBe("exit_1");
+		expect(first.outputSignature).toMatch(/^[0-9a-f]{64}$/);
+		expect(repeated.outputSignature).toBe(first.outputSignature);
+		expect(changed.outputSignature).not.toBe(first.outputSignature);
+	});
+
 	it("reopens one exact shell probe only after a successful mutation in the same workspace", async () => {
 		const cwd = await createTemporaryRoot("pi-shell-mutation-recovery-");
 		const otherCwd = await createTemporaryRoot("pi-shell-mutation-other-");

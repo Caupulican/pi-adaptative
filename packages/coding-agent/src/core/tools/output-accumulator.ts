@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -92,6 +92,7 @@ export class OutputAccumulator {
 	private readonly persistAllOutput: boolean;
 	private readonly maxPersistedBytes: number;
 	private readonly decoder: ShellOutputDecoder;
+	private readonly outputHash = createHash("sha256");
 
 	private rawChunks: Buffer[] = [];
 	private headLines: string[] = [];
@@ -111,6 +112,7 @@ export class OutputAccumulator {
 	private totalLines = 0;
 	private hasOpenLine = false;
 	private finished = false;
+	private outputSignature: string | undefined;
 
 	private tempFilePath: string | undefined;
 	private tempFileFd: number | undefined;
@@ -132,6 +134,7 @@ export class OutputAccumulator {
 		if (this.finished) {
 			throw new Error("Cannot append to a finished output accumulator");
 		}
+		this.outputHash.update(data);
 
 		for (let offset = 0; offset < data.length; offset += MAX_APPEND_CHUNK_BYTES) {
 			this.appendBlock(data.subarray(offset, offset + MAX_APPEND_CHUNK_BYTES));
@@ -143,6 +146,7 @@ export class OutputAccumulator {
 			return;
 		}
 		this.finished = true;
+		this.outputSignature = this.outputHash.digest("hex");
 		this.appendDecodedText(this.decoder.decode());
 		if (this.shouldUseTempFile()) {
 			this.tryEnsureTempFile();
@@ -204,6 +208,13 @@ export class OutputAccumulator {
 
 	getLastLineBytes(): number {
 		return this.hasOpenLine ? this.currentLineBytes : this.lastCompletedLineBytes;
+	}
+
+	getOutputSignature(): string {
+		if (!this.finished || this.outputSignature === undefined) {
+			throw new Error("Output signature is unavailable before finish");
+		}
+		return this.outputSignature;
 	}
 
 	private appendBlock(data: Buffer): void {
