@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
+import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -164,5 +165,61 @@ describe("credential exposure guard", () => {
 			boundary,
 		);
 		await expect(failing.execute("call", {})).rejects.not.toThrow(secret);
+	});
+
+	it("preserves classified tool errors while redacting their messages", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-secret-classified-error-"));
+		tempDirs.push(root);
+		const secret = "classified-secret-marker";
+		const boundary = {
+			redactSensitiveText: (text: string) => text.split(secret).join("[REDACTED_SECRET]"),
+			protectedFiles: [],
+			protectedDirectories: [],
+		};
+		const tool: AgentTool<typeof testSchema> = {
+			name: "example",
+			label: "example",
+			description: "test tool",
+			parameters: testSchema,
+			async execute() {
+				throw new AgentToolExecutionError(
+					`failure ${secret}`,
+					"exit_3",
+					"stable-output-signature",
+					"operation_outcome",
+				);
+			},
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(tool, root, boundary);
+
+		const thrown = await guarded.execute("call", {}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(thrown).toBeInstanceOf(AgentToolExecutionError);
+		expect(thrown).toMatchObject({
+			message: "failure [REDACTED_SECRET]",
+			failureCode: "exit_3",
+			outputSignature: "stable-output-signature",
+			errorKind: "operation_outcome",
+		});
+
+		const generic = wrapToolWithCredentialExposureGuard(
+			{
+				...tool,
+				async execute() {
+					throw new Error(`generic ${secret}`);
+				},
+			},
+			root,
+			boundary,
+		);
+		const genericThrown = await generic.execute("call", {}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(genericThrown).toBeInstanceOf(Error);
+		expect(genericThrown).not.toBeInstanceOf(AgentToolExecutionError);
+		expect(genericThrown).toMatchObject({ message: "generic [REDACTED_SECRET]" });
 	});
 });

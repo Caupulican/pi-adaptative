@@ -59,7 +59,7 @@ export interface GoalLoopControllerDeps {
 	/** Read the current goal runtime snapshot (continuation decision + goal state) fresh each pass. */
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	/** Submit a continuation prompt through the session's own prompt path. */
-	prompt(text: string, options?: PromptOptions): Promise<void>;
+	prompt(text: string, options?: PromptOptions): Promise<"completed" | "interrupted">;
 	/**
 	 * Persist one submitted pass's turn and active-wall-clock contribution. Provider usage is charged
 	 * at each assistant response before another request can be admitted. Called once per
@@ -93,7 +93,7 @@ export class GoalLoopController {
 		}
 
 		const prompt = buildGoalContinuationPrompt();
-		await this.deps.prompt(prompt.text, {
+		const turnOutcome = await this.deps.prompt(prompt.text, {
 			expandPromptTemplates: false,
 			processSlashCommands: false,
 			autoContinueGoal: false,
@@ -101,7 +101,7 @@ export class GoalLoopController {
 			goalExecutionId: snapshot.goalState?.goalId,
 		});
 
-		return { submitted: true, snapshot, prompt };
+		return { submitted: true, snapshot, prompt, turnOutcome };
 	}
 
 	async continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
@@ -170,10 +170,6 @@ export class GoalLoopController {
 				this.deps.recordGoalContinuationPass({ ...passAccounting, wallClockMs: now() - passStartedAt });
 			}
 
-			if (hasReachedWallClockBudget()) {
-				return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: snapshot() };
-			}
-
 			let afterSnapshot = snapshot();
 			if (afterSnapshot.goalState?.status === "budget_limited") {
 				return { turnsSubmitted, stopReason: "goal_budget_exhausted", finalSnapshot: afterSnapshot };
@@ -186,6 +182,12 @@ export class GoalLoopController {
 			}
 			if (afterSnapshot.continuation.action !== "continue") {
 				return { turnsSubmitted, stopReason: nonContinueStopReason(afterSnapshot), finalSnapshot: afterSnapshot };
+			}
+			if (result.turnOutcome === "interrupted") {
+				return { turnsSubmitted, stopReason: "turn_interrupted", finalSnapshot: afterSnapshot };
+			}
+			if (hasReachedWallClockBudget()) {
+				return { turnsSubmitted, stopReason: "wall_clock_budget_reached", finalSnapshot: afterSnapshot };
 			}
 		}
 

@@ -1,6 +1,6 @@
 import { realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
-import type { AgentTool, AgentToolResult } from "@caupulican/pi-agent-core";
+import { type AgentTool, AgentToolExecutionError, type AgentToolResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
@@ -324,9 +324,13 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				return redactResult(await tool.execute(toolCallId, params, signal, safeUpdate), boundary);
 			} catch (error) {
 				if (error instanceof Error) {
-					throw new Error(
-						boundary ? boundary.redactSensitiveText(error.message) : redactKnownSecrets(error.message),
-					);
+					const message = boundary
+						? boundary.redactSensitiveText(error.message)
+						: redactKnownSecrets(error.message);
+					if (error instanceof AgentToolExecutionError) {
+						throw new AgentToolExecutionError(message, error.failureCode, error.outputSignature, error.errorKind);
+					}
+					throw new Error(message);
 				}
 				throw new Error("Credential-safe tool execution failed without retaining raw error output.");
 			}

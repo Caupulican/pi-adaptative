@@ -307,6 +307,13 @@ export interface GoalContinuationOnceResult {
 	submitted: boolean;
 	snapshot: GoalRuntimeSnapshot;
 	prompt?: GoalContinuationPrompt;
+	/** Terminal outcome of the submitted provider turn; absent when no prompt was submitted. */
+	turnOutcome?: "completed" | "interrupted";
+}
+
+/** Provider aborts and terminal errors must never drive another autonomous continuation request. */
+export function isInterruptedAssistantStopReason(stopReason: StopReason | undefined): boolean {
+	return stopReason === "aborted" || stopReason === "error";
 }
 
 export type GoalContinuationLoopStopReason =
@@ -317,7 +324,8 @@ export type GoalContinuationLoopStopReason =
 	| "already_continuing"
 	| "session_disposed"
 	| "goal_tool_unavailable"
-	| "worker_in_flight";
+	| "worker_in_flight"
+	| "turn_interrupted";
 
 export interface GoalContinuationLoopOptions extends GoalContinuationOnceOptions {
 	/** Explicit per-invocation turn limit; 0 means unbounded. */

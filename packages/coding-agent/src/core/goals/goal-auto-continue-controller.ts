@@ -101,11 +101,12 @@ export class GoalAutoContinueController {
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		if (snapshot.continuation.action !== "continue") return;
 		try {
-			await this.continueExclusive({
+			const result = await this.continueExclusive({
 				maxTurns: goalContinueTurns,
 				maxStallTurns,
 				maxWallClockMinutes: goalContinueMaxWallClockMinutes,
 			});
+			if (result.stopReason === "turn_interrupted") return;
 			if (!this.deps.isDisposed()) {
 				const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 				if (nextSnapshot.continuation.action === "continue") {

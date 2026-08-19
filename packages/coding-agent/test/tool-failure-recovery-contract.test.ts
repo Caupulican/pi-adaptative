@@ -6,6 +6,7 @@ import type { AgentEvent, AgentMessage } from "@caupulican/pi-agent-core/types";
 import { EventStream } from "@caupulican/pi-ai/event-stream";
 import type { AssistantMessage, AssistantMessageEvent, Message } from "@caupulican/pi-ai/types";
 import { afterEach, describe, expect, it } from "vitest";
+import { wrapToolWithCredentialExposureGuard } from "../src/core/secrets/credential-exposure-guard.ts";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import {
@@ -353,6 +354,7 @@ describe("tool-owned failure recovery contracts", () => {
 		const cwd = await createTemporaryRoot("pi-shell-operation-outcome-");
 		const shellSessionKey = `tool-failure-operation-outcome:${cwd}`;
 		const bash = createBashTool(cwd, { outputDirectory: cwd, sessionKey: shellSessionKey });
+		const guardedBash = wrapToolWithCredentialExposureGuard(bash, cwd);
 		const command = `node -e "console.log('FAILED (errors=2)'); process.exit(3)"`;
 		try {
 			// 1. The tool itself classifies a completed process that exited non-zero.
@@ -369,7 +371,7 @@ describe("tool-owned failure recovery contracts", () => {
 			const events: AgentEvent[] = [];
 			const stream = agentLoop(
 				[{ role: "user", content: "reproduce the red baseline", timestamp: 1 }],
-				{ systemPrompt: "", messages: [], tools: [bash] },
+				{ systemPrompt: "", messages: [], tools: [guardedBash] },
 				{
 					model: {
 						id: "mock",

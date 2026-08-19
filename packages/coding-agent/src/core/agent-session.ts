@@ -258,7 +258,11 @@ import type {
 	ToolValidationEscalationRecord,
 	WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import { RUNAWAY_STOP_CUSTOM_TYPE, TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE } from "./agent-session-contracts.ts";
+import {
+	isInterruptedAssistantStopReason,
+	RUNAWAY_STOP_CUSTOM_TYPE,
+	TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE,
+} from "./agent-session-contracts.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
@@ -2876,7 +2880,9 @@ export class AgentSession {
 		}
 
 		this._backgroundLanes.drainQueuedWorkerDelegations();
-		this._backgroundLanes.scheduleGoalAutoContinueFromIdle(options);
+		if (!isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
+			this._backgroundLanes.scheduleGoalAutoContinueFromIdle(options);
+		}
 		this._backgroundLanes.scheduleResearchLaneFromIdle();
 	}
 

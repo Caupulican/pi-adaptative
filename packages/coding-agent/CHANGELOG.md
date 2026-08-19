@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved classified tool-execution metadata through credential-output redaction, so completed non-zero shell exits remain `operation_outcome` results in the real session runtime instead of reverting to harness failures.
+- Stopped goal continuation after an aborted/error provider turn and suppressed idle autosteer after an interrupted foreground response, preventing one abort from consuming the entire stall allowance with immediate hidden replays.
+
 ## [0.93.9] - 2026-08-19
 
 ### Fixed

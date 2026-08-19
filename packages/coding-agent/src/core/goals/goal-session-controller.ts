@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
+import { MAX_SESSION_ENTRY_VISIT_COUNT, type SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentMessage, AgentRunawayStopInfo } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import type {
-	GoalContinuationLoopOptions,
-	GoalContinuationLoopResult,
-	GoalContinuationOnceOptions,
-	GoalContinuationOnceResult,
-	PromptOptions,
+import {
+	type GoalContinuationLoopOptions,
+	type GoalContinuationLoopResult,
+	type GoalContinuationOnceOptions,
+	type GoalContinuationOnceResult,
+	isInterruptedAssistantStopReason,
+	type PromptOptions,
 } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
@@ -108,11 +109,31 @@ export class GoalSessionController {
 		this.deps = deps;
 		this.loop = new GoalLoopController({
 			getGoalRuntimeSnapshot: (settings) => this.getRuntimeSnapshot(settings),
-			prompt: (text, options) => this.deps.prompt(text, options),
+			prompt: async (text, options) => {
+				const firstTurnEntryIndex = this.deps.getSessionManager().getEntryCount();
+				await this.deps.prompt(text, options);
+				return this.getContinuationTurnOutcome(firstTurnEntryIndex);
+			},
 			recordGoalContinuationPass: (pass) => this.recordContinuationPass(pass),
 			recordGoalContinuationFailure: (error) => this.recordContinuationFailure(error),
 			markGoalBudgetLimited: (reason) => this.markBudgetLimited(reason),
 		});
+	}
+
+	private getContinuationTurnOutcome(firstTurnEntryIndex: number): "completed" | "interrupted" {
+		const sessionManager = this.deps.getSessionManager();
+		const endIndex = sessionManager.getEntryCount();
+		let nextIndex = firstTurnEntryIndex;
+		let lastAssistantStopReason: AssistantMessage["stopReason"] | undefined;
+		while (nextIndex < endIndex) {
+			const visitCount = Math.min(MAX_SESSION_ENTRY_VISIT_COUNT, endIndex - nextIndex);
+			nextIndex = sessionManager.visitEntries(nextIndex, visitCount, (entry) => {
+				if (entry.type === "message" && entry.message.role === "assistant") {
+					lastAssistantStopReason = entry.message.stopReason;
+				}
+			});
+		}
+		return isInterruptedAssistantStopReason(lastAssistantStopReason) ? "interrupted" : "completed";
 	}
 
 	saveState(state: GoalState, expected?: GoalStateRevision): string {

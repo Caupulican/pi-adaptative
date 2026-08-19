@@ -203,4 +203,36 @@ describe("GoalAutoContinueController idle autosteer", () => {
 		expect(continuationOptions).toHaveLength(2);
 		expect(callCount).toBe(2);
 	});
+
+	it("does not re-arm after an interrupted continuation turn", async () => {
+		let callCount = 0;
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => AUTONOMY_SETTINGS,
+				}) as never,
+			getGoalRuntimeSnapshot: () => activeSnapshot(),
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				callCount++;
+				return {
+					turnsSubmitted: 1,
+					stopReason: "turn_interrupted",
+					finalSnapshot: activeSnapshot(),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.advanceTimersToNextTimerAsync();
+
+		expect(callCount).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
 });
