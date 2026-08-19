@@ -264,7 +264,7 @@ describe("tool failure memory", () => {
 		expect(sanitized.systemPrompt).toContain("ACTIVE TOOL FAILURES mistakes=bash:1");
 		expect(sanitized.systemPrompt).toContain('"kind_mistakes":1');
 		expect(sanitized.systemPrompt).toContain(
-			"The operation is readmitted after another tool succeeds or a new user turn",
+			"Retry unchanged only after any other tool succeeds or a new user turn.",
 		);
 		expect(sanitized.systemPrompt).not.toContain("<harness_tool_failures");
 	});
