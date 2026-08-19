@@ -476,8 +476,9 @@ describe("non-native phone filesystem workflow", () => {
 
 			expect(blockedContext).toContain('"failure_code":"file_not_found"');
 			expect(blockedContext).toContain('"occ":2');
+			expect(blockedContext).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
 			expect(blockedContext).toContain(
-				"Do not immediately replay the unchanged operation. The operation is readmitted after another tool succeeds or a new user turn.",
+				"The operation is readmitted after another tool succeeds or a new user turn.",
 			);
 			expect(blockedContext).not.toContain("never repeat the same call");
 			expect(blockedContext).toContain("If the goal requires this exact missing file and its content is known");

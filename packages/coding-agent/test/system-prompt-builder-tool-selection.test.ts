@@ -138,9 +138,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 				}),
 			).rebuildSystemPrompt(["read"]);
 
-			expect(prompt).toContain(
-				"Do not immediately replay the unchanged operation. The operation is readmitted after another tool succeeds or a new user turn.",
-			);
+			expect(prompt).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
 			expect(prompt).not.toContain("never repeat unchanged failure");
 			expect(prompt).not.toContain("never repeat the same call");
 		},

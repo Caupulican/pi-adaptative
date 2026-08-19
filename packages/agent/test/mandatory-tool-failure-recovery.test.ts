@@ -129,7 +129,7 @@ function singleFailureTurnStream(toolName: string, args: Record<string, unknown>
 
 describe("mandatory tool failure recovery protocol", () => {
 	it("keeps the mandatory standing template compact", () => {
-		expect(MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT.length).toBeLessThan(650);
+		expect(MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT.length).toBeLessThan(500);
 	});
 	it("uses one explicit mandatory template for repair, execution, and blocked failures", () => {
 		const record = failureRecord();
@@ -183,16 +183,16 @@ describe("mandatory tool failure recovery protocol", () => {
 		expect(sanitized.systemPrompt).toContain("MANDATORY TOOL FAILURE RECOVERY v1");
 		expect(sanitized.systemPrompt).toContain("MANDATORY AND NON-NEGOTIABLE");
 		expect(sanitized.systemPrompt).toContain("MANDATORY: blocked/rejected means not executed");
-		expect(sanitized.systemPrompt).toContain("Irrelevant argument changes never recover it");
-		expect(sanitized.systemPrompt).toContain("blocked call preserves tool-result pairing but runs no hook/tool code");
+		expect(sanitized.systemPrompt).toContain("Irrelevant argument changes do not recover it");
+		expect(sanitized.systemPrompt).toContain("refusal keeps tool-result pairing and runs no hooks/tools");
 		expect(sanitized.systemPrompt).toContain('"MUST":true');
 		expect(sanitized.systemPrompt).not.toContain("<mandatory_tool_failure");
 
 		// The standing prompt must teach the world-cursor rule and nothing that outlived it.
 		expect(sanitized.systemPrompt).toContain(
-			"Do not immediately replay the unchanged operation. The operation is readmitted after another tool succeeds or a new user turn.",
+			"Retry unchanged only after any other tool succeeds or a new user turn.",
 		);
-		expect(sanitized.systemPrompt).toContain("Refusal is only ever this one operation");
+		expect(sanitized.systemPrompt).toContain("Only that operation is refused; tools and run continue");
 		for (const removed of [
 			"never repeat the same call",
 			"before another tool call",
