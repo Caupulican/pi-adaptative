@@ -85,4 +85,21 @@ describe("secret_store capability boundary", () => {
 			}),
 		).toMatchObject({ outcome: "block", reasonCode: "path_outside_allowed_roots" });
 	});
+
+	it("scopes autonomous credential discovery to the current working tree", () => {
+		expect(extractCandidatePaths("secret_store", { action: "discover" })).toEqual(["."]);
+		expect(
+			evaluateToolGate({
+				toolName: "secret_store",
+				args: { action: "discover" },
+				cwd: "/workspace",
+				envelope: {
+					id: "restricted-secret-envelope",
+					allowedTools: ["secret_store"],
+					capabilities: ["credentials.use"],
+					allowedPaths: ["/workspace/src"],
+				},
+			}),
+		).toMatchObject({ outcome: "block", reasonCode: "path_outside_allowed_roots" });
+	});
 });

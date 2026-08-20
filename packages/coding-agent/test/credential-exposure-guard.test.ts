@@ -22,10 +22,13 @@ describe("credential exposure guard", () => {
 	it("blocks direct dotenv reads and shell inspection while allowing consuming commands", () => {
 		const cwd = "/workspace";
 		expect(credentialToolBlockReason("read", { path: ".env" }, cwd)).toContain("secret_store migrate");
-		expect(credentialToolBlockReason("grep", { pattern: "x", glob: ".env*" }, cwd)).toContain("secret_store migrate");
+		expect(credentialToolBlockReason("grep", { pattern: "x", glob: ".env*" }, cwd)).toContain(
+			"secret_store discover",
+		);
 		expect(credentialToolBlockReason("grep", { pattern: "x", path: "src" }, cwd)).toContain("explicit regular file");
 		expect(credentialToolBlockReason("grep", { pattern: "x", path: "src", glob: "*.ts" }, cwd)).toBeUndefined();
 		expect(credentialToolBlockReason("bash", { command: "cat .env.local" }, cwd)).toContain("secret_store migrate");
+		expect(credentialToolBlockReason("find", { pattern: ".env*" }, cwd)).toContain("secret_store discover");
 		expect(credentialToolBlockReason("bash", { command: "rg TOKEN ." }, cwd)).toContain("narrow non-dotenv");
 		expect(credentialToolBlockReason("bash", { command: "rg TOKEN src -g '*.ts'" }, cwd)).toBeUndefined();
 		expect(credentialToolBlockReason("bash", { command: "npm run deploy" }, cwd)).toBeUndefined();
@@ -33,7 +36,7 @@ describe("credential exposure guard", () => {
 
 	it("blocks jq process-environment projection without blocking ordinary env fields", () => {
 		const cwd = "/workspace";
-		expect(credentialToolBlockReason("bash", { command: "jq -n 'env'" }, cwd)).toContain("secret_store migrate");
+		expect(credentialToolBlockReason("bash", { command: "jq -n 'env'" }, cwd)).toContain("secret_store discover");
 		expect(credentialToolBlockReason("bash", { command: "jq -n '$ENV.API_TOKEN'" }, cwd)).toContain("environment");
 		expect(credentialToolBlockReason("bash", { command: "jq -n '[env]'" }, cwd)).toContain("environment");
 		expect(credentialToolBlockReason("bash", { command: "jq -n '{token: $ENV.API_TOKEN}'" }, cwd)).toContain(

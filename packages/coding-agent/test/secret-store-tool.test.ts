@@ -67,6 +67,14 @@ function createHarness(
 	options: {
 		initialSessionKey?: string;
 		resolveMigrationSources?: () => Promise<Array<{ name: string; value: string }>>;
+		discoverMigrationSources?: () => Promise<{
+			candidates: Array<{
+				source: { kind: "environment"; name: string } | { kind: "dotenv_file"; path: string };
+				variableNames: string[];
+			}>;
+			skipped: number;
+			truncated: boolean;
+		}>;
 	} = { initialSessionKey: "valid-session" },
 ) {
 	const storage = new MemoryStorage();
@@ -81,6 +89,7 @@ function createHarness(
 		tool: createSecretStoreToolDefinition({
 			manager,
 			...(options.resolveMigrationSources ? { resolveMigrationSources: options.resolveMigrationSources } : {}),
+			...(options.discoverMigrationSources ? { discoverMigrationSources: options.discoverMigrationSources } : {}),
 		}),
 	};
 }
@@ -133,6 +142,42 @@ describe("secret_store tool", () => {
 			},
 		]);
 		expect(JSON.stringify(listed)).not.toContain(secret);
+	});
+
+	it("discovers local credential sources without a vault session or owner handoff", async () => {
+		const secret = "discovery-secret-must-never-reach-the-model";
+		const discoverMigrationSources = vi.fn(async () => ({
+			candidates: [
+				{
+					source: { kind: "dotenv_file" as const, path: ".env.local" },
+					variableNames: ["DEPLOY_TOKEN"],
+				},
+			],
+			skipped: 0,
+			truncated: false,
+		}));
+		const { tool } = createHarness({ discoverMigrationSources });
+		const ui = createContext("rpc", "/work/project");
+
+		const discovered = await tool.execute("discover", { action: "discover" }, undefined, undefined, ui.context);
+
+		expect(discoverMigrationSources).toHaveBeenCalledWith("/work/project", undefined);
+		expect(discovered.details).toEqual({
+			action: "discover",
+			status: "discovered",
+			sources: [
+				{
+					source: { kind: "dotenv_file", path: ".env.local" },
+					variableNames: ["DEPLOY_TOKEN"],
+				},
+			],
+			skipped: 0,
+			truncated: false,
+		});
+		expect(JSON.stringify(discovered)).not.toContain(secret);
+		expect(ui.input).not.toHaveBeenCalled();
+		expect(ui.custom).not.toHaveBeenCalled();
+		expect(ui.confirm).not.toHaveBeenCalled();
 	});
 
 	it("requests only one masked BW_SESSION key and then completes the credential action", async () => {
@@ -399,6 +444,7 @@ describe("secret_store tool", () => {
 		expect(schema).toContain("activate");
 		expect(schema).toContain("list");
 		expect(schema).toContain("status");
+		expect(schema).toContain("discover");
 		expect(schema).toContain("migrate");
 		expect(schema).toContain("dotenv_file");
 		expect(schema).toContain("environment");
@@ -408,6 +454,7 @@ describe("secret_store tool", () => {
 		}
 		expect(teachings).toContain("one masked BW_SESSION only");
 		expect(teachings).toContain("current task genuinely requires credentials");
+		expect(teachings).toContain("never ask the owner for source paths or environment-variable names");
 		expect(teachings).toContain("Never probe or activate for an optional integration");
 		expect(teachings).not.toContain("run /secrets");
 	});

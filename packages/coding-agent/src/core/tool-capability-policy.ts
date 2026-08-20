@@ -180,7 +180,7 @@ export function resolveToolCallPathAccess(
 			args && typeof args === "object" && !Array.isArray(args) && "action" in args
 				? (args as { action: unknown }).action
 				: undefined;
-		return action === "migrate" ? "read" : "none";
+		return action === "migrate" || action === "discover" ? "read" : "none";
 	}
 	return resolveCapabilityPathAccess(selected) ?? "none";
 }

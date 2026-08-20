@@ -226,7 +226,7 @@ export function credentialToolBlockReason(
 			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
 			(glob && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob))
 		) {
-			return "Credential dotenv files are model-blind. Use secret_store migrate with the file path instead of searching its contents.";
+			return "Credential dotenv files are model-blind. Use secret_store discover instead of searching their contents.";
 		}
 		if (!(path && isExistingRegularFile(path, cwd)) && !(glob && isCredentialSafeGlob(glob))) {
 			return "Credential-safe grep requires one explicit regular file or a narrow non-dotenv file glob (for example *.ts). Refine the search instead of scanning a directory without a file filter.";
@@ -239,7 +239,7 @@ export function credentialToolBlockReason(
 			(path && isProtectedCredentialPath(path, cwd, boundary)) ||
 			(pattern && /(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(pattern))
 		) {
-			return "Credential dotenv files are model-blind. Use secret_store migrate with a known file path instead of discovering their contents.";
+			return "Credential dotenv files are model-blind. Use secret_store discover instead of searching their contents.";
 		}
 	}
 	if (toolName === "bash" || toolName === "powershell" || toolName === "run_process") {
@@ -249,7 +249,7 @@ export function credentialToolBlockReason(
 			return "Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.";
 		}
 		if (shellRisk === "process_environment") {
-			return "Direct process-environment projection is blocked because it can expose credentials. Use secret_store migrate with known environment-variable names.";
+			return "Direct process-environment projection is blocked because it can expose credentials. Use secret_store discover to list eligible source names without exposing values.";
 		}
 		if (SHELL_SECRET_READ_RE.test(command) || shellRisk === "credential_path") {
 			return "Direct shell inspection of credential files is blocked. Use secret_store migrate with the file path, then run the credential-consuming command normally.";

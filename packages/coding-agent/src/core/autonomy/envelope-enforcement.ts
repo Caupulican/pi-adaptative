@@ -47,6 +47,7 @@ export function extractToolPathArguments(toolName: string, params: unknown): str
 				if (typeof sourcePath === "string" && sourcePath.trim()) paths.push(sourcePath.trim());
 			}
 		}
+		if (record.action === "discover" && paths.length === 0) paths.push(".");
 	}
 	if (
 		paths.length === 0 &&

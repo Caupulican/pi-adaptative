@@ -16,6 +16,12 @@ import {
 	connectCredentialSessionWithMaskedPrompt,
 	isCredentialSessionKeyRequired,
 } from "../secrets/credential-session-connection.ts";
+import {
+	CredentialMigrationDiscoveryError,
+	type CredentialMigrationSourceCandidate,
+	type CredentialMigrationSourceDiscoverer,
+	discoverCredentialMigrationSources,
+} from "../secrets/credential-source-discovery.ts";
 import { SECRET_VARIABLE_NAME_MAX_CHARS, SECRET_VARIABLE_NAME_PATTERN } from "../secrets/secret-dotenv.ts";
 import {
 	emptyOrchestrationCall,
@@ -48,9 +54,15 @@ const migrationSourceSchema = Type.Union([
 const secretStoreSchema = Type.Object(
 	{
 		action: Type.Union(
-			[Type.Literal("status"), Type.Literal("list"), Type.Literal("activate"), Type.Literal("migrate")],
+			[
+				Type.Literal("status"),
+				Type.Literal("list"),
+				Type.Literal("discover"),
+				Type.Literal("activate"),
+				Type.Literal("migrate"),
+			],
 			{
-				description: "Inspect, activate, or migrate model-blind credential sources.",
+				description: "Inspect, discover, activate, or migrate model-blind credential sources.",
 			},
 		),
 		profile: Type.Optional(
@@ -82,6 +94,7 @@ export type SecretStoreStatus =
 	| "activated"
 	| "available"
 	| "cancelled"
+	| "discovered"
 	| "error"
 	| "listed"
 	| "migrated"
@@ -95,6 +108,9 @@ export interface SecretStoreToolDetails {
 	profiles?: CredentialProfileSummary[];
 	project?: string;
 	connected?: boolean;
+	sources?: CredentialMigrationSourceCandidate[];
+	skipped?: number;
+	truncated?: boolean;
 	code?: string;
 	message?: string;
 	sourceRetained?: boolean;
@@ -103,6 +119,7 @@ export interface SecretStoreToolDetails {
 export interface SecretStoreToolOptions {
 	manager: CredentialManager;
 	resolveMigrationSources?: CredentialMigrationSourceResolver;
+	discoverMigrationSources?: CredentialMigrationSourceDiscoverer;
 }
 
 type SecretStoreResult = {
@@ -167,16 +184,19 @@ function failed(input: SecretStoreToolInput, error: unknown): SecretStoreResult 
 	const known =
 		error instanceof CredentialManagerError ||
 		error instanceof CredentialStorageError ||
-		error instanceof CredentialMigrationSourceError;
+		error instanceof CredentialMigrationSourceError ||
+		error instanceof CredentialMigrationDiscoveryError;
 	const code = known ? error.code : "safe_failure";
 	const migrationMessages: Record<string, string> = {
 		duplicate_variable: "Credential migration defines the same variable more than once.",
 		invalid_source: "Credential migration source data is invalid.",
 		source_not_found: "A requested credential source is unavailable.",
 		source_unavailable: "A requested credential source could not be read.",
+		discovery_cancelled: "Credential discovery was cancelled.",
+		discovery_unavailable: "Credential discovery could not inspect the current working tree.",
 	};
 	const message =
-		error instanceof CredentialMigrationSourceError
+		error instanceof CredentialMigrationSourceError || error instanceof CredentialMigrationDiscoveryError
 			? (migrationMessages[error.code] ?? "Credential migration failed safely without exposing values.")
 			: known
 				? error.message
@@ -198,7 +218,7 @@ function failed(input: SecretStoreToolInput, error: unknown): SecretStoreResult 
 
 function panelModel(details: SecretStoreToolDetails | undefined, expanded: boolean): OrchestrationPanelModel {
 	if (!details) return { label: "secrets", status: "error", emptyText: "No credential result was retained." };
-	const success = ["activated", "available", "listed", "migrated"].includes(details.status);
+	const success = ["activated", "available", "discovered", "listed", "migrated"].includes(details.status);
 	return {
 		label: "secrets",
 		action: details.status,
@@ -210,6 +230,7 @@ function panelModel(details: SecretStoreToolDetails | undefined, expanded: boole
 				? `${details.variableNames.length} variable${details.variableNames.length === 1 ? "" : "s"}`
 				: undefined,
 			details.profiles ? `${details.profiles.length} profile${details.profiles.length === 1 ? "" : "s"}` : undefined,
+			details.sources ? `${details.sources.length} source${details.sources.length === 1 ? "" : "s"}` : undefined,
 		].filter((value): value is string => value !== undefined),
 		rows: expanded
 			? details.profiles?.map((profile) => ({
@@ -230,6 +251,7 @@ function panelModel(details: SecretStoreToolDetails | undefined, expanded: boole
 export function createSecretStoreToolDefinition(options: SecretStoreToolOptions) {
 	const { manager } = options;
 	const resolveSources = options.resolveMigrationSources ?? resolveCredentialMigrationSources;
+	const discoverSources = options.discoverMigrationSources ?? discoverCredentialMigrationSources;
 	return defineTool<typeof secretStoreSchema, SecretStoreToolDetails>({
 		name: "secret_store",
 		label: "Secret Store",
@@ -240,6 +262,8 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 		promptGuidelines: [
 			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
 			"Only when the current task genuinely requires credentials: call secret_store. Never probe or activate for an optional integration; its absence does not block unrelated work.",
+			"When required credentials are already on this machine or exact descriptors are unknown, call discover; never ask the owner for source paths or environment-variable names.",
+			"Discovery is bounded to the current working tree and process environment and returns paths/names only. Migrate relevant candidates into concise project profiles without exposing values.",
 			"If required credentials are disconnected, TUI asks for one masked BW_SESSION only; never request chat/setup work.",
 			"activate before credential work; TUI/print/RPC return metadata only.",
 			"One project binding: omit profile. Multiple: use list, select authorized profile.",
@@ -280,6 +304,26 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 						status.connected
 							? "Bitwarden is connected for this Pi session."
 							: "A Bitwarden session key is available and will be validated on activation.",
+					);
+				}
+				if (input.action === "discover") {
+					const discovered = await discoverSources(ctx.cwd, signal);
+					const count = discovered.candidates.length;
+					const notes = [
+						discovered.skipped > 0
+							? `${discovered.skipped} unreadable or invalid candidate${discovered.skipped === 1 ? " was" : "s were"} skipped.`
+							: undefined,
+						discovered.truncated ? "The bounded discovery limit was reached." : undefined,
+					].filter((note): note is string => note !== undefined);
+					return result(
+						{
+							action: input.action,
+							status: "discovered",
+							sources: discovered.candidates,
+							skipped: discovered.skipped,
+							truncated: discovered.truncated,
+						},
+						`Discovered ${count} credential source${count === 1 ? "" : "s"}; only paths and variable names were returned.${notes.length > 0 ? ` ${notes.join(" ")}` : ""}`,
 					);
 				}
 
