@@ -45,7 +45,7 @@ describe("goal tool", () => {
 		});
 		const result = await tool.execute(
 			"call-1",
-			{ action: "start", goalId: "g1", userGoal: "Ship feature" },
+			{ action: "start", goalId: "g1", userGoal: "Ship feature", tokenBudget: 5_000 },
 			undefined,
 			undefined,
 			ctx,

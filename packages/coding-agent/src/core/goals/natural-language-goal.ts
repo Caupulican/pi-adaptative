@@ -255,7 +255,7 @@ export function parseExplicitChatGoal(text: string, priorUserText?: string): Exp
 	return { objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
 }
 
-/** Exact owner authority for model-facing goal creation; ordinary work and meta-discussion fail closed. */
+/** Exact owner authority for model-supplied token budgets; ordinary work carries no budget authority. */
 export function parseExplicitGoalStartAuthority(text: string): ExplicitGoalStartAuthority | undefined {
 	const goal = parseExplicitChatGoal(text);
 	if (goal) return goal.tokenBudget === undefined ? {} : { tokenBudget: goal.tokenBudget };

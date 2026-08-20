@@ -52,6 +52,60 @@ describe("AgentSession natural-language goal admission", () => {
 		}
 	});
 
+	it("lets the model create a durable goal from an ordinary owner task at its discretion", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("create_goal", {
+							objective: "Investigate and fix the flaky Windows harness",
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("The durable goal is active."),
+			]);
+
+			await harness.session.prompt("Investigate and fix the flaky Windows harness.", {
+				autoContinueGoal: false,
+			});
+
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				status: "active",
+				userGoal: "Investigate and fix the flaky Windows harness",
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not let model discretion invent a goal token budget", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("create_goal", {
+							objective: "Investigate and fix the flaky Windows harness",
+							token_budget: 5_000,
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("The owner did not set a token budget."),
+			]);
+
+			await harness.session.prompt("Investigate and fix the flaky Windows harness.", {
+				autoContinueGoal: false,
+			});
+
+			expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("starts a durable goal from handover language using the previous user task", async () => {
 		const harness = await createHarness();
 		try {

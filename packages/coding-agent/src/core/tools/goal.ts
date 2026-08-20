@@ -403,10 +403,10 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 		name: LEGACY_GOAL_TOOL_NAME,
 		label: "goal",
 		description:
-			"Read or update the durable goal for explicitly persistent work. Use task_steps for plans and delegate for workers; owner or system controls lifecycle and budget stops.",
+			"Read or update the durable goal for work that benefits from persistent autonomous continuation. The agent may start one at its discretion or on explicit user/system request; only the owner or system may set a token budget.",
 		promptSnippet: "Read or update the durable goal.",
 		promptGuidelines: [
-			"Start only for explicit persistent chat/system goal. get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
+			"Start when persistent continuation materially benefits current work or the user/system requests it. Skip routine one-turn tasks; get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
 			"complete needs current authoritative evidence, no remaining work, no linked open task_steps, no running tool_task, no active pipeline. block_goal needs same real impasse for 3 goal turns.",
@@ -445,7 +445,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					details: { action: "get", applied: false, state },
 				};
 			}
-			if (input.action === "start" && deps.authorizeStart) {
+			if (input.action === "start" && input.tokenBudget !== undefined && deps.authorizeStart) {
 				const error = deps.authorizeStart(input);
 				if (error) {
 					return {
@@ -625,8 +625,8 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		name: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		description:
-			"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
-		promptSnippet: "Create an explicitly requested durable goal.",
+			"Create a durable goal when persistent autonomous continuation materially benefits the current work, or when the user/system explicitly requests one. Use agent discretion; skip routine short tasks. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
+		promptSnippet: "Create a durable goal when persistent continuation is useful.",
 		parameters: createGoalSchema,
 		execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
 			return goalTool.execute(
