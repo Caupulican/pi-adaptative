@@ -22,11 +22,11 @@ import {
 	type WorkerAction,
 } from "./worker-actions.ts";
 import {
+	clipWorkerClaimSummary,
 	collectBoundedWorkerClaimBlockers,
 	collectBoundedWorkerClaimChangedFiles,
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
 	MAX_WORKER_CLAIM_BLOCKERS,
-	MAX_WORKER_CLAIM_SUMMARY_CHARS,
 	normalizeWorkerClaimForHost,
 	validateWorkerClaim,
 } from "./worker-claim.ts";
@@ -138,7 +138,8 @@ const MAX_WORKER_REASON_CODE_CHARS = 128;
 
 function balancedObjectCandidates(text: string): string[] {
 	const ranges: Array<{ start: number; end: number }> = [];
-	const starts: number[] = [];
+	let start: number | undefined;
+	let depth = 0;
 	let inString = false;
 	let escaped = false;
 	for (let index = 0; index < text.length; index++) {
@@ -154,15 +155,18 @@ function balancedObjectCandidates(text: string): string[] {
 			continue;
 		}
 		if (character === "{") {
-			if (starts.length >= MAX_WORKER_JSON_DEPTH) return ranges.map(({ start, end }) => text.slice(start, end));
-			starts.push(index);
+			if (depth === 0) start = index;
+			depth++;
+			if (depth > MAX_WORKER_JSON_DEPTH) return ranges.map((range) => text.slice(range.start, range.end));
 			continue;
 		}
 		if (character !== "}") continue;
-		const start = starts.pop();
-		if (start === undefined || ranges.length >= MAX_WORKER_JSON_CANDIDATES) continue;
+		if (depth === 0) continue;
+		depth--;
+		if (depth !== 0 || start === undefined || ranges.length >= MAX_WORKER_JSON_CANDIDATES) continue;
 		const end = index + 1;
 		if (end - start <= MAX_WORKER_OUTPUT_CHARS) ranges.push({ start, end });
+		start = undefined;
 	}
 	return ranges.map(({ start, end }) => text.slice(start, end));
 }
@@ -247,7 +251,7 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 			: [];
 		const actionOutcome = parseWorkerActions(record.actions);
 		return {
-			summary: summary.trim().slice(0, MAX_WORKER_CLAIM_SUMMARY_CHARS),
+			summary: clipWorkerClaimSummary(summary.trim()),
 			status,
 			blockers,
 			findings,
@@ -433,7 +437,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				completion.stopReason === "stop"
 					? ""
 					: `\n\n[Worker output ended with stop reason '${completion.stopReason}'; verify completeness.]`;
-			const summary = `${completion.text.trim().slice(0, Math.max(0, MAX_WORKER_CLAIM_SUMMARY_CHARS - incompleteNote.length))}${incompleteNote}`;
+			const summary = clipWorkerClaimSummary(completion.text.trim(), incompleteNote);
 			const blocked = completionBlockers.length > 0;
 			return finishOutcome({
 				request: options.request,

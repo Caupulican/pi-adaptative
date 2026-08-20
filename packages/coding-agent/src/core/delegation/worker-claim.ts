@@ -1,10 +1,13 @@
 import path from "node:path";
+import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
+import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
-export const MAX_WORKER_CLAIM_SUMMARY_CHARS = 8_000;
+export const MAX_WORKER_CLAIM_SUMMARY_CHARS = DEFAULT_MAX_BYTES;
+export const MAX_WORKER_CLAIM_SUMMARY_BYTES = DEFAULT_MAX_BYTES;
 export const MAX_WORKER_CLAIM_BLOCKERS = 32;
 export const MAX_WORKER_CLAIM_BLOCKER_CHARS = 1_000;
 export const MAX_WORKER_CLAIM_CHANGED_FILES = 128;
@@ -83,6 +86,23 @@ function requiredWorkerClaimString(value: unknown, label: string, maximumChars: 
 	if (typeof value !== "string" || value.length === 0) invalidWorkerClaim(`${label} must be a non-empty string.`);
 	if (value.length > maximumChars) invalidWorkerClaim(`${label} exceeds ${maximumChars} characters.`);
 	return value;
+}
+
+function requiredWorkerClaimSummary(value: unknown): string {
+	const summary = requiredWorkerClaimString(value, "claim.summary", MAX_WORKER_CLAIM_SUMMARY_CHARS);
+	if (Buffer.byteLength(summary, "utf8") > MAX_WORKER_CLAIM_SUMMARY_BYTES) {
+		invalidWorkerClaim(`claim.summary exceeds ${MAX_WORKER_CLAIM_SUMMARY_BYTES} bytes.`);
+	}
+	return summary;
+}
+
+/** Bound a host-produced claim summary without splitting a UTF-8 code point. */
+export function clipWorkerClaimSummary(value: string, suffix = ""): string {
+	const suffixBytes = Buffer.byteLength(suffix, "utf8");
+	if (suffixBytes > MAX_WORKER_CLAIM_SUMMARY_BYTES) {
+		throw new TypeError("Worker claim summary suffix exceeds the inline output ceiling.");
+	}
+	return `${utf8PrefixByBytes(value, MAX_WORKER_CLAIM_SUMMARY_BYTES - suffixBytes)}${suffix}`;
 }
 
 function optionalWorkerClaimString(value: unknown, label: string, maximumChars: number): string | undefined {
@@ -190,7 +210,7 @@ export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 				}
 			: {}),
 		status,
-		summary: requiredWorkerClaimString(claim.summary, "claim.summary", MAX_WORKER_CLAIM_SUMMARY_CHARS),
+		summary: requiredWorkerClaimSummary(claim.summary),
 		...(claim.outputFormat !== undefined ? { outputFormat: claim.outputFormat } : {}),
 		...(claim.evidence !== undefined ? { evidence: normalizeEvidenceBundleForStorage(claim.evidence) } : {}),
 		changedFiles: workerClaimStringArray(

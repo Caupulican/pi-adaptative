@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -18,6 +19,8 @@ export const MAX_ORCHESTRATION_IDENTIFIER_LENGTH = 512;
 export const MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH = 128;
 export const MAX_ORCHESTRATION_MODEL_ID_LENGTH = 512;
 export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
+/** Worker terminal summaries use the same inline byte ceiling as ordinary tool output. */
+export const MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES = DEFAULT_MAX_BYTES;
 export const MAX_ORCHESTRATION_COLLECTION_LENGTH = 64;
 export const MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH = 16 * 1024;
 /**

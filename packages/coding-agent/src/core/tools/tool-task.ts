@@ -106,16 +106,20 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 
 			try {
 				const record = await deps.wait(taskId, signal);
-				const isError = record.status !== "completed";
+				const isError = record.status === "failed" || record.status === "canceled";
+				const text =
+					record.status === "running"
+						? `${record.summary}\nWait watchdog elapsed; continue independent work. The terminal handoff will wake the session.`
+						: record.output || record.summary;
 				return {
-					content: [{ type: "text" as const, text: record.output || record.summary }],
+					content: [{ type: "text" as const, text }],
 					details: {
 						kind: "wait" as const,
 						taskId,
 						status: record.status,
 						...(record.artifactId ? { artifactId: record.artifactId } : {}),
 					},
-					...(isError ? { isError: true } : {}),
+					...(isError ? { isError: true, errorKind: "operation_outcome" as const } : {}),
 				};
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);

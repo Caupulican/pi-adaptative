@@ -37,6 +37,28 @@ describe("worker terminal handoff protocol", () => {
 		expect(content).not.toContain("worker_blocked means");
 	});
 
+	it("includes a host-verified terminal-output pointer in nested and foreground handoffs", () => {
+		const outputArtifact = {
+			artifactId: "worker-output-1",
+			kind: "report" as const,
+			uri: "file:///tmp/worker-output-1.txt",
+			sizeBytes: 75_000,
+			createdAt: "2026-08-20T00:00:00.000Z",
+			metadata: { source: "worker_terminal_output", complete: true },
+		};
+		const nested = buildWorkerTerminalHandoffContent({
+			childAgentId: "worker-2",
+			record: { laneId: "worker-2", status: "succeeded" },
+			outputArtifact,
+		});
+		const foreground = buildForegroundWorkerTerminalHandoffContent([
+			{ laneId: "worker-2", status: "succeeded", outputArtifact },
+		]);
+
+		expect(nested).toContain("file:///tmp/worker-output-1.txt");
+		expect(foreground).toContain("file:///tmp/worker-output-1.txt");
+	});
+
 	it("makes an exhausted child budget authoritative over earlier transcript errors", () => {
 		const content = buildWorkerTerminalHandoffContent({
 			childAgentId: "worker-3",

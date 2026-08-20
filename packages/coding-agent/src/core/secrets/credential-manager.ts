@@ -81,8 +81,17 @@ export interface StoredCredentialProfileSummary {
 	projectKeys: string[];
 }
 
+export type CredentialStorageProvider = "bitwarden_password_manager" | "bitwarden_secrets_manager";
+
+export interface MachineCredentialSession {
+	provider: CredentialStorageProvider;
+	sessionKey: string;
+}
+
+export type MachineCredentialSessionResolver = (signal?: AbortSignal) => Promise<MachineCredentialSession | undefined>;
+
 export interface CredentialProfileStorage {
-	connect(sessionKey: string, signal?: AbortSignal): Promise<void>;
+	connect(sessionKey: string, signal?: AbortSignal, provider?: CredentialStorageProvider): Promise<void>;
 	refresh?(signal?: AbortSignal): Promise<void>;
 	listProfiles(signal?: AbortSignal): Promise<StoredCredentialProfileSummary[]>;
 	readProfile(profile: string, signal?: AbortSignal): Promise<CredentialProfileRecord>;
@@ -122,6 +131,7 @@ export interface CredentialManagerOptions {
 	storage: CredentialProfileStorage;
 	resolveProject: CredentialProjectResolver;
 	initialSessionKey?: string;
+	resolveMachineSession?: MachineCredentialSessionResolver;
 	onEnvironmentChanged?: () => void;
 }
 
@@ -254,10 +264,12 @@ function findReplaceableProfile(
 export class CredentialManager {
 	private readonly storage: CredentialProfileStorage;
 	private readonly resolveProject: CredentialProjectResolver;
+	private readonly resolveMachineSession: MachineCredentialSessionResolver | undefined;
 	private readonly onEnvironmentChanged: () => void;
 	private readonly activeEnvironments = new Map<string, ActiveCredentialEnvironment>();
 	private readonly sensitiveValues = new Set<string>();
 	private pendingSessionKey: string | undefined;
+	private pendingStorageProvider: CredentialStorageProvider | undefined;
 	private sessionKeyForRedaction: string | undefined;
 	private connectionPromise: Promise<void> | undefined;
 	private connectionGeneration = 0;
@@ -266,14 +278,22 @@ export class CredentialManager {
 	constructor(options: CredentialManagerOptions) {
 		this.storage = options.storage;
 		this.resolveProject = options.resolveProject;
+		this.resolveMachineSession = options.resolveMachineSession;
 		this.onEnvironmentChanged = options.onEnvironmentChanged ?? (() => {});
-		this.pendingSessionKey = options.initialSessionKey ?? process.env.BW_SESSION;
+		this.pendingSessionKey =
+			options.initialSessionKey ??
+			(options.resolveMachineSession === undefined ? process.env.BW_SESSION : undefined);
+		this.pendingStorageProvider = this.pendingSessionKey ? "bitwarden_password_manager" : undefined;
 		this.sessionKeyForRedaction = this.pendingSessionKey;
 		this.rebuildSensitiveValues();
 	}
 
 	get status(): CredentialConnectionStatus {
-		return { connected: this.connected, sessionAvailable: this.connected || Boolean(this.pendingSessionKey) };
+		return {
+			connected: this.connected,
+			sessionAvailable:
+				this.connected || Boolean(this.pendingSessionKey) || this.resolveMachineSession !== undefined,
+		};
 	}
 
 	async connect(sessionKey: string, signal?: AbortSignal): Promise<void> {
@@ -281,6 +301,7 @@ export class CredentialManager {
 		this.connectionGeneration++;
 		let privateSessionKey = validateSessionKey(sessionKey);
 		this.pendingSessionKey = privateSessionKey;
+		this.pendingStorageProvider = "bitwarden_password_manager";
 		this.sessionKeyForRedaction = privateSessionKey;
 		this.rebuildSensitiveValues();
 		this.connected = false;
@@ -296,6 +317,11 @@ export class CredentialManager {
 		} finally {
 			privateSessionKey = "";
 		}
+	}
+
+	async ensureAvailable(signal?: AbortSignal): Promise<CredentialConnectionStatus> {
+		await this.ensureConnected(signal);
+		return this.status;
 	}
 
 	async listForProject(cwd: string, signal?: AbortSignal): Promise<CredentialProfileSummary[]> {
@@ -510,6 +536,7 @@ export class CredentialManager {
 		this.storage.lock();
 		this.connected = false;
 		this.pendingSessionKey = undefined;
+		this.pendingStorageProvider = undefined;
 		this.sessionKeyForRedaction = undefined;
 		this.connectionPromise = undefined;
 		this.activeEnvironments.clear();
@@ -520,17 +547,41 @@ export class CredentialManager {
 	private async ensureConnected(signal?: AbortSignal): Promise<void> {
 		if (this.connected) return;
 		if (this.connectionPromise) return this.connectionPromise;
-		let sessionKey = this.pendingSessionKey;
-		if (!sessionKey) {
-			throw new CredentialManagerError(
-				"owner_setup_required",
-				"Bitwarden needs a BW_SESSION key through Pi's masked owner prompt.",
-			);
-		}
 		const generation = this.connectionGeneration;
 		const connectionPromise = (async () => {
+			let sessionKey = this.pendingSessionKey;
+			let provider = this.pendingStorageProvider;
 			try {
-				await this.storage.connect(sessionKey, signal);
+				if (!sessionKey && this.resolveMachineSession) {
+					const machineSession = await this.resolveMachineSession(signal);
+					if (generation !== this.connectionGeneration) {
+						throw new CredentialManagerError(
+							"owner_setup_required",
+							"Bitwarden connection was cancelled when the owner locked credentials.",
+						);
+					}
+					if (machineSession) {
+						if (
+							machineSession.provider !== "bitwarden_password_manager" &&
+							machineSession.provider !== "bitwarden_secrets_manager"
+						) {
+							throw new CredentialManagerError("invalid_session_key", "The Bitwarden provider is invalid.");
+						}
+						sessionKey = validateSessionKey(machineSession.sessionKey);
+						provider = machineSession.provider;
+						this.pendingSessionKey = sessionKey;
+						this.pendingStorageProvider = provider;
+						this.sessionKeyForRedaction = sessionKey;
+						this.rebuildSensitiveValues();
+					}
+				}
+				if (!sessionKey || !provider) {
+					throw new CredentialManagerError(
+						"owner_setup_required",
+						"No machine-owned Bitwarden session is available; TUI can accept one masked BW_SESSION key.",
+					);
+				}
+				await this.storage.connect(sessionKey, signal, provider);
 				if (generation !== this.connectionGeneration) {
 					this.storage.lock();
 					throw new CredentialManagerError(
@@ -540,8 +591,11 @@ export class CredentialManager {
 				}
 				this.connected = true;
 			} finally {
-				if (generation === this.connectionGeneration) this.pendingSessionKey = undefined;
-				sessionKey = "";
+				if (generation === this.connectionGeneration) {
+					this.pendingSessionKey = undefined;
+					this.pendingStorageProvider = undefined;
+				}
+				if (sessionKey) sessionKey = "";
 			}
 		})();
 		this.connectionPromise = connectionPromise;

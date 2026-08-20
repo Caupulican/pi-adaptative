@@ -133,7 +133,7 @@ function result(details: SecretStoreToolDetails, text: string): SecretStoreResul
 
 function ownerSetupRequired(action: SecretStoreToolInput["action"]): SecretStoreResult {
 	const message =
-		"Bitwarden needs one owner input: a BW_SESSION key supplied through Pi's masked prompt or process environment, never through chat.";
+		"No usable machine-owned Bitwarden session was found. TUI needs one owner input: a BW_SESSION key supplied through Pi's masked prompt, never through chat.";
 	return result(
 		{
 			action,
@@ -262,15 +262,15 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
 			"Only when the current task genuinely requires credentials: call secret_store. Never probe or activate for an optional integration; its absence does not block unrelated work.",
 			"When required credentials are already on this machine or exact descriptors are unknown, call discover; never ask the owner for source paths or environment-variable names.",
-			"Discovery is bounded to the current working tree and process environment and returns paths/names only. Migrate relevant candidates into concise project profiles without exposing values.",
-			"If required credentials are disconnected, TUI asks for one masked BW_SESSION only; never request chat/setup work.",
+			"Discovery is bounded to the current working tree, configured machine roots, and process environment and returns paths/names only. Migrate relevant candidates into concise project profiles without exposing values.",
+			"Pi first uses a machine-owned BWS_ACCESS_TOKEN or BW_SESSION bootstrap. Only if none works does TUI ask for one masked BW_SESSION only; never request chat/setup work.",
 			"activate before credential work; TUI/print/RPC return metadata only.",
 			"One project binding: omit profile. Multiple: use list, select authorized profile.",
 			"Never request credentials in chat/tool arguments.",
 			"After activation, run consumer normally; never print/inspect/grep/echo credential environment values.",
 			"migrate accepts environment names, dotenv paths, key-file paths; never credential values.",
 			"Migration keeps sources. overwrite only for intentional Bitwarden profile replacement.",
-			"owner_setup_required without UI: report only BW_SESSION missing, supplied out of band to Pi; never request more/retry.",
+			"owner_setup_required without UI: report that no usable machine Bitwarden session was found; never request chat/setup work or retry unchanged.",
 		],
 		parameters: secretStoreSchema,
 		executionMode: "sequential",
@@ -296,13 +296,10 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 			if (validation) return validation;
 			try {
 				if (input.action === "status") {
-					const status = manager.status;
-					if (!status.sessionAvailable) return ownerSetupRequired(input.action);
+					const status = await manager.ensureAvailable(signal);
 					return result(
 						{ action: input.action, status: "available", connected: status.connected },
-						status.connected
-							? "Bitwarden is connected for this Pi session."
-							: "A Bitwarden session key is available and will be validated on activation.",
+						"Bitwarden is connected for this Pi session.",
 					);
 				}
 				if (input.action === "discover") {
@@ -394,10 +391,6 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 					return connection === "connected" ? undefined : cancelled(input.action);
 				};
 
-				if (!manager.status.sessionAvailable) {
-					const setup = await connectWithOwnerKey();
-					if (setup) return setup;
-				}
 				try {
 					return await executeCredentialAction();
 				} catch (error) {

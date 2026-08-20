@@ -5,9 +5,11 @@ import { pathToFileURL } from "node:url";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { normalizeWorkerClaimForHost } from "../delegation/worker-claim.ts";
 import { sameFileVersion } from "../util/bounded-file.ts";
+import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import {
 	type ArtifactContract,
 	type EvidenceContract,
+	MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
 	ORCHESTRATION_SCHEMA_VERSION,
 	type WorkerResultContract,
 } from "./contracts.ts";
@@ -18,6 +20,8 @@ export const MAX_WORKER_ARTIFACT_HASH_BYTES = 16 * 1024 * 1024;
 /** A terminal result may report many files; bound their cumulative synchronous reads too. */
 export const MAX_WORKER_ARTIFACT_HASH_TOTAL_BYTES = 32 * 1024 * 1024;
 const WORKER_ARTIFACT_HASH_CHUNK_BYTES = 64 * 1024;
+const WORKER_RESULT_SUMMARY_TRUNCATION_NOTICE =
+	"\n\n[Worker summary truncated; full output remains in the worker transcript.]";
 
 type HostFileState = "regular" | "missing" | "non_regular" | "read_error";
 
@@ -208,8 +212,30 @@ function evidenceForClaim(claim: WorkerClaim, createdAt: string): EvidenceContra
 	}));
 }
 
+function durableWorkerResultSummary(value: string, outputArtifact?: ArtifactContract): string {
+	const summary = value.trim();
+	if (outputArtifact) {
+		const artifactNotice = `\n\n[Full worker output: ${outputArtifact.uri}]`;
+		const noticeBytes = Buffer.byteLength(artifactNotice, "utf8");
+		if (noticeBytes > MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES) {
+			throw new Error("Worker terminal output artifact URI exceeds the durable summary limit.");
+		}
+		return `${utf8PrefixByBytes(
+			summary,
+			MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES - noticeBytes,
+		)}${artifactNotice}`;
+	}
+	if (Buffer.byteLength(summary, "utf8") <= MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES) return summary;
+	const noticeBytes = Buffer.byteLength(WORKER_RESULT_SUMMARY_TRUNCATION_NOTICE, "utf8");
+	return `${utf8PrefixByBytes(
+		summary,
+		MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES - noticeBytes,
+	)}${WORKER_RESULT_SUMMARY_TRUNCATION_NOTICE}`;
+}
+
 function verificationEvidence(
 	claim: WorkerClaim,
+	summary: string,
 	accepted: boolean,
 	criterionIds: readonly string[],
 	createdAt: string,
@@ -220,7 +246,7 @@ function verificationEvidence(
 		{
 			evidenceId: "independent-review",
 			kind: "review",
-			summary: claim.summary,
+			summary,
 			artifactIds: [],
 			trusted: trustedReview,
 			createdAt,
@@ -235,7 +261,7 @@ function verificationEvidence(
 				evidenceId: `independent-review-criterion-${index + 1}`,
 				criterionId,
 				kind: "review",
-				summary: claim.summary,
+				summary,
 				artifactIds: [],
 				trusted: trustedReview && claim.verification?.verdict === "accepted",
 				createdAt,
@@ -261,6 +287,7 @@ export interface CreateWorkerResultContractInput {
 	verificationCriterionIds?: readonly string[];
 	reasonCode?: string;
 	createdAt?: string;
+	outputArtifact?: ArtifactContract;
 }
 
 /** Sole host-owned conversion from an untrusted claim to a fenced durable result. */
@@ -269,6 +296,7 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 	// Result construction is reachable from recovery/error paths as well as the native runner.
 	// Normalize first so no claim can expand file iteration, hashing, evidence, or durable results.
 	const claim = normalizeWorkerClaimForHost(args.claim);
+	const summary = durableWorkerResultSummary(claim.summary, args.outputArtifact);
 	const status: WorkerResultContract["status"] =
 		claim.status === "completed"
 			? args.accepted && !args.verificationRequired
@@ -282,7 +310,10 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		changedFileObservations.push(observation);
 		remainingDigestBytes -= observation.digestBytesCaptured;
 	}
-	const artifacts = changedFileObservations.map(({ artifact }) => artifact);
+	const artifacts = [
+		...changedFileObservations.map(({ artifact }) => artifact),
+		...(args.outputArtifact ? [args.outputArtifact] : []),
+	];
 	const blockers = claim.blockers ?? [];
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -294,12 +325,25 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		fencingToken: args.handle.fencingToken,
 		status,
 		reasonCode: args.reasonCode ?? `worker_${claim.status}`,
-		summary: claim.summary,
+		summary,
 		artifacts,
 		evidence: [
 			...evidenceForClaim(claim, createdAt),
 			...hostFileStateEvidence(changedFileObservations, createdAt),
-			...verificationEvidence(claim, args.accepted, args.verificationCriterionIds ?? [], createdAt),
+			...(args.outputArtifact
+				? [
+						{
+							evidenceId: "host-worker-terminal-output",
+							kind: "observation" as const,
+							summary: "Host persisted the complete terminal worker output.",
+							artifactIds: [args.outputArtifact.artifactId],
+							trusted: true,
+							createdAt,
+							metadata: { observation: "worker_terminal_output_persisted" },
+						},
+					]
+				: []),
+			...verificationEvidence(claim, summary, args.accepted, args.verificationCriterionIds ?? [], createdAt),
 		],
 		errors: blockers.map((message) => ({ code: "worker_blocker", message, retryable: false })),
 		...(args.verificationRequired

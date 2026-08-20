@@ -30,6 +30,7 @@ import {
 	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
+	MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
 	MAX_WORKER_RESOURCE_PATH_LENGTH,
 	MAX_WORKER_RESOURCE_POINTERS,
 	OBJECTIVE_STATUSES,
@@ -227,6 +228,15 @@ function retainedDescription(value: unknown, label: string): string {
 		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
 	}
 	return description;
+}
+
+function retainedWorkerResultSummary(value: unknown, label: string): string {
+	const summary = string(value, label).trim();
+	if (!summary) throw new DurableTaskRuntimeError(`${label} is required.`);
+	if (Buffer.byteLength(summary, "utf8") > MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES) {
+		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
+	}
+	return summary;
 }
 
 export function checkpointSummary(value: unknown, label: string): string {
@@ -1039,7 +1049,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		fencingToken,
 		status: status as WorkerResultContract["status"],
 		reasonCode: dispatchIdentifier(result.reasonCode, `${label}.reasonCode`),
-		summary: retainedDescription(result.summary, `${label}.summary`),
+		summary: retainedWorkerResultSummary(result.summary, `${label}.summary`),
 		artifacts: artifacts as WorkerResultContract["artifacts"],
 		evidence: result.evidence.map((item, index) => evidenceFromValue(item, `${label}.evidence[${index}]`)),
 		errors: errors as WorkerResultContract["errors"],

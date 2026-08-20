@@ -477,6 +477,22 @@ describe("AgentSession background tool tasks", () => {
 		try {
 			await harness.session.prompt("inspect the failed task", { autoContinueGoal: false });
 
+			const toolResults = harness.agent.state.messages.filter((message) => message.role === "toolResult");
+			const firstResultText = toolResults[0]?.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			expect(toolResults[0]?.errorKind).toBe("operation_outcome");
+			expect(firstResultText).toContain("Background bash task timed out after 30 seconds.");
+			expect(firstResultText).not.toContain("[harness]");
+			for (const replay of toolResults.slice(1)) {
+				const replayText = replay.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n");
+				expect(replayText).toContain('"failure_code":"repeated_failed_operation"');
+			}
+
 			const assistantText = harness.agent.state.messages
 				.flatMap((message) =>
 					message.role === "assistant"
@@ -489,7 +505,7 @@ describe("AgentSession background tool tasks", () => {
 			expect(harness.faux.callCount).toBe(5);
 			expect(assistantText).not.toContain("Tool recovery stopped");
 			expect(assistantText).toContain("The background task failure requires owner action.");
-			// An ordinary repeated tool failure is not a terminal outcome and must not block the goal.
+			// A repeated negative operation outcome is not a terminal run outcome and must not block the goal.
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({ goalId: "goal-task-wait" });
 			expect(harness.session.getGoalStateSnapshot()?.status).not.toBe("blocked");
 			expect(harness.session.getGoalStateSnapshot()?.blockedReason ?? "").not.toContain("terminal_tool_failure");

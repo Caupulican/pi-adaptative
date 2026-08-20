@@ -549,6 +549,10 @@ export class WorkerLifecycle {
 		return selectedWorkerAttempt(this.ledger.runtime.getSnapshot(), laneId);
 	}
 
+	getResult(laneId: string): WorkerResultContract | undefined {
+		return this.getActiveAttempt(laneId)?.result;
+	}
+
 	getAttemptUsage(laneId: string): AttemptUsageSnapshot | undefined {
 		const attempt = this.getActiveAttempt(laneId);
 		return attempt ? this.ledger.getAttemptUsage(attempt.attemptId) : undefined;

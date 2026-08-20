@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
+import { MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
 import {
+	type CreateWorkerResultContractInput,
 	createWorkerResultContract,
 	MAX_WORKER_ARTIFACT_HASH_BYTES,
 	MAX_WORKER_ARTIFACT_HASH_TOTAL_BYTES,
@@ -19,7 +21,7 @@ function root(): string {
 	return directory;
 }
 
-function createResult(cwd: string, claim: WorkerClaim) {
+function createResult(cwd: string, claim: WorkerClaim, overrides: Partial<CreateWorkerResultContractInput> = {}) {
 	const handle: StartedDelegationAttempt = {
 		objectiveId: "objective-1",
 		taskId: "task-1",
@@ -36,6 +38,7 @@ function createResult(cwd: string, claim: WorkerClaim) {
 		wallClockMs: 1,
 		toolCalls: 0,
 		createdAt: "2026-07-27T00:00:00.000Z",
+		...overrides,
 	});
 }
 
@@ -198,5 +201,37 @@ describe("createWorkerResultContract", () => {
 			}),
 		).toThrow("claim.changedFiles exceeds 128 entries");
 		expect(getterRead).toBe(false);
+	});
+
+	it("projects a valid long worker claim with a lossless terminal-output pointer", () => {
+		const outputArtifact = {
+			artifactId: "worker-output-abcdef1234567890",
+			kind: "report" as const,
+			uri: "file:///tmp/worker-output.txt",
+			digest: "a".repeat(64),
+			sizeBytes: 8_000,
+			createdAt: "2026-08-20T00:00:00.000Z",
+			metadata: { source: "worker_terminal_output", complete: true },
+		};
+		const result = createResult(
+			root(),
+			{
+				requestId: "request-1",
+				status: "completed",
+				summary: "evidence ".repeat(800),
+				changedFiles: [],
+			},
+			{ outputArtifact },
+		);
+
+		expect(Buffer.byteLength(result.summary, "utf8")).toBeLessThanOrEqual(
+			MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
+		);
+		expect(result.summary).toContain(outputArtifact.uri);
+		expect(result.summary).not.toContain("remains in the worker transcript");
+		expect(result.artifacts).toContainEqual(outputArtifact);
+		expect(result.evidence).toContainEqual(
+			expect.objectContaining({ artifactIds: [outputArtifact.artifactId], trusted: true }),
+		);
 	});
 });

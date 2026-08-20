@@ -5,8 +5,10 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
+	type ArtifactContract,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	type WorkerResultContract,
 } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
@@ -51,6 +53,7 @@ import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./worker-terminal-handoff-coordinator.ts";
+import { workerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
 
 export interface WorkerAgentControlCoordinatorOptions {
 	agentDir: string;
@@ -65,6 +68,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	scheduler: Pick<WorkerDispatchScheduler, "enqueue" | "track" | "drain" | "dropQueued">;
 	statusChanged(): void;
 	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
+	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	abortLane(laneId: string, reasonCode: string): void;
 	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
 	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
@@ -95,6 +99,7 @@ const WORKER_WAIT_RESTORE_MAX_MS = 300_000;
 export function buildWorkerTerminalHandoffContent(args: {
 	childAgentId: string;
 	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode">;
+	outputArtifact?: ArtifactContract;
 	claim?: {
 		summary?: string;
 		status?: string;
@@ -109,6 +114,11 @@ export function buildWorkerTerminalHandoffContent(args: {
 		`laneId=${args.record.laneId}`,
 		`status=${args.record.status}`,
 		...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
+		...(args.outputArtifact
+			? [
+					`fullOutput=${args.outputArtifact.uri}${args.outputArtifact.sizeBytes === undefined ? "" : ` (${args.outputArtifact.sizeBytes} bytes)`}`,
+				]
+			: []),
 		...(args.claim?.summary ? [`claimStatus=${args.claim.status || args.record.status}`] : []),
 		...(args.claim?.summary ? [`claimSummary=${sanitize(args.claim.summary)}`] : []),
 		...(args.claim?.changedFiles && args.claim.changedFiles.length > 0
@@ -1502,8 +1512,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const latest = this.latestAgentAttempt(parent);
 		const active = latest?.status === "queued" || latest?.status === "leased" || latest?.status === "running";
 		const snapshot = this.options.getWorkerClaimSnapshot?.(args.record.laneId);
+		const outputArtifact = workerTerminalOutputArtifact(this.options.getWorkerResult?.(args.record.laneId));
 		const content = buildWorkerTerminalHandoffContent({
 			...args,
+			...(outputArtifact ? { outputArtifact } : {}),
 			...(snapshot?.claim
 				? {
 						claim: {

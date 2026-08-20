@@ -6,6 +6,8 @@ import {
 	type CredentialProfileRecord,
 	type CredentialProfileStorage,
 	CredentialStorageError,
+	type CredentialStorageProvider,
+	type MachineCredentialSession,
 } from "../src/core/secrets/credential-manager.ts";
 import { createSecretStoreToolDefinition } from "../src/core/tools/secret-store.ts";
 
@@ -14,8 +16,10 @@ const projectKey = `git:${"a".repeat(64)}`;
 class MemoryStorage implements CredentialProfileStorage {
 	readonly records = new Map<string, CredentialProfileRecord>();
 	readonly rejectedSessionKeys = new Set<string>();
+	readonly connections: Array<{ sessionKey: string; provider: CredentialStorageProvider | undefined }> = [];
 
-	async connect(sessionKey: string): Promise<void> {
+	async connect(sessionKey: string, _signal?: AbortSignal, provider?: CredentialStorageProvider): Promise<void> {
+		this.connections.push({ sessionKey, provider });
 		if (this.rejectedSessionKeys.has(sessionKey)) {
 			throw new CredentialStorageError(
 				"provider_command_failed",
@@ -66,6 +70,7 @@ function createContext(mode: "tui" | "print" | "rpc", cwd: string) {
 function createHarness(
 	options: {
 		initialSessionKey?: string;
+		resolveMachineSession?: () => Promise<MachineCredentialSession | undefined>;
 		resolveMigrationSources?: () => Promise<Array<{ name: string; value: string }>>;
 		discoverMigrationSources?: () => Promise<{
 			candidates: Array<{
@@ -82,6 +87,7 @@ function createHarness(
 		storage,
 		resolveProject: async () => ({ key: projectKey, root: "/work/project", label: "project", portable: true }),
 		initialSessionKey: options.initialSessionKey,
+		resolveMachineSession: options.resolveMachineSession,
 	});
 	return {
 		storage,
@@ -178,6 +184,30 @@ describe("secret_store tool", () => {
 		expect(ui.input).not.toHaveBeenCalled();
 		expect(ui.custom).not.toHaveBeenCalled();
 		expect(ui.confirm).not.toHaveBeenCalled();
+	});
+
+	it("connects from a machine-owned BWS bootstrap without forcing owner input", async () => {
+		const secret = "machine-owned-bws-session";
+		const { storage, manager, tool } = createHarness({
+			resolveMachineSession: async () => ({
+				provider: "bitwarden_secrets_manager",
+				sessionKey: secret,
+			}),
+		});
+		storage.records.set("deploy", {
+			profile: "deploy",
+			variables: [{ name: "DEPLOY_TOKEN", value: "activated-secret" }],
+			projectKeys: [projectKey],
+		});
+		const ui = createContext("rpc", "/work/project");
+
+		const activated = await tool.execute("activate", { action: "activate" }, undefined, undefined, ui.context);
+
+		expect(activated.details).toMatchObject({ status: "activated", profile: "deploy" });
+		expect(storage.connections).toEqual([{ sessionKey: secret, provider: "bitwarden_secrets_manager" }]);
+		expect(manager.getEnvironmentForCwd("/work/project")).toEqual({ DEPLOY_TOKEN: "activated-secret" });
+		expect(ui.input).not.toHaveBeenCalled();
+		expect(JSON.stringify(activated)).not.toContain(secret);
 	});
 
 	it("requests only one masked BW_SESSION key and then completes the credential action", async () => {

@@ -11,7 +11,7 @@ import { budgetedTokens } from "../src/core/orchestration/capability-gateway.ts"
 import { createHarness } from "./suite/harness.ts";
 
 describe("goal-owned execution budget", () => {
-	it("rejects a model-created goal when the user submitted only ordinary task work", async () => {
+	it("allows a model-created goal for ordinary work while stripping its invented token budget", async () => {
 		const harness = await createHarness();
 		harness.setResponses([
 			fauxAssistantMessage(
@@ -28,18 +28,16 @@ describe("goal-owned execution budget", () => {
 
 		await harness.session.prompt("Investigate and fix the reported bug", { autoContinueGoal: false });
 
-		expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			goalId: "model-invented-goal",
+			status: "active",
+		});
+		expect(harness.session.getGoalStateSnapshot()?.tokenBudget).toBeUndefined();
 		const result = harness.session.messages.find(
 			(message) => message.role === "toolResult" && message.toolName === "goal",
 		);
 		if (!result || result.role !== "toolResult") throw new Error("Expected goal tool result");
-		expect(result.isError).toBe(true);
-		expect(result.details).toMatchObject({
-			piToolFailureMemory: {
-				failureCode: "owner_authorization_required",
-				tool: "goal",
-			},
-		});
+		expect(result.isError).not.toBe(true);
 	});
 
 	it("allows standalone explicit goal authority but only with the exact requested budget", async () => {
@@ -70,8 +68,8 @@ describe("goal-owned execution budget", () => {
 		});
 		expect(accepted.session.getGoalStateSnapshot()?.tokensUsed).toBeGreaterThan(0);
 
-		const rejected = await createHarness();
-		rejected.setResponses([
+		const unbounded = await createHarness();
+		unbounded.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("goal", {
 					action: "start",
@@ -81,10 +79,11 @@ describe("goal-owned execution budget", () => {
 				}),
 				{ stopReason: "toolUse" },
 			),
-			fauxAssistantMessage("budget rejected"),
+			fauxAssistantMessage("goal recorded without an invented budget"),
 		]);
-		await rejected.session.prompt("this is a goal", { autoContinueGoal: false });
-		expect(rejected.session.getGoalStateSnapshot()).toBeUndefined();
+		await unbounded.session.prompt("this is a goal", { autoContinueGoal: false });
+		expect(unbounded.session.getGoalStateSnapshot()).toMatchObject({ goalId: "invented-budget" });
+		expect(unbounded.session.getGoalStateSnapshot()?.tokenBudget).toBeUndefined();
 	});
 
 	it("uses the shared lean token charge for cache reads and cache writes", () => {

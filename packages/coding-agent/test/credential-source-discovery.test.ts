@@ -95,6 +95,30 @@ describe("credential source discovery", () => {
 		});
 	});
 
+	it("sweeps additional machine roots while hiding store bootstrap credentials", async () => {
+		const cwd = await createTemporaryRoot();
+		const machineRoot = await createTemporaryRoot();
+		const secret = "machine-discovery-secret-marker";
+		await mkdir(join(machineRoot, "bitwarden"));
+		await writeFile(join(machineRoot, "bitwarden", "bws.env"), `BWS_ACCESS_TOKEN=${secret}\n`, { mode: 0o600 });
+		await writeFile(join(machineRoot, "service.env"), `SERVICE_API_TOKEN=${secret}\n`, { mode: 0o600 });
+
+		const discovered = await discoverCredentialMigrationSources(
+			cwd,
+			undefined,
+			{ BWS_ACCESS_TOKEN: `${secret}-process` },
+			{ additionalRoots: [machineRoot] },
+		);
+
+		expect(discovered.candidates).toContainEqual({
+			source: { kind: "dotenv_file", path: join(machineRoot, "service.env") },
+			variableNames: ["SERVICE_API_TOKEN"],
+		});
+		expect(JSON.stringify(discovered)).not.toContain("BWS_ACCESS_TOKEN");
+		expect(JSON.stringify(discovered)).not.toContain("bws.env");
+		expect(JSON.stringify(discovered)).not.toContain(secret);
+	});
+
 	it("fails closed when discovery is cancelled", async () => {
 		const root = await createTemporaryRoot();
 		const controller = new AbortController();

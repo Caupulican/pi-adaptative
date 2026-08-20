@@ -45,6 +45,32 @@ export interface RetryEvents {
 /** Runtime retry policy: the backoff shape plus the on/off switch the host resolves per call. */
 export type RetryControllerPolicy = RetryPolicy & { enabled: boolean };
 
+function hasMeaningfulAssistantProgress(message: AssistantMessage): boolean {
+	return message.content.some((block) => {
+		if (block.type === "text") return block.text.trim().length > 0;
+		if (block.type === "thinking") return block.thinking.trim().length > 0;
+		return block.type === "toolCall";
+	});
+}
+
+/**
+ * xAI can accept a subscription request, allocate a response id, emit an empty reasoning item,
+ * and then remain silent until the quiet watchdog fires. Repeating that exact zero-progress wait
+ * through every configured retry held one observed foreground run for four consecutive 10-minute
+ * windows. Preserve one recovery attempt, but require real generated content before granting the
+ * ordinary retry allowance. Capacity responses and stalls after real progress remain unchanged.
+ */
+function effectiveMaxAttempts(
+	message: AssistantMessage,
+	reason: ReturnType<typeof classifyFailure>["reason"],
+	configuredMaxAttempts: number,
+): number {
+	if (message.provider === "xai" && reason === "stream_stall" && !hasMeaningfulAssistantProgress(message)) {
+		return Math.min(configuredMaxAttempts, 1);
+	}
+	return configuredMaxAttempts;
+}
+
 export class RetryController {
 	private _attempt = 0;
 	private _abortController: AbortController | undefined;
@@ -107,8 +133,9 @@ export class RetryController {
 			return false;
 		}
 
+		const maxAttempts = effectiveMaxAttempts(message, classified.reason, policy.maxAttempts);
 		this._attempt++;
-		if (this._attempt > policy.maxAttempts) {
+		if (this._attempt > maxAttempts) {
 			// Preserve the completed attempt count so the host can emit the final failure.
 			this._attempt--;
 			return false;
@@ -123,7 +150,7 @@ export class RetryController {
 
 		this.events.onRetryStart({
 			attempt: this._attempt,
-			maxAttempts: policy.maxAttempts,
+			maxAttempts,
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
 		});

@@ -9,3 +9,15 @@ export function requireBoundedTrimmedText(value: string, maximum: number, label:
 	}
 	return trimmed;
 }
+
+/** Return the longest prefix within a UTF-8 byte ceiling without splitting a code point. */
+export function utf8PrefixByBytes(value: string, maximumBytes: number): string {
+	if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) {
+		throw new TypeError("A UTF-8 prefix maximum must be a non-negative safe integer.");
+	}
+	const bytes = Buffer.from(value, "utf8");
+	if (bytes.length <= maximumBytes) return value;
+	let end = maximumBytes;
+	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+	return bytes.subarray(0, end).toString("utf8");
+}

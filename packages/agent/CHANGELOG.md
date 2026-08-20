@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Limited zero-progress xAI stream-stall recovery to one retry instead of repeating ten-minute quiet waits.
+
 ## [0.93.12] - 2026-08-20
 
 ## [0.93.11] - 2026-08-20

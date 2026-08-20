@@ -80,7 +80,7 @@ describe("AgentSession natural-language goal admission", () => {
 		}
 	});
 
-	it("does not let model discretion invent a goal token budget", async () => {
+	it("strips a model-invented budget while allowing a discretionary goal", async () => {
 		const harness = await createHarness();
 		try {
 			harness.setResponses([
@@ -100,7 +100,12 @@ describe("AgentSession natural-language goal admission", () => {
 				autoContinueGoal: false,
 			});
 
-			expect(harness.session.getGoalStateSnapshot()).toBeUndefined();
+			const goal = harness.session.getGoalStateSnapshot();
+			expect(goal).toMatchObject({
+				status: "active",
+				userGoal: "Investigate and fix the flaky Windows harness",
+			});
+			expect(goal?.tokenBudget).toBeUndefined();
 		} finally {
 			harness.cleanup();
 		}

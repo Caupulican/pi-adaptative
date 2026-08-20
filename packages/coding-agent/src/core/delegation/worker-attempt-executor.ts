@@ -19,7 +19,7 @@ import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { ModelCapabilityProfile } from "../model-capability.ts";
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
-import type { AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
+import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
@@ -31,6 +31,7 @@ import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
 import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
 import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
+import { captureWorkerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
 import { WorkerTreeBudgetExceededError } from "./worker-tree-budget-coordinator.ts";
 
 export interface RecoveredWorkerTerminalCompletion {
@@ -49,6 +50,7 @@ export interface WorkerAttemptExecutionResult {
 	rawOutcome: WorkerRunOutcome;
 	usage: AttemptUsageSnapshot;
 	changedFiles: readonly string[];
+	outputArtifact?: ArtifactContract;
 }
 
 /**
@@ -266,6 +268,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	let retentionWarningEmitted = false;
 	let firstMailboxPoll = true;
 	let ran = false;
+	let terminalOutput: string | undefined;
 
 	const currentUsage = (): AttemptUsageSnapshot =>
 		attemptUsageFromGatewayUsage(
@@ -452,6 +455,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					: {}),
 				complete: async ({ systemPrompt, userPrompt, signal }) => {
 					if (options.recoveredTerminal) {
+						terminalOutput = options.recoveredTerminal.text;
 						checkpointUsage("Reused the persisted terminal worker assistant response after recovery.");
 						return {
 							text: options.recoveredTerminal.text,
@@ -771,6 +775,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					const cumulativeUsage = checkpointUsage(
 						"Verified the callback-persisted worker conversation terminal suffix.",
 					);
+					terminalOutput = completion.text;
 					return {
 						text: completion.text,
 						costUsd: cumulativeUsage.costUsd,
@@ -781,7 +786,16 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				},
 			});
 			const usage = checkpointUsage("Persisted final cumulative worker usage before terminal result.");
-			return { rawOutcome, usage, changedFiles: [...changedFiles] };
+			const outputArtifact = terminalOutput
+				? captureWorkerTerminalOutputArtifact({
+						agentDir: options.agentDir,
+						parentSessionId: options.parentSessionId,
+						attemptId: options.durableHandle.attemptId,
+						text: terminalOutput,
+						createdAt: new Date().toISOString(),
+					})
+				: undefined;
+			return { rawOutcome, usage, changedFiles: [...changedFiles], ...(outputArtifact ? { outputArtifact } : {}) };
 		},
 	};
 }

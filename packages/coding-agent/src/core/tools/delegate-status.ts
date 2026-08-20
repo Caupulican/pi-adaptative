@@ -1,6 +1,8 @@
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "../delegation/worker-terminal-handoff-coordinator.ts";
+import { workerTerminalOutputArtifact } from "../delegation/worker-terminal-output-artifact.ts";
+import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { OrchestrationPanelModel, OrchestrationPanelRow } from "./orchestration-panel.ts";
 
 const MAX_WORKER_CONTROL_ID_CHARS = 512;
@@ -46,6 +48,8 @@ export interface DelegateStatusToolDetails {
 	reviewedAt?: string;
 	reason?: string;
 	claimSummary?: string;
+	outputArtifactUri?: string;
+	outputArtifactSizeBytes?: number;
 	changedFiles?: readonly string[];
 	blockers?: readonly string[];
 }
@@ -57,6 +61,7 @@ export type AcknowledgeWorkerReviewResult =
 export interface DelegateStatusDependencies {
 	getLaneRecords(): LaneRecord[];
 	getWorkerClaimSnapshots(): WorkerClaim[];
+	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	acknowledgeWorkerReview?(requestId: string): AcknowledgeWorkerReviewResult;
 }
 
@@ -79,7 +84,11 @@ function formattedRecordStatus(record: LaneRecord): string {
 	return `${record.status}${record.reasonCode ? ` (${record.reasonCode})` : ""}`;
 }
 
-function formatRecord(record: LaneRecord, claim: WorkerClaim | undefined): string {
+function formatRecord(
+	record: LaneRecord,
+	claim: WorkerClaim | undefined,
+	result?: Pick<WorkerResultContract, "artifacts">,
+): string {
 	const lines = [`${record.laneId}: ${formattedRecordStatus(record)}`];
 	if (record.modelRef) {
 		lines.push(`effective model: ${record.modelRef}; thinking: ${record.thinkingLevel ?? "unknown"}`);
@@ -91,6 +100,12 @@ function formatRecord(record: LaneRecord, claim: WorkerClaim | undefined): strin
 		);
 	}
 	if (record.reasonCode === "completion_error") lines.push(WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE);
+	const outputArtifact = workerTerminalOutputArtifact(result);
+	if (outputArtifact) {
+		lines.push(
+			`full worker output: ${outputArtifact.uri}${outputArtifact.sizeBytes === undefined ? "" : ` (${outputArtifact.sizeBytes} bytes)`}`,
+		);
+	}
 	if (!claim) return lines.join("\n");
 	lines.push(`usageReportId: ${claim.usageReportId ?? "none"}`);
 	if (isUnreviewed(claim)) {
@@ -132,6 +147,7 @@ function lanePanelRow(view: DelegateStatusLaneView, details?: DelegateStatusTool
 		view.unreviewed ? "review required" : undefined,
 	].filter((value): value is string => value !== undefined);
 	const expandedDetails = [
+		details?.outputArtifactUri ? `full output: ${details.outputArtifactUri}` : undefined,
 		details?.claimSummary ? `untrusted claim: ${details.claimSummary}` : undefined,
 		details?.changedFiles?.length ? `changed: ${details.changedFiles.join(", ")}` : undefined,
 		...(details?.blockers ?? []).map((blocker) => `blocker: ${blocker}`),
@@ -257,8 +273,10 @@ export function executeDelegateStatusAction(
 			};
 		}
 		const claim = claims.get(record.laneId);
+		const workerResult = deps.getWorkerResult?.(record.laneId);
+		const outputArtifact = workerTerminalOutputArtifact(workerResult);
 		return {
-			content: [{ type: "text", text: formatRecord(record, claim) }],
+			content: [{ type: "text", text: formatRecord(record, claim, workerResult) }],
 			details: {
 				started: true,
 				action,
@@ -268,6 +286,14 @@ export function executeDelegateStatusAction(
 				unreviewed: isUnreviewed(claim),
 				lanes: [laneView(record, claim)],
 				claimSummary: claim?.summary.slice(0, 8_000),
+				...(outputArtifact
+					? {
+							outputArtifactUri: outputArtifact.uri,
+							...(outputArtifact.sizeBytes === undefined
+								? {}
+								: { outputArtifactSizeBytes: outputArtifact.sizeBytes }),
+						}
+					: {}),
 				changedFiles: claim?.changedFiles.slice(0, 64),
 				blockers: claim?.blockers?.slice(0, 16),
 			},
@@ -279,7 +305,9 @@ export function executeDelegateStatusAction(
 	const queued = records.filter((record) => record.status === "queued").length;
 	const running = records.filter((record) => record.status === "running").length;
 	const terminal = records.length - queued - running;
-	const recent = recentRecords.map((record) => formatRecord(record, claims.get(record.laneId)).slice(0, 2_048));
+	const recent = recentRecords.map((record) =>
+		formatRecord(record, claims.get(record.laneId), deps.getWorkerResult?.(record.laneId)).slice(0, 2_048),
+	);
 	const olderUnreviewed = unreviewedRecords.filter((record) => !recentLaneIds.has(record.laneId));
 	const displayedRecords = [...recentRecords, ...olderUnreviewed.slice(0, 10)].filter(
 		(record, index, all) => all.findIndex((candidate) => candidate.laneId === record.laneId) === index,
@@ -296,7 +324,12 @@ export function executeDelegateStatusAction(
 		olderUnreviewed.length > 0
 			? `\n\nOlder unreviewed workers (outside the recent list):\n${olderUnreviewed
 					.slice(0, 10)
-					.map((record) => formatRecord(record, claims.get(record.laneId)).slice(0, 2_048))
+					.map((record) =>
+						formatRecord(record, claims.get(record.laneId), deps.getWorkerResult?.(record.laneId)).slice(
+							0,
+							2_048,
+						),
+					)
 					.join("\n\n")}`
 			: "";
 	const overview = overviewLines.join("\n");

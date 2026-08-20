@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import {
 	isWorkerClaim,
+	MAX_WORKER_CLAIM_SUMMARY_CHARS,
 	MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS,
 	normalizeWorkerClaimForHost,
 	requiresParentReview,
@@ -309,7 +310,10 @@ describe("Worker Result Validator (Phase 6)", () => {
 		}
 		expect(metadataGetterRead).toBe(false);
 		expect(
-			validateWorkerClaim({ request: mockRequest, claim: { ...baseClaim, summary: "s".repeat(8_001) } }),
+			validateWorkerClaim({
+				request: mockRequest,
+				claim: { ...baseClaim, summary: "s".repeat(MAX_WORKER_CLAIM_SUMMARY_CHARS + 1) },
+			}),
 		).toMatchObject({
 			outcome: "block",
 			reasonCode: "invalid_worker_claim",

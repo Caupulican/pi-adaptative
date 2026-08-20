@@ -1,6 +1,5 @@
-import type { ChildProcess } from "node:child_process";
-import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { ensureToolWithDiagnostics, type ManagedToolResolver } from "../../utils/tools-manager.ts";
+import { type CredentialCliCommandResult, runCredentialCliCommand } from "./credential-cli-command.ts";
 import {
 	type CredentialProfileRecord,
 	type CredentialProfileStorage,
@@ -9,14 +8,14 @@ import {
 	validateCredentialProfileName,
 	validateCredentialProfileRecord,
 } from "./credential-manager.ts";
+import {
+	CREDENTIAL_PROFILE_KEY_PREFIX,
+	parseCredentialProfileEnvelope,
+	serializeCredentialProfileEnvelope,
+	summarizeCredentialProfiles,
+} from "./credential-profile-envelope.ts";
 
-const ITEM_NAME_PREFIX = "Pi credential profile · ";
-const ENVELOPE_KIND = "pi.credential-profile";
-const ENVELOPE_SCHEMA = 1;
-const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_PROFILE_ITEMS = 256;
-const MAX_NOTE_BYTES = 1024 * 1024;
-const COMMAND_TIMEOUT_MS = 30_000;
 const SYNC_FRESHNESS_MS = 30_000;
 const ITEM_ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
 
@@ -44,14 +43,7 @@ export interface BitwardenCommandRequest {
 	signal?: AbortSignal;
 }
 
-export interface BitwardenCommandResult {
-	exitCode: number;
-	stdout: string;
-	stderr: string;
-	aborted?: boolean;
-	timedOut?: boolean;
-	outputLimitExceeded?: boolean;
-}
+export type BitwardenCommandResult = CredentialCliCommandResult;
 
 export type BitwardenCommandRunner = (request: BitwardenCommandRequest) => Promise<BitwardenCommandResult>;
 
@@ -60,87 +52,21 @@ export interface BitwardenCredentialStorageOptions {
 	runCommand?: BitwardenCommandRunner;
 }
 
-interface BitwardenProfileEnvelope {
-	kind: typeof ENVELOPE_KIND;
-	schema: typeof ENVELOPE_SCHEMA;
-	profile: string;
-	description?: string;
-	variables: Array<{ name: string; value: string }>;
-	projectKeys: string[];
-}
-
 interface CachedBitwardenProfile {
 	id: string;
 	item: Record<string, unknown>;
 	record: CredentialProfileRecord;
 }
 
-function appendBounded(current: string, chunk: Buffer | string, limit: number): { value: string; exceeded: boolean } {
-	const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-	if (Buffer.byteLength(current, "utf8") + Buffer.byteLength(text, "utf8") <= limit) {
-		return { value: current + text, exceeded: false };
-	}
-	return { value: current, exceeded: true };
-}
-
-function combineAbortSignal(source: AbortSignal | undefined, controller: AbortController): () => void {
-	if (!source) return () => {};
-	const abort = () => controller.abort();
-	if (source.aborted) abort();
-	else source.addEventListener("abort", abort, { once: true });
-	return () => source.removeEventListener("abort", abort);
-}
-
 export async function runBitwardenCommand(request: BitwardenCommandRequest): Promise<BitwardenCommandResult> {
-	const controller = new AbortController();
-	const detachAbort = combineAbortSignal(request.signal, controller);
-	let stdout = "";
-	let stderr = "";
-	let outputLimitExceeded = false;
-	let child: ChildProcess;
-	try {
-		child = spawnProcess(request.executable, request.args, {
-			env: { ...process.env, BW_SESSION: request.sessionKey, NO_COLOR: "1" },
-			stdio: ["pipe", "pipe", "pipe"],
-			windowsHide: true,
-		});
-		child.stdout?.on("data", (chunk: Buffer | string) => {
-			const appended = appendBounded(stdout, chunk, MAX_COMMAND_OUTPUT_BYTES);
-			stdout = appended.value;
-			if (appended.exceeded) {
-				outputLimitExceeded = true;
-				controller.abort();
-			}
-		});
-		child.stderr?.on("data", (chunk: Buffer | string) => {
-			const appended = appendBounded(stderr, chunk, MAX_COMMAND_OUTPUT_BYTES);
-			stderr = appended.value;
-			if (appended.exceeded) {
-				outputLimitExceeded = true;
-				controller.abort();
-			}
-		});
-		child.stdin?.end(request.input);
-		const terminal = await waitForChildProcessWithTermination(child, {
-			signal: controller.signal,
-			timeoutMs: COMMAND_TIMEOUT_MS,
-			killGraceMs: 2_000,
-		});
-		return {
-			exitCode: terminal.code ?? 1,
-			stdout,
-			stderr,
-			...(terminal.reason === "aborted" ? { aborted: true } : {}),
-			...(terminal.reason === "timeout" ? { timedOut: true } : {}),
-			...(outputLimitExceeded ? { outputLimitExceeded: true } : {}),
-		};
-	} catch {
-		return { exitCode: 1, stdout: "", stderr: "" };
-	} finally {
-		detachAbort();
-		stdout = "";
-		stderr = "";
-	}
+	return runCredentialCliCommand({
+		executable: request.executable,
+		args: request.args,
+		...(request.input !== undefined ? { input: request.input } : {}),
+		authEnvironment: { name: "BW_SESSION", value: request.sessionKey },
+		omitEnvironmentVariables: ["BWS_ACCESS_TOKEN"],
+		...(request.signal ? { signal: request.signal } : {}),
+	});
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -158,54 +84,11 @@ function parseJson(value: string): unknown {
 	}
 }
 
-function parseEnvelope(note: string, expectedProfile: string): CredentialProfileRecord {
-	if (Buffer.byteLength(note, "utf8") > MAX_NOTE_BYTES) {
-		throw new BitwardenCredentialStorageError(
-			"malformed_provider_data",
-			"Bitwarden returned an oversized profile record.",
-		);
-	}
-	const value = parseJson(note);
-	if (
-		!isObject(value) ||
-		value.kind !== ENVELOPE_KIND ||
-		value.schema !== ENVELOPE_SCHEMA ||
-		value.profile !== expectedProfile ||
-		(value.description !== undefined && typeof value.description !== "string") ||
-		!Array.isArray(value.variables) ||
-		!Array.isArray(value.projectKeys) ||
-		!value.variables.every(
-			(variable) => isObject(variable) && typeof variable.name === "string" && typeof variable.value === "string",
-		) ||
-		!value.projectKeys.every((key) => typeof key === "string")
-	) {
-		throw new BitwardenCredentialStorageError(
-			"malformed_provider_data",
-			"Bitwarden returned malformed profile data.",
-		);
-	}
-	const record: CredentialProfileRecord = {
-		profile: expectedProfile,
-		...(typeof value.description === "string" ? { description: value.description } : {}),
-		variables: value.variables.map((variable) => ({
-			name: (variable as Record<string, unknown>).name as string,
-			value: (variable as Record<string, unknown>).value as string,
-		})),
-		projectKeys: value.projectKeys as string[],
-	};
-	try {
-		return validateCredentialProfileRecord(record);
-	} catch {
-		throw new BitwardenCredentialStorageError(
-			"malformed_provider_data",
-			"Bitwarden returned malformed profile data.",
-		);
-	}
-}
-
 function parseProfileItem(value: unknown): CachedBitwardenProfile | undefined {
-	if (!isObject(value) || typeof value.name !== "string" || !value.name.startsWith(ITEM_NAME_PREFIX)) return undefined;
-	const profile = value.name.slice(ITEM_NAME_PREFIX.length);
+	if (!isObject(value) || typeof value.name !== "string" || !value.name.startsWith(CREDENTIAL_PROFILE_KEY_PREFIX)) {
+		return undefined;
+	}
+	const profile = value.name.slice(CREDENTIAL_PROFILE_KEY_PREFIX.length);
 	if (
 		value.type !== 2 ||
 		typeof value.id !== "string" ||
@@ -227,27 +110,14 @@ function parseProfileItem(value: unknown): CachedBitwardenProfile | undefined {
 			"Bitwarden returned malformed profile data.",
 		);
 	}
-	return { id: value.id, item: value, record: parseEnvelope(value.notes, profile) };
-}
-
-function profileSummary(record: CredentialProfileRecord): StoredCredentialProfileSummary {
-	return {
-		profile: record.profile,
-		...(record.description ? { description: record.description } : {}),
-		variableNames: record.variables.map((variable) => variable.name),
-		projectKeys: [...record.projectKeys],
-	};
-}
-
-function createEnvelope(record: CredentialProfileRecord): BitwardenProfileEnvelope {
-	return {
-		kind: ENVELOPE_KIND,
-		schema: ENVELOPE_SCHEMA,
-		profile: record.profile,
-		...(record.description ? { description: record.description } : {}),
-		variables: record.variables.map((variable) => ({ ...variable })),
-		projectKeys: [...record.projectKeys],
-	};
+	try {
+		return { id: value.id, item: value, record: parseCredentialProfileEnvelope(value.notes, profile) };
+	} catch {
+		throw new BitwardenCredentialStorageError(
+			"malformed_provider_data",
+			"Bitwarden returned malformed profile data.",
+		);
+	}
 }
 
 export class BitwardenCredentialStorage implements CredentialProfileStorage {
@@ -291,9 +161,7 @@ export class BitwardenCredentialStorage implements CredentialProfileStorage {
 
 	async listProfiles(signal?: AbortSignal): Promise<StoredCredentialProfileSummary[]> {
 		await this.ensureLoaded(signal);
-		return [...this.profiles.values()]
-			.map((profile) => profileSummary(profile.record))
-			.sort((left, right) => left.profile.localeCompare(right.profile));
+		return summarizeCredentialProfiles([...this.profiles.values()].map((profile) => profile.record));
 	}
 
 	async readProfile(profile: string, signal?: AbortSignal): Promise<CredentialProfileRecord> {
@@ -323,8 +191,8 @@ export class BitwardenCredentialStorage implements CredentialProfileStorage {
 			item = template;
 		}
 		item.type = 2;
-		item.name = `${ITEM_NAME_PREFIX}${record.profile}`;
-		item.notes = JSON.stringify(createEnvelope(record));
+		item.name = `${CREDENTIAL_PROFILE_KEY_PREFIX}${record.profile}`;
+		item.notes = serializeCredentialProfileEnvelope(record);
 		item.secureNote = { type: 0 };
 
 		let serialized = "";
@@ -398,7 +266,7 @@ export class BitwardenCredentialStorage implements CredentialProfileStorage {
 			}
 		}
 		const rawItems = parseJson(
-			await this.runChecked(["list", "items", "--search", ITEM_NAME_PREFIX], undefined, signal),
+			await this.runChecked(["list", "items", "--search", CREDENTIAL_PROFILE_KEY_PREFIX], undefined, signal),
 		);
 		if (!Array.isArray(rawItems) || rawItems.length > MAX_PROFILE_ITEMS) {
 			throw new BitwardenCredentialStorageError(

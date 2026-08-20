@@ -72,6 +72,29 @@ describe("tool_task", () => {
 		expect(result.isError).not.toBe(true);
 	});
 
+	it("returns a running snapshot as nonterminal control flow instead of a tool failure", async () => {
+		const tool = createToolTaskToolDefinition({
+			list: () => [running],
+			wait: async () => running,
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "wait", taskId: running.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(result.isError).not.toBe(true);
+		expect(result.details).toMatchObject({ kind: "wait", taskId: running.taskId, status: "running" });
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("terminal handoff will wake the session"),
+		});
+	});
+
 	it.each([
 		["failed", failed],
 		["canceled", canceled],
@@ -91,6 +114,7 @@ describe("tool_task", () => {
 		expect(result.content).toEqual([{ type: "text", text: record.output }]);
 		expect(result.details).toMatchObject({ kind: "wait", taskId: record.taskId, status: record.status });
 		expect(result.isError).toBe(true);
+		expect(result.errorKind).toBe("operation_outcome");
 	});
 
 	it("projects an invalid or rejected wait as a failed tool call", async () => {

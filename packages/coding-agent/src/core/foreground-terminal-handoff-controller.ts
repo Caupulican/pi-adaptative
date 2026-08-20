@@ -7,14 +7,17 @@ import {
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./delegation/worker-terminal-handoff-coordinator.ts";
+import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-output-artifact.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
+import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
 
 interface ForegroundTerminalHandoffControllerDeps {
 	foreground: ForegroundRecoveryController;
 	isDisposed(): boolean;
 	getGoalStateSnapshot(): Pick<GoalState, "goalId" | "status"> | undefined;
 	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
+	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	startCustomMessageTurn(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
 		lease: ForegroundSubmissionLease,
@@ -33,6 +36,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		laneId: string;
 		status: LaneTerminalStatus;
 		reasonCode?: string;
+		outputArtifact?: ArtifactContract;
 		claim?: {
 			summary?: string;
 			status?: string;
@@ -52,6 +56,11 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		...included.flatMap((record) => {
 			const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
 			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
+			if (record.outputArtifact) {
+				lines.push(
+					`  Full Output: ${record.outputArtifact.uri}${record.outputArtifact.sizeBytes === undefined ? "" : ` (${record.outputArtifact.sizeBytes} bytes)`}`,
+				);
+			}
 			if (record.claim?.summary) {
 				lines.push(`  Claim Status: ${record.claim.status || record.status}`);
 				lines.push(`  Claim Summary: ${sanitize(record.claim.summary)}`);
@@ -108,10 +117,12 @@ export class ForegroundTerminalHandoffController {
 			const included = records.slice(0, 8).map((record) => {
 				const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId);
 				const claim = snapshot?.claim;
+				const outputArtifact = workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId));
 				return {
 					laneId: record.laneId,
 					status: record.status,
 					...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+					...(outputArtifact ? { outputArtifact } : {}),
 					...(claim
 						? {
 								claim: {

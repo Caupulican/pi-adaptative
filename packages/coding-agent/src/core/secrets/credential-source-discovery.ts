@@ -1,10 +1,11 @@
 import type { Dirent } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { CredentialVariable } from "./credential-manager.ts";
 import { type CredentialMigrationSource, resolveCredentialMigrationSources } from "./credential-migration-source.ts";
 
 const MAX_DISCOVERY_DEPTH = 6;
+const MAX_DISCOVERY_ROOTS = 8;
 const MAX_DISCOVERY_DIRECTORIES = 256;
 const MAX_DISCOVERY_ENTRIES = 10_000;
 const MAX_DISCOVERY_ENVIRONMENT_CANDIDATES = 32;
@@ -30,7 +31,8 @@ const DOTENV_TEMPLATE_NAME_RE = /(?:^|[._-])(?:defaults?|dist|example|sample|tem
 const CREDENTIAL_ENV_NAME_RE =
 	/(?:^|_)(?:ACCESS_KEY|API_KEY|CREDENTIALS?|CLIENT_SECRET|PASS|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)/i;
 const CREDENTIAL_URL_NAME_RE = /^(?:DATABASE|DB|MONGO(?:DB)?|MYSQL|POSTGRES(?:QL)?|REDIS)_URL$/i;
-const EXCLUDED_ENVIRONMENT_NAMES = new Set(["BW_SESSION"]);
+const EXCLUDED_ENVIRONMENT_NAMES = new Set(["BWS_ACCESS_TOKEN", "BW_SESSION"]);
+const EXCLUDED_BOOTSTRAP_FILE_NAMES = new Set(["bws.env", "bw.env"]);
 
 export type CredentialMigrationDiscoveryErrorCode = "discovery_cancelled" | "discovery_unavailable";
 
@@ -59,6 +61,11 @@ export type CredentialMigrationSourceDiscoverer = (
 	cwd: string,
 	signal?: AbortSignal,
 ) => Promise<CredentialMigrationDiscoveryResult>;
+
+export interface CredentialMigrationDiscoveryOptions {
+	additionalRoots?: readonly string[];
+	excludedFiles?: readonly string[];
+}
 
 function throwIfCancelled(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) {
@@ -112,13 +119,14 @@ async function inspectSource(
 
 /**
  * Discover supported credential sources without returning their values. The scan is deliberately
- * bounded to the current working tree plus the current process environment, never follows symlinks,
- * and skips dependency/build trees and dotenv templates.
+ * bounded to the current working tree, explicit machine roots, and the current process environment.
+ * It never follows symlinks and skips dependency/build trees, dotenv templates, and store bootstraps.
  */
 export async function discoverCredentialMigrationSources(
 	cwd: string,
 	signal?: AbortSignal,
 	environment: NodeJS.ProcessEnv = process.env,
+	options: CredentialMigrationDiscoveryOptions = {},
 ): Promise<CredentialMigrationDiscoveryResult> {
 	throwIfCancelled(signal);
 	let root: string;
@@ -136,6 +144,7 @@ export async function discoverCredentialMigrationSources(
 	let dotenvCandidateCount = 0;
 	let variableNameCount = 0;
 	let metadataBytes = 0;
+	const excludedFiles = new Set((options.excludedFiles ?? []).map((path) => resolve(path)));
 	const addCandidate = (
 		candidate: CredentialMigrationSourceCandidate,
 		category: "environment" | "dotenv",
@@ -173,7 +182,29 @@ export async function discoverCredentialMigrationSources(
 		if (!addCandidate({ source, variableNames }, "environment")) break;
 	}
 
-	const directories: Array<{ path: string; depth: number }> = [{ path: root, depth: 0 }];
+	const scanRoots: Array<{ path: string; relativeToProject: boolean }> = [{ path: root, relativeToProject: true }];
+	const seenRoots = new Set([root]);
+	const requestedAdditionalRoots = options.additionalRoots ?? [];
+	if (requestedAdditionalRoots.length > MAX_DISCOVERY_ROOTS - 1) truncated = true;
+	for (const candidate of requestedAdditionalRoots.slice(0, MAX_DISCOVERY_ROOTS - 1)) {
+		throwIfCancelled(signal);
+		let canonical: string;
+		try {
+			canonical = await realpath(candidate);
+			if (!(await stat(canonical)).isDirectory()) throw new Error("not a directory");
+		} catch {
+			skipped++;
+			continue;
+		}
+		if (seenRoots.has(canonical)) continue;
+		seenRoots.add(canonical);
+		scanRoots.push({ path: canonical, relativeToProject: false });
+	}
+
+	const directories: Array<{ path: string; depth: number; relativeToProject: boolean }> = scanRoots.map(
+		(scanRoot) => ({ ...scanRoot, depth: 0 }),
+	);
+	const queuedDirectories = new Set(scanRoots.map((scanRoot) => scanRoot.path));
 	let directoryIndex = 0;
 	let visitedEntries = 0;
 	let stopDirectoryScan = false;
@@ -203,13 +234,28 @@ export async function discoverCredentialMigrationSources(
 			if (entry.isSymbolicLink()) continue;
 			const path = join(current.path, entry.name);
 			if (entry.isDirectory()) {
-				if (current.depth < MAX_DISCOVERY_DEPTH && !EXCLUDED_DIRECTORY_NAMES.has(entry.name.toLowerCase())) {
-					directories.push({ path, depth: current.depth + 1 });
+				if (
+					current.depth < MAX_DISCOVERY_DEPTH &&
+					!EXCLUDED_DIRECTORY_NAMES.has(entry.name.toLowerCase()) &&
+					!queuedDirectories.has(path)
+				) {
+					queuedDirectories.add(path);
+					directories.push({
+						path,
+						depth: current.depth + 1,
+						relativeToProject: current.relativeToProject,
+					});
 				}
 				continue;
 			}
 			if (!entry.isFile() || !isDotenvCandidateName(entry.name)) continue;
-			const source = { kind: "dotenv_file" as const, path: relative(root, path) };
+			if (EXCLUDED_BOOTSTRAP_FILE_NAMES.has(entry.name.toLowerCase()) || excludedFiles.has(resolve(path))) {
+				continue;
+			}
+			const source = {
+				kind: "dotenv_file" as const,
+				path: current.relativeToProject ? relative(root, path) : path,
+			};
 			const variableNames = await inspectSource(source, root, signal, environment);
 			throwIfCancelled(signal);
 			if (!variableNames) {

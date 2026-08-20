@@ -788,6 +788,7 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getWorkerClaimSnapshot: (laneId) =>
 				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.sessionManager), laneId),
+			getWorkerResult: (laneId) => this._backgroundLanes.getWorkerResult(laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),
@@ -942,6 +943,7 @@ export class AgentSession {
 			getOrchestrationProfileCatalog: () => this._backgroundLanes.getOrchestrationProfileCatalog(),
 			getWorkerLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
+			getWorkerResult: (laneId) => this._backgroundLanes.getWorkerResult(laneId),
 			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			runModelFitness: (args) => this.runModelFitness(args),

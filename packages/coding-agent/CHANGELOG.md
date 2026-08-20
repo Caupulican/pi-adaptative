@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Added autonomous machine credential discovery and encrypted Bitwarden Secrets Manager profile storage.
+
+### Fixed
+
+- Preserved failed background child results as operation outcomes and made waits event-driven without losing terminal parent wakeups.
+- Kept worker terminal reports inline through 50 KiB, then persisted the complete output and returned its verified file pointer.
+- Allowed agents to start durable goals autonomously while stripping unapproved token budgets and generating stable record IDs.
+- Blocked credential-file access before tool execution and serialized concurrent Secrets Manager profile mutations.
+
 ## [0.93.12] - 2026-08-20
 
 ### Changed

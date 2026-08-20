@@ -34,6 +34,18 @@ const tool = createDelegateToolDefinition({
 				usageReportId: "usage-1",
 			},
 		],
+		getWorkerResult: () => ({
+			artifacts: [
+				{
+					artifactId: "worker-output-1",
+					kind: "report",
+					uri: "file:///tmp/worker-output-1.txt",
+					sizeBytes: 75_000,
+					createdAt: "2026-08-20T00:00:00.000Z",
+					metadata: { source: "worker_terminal_output", complete: true },
+				},
+			],
+		}),
 	},
 });
 
@@ -53,8 +65,11 @@ describe("delegate status", () => {
 		expect(text).toContain("UNTRUSTED");
 		expect(text).toContain("inspect this");
 		expect(text).toContain("usage-1");
+		expect(text).toContain("file:///tmp/worker-output-1.txt");
 		expect(text).toContain("effective model: openai-codex/gpt-5.6-terra; thinking: low");
 		expect(result.details).toMatchObject({
+			outputArtifactUri: "file:///tmp/worker-output-1.txt",
+			outputArtifactSizeBytes: 75_000,
 			lanes: [
 				{
 					laneId: "worker-1",

@@ -59,6 +59,7 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
+import type { WorkerResultContract } from "./orchestration/contracts.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -259,6 +260,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Does not materialize the worker controller when UAC omitted delegation. */
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined {
 		return this._workerLifecycle?.getTaskRuntimeSnapshot();
+	}
+
+	getWorkerResult(laneId: string): WorkerResultContract | undefined {
+		return this._workerLifecycle?.getResult(laneId);
 	}
 
 	/** Reconcile only when delegation has already been materialized; UAC omission stays zero-load. */

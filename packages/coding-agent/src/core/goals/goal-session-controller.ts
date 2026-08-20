@@ -398,16 +398,8 @@ export class GoalSessionController {
 		this.startAuthority = authority;
 	}
 
-	authorizeStartFromTool(input: { tokenBudget?: number }): string | undefined {
-		const authority = this.startAuthority;
-		if (!authority) return "goal start requires explicit owner authorization in the current prompt.";
-		if (authority.tokenBudget === undefined && input.tokenBudget !== undefined) {
-			return "tokenBudget requires an exact numeric token ceiling in the current owner prompt.";
-		}
-		if (authority.tokenBudget !== undefined && input.tokenBudget !== authority.tokenBudget) {
-			return `tokenBudget must equal the owner-requested ceiling ${authority.tokenBudget}.`;
-		}
-		return undefined;
+	authorizeStartFromTool(_input: { tokenBudget?: number }): number | null {
+		return this.startAuthority?.tokenBudget ?? null;
 	}
 
 	/**

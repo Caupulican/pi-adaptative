@@ -312,6 +312,7 @@ export class WorkerDelegationController {
 			},
 			getWorkerClaimSnapshot: (laneId) =>
 				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.deps.getSessionManager()), laneId),
+			getWorkerResult: (laneId) => this.getWorkerLifecycle().getResult(laneId),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			cancelLane: (laneId, reasonCode) => {
 				this.scheduler.dropQueued(laneId);
@@ -2166,6 +2167,7 @@ export class WorkerDelegationController {
 				toolCalls: finalUsage.toolCalls,
 				verificationRequired,
 				verificationCriterionIds: verificationSubject?.task.acceptanceCriterionIds,
+				...(executionResult.outputArtifact ? { outputArtifact: executionResult.outputArtifact } : {}),
 				notify: !verificationRequired,
 			}).record;
 			try {

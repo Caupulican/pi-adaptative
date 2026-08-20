@@ -10,6 +10,7 @@ import { formatArtifactNotice, packToolOutput } from "./context/tool-output-pack
 import { hasOnlyKeys, isPlainRecord } from "./util/value-guards.ts";
 
 export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 15_000;
+export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 30_000;
 export const BACKGROUND_TOOL_TASK_CUSTOM_TYPE = "background_tool_task";
 
 const MAX_RETAINED_TERMINAL_TASKS = 64;
@@ -120,6 +121,8 @@ export interface BackgroundToolTaskControllerDeps {
 	recordUsage?(taskId: string, usage: Usage): void;
 	onError?(message: string, error: unknown): void;
 	now?(): Date;
+	/** Event-wait watchdog; completion still arrives through the terminal handoff after this bound. */
+	waitTimeoutMs?: number;
 }
 
 interface BackgroundToolTaskState {
@@ -291,11 +294,16 @@ export class BackgroundToolTaskController {
 	private readonly handoffRequests = new Map<string, Set<() => void>>();
 	private readonly queuedNotifications: Array<{ record: BackgroundToolTaskRecord; wakeParent: boolean }> = [];
 	private notificationDrain: Promise<void> | undefined;
+	private readonly waitTimeoutMs: number;
 	private nextTaskId = 1;
 	private disposed = false;
 
 	constructor(deps: BackgroundToolTaskControllerDeps) {
 		this.deps = deps;
+		this.waitTimeoutMs = deps.waitTimeoutMs ?? DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS;
+		if (!Number.isSafeInteger(this.waitTimeoutMs) || this.waitTimeoutMs < 1) {
+			throw new TypeError("Background tool task wait timeout must be a positive safe integer.");
+		}
 		this.restorePersistedTasks();
 	}
 
@@ -351,6 +359,7 @@ export class BackgroundToolTaskController {
 		const state = this.tasks.get(taskId);
 		if (!state) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
 		if (state.record.status !== "running") return Promise.resolve({ ...state.record });
+		if (signal?.aborted) return Promise.resolve({ ...state.record });
 		state.waitingConsumers++;
 		let waiting = true;
 		const releaseWaiter = (): void => {
@@ -358,28 +367,23 @@ export class BackgroundToolTaskController {
 			waiting = false;
 			state.waitingConsumers--;
 		};
-		if (!signal) {
-			return state.terminal.then((record) => {
-				releaseWaiter();
-				return { ...record };
-			});
-		}
-		if (signal.aborted) {
-			releaseWaiter();
-			return Promise.reject(signal.reason ?? new Error("Operation aborted"));
-		}
-		return new Promise<BackgroundToolTaskRecord>((resolve, reject) => {
-			const onAbort = (): void => {
-				signal.removeEventListener("abort", onAbort);
-				releaseWaiter();
-				reject(signal.reason ?? new Error("Operation aborted"));
-			};
-			signal.addEventListener("abort", onAbort, { once: true });
-			state.terminal.then((record) => {
-				signal.removeEventListener("abort", onAbort);
+		return new Promise<BackgroundToolTaskRecord>((resolve) => {
+			let settled = false;
+			const finishWait = (record: BackgroundToolTaskRecord): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(watchdog);
+				signal?.removeEventListener("abort", onAbort);
 				releaseWaiter();
 				resolve({ ...record });
-			});
+			};
+			const onAbort = (): void => {
+				finishWait(state.record);
+			};
+			const watchdog = setTimeout(() => finishWait(state.record), this.waitTimeoutMs);
+			watchdog.unref?.();
+			signal?.addEventListener("abort", onAbort, { once: true });
+			state.terminal.then(finishWait);
 		});
 	}
 

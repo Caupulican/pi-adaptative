@@ -70,6 +70,62 @@ describe("goal tool", () => {
 		expect(first.text).toContain("goal start recorded");
 	});
 
+	it("normalizes model-supplied budgets through host authority without blocking autonomous goals", async () => {
+		let state: GoalState | undefined;
+		const unbounded = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			authorizeStart: () => null,
+			now: () => "T0",
+		});
+		const started = await unbounded.execute(
+			"call-unbounded",
+			{ action: "start", goalId: "g1", userGoal: "Ship", tokenBudget: 80_000 },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(started.isError).not.toBe(true);
+		expect((state as GoalState | undefined)?.tokenBudget).toBeUndefined();
+
+		state = undefined;
+		const bounded = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			authorizeStart: () => 12_000,
+			now: () => "T0",
+		});
+		await bounded.execute(
+			"call-bounded",
+			{ action: "start", goalId: "g2", userGoal: "Ship" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect((state as GoalState | undefined)?.tokenBudget).toBe(12_000);
+	});
+
+	it("host-generates stable requirement and evidence ids when callers omit them", async () => {
+		const { run, getState } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship" });
+		const requirement = await run({ action: "add_requirement", text: "Implement the durable owner" });
+		expect(requirement.isError).not.toBe(true);
+		const requirementId = getState()?.requirements[0]?.id;
+		expect(requirementId).toMatch(/^req-[a-f0-9]{16}$/);
+
+		const replay = await run({ action: "add_requirement", text: "Implement the durable owner" });
+		expect(replay.isError).toBe(true);
+		expect(getState()?.requirements).toHaveLength(1);
+
+		const evidence = await run({ action: "add_evidence", kind: "finding", summary: "Owner verified" });
+		expect(evidence.isError).not.toBe(true);
+		expect(getState()?.evidence[0]?.id).toMatch(/^ev-[a-f0-9]{16}$/);
+	});
+
 	it("does not persist when an action fails validation", async () => {
 		const { run, saves } = createHarness();
 		const result = await run({ action: "progress" });

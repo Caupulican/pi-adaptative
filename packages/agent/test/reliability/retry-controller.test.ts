@@ -62,6 +62,40 @@ describe("RetryController", () => {
 		expect(agent.state.messages).toEqual([]);
 	});
 
+	it("allows only one identical xAI zero-progress stream-stall retry", async () => {
+		const failure = {
+			...errorMessage("stream stalled: no events for 600000ms (quiet phase)"),
+			provider: "xai",
+			model: "grok-4.6",
+			content: [{ type: "thinking" as const, thinking: "" }],
+		};
+		const { controller, startInfos } = setup({
+			messages: [failure],
+			policy: { maxAttempts: 3, baseDelayMs: 1 },
+		});
+
+		expect(await controller.prepareRetry(failure)).toBe(true);
+		expect(await controller.prepareRetry(failure)).toBe(false);
+		expect(startInfos.map((info) => info.attempt)).toEqual([1]);
+	});
+
+	it("keeps the configured retry allowance when an xAI stalled turn made real progress", async () => {
+		const failure = {
+			...errorMessage("stream stalled: no events for 600000ms (quiet phase)"),
+			provider: "xai",
+			model: "grok-4.6",
+			content: [{ type: "thinking" as const, thinking: "working through the repository" }],
+		};
+		const { controller, startInfos } = setup({
+			messages: [failure],
+			policy: { maxAttempts: 3, baseDelayMs: 1 },
+		});
+
+		expect(await controller.prepareRetry(failure)).toBe(true);
+		expect(await controller.prepareRetry(failure)).toBe(true);
+		expect(startInfos.map((info) => info.attempt)).toEqual([1, 2]);
+	});
+
 	it("marks isRetrying true from inside onRetryStart until the backoff resolves", async () => {
 		const failure = errorMessage("overloaded_error");
 		const agent = { state: { messages: [failure] as AgentMessage[] } };

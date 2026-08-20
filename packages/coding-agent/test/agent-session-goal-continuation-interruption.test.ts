@@ -106,4 +106,20 @@ describe("goal continuation interruption containment", () => {
 
 		expect(harness.faux.state.callCount).toBe(2);
 	});
+
+	it("uses a fresh abort signal for the user turn after an interrupted foreground run", async () => {
+		const harness = await createHarness();
+		seedOpenGoal(harness);
+		harness.settingsManager.setAutonomySettings({ goalAutoContinue: false });
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "Operation aborted" }),
+			fauxAssistantMessage("fresh turn recovered"),
+		]);
+
+		await harness.session.prompt("interrupt this turn");
+		await harness.session.prompt("continue in a fresh turn");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.session.getLastAssistantText()).toBe("fresh turn recovered");
+	});
 });

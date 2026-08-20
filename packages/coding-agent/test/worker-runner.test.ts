@@ -6,6 +6,7 @@ import {
 	getWorkerClaimSnapshots,
 	getWorkerRequestSnapshots,
 } from "../src/core/delegation/session-worker-claim.ts";
+import { MAX_WORKER_CLAIM_SUMMARY_BYTES, MAX_WORKER_CLAIM_SUMMARY_CHARS } from "../src/core/delegation/worker-claim.ts";
 import {
 	buildWorkerSystemPrompt,
 	buildWorkerUserPrompt,
@@ -78,6 +79,12 @@ describe("parseWorkerOutput", () => {
 		);
 		expect(withFindings?.findings).toHaveLength(2);
 		expect(withFindings?.findings[0]).toEqual({ summary: "Rule A", confidence: 0.7 });
+
+		const embedded = parseWorkerOutput(
+			'prefix\n{"summary":"Embedded","status":"completed","findings":[{"summary":"Nested"}]}\nsuffix',
+		);
+		expect(embedded).toMatchObject({ summary: "Embedded", status: "completed" });
+		expect(embedded?.findings).toEqual([{ summary: "Nested" }]);
 	});
 
 	it("returns undefined for prose or missing summary", () => {
@@ -103,7 +110,7 @@ describe("parseWorkerOutput", () => {
 	it("bounds every untrusted structured claim field before it reaches durable state", () => {
 		const parsed = parseWorkerOutput(
 			JSON.stringify({
-				summary: "s".repeat(20_000),
+				summary: "s".repeat(MAX_WORKER_CLAIM_SUMMARY_CHARS + 1),
 				status: "completed",
 				blockers: Array.from({ length: 100 }, () => "b".repeat(1_200)),
 				findings: Array.from({ length: 100 }, () => ({ summary: "f".repeat(2_200), confidence: 2 })),
@@ -111,7 +118,7 @@ describe("parseWorkerOutput", () => {
 			}),
 		);
 
-		expect(parsed?.summary).toHaveLength(8_000);
+		expect(Buffer.byteLength(parsed?.summary ?? "", "utf8")).toBe(MAX_WORKER_CLAIM_SUMMARY_BYTES);
 		expect(parsed?.blockers).toHaveLength(32);
 		expect(parsed?.blockers[0]).toHaveLength(1_000);
 		expect(parsed?.findings).toHaveLength(64);
@@ -276,6 +283,21 @@ describe("runWorker", () => {
 		expect(outcome.claim.summary).toContain("bounded findings");
 		expect(outcome.claim.summary).toContain("stop reason 'length'");
 		expect(outcome.laneStatus).toBe("succeeded");
+		expect(outcome.reasonCode).toBe("worker_completed_plain_text_incomplete");
+	});
+
+	it("salvages a truncated outer claim without mistaking nested findings for malformed envelopes", async () => {
+		const truncated = [
+			'{"summary":"bounded audit","status":"completed","findings":[',
+			'{"summary":"first concrete finding","confidence":0.9},',
+			'{"summary":"second finding cut off',
+		].join("");
+		const outcome = await runWorker(runnerOptions({ complete: async () => completionOf(truncated, 0.02, "length") }));
+
+		expect(outcome.claim.status).toBe("completed");
+		expect(outcome.claim.outputFormat).toBe("plain_text");
+		expect(outcome.claim.summary).toContain("first concrete finding");
+		expect(outcome.claim.summary).toContain("stop reason 'length'");
 		expect(outcome.reasonCode).toBe("worker_completed_plain_text_incomplete");
 	});
 

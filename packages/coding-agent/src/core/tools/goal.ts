@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stat as fsStat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
@@ -49,7 +49,7 @@ const goalSchema = Type.Object(
 		),
 		requirementId: Type.Optional(
 			Type.String({
-				description: "Requirement id for requirement actions.",
+				description: "Requirement id for requirement actions. Omit on add_requirement for a stable host id.",
 			}),
 		),
 		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
@@ -60,7 +60,9 @@ const goalSchema = Type.Object(
 			}),
 		),
 		instructions: Type.Optional(Type.String({ description: "Worker instructions. Required for dispatch_worker." })),
-		evidenceId: Type.Optional(Type.String({ description: "Evidence id. Required for add_evidence." })),
+		evidenceId: Type.Optional(
+			Type.String({ description: "Evidence id. Omit on add_evidence for a stable host id." }),
+		),
 		evidenceIds: Type.Optional(
 			Type.Array(Type.String(), {
 				description: "Existing evidence ids for satisfy_requirement.",
@@ -222,8 +224,8 @@ export interface GoalToolDependencies {
 	getBackgroundToolTasks?: () => readonly BackgroundToolTaskRef[];
 	/** Active ICM pipeline run for the complete/increment join. */
 	getActivePipeline?: () => { runId: string; pipelineName: string; goalId?: string; status: string } | undefined;
-	/** Model-facing start authority for the current foreground turn. Omitted by direct owner/test callers. */
-	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | undefined;
+	/** Model-facing budget normalization for the current foreground turn. Omitted by direct owner/test callers. */
+	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | number | null | undefined;
 	/**
 	 * Live tool-evidence check. When wired, kind:"tool" uses this instead of {@link hasToolCallId}
 	 * so a still-running background handoff cannot verify as done.
@@ -276,6 +278,10 @@ async function resolveEvidenceVerified(
 	return undefined;
 }
 
+function generatedGoalRecordId(prefix: "req" | "ev", value: unknown): string {
+	return `${prefix}-${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16)}`;
+}
+
 function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 	switch (input.action) {
 		case "start":
@@ -288,7 +294,12 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 		case "add_requirement":
 			return {
 				action: "add_requirement",
-				requirementId: input.requirementId ?? "",
+				requirementId:
+					input.requirementId ??
+					generatedGoalRecordId("req", {
+						text: input.text?.trim() ?? "",
+						dependencies: [...(input.dependencies ?? [])].map((value) => value.trim()).sort(),
+					}),
 				text: input.text ?? "",
 				dependencies: input.dependencies,
 			};
@@ -319,7 +330,13 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			const kind: GoalEvidenceKind = input.kind;
 			return {
 				action: "add_evidence",
-				evidenceId: input.evidenceId ?? "",
+				evidenceId:
+					input.evidenceId ??
+					generatedGoalRecordId("ev", {
+						kind,
+						summary: input.summary?.trim() ?? "",
+						uri: input.uri?.trim() ?? "",
+					}),
 				kind,
 				summary: input.summary ?? "",
 				uri: input.uri,
@@ -445,17 +462,23 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					details: { action: "get", applied: false, state },
 				};
 			}
-			if (input.action === "start" && input.tokenBudget !== undefined && deps.authorizeStart) {
-				const error = deps.authorizeStart(input);
-				if (error) {
+			let normalizedInput = input;
+			if (input.action === "start" && deps.authorizeStart) {
+				const authority = deps.authorizeStart(input);
+				if (typeof authority === "string") {
 					return {
-						content: [{ type: "text", text: `goal start failed: ${error}` }],
-						details: { action: "start", applied: false, error },
+						content: [{ type: "text", text: `goal start failed: ${authority}` }],
+						details: { action: "start", applied: false, error: authority },
 						isError: true,
 					};
 				}
+				normalizedInput = {
+					...input,
+					...(typeof authority === "number" ? { tokenBudget: authority } : {}),
+				};
+				if (authority === null) delete normalizedInput.tokenBudget;
 			}
-			const mapped = toGoalAction(input);
+			const mapped = toGoalAction(normalizedInput);
 			if ("error" in mapped) {
 				return {
 					content: [{ type: "text" as const, text: `goal ${input.action} failed: ${mapped.error}` }],

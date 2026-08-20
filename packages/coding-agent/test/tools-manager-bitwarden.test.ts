@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { BITWARDEN_CLI_VERSION, getPinnedToolAsset } from "../src/utils/tools-manager.ts";
+import {
+	BITWARDEN_CLI_VERSION,
+	BITWARDEN_SECRETS_MANAGER_CLI_VERSION,
+	getPinnedToolAsset,
+} from "../src/utils/tools-manager.ts";
 
 describe("managed Bitwarden CLI release", () => {
 	it("pins the official checksummed desktop archives Pi can install", () => {
@@ -33,5 +37,25 @@ describe("managed Bitwarden CLI release", () => {
 
 	it("does not invent an upstream archive for Windows arm64", () => {
 		expect(getPinnedToolAsset("bw", "win32", "arm64")).toBeNull();
+	});
+
+	it("pins official Secrets Manager archives for every release target", () => {
+		expect(getPinnedToolAsset("bws", "linux", "x64")).toEqual({
+			version: BITWARDEN_SECRETS_MANAGER_CLI_VERSION,
+			assetName: `bws-x86_64-unknown-linux-musl-${BITWARDEN_SECRETS_MANAGER_CLI_VERSION}.zip`,
+			expectedSha256: "f59ee150e42b82128d437087e9bac920053c6bfddcb960d20ce9386e5ac9bba6",
+		});
+		for (const [targetPlatform, targetArchitecture] of [
+			["linux", "x64"],
+			["linux", "arm64"],
+			["darwin", "x64"],
+			["darwin", "arm64"],
+			["win32", "x64"],
+			["win32", "arm64"],
+		] as const) {
+			expect(getPinnedToolAsset("bws", targetPlatform, targetArchitecture)?.expectedSha256).toMatch(
+				/^[a-f0-9]{64}$/,
+			);
+		}
 	});
 });

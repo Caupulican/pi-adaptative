@@ -8,6 +8,16 @@ import type { GoalState } from "../src/core/goals/goal-state.ts";
 
 function createController(
 	goal: Pick<GoalState, "goalId" | "status"> | undefined = { goalId: "goal-active", status: "active" },
+	getWorkerResult?: () => {
+		artifacts: Array<{
+			artifactId: string;
+			kind: "report";
+			uri: string;
+			sizeBytes: number;
+			createdAt: string;
+			metadata: { source: string; complete: boolean };
+		}>;
+	},
 ) {
 	const lease = {} as ForegroundSubmissionLease;
 	const foreground = {
@@ -20,6 +30,7 @@ function createController(
 		foreground,
 		isDisposed: () => false,
 		getGoalStateSnapshot: () => goal,
+		...(getWorkerResult ? { getWorkerResult } : {}),
 		startCustomMessageTurn,
 		sendCustomMessage,
 		warn: vi.fn(),
@@ -125,6 +136,38 @@ describe("ForegroundTerminalHandoffController", () => {
 			expect.objectContaining({ customType: "background-worker-completion" }),
 			lease,
 			"goal-active",
+		);
+	});
+
+	it("delivers the complete terminal-output file pointer to the parent", async () => {
+		const { controller, startCustomMessageTurn } = createController(undefined, () => ({
+			artifacts: [
+				{
+					artifactId: "worker-output-1",
+					kind: "report",
+					uri: "file:///tmp/worker-output-1.txt",
+					sizeBytes: 75_000,
+					createdAt: "2026-08-20T00:00:00.000Z",
+					metadata: { source: "worker_terminal_output", complete: true },
+				},
+			],
+		}));
+
+		await controller.notifyWorkers([{ laneId: "worker-output", status: "succeeded" }]);
+
+		expect(startCustomMessageTurn).toHaveBeenCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining("file:///tmp/worker-output-1.txt"),
+				details: expect.objectContaining({
+					records: [
+						expect.objectContaining({
+							outputArtifact: expect.objectContaining({ uri: "file:///tmp/worker-output-1.txt" }),
+						}),
+					],
+				}),
+			}),
+			expect.anything(),
+			undefined,
 		);
 	});
 

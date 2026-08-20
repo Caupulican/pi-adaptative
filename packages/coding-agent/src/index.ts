@@ -310,6 +310,17 @@ export {
 	type BitwardenCredentialStorageOptions,
 } from "./core/secrets/bitwarden-credential-storage.ts";
 export {
+	BitwardenCredentialStorageRouter,
+	type BitwardenCredentialStorageRouterOptions,
+} from "./core/secrets/bitwarden-credential-storage-router.ts";
+export {
+	type BitwardenSecretsManagerCommandRequest,
+	type BitwardenSecretsManagerCommandResult,
+	BitwardenSecretsManagerCredentialStorage,
+	type BitwardenSecretsManagerCredentialStorageOptions,
+	BitwardenSecretsManagerStorageError,
+} from "./core/secrets/bitwarden-secrets-manager-storage.ts";
+export {
 	type CredentialActivationResult,
 	type CredentialConnectionStatus,
 	CredentialManager,
@@ -324,7 +335,10 @@ export {
 	type CredentialProjectResolver,
 	CredentialStorageError,
 	type CredentialStorageErrorCode,
+	type CredentialStorageProvider,
 	type CredentialVariable,
+	type MachineCredentialSession,
+	type MachineCredentialSessionResolver,
 	type StoredCredentialProfileSummary,
 } from "./core/secrets/credential-manager.ts";
 export {

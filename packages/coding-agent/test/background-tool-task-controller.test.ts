@@ -225,7 +225,7 @@ describe("BackgroundToolTaskController", () => {
 		});
 		abort.abort(new Error("foreground turn ended"));
 
-		await expect(wait).rejects.toThrow("foreground turn ended");
+		await expect(wait).resolves.toMatchObject({ status: "running", taskId: "tool-task-1" });
 		await controller.waitForNotifications();
 		expect(wakeSignals).toEqual([true]);
 		await controller.shutdown();

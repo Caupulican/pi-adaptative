@@ -35,6 +35,7 @@ const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
 const FFF_NODE_VERSION = "0.9.6";
 export const BITWARDEN_CLI_VERSION = "2026.7.0";
+export const BITWARDEN_SECRETS_MANAGER_CLI_VERSION = "2.1.0";
 export const FD_VERSION = "10.4.2";
 const FD_DARWIN_X64_VERSION = "10.3.0";
 export const RG_VERSION = "15.2.0";
@@ -67,7 +68,7 @@ interface ToolConfig {
 	sha256ByAsset?: Readonly<Record<string, string>>;
 }
 
-const TOOLS: Record<"bw" | "fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
+const TOOLS: Record<"bw" | "bws" | "fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
 	bw: {
 		name: "Bitwarden CLI",
 		repo: "bitwarden/clients",
@@ -89,6 +90,30 @@ const TOOLS: Record<"bw" | "fd" | "jq" | "jscpd" | "rg" | "uv", ToolConfig> = {
 			"bw-macos-2026.7.0.zip": "b37836d539798f5adeb8a907619ee8a55b6322549bb68669aa4b3a03d5bc0452",
 			"bw-macos-arm64-2026.7.0.zip": "61d5de8a279a9faf3637216f4fb02b506a1e4bb2817d1c64be0bd474466dd85a",
 			"bw-windows-2026.7.0.zip": "b0c22438607b789c6452dbd37ffd6be0e8a61e7a5c4e9ac57804d7ae5ed01b5b",
+		},
+	},
+	bws: {
+		name: "Bitwarden Secrets Manager CLI",
+		repo: "bitwarden/sdk-sm",
+		binaryName: "bws",
+		systemBinaryNames: ["bws"],
+		tagPrefix: "bws-v",
+		pinnedVersion: BITWARDEN_SECRETS_MANAGER_CLI_VERSION,
+		getAssetName: (version, plat, architecture) => {
+			if (architecture !== "arm64" && architecture !== "x64") return null;
+			const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+			if (plat === "darwin") return `bws-${archStr}-apple-darwin-${version}.zip`;
+			if (plat === "linux") return `bws-${archStr}-unknown-linux-musl-${version}.zip`;
+			if (plat === "win32") return `bws-${archStr}-pc-windows-msvc-${version}.zip`;
+			return null;
+		},
+		sha256ByAsset: {
+			"bws-aarch64-apple-darwin-2.1.0.zip": "9cb1c1c6e6164d83b2e339883ba02b4cbb37188ce9a484b1ce8249443163e066",
+			"bws-aarch64-pc-windows-msvc-2.1.0.zip": "ba18adeb5d123481211c47c4e4d0ad6d81a6b0139150704785542fdee542e583",
+			"bws-aarch64-unknown-linux-musl-2.1.0.zip": "eb0f1ae61d1c3b74244d2841233276e05c77e8be4da197ed90fc6248387005e1",
+			"bws-x86_64-apple-darwin-2.1.0.zip": "6f626b3971368902af1b9847c02791a1b4666969d7561e2047681cded7997537",
+			"bws-x86_64-pc-windows-msvc-2.1.0.zip": "8d6f2b51beb6f992b5b1de8b85a98bdf18de74096b724d17fa06219fc23f2bd5",
+			"bws-x86_64-unknown-linux-musl-2.1.0.zip": "f59ee150e42b82128d437087e9bac920053c6bfddcb960d20ce9386e5ac9bba6",
 		},
 	},
 	fd: {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
@@ -168,6 +168,34 @@ describe("credential exposure guard", () => {
 			boundary,
 		);
 		await expect(failing.execute("call", {})).rejects.not.toThrow(secret);
+	});
+
+	it("enforces the path decision at the wrapped execution boundary", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-secret-execution-boundary-"));
+		tempDirs.push(root);
+		const protectedFile = join(root, "machine", "bws.env");
+		mkdirSync(join(root, "machine"));
+		writeFileSync(protectedFile, "BWS_ACCESS_TOKEN=hidden\n");
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "must not run" }], details: {} }));
+		const tool: AgentTool<typeof testSchema> = {
+			name: "read",
+			label: "read",
+			description: "test read",
+			parameters: testSchema,
+			execute,
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(tool, root, {
+			redactSensitiveText: (text) => text,
+			protectedFiles: [protectedFile],
+		});
+
+		const error = await guarded.execute("call", { path: protectedFile }).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(AgentToolExecutionError);
+		expect(error).toMatchObject({ failureCode: "credential_access_blocked" });
+		expect(execute).not.toHaveBeenCalled();
 	});
 
 	it("preserves classified tool errors while redacting their messages", async () => {

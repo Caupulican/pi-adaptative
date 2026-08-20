@@ -143,6 +143,11 @@ export function managedSecretEnvDir(agentDir: string): string {
 	return join(secretsDir(agentDir), "materialized");
 }
 
+/** Cross-process lock target for Bitwarden Secrets Manager profile mutations and bootstrap. */
+export function bitwardenSecretsManagerCoordinationFile(agentDir: string): string {
+	return join(secretsDir(agentDir), "bitwarden-secrets-manager");
+}
+
 /** `<agentDir>/state/extensions/<namespace>` -- durable state owned by one extension. */
 export function extensionStateDir(agentDir: string, namespace: string): string {
 	assertPortablePathSegment("Extension namespace", namespace);
@@ -256,6 +261,27 @@ export function workerContextForkFile(
 	return join(
 		workerContextForksDir(agentDir, parentSessionId),
 		`${identityDigest.toLowerCase()}-${contentDigest.toLowerCase()}.json`,
+	);
+}
+
+/** `<orchestrationSessionDir>/worker-output-artifacts` -- lossless terminal worker reports. */
+export function workerOutputArtifactsDir(agentDir: string, parentSessionId: string): string {
+	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-output-artifacts");
+}
+
+/** One immutable, content-addressed terminal worker report. */
+export function workerTerminalOutputArtifactFile(
+	agentDir: string,
+	parentSessionId: string,
+	attemptDigest: string,
+	contentDigest: string,
+): string {
+	if (!/^[a-f0-9]{64}$/i.test(attemptDigest) || !/^[a-f0-9]{64}$/i.test(contentDigest)) {
+		throw new TypeError("Worker output artifact identities must be hexadecimal SHA-256 digests.");
+	}
+	return join(
+		workerOutputArtifactsDir(agentDir, parentSessionId),
+		`${attemptDigest.toLowerCase()}-${contentDigest.toLowerCase()}.txt`,
 	);
 }
 

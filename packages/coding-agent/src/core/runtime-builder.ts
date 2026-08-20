@@ -39,7 +39,12 @@ import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { getShellEnv } from "../utils/shell.ts";
-import { managedSecretEnvDir, resourceDir, secretVaultFile } from "./agent-paths.ts";
+import {
+	bitwardenSecretsManagerCoordinationFile,
+	managedSecretEnvDir,
+	resourceDir,
+	secretVaultFile,
+} from "./agent-paths.ts";
 import type {
 	IsolatedCompletionOptions,
 	IsolatedCompletionResult,
@@ -88,7 +93,7 @@ import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { resolveModelToolProtocol } from "./model-tool-protocol.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
-import type { OrchestrationProfile } from "./orchestration/contracts.ts";
+import type { OrchestrationProfile, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
 import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
@@ -98,13 +103,19 @@ import { describeInFlightWorkUnit, getInFlightWorkUnits } from "./reload-blocker
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ScoutController } from "./scout-controller.ts";
-import { BitwardenCredentialStorage } from "./secrets/bitwarden-credential-storage.ts";
+import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
 	type CredentialExposureBoundary,
 	wrapToolWithCredentialExposureGuard,
 } from "./secrets/credential-exposure-guard.ts";
+import {
+	discoverMachineCredentialSession,
+	getMachineCredentialBootstrapFiles,
+	getMachineCredentialDiscoveryRoots,
+} from "./secrets/credential-machine-session.ts";
 import { CredentialManager } from "./secrets/credential-manager.ts";
 import { resolveCredentialProject } from "./secrets/credential-project.ts";
+import { discoverCredentialMigrationSources } from "./secrets/credential-source-discovery.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getSessionRole, isWorkerSession, WORKER_FORBIDDEN_TOOLS } from "./session-role.ts";
 import {
@@ -335,7 +346,9 @@ export interface RuntimeBuilderDeps {
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
-	authorizeGoalStartFromTool?(input: Pick<GoalToolInput, "userGoal" | "tokenBudget">): string | undefined;
+	authorizeGoalStartFromTool?(
+		input: Pick<GoalToolInput, "userGoal" | "tokenBudget">,
+	): string | number | null | undefined;
 	/** Native task-step state accessors. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
 	saveTaskStepsStateSnapshot(state: TaskStepsState): string;
@@ -351,6 +364,7 @@ export interface RuntimeBuilderDeps {
 	getOrchestrationProfileCatalog(): Array<{ profileId: string; role: string; description: string }>;
 	getWorkerLaneRecords(): LaneRecord[];
 	getWorkerClaimSnapshots(): WorkerClaim[];
+	getWorkerResult?(laneId: string): WorkerResultContract | undefined;
 	/** Confirm a managed dispatch's caller-stable canonical lane id was registered durably before the
 	 * goal binds it (`BackgroundLaneController.resolveManagedLaneId`). */
 	resolveManagedLaneId(callerLaneId: string): string | undefined;
@@ -429,15 +443,25 @@ export class RuntimeBuilder {
 	private _reloadRequested = false;
 	private readonly _credentialManager: CredentialManager;
 	private readonly _credentialExposureBoundary: CredentialExposureBoundary;
+	private readonly _credentialBootstrapFiles: readonly string[];
+	private readonly _credentialDiscoveryRoots: readonly string[];
 	private readonly _fileMutationIntents: FileMutationIntentController;
 
 	private readonly deps: RuntimeBuilderDeps;
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
+		this._credentialBootstrapFiles = getMachineCredentialBootstrapFiles(deps.getAgentDir());
+		this._credentialDiscoveryRoots = getMachineCredentialDiscoveryRoots(deps.getAgentDir());
 		this._credentialManager = new CredentialManager({
-			storage: new BitwardenCredentialStorage(),
+			storage: new BitwardenCredentialStorageRouter({
+				secretsManagerCoordinationFile: bitwardenSecretsManagerCoordinationFile(deps.getAgentDir()),
+			}),
 			resolveProject: resolveCredentialProject,
+			resolveMachineSession: (signal) => {
+				if (signal?.aborted) return Promise.resolve(undefined);
+				return discoverMachineCredentialSession({ candidateFiles: this._credentialBootstrapFiles, signal });
+			},
 			onEnvironmentChanged: () => {
 				const sessionKey = deps.getShellSessionKey();
 				disposeShellExecutionSession(sessionKey);
@@ -446,7 +470,7 @@ export class RuntimeBuilder {
 		this._credentialExposureBoundary = {
 			redactSensitiveText: (text) => this._credentialManager.redactSensitiveText(text),
 			// Data from the retired local vault remains protected even though it is no longer executable.
-			protectedFiles: [secretVaultFile(deps.getAgentDir())],
+			protectedFiles: [secretVaultFile(deps.getAgentDir()), ...this._credentialBootstrapFiles],
 			protectedDirectories: [managedSecretEnvDir(deps.getAgentDir())],
 		};
 		this._fileMutationIntents = new FileMutationIntentController();
@@ -972,9 +996,7 @@ export class RuntimeBuilder {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
 					authorizeStart: (input) =>
-						this.deps.authorizeGoalStartFromTool
-							? this.deps.authorizeGoalStartFromTool(input)
-							: "goal start requires explicit owner authorization in the current prompt.",
+						this.deps.authorizeGoalStartFromTool ? this.deps.authorizeGoalStartFromTool(input) : null,
 					saveGoalState: (state, expected) => {
 						this.deps.saveGoalStateSnapshot(state, expected);
 					},
@@ -1099,7 +1121,14 @@ export class RuntimeBuilder {
 				this._baseToolDefinitions.set(askQuestionToolDefinition.name, askQuestionToolDefinition);
 			}
 			if (toolAccess.allows("secret_store")) {
-				const secretStoreToolDefinition = createSecretStoreToolDefinition({ manager: this._credentialManager });
+				const secretStoreToolDefinition = createSecretStoreToolDefinition({
+					manager: this._credentialManager,
+					discoverMigrationSources: (cwd, signal) =>
+						discoverCredentialMigrationSources(cwd, signal, process.env, {
+							additionalRoots: this._credentialDiscoveryRoots,
+							excludedFiles: this._credentialBootstrapFiles,
+						}),
+				});
 				this._baseToolDefinitions.set(secretStoreToolDefinition.name, secretStoreToolDefinition);
 			}
 			if (toolAccess.allows("delegate")) {
@@ -1133,6 +1162,9 @@ export class RuntimeBuilder {
 					status: {
 						getLaneRecords: () => this.deps.getWorkerLaneRecords(),
 						getWorkerClaimSnapshots: () => this.deps.getWorkerClaimSnapshots(),
+						...(this.deps.getWorkerResult
+							? { getWorkerResult: (laneId: string) => this.deps.getWorkerResult?.(laneId) }
+							: {}),
 						acknowledgeWorkerReview: (requestId) =>
 							acknowledgeWorkerClaimReview(this.deps.getSessionManager(), requestId),
 					},
