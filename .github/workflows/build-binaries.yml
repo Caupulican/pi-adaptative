@@ -77,7 +77,6 @@ jobs:
       contents: read
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      LOCAL_RELEASE_DIR: ${{ runner.temp }}/pi-adaptative/local-release
     steps:
       - name: Checkout release-smoke harness
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -101,9 +100,13 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Build isolated Node package release
+        env:
+          LOCAL_RELEASE_DIR: ${{ runner.temp }}/pi-adaptative/local-release
         run: npm run release:local -- --out "${LOCAL_RELEASE_DIR}" --force --skip-check --skip-bun-install --skip-binary-build
 
       - name: Smoke Node package and Bun binary conversations
+        env:
+          LOCAL_RELEASE_DIR: ${{ runner.temp }}/pi-adaptative/local-release
         run: |
           bun_dir="${LOCAL_RELEASE_DIR}/bun"
           mkdir -p "${bun_dir}"

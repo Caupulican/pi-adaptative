@@ -151,6 +151,11 @@ test("release publication is gated on deterministic Node-package and Bun-binary 
 	assert.match(releaseJob, /needs: \[[^\]]*verify-node-bun-release[^\]]*\]/u);
 });
 
+test("release jobs do not resolve runner-scoped paths before a step starts", () => {
+	const invalidJobEnvEntries = releaseWorkflow.match(/^      [A-Z_][A-Z0-9_]*:.*\$\{\{\s*runner\./gmu) ?? [];
+	assert.deepEqual(invalidJobEnvEntries, []);
+});
+
 test("CI jobs share the bounded Linux dependency installation script without duplicate YAML commands", () => {
 	const matches = workflow.match(/run: \.\/scripts\/install-linux-ci-deps\.sh/g);
 	assert.equal(matches?.length, 2);
