@@ -45,6 +45,7 @@ export class ForegroundRecoveryController {
 	private readonly retry: RetryController;
 	private readonly billingFailover: BillingFailoverController;
 	private lastAssistantMessage: AssistantMessage | undefined;
+	private pendingCompactionRetryKey: string | undefined;
 	private activeRuns = 0;
 	private submissionLease: ForegroundSubmissionLease | undefined;
 	private shutdownReason: Error | undefined;
@@ -253,7 +254,20 @@ export class ForegroundRecoveryController {
 				classified,
 			});
 		}
-		if (classified?.retryable && (await this.retry.prepareRetry(message))) return true;
+		const compactionRetryKey =
+			classified?.retryable && classified.shouldCompact
+				? `${message.provider}\u0000${message.model}\u0000${classified.reason}\u0000${message.errorMessage ?? ""}`
+				: undefined;
+		const repeatedCompactionFailure =
+			compactionRetryKey !== undefined && compactionRetryKey === this.pendingCompactionRetryKey;
+		if (!repeatedCompactionFailure) this.pendingCompactionRetryKey = undefined;
+		if (repeatedCompactionFailure && (await this.deps.checkCompaction(message))) {
+			return true;
+		}
+		if (classified?.retryable && (await this.retry.prepareRetry(message))) {
+			this.pendingCompactionRetryKey = compactionRetryKey;
+			return true;
+		}
 		if (await this.billingFailover.handleAssistantError(message, classified)) return false;
 
 		if (message.stopReason === "error") this.finishRetry(false, message.errorMessage);
@@ -262,6 +276,7 @@ export class ForegroundRecoveryController {
 	}
 
 	private finishRetry(success: boolean, finalError?: string): void {
+		this.pendingCompactionRetryKey = undefined;
 		if (this.retry.attempt === 0) return;
 		this.deps.emit({ type: "auto_retry_end", success, attempt: this.retry.attempt, finalError });
 		this.retry.reset();

@@ -899,7 +899,7 @@ Emitted during streaming of assistant messages. Contains both the partial messag
 }
 ```
 
-The `assistantMessageEvent` field contains one of these delta types:
+The `assistantMessageEvent` field contains one of these delta types. RPC projects `message_update` onto a bounded delta-only wire shape: `message.content` is `[]`, accumulated `partial` and block-end payloads are omitted, and `accumulatedContentOmitted` is `true`. Reconstruct content from the deltas; `message_end` carries the authoritative complete message. A single oversized delta is capped below the 50 KiB JSONL record ceiling and reports `deltaTruncated: true` with its original `deltaBytes`.
 
 | Type | Description |
 |------|-------------|
@@ -918,10 +918,10 @@ The `assistantMessageEvent` field contains one of these delta types:
 
 Example streaming a text response:
 ```json
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_start","contentIndex":0,"partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello","partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world","partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world","partial":{...}}}
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_start","contentIndex":0},"accumulatedContentOmitted":true}
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"},"accumulatedContentOmitted":true}
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"},"accumulatedContentOmitted":true}
+{"type":"message_update","message":{"content":[],"role":"assistant",...},"assistantMessageEvent":{"type":"text_end","contentIndex":0},"accumulatedContentOmitted":true}
 ```
 
 ### tool_execution_start / tool_execution_update / tool_execution_end
@@ -989,7 +989,7 @@ Emitted when compaction runs, whether manual or automatic.
 {"type": "compaction_start", "reason": "threshold"}
 ```
 
-The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
+The `reason` field is `"manual"`, `"threshold"`, `"overflow"`, or `"provider_recovery"`.
 
 ```json
 {
@@ -1006,7 +1006,7 @@ The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
 }
 ```
 
-If `reason` was `"overflow"` and compaction succeeds, `willRetry` is `true` and the agent will automatically retry the prompt.
+If `reason` was `"overflow"` or `"provider_recovery"` and compaction succeeds, `willRetry` is `true` and the agent automatically continues the same prompt. Provider recovery is bounded to one compaction after an unchanged retry reproduces a classified history-sensitive failure.
 
 If compaction was aborted, `result` is `null` and `aborted` is `true`.
 

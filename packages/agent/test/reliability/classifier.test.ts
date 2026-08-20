@@ -4,6 +4,7 @@ import { PROVIDER_FAILURE_SIGNATURES } from "../../src/reliability/provider-sign
 
 const XAI_CAPACITY_ERROR =
 	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
+const XAI_GENERATION_ERROR = "Error Code null: Internal error during token generation";
 
 describe("classifyFailure", () => {
 	it("classifies rate limits as retryable + rotate + fallback", () => {
@@ -58,6 +59,25 @@ describe("classifyFailure", () => {
 		).toMatchObject({
 			reason: "unknown",
 			retryable: false,
+		});
+	});
+
+	it("routes the observed xAI retained-history generation failure to retry plus compaction", () => {
+		expect(classifyFailure({ provider: "xai", message: XAI_GENERATION_ERROR })).toMatchObject({
+			reason: "server_error",
+			retryable: true,
+			shouldCompact: true,
+			shouldRotateCredential: false,
+			shouldFallback: false,
+		});
+	});
+
+	it("does not compact a generic provider's internal generation error", () => {
+		expect(classifyFailure({ provider: "openai", message: XAI_GENERATION_ERROR })).toMatchObject({
+			reason: "server_error",
+			retryable: true,
+			shouldCompact: false,
+			shouldFallback: true,
 		});
 	});
 

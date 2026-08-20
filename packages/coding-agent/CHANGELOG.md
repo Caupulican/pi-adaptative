@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Recovered repeated xAI retained-history token-generation failures after one unchanged retry by performing one bounded provider-recovery compaction and continuing the same foreground run.
+- Prevented print/RPC JSON streams from repeating the complete accumulated assistant prefix on every delta, which could turn one long response into gigabytes of output; streaming records now stay below 50 KiB and the terminal event remains authoritative.
+
 ## [0.93.15] - 2026-08-20
 
 ## [0.93.14] - 2026-08-20

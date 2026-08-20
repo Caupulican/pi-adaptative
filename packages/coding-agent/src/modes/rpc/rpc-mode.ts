@@ -27,6 +27,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
+import { projectSessionEventForJson } from "../json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "../termination-signals.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
@@ -388,7 +389,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			output(event);
+			output(projectSessionEventForJson(event));
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			await waitForRawStdoutBackpressure();

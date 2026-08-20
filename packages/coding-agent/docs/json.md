@@ -14,13 +14,15 @@ Events are defined in [`AgentSessionEvent`](https://github.com/earendil-works/pi
 type AgentSessionEvent =
   | AgentEvent
   | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
-  | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
-  | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
+  | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" | "provider_recovery" }
+  | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow" | "provider_recovery"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
   | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 ```
 
-`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover manual, threshold, overflow-recovery, and provider-recovery compaction.
+
+On the JSON wire, `message_update` is delta-only: `message.content` is `[]`, accumulated `partial`/block-end payloads are omitted, and `accumulatedContentOmitted` is `true`. Reconstruct streaming content from `text_delta`, `thinking_delta`, and `toolcall_delta`; the later `message_end` is the authoritative complete message. An unusually large single delta is capped so the JSONL record remains below 50 KiB and includes `deltaTruncated: true` plus its original `deltaBytes`; the complete value remains available in `message_end`.
 
 Base events from [`AgentEvent`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts#L179):
 

@@ -49,14 +49,14 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 			commands: readonly string[];
 	  }
-	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" | "provider_recovery" }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "warning"; message: string }
 	| { type: "background_tools"; tasks: readonly BackgroundToolTaskLiveView[] }
 	| {
 			type: "compaction_end";
-			reason: "manual" | "threshold" | "overflow";
+			reason: "manual" | "threshold" | "overflow" | "provider_recovery";
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;

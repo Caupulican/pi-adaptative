@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Classified the observed xAI retained-history token-generation failure as independently retryable and compactable without rotating or leaving the subscription route.
+
 ## [0.93.15] - 2026-08-20
 
 ## [0.93.14] - 2026-08-20

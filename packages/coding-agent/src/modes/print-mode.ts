@@ -9,6 +9,7 @@
 import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+import { projectSessionEventForJson } from "./json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "./termination-signals.ts";
 
 /**
@@ -100,7 +101,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(event)}\n`);
+				writeRawStdout(`${JSON.stringify(projectSessionEventForJson(event))}\n`);
 			} else if (event.type === "warning") {
 				console.warn(`Warning: ${event.message}`);
 			}

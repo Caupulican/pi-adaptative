@@ -3,6 +3,8 @@ import type { FailureReason } from "./classifier.ts";
 export interface ProviderSignature {
 	reason: FailureReason;
 	pattern: RegExp;
+	/** Route the matched provider failure through history compaction as an independent recovery action. */
+	shouldCompact?: boolean;
 	/** Evidence citation: sdk package+version+file, corpus capture, or adapter file:line. */
 	source: string;
 	/** True when the SDK-rendered fixture uses a vendor body shape that still awaits corpus confirmation. */
@@ -39,6 +41,12 @@ export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignat
 			reason: "overloaded",
 			pattern: /the model is currently at capacity due to high demand/i,
 			source: "corpus:xai/grok-4.6 openai-responses code:null capacity response",
+		},
+		{
+			reason: "server_error",
+			pattern: /Error Code null:\s*Internal error during token generation/i,
+			shouldCompact: true,
+			source: "corpus:xai/grok-4.6 retained-history session 01a02019-06fb-716f-a921-a653315d9354",
 		},
 	],
 	"openai-codex": [

@@ -12,6 +12,7 @@ import {
 	shouldCompact,
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { runCompactionLoop } from "@caupulican/pi-agent-core/compaction/loop";
+import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
 import {
@@ -32,7 +33,7 @@ import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
-export type AutoCompactionReason = "overflow" | "threshold";
+export type AutoCompactionReason = "overflow" | "provider_recovery" | "threshold";
 
 export interface ProviderRequestCompactionInput {
 	requestTokens: number;
@@ -60,6 +61,8 @@ export class ProviderRequestEnvelopeOverflowError extends Error {
 const COMPACTION_RETRY_PREPARATION_OPTIONS = { allowTrailingCompactionAsPrevious: true } as const;
 const INEFFECTIVE_THRESHOLD_SKIP_REASON =
 	"previous auto-compaction did not restore headroom; waiting for materially new compactable history";
+const PROVIDER_RECOVERY_CONTINUATION_CUSTOM_TYPE = "provider_recovery_continuation";
+const PROVIDER_RECOVERY_CONTINUATION = "Continue the latest owner request from the compacted checkpoint.";
 
 interface IneffectiveThresholdFrontier {
 	provider: string;
@@ -167,6 +170,7 @@ export class CompactionController {
 	private autoAbortController: AbortController | undefined;
 	private autoRunPromise: Promise<boolean> | undefined;
 	private overflowRecoveryAttempted = false;
+	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
 	private readonly deps: CompactionControllerDeps;
 
@@ -194,6 +198,7 @@ export class CompactionController {
 
 	resetOverflowRecovery(): void {
 		this.overflowRecoveryAttempted = false;
+		this.providerRecoveryAttempted = false;
 	}
 
 	async admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision> {
@@ -491,11 +496,18 @@ export class CompactionController {
 				return false;
 			}
 			this.overflowRecoveryAttempted = true;
-			const messages = this.deps.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.deps.agent.state.messages = messages.slice(0, -1);
-			}
+			this.dropTrailingAssistantErrors();
 			return this.deps.runAutoCompaction("overflow", true);
+		}
+		const classified =
+			assistantMessage.stopReason === "error" && assistantMessage.errorMessage
+				? classifyFailure({ message: assistantMessage.errorMessage, provider: assistantMessage.provider })
+				: undefined;
+		if (sameModel && classified?.shouldCompact) {
+			if (this.providerRecoveryAttempted) return false;
+			this.providerRecoveryAttempted = true;
+			this.dropTrailingAssistantErrors();
+			return this.deps.runAutoCompaction("provider_recovery", true);
 		}
 
 		let contextTokens: number;
@@ -604,9 +616,9 @@ export class CompactionController {
 				getBranch: () => this.deps.sessionManager.getBranch(),
 				measureLiveTokens: () => options.initialTokens ?? this.deps.measureLiveContextTokens(),
 				shouldCompact:
-					reason === "overflow"
-						? () => true
-						: (tokens) => shouldCompact(tokens, contextWindow, settings, model.autoCompactionTriggerTokens),
+					reason === "threshold"
+						? (tokens) => shouldCompact(tokens, contextWindow, settings, model.autoCompactionTriggerTokens)
+						: () => true,
 				getPostApplyMargin: () => margin,
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) =>
@@ -670,7 +682,7 @@ export class CompactionController {
 					lastCompaction = result;
 					await this.applyResult(result, fromExtension);
 				},
-				verifyPostApplyEffect: reason === "overflow" || options.singlePass ? () => false : undefined,
+				verifyPostApplyEffect: reason !== "threshold" || options.singlePass ? () => false : undefined,
 				allowTrailingCompactionAsPrevious: options.allowTrailingCompactionAsPrevious,
 				forceDeterministic: options.forceDeterministic,
 				onTransition: ({ cycle, cause, detail }) => {
@@ -710,15 +722,12 @@ export class CompactionController {
 			if (reason === "threshold" && options.recordThresholdFrontier !== false) {
 				this.recordThresholdFrontier(model, settings, margin);
 			} else this.ineffectiveThresholdFrontier = undefined;
-			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			if (willRetry) {
-				const messages = this.deps.agent.state.messages;
-				const lastMessage = messages[messages.length - 1];
-				if (lastMessage?.role === "assistant" && lastMessage.stopReason === "error") {
-					this.deps.agent.state.messages = messages.slice(0, -1);
-				}
-				return true;
+				this.dropTrailingAssistantErrors();
+				if (reason === "provider_recovery") this.appendProviderRecoveryContinuation();
 			}
+			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+			if (willRetry) return true;
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
@@ -731,7 +740,9 @@ export class CompactionController {
 				errorMessage:
 					reason === "overflow"
 						? `Context overflow recovery failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`,
+						: reason === "provider_recovery"
+							? `Provider failure recovery failed: ${errorMessage}`
+							: `Auto-compaction failed: ${errorMessage}`,
 			});
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 		}
@@ -815,6 +826,29 @@ export class CompactionController {
 			if (message.role === "assistant") return message;
 		}
 		return undefined;
+	}
+
+	private dropTrailingAssistantErrors(): void {
+		const messages = this.deps.agent.state.messages;
+		let keepLength = messages.length;
+		while (keepLength > 0) {
+			const message = messages[keepLength - 1];
+			if (message?.role !== "assistant" || message.stopReason !== "error") break;
+			keepLength--;
+		}
+		if (keepLength < messages.length) this.deps.agent.state.messages = messages.slice(0, keepLength);
+	}
+
+	private appendProviderRecoveryContinuation(): void {
+		const message = createCustomMessage(
+			PROVIDER_RECOVERY_CONTINUATION_CUSTOM_TYPE,
+			PROVIDER_RECOVERY_CONTINUATION,
+			false,
+			undefined,
+			new Date().toISOString(),
+		);
+		this.deps.sessionManager.appendMessage(message);
+		this.deps.agent.state.messages = [...this.deps.agent.state.messages, message];
 	}
 
 	private async getExtensionCompaction(

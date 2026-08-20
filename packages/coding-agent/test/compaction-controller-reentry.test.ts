@@ -2,7 +2,11 @@ import type { Agent, AgentMessage } from "@caupulican/pi-agent-core";
 import { type CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { CompactionController, type CompactionControllerDeps } from "../src/core/compaction-controller.ts";
+import {
+	type AutoCompactionReason,
+	CompactionController,
+	type CompactionControllerDeps,
+} from "../src/core/compaction-controller.ts";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
 import type { FailureCorpusRecorder } from "../src/core/failure-corpus.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
@@ -50,9 +54,11 @@ function assistantWithUsage(tokens: number, timestamp: number): AssistantMessage
 function createFixture(options: {
 	measureLiveContextTokens: () => number;
 	createResult(attempt: number, entryIds: string[]): Promise<CompactionResult>;
+	model?: Model<"openai-completions">;
 	settings?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number; triggerPercent: number };
 	estimatedContextTokens?: number;
 	onCompactionSettled?: () => void;
+	refreshAfterCompaction?: (agent: Agent) => void;
 	abortForeground?: () => Promise<void>;
 	disconnectAgent?: () => void;
 	reconnectAgent?: () => void;
@@ -77,7 +83,7 @@ function createFixture(options: {
 		entryIds.push(sessionManager.appendMessage(message));
 	}
 
-	const model = createModel();
+	const model = options.model ?? createModel();
 	const events: Array<Record<string, unknown>> = [];
 	let compactionAttempt = 0;
 	const compactWithRetry = vi.fn(async (): Promise<CompactionResult> => {
@@ -94,7 +100,7 @@ function createFixture(options: {
 		hasQueuedMessages: () => false,
 	} as unknown as Agent;
 	let controller: CompactionController;
-	const runAutoCompaction = vi.fn((reason: "overflow" | "threshold", willRetry: boolean) =>
+	const runAutoCompaction = vi.fn((reason: AutoCompactionReason, willRetry: boolean) =>
 		controller.runAuto(reason, willRetry),
 	);
 
@@ -125,7 +131,7 @@ function createFixture(options: {
 		estimateCurrentContextTokens: () => options.estimatedContextTokens ?? 3_000,
 		buildPreDigest: () => undefined,
 		getMemoryPreCompressInsight: async () => "",
-		refreshAfterCompaction: () => {},
+		refreshAfterCompaction: () => options.refreshAfterCompaction?.(agent),
 		getFailureCorpus: () => ({}) as FailureCorpusRecorder,
 		measureLiveContextTokens: options.measureLiveContextTokens,
 		runAutoCompaction,
@@ -135,6 +141,7 @@ function createFixture(options: {
 	controller = new CompactionController(deps);
 
 	return {
+		agent,
 		controller,
 		compactWithRetry,
 		entryIds,
@@ -154,6 +161,53 @@ function checkpoint(attempt: number, entryIds: string[]): CompactionResult {
 }
 
 describe("CompactionController auto-compaction re-entry", () => {
+	it("forces one xAI provider-recovery compaction below the threshold per episode", async () => {
+		const model = { ...createModel(), provider: "xai", id: "grok-4.6", name: "grok-4.6" };
+		const firstFailure: AssistantMessage = {
+			...assistantWithUsage(500, Date.now() + 1_000),
+			provider: "xai",
+			model: "grok-4.6",
+			content: [],
+			stopReason: "error",
+			errorMessage: "Error Code null: Internal error during token generation",
+		};
+		const { agent, compactWithRetry, controller, events, runAutoCompaction, sessionManager } = createFixture({
+			model,
+			measureLiveContextTokens: () => 500,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			refreshAfterCompaction: (refreshedAgent) => {
+				refreshedAgent.state.messages = [
+					...refreshedAgent.state.messages,
+					{ ...firstFailure, timestamp: Date.now() + 1_500 },
+					{ ...firstFailure, timestamp: Date.now() + 1_600 },
+				];
+			},
+		});
+		agent.state.messages = [...agent.state.messages, firstFailure];
+
+		await expect(controller.check(firstFailure)).resolves.toBe(true);
+		expect(runAutoCompaction).toHaveBeenCalledWith("provider_recovery", true);
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "custom",
+			customType: "provider_recovery_continuation",
+			content: "Continue the latest owner request from the compacted checkpoint.",
+			display: false,
+		});
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "message",
+			message: { role: "custom", customType: "provider_recovery_continuation" },
+		});
+		expect(events).toContainEqual({ type: "compaction_start", reason: "provider_recovery" });
+
+		const repeatedFailure = { ...firstFailure, timestamp: Date.now() + 2_000 };
+		agent.state.messages = [...agent.state.messages, repeatedFailure];
+		await expect(controller.check(repeatedFailure)).resolves.toBe(false);
+		expect(runAutoCompaction).toHaveBeenCalledOnce();
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+	});
+
 	it("rejects an irreducible mandatory envelope without buying a compaction probe", async () => {
 		const { compactWithRetry, controller, sessionManager } = createFixture({
 			measureLiveContextTokens: () => 3_000,

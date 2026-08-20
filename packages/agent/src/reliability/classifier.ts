@@ -93,6 +93,7 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 			return withRetry({
 				...base,
 				reason: signature.reason,
+				shouldCompact: signature.shouldCompact ?? false,
 				shouldFallback: signature.reason === "billing_or_quota" || signature.reason === "auth",
 				shouldRotateCredential: signature.reason === "auth",
 				retryable:
