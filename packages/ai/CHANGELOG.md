@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed SuperGrok subscription requests missing the installed CLI authentication-response header, which caused valid retained sessions to fail during token generation.
+
 ## [0.93.14] - 2026-08-20
 
 ## [0.93.13] - 2026-08-20

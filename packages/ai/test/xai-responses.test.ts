@@ -100,6 +100,7 @@ describe.each(["grok-4.5", "grok-4.6"] as const)("xAI Responses lane (%s)", (mod
 	it("does not send Grok CLI proxy headers to the public API", async () => {
 		const { headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
 		expect(headers.get("x-xai-token-auth")).toBeNull();
+		expect(headers.get("x-authenticateresponse")).toBeNull();
 		expect(headers.get("x-grok-client-version")).toBeNull();
 		expect(headers.get("x-grok-client-identifier")).toBeNull();
 		expect(headers.get("x-grok-client-mode")).toBeNull();
@@ -158,6 +159,7 @@ describe("xAI Grok CLI subscription schema", () => {
 			baseUrl: "https://cli-chat-proxy.grok.com/v1",
 			headers: {
 				"X-XAI-Token-Auth": "xai-grok-cli",
+				"x-authenticateresponse": "authenticate-response",
 				"x-grok-client-version": "1.0.5",
 				"x-grok-client-identifier": "grok-shell",
 				"x-grok-client-mode": "headless",
@@ -260,6 +262,7 @@ describe("xAI Grok CLI subscription schema", () => {
 		expect(url).toBe("https://cli-chat-proxy.grok.com/v1/responses");
 		expect(headers.get("authorization")).toBe("Bearer oauth-access");
 		expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
+		expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
 		expect(headers.get("x-grok-client-version")).toBe("1.0.5");
 		expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
 		expect(headers.get("x-grok-client-mode")).toBe("headless");
