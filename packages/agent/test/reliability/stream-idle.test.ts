@@ -8,6 +8,7 @@ import {
 	makeStartEvent,
 	makeTextDeltaEvent,
 	makeThinkingDeltaEvent,
+	makeThinkingStartEvent,
 } from "./stream-fixtures.ts";
 
 // Minimal fake inner stream we can drive by hand. Emits nothing until told.
@@ -35,7 +36,12 @@ function makeResponseAwareFakeStreamFn(responseDelayMs: number) {
 }
 
 // Distinct values per phase so a test failing on the wrong bound is unambiguous.
-const BOUNDS: Partial<StreamIdleOptions> = { connectMs: 120_000, activeIdleMs: 30_000, quietIdleMs: 90_000 };
+const BOUNDS: Partial<StreamIdleOptions> = {
+	connectMs: 120_000,
+	firstProgressMs: 45_000,
+	activeIdleMs: 30_000,
+	quietIdleMs: 90_000,
+};
 
 describe("withStreamIdleWatchdog (phase-aware)", () => {
 	beforeEach(() => vi.useFakeTimers());
@@ -70,17 +76,60 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		expect(result.stopReason).toBe("stop");
 	});
 
-	it("quiet phase (connected, no content blocks yet) uses quietIdleMs, not activeIdleMs", async () => {
+	it("first-progress phase bounds connected streams with no generated content", async () => {
 		const fake = makeFakeStreamFn();
 		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);
 		const stream = await wrapped({} as never, {} as never, {});
 		fake.inner.push(makeStartEvent());
-		await vi.advanceTimersByTimeAsync(89_999); // far past activeIdleMs — must still be alive
+		await vi.advanceTimersByTimeAsync(44_999); // past activeIdleMs, but below firstProgressMs
 		expect(fake.signal()?.aborted).toBe(false);
 		await vi.advanceTimersByTimeAsync(1);
 		expect(fake.signal()?.aborted).toBe(true);
 		const result = await stream.result();
-		expect(result.errorMessage).toMatch(/stream stalled: no events for 90000ms/);
+		expect(result.errorMessage).toContain("stream stalled: no events for 45000ms (first-progress phase)");
+	});
+
+	it("does not treat transport headers or empty thinking frames as model progress", async () => {
+		const fake = makeResponseAwareFakeStreamFn(1_000);
+		const bounds = {
+			connectMs: 120_000,
+			firstProgressMs: 10_000,
+			activeIdleMs: 30_000,
+			quietIdleMs: 90_000,
+		};
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, bounds);
+		const stream = await wrapped({} as never, {} as never, {});
+		await vi.advanceTimersByTimeAsync(1_000);
+		fake.inner.push(makeStartEvent());
+		fake.inner.push(makeThinkingStartEvent());
+
+		await vi.advanceTimersByTimeAsync(9_999);
+		expect(fake.signal()?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(fake.signal()?.aborted).toBe(true);
+		const result = await stream.result();
+		expect(result.errorMessage).toContain("no events for 10000ms (first-progress phase)");
+	});
+
+	it("unlocks the long quiet bound only after non-empty thinking progress", async () => {
+		const fake = makeResponseAwareFakeStreamFn(1_000);
+		const bounds = {
+			connectMs: 120_000,
+			firstProgressMs: 10_000,
+			activeIdleMs: 30_000,
+			quietIdleMs: 90_000,
+		};
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, bounds);
+		await wrapped({} as never, {} as never, {});
+		await vi.advanceTimersByTimeAsync(1_000);
+		fake.inner.push(makeStartEvent());
+		fake.inner.push(makeThinkingStartEvent());
+		fake.inner.push(makeThinkingDeltaEvent());
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(fake.signal()?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(80_000);
+		expect(fake.signal()?.aborted).toBe(true);
 	});
 
 	it("thinking blocks keep the quiet bound: silence after a thinking delta outlives activeIdleMs", async () => {

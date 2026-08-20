@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Bounded streams that emit only headers or empty structural frames with a separate first-progress phase instead of granting the ten-minute deep-thinking allowance.
+
 ## [0.93.13] - 2026-08-20
 
 ### Fixed

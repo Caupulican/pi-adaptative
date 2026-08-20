@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Adapted the first model-progress watchdog to measured prefill throughput so zero-output Grok subscription turns fail promptly without constraining genuine long reasoning.
+
 ## [0.93.13] - 2026-08-20
 
 ### Added

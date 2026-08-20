@@ -58,7 +58,7 @@ import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderRespo
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import type { StreamFn } from "../types.ts";
 
-export type StallPhase = "connect" | "quiet" | "active";
+export type StallPhase = "connect" | "first-progress" | "quiet" | "active";
 
 export interface StreamIdleOptions {
 	/** Max ms to wait for the FIRST event (connection/first-token allowance). */
@@ -66,20 +66,23 @@ export interface StreamIdleOptions {
 	/** Max ms between events while content is flowing — the latest content block is
 	 *  text or toolCall. A flowing stream that goes silent this long is presumed dead. */
 	activeIdleMs: number;
+	/** Max ms after transport confirmation until the first non-empty model delta.
+	 *  Headers and structural start frames prove connectivity, not generation progress. */
+	firstProgressMs: number;
 	/** Max ms between events while the model is quietly working — no content blocks
-	 *  yet (provider queue / prompt prefill / unstreamed reasoning) or the latest block
-	 *  is thinking. Deep-thinking models and huge compaction prompts legitimately sit
+	 *  after it has emitted non-empty thinking. Deep-thinking models legitimately sit
 	 *  here for minutes, so this bound is deliberately generous. */
 	quietIdleMs: number;
 	/** Fired once when a stall is detected, before the inner request is aborted. */
 	onStall?: (info: { phase: StallPhase; elapsedMs: number }) => void;
 }
 
-/** User-locked defaults: connect 120s / active 180s / quiet 600s. The quiet bound must stay
+/** Defaults: connect 120s / first progress 120s / active 180s / quiet 600s. The quiet bound must stay
  *  below the HTTP dispatcher idle timeout (see coding-agent http-dispatcher.ts, 660s) or the
  *  HTTP layer would kill quiet-but-healthy streams before this watchdog ever sees the gap. */
 export const DEFAULT_STREAM_IDLE: StreamIdleOptions = {
 	connectMs: 120_000,
+	firstProgressMs: 120_000,
 	activeIdleMs: 180_000,
 	quietIdleMs: 600_000,
 };
@@ -97,11 +100,10 @@ function partialFromEvent(event: AssistantMessageEvent): AssistantMessage {
 /**
  * Wrap a StreamFn so a silently dead connection cannot wedge a turn forever.
  *
- * Phase-aware: `connectMs` bounds the wait for the first event; after that the
- * inter-event bound adapts to what the stream is doing — `quietIdleMs` while the
- * model is quietly working (no content blocks yet, or the latest block is thinking:
- * prefill, provider queues, unstreamed reasoning) and `activeIdleMs` once content is
- * flowing (latest block is text/toolCall). This keeps detection fast where silence is
+ * Phase-aware: `connectMs` bounds the wait for transport confirmation,
+ * `firstProgressMs` bounds headers and structural frames that contain no model output,
+ * `quietIdleMs` covers silence after non-empty thinking, and `activeIdleMs` covers
+ * silence after text or tool-call output. This keeps detection fast where silence is
  * anomalous without killing healthy deep-thinking or compaction-sized requests.
  * No bound ever limits total runtime (autonomy constraint).
  *
@@ -163,7 +165,7 @@ export function withStreamIdleWatchdog(
 			timestamp: Date.now(),
 		};
 		let stalled = false;
-		let firstEventSeen = false;
+		let meaningfulProgressSeen = false;
 		let transportConfirmed = false;
 		let streamSetupSettled = false;
 		let terminalPushed = false;
@@ -219,16 +221,16 @@ export function withStreamIdleWatchdog(
 			callerSignal?.removeEventListener("abort", onCallerAbort);
 		};
 
-		let watchdog = createSilenceWatchdog({
+		const watchdog = createSilenceWatchdog({
 			silenceMs: opts.connectMs,
 			onSilence: () => stall(currentPhase, currentBoundMs),
 		});
 		const markTransportConfirmed = () => {
-			if (callerAborted || stalled || firstEventSeen || transportConfirmed) return;
+			if (callerAborted || stalled || meaningfulProgressSeen || transportConfirmed) return;
 			transportConfirmed = true;
-			currentPhase = "quiet";
-			currentBoundMs = opts.quietIdleMs;
-			watchdog.touch(opts.quietIdleMs);
+			currentPhase = "first-progress";
+			currentBoundMs = opts.firstProgressMs;
+			watchdog.touch(opts.firstProgressMs);
 		};
 		const originalOnResponse = streamOptions?.onResponse;
 		const pushSetupAbort = () => {
@@ -287,17 +289,14 @@ export function withStreamIdleWatchdog(
 				for await (const event of inner) {
 					if (stalled) break;
 					latest = partialFromEvent(event);
-					const bound = idleBoundFor(latest);
-					currentPhase = bound.phase;
-					currentBoundMs = bound.ms;
-					if (!firstEventSeen) {
-						firstEventSeen = true;
-						watchdog.disarm();
-						watchdog = createSilenceWatchdog({
-							silenceMs: bound.ms,
-							onSilence: () => stall(currentPhase, currentBoundMs),
-						});
-					} else {
+					const meaningfulProgress = eventHasMeaningfulProgress(event);
+					if (meaningfulProgress) meaningfulProgressSeen = true;
+					if (!transportConfirmed && !meaningfulProgress) {
+						markTransportConfirmed();
+					} else if (meaningfulProgressSeen) {
+						const bound = idleBoundFor(latest);
+						currentPhase = bound.phase;
+						currentBoundMs = bound.ms;
 						watchdog.touch(bound.ms);
 					}
 					// A terminal event ends the turn: disarm synchronously, in the same tick as
@@ -336,4 +335,20 @@ export function withStreamIdleWatchdog(
 
 		return ready;
 	};
+}
+
+function eventHasMeaningfulProgress(event: AssistantMessageEvent): boolean {
+	switch (event.type) {
+		case "text_delta":
+		case "thinking_delta":
+		case "toolcall_delta":
+			return event.delta.length > 0;
+		case "text_end":
+		case "thinking_end":
+			return event.content.length > 0;
+		case "toolcall_end":
+			return true;
+		default:
+			return false;
+	}
 }

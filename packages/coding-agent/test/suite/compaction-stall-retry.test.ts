@@ -32,7 +32,12 @@ describe("compaction stall retry", () => {
 		});
 
 	it("a stalled summarization is retried and the compaction completes", async () => {
-		setStreamIdleOptionsForTests({ connectMs: 300, activeIdleMs: 300, quietIdleMs: 300 });
+		setStreamIdleOptionsForTests({
+			connectMs: 300,
+			firstProgressMs: 300,
+			activeIdleMs: 300,
+			quietIdleMs: 300,
+		});
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
 		});
@@ -130,7 +135,12 @@ describe("compaction stall retry", () => {
 	});
 
 	it("exhausted retries still surface the stall error", async () => {
-		setStreamIdleOptionsForTests({ connectMs: 200, activeIdleMs: 200, quietIdleMs: 200 });
+		setStreamIdleOptionsForTests({
+			connectMs: 200,
+			firstProgressMs: 200,
+			activeIdleMs: 200,
+			quietIdleMs: 200,
+		});
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
 		});

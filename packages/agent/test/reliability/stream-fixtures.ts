@@ -34,6 +34,13 @@ export function makeStartEvent(): AssistantMessageEvent {
 	return { type: "start", partial: baseAssistantMessage() };
 }
 
+/** A structural thinking block start with no generated reasoning yet. */
+export function makeThinkingStartEvent(): AssistantMessageEvent {
+	const partial = baseAssistantMessage();
+	partial.content = [{ type: "thinking", thinking: "" }];
+	return { type: "thinking_start", contentIndex: 0, partial };
+}
+
 /** A thinking delta: the latest content block is a thinking block (quiet phase). */
 export function makeThinkingDeltaEvent(): AssistantMessageEvent {
 	const partial = baseAssistantMessage();

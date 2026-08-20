@@ -67,6 +67,7 @@ export function constrainStreamIdleToHttpTimeout(
 	const resolvedOptions: StreamIdleOptions = {
 		...options,
 		connectMs: options.connectMs ?? DEFAULT_STREAM_IDLE.connectMs,
+		firstProgressMs: options.firstProgressMs ?? DEFAULT_STREAM_IDLE.firstProgressMs,
 		activeIdleMs: options.activeIdleMs ?? DEFAULT_STREAM_IDLE.activeIdleMs,
 		quietIdleMs: options.quietIdleMs ?? DEFAULT_STREAM_IDLE.quietIdleMs,
 	};
@@ -87,6 +88,7 @@ export function constrainStreamIdleToHttpTimeout(
 		options: {
 			...resolvedOptions,
 			connectMs: Math.min(resolvedOptions.connectMs, adaptiveCeilingMs),
+			firstProgressMs: Math.min(resolvedOptions.firstProgressMs, adaptiveCeilingMs),
 			activeIdleMs: Math.min(resolvedOptions.activeIdleMs, adaptiveCeilingMs),
 			quietIdleMs: Math.min(resolvedOptions.quietIdleMs, adaptiveCeilingMs),
 		},

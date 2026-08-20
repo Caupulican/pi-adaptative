@@ -7,6 +7,7 @@ describe("HTTP-bound stream-idle policy", () => {
 		const onStall = vi.fn();
 		const options: StreamIdleOptions = {
 			connectMs: 500_000,
+			firstProgressMs: 600_000,
 			activeIdleMs: 700_000,
 			quietIdleMs: 900_000,
 			onStall,
@@ -15,6 +16,7 @@ describe("HTTP-bound stream-idle policy", () => {
 		expect(constrainStreamIdleToHttpTimeout(options, 300_000)).toEqual({
 			options: {
 				connectMs: 270_000,
+				firstProgressMs: 270_000,
 				activeIdleMs: 270_000,
 				quietIdleMs: 270_000,
 				onStall,
@@ -26,6 +28,7 @@ describe("HTTP-bound stream-idle policy", () => {
 	it("preserves the stock 60-second margin at the default HTTP timeout", () => {
 		const options: StreamIdleOptions = {
 			connectMs: 120_000,
+			firstProgressMs: 120_000,
 			activeIdleMs: 180_000,
 			quietIdleMs: 600_000,
 		};
@@ -39,6 +42,7 @@ describe("HTTP-bound stream-idle policy", () => {
 	it("leaves watchdog bounds and adaptive expansion unconstrained when HTTP idle is disabled", () => {
 		const options: StreamIdleOptions = {
 			connectMs: 120_000,
+			firstProgressMs: 120_000,
 			activeIdleMs: 180_000,
 			quietIdleMs: 1_800_000,
 		};
@@ -49,6 +53,7 @@ describe("HTTP-bound stream-idle policy", () => {
 	it("restores defaults for unset bounds carried through a partial settings spread", () => {
 		const options = {
 			connectMs: undefined,
+			firstProgressMs: undefined,
 			activeIdleMs: undefined,
 			quietIdleMs: undefined,
 		} as unknown as StreamIdleOptions;
@@ -56,6 +61,7 @@ describe("HTTP-bound stream-idle policy", () => {
 		expect(constrainStreamIdleToHttpTimeout(options, 60_000)).toEqual({
 			options: {
 				connectMs: 54_000,
+				firstProgressMs: 54_000,
 				activeIdleMs: 54_000,
 				quietIdleMs: 54_000,
 			},

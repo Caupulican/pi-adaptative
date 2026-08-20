@@ -37,7 +37,12 @@ describe("stream-idle watchdog wiring", () => {
 		// Tight bounds so the wired watchdog fires within the test. The override is read
 		// per-request by the wiring's options resolver, so it may be set at any point
 		// before the request that should stall.
-		setStreamIdleOptionsForTests({ connectMs: 300, activeIdleMs: 300, quietIdleMs: 300 });
+		setStreamIdleOptionsForTests({
+			connectMs: 300,
+			firstProgressMs: 300,
+			activeIdleMs: 300,
+			quietIdleMs: 300,
+		});
 
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
@@ -58,7 +63,12 @@ describe("stream-idle watchdog wiring", () => {
 	}, 5000);
 
 	it("constrains the watchdog below a shorter nonzero HTTP idle timeout", async () => {
-		setStreamIdleOptionsForTests({ connectMs: 300, activeIdleMs: 300, quietIdleMs: 300 });
+		setStreamIdleOptionsForTests({
+			connectMs: 300,
+			firstProgressMs: 300,
+			activeIdleMs: 300,
+			quietIdleMs: 300,
+		});
 
 		const harness = await createHarness({
 			settings: {
@@ -73,7 +83,7 @@ describe("stream-idle watchdog wiring", () => {
 
 		const retries = harness.eventsOfType("auto_retry_start");
 		expect(retries).toHaveLength(1);
-		expect(retries[0].errorMessage).toContain("no events for 45ms (quiet phase)");
+		expect(retries[0].errorMessage).toContain("no events for 45ms (first-progress phase)");
 		expect(getAssistantTexts(harness)).toContain("recovered before HTTP timeout");
 	}, 5000);
 });

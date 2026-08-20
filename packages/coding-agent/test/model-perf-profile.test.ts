@@ -15,7 +15,12 @@ import {
 
 const MODEL = { api: "openai-completions", provider: "faux", id: "slow-local" } as Model<Api>;
 const CONTEXT = { messages: [{ role: "user", content: "hello" }] } as Context;
-const BASE_IDLE: StreamIdleOptions = { connectMs: 500, activeIdleMs: 500, quietIdleMs: 1_000 };
+const BASE_IDLE: StreamIdleOptions = {
+	connectMs: 500,
+	firstProgressMs: 500,
+	activeIdleMs: 500,
+	quietIdleMs: 1_000,
+};
 
 function assistantMessage(
 	inputTokens: number,
@@ -121,7 +126,7 @@ describe("model perf profile", () => {
 				localClass: true,
 				ceilingMs: 20_000,
 			}),
-		).toEqual({ quietIdleMs: 6_000, connectMs: 9_000 });
+		).toEqual({ firstProgressMs: 6_000, quietIdleMs: 6_000, connectMs: 9_000 });
 		expect(
 			resolveAdaptiveStreamIdleOptions({
 				base: BASE_IDLE,
@@ -129,7 +134,26 @@ describe("model perf profile", () => {
 				promptTokens: 2_000,
 				ceilingMs: 20_000,
 			}),
-		).toEqual({ quietIdleMs: 6_000 });
+		).toEqual({ firstProgressMs: 6_000, quietIdleMs: 6_000 });
+	});
+
+	it("expands first-progress time from measured prefill instead of a fixed remote cap", () => {
+		const base = { ...BASE_IDLE, firstProgressMs: 500 };
+		const profile = {
+			prefillTokensPerSecond: 1_000,
+			samples: 1,
+			updatedAt: "2026-08-20T00:00:00.000Z",
+		};
+
+		expect(resolveAdaptiveStreamIdleOptions({ base, promptTokens: 2_000 })).toEqual({});
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				base,
+				profile,
+				promptTokens: 2_000,
+				ceilingMs: 20_000,
+			}),
+		).toMatchObject({ firstProgressMs: 6_000 });
 	});
 
 	it("estimates the serialized context without materializing one accumulated prompt string", () => {
@@ -199,7 +223,7 @@ describe("model perf profile", () => {
 				localClass: true,
 				ceilingMs: 20_000,
 			}),
-		).toEqual({ quietIdleMs: 6_000, connectMs: 6_000 });
+		).toEqual({ firstProgressMs: 6_000, quietIdleMs: 6_000, connectMs: 6_000 });
 	});
 
 	it("profiles the full prompt footprint including cache reads and writes", async () => {

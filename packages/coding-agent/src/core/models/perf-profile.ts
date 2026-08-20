@@ -110,11 +110,17 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 	const localConnectDefaultMs = input.localClass
 		? Math.max(input.base.connectMs, input.base.quietIdleMs)
 		: input.base.connectMs;
+	const firstProgressCeilingMs = Math.max(
+		input.base.firstProgressMs,
+		input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
+	);
 	const quietCeilingMs = Math.max(input.base.quietIdleMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
 	const connectCeilingMs = Math.max(localConnectDefaultMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
 
 	const expectedPrefillMs = expectedPrefillFromProfile(profile, input.promptTokens);
 	if (expectedPrefillMs !== undefined) {
+		const firstProgressMs = adaptiveBound(input.base.firstProgressMs, firstProgressCeilingMs, expectedPrefillMs);
+		if (firstProgressMs > input.base.firstProgressMs) result.firstProgressMs = firstProgressMs;
 		const quietIdleMs = adaptiveBound(input.base.quietIdleMs, quietCeilingMs, expectedPrefillMs);
 		if (quietIdleMs > input.base.quietIdleMs) result.quietIdleMs = quietIdleMs;
 	}
