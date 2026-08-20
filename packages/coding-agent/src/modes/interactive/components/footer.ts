@@ -2,8 +2,11 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatFooterCostParts } from "../../../core/cost/cost-summary.ts";
+import { getFastModeStatus } from "../../../core/fast-mode.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { theme } from "../theme/theme.ts";
+
+const FAST_MODE_BADGE = "[fast]";
 
 /**
  * Sanitize text for display in a single-line status.
@@ -268,6 +271,8 @@ export class FooterComponent implements Component {
 
 		// Add model display name on the right side, plus thinking level if model supports it
 		const modelName = state.model?.name || state.model?.id || "no-model";
+		const fastModeEnabled = getFastModeStatus(this.session).enabled;
+		const modelDisplayName = fastModeEnabled ? `${modelName} ${FAST_MODE_BADGE}` : modelName;
 
 		let statsLeftWidth = visibleWidth(statsLeft);
 
@@ -281,11 +286,11 @@ export class FooterComponent implements Component {
 		const minPadding = 2;
 
 		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
+		let rightSideWithoutProvider = modelDisplayName;
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
 			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+				thinkingLevel === "off" ? `${modelDisplayName} • thinking off` : `${modelDisplayName} • ${thinkingLevel}`;
 		}
 
 		// Prepend the provider in parentheses if there are multiple providers and there's enough room
@@ -325,7 +330,13 @@ export class FooterComponent implements Component {
 		// before and after the colored section independently.
 		const dimStatsLeft = theme.fg("dim", statsLeft);
 		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const dimRemainder = theme.fg("dim", remainder);
+		const badgeIndex = fastModeEnabled ? remainder.indexOf(FAST_MODE_BADGE) : -1;
+		const dimRemainder =
+			badgeIndex === -1
+				? theme.fg("dim", remainder)
+				: theme.fg("dim", remainder.slice(0, badgeIndex)) +
+					theme.bg("selectedBg", theme.bold(theme.fg("accent", FAST_MODE_BADGE))) +
+					theme.fg("dim", remainder.slice(badgeIndex + FAST_MODE_BADGE.length));
 
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];

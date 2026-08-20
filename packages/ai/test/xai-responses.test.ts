@@ -158,13 +158,32 @@ describe("xAI Grok CLI subscription schema", () => {
 			baseUrl: "https://cli-chat-proxy.grok.com/v1",
 			headers: {
 				"X-XAI-Token-Auth": "xai-grok-cli",
-				"x-grok-client-version": "1.0.3",
+				"x-grok-client-version": "1.0.5",
 				"x-grok-client-identifier": "grok-shell",
 				"x-grok-client-mode": "headless",
 				"x-grok-model-override": "grok-4.6",
 			},
 			compat: { requestFormat: "xai-cli", supportsLongCacheRetention: false },
 		});
+	});
+
+	it("sends priority processing independently from reasoning effort", async () => {
+		const subscriptionModel = xaiOAuthProvider.modifyModels?.([getModel("xai", "grok-4.6")], {
+			access: "oauth-access",
+			refresh: "oauth-refresh",
+			expires: Date.now() + 60_000,
+		})?.[0] as Model<"openai-responses"> | undefined;
+		if (!subscriptionModel) throw new Error("xAI OAuth model was not projected");
+
+		const { body } = await captureResponsesRequest(
+			"grok-4.6",
+			{ apiKey: "oauth-access", reasoningEffort: "xhigh", serviceTier: "priority" },
+			context,
+			subscriptionModel,
+		);
+
+		expect(body.service_tier).toBe("priority");
+		expect(body.reasoning).toMatchObject({ effort: "xhigh" });
 	});
 
 	it("matches the installed Grok CLI request and replay schema", async () => {
@@ -239,8 +258,9 @@ describe("xAI Grok CLI subscription schema", () => {
 		);
 
 		expect(url).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+		expect(headers.get("authorization")).toBe("Bearer oauth-access");
 		expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
-		expect(headers.get("x-grok-client-version")).toBe("1.0.3");
+		expect(headers.get("x-grok-client-version")).toBe("1.0.5");
 		expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
 		expect(headers.get("x-grok-client-mode")).toBe("headless");
 		expect(headers.get("x-grok-model-override")).toBe("grok-4.6");
@@ -254,6 +274,7 @@ describe("xAI Grok CLI subscription schema", () => {
 		});
 		expect(body.instructions).toBeUndefined();
 		expect(body.prompt_cache_retention).toBeUndefined();
+		expect(body.service_tier).toBeUndefined();
 		expect(body.input).toEqual([
 			{ type: "message", role: "system", content: "Follow the system instructions." },
 			{ type: "message", role: "user", content: "Run it." },

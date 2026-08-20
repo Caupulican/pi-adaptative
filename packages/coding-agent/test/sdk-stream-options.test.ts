@@ -74,7 +74,11 @@ describe("createAgentSession stream options", () => {
 
 	async function captureStreamOptions(
 		api: Api,
-		settings: { httpIdleTimeoutMs?: number; websocketConnectTimeoutMs?: number },
+		settings: {
+			httpIdleTimeoutMs?: number;
+			websocketConnectTimeoutMs?: number;
+			fastMode?: Record<string, boolean>;
+		},
 		requestOptions: SimpleStreamOptions = {},
 		provider = "capture-provider",
 		isChildSession = false,
@@ -213,6 +217,77 @@ describe("createAgentSession stream options", () => {
 		);
 
 		expect(options?.serviceTier).toBeNull();
+	});
+
+	it("maps a saved Codex fast preference to priority processing", async () => {
+		const options = await captureStreamOptions(
+			"openai-codex-responses",
+			{ fastMode: { "openai-codex": true } },
+			{},
+			"openai-codex",
+		);
+
+		expect(options?.serviceTier).toBe("priority");
+	});
+
+	it("maps an explicit Codex fast-off preference to default even over a session tier", async () => {
+		const options = await captureStreamOptions(
+			"openai-codex-responses",
+			{ fastMode: { "openai-codex": false } },
+			{},
+			"openai-codex",
+			false,
+			{ serviceTier: "priority" },
+		);
+
+		expect(options?.serviceTier).toBe("default");
+	});
+
+	it("keeps a request-specific tier authoritative over Codex fast mode", async () => {
+		const options = await captureStreamOptions(
+			"openai-codex-responses",
+			{ fastMode: { "openai-codex": true } },
+			{ serviceTier: "flex" },
+			"openai-codex",
+		);
+
+		expect(options?.serviceTier).toBe("flex");
+	});
+
+	it("maps a saved Grok fast preference to priority processing", async () => {
+		const options = await captureStreamOptions("openai-responses", { fastMode: { xai: true } }, {}, "xai");
+
+		expect(options?.serviceTier).toBe("priority");
+	});
+
+	it("keeps Grok reasoning effort independent from a saved fast preference", async () => {
+		const model = createModel("openai-responses", "xai");
+		model.reasoning = true;
+		model.defaultThinkingLevel = "high";
+		const settingsManager = SettingsManager.inMemory({ fastMode: { xai: true } });
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		authStorage.setRuntimeApiKey(model.provider, "test-api-key");
+		const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+		modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			streamSimple: () => createDoneStream(model.api),
+		});
+
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model,
+			authStorage,
+			modelRegistry,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+		try {
+			expect(session.thinkingLevel).toBe("high");
+		} finally {
+			session.dispose();
+			modelRegistry.unregisterProvider(model.provider);
+		}
 	});
 
 	it("wires OAuth rejection recovery by the Codex provider id rather than its API id", async () => {

@@ -493,6 +493,8 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
+	/** Provider-scoped fast-mode preferences. Concrete providers own the meaning of enabled. */
+	fastMode?: Record<string, boolean>;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -2619,6 +2621,20 @@ export class SettingsManager {
 	setDefaultThinkingLevel(level: ThinkingLevel): void {
 		this.globalSettings.defaultThinkingLevel = level;
 		this.markModified("defaultThinkingLevel");
+		this.save();
+	}
+
+	getFastModeEnabled(provider: string): boolean | undefined {
+		const enabled = this.settings.fastMode?.[provider];
+		return typeof enabled === "boolean" ? enabled : undefined;
+	}
+
+	setFastModeEnabled(provider: string, enabled: boolean): void {
+		if (!provider || provider === "__proto__" || provider === "constructor" || provider === "prototype") {
+			throw new TypeError(`Invalid fast-mode provider '${provider}'.`);
+		}
+		this.globalSettings.fastMode = { ...(this.globalSettings.fastMode ?? {}), [provider]: enabled };
+		this.markModified("fastMode", provider);
 		this.save();
 	}
 

@@ -34,6 +34,13 @@ export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignat
 			provisional: true,
 		},
 	],
+	xai: [
+		{
+			reason: "overloaded",
+			pattern: /the model is currently at capacity due to high demand/i,
+			source: "corpus:xai/grok-4.6 openai-responses code:null capacity response",
+		},
+	],
 	"openai-codex": [
 		{
 			reason: "billing_or_quota",

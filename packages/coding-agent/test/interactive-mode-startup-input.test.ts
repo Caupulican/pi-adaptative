@@ -1,3 +1,5 @@
+import type { ThinkingLevel } from "@caupulican/pi-agent-core";
+import { type Api, getModel, type Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -19,8 +21,17 @@ type SubmitContext = {
 		isCompacting: boolean;
 		isStreaming: boolean;
 		isBashRunning: boolean;
+		model: Model<Api>;
+		readonly thinkingLevel: ThinkingLevel;
+		settingsManager: {
+			getFastModeEnabled(provider: string): boolean | undefined;
+			setFastModeEnabled(provider: string, enabled: boolean): void;
+		};
+		setThinkingLevel(level: ThinkingLevel, options?: { persistSettings?: boolean }): void;
 		prompt: (text: string, options?: unknown) => Promise<void>;
 	};
+	showStatus: (message: string) => void;
+	footer: { invalidate: () => void };
 	flushPendingBashComponents: () => void;
 	buildUserInputSubmission: (text: string) => UserInputSubmission;
 	takeClipboardImagesForText: (text: string) => unknown[] | undefined;
@@ -56,6 +67,8 @@ type InteractiveModePrivate = {
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrivate;
 
 function createSubmitContext(): SubmitContext {
+	let thinkingLevel: ThinkingLevel = "high";
+	const fastMode = new Map<string, boolean>();
 	return {
 		defaultEditor: {},
 		editor: {
@@ -68,8 +81,21 @@ function createSubmitContext(): SubmitContext {
 			isCompacting: false,
 			isStreaming: false,
 			isBashRunning: false,
+			model: getModel("xai", "grok-4.6"),
+			get thinkingLevel() {
+				return thinkingLevel;
+			},
+			settingsManager: {
+				getFastModeEnabled: (provider) => fastMode.get(provider),
+				setFastModeEnabled: (provider, enabled) => fastMode.set(provider, enabled),
+			},
+			setThinkingLevel: (level) => {
+				thinkingLevel = level;
+			},
 			prompt: vi.fn(async () => {}),
 		},
+		showStatus: vi.fn(),
+		footer: { invalidate: vi.fn() },
 		flushPendingBashComponents: vi.fn(),
 		buildUserInputSubmission: (text: string) => ({ text }),
 		takeClipboardImagesForText: vi.fn(() => undefined),
@@ -145,6 +171,19 @@ describe("InteractiveMode startup input", () => {
 		expect(context.session.prompt).not.toHaveBeenCalled();
 		expect(context.editor.setText).toHaveBeenCalledWith("");
 		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "secrets")).toBe(true);
+	});
+
+	it("handles /fast locally without sending it to the model", async () => {
+		const context = createSubmitContext();
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+		await context.defaultEditor.onSubmit?.("/fast on");
+
+		expect(context.session.thinkingLevel).toBe("high");
+		expect(context.showStatus).toHaveBeenCalledWith("Fast mode on: Grok requests priority processing.");
+		expect(context.session.prompt).not.toHaveBeenCalled();
+		expect(context.editor.setText).toHaveBeenCalledWith("");
+		expect(context.footer.invalidate).toHaveBeenCalledTimes(1);
 	});
 
 	it("lets /quit and /exit bypass steering and compaction queues", async () => {

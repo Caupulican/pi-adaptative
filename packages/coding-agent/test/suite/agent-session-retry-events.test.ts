@@ -21,6 +21,9 @@ function normalizeEventOrder(events: Harness["events"]): string[] {
 	return normalized;
 }
 
+const XAI_CAPACITY_ERROR =
+	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
+
 describe("AgentSession retry and event characterization", () => {
 	const harnesses: Harness[] = [];
 
@@ -50,6 +53,27 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.eventsOfType("agent_end").map((event) => event.willRetry)).toEqual([true, false]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.isRetrying).toBe(false);
+	});
+
+	it("retries the production xAI code-null capacity response without owner intervention", async () => {
+		const harness = await createHarness({
+			fauxProvider: { api: "openai-responses", provider: "xai" },
+			models: [{ id: "grok-4.6" }],
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: XAI_CAPACITY_ERROR }),
+			fauxAssistantMessage("recovered"),
+		]);
+
+		await harness.session.prompt("test");
+
+		expect(harness.eventsOfType("auto_retry_start")).toEqual([
+			expect.objectContaining({ attempt: 1, errorMessage: XAI_CAPACITY_ERROR }),
+		]);
+		expect(harness.eventsOfType("auto_retry_end")).toEqual([expect.objectContaining({ success: true })]);
+		expect(harness.faux.state.callCount).toBe(2);
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {

@@ -6,7 +6,7 @@ import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
 import type { CostGuardDecision } from "../src/core/cost-guard.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 
 type FooterUsageSnapshotForTest = {
 	totalInput: number;
@@ -23,6 +23,8 @@ type AssistantUsage = {
 
 function createSession(options: {
 	sessionName: string;
+	api?: "anthropic-messages" | "openai-codex-responses" | "openai-responses";
+	fastMode?: boolean;
 	modelId?: string;
 	provider?: string;
 	reasoning?: boolean;
@@ -62,17 +64,20 @@ function createSession(options: {
 		todayWindow: { startMs: 0, endMs: 86_400_000 },
 		todayRollover: "local-midnight",
 	};
+	const model = {
+		api: options.api ?? "openai-responses",
+		id: options.modelId ?? "test-model",
+		provider: options.provider ?? "test",
+		contextWindow: 200_000,
+		reasoning: options.reasoning ?? false,
+	};
 
 	const session = {
 		state: {
-			model: {
-				id: options.modelId ?? "test-model",
-				provider: options.provider ?? "test",
-				contextWindow: 200_000,
-				reasoning: options.reasoning ?? false,
-			},
+			model,
 			thinkingLevel: options.thinkingLevel ?? "off",
 		},
+		model,
 		sessionManager: {
 			getEntries: () => entries,
 			getSessionName: () => options.sessionName,
@@ -85,6 +90,9 @@ function createSession(options: {
 		getLastCostGuardDecision: () => options.costGuardDecision,
 		modelRegistry: {
 			isUsingSubscription: () => options.subscription ?? false,
+		},
+		settingsManager: {
+			getFastModeEnabled: () => options.fastMode,
 		},
 	};
 
@@ -206,6 +214,39 @@ describe("FooterComponent width handling", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+
+	it("shows a highlighted fast badge beside supported models only while enabled", () => {
+		const enabled = createSession({
+			sessionName: "",
+			api: "openai-responses",
+			fastMode: true,
+			modelId: "grok-4.6",
+			provider: "xai",
+		});
+		const disabled = createSession({
+			sessionName: "",
+			api: "openai-responses",
+			fastMode: false,
+			modelId: "grok-4.6",
+			provider: "xai",
+		});
+		const unsupported = createSession({
+			sessionName: "",
+			api: "anthropic-messages",
+			fastMode: true,
+			modelId: "claude-sonnet",
+			provider: "anthropic",
+		});
+
+		const enabledLine = new FooterComponent(enabled, createFooterData(1)).render(120)[1] ?? "";
+		const disabledLine = stripAnsi(new FooterComponent(disabled, createFooterData(1)).render(120)[1] ?? "");
+		const unsupportedLine = stripAnsi(new FooterComponent(unsupported, createFooterData(1)).render(120)[1] ?? "");
+
+		expect(stripAnsi(enabledLine)).toContain("grok-4.6 [fast]");
+		expect(enabledLine).toContain(theme.bg("selectedBg", theme.bold(theme.fg("accent", "[fast]"))));
+		expect(disabledLine).not.toContain("[fast]");
+		expect(unsupportedLine).not.toContain("[fast]");
 	});
 
 	it("folds duplicate learning footer statuses into one phase chip", () => {

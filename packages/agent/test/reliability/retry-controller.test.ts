@@ -7,6 +7,9 @@ import type { AgentMessage } from "../../src/types.ts";
 const errorMessage = (text: string): AssistantMessage =>
 	fauxAssistantMessage("", { stopReason: "error", errorMessage: text });
 
+const XAI_CAPACITY_ERROR =
+	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
+
 function setup(opts?: {
 	messages?: AgentMessage[];
 	policy?: Partial<RetryPolicy & { enabled: boolean }>;
@@ -48,6 +51,15 @@ describe("RetryController", () => {
 		expect(agent.state.messages).toEqual([prior]);
 		// The retry window is closed again once the backoff resolves.
 		expect(controller.isRetrying).toBe(false);
+	});
+
+	it("retries an xAI subscription capacity response", async () => {
+		const failure = { ...errorMessage(XAI_CAPACITY_ERROR), provider: "xai", model: "grok-4.6" };
+		const { agent, controller, startInfos } = setup({ messages: [failure], policy: { baseDelayMs: 1 } });
+
+		expect(await controller.prepareRetry(failure)).toBe(true);
+		expect(startInfos).toEqual([expect.objectContaining({ attempt: 1, errorMessage: XAI_CAPACITY_ERROR })]);
+		expect(agent.state.messages).toEqual([]);
 	});
 
 	it("marks isRetrying true from inside onRetryStart until the backoff resolves", async () => {

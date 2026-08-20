@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { classifyFailure } from "../../src/reliability/classifier.ts";
 import { PROVIDER_FAILURE_SIGNATURES } from "../../src/reliability/provider-signatures.ts";
 
+const XAI_CAPACITY_ERROR =
+	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
+
 describe("classifyFailure", () => {
 	it("classifies rate limits as retryable + rotate + fallback", () => {
 		for (const msg of ["429 Too Many Requests", "rate_limit_error: slow down", "overloaded_error"]) {
@@ -37,6 +40,25 @@ describe("classifyFailure", () => {
 			expect(c.shouldRotateCredential, msg).toBe(false);
 		}
 		expect(classifyFailure({ message: "stream stalled: no events for 30000ms" }).reason).toBe("stream_stall");
+	});
+
+	it("classifies the xAI code-null capacity response as retryable subscription overload", () => {
+		expect(classifyFailure({ provider: "xai", message: XAI_CAPACITY_ERROR })).toMatchObject({
+			reason: "overloaded",
+			retryable: true,
+			shouldCompact: false,
+			shouldRotateCredential: false,
+			shouldFallback: false,
+		});
+	});
+
+	it("does not infer provider overload from unrelated capacity wording", () => {
+		expect(
+			classifyFailure({ provider: "xai", message: "The model context capacity is 131072 tokens." }),
+		).toMatchObject({
+			reason: "unknown",
+			retryable: false,
+		});
 	});
 
 	it("classifies gRPC resource exhaustion as a transient server error", () => {

@@ -85,6 +85,7 @@ import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
+import { handleFastModeCommand } from "./fast-mode-command.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
 import { handleInteractiveEvent, type InteractiveEventHost } from "./interactive-event-controller.ts";
 import * as keyHandlers from "./key-handlers.ts";
@@ -1523,6 +1524,12 @@ export class InteractiveMode {
 			if (text === "/scoped-models") {
 				this.editor.setText("");
 				await this.showModelsSelector();
+				return;
+			}
+			if (text === "/fast" || text.startsWith("/fast ")) {
+				handleFastModeCommand({ session: this.session, showStatus: (message) => this.showStatus(message) }, text);
+				this.editor.setText("");
+				this.footer.invalidate();
 				return;
 			}
 			if (text === "/model" || text.startsWith("/model ")) {

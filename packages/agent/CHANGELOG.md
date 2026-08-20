@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Classified xAI Grok subscription capacity responses as transient overloads so zero-token failures retry on the same subscription route instead of requiring another user turn.
+
 ## [0.93.10] - 2026-08-19
 
 ## [0.93.9] - 2026-08-19

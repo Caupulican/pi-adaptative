@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added bounded model-blind credential discovery for the current working tree and process environment, so agents can locate and organize supported local secrets without asking owners for source paths or variable names.
+- Added provider-native `/fast` controls with an enabled-state footer badge: OpenAI Codex and Grok use priority/default processing independently from reasoning effort.
+
+### Changed
+
+- Durable goal creation is now available at agent discretion during ordinary owner turns while exact token budgets remain owner-controlled; explicit chat goal phrasing still starts goals directly.
+
 ## [0.93.10] - 2026-08-19
 
 ### Fixed

@@ -25,6 +25,7 @@ import {
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import { isInstallTelemetryEnabled } from "./install-telemetry.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
@@ -494,9 +495,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const attributionHeaders = getAttributionHeaders(model, settingsManager, options?.sessionId);
+			const fastModeServiceTier = resolveFastModeServiceTier(
+				model,
+				settingsManager.getFastModeEnabled(model.provider),
+			);
 			const providerOptions = {
 				...options,
-				serviceTier: options?.serviceTier === undefined ? defaultServiceTier : options.serviceTier,
+				serviceTier:
+					options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier,
 				...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
 				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
 				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
