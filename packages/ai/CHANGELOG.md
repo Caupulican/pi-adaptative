@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated Grok CLI OAuth requests to match the installed v1.0.5 subscription client identity.
+
 ## [0.93.10] - 2026-08-19
 
 ## [0.93.9] - 2026-08-19
