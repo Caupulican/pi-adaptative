@@ -28,7 +28,7 @@ describe("release workflow quality gate", () => {
 		expect(release).toContain("--warm-iterations 10");
 	});
 
-	it("gates GitHub and npm publishing on native Windows correctness and absolute performance", () => {
+	it("gates GitHub and npm publishing on package conversations plus native Windows correctness and performance", () => {
 		const ci = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
 		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
 
@@ -48,6 +48,9 @@ describe("release workflow quality gate", () => {
 		);
 		expect(performanceGate).not.toContain(`ref: \${{ env.RELEASE_TAG }}`);
 		expect(release).toContain("release-binary-performance-gate.mjs");
-		expect(release).toContain("needs: [quality-gate, build, verify-release-binary-performance]");
+		expect(release).toContain("verify-node-bun-release:");
+		expect(release).toContain(
+			"needs: [quality-gate, build, verify-node-bun-release, verify-release-binary-performance]",
+		);
 	});
 });
