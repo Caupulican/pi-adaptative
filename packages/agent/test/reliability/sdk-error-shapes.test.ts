@@ -21,6 +21,7 @@ const OPENAI_RATE_LIMIT_MESSAGE = "429 Rate limit reached for gpt";
 const OPENROUTER_CREDITS_MESSAGE = "402 Insufficient credits. Add more credits to continue.";
 const XAI_CAPACITY_MESSAGE =
 	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
+const XAI_INTERNAL_GENERATION_MESSAGE = "Error Code null: Internal error during token generation";
 
 function mistralSdkError(status: number, body: object): string {
 	return new SDKError("Mistral API error", {
@@ -107,6 +108,12 @@ function fixtureExpectations(): FixtureExpectation[] {
 			genericReason: "unknown",
 		},
 		{
+			provider: "xai",
+			message: XAI_INTERNAL_GENERATION_MESSAGE,
+			reason: "server_error",
+			genericReason: "server_error",
+		},
+		{
 			provider: "google",
 			message: new ApiError({
 				status: 429,
@@ -131,7 +138,7 @@ const providerRowFixtureCoverage: Record<string, readonly string[]> = {
 	anthropic: ["Your credit balance is too low"],
 	mistral: ["Insufficient credits"],
 	openrouter: ["Insufficient credits"],
-	xai: [XAI_CAPACITY_MESSAGE],
+	xai: [XAI_CAPACITY_MESSAGE, XAI_INTERNAL_GENERATION_MESSAGE],
 	"openai-codex": ["You have hit your ChatGPT usage limit"],
 };
 
