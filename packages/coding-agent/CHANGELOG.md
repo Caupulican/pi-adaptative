@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- GitHub release publication now requires isolated npm/Node and Bun binary smoke tests covering model discovery, streamed prompts, and interactive TTY conversations.
+
 ## [0.93.11] - 2026-08-20
 
 ### Added

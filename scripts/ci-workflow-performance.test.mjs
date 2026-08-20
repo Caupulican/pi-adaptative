@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const releaseWorkflow = readFileSync(new URL("../.github/workflows/build-binaries.yml", import.meta.url), "utf8");
 const installScript = readFileSync(new URL("../scripts/install-linux-ci-deps.sh", import.meta.url), "utf8");
 const installScriptPath = fileURLToPath(new URL("../scripts/install-linux-ci-deps.sh", import.meta.url));
 
@@ -122,6 +123,32 @@ test("release fast paths skip every coding-agent shard after the exact suite alr
 	const shardJob = workflow.slice(shardJobStart);
 	assert.match(shardJob, /inputs\.skip_tests != true/u);
 	assert.match(shardJob, /!startsWith\(github\.event\.head_commit\.message, 'Release v'\)/u);
+});
+
+test("release publication is gated on deterministic Node-package and Bun-binary conversation smoke", () => {
+	const smokeJobStart = releaseWorkflow.indexOf("  verify-node-bun-release:");
+	assert.notEqual(smokeJobStart, -1, "release workflow must define the Node/Bun smoke job");
+	const nextJobMatch = releaseWorkflow.slice(smokeJobStart + 2).match(/^  [a-z0-9-]+:\n/mu);
+	assert.ok(nextJobMatch?.index !== undefined, "release smoke job must be followed by another job");
+	const smokeJobEnd = smokeJobStart + 2 + nextJobMatch.index;
+	const smokeJob = releaseWorkflow.slice(smokeJobStart, smokeJobEnd);
+
+	assert.match(smokeJob, /^    needs: build$/mu);
+	assert.match(smokeJob, /name: release-binaries/u);
+	assert.match(smokeJob, /npm ci --ignore-scripts/u);
+	assert.match(smokeJob, /npm run release:local -- --out .* --force --skip-check --skip-bun-install --skip-binary-build/u);
+	assert.match(smokeJob, /node scripts\/release-artifact-smoke\.mjs/u);
+	assert.match(smokeJob, /--node /u);
+	assert.match(smokeJob, /--bun /u);
+	assert.doesNotMatch(smokeJob, /secrets\./u, "deterministic smoke must not require provider credentials");
+	assert.doesNotMatch(smokeJob, /build-binaries\.sh/u, "smoke must reuse the already-built Bun artifact");
+
+	const releaseJobStart = releaseWorkflow.indexOf("  release:");
+	const publishJobStart = releaseWorkflow.indexOf("  publish-npm:");
+	assert.notEqual(releaseJobStart, -1);
+	assert.notEqual(publishJobStart, -1);
+	const releaseJob = releaseWorkflow.slice(releaseJobStart, publishJobStart);
+	assert.match(releaseJob, /needs: \[[^\]]*verify-node-bun-release[^\]]*\]/u);
 });
 
 test("CI jobs share the bounded Linux dependency installation script without duplicate YAML commands", () => {

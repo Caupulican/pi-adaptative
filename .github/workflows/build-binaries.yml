@@ -68,6 +68,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  verify-node-bun-release:
+    name: Smoke Node package and Bun binary releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      LOCAL_RELEASE_DIR: ${{ runner.temp }}/pi-adaptative/local-release
+    steps:
+      - name: Checkout release-smoke harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+
+      - name: Download release binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-binaries
+          path: artifacts
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build isolated Node package release
+        run: npm run release:local -- --out "${LOCAL_RELEASE_DIR}" --force --skip-check --skip-bun-install --skip-binary-build
+
+      - name: Smoke Node package and Bun binary conversations
+        run: |
+          bun_dir="${LOCAL_RELEASE_DIR}/bun"
+          mkdir -p "${bun_dir}"
+          tar -xzf artifacts/pi-linux-x64.tar.gz -C "${bun_dir}" --strip-components=1
+          node scripts/release-artifact-smoke.mjs \
+            --node "${LOCAL_RELEASE_DIR}/node/pi" \
+            --bun "${bun_dir}/pi" \
+            --expected-version "${RELEASE_TAG#v}"
+
   verify-windows-binary:
     name: Verify Windows binary (${{ matrix.arch }})
     if: github.event_name == 'push' || inputs.verify_only == true || inputs.skip_windows_verify != true
@@ -307,7 +352,7 @@ jobs:
     # GitHub and npm publishing stay blocked until both native Windows binaries pass
     # functional RPC smoke and absolute startup/warm-path budgets. Linux-relative
     # ratios remain in the report as cross-runner performance telemetry.
-    needs: [quality-gate, build, verify-release-binary-performance]
+    needs: [quality-gate, build, verify-node-bun-release, verify-release-binary-performance]
     permissions:
       contents: write
     env:
