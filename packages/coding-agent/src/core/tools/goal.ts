@@ -626,7 +626,7 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		description:
 			"Create a durable goal when persistent autonomous continuation materially benefits the current work, or when the user/system explicitly requests one. Use agent discretion; skip routine short tasks. Set token_budget only when explicitly requested. Fails if an unfinished goal exists.",
-		promptSnippet: "Create a durable goal when persistent continuation is useful.",
+		promptSnippet: "Start durable goal.",
 		parameters: createGoalSchema,
 		execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
 			return goalTool.execute(
@@ -649,7 +649,7 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		label: GOAL_LIFECYCLE_TOOL_NAMES[1],
 		description:
 			"Get the current goal for this session, including status, budget, token and elapsed-time usage, requirements, evidence, and progress.",
-		promptSnippet: "Inspect the current durable goal.",
+		promptSnippet: "Inspect durable goal.",
 		parameters: getGoalSchema,
 		execute(toolCallId, _input, signal, onUpdate, context) {
 			return goalTool.execute(toolCallId, { action: "get" }, signal, onUpdate, context);
@@ -661,7 +661,7 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
 			"Update the existing goal. Set active only after concrete, verifiable progress in the current turn. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only after the same blocking condition has recurred for at least three consecutive goal turns and no meaningful progress is possible without user input or external change; include that condition in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
-		promptSnippet: "Report concrete progress or mark the durable goal complete or genuinely blocked.",
+		promptSnippet: "Update goal; complete/block only with evidence.",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
 			const requestedGoalStatus: GoalStatus = input.status === "complete" ? "completed" : input.status;

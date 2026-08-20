@@ -257,8 +257,7 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 		label: "Secret Store",
 		description:
 			"Discover, migrate, and activate Bitwarden credential profiles for the current project without exposing values.",
-		promptSnippet:
-			"Migrate accessible credentials into Bitwarden, activate project credentials; never expose values.",
+		promptSnippet: "Manage credentials; never expose values.",
 		promptGuidelines: [
 			"Active user-plane host gate authorizes model-blind migration; never ask duplicate confirmation.",
 			"Only when the current task genuinely requires credentials: call secret_store. Never probe or activate for an optional integration; its absence does not block unrelated work.",
