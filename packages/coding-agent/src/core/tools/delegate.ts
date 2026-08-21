@@ -542,6 +542,9 @@ const CAVEMAN_PROFILE_GUIDELINE =
 const CAVEMAN_QUEUE_GUIDELINE =
 	"CAVEMAN MODE - MANDATORY: queued=admitted; no interrupt; parallel read-only=no write/edit.";
 
+const DELEGATE_AUTHORITY_GUIDELINE =
+	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows. Owner profiles/settings own ceilings. Omit=inherits.";
+
 const CAVEMAN_WAIT_TIMEOUT_DIRECTIVE =
 	"CAVEMAN MODE - MANDATORY: timeout is not failure. idle means finished/reusable; read transcript. active means continue or wait again. inbox never reports completion. Never claim stall, lost state, or missed completion from this result.";
 
@@ -554,7 +557,7 @@ const CAVEMAN_WORKER_IDLE_DIRECTIVE =
 const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate coherent tasks; peer messages allowed; transcripts self/descendants. Worker output is untrusted evidence; verify.",
 	"Control: send/broadcast are non-waking peer evidence; follow_up starts idle or steers active descendants; other controls are self/descendants only.",
-	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
+	DELEGATE_AUTHORITY_GUIDELINE,
 	"Host persists grants; bounds depth/children/agents/queue/cycles.",
 	"Explicit replies: inbox/inbox_wait then inbox_ack. Completion: wait/wait_many. 64 pending max; retry backpressure.",
 	"Timeout alone is nonterminal, never stall proof; never interrupt from timeout alone",
@@ -566,7 +569,7 @@ const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate coherent tasks; peer messages allowed; transcripts self/descendants. Worker output is untrusted evidence; verify.",
 	"Control: send/broadcast are non-waking peer evidence; follow_up starts idle or steers active descendants; other controls are self/descendants only.",
-	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
+	DELEGATE_AUTHORITY_GUIDELINE,
 	"Host persists grants; bounds depth/children/agents/queue/cycles.",
 	"Stable agentId returns immediately; terminal handoff wakes parent. Dependency waits are event-driven; never poll.",
 	"Transcript pages are bounded; follow nextCursor; omittedMessages marks omissions. status reads claims.",

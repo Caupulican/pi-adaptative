@@ -13,6 +13,9 @@ import {
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition, DELEGATE_ACTIONS } from "../src/core/tools/delegate.ts";
 
+const EXPECTED_AUTHORITY_GUIDELINE =
+	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows. Owner profiles/settings own ceilings. Omit=inherits.";
+
 describe("delegate tool capability description", () => {
 	it("derives the tool action schema from the canonical action registry", () => {
 		const definition = createDelegateToolDefinition({
@@ -109,9 +112,7 @@ describe("delegate tool capability description", () => {
 			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
 		});
-		expect(definition.promptGuidelines).toContain(
-			"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
-		);
+		expect(definition.promptGuidelines).toContain(EXPECTED_AUTHORITY_GUIDELINE);
 
 		expect(
 			Value.Check(definition.parameters, {
@@ -150,9 +151,7 @@ describe("delegate tool capability description", () => {
 			readPaths: [".", "src"],
 			writePaths: ["src"],
 		};
-		expect(definition.promptGuidelines).toContain(
-			"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
-		);
+		expect(definition.promptGuidelines).toContain(EXPECTED_AUTHORITY_GUIDELINE);
 
 		expect(
 			Value.Check(definition.parameters, {
@@ -275,7 +274,7 @@ describe("delegate tool capability description", () => {
 		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: fresh=no agentId");
 		expect(promptGuidelines).toContain("reuse=returned agentId");
 		expect(promptGuidelines).toContain("task=instructions");
-		expect(promptGuidelines).toContain("owner profiles/settings cap");
+		expect(promptGuidelines).toContain("Owner profiles/settings own ceilings");
 		expect(promptGuidelines).toContain("queued=admitted");
 		expect(promptGuidelines).toContain("parallel read-only=no write/edit");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
