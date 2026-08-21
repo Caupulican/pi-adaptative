@@ -86,7 +86,10 @@ export class ProviderRequestRuntimeController {
 
 		const envelopeDelta = nonCompactableTokens - this.usageEnvelopeAnchor.tokens;
 		const measuredTokens = this.deps.compaction.measureLiveContextTokens() + envelopeDelta;
-		return Math.max(nonCompactableTokens, measuredTokens);
+		// The materialized plan is authoritative when replay-safe transforms such as context GC
+		// shrink history for this exact request. Provider usage corrects an inflated character
+		// estimate, but must not reintroduce bytes the accepted plan has already projected away.
+		return Math.max(nonCompactableTokens, Math.min(fallbackTokens, measuredTokens));
 	}
 
 	private recordSentEnvelope(model: Model<Api>, tokens: number): void {

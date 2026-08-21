@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed auto-compaction preflight to anchor ongoing same-model sessions to provider-reported usage and account only request-envelope changes, preventing fixed character heuristics from compacting code/tool-heavy histories prematurely.
+- Fixed provider-usage admission reintroducing context-GC-removed history, and made post-compaction usage staleness follow durable branch order instead of message timestamps.
 - Fixed memory-provider lifecycle hooks so hung providers time out, are abandoned across reload generations until their late operation settles, and emit bounded source-labelled diagnostics.
 - Fixed budget-limited goals remaining projected as active, malformed requirement dependencies crossing storage boundaries, worker model pins being hidden from persistent-agent listings, and public subscriber failures escaping the session event boundary.
 

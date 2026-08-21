@@ -610,8 +610,7 @@ export class CompactionController {
 		const contextWindow = model?.contextWindow ?? 0;
 		const sameModel = model && assistantMessage.provider === model.provider && assistantMessage.model === model.id;
 		const compactionEntry = getLatestCompactionEntry(this.deps.sessionManager.getBranch());
-		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
+		const assistantIsFromBeforeCompaction = this.isAssistantFromBeforeCompaction(assistantMessage, compactionEntry);
 		if (assistantIsFromBeforeCompaction) return false;
 
 		if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
@@ -648,11 +647,7 @@ export class CompactionController {
 			const estimate = estimateContextTokens(messages);
 			if (estimate.lastUsageIndex === null) return false;
 			const usageMessage = messages[estimate.lastUsageIndex];
-			if (
-				compactionEntry &&
-				usageMessage.role === "assistant" &&
-				usageMessage.timestamp <= new Date(compactionEntry.timestamp).getTime()
-			) {
+			if (usageMessage.role === "assistant" && this.isAssistantFromBeforeCompaction(usageMessage, compactionEntry)) {
 				return false;
 			}
 			contextTokens = estimate.tokens;
@@ -662,9 +657,7 @@ export class CompactionController {
 			if (estimate.lastUsageIndex !== null) {
 				const usageMessage = this.deps.agent.state.messages[estimate.lastUsageIndex];
 				const usageIsPostCompaction = !(
-					compactionEntry &&
-					usageMessage.role === "assistant" &&
-					usageMessage.timestamp <= new Date(compactionEntry.timestamp).getTime()
+					usageMessage.role === "assistant" && this.isAssistantFromBeforeCompaction(usageMessage, compactionEntry)
 				);
 				if (usageIsPostCompaction) contextTokens = Math.max(contextTokens, estimate.tokens);
 			}
@@ -686,10 +679,29 @@ export class CompactionController {
 			return estimatedTokens;
 		}
 		const compactionEntry = getLatestCompactionEntry(this.deps.sessionManager.getBranch());
-		if (compactionEntry && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime()) {
+		if (this.isAssistantFromBeforeCompaction(assistantMessage, compactionEntry)) {
 			return estimatedTokens;
 		}
 		return Math.max(calculateContextTokens(assistantMessage.usage), estimatedTokens);
+	}
+
+	/** Prefer authoritative branch order; timestamps are only a fallback for reconstructed messages. */
+	private isAssistantFromBeforeCompaction(
+		assistantMessage: AssistantMessage,
+		compactionEntry: CompactionEntry | null,
+	): boolean {
+		if (!compactionEntry) return false;
+		const branch = this.deps.sessionManager.getBranch();
+		const compactionPosition = branch.findIndex((entry) => entry.id === compactionEntry.id);
+		if (compactionPosition >= 0) {
+			for (let position = branch.length - 1; position >= 0; position--) {
+				const entry = branch[position];
+				if (entry?.type === "message" && entry.message === assistantMessage) {
+					return position < compactionPosition;
+				}
+			}
+		}
+		return assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
 	}
 
 	get isCompacting(): boolean {

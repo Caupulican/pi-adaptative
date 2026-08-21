@@ -12,53 +12,56 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-vi.mock("@caupulican/pi-agent-core/compaction/compaction", async (importOriginal) => ({
-	...(await importOriginal<typeof import("@caupulican/pi-agent-core/compaction/compaction")>()),
-	calculateContextTokens: (usage: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		totalTokens?: number;
-	}) => usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
-	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
-	compact: async () => ({
-		summary: "compacted",
-		firstKeptEntryId: "entry-1",
-		tokensBefore: 100,
-		details: {},
-	}),
-	estimateContextTokens: (
-		messages: Array<{
-			role: string;
-			content?: Array<{ type: string; text?: string }>;
-			usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
-			stopReason?: string;
-		}>,
-	) => {
-		const estimate = (message: { content?: Array<{ type: string; text?: string }> }) =>
-			(message.content || []).reduce((sum, part) => sum + Math.ceil((part.text || "").length / 4), 0);
-		// Walk backwards to find last non-error, non-aborted assistant with usage
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role === "assistant" && msg.stopReason !== "error" && msg.stopReason !== "aborted" && msg.usage) {
-				const usageTokens =
-					msg.usage.totalTokens ?? msg.usage.input + msg.usage.output + msg.usage.cacheRead + msg.usage.cacheWrite;
-				const trailingTokens = messages.slice(i + 1).reduce((sum, message) => sum + estimate(message), 0);
-				return { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: i };
+vi.mock("@caupulican/pi-agent-core/compaction/compaction", async (importOriginal) => {
+	const original = await importOriginal<typeof import("@caupulican/pi-agent-core/compaction/compaction")>();
+	return {
+		...original,
+		calculateContextTokens: (usage: {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			totalTokens?: number;
+		}) => usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+		collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
+		compact: async (preparation: Parameters<typeof original.compact>[0]) => ({
+			summary: "compacted",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}),
+		estimateContextTokens: (
+			messages: Array<{
+				role: string;
+				content?: Array<{ type: string; text?: string }>;
+				usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
+				stopReason?: string;
+			}>,
+		) => {
+			const estimate = (message: { content?: Array<{ type: string; text?: string }> }) =>
+				(message.content || []).reduce((sum, part) => sum + Math.ceil((part.text || "").length / 4), 0);
+			// Walk backwards to find last non-error, non-aborted assistant with usage
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const msg = messages[i];
+				if (msg.role === "assistant" && msg.stopReason !== "error" && msg.stopReason !== "aborted" && msg.usage) {
+					const usageTokens =
+						msg.usage.totalTokens ??
+						msg.usage.input + msg.usage.output + msg.usage.cacheRead + msg.usage.cacheWrite;
+					const trailingTokens = messages.slice(i + 1).reduce((sum, message) => sum + estimate(message), 0);
+					return { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: i };
+				}
 			}
-		}
-		const tokens = messages.reduce((sum, message) => sum + estimate(message), 0);
-		return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
-	},
-	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
-	prepareCompaction: () => ({ dummy: true }),
-	shouldCompact: (
-		contextTokens: number,
-		contextWindow: number,
-		settings: { enabled: boolean; reserveTokens: number },
-	) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
-}));
+			const tokens = messages.reduce((sum, message) => sum + estimate(message), 0);
+			return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
+		},
+		generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
+		shouldCompact: (
+			contextTokens: number,
+			contextWindow: number,
+			settings: { enabled: boolean; reserveTokens: number },
+		) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
+	};
+});
 
 async function admitProviderPlan(
 	session: AgentSession,
