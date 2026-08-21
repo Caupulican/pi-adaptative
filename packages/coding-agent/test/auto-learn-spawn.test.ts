@@ -319,6 +319,22 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		expect(readFileSync(promptPath!, "utf-8")).toContain("before-null\0after-null");
 	});
 
+	it("marks a background learner as a worker session", async () => {
+		const dataDir = createTempDir();
+		const fakeCliPath = writeFakeCli(
+			dataDir,
+			`console.log("session-role=" + process.env.PI_SESSION_ROLE); setTimeout(() => undefined, 1000);\n`,
+		);
+		const mode = createAutoLearnHarness(dataDir, { command: process.execPath, argsPrefix: [fakeCliPath] });
+
+		const result = mode.launchAutoLearn("worker privilege regression", true);
+
+		expect(result).toContain("Auto Learn started");
+		const logPath = result.match(/Log: (.*)$/)?.[1];
+		expect(logPath).toBeDefined();
+		await waitForFileToContain(logPath!, "session-role=worker");
+	});
+
 	it("refuses null bytes in spawn command before child_process.spawn", () => {
 		const dataDir = createTempDir();
 		const mode = createAutoLearnHarness(dataDir, { command: `${process.execPath}\0`, argsPrefix: [] });

@@ -29,6 +29,47 @@ describe("session-owned memory lifecycle", () => {
 
 	afterEach(async () => {
 		while (harnesses.length > 0) await harnesses.pop()?.session.disposeAndWait();
+		vi.unstubAllEnvs();
+	});
+
+	it("keeps managed workers read-only across memory lifecycle hooks", async () => {
+		vi.stubEnv("PI_SESSION_ROLE", "worker");
+		const calls: string[] = [];
+		const provider: MemoryProvider = {
+			name: "worker-lifecycle-probe",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {
+				calls.push("initialize");
+			},
+			syncTurn: async () => {
+				calls.push("sync");
+			},
+			onSessionEnd: async () => {
+				calls.push("session-end");
+			},
+			shutdown: async () => {
+				calls.push("shutdown");
+			},
+		};
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", () => pi.registerMemoryProvider(provider));
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		harness.setResponses([fauxAssistantMessage("worker reply")]);
+
+		await harness.session.prompt("worker turn");
+		await harness.session.disposeAndWait();
+
+		expect(calls).toContain("initialize");
+		expect(calls).toContain("shutdown");
+		expect(calls).not.toContain("sync");
+		expect(calls).not.toContain("session-end");
 	});
 
 	it("syncs completed turns, delivers one bounded pre-compression handoff, and flushes before shutdown", async () => {

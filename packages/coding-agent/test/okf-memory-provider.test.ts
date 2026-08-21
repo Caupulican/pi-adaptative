@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -139,5 +139,75 @@ describe("Pi OKF memory provider", () => {
 
 		const report = loadOkfMemoryBundle({ rootDir: tempDir, maxFileBytes: 600, maxDocuments: 10 });
 		expect(report.entries.map((entry) => entry.relativePath)).toEqual(["small.okf.md"]);
+	});
+
+	it("isolates project-scoped records by project identity while retaining global memory", async () => {
+		const projectA = join(tempDir, "workspace-a");
+		const projectB = join(tempDir, "workspace-b");
+		mkdirSync(projectA);
+		mkdirSync(projectB);
+		mkdirSync(join(tempDir, "projects", "aaaaaaaaaaaaaaaa"), { recursive: true });
+		mkdirSync(join(tempDir, "projects", "bbbbbbbbbbbbbbbb"), { recursive: true });
+		writeFileSync(
+			join(tempDir, "projects", "aaaaaaaaaaaaaaaa", "decision.okf.md"),
+			formatOkfMemoryDocument({
+				type: "Design Decision",
+				title: "Workspace A decision",
+				description: "Only workspace A should retrieve this decision.",
+				scope: "project",
+				projectId: "aaaaaaaaaaaaaaaa",
+				body: "A-only body",
+				evidenceRefs: [join(projectA, "README.md")],
+			}),
+			"utf8",
+		);
+		writeFileSync(
+			join(tempDir, "projects", "bbbbbbbbbbbbbbbb", "decision.okf.md"),
+			formatOkfMemoryDocument({
+				type: "Design Decision",
+				title: "Workspace B decision",
+				description: "Only workspace B should retrieve this decision.",
+				scope: "project",
+				projectId: "bbbbbbbbbbbbbbbb",
+				body: "B-only body",
+				evidenceRefs: [join(projectB, "README.md")],
+			}),
+			"utf8",
+		);
+		writeFileSync(
+			join(tempDir, "global.okf.md"),
+			okfDocument("Global preference", "Visible to every project.", "Global body", "User Preference", "global"),
+			"utf8",
+		);
+
+		const provider = createOkfMemoryProvider({
+			rootDir: tempDir,
+			projectId: "aaaaaaaaaaaaaaaa",
+			projectRoot: projectA,
+		});
+		const hits = await provider.search({ query: "workspace decision global", maxResults: 10 });
+
+		expect(hits.map((hit) => hit.item.title)).toContain("Workspace A decision");
+		expect(hits.map((hit) => hit.item.title)).toContain("Global preference");
+		expect(hits.map((hit) => hit.item.title)).not.toContain("Workspace B decision");
+	});
+
+	it.skipIf(process.platform === "win32")("skips symlinked files and directories", () => {
+		const outside = mkdtempSync(join(tmpdir(), "pi-okf-memory-outside-"));
+		try {
+			writeFileSync(
+				join(outside, "outside.okf.md"),
+				okfDocument("Outside", "Must not cross a symlink boundary.", "outside body"),
+				"utf8",
+			);
+			symlinkSync(outside, join(tempDir, "linked-directory"), "dir");
+			symlinkSync(join(outside, "outside.okf.md"), join(tempDir, "linked-file.okf.md"), "file");
+
+			const report = loadOkfMemoryBundle({ rootDir: tempDir });
+
+			expect(report.entries).toEqual([]);
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
 	});
 });

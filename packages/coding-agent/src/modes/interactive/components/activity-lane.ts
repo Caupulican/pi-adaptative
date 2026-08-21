@@ -147,38 +147,19 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 				kind: "worker",
 				label: laneLabel(record),
 				status: record.status === "queued" ? "waiting" : "active",
-				tag: record.type === "tmux-worker" ? "tmux" : "agent",
+				tag:
+					record.type === "tmux-worker"
+						? record.status === "queued"
+							? "tmux agent queued"
+							: "tmux agent running"
+						: record.status === "queued"
+							? "agent queued"
+							: "agent running",
 			}),
 		);
-	const terminal = workers
-		.filter(
-			(record) =>
-				record.status === "succeeded" ||
-				record.status === "partial" ||
-				record.status === "blocked" ||
-				record.status === "failed" ||
-				record.status === "timeout" ||
-				record.status === "budget_exhausted" ||
-				record.status === "canceled",
-		)
-		.map(
-			(record): ActivityLaneItem => ({
-				id: `terminal:worker:${record.laneId}:${record.status}:${record.completedAt ?? "unknown"}`,
-				kind: "worker",
-				label: boundedLabel(
-					`${record.status === "succeeded" ? "Finished" : record.status} · ${record.label ?? record.laneId}`,
-				),
-				status:
-					record.status === "succeeded"
-						? "success"
-						: record.status === "partial" || record.status === "blocked"
-							? "warning"
-							: record.status === "canceled"
-								? "neutral"
-								: "failure",
-			}),
-		);
-	return { active, terminal };
+	// Terminal workers are projected only after the foreground delivery owner resolves the
+	// observation receipt. This prevents already-read events from flashing in the TUI.
+	return { active, terminal: [] };
 }
 
 export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): ActivityLaneProjection {
@@ -282,7 +263,8 @@ function renderConcurrency(theme: Theme, groups: readonly AggregateGroup[]): str
 	const parts: string[] = [];
 	const shown = groups.slice(0, AGGREGATE_GROUP_MAX);
 	for (const group of shown) {
-		parts.push(theme.fg(group.waiting ? "warning" : "muted", `${group.count} ${group.tag}`));
+		const tag = group.count === 1 ? group.tag : group.tag.replace(/\bagent\b/, "agents");
+		parts.push(theme.fg(group.waiting ? "warning" : "muted", `${group.count} ${tag}`));
 	}
 	const overflow = groups.length - shown.length;
 	if (overflow > 0) parts.push(theme.fg("dim", `+${overflow}`));

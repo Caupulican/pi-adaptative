@@ -281,6 +281,48 @@ describe("delegate logical-agent controls", () => {
 		expect(getWorkerTaskSessionView).toHaveBeenCalledTimes(2);
 	});
 
+	it("observes only bounded list/task entries that the model actually receives", async () => {
+		const observeWorkerAgentTerminals = vi.fn();
+		const agents = Array.from({ length: 32 }, (_, index) => ({
+			agentId: `worker-${index}`,
+			rootAgentId: "root",
+			depth: 1,
+			role: "explorer" as const,
+			status: "retired" as const,
+			activity: "idle" as const,
+			controllable: true,
+			createdAt: `T${index}`,
+			updatedAt: `T${index}`,
+		}));
+		const tasks = agents.map((agent, index) => ({
+			taskId: `task-${index}`,
+			title: "x".repeat(1_024),
+			role: "explorer" as const,
+			status: "completed" as const,
+			dependsOn: [],
+			latestAttempt: { agentId: agent.agentId, status: "completed" as const },
+		}));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({
+				listWorkerAgents: () => agents,
+				getWorkerTaskSessionView: () => ({ totalTasks: tasks.length, omittedTaskCount: 0, tasks }),
+				observeWorkerAgentTerminals,
+			}),
+		});
+
+		await tool.execute("list-bounded", { action: "list" }, undefined, undefined, context);
+		const listedIds = observeWorkerAgentTerminals.mock.calls[0]?.[0] as readonly string[];
+		expect(listedIds).toEqual(agents.slice(0, MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES).map((agent) => agent.agentId));
+
+		observeWorkerAgentTerminals.mockClear();
+		await tool.execute("tasks-bounded", { action: "tasks" }, undefined, undefined, context);
+		const taskIds = observeWorkerAgentTerminals.mock.calls[0]?.[0] as readonly string[];
+		expect(taskIds.length).toBeLessThan(tasks.length);
+		expect(taskIds).toEqual(tasks.slice(0, taskIds.length).map((task) => task.latestAttempt?.agentId));
+	});
+
 	it("projects queued tasks as admitted nonterminal work", async () => {
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },

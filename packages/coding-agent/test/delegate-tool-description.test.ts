@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { Value } from "typebox/value";
+import { describe, expect, it, vi } from "vitest";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../src/core/delegation/worker-conversation-store.ts";
 import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
@@ -6,6 +7,8 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	MAX_WORKER_AUTHORITY_PATHS,
 } from "../src/core/orchestration/contracts.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition, DELEGATE_ACTIONS } from "../src/core/tools/delegate.ts";
@@ -89,12 +92,141 @@ describe("delegate tool capability description", () => {
 			expect(parameters.properties[field]?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
 		}
 		expect(parameters.properties.agentIds.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
+		expect((parameters.properties.agentIds as { uniqueItems?: boolean }).uniqueItems).toBe(true);
 		expect(parameters.properties.agentIds.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
 		expect(parameters.properties.maxMessages.maximum).toBe(MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES);
 		expect(authority.properties.model.properties?.provider?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH);
 		expect(authority.properties.model.properties?.modelId?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_ID_LENGTH);
 		expect(authority.properties.toolNames.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
+		expect((authority.properties.toolNames as { uniqueItems?: boolean }).uniqueItems).toBe(true);
 		expect(authority.properties.toolNames.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
+		expect((authority.properties.readPaths as { uniqueItems?: boolean }).uniqueItems).toBe(true);
+		expect((authority.properties.writePaths as { uniqueItems?: boolean }).uniqueItems).toBe(true);
+	});
+
+	it("requires exact registered unprefixed authority tool names", () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
+		});
+		expect(definition.promptGuidelines).toContain(
+			"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
+		);
+
+		expect(
+			Value.Check(definition.parameters, {
+				action: "start",
+				instructions: "Inspect the repository",
+				authority: { toolNames: ["read", "bash"] },
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(definition.parameters, {
+				action: "start",
+				instructions: "Inspect the repository",
+				authority: { toolNames: ["functions.read"] },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(definition.parameters, {
+				action: "start",
+				instructions: "Inspect the repository",
+				authority: { toolNames: ["functions.bash"] },
+			}),
+		).toBe(false);
+	});
+
+	it("bounds authority path scopes and forwards them unchanged to fresh workers", async () => {
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation: vi.fn(() => ({
+				started: true as const,
+				record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
+			})),
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const authority = {
+			toolNames: ["read", "bash"],
+			readPaths: [".", "src"],
+			writePaths: ["src"],
+		};
+		expect(definition.promptGuidelines).toContain(
+			"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
+		);
+
+		expect(
+			Value.Check(definition.parameters, {
+				action: "start",
+				instructions: "Inspect the repository",
+				authority,
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(definition.parameters, {
+				action: "start",
+				instructions: "Inspect the repository",
+				authority: { readPaths: Array.from({ length: MAX_WORKER_AUTHORITY_PATHS + 1 }, () => ".") },
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(definition.parameters, {
+				action: "start",
+				instructions: "Inspect the repository",
+				authority: { writePaths: ["x".repeat(MAX_WORKER_AUTHORITY_PATH_LENGTH + 1)] },
+			}),
+		).toBe(false);
+
+		let received: unknown;
+		const forwardingDefinition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			startWorkerDelegation: (request) => {
+				received = request;
+				return {
+					started: true as const,
+					record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
+				};
+			},
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		await forwardingDefinition.execute(
+			"call-path-scopes",
+			{ action: "start", instructions: "Inspect the repository", authority },
+			new AbortController().signal,
+			() => {},
+			{} as never,
+		);
+		expect(received).toMatchObject({ instructions: "Inspect the repository", authority });
+	});
+
+	it("observes terminal records for status reads without observing mutation review", async () => {
+		const records = [{ laneId: "worker-1", type: "worker", status: "completed" }] as never;
+		const observeWorkerTerminalRecords = vi.fn();
+		const getLaneRecords = vi.fn(() => records);
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			workerAgentControl: { observeWorkerTerminalRecords } as never,
+			status: {
+				getLaneRecords,
+				getWorkerClaimSnapshots: () => [],
+				acknowledgeWorkerReview: () => ({ ok: true as const, requestId: "worker-1", reviewedAt: "T1" }),
+			},
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+
+		await definition.execute("status", { action: "status" }, new AbortController().signal, () => {}, {} as never);
+		expect(getLaneRecords).toHaveBeenCalledTimes(1);
+		expect(observeWorkerTerminalRecords).toHaveBeenCalledWith(records);
+		expect(observeWorkerTerminalRecords.mock.calls[0]?.[0]).toBe(records);
+		observeWorkerTerminalRecords.mockClear();
+
+		await definition.execute(
+			"review",
+			{ action: "review", laneId: "worker-1" },
+			new AbortController().signal,
+			() => {},
+			{} as never,
+		);
+		expect(observeWorkerTerminalRecords).not.toHaveBeenCalled();
 	});
 
 	it("stays accurate when worker write settings change without a runtime rebuild", () => {
@@ -143,7 +275,7 @@ describe("delegate tool capability description", () => {
 		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: fresh=no agentId");
 		expect(promptGuidelines).toContain("reuse=returned agentId");
 		expect(promptGuidelines).toContain("task=instructions");
-		expect(promptGuidelines).toContain("Owner profiles/settings own ceilings");
+		expect(promptGuidelines).toContain("owner profiles/settings cap");
 		expect(promptGuidelines).toContain("queued=admitted");
 		expect(promptGuidelines).toContain("parallel read-only=no write/edit");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");

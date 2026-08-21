@@ -183,6 +183,7 @@ import { RuntimeBuilder } from "./runtime-builder.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
 import { SessionAnalytics } from "./session-analytics.ts";
 import { SessionImageStore } from "./session-image-store.ts";
+import { isWorkerSession } from "./session-role.ts";
 import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
@@ -831,6 +832,9 @@ export class AgentSession {
 			isRawStreamSimple: () => this._isRawStreamSimple(this.agent.streamFn),
 			getModelRegistry: () => this._modelRegistry,
 			getMemoryManager: () => this._memory.getMemoryManager(),
+			getFreshOkfMemoryForReflection: () => this._memory.getFreshOkfMemoryForReflection(),
+			applyStructuredReflectionWrite: (write, signal) => this._memory.applyStructuredReflectionWrite(write, signal),
+			rollbackStructuredReflectionWrite: this._memory.rollbackStructuredReflectionWrite.bind(this._memory),
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			getAgentDir: () => this._agentDir,
@@ -864,7 +868,7 @@ export class AgentSession {
 			: undefined;
 		this._isExplicitModel = config.isExplicitModel ?? false;
 		this._isExplicitThinking = config.isExplicitThinking ?? false;
-		this._isChildSession = config.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
+		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({

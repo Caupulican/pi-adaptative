@@ -8,6 +8,7 @@ export type LongTermMemoryTriggerReason =
 	| "user_or_project_preference"
 	| "durable_identifier"
 	| "missing_background"
+	| "proactive_local_turn"
 	| "short_or_grounded_turn"
 	| "budget_disabled"
 	| "secret_like_query";
@@ -22,6 +23,8 @@ export interface LongTermMemoryTriggerInput {
 export interface LongTermMemoryTriggerDecision {
 	shouldQuery: boolean;
 	reason: LongTermMemoryTriggerReason;
+	/** External providers remain demand-gated even when local OKF retrieval is proactive. */
+	shouldQueryExternal?: boolean;
 }
 
 const EXPLICIT_RECALL_RE = /\b(recall|remember|memory|memories|resume|previous|prior|before|history)\b/i;
@@ -64,5 +67,5 @@ export function shouldQueryLongTermMemory(input: LongTermMemoryTriggerInput): Lo
 	if ((input.currentWorkCandidateCount ?? 0) > 0 && input.budget?.compact) {
 		return { shouldQuery: false, reason: "short_or_grounded_turn" };
 	}
-	return { shouldQuery: false, reason: "short_or_grounded_turn" };
+	return { shouldQuery: true, reason: "proactive_local_turn", shouldQueryExternal: false };
 }

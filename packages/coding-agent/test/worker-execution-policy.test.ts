@@ -241,4 +241,42 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(managed.grant.readPaths).toEqual([]);
 		expect(managed.grant.writePaths).toEqual([]);
 	});
+
+	it("narrows root read requests to the worker cwd instead of granting outside paths", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "root-read-boundary",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["filesystem.read"],
+			toolNames: ["read"],
+		});
+
+		const nested = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			requestedReadPaths: ["/repo/src"],
+		});
+		const outside = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			requestedReadPaths: ["/etc"],
+		});
+		const parent = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			requestedReadPaths: ["/"],
+		});
+
+		expect(nested.readPaths).toEqual([resolve("/repo/src")]);
+		expect(outside.readPaths).toEqual([]);
+		expect(parent.readPaths).toEqual([resolve("/repo")]);
+	});
 });

@@ -1,4 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
+import { PI_OKF_TYPES, type PiOkfType, validateOkfMemoryDocumentInput } from "../context/okf-memory.ts";
 import { REFLECTION_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
 
 export { REFLECTION_SYSTEM_PROMPT };
@@ -71,6 +72,27 @@ export interface ReflectionInput {
 
 export type ReflectionWrite =
 	| { kind: "memory_add"; section: "MEMORY" | "USER"; text: string }
+	| {
+			kind: "okf_add";
+			type: PiOkfType;
+			title: string;
+			description: string;
+			scope: "project";
+			text: string;
+			tags?: string[];
+			evidenceRefs: string[];
+	  }
+	| {
+			kind: "okf_organize";
+			type: PiOkfType;
+			title: string;
+			description: string;
+			scope: "project";
+			text: string;
+			sourceText: string;
+			tags?: string[];
+			evidenceRefs: string[];
+	  }
 	| { kind: "memory_replace"; target: string; text: string }
 	| { kind: "memory_remove"; target: string }
 	// R7 memory-to-behavior: promote a recurring procedural workflow into an executable skill.
@@ -80,6 +102,69 @@ export interface ReflectionResult {
 	writes: ReflectionWrite[];
 	usage: Usage;
 	rationale: string;
+}
+
+type StructuredReflectionWrite = Extract<ReflectionWrite, { kind: "okf_add" | "okf_organize" }>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+/** One parser/validation path for both structured reflection operations. */
+function parseStructuredReflectionWrite(value: unknown, existingMemory: string): StructuredReflectionWrite | undefined {
+	if (!isRecord(value) || (value.kind !== "okf_add" && value.kind !== "okf_organize")) return undefined;
+	if (
+		!PI_OKF_TYPES.includes(value.type as PiOkfType) ||
+		typeof value.title !== "string" ||
+		typeof value.description !== "string" ||
+		value.scope !== "project" ||
+		typeof value.text !== "string" ||
+		!isStringArray(value.evidenceRefs) ||
+		value.evidenceRefs.length === 0 ||
+		(value.tags !== undefined && !isStringArray(value.tags))
+	) {
+		return undefined;
+	}
+	const common = {
+		type: value.type as PiOkfType,
+		title: value.title,
+		description: value.description,
+		scope: "project" as const,
+		text: value.text,
+		...(value.tags !== undefined ? { tags: value.tags } : {}),
+		evidenceRefs: value.evidenceRefs,
+	};
+	let write: StructuredReflectionWrite;
+	if (value.kind === "okf_organize") {
+		if (
+			typeof value.sourceText !== "string" ||
+			value.sourceText.length === 0 ||
+			!existingMemory.includes(value.sourceText)
+		) {
+			return undefined;
+		}
+		write = { kind: "okf_organize", ...common, sourceText: value.sourceText };
+	} else {
+		write = { kind: "okf_add", ...common };
+	}
+	return validateOkfMemoryDocumentInput(
+		{
+			type: write.type,
+			title: write.title,
+			description: write.description,
+			scope: write.scope,
+			body: write.text,
+			tags: write.tags,
+			evidenceRefs: write.evidenceRefs,
+		},
+		{ projectOnly: true, requireEvidence: true },
+	).length === 0
+		? write
+		: undefined;
 }
 
 /**
@@ -128,12 +213,15 @@ Return JSON updates.`;
 			if (Array.isArray(parsed.writes)) {
 				for (const w of parsed.writes) {
 					if (w && typeof w === "object") {
+						const structuredWrite = parseStructuredReflectionWrite(w, input.existingMemory);
 						if (
 							w.kind === "memory_add" &&
 							(w.section === "MEMORY" || w.section === "USER") &&
 							typeof w.text === "string"
 						) {
 							writes.push({ kind: "memory_add", section: w.section, text: w.text });
+						} else if (structuredWrite) {
+							writes.push(structuredWrite);
 						} else if (
 							w.kind === "memory_replace" &&
 							typeof w.target === "string" &&

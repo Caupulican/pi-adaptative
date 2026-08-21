@@ -18,13 +18,17 @@ const ATTENTION_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["p
  * subsequent worker terminal) forever with zero visibility. This watchdog only ever warns.
  */
 const HANDOFF_WATCHDOG_MS = 1_800_000;
+const MAX_OBSERVED_TERMINALS = 512;
 
 export interface WorkerTerminalHandoffRecord {
 	laneId: string;
 	status: LaneTerminalStatus;
+	completedAt?: string;
 	reasonCode?: string;
 	/** Goal ownership retained until delivery so a stopped goal cannot be resurrected by a late terminal. */
 	goalId?: string;
+	/** Runtime-only receipt. Observation consumes delivery, never mutation review. */
+	observedAt?: string;
 }
 
 export interface WorkerNotificationStatus {
@@ -50,6 +54,12 @@ export interface WorkerNotificationCoordinatorOptions {
 	notify(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	warn(message: string): void;
 	markDurableDelivered(notificationIds: readonly string[]): void;
+	/** Active event-driven waits consume matching terminals before a second foreground wake is admitted. */
+	isObserved?(record: LaneRecord): boolean;
+}
+
+function terminalIdentity(record: Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode">): string {
+	return [record.laneId, record.completedAt ?? "", record.status, record.reasonCode ?? ""].join("\0");
 }
 
 /** Event-driven, bounded terminal outbox. Durable worker events can be replayed into it on resume. */
@@ -66,10 +76,12 @@ export class WorkerNotificationCoordinator {
 	 * an owning caller can durably persist and replay them across a process restart.
 	 */
 	private readonly inFlight = new Map<string, PendingWorkerNotification>();
+	private readonly observedTerminals = new Map<string, string>();
 	private scheduled = false;
 	private disposed = false;
 	private deliveryTail = Promise.resolve();
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
+	private readonly handoffWatchdogs = new Set<ReturnType<typeof setTimeout>>();
 	private retryCount = 0;
 
 	constructor(options: WorkerNotificationCoordinatorOptions) {
@@ -84,17 +96,58 @@ export class WorkerNotificationCoordinator {
 	recordTerminal(record: LaneRecord, durableNotificationId?: string): void {
 		if (record.status === "queued" || record.status === "running") return;
 		const key = durableNotificationId ?? `transient:${record.laneId}:${record.completedAt ?? record.status}`;
+		const inFlight = this.inFlight.get(key);
+		if (inFlight) {
+			// A terminal can be observed again while its handoff is still awaiting the parent. Keep
+			// the existing receipt and consumer: replacing it in `pending` would enqueue a second
+			// wake as soon as the first delivery settles.
+			if (this.options.isObserved?.(record)) {
+				const observedAt = new Date().toISOString();
+				this.rememberObserved(terminalIdentity(record), observedAt);
+				inFlight.record.observedAt = observedAt;
+			}
+			return;
+		}
+		const identity = terminalIdentity(record);
+		const observedAt = this.options.isObserved?.(record)
+			? new Date().toISOString()
+			: this.observedTerminals.get(identity);
+		if (observedAt) this.rememberObserved(identity, observedAt);
 		this.pending.set(key, {
 			key,
 			record: {
 				laneId: record.laneId,
 				status: record.status,
+				...(record.completedAt ? { completedAt: record.completedAt } : {}),
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 				...(record.goalId ? { goalId: record.goalId } : {}),
+				...(observedAt ? { observedAt } : {}),
 			},
 			...(durableNotificationId ? { durableNotificationId } : {}),
 		});
 		this.schedule();
+	}
+
+	/** Mark exact terminal generations as already exposed to the parent model. */
+	observeTerminals(
+		records: readonly Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode">[],
+		observedAt = new Date().toISOString(),
+	): void {
+		const identities = new Set(records.map(terminalIdentity));
+		for (const identity of identities) this.rememberObserved(identity, observedAt);
+		for (const notification of [...this.pending.values(), ...this.inFlight.values()]) {
+			if (identities.has(terminalIdentity(notification.record))) notification.record.observedAt = observedAt;
+		}
+	}
+
+	private rememberObserved(identity: string, observedAt: string): void {
+		this.observedTerminals.delete(identity);
+		this.observedTerminals.set(identity, observedAt);
+		while (this.observedTerminals.size > MAX_OBSERVED_TERMINALS) {
+			const oldest = this.observedTerminals.keys().next().value;
+			if (oldest === undefined) break;
+			this.observedTerminals.delete(oldest);
+		}
 	}
 
 	statusChanged(): void {
@@ -107,8 +160,11 @@ export class WorkerNotificationCoordinator {
 		this.scheduled = false;
 		if (this.retryTimer) clearTimeout(this.retryTimer);
 		this.retryTimer = undefined;
+		for (const watchdog of this.handoffWatchdogs) clearTimeout(watchdog);
+		this.handoffWatchdogs.clear();
 		this.pending.clear();
 		this.inFlight.clear();
+		this.observedTerminals.clear();
 	}
 
 	private schedule(): void {
@@ -145,12 +201,19 @@ export class WorkerNotificationCoordinator {
 	 */
 	private startHandoffWatchdog(laneIds: readonly string[]): { clear(): void } {
 		const timer = setTimeout(() => {
+			this.handoffWatchdogs.delete(timer);
 			this.warnBestEffort(
 				`Background worker handoff has not settled after ${HANDOFF_WATCHDOG_MS}ms for lane(s): ${laneIds.join(", ")}. Observation only; no redispatch will occur.`,
 			);
 		}, HANDOFF_WATCHDOG_MS);
+		this.handoffWatchdogs.add(timer);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
-		return { clear: () => clearTimeout(timer) };
+		return {
+			clear: () => {
+				clearTimeout(timer);
+				this.handoffWatchdogs.delete(timer);
+			},
+		};
 	}
 
 	private flush(): void {
@@ -208,7 +271,20 @@ export class WorkerNotificationCoordinator {
 			const durableIds = batch.flatMap((notification) =>
 				notification.durableNotificationId ? [notification.durableNotificationId] : [],
 			);
-			if (durableIds.length > 0) this.options.markDurableDelivered(durableIds);
+			if (durableIds.length > 0) {
+				try {
+					this.options.markDurableDelivered(durableIds);
+				} catch (error) {
+					// Delivery is already confirmed. Retrying notify() would wake the parent twice just
+					// to repair a separate durable acknowledgment; keep the ledger pending for a future
+					// replay and make the acknowledgment failure observable instead.
+					this.warnBestEffort(
+						`Background worker durable handoff acknowledgment failed after delivery: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
 		});
 		this.deliveryTail = delivery.catch((error: unknown) => {
 			for (const notification of batch) {

@@ -33,9 +33,11 @@ const RECORD_KEYS = [
 	"artifactId",
 	"usage",
 	"cancellationRequested",
+	"terminalDelivery",
 ] as const;
 
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
+export type BackgroundToolTerminalDelivery = "pending" | "delivered";
 
 export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "status">;
 
@@ -85,6 +87,10 @@ export interface BackgroundToolTaskRecord {
 	artifactId?: string;
 	usage?: Usage;
 	cancellationRequested?: boolean;
+	/** Durable terminal handoff state. Undefined on legacy records, which are treated as delivered. */
+	terminalDelivery?: BackgroundToolTerminalDelivery;
+	/** Runtime-only receipt; never serialized into the durable task record. */
+	observedAt?: string;
 }
 
 export interface BackgroundToolTaskLiveView {
@@ -261,7 +267,10 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		typeof value.output !== "string" ||
 		(value.artifactId !== undefined &&
 			(typeof value.artifactId !== "string" || !/^[0-9a-f]{1,64}$/.test(value.artifactId))) ||
-		(value.cancellationRequested !== undefined && typeof value.cancellationRequested !== "boolean")
+		(value.cancellationRequested !== undefined && typeof value.cancellationRequested !== "boolean") ||
+		(value.terminalDelivery !== undefined &&
+			value.terminalDelivery !== "pending" &&
+			value.terminalDelivery !== "delivered")
 	) {
 		return undefined;
 	}
@@ -281,6 +290,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		...(value.artifactId ? { artifactId: value.artifactId } : {}),
 		...(usage ? { usage } : {}),
 		...(value.cancellationRequested !== undefined ? { cancellationRequested: value.cancellationRequested } : {}),
+		...(value.terminalDelivery !== undefined ? { terminalDelivery: value.terminalDelivery } : {}),
 	};
 }
 
@@ -293,7 +303,12 @@ export class BackgroundToolTaskController {
 	private readonly tasks = new Map<string, BackgroundToolTaskState>();
 	private readonly handoffRequests = new Map<string, Set<() => void>>();
 	private readonly queuedNotifications: Array<{ record: BackgroundToolTaskRecord; wakeParent: boolean }> = [];
+	private readonly activeNotificationRecords = new Set<BackgroundToolTaskRecord>();
 	private notificationDrain: Promise<void> | undefined;
+	private notificationRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	private notificationRetryCompletion: Promise<void> | undefined;
+	private resolveNotificationRetry: (() => void) | undefined;
+	private notificationRetryCount = 0;
 	private readonly waitTimeoutMs: number;
 	private nextTaskId = 1;
 	private disposed = false;
@@ -355,10 +370,26 @@ export class BackgroundToolTaskController {
 		return [...this.tasks.values()].map((state) => ({ ...state.record }));
 	}
 
+	/** Model-facing read that consumes terminal delivery without approving its outcome. */
+	observe(taskIds?: string | readonly string[]): BackgroundToolTaskRecord[] {
+		const ids = typeof taskIds === "string" ? [taskIds] : taskIds;
+		const states = ids
+			? ids.flatMap((taskId) => {
+					const state = this.tasks.get(taskId);
+					return state === undefined ? [] : [state];
+				})
+			: [...this.tasks.values()];
+		for (const state of states) this.observeState(state);
+		return states.map((state) => ({ ...state.record }));
+	}
+
 	wait(taskId: string, signal?: AbortSignal): Promise<BackgroundToolTaskRecord> {
 		const state = this.tasks.get(taskId);
 		if (!state) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
-		if (state.record.status !== "running") return Promise.resolve({ ...state.record });
+		if (state.record.status !== "running") {
+			this.observeState(state);
+			return Promise.resolve({ ...state.record });
+		}
 		if (signal?.aborted) return Promise.resolve({ ...state.record });
 		state.waitingConsumers++;
 		let waiting = true;
@@ -375,7 +406,8 @@ export class BackgroundToolTaskController {
 				clearTimeout(watchdog);
 				signal?.removeEventListener("abort", onAbort);
 				releaseWaiter();
-				resolve({ ...record });
+				if (record.status !== "running") this.observeState(state);
+				resolve({ ...state.record });
 			};
 			const onAbort = (): void => {
 				finishWait(state.record);
@@ -426,9 +458,18 @@ export class BackgroundToolTaskController {
 		await Promise.resolve();
 		for (;;) {
 			const drain = this.notificationDrain;
-			if (!drain) return;
-			await drain;
-			if (!this.notificationDrain && this.queuedNotifications.length === 0) return;
+			if (drain) {
+				await drain;
+				continue;
+			}
+			if (this.queuedNotifications.length === 0) return;
+			const retry = this.notificationRetryCompletion;
+			if (retry) {
+				await retry;
+				continue;
+			}
+			if (this.disposed) return;
+			this.scheduleNotificationDrain();
 		}
 	}
 
@@ -510,6 +551,7 @@ export class BackgroundToolTaskController {
 			this.tasks.set(record.taskId, state);
 			if (record.status !== "running") {
 				state.resolveTerminal(record);
+				if (record.terminalDelivery === "pending") this.notify(record, true);
 				continue;
 			}
 			this.finishState(
@@ -571,19 +613,30 @@ export class BackgroundToolTaskController {
 			...(packed.artifactId ? { artifactId: packed.artifactId } : {}),
 			...(usage ? { usage } : {}),
 			...(state.cancellationRequested ? { cancellationRequested: true } : {}),
+			terminalDelivery: notify ? "pending" : "delivered",
 		};
-		state.record = record;
-		this.persist(record);
+		const persisted = this.persist(record);
+		const terminalRecord = persisted
+			? record
+			: {
+					...record,
+					status: "failed" as const,
+					summary: `${record.toolName} failed: terminal result could not be persisted`,
+					output: "Background tool result could not be persisted; treat it as unavailable.",
+				};
+		state.record = terminalRecord;
 		if (usage) this.deps.recordUsage?.(record.taskId, usage);
-		state.resolveTerminal(record);
+		state.resolveTerminal(terminalRecord);
 		this.emitLiveTasks();
 		this.pruneTerminalTasks();
-		if (notify) this.notify(record, state.waitingConsumers === 0);
+		if (notify) this.notify(terminalRecord, state.waitingConsumers === 0);
 	}
 
 	private persist(record: BackgroundToolTaskRecord): boolean {
 		try {
-			this.deps.persist({ ...record });
+			const durableRecord = { ...record };
+			delete durableRecord.observedAt;
+			this.deps.persist(durableRecord);
 			return true;
 		} catch (error) {
 			this.deps.onError?.(`Failed to persist background tool task ${record.taskId}`, error);
@@ -592,16 +645,59 @@ export class BackgroundToolTaskController {
 	}
 
 	private notify(record: BackgroundToolTaskRecord, wakeParent: boolean): void {
-		this.queuedNotifications.push({ record: { ...record }, wakeParent });
+		const notificationRecord = {
+			...record,
+			...(!wakeParent && !record.observedAt ? { observedAt: this.now().toISOString() } : {}),
+		};
+		this.activeNotificationRecords.add(notificationRecord);
+		this.queuedNotifications.push({ record: notificationRecord, wakeParent });
 		this.scheduleNotificationDrain();
 	}
 
+	private markNotificationDelivered(record: BackgroundToolTaskRecord): void {
+		if (record.terminalDelivery !== "pending") return;
+		const delivered = { ...record, terminalDelivery: "delivered" as const };
+		if (this.persist(delivered)) {
+			const state = this.tasks.get(record.taskId);
+			if (state && state.record.completedAt === record.completedAt) state.record = delivered;
+		}
+	}
+
+	private observeState(state: BackgroundToolTaskState): void {
+		if (state.record.status === "running" || state.record.observedAt) return;
+		const observedAt = this.now().toISOString();
+		state.record = { ...state.record, observedAt };
+		for (const record of this.activeNotificationRecords) {
+			if (record.taskId === state.record.taskId && record.completedAt === state.record.completedAt) {
+				record.observedAt = observedAt;
+			}
+		}
+	}
+
 	private scheduleNotificationDrain(): void {
-		if (this.notificationDrain) return;
+		if (this.disposed || this.notificationDrain || this.notificationRetryTimer) return;
 		this.notificationDrain = this.drainNotifications().finally(() => {
 			this.notificationDrain = undefined;
-			if (this.queuedNotifications.length > 0) this.scheduleNotificationDrain();
+			if (this.queuedNotifications.length > 0 && !this.notificationRetryTimer) this.scheduleNotificationDrain();
 		});
+	}
+
+	private scheduleNotificationRetry(): void {
+		if (this.disposed || this.notificationRetryTimer) return;
+		const delayMs = Math.min(100 * 2 ** Math.min(this.notificationRetryCount, 5), 5_000);
+		this.notificationRetryCount++;
+		this.notificationRetryCompletion = new Promise<void>((resolve) => {
+			this.resolveNotificationRetry = resolve;
+		});
+		this.notificationRetryTimer = setTimeout(() => {
+			this.notificationRetryTimer = undefined;
+			const resolve = this.resolveNotificationRetry;
+			this.resolveNotificationRetry = undefined;
+			this.notificationRetryCompletion = undefined;
+			resolve?.();
+			this.scheduleNotificationDrain();
+		}, delayMs);
+		this.notificationRetryTimer.unref?.();
 	}
 
 	private async drainNotifications(): Promise<void> {
@@ -616,13 +712,28 @@ export class BackgroundToolTaskController {
 					wakeParent: batch.some((notification) => notification.wakeParent),
 				});
 			} catch (error) {
+				// A rejected handoff is not a delivery receipt. Put the exact records back ahead of
+				// newer completions and retry on an event-driven backoff; persistence already contains
+				// the terminal, so a transient notifier failure must not make it disappear.
+				this.queuedNotifications.unshift(...batch);
 				const includedIds = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS).map((record) => record.taskId);
 				const omitted = records.length - includedIds.length;
 				const suffix = omitted > 0 ? ` (+${omitted} more)` : "";
-				this.deps.onError?.(
-					`Failed to notify terminal background tool task batch ${includedIds.join(", ")}${suffix}`,
-					error,
-				);
+				try {
+					this.deps.onError?.(
+						`Failed to notify terminal background tool task batch ${includedIds.join(", ")}${suffix}`,
+						error,
+					);
+				} catch {
+					// Diagnostics cannot consume the pending terminal handoff.
+				}
+				this.scheduleNotificationRetry();
+				return;
+			}
+			this.notificationRetryCount = 0;
+			for (const record of records) this.markNotificationDelivered(record);
+			for (const record of records) {
+				this.activeNotificationRecords.delete(record);
 			}
 		}
 	}

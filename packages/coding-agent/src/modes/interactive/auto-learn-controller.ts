@@ -27,6 +27,7 @@ import {
 	getInFlightWorkUnits,
 	getPendingReloadBlockers,
 } from "../../core/reload-blockers.ts";
+import { PI_SESSION_ROLE_ENV } from "../../core/session-role.ts";
 import type { AutoLearnSettings, AutonomyMode } from "../../core/settings-manager.ts";
 import {
 	checkTaskStepsContract,
@@ -1040,6 +1041,7 @@ export class AutoLearnController {
 				env: {
 					...process.env,
 					PI_AUTO_LEARN_CHILD: "1",
+					[PI_SESSION_ROLE_ENV]: "worker",
 					...(sourceSessionFile ? { PI_AUTO_LEARN_SOURCE_SESSION_FILE: sourceSessionFile } : {}),
 				},
 			});

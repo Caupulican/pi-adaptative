@@ -35,6 +35,7 @@ import {
 } from "./agent-session-contracts.ts";
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
+import { PI_OKF_TYPES, type PiOkfType } from "./context/okf-memory.ts";
 import {
 	APPLY_WRITE_REFUSED_REASON_CODE,
 	appendLearningAuditSnapshot,
@@ -60,6 +61,11 @@ import {
 	reflectionTriggerPriority,
 } from "./learning/reflection-turn-analysis.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
+import type {
+	StructuredReflectionApplyResult,
+	StructuredReflectionRollback,
+	StructuredReflectionWrite,
+} from "./memory/providers/file-store.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
@@ -77,6 +83,15 @@ export interface ReflectionControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	/** Memory subsystem — the bundled `memory` tool applies durable writes; fresh block feeds reflection. */
 	getMemoryManager(): MemoryManager;
+	/** Fresh bounded structured OKF snapshot, read at reflection time for confront-before-write. */
+	getFreshOkfMemoryForReflection(): string;
+	/** Main-orchestrator-only structured memory mutation port. */
+	applyStructuredReflectionWrite(
+		write: StructuredReflectionWrite,
+		signal?: AbortSignal,
+	): Promise<StructuredReflectionApplyResult>;
+	/** Main-orchestrator-only inverse for an audited structured write. */
+	rollbackStructuredReflectionWrite(rollback: StructuredReflectionRollback, signal?: AbortSignal): Promise<boolean>;
 	/** Settings — the learning-apply policy (gate thresholds, auto-apply layers) is read here. */
 	getSettingsManager(): SettingsManager;
 	/** Session log — audit snapshots and learning-audit reads go through this. */
@@ -125,6 +140,20 @@ export const SKILL_AUDIT_UNAVAILABLE_REASON_CODE = "skill_audit_unavailable";
 const REFLECTION_MIN_INTERVAL_MS = 45_000;
 const REFLECTION_PENDING_MAX_CHARS = 12_000;
 const REFLECTION_DIGEST_HISTORY_SIZE = 64;
+
+interface ReflectionApplyResult {
+	applied: boolean;
+	rollback?: LearningAuditRecord["rollback"];
+}
+
+function parseOkfRollbackTarget(target: string | undefined): { type: PiOkfType; title: string } | undefined {
+	if (!target) return undefined;
+	const separator = target.indexOf("\0");
+	if (separator <= 0 || separator === target.length - 1) return undefined;
+	const type = target.slice(0, separator);
+	if (!PI_OKF_TYPES.includes(type as PiOkfType)) return undefined;
+	return { type: type as PiOkfType, title: target.slice(separator + 1) };
+}
 
 export class ReflectionController {
 	private readonly deps: ReflectionControllerDeps;
@@ -540,8 +569,13 @@ export class ReflectionController {
 		const result = await new ReflectionEngine().reflect({
 			recentTurnText: input.recentTurnText,
 			// Read memory FRESH (not the prefix-cache-frozen system-prompt block) so confront-before-write
-			// sees writes made earlier this session.
-			existingMemory: this.deps.getMemoryManager().buildSystemPromptBlockFresh() || "",
+			// sees writes made earlier this session, including bounded structured OKF records.
+			existingMemory: [
+				this.deps.getMemoryManager().buildSystemPromptBlockFresh(),
+				this.deps.getFreshOkfMemoryForReflection(),
+			]
+				.filter((block) => block.trim().length > 0)
+				.join("\n\n"),
 			plan,
 			complete,
 		});
@@ -567,7 +601,7 @@ export class ReflectionController {
 			writeIndex += 1;
 			const proposalId = `${input.reportId ?? "reflection"}-w${writeIndex}`;
 			const proposal = proposalFromReflectionWrite(write, proposalId);
-			const rollback = rollbackPlanForReflectionWrite(write);
+			const plannedRollback = rollbackPlanForReflectionWrite(write);
 			let observations = 1;
 			if (policy.enabled) {
 				try {
@@ -673,9 +707,11 @@ export class ReflectionController {
 			// throwing. Capture that outcome instead of assuming "decision.kind === apply" means it landed
 			// — otherwise a refused write leaves a phantom "apply" audit whose rollback later fails
 			// not-found (or, worse, misfires against whatever now occupies that text).
-			const applied =
-				decision.kind === "apply" && !skillPromotionBlock ? await this._applyReflectionWrite(write, signal) : false;
-			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applied;
+			const applyResult =
+				decision.kind === "apply" && !skillPromotionBlock
+					? await this._applyReflectionWrite(write, signal)
+					: { applied: false };
+			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applyResult.applied;
 			if (decision.kind !== "no-op") {
 				auditSequence += 1;
 				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
@@ -698,7 +734,10 @@ export class ReflectionController {
 					decision,
 					// No rollback plan on a failed apply or a held/proposed promotion — nothing durable
 					// landed in either case, so there is nothing to undo.
-					rollback: skillPromotionBlock || writeFailed ? undefined : rollback,
+					rollback:
+						decision.kind === "apply" && !skillPromotionBlock && !writeFailed
+							? (applyResult.rollback ?? plannedRollback)
+							: undefined,
 					createdAt: new Date().toISOString(),
 				});
 			}
@@ -741,7 +780,7 @@ export class ReflectionController {
 		switch (rollback.kind) {
 			case "memory_remove": {
 				if (!rollback.target) return { ok: false, reason: "missing_rollback_target" };
-				if (!(await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target }))) {
+				if (!(await this._applyReflectionWrite({ kind: "memory_remove", target: rollback.target })).applied) {
 					return { ok: false, reason: "rollback_apply_failed" };
 				}
 				break;
@@ -755,7 +794,7 @@ export class ReflectionController {
 					target: rollback.target,
 					text: rollback.previous,
 				});
-				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
+				if (!applied.applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
 			}
 			case "memory_add": {
@@ -764,6 +803,32 @@ export class ReflectionController {
 					kind: "memory_add",
 					section: "MEMORY",
 					text: rollback.previous,
+				});
+				if (!applied.applied) return { ok: false, reason: "rollback_apply_failed" };
+				break;
+			}
+			case "okf_remove": {
+				const target = parseOkfRollbackTarget(rollback.target);
+				if (!target) return { ok: false, reason: "missing_rollback_target" };
+				const applied = await this.deps.rollbackStructuredReflectionWrite({
+					...target,
+					expectedDigest: rollback.expectedDigest,
+					removeRecord: true,
+				});
+				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
+				break;
+			}
+			case "okf_organize": {
+				if (!rollback.target || rollback.previous === undefined) {
+					return { ok: false, reason: "missing_rollback_target" };
+				}
+				const target = parseOkfRollbackTarget(rollback.target);
+				if (!target) return { ok: false, reason: "missing_rollback_target" };
+				const applied = await this.deps.rollbackStructuredReflectionWrite({
+					...target,
+					expectedDigest: rollback.expectedDigest,
+					sourceText: rollback.previous,
+					removeRecord: rollback.removeOkf === true,
 				});
 				if (!applied) return { ok: false, reason: "rollback_apply_failed" };
 				break;
@@ -799,19 +864,58 @@ export class ReflectionController {
 	 * actually applied so callers that MUST know — rollback's once-only accounting — can react instead
 	 * of recording a success that never happened.
 	 */
-	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<boolean> {
+	private async _applyReflectionWrite(write: ReflectionWrite, signal?: AbortSignal): Promise<ReflectionApplyResult> {
 		// R7 memory-to-behavior: a recurring procedure is compiled into an executable skill file rather
 		// than stored as a flat fact. Written under the agent skills dir so it loads like any user skill.
 		if (write.kind === "promote_skill") {
 			const promoted = this._promoteReflectionSkill(write.name, write.description, write.body);
 			if (promoted) this.deps.refreshLiveSkills?.();
-			return promoted;
+			return { applied: promoted };
+		}
+		if (write.kind === "okf_add" || write.kind === "okf_organize") {
+			try {
+				const result = await this.deps.applyStructuredReflectionWrite(write, signal);
+				if (!result.applied || result.digest === undefined) return { applied: false };
+				return {
+					applied: true,
+					rollback:
+						write.kind === "okf_add"
+							? {
+									kind: "okf_remove",
+									target: `${write.type}\0${write.title}`,
+									expectedDigest: result.digest,
+									instructions: "Remove only the exact structured OKF record created by this reflection.",
+								}
+							: {
+									kind: "okf_organize",
+									target: `${write.type}\0${write.title}`,
+									previous: write.sourceText,
+									expectedDigest: result.digest,
+									removeOkf: result.created,
+									instructions:
+										"Restore the exact hot-memory source first, then remove only the OKF record created by this reflection.",
+								},
+				};
+			} catch {
+				return { applied: false };
+			}
 		}
 
 		type MemResult = { details?: { success?: boolean; error?: string } };
 		type MemExec = (
 			toolCallId: string,
-			params: { action: string; target: string; content?: string; oldContent?: string },
+			params: {
+				action: string;
+				target: string;
+				content?: string;
+				oldContent?: string;
+				type?: string;
+				title?: string;
+				description?: string;
+				scope?: string;
+				tags?: string[];
+				evidenceRefs?: string[];
+			},
 			signal: AbortSignal | undefined,
 			onUpdate: undefined,
 			ctx: undefined,
@@ -821,7 +925,7 @@ export class ReflectionController {
 			.getToolDefinitions()
 			.find((t) => t.name === "memory");
 		const exec = memTool?.execute as unknown as MemExec | undefined;
-		if (!exec) return false;
+		if (!exec) return { applied: false };
 
 		const run = (params: Parameters<MemExec>[1]) => exec("reflection", params, signal, undefined, undefined);
 
@@ -832,10 +936,10 @@ export class ReflectionController {
 					target: write.section === "USER" ? "user" : "memory",
 					content: write.text,
 				});
-				return res?.details?.success === true;
+				return { applied: res?.details?.success === true };
 			} catch {
 				// best-effort; reflection writes must never throw into the turn loop
-				return false;
+				return { applied: false };
 			}
 		}
 
@@ -850,14 +954,14 @@ export class ReflectionController {
 						? { action: "replace", target, oldContent: write.target, content: write.text }
 						: { action: "remove", target, oldContent: write.target };
 				const res = await run(params);
-				if (res?.details?.success === true) return true; // applied
-				if (!/not found/i.test(String(res?.details?.error ?? ""))) return false; // real failure — don't misapply
+				if (res?.details?.success === true) return { applied: true }; // applied
+				if (!/not found/i.test(String(res?.details?.error ?? ""))) return { applied: false }; // real failure
 				// substring simply absent from this file — try the next target
 			} catch {
 				// defensive: if the tool ever does throw, try the next target
 			}
 		}
-		return false;
+		return { applied: false };
 	}
 
 	/**

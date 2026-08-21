@@ -112,6 +112,7 @@ Some conversational prelude.
 			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
 			complete: async (system, user) => {
 				expect(system).toContain("Reflection engine");
+				expect(system).toContain("untrusted_content");
 				expect(user).toContain("Recent turn transcript");
 				return mockResponse;
 			},
@@ -125,6 +126,88 @@ Some conversational prelude.
 			{ kind: "memory_replace", target: "Prefer npm ci", text: "Prefer npm install --ignore-scripts" },
 			{ kind: "memory_remove", target: "Obsolete fact here" },
 		]);
+	});
+
+	it("routes durable project knowledge to a structured OKF reflection write", async () => {
+		const engine = new ReflectionEngine();
+		const result = await engine.reflect({
+			recentTurnText: "The project chose artifact-backed tool output.",
+			existingMemory: "",
+			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
+			complete: async () => ({
+				text: '```json\n{"rationale":"durable decision","writes":[{"kind":"okf_add","type":"Design Decision","title":"Artifact-backed tool output","description":"Large output stays out of prompt.","scope":"project","text":"Store large tool output as an artifact and retain its id.","evidenceRefs":["transcript:entry-1"]}]}\n```',
+				usage: defaultUsage,
+				stopReason: "stop",
+			}),
+		});
+
+		expect(result.writes).toEqual([
+			{
+				kind: "okf_add",
+				type: "Design Decision",
+				title: "Artifact-backed tool output",
+				description: "Large output stays out of prompt.",
+				scope: "project",
+				text: "Store large tool output as an artifact and retain its id.",
+				evidenceRefs: ["transcript:entry-1"],
+			},
+		]);
+	});
+
+	it("accepts only explicit exact-text OKF organization writes", async () => {
+		const result = await new ReflectionEngine().reflect({
+			recentTurnText: "Organize the verified project decision.",
+			existingMemory: "Known decision text",
+			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
+			complete: async () => ({
+				text: '```json\n{"writes":[{"kind":"okf_organize","type":"Design Decision","title":"Artifact output","description":"Large output uses artifacts.","scope":"project","text":"Store large output as artifacts.","sourceText":"Known decision text","evidenceRefs":["transcript:entry-2"]}]}\n```',
+				usage: defaultUsage,
+				stopReason: "stop",
+			}),
+		});
+		expect(result.writes[0]).toMatchObject({ kind: "okf_organize", sourceText: "Known decision text" });
+	});
+
+	it("rejects organization unless sourceText is an exact current hot-memory fact", async () => {
+		const result = await new ReflectionEngine().reflect({
+			recentTurnText: "Organize a claimed decision.",
+			existingMemory: "Different current decision text",
+			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
+			complete: async () => ({
+				text: '```json\n{"writes":[{"kind":"okf_organize","type":"Design Decision","title":"Artifact output","description":"Large output uses artifacts.","scope":"project","text":"Store large output as artifacts.","sourceText":"Missing decision text","evidenceRefs":["transcript:entry-2"]}]}\n```',
+				usage: defaultUsage,
+				stopReason: "stop",
+			}),
+		});
+
+		expect(result.writes).toEqual([]);
+	});
+
+	it("rejects oversized structured memory fields at the reflection boundary", async () => {
+		const result = await new ReflectionEngine().reflect({
+			recentTurnText: "Store a decision.",
+			existingMemory: "",
+			plan: { act: "reflect", reason: "test", tokenBudget: 1000 },
+			complete: async () => ({
+				text: `\`\`\`json\n${JSON.stringify({
+					writes: [
+						{
+							kind: "okf_add",
+							type: "Design Decision",
+							title: "x".repeat(300),
+							description: "bounded",
+							scope: "project",
+							text: "body",
+							evidenceRefs: ["transcript:entry-3"],
+						},
+					],
+				})}\n\`\`\``,
+				usage: defaultUsage,
+				stopReason: "stop",
+			}),
+		});
+
+		expect(result.writes).toEqual([]);
 	});
 
 	it("gracefully falls back on malformed or missing json responses", async () => {

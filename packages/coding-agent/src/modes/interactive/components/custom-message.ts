@@ -1,8 +1,23 @@
 import type { CustomMessage } from "@caupulican/pi-agent-core";
 import type { TextContent } from "@caupulican/pi-ai";
-import type { Component } from "@caupulican/pi-tui";
-import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@caupulican/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	Spacer,
+	Text,
+	truncateToWidth,
+} from "@caupulican/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
+import {
+	type BackgroundActivitySummaryContract,
+	type BackgroundActivitySummaryItem,
+	createBackgroundActivitySummaryContract,
+	isBackgroundActivitySummaryContract,
+} from "../../../core/foreground-terminal-handoff-controller.ts";
+import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { renderTitleBadge } from "./tool-title.ts";
 
@@ -56,6 +71,13 @@ export class CustomMessageComponent extends Container {
 		}
 		this.removeChild(this.box);
 
+		const backgroundSummary = formatBackgroundActivitySummary(this.message);
+		if (backgroundSummary) {
+			this.customComponent = new BackgroundActivitySummaryComponent(backgroundSummary);
+			this.addChild(this.customComponent);
+			return;
+		}
+
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
 			try {
@@ -96,4 +118,147 @@ export class CustomMessageComponent extends Container {
 			}),
 		);
 	}
+}
+
+function boundedIds(ids: readonly string[], totalCount: number): string {
+	const shown = ids.slice(0, 4);
+	const omitted = Math.max(0, totalCount - shown.length);
+	return `[${shown.join(", ")}${omitted > 0 ? `, +${omitted}` : ""}]`;
+}
+
+interface BackgroundActivitySummary {
+	text: string;
+	status: "success" | "warning" | "error";
+}
+
+class BackgroundActivitySummaryComponent implements Component {
+	private readonly summary: BackgroundActivitySummary;
+
+	constructor(summary: BackgroundActivitySummary) {
+		this.summary = summary;
+	}
+
+	render(width: number): string[] {
+		const line = `${theme.fg(this.summary.status, "•")} ${theme.fg("muted", this.summary.text)}`;
+		return [truncateToWidth(line, Math.max(1, width), "…")];
+	}
+
+	invalidate(): void {}
+}
+
+function noun(count: number, singular: string): string {
+	return count === 1 ? singular : `${singular}s`;
+}
+
+function formatCountedStatus(
+	count: number,
+	singularNoun: string,
+	singularVerb: string,
+	pluralVerb: string,
+	ids: readonly string[],
+): string | undefined {
+	if (count === 0) return undefined;
+	const verb = count === 1 ? singularVerb : pluralVerb;
+	const idsText = ids.length > 0 ? ` ${boundedIds(ids, count)}` : "";
+	return `${count} ${noun(count, singularNoun)} ${verb}${idsText}`;
+}
+
+function fallbackBackgroundActivitySummary(kind: "agent" | "task"): BackgroundActivitySummary {
+	const singularNoun = kind === "agent" ? "agent" : "background task";
+	return {
+		text: `Background ${singularNoun} activity unavailable`,
+		status: "warning",
+	};
+}
+
+function recordSummaryItems(
+	kind: "agent" | "task",
+	records: readonly Record<string, unknown>[],
+): BackgroundActivitySummaryItem[] | undefined {
+	const items: BackgroundActivitySummaryItem[] = [];
+	for (const record of records) {
+		const id = kind === "agent" ? record.laneId : record.taskId;
+		if (typeof id !== "string" || id.length === 0 || typeof record.status !== "string") return undefined;
+		if (kind === "agent") {
+			const claimNeedsReview = isPlainRecord(record.claim) && record.claim.parentReviewRequired === true;
+			const status =
+				record.status === "failed" || record.status === "timeout" || record.status === "budget_exhausted"
+					? "failed"
+					: record.status === "canceled"
+						? "canceled"
+						: claimNeedsReview || record.status === "partial" || record.status === "blocked"
+							? "attention"
+							: record.status === "succeeded"
+								? "success"
+								: undefined;
+			if (!status) return undefined;
+			items.push({ id, status });
+			continue;
+		}
+		if (record.status !== "completed" && record.status !== "failed" && record.status !== "canceled") return undefined;
+		items.push({
+			id,
+			status: record.status === "failed" ? "failed" : record.status === "canceled" ? "canceled" : "success",
+		});
+	}
+	return items;
+}
+
+function readSummaryContract(
+	message: CustomMessage<unknown>,
+	kind: "agent" | "task",
+	items: readonly BackgroundActivitySummaryItem[] | undefined,
+): BackgroundActivitySummaryContract | undefined {
+	if (isPlainRecord(message.details) && isBackgroundActivitySummaryContract(message.details.summary)) {
+		const summary = message.details.summary;
+		if (summary.kind !== kind || !items || summary.totalCount < items.length) return undefined;
+		const includedCounts = {
+			attention: items.filter((item) => item.status === "attention").length,
+			failed: items.filter((item) => item.status === "failed").length,
+			canceled: items.filter((item) => item.status === "canceled").length,
+		};
+		if (
+			summary.attentionCount < includedCounts.attention ||
+			summary.failedCount < includedCounts.failed ||
+			summary.canceledCount < includedCounts.canceled
+		) {
+			return undefined;
+		}
+		return summary;
+	}
+	return items && items.length > 0 ? createBackgroundActivitySummaryContract(kind, items) : undefined;
+}
+
+function formatBackgroundActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
+	const kind =
+		message.customType === "background-worker-completion"
+			? "agent"
+			: message.customType === "background-tool-completion"
+				? "task"
+				: undefined;
+	if (!kind) return undefined;
+	if (!isPlainRecord(message.details) || !Array.isArray(message.details.records))
+		return fallbackBackgroundActivitySummary(kind);
+	if (message.details.records.some((record) => !isPlainRecord(record))) return fallbackBackgroundActivitySummary(kind);
+	const records = message.details.records as Record<string, unknown>[];
+	const items = recordSummaryItems(kind, records);
+	const summary = readSummaryContract(message, kind, items);
+	if (!summary || !items) return fallbackBackgroundActivitySummary(kind);
+	const nounName = kind === "agent" ? "agent" : "background task";
+	const attentionIds = items.filter((item) => item.status === "attention").map((item) => item.id);
+	const failedIds = items.filter((item) => item.status === "failed").map((item) => item.id);
+	const canceledIds = items.filter((item) => item.status === "canceled").map((item) => item.id);
+	const text = [
+		`${summary.totalCount} ${noun(summary.totalCount, nounName)} finished`,
+		formatCountedStatus(summary.attentionCount, nounName, "needs verification", "need verification", attentionIds),
+		formatCountedStatus(summary.failedCount, nounName, "failed", "failed", failedIds),
+		formatCountedStatus(summary.canceledCount, nounName, "canceled", "canceled", canceledIds),
+	]
+		.filter((part): part is string => part !== undefined)
+		.join(" | ");
+	return {
+		text,
+		status:
+			summary.failedCount > 0 ? "error" : summary.attentionCount + summary.canceledCount > 0 ? "warning" : "success",
+	};
 }

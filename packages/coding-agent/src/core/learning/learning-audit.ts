@@ -16,7 +16,13 @@ import type { ReflectionWrite } from "./reflection-engine.ts";
  * `rollbackLearningWrite` can execute the inverse operation.
  */
 
-export type LearningRollbackKind = "memory_remove" | "memory_restore" | "memory_add" | "archive_skill";
+export type LearningRollbackKind =
+	| "memory_remove"
+	| "memory_restore"
+	| "memory_add"
+	| "okf_remove"
+	| "okf_organize"
+	| "archive_skill";
 
 export interface LearningRollbackPlan {
 	kind: LearningRollbackKind;
@@ -24,6 +30,10 @@ export interface LearningRollbackPlan {
 	target?: string;
 	/** Original text to restore (memory_restore/memory_add). */
 	previous?: string;
+	/** Compare-and-delete guard for a structured record created by this exact audited write. */
+	expectedDigest?: string;
+	/** Organization rollback only: false when the OKF record predated this hot-memory move. */
+	removeOkf?: boolean;
 	instructions: string;
 }
 
@@ -55,6 +65,10 @@ function describeWrite(write: ReflectionWrite): string {
 	switch (write.kind) {
 		case "memory_add":
 			return `Add ${write.section} memory: ${write.text}`;
+		case "okf_add":
+			return `Add OKF ${write.type}: ${write.title}`;
+		case "okf_organize":
+			return `Organize MEMORY fact into OKF ${write.type}: ${write.title}`;
 		case "memory_replace":
 			return `Replace memory "${write.target}" with "${write.text}"`;
 		case "memory_remove":
@@ -86,6 +100,8 @@ export function contradictionsForReflectionWrite(write: ReflectionWrite): number
 		case "memory_remove":
 			return 1;
 		case "memory_add":
+		case "okf_add":
+		case "okf_organize":
 		case "promote_skill":
 			return 0;
 	}
@@ -98,6 +114,20 @@ export function rollbackPlanForReflectionWrite(write: ReflectionWrite): Learning
 				kind: "memory_remove",
 				target: write.text,
 				instructions: `Remove the added ${write.section} memory text.`,
+			};
+		case "okf_add":
+			return {
+				kind: "okf_remove",
+				target: `${write.type}\0${write.title}`,
+				instructions: "Remove the added structured OKF memory record.",
+			};
+		case "okf_organize":
+			return {
+				kind: "okf_organize",
+				target: `${write.type}\0${write.title}`,
+				previous: write.sourceText,
+				removeOkf: true,
+				instructions: "Restore the exact hot-memory source first, then remove only the audited OKF record.",
 			};
 		case "memory_replace":
 			return {
@@ -122,7 +152,14 @@ export function rollbackPlanForReflectionWrite(write: ReflectionWrite): Learning
 }
 
 const AUDIT_ACTIONS: readonly string[] = ["apply", "apply_failed", "propose", "rollback"];
-const ROLLBACK_KINDS: readonly string[] = ["memory_remove", "memory_restore", "memory_add", "archive_skill"];
+const ROLLBACK_KINDS: readonly string[] = [
+	"memory_remove",
+	"memory_restore",
+	"memory_add",
+	"okf_remove",
+	"okf_organize",
+	"archive_skill",
+];
 const LAYERS: readonly string[] = ["memory", "skill", "prompt", "extension", "tool", "script", "settings", "source"];
 
 function isOptionalString(value: unknown): boolean {
@@ -134,6 +171,8 @@ function isLearningRollbackPlan(value: unknown): value is LearningRollbackPlan {
 	const plan = value as Record<string, unknown>;
 	if (typeof plan.kind !== "string" || !ROLLBACK_KINDS.includes(plan.kind)) return false;
 	if (!isOptionalString(plan.target) || !isOptionalString(plan.previous)) return false;
+	if (!isOptionalString(plan.expectedDigest)) return false;
+	if (plan.removeOkf !== undefined && typeof plan.removeOkf !== "boolean") return false;
 	return typeof plan.instructions === "string";
 }
 

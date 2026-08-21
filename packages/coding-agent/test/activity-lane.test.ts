@@ -93,7 +93,7 @@ describe("activity lane", () => {
 		lane.dispose();
 	});
 
-	it("uses a red terminal state for failed workers and expires it", () => {
+	it("does not project worker terminals before the delivery owner resolves their read receipt", () => {
 		vi.useFakeTimers();
 		const lane = new ActivityLaneComponent(theme, () => {});
 		lane.replaceCanonical("session", {
@@ -112,10 +112,6 @@ describe("activity lane", () => {
 			],
 		});
 
-		expect(lane.getItems()).toEqual([
-			expect.objectContaining({ kind: "worker", status: "failure", label: "failed · Verifier" }),
-		]);
-		vi.advanceTimersByTime(2_000);
 		expect(lane.getItems()).toEqual([]);
 		lane.dispose();
 	});
@@ -219,6 +215,20 @@ describe("activity lane slots", () => {
 		expect(text).toContain("1 python");
 		expect(text).toContain("+1");
 		expect(text).not.toContain("tool-task");
+	});
+
+	it("separates running and queued agents in the shared counter line", () => {
+		const items = projectActivityLane({
+			laneRecords: [
+				{ laneId: "worker-1", type: "worker", status: "running" },
+				{ laneId: "worker-2", type: "worker", status: "running" },
+				{ laneId: "worker-3", type: "worker", status: "queued" },
+			],
+		}).active;
+		const text = render(items, 100);
+
+		expect(text).toContain("2 agents running");
+		expect(text).toContain("1 agent queued");
 	});
 
 	it("normalizes equivalent foreground and background tool tags through one aggregation path", () => {

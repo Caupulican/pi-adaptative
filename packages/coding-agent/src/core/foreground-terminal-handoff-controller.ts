@@ -12,6 +12,71 @@ import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
 
+export type BackgroundActivitySummaryKind = "agent" | "task";
+export type BackgroundActivitySummaryStatus = "success" | "attention" | "failed" | "canceled";
+
+export interface BackgroundActivitySummaryItem {
+	id: string;
+	status: BackgroundActivitySummaryStatus;
+}
+
+/** Provider-neutral counts retained when the detailed handoff is bounded. */
+export interface BackgroundActivitySummaryContract {
+	kind: BackgroundActivitySummaryKind;
+	totalCount: number;
+	attentionCount: number;
+	failedCount: number;
+	canceledCount: number;
+}
+
+export function createBackgroundActivitySummaryContract(
+	kind: BackgroundActivitySummaryKind,
+	items: readonly BackgroundActivitySummaryItem[],
+): BackgroundActivitySummaryContract {
+	return {
+		kind,
+		totalCount: items.length,
+		attentionCount: items.filter((item) => item.status === "attention").length,
+		failedCount: items.filter((item) => item.status === "failed").length,
+		canceledCount: items.filter((item) => item.status === "canceled").length,
+	};
+}
+
+export function isBackgroundActivitySummaryContract(value: unknown): value is BackgroundActivitySummaryContract {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const summary = value as Record<string, unknown>;
+	const counts = ["totalCount", "attentionCount", "failedCount", "canceledCount"] as const;
+	if (summary.kind !== "agent" && summary.kind !== "task") return false;
+	if (
+		counts.some(
+			(field) =>
+				typeof summary[field] !== "number" ||
+				!Number.isSafeInteger(summary[field]) ||
+				(summary[field] as number) < 0,
+		)
+	) {
+		return false;
+	}
+	const totalCount = summary.totalCount as number;
+	return (
+		totalCount > 0 &&
+		(summary.attentionCount as number) + (summary.failedCount as number) + (summary.canceledCount as number) <=
+			totalCount
+	);
+}
+
+function workerSummaryStatus(
+	record: Pick<WorkerTerminalHandoffRecord, "status">,
+	claimNeedsReview: boolean,
+): BackgroundActivitySummaryStatus {
+	if (record.status === "failed" || record.status === "timeout" || record.status === "budget_exhausted") {
+		return "failed";
+	}
+	if (record.status === "canceled") return "canceled";
+	if (claimNeedsReview || record.status === "partial" || record.status === "blocked") return "attention";
+	return "success";
+}
+
 interface ForegroundTerminalHandoffControllerDeps {
 	foreground: ForegroundRecoveryController;
 	isDisposed(): boolean;
@@ -45,10 +110,10 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			parentReviewRequired?: boolean;
 		};
 	}[],
-	options?: { wakeParent?: boolean },
+	options?: { wakeParent?: boolean; totalCount?: number },
 ): string {
 	const included = records.slice(0, 8);
-	const omitted = records.length - included.length;
+	const omitted = Math.max(0, (options?.totalCount ?? records.length) - included.length);
 	const wakeParent = options?.wakeParent ?? true;
 	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
 	return [
@@ -108,17 +173,24 @@ export class ForegroundTerminalHandoffController {
 	}
 
 	async notifyWorkers(records: readonly WorkerTerminalHandoffRecord[]): Promise<void> {
-		if (records.length === 0) return;
+		if (records.every((record) => record.observedAt !== undefined)) return;
 		this.assertLive("worker terminal handoff was persisted");
 		const lease = await this.deps.foreground.acquireSubmission();
 		let releaseLease = true;
 		try {
 			this.assertLive("worker terminal handoff was persisted");
-			const included = records.slice(0, 8).map((record) => {
+			const unread = records.filter((record) => record.observedAt === undefined);
+			if (unread.length === 0) return;
+			const prepared = unread.map((record, index) => {
 				const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId);
 				const claim = snapshot?.claim;
-				const outputArtifact = workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId));
+				const outputArtifact =
+					index < 8 ? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId)) : undefined;
 				return {
+					summaryItem: {
+						id: record.laneId,
+						status: workerSummaryStatus(record, claim?.parentReviewRequired === true),
+					},
 					laneId: record.laneId,
 					status: record.status,
 					...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
@@ -136,18 +208,28 @@ export class ForegroundTerminalHandoffController {
 						: {}),
 				};
 			});
+			const included = prepared.slice(0, 8).map(({ summaryItem: _summaryItem, ...record }) => record);
 			const goal = this.deps.getGoalStateSnapshot();
-			const wakeParent = records.some(
+			const wakeParent = unread.some(
 				(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
 			);
 			const message = {
 				customType: "background-worker-completion",
-				content: buildForegroundWorkerTerminalHandoffContent(included, { wakeParent }),
+				content: buildForegroundWorkerTerminalHandoffContent(included, {
+					wakeParent,
+					totalCount: unread.length,
+				}),
 				display: true,
-				details: { records: included },
+				details: {
+					records: included,
+					summary: createBackgroundActivitySummaryContract(
+						"agent",
+						prepared.map((entry) => entry.summaryItem),
+					),
+				},
 			};
 			if (wakeParent) {
-				const goalId = records.find((record) => record.goalId === goal?.goalId)?.goalId;
+				const goalId = unread.find((record) => record.goalId === goal?.goalId)?.goalId;
 				const started = await this.deps.startCustomMessageTurn(message, lease, goalId);
 				this.releaseAfterTurn(started.completion, lease, "worker terminal handoff turn");
 				releaseLease = false;
@@ -160,13 +242,34 @@ export class ForegroundTerminalHandoffController {
 	}
 
 	async notifyTools(records: readonly BackgroundToolTaskRecord[], wakeParent: boolean): Promise<void> {
-		if (!wakeParent) return;
+		if (!wakeParent || records.every((record) => record.observedAt !== undefined)) return;
 		this.assertLive("background tool terminal handoff was delivered");
 		const lease = await this.deps.foreground.acquireSubmission();
 		let releaseLease = true;
 		try {
 			this.assertLive("background tool terminal handoff was delivered");
-			const started = await this.deps.startCustomMessageTurn(createBackgroundToolTerminalMessage(records), lease);
+			const unread = records.filter((record) => record.observedAt === undefined);
+			if (unread.length === 0) return;
+			const toolMessage = createBackgroundToolTerminalMessage(unread);
+			const message = {
+				...toolMessage,
+				details: {
+					...toolMessage.details,
+					summary: createBackgroundActivitySummaryContract(
+						"task",
+						unread.map((record) => ({
+							id: record.taskId,
+							status:
+								record.status === "failed"
+									? ("failed" as const)
+									: record.status === "canceled"
+										? ("canceled" as const)
+										: ("success" as const),
+						})),
+					),
+				},
+			};
+			const started = await this.deps.startCustomMessageTurn(message, lease);
 			this.releaseAfterTurn(started.completion, lease, "background tool terminal handoff turn");
 			releaseLease = false;
 		} finally {

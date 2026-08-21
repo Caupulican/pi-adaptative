@@ -35,6 +35,14 @@ describe("shouldQueryLongTermMemory", () => {
 		).toMatchObject({ shouldQuery: false });
 	});
 
+	it("proactively queries local OKF for substantial ordinary turns without opening external providers", () => {
+		expect(shouldQueryLongTermMemory({ latestUserText: "implement the package decision from yesterday" })).toEqual({
+			shouldQuery: true,
+			reason: "proactive_local_turn",
+			shouldQueryExternal: false,
+		});
+	});
+
 	it("fails closed on disabled budgets and secret-like queries", () => {
 		expect(
 			shouldQueryLongTermMemory({ latestUserText: "recall", budget: resolveMemoryPromptBudget({}) }),

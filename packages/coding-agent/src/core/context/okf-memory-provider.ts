@@ -1,5 +1,7 @@
-import { readdirSync, readFileSync, type Stats, statSync } from "node:fs";
+import { lstatSync, opendirSync } from "node:fs";
 import { join, relative } from "node:path";
+import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import type { MemoryScope } from "./context-item.ts";
 import { fetchLocalMemoryItem, searchLocalMemoryItems, tokenOverlapScore } from "./local-memory-search.ts";
 import type {
@@ -23,6 +25,9 @@ export interface OkfMemoryProviderOptions {
 	providerId?: string;
 	maxFileBytes?: number;
 	maxDocuments?: number;
+	/** Current workspace identity. When set, foreign project-scoped records are excluded. */
+	projectId?: string;
+	projectRoot?: string;
 }
 
 export interface OkfMemoryLoadEntry {
@@ -38,6 +43,8 @@ export interface OkfMemoryLoadReport {
 
 const DEFAULT_MAX_FILE_BYTES = 512_000;
 const DEFAULT_MAX_DOCUMENTS = 1_000;
+const MAX_DIRECTORY_ENTRIES = 4_096;
+const MAX_DIRECTORIES = 256;
 const OKF_EXTENSIONS = [".okf.md", ".okf", ".md"];
 
 const OKF_PROVIDER_CAPABILITIES: MemoryProviderCapabilities = {
@@ -60,32 +67,67 @@ function isOkfPath(path: string): boolean {
 function walkFiles(rootDir: string, maxDocuments: number): string[] {
 	const files: string[] = [];
 	const pending = [rootDir];
-	while (pending.length > 0 && files.length < maxDocuments) {
+	let visitedDirectories = 0;
+	try {
+		const root = lstatSync(rootDir);
+		if (!root.isDirectory() || root.isSymbolicLink()) return files;
+	} catch {
+		return files;
+	}
+	while (pending.length > 0 && files.length < maxDocuments && visitedDirectories < MAX_DIRECTORIES) {
 		const dir = pending.pop();
 		if (dir === undefined) continue;
-		let entries: string[];
+		visitedDirectories += 1;
+		let directory: ReturnType<typeof opendirSync>;
 		try {
-			entries = readdirSync(dir).sort();
+			directory = opendirSync(dir);
 		} catch {
 			continue;
 		}
-		for (const entry of entries) {
-			const path = join(dir, entry);
-			let stat: Stats;
-			try {
-				stat = statSync(path);
-			} catch {
-				continue;
+		try {
+			const entries: Array<{ name: string; directory: boolean; file: boolean }> = [];
+			for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+				if (entries.length >= MAX_DIRECTORY_ENTRIES) break;
+				if (entry.isSymbolicLink()) continue;
+				entries.push({ name: entry.name, directory: entry.isDirectory(), file: entry.isFile() });
 			}
-			if (stat.isDirectory()) {
-				pending.push(path);
-			} else if (stat.isFile() && isOkfPath(path)) {
-				files.push(path);
-				if (files.length >= maxDocuments) break;
+			entries.sort((left, right) => left.name.localeCompare(right.name));
+			for (const entry of entries) {
+				const path = join(dir, entry.name);
+				if (entry.directory) pending.push(path);
+				else if (entry.file && isOkfPath(path)) {
+					files.push(path);
+					if (files.length >= maxDocuments) break;
+				}
 			}
+		} finally {
+			directory.closeSync();
 		}
 	}
 	return files;
+}
+
+function isPortableAbsolutePath(value: string): boolean {
+	return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+function belongsToSelectedProject(
+	entry: OkfMemoryLoadEntry,
+	options: Pick<OkfMemoryProviderOptions, "projectId" | "projectRoot">,
+): boolean {
+	const item = entry.parsed.item;
+	if (item === undefined) return false;
+	if (options.projectId === undefined) return true;
+	if (item.scope === "user" || item.scope === "global") return true;
+	if (item.scope !== "project") return false;
+	if (entry.parsed.projectId !== undefined) return entry.parsed.projectId === options.projectId.toLowerCase();
+	const normalizedRelativePath = entry.relativePath.replaceAll("\\", "/");
+	if (normalizedRelativePath.startsWith(`projects/${options.projectId.toLowerCase()}/`)) return true;
+	const projectRoot = options.projectRoot;
+	if (projectRoot === undefined) return false;
+	return item.evidenceRefs.some(
+		(ref) => ref.type === "external" && isPortableAbsolutePath(ref.id) && isPathWithinScope(ref.id, projectRoot),
+	);
 }
 
 function scoreItem(queryTokens: ReadonlySet<string>, item: MemoryItem): number {
@@ -104,17 +146,9 @@ export function loadOkfMemoryBundle(options: OkfMemoryProviderOptions): OkfMemor
 	const diagnostics: Array<{ path: string; diagnostics: OkfMemoryDiagnostic[] }> = [];
 
 	for (const path of walkFiles(options.rootDir, maxDocuments)) {
-		let stat: Stats;
-		try {
-			stat = statSync(path);
-		} catch {
-			continue;
-		}
-		if (stat.size > maxFileBytes) continue;
-
 		let content: string;
 		try {
-			content = readFileSync(path, "utf8");
+			content = readBoundedTextFileSync(path, maxFileBytes, "OKF memory document");
 		} catch {
 			continue;
 		}
@@ -126,7 +160,8 @@ export function loadOkfMemoryBundle(options: OkfMemoryProviderOptions): OkfMemor
 			fallbackId: relativePath,
 		});
 		if (parsed.diagnostics.length > 0) diagnostics.push({ path, diagnostics: parsed.diagnostics });
-		if (parsed.item !== undefined) entries.push({ path, relativePath, parsed });
+		const entry = { path, relativePath, parsed };
+		if (parsed.item !== undefined && belongsToSelectedProject(entry, options)) entries.push(entry);
 	}
 
 	return { entries, diagnostics };

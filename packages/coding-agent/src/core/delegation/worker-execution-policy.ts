@@ -153,8 +153,11 @@ export function buildWorkerExecutionPlan(args: {
 		toolManifests,
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
 		readPaths: readEnabled
-			? (args.requestedReadPaths ?? [args.cwd]).map((entry) =>
-					path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
+			? intersectPathScopes(
+					[path.resolve(args.cwd)],
+					(args.requestedReadPaths ?? [args.cwd]).map((entry) =>
+						path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
+					),
 				)
 			: [],
 		writePaths: writeEnabled

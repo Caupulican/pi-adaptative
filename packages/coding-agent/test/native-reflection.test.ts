@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { getModel } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -64,6 +64,7 @@ describe("native reflection pass — write application + accounting", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -138,5 +139,57 @@ describe("native reflection pass — write application + accounting", () => {
 		expect(called).toBe(false);
 		expect(session.getSpawnedUsage().reports).toBe(0);
 		session.dispose();
+	});
+
+	it("denies reflection to a managed worker even when isChildSession is explicitly false", async () => {
+		vi.stubEnv("PI_SESSION_ROLE", "worker");
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		settingsManager.setLearningPolicySettings({ enabled: false });
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+			isChildSession: false,
+		});
+		await session.bindExtensions({});
+		let called = false;
+		(session.agent as unknown as { streamFn: unknown }).streamFn = async () => {
+			called = true;
+			return { result: async () => reply("{}") } as never;
+		};
+
+		const result = await session.runReflectionPass({
+			signals: {
+				trigger: "corrective",
+				toolCallCount: 0,
+				hadCorrection: true,
+				contextHeadroomPct: 90,
+				usefulLately: 0,
+			},
+			recentTurnText: "worker-side durable instruction",
+		});
+
+		expect(result).toBeNull();
+		expect(called).toBe(false);
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toBe("Deploy with npm run release:patch\n");
+		let curated = false;
+		(
+			session as unknown as {
+				_skillCuratorInstance: { autoArchiveStale(): Promise<string[]> };
+			}
+		)._skillCuratorInstance = {
+			autoArchiveStale: async () => {
+				curated = true;
+				return ["worker-owned-skill"];
+			},
+		};
+		expect(await session.runStartupSkillCuration()).toEqual([]);
+		expect(curated).toBe(false);
+		await session.disposeAndWait();
 	});
 });

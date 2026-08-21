@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryManager } from "../src/core/memory/memory-manager.ts";
@@ -488,6 +488,169 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		expect((result as any).details.success).toBe(false);
 		expect((result as any).details.error).toContain("Memory budget exceeded");
 		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8").trim()).toBe("");
+	});
+
+	it("should author structured project OKF memory without funneling it into MEMORY.md", async () => {
+		const provider = new FileStoreProvider();
+		const ctx: MemoryLifecycleContext = {
+			agentDir,
+			cwd: testDir,
+			isChildSession: false,
+		};
+
+		await provider.initialize("test-session", ctx);
+		const memoryTool = provider.getToolDefinitions().find((tool) => tool.name === "memory");
+		const result = await memoryTool!.execute(
+			"call-okf",
+			{
+				action: "add",
+				target: "okf",
+				type: "Design Decision",
+				title: "Use bounded hot memory",
+				description: "Project decisions live in indexed OKF records.",
+				scope: "project",
+				content: "Keep MEMORY.md small and put durable design decisions in OKF.",
+				tags: ["memory", "architecture"],
+				evidenceRefs: ["transcript:decision-1"],
+			},
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(result.details).toEqual(expect.objectContaining({ success: true }));
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8").trim()).toBe("");
+		const okfFiles = readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+			String(entry).endsWith(".okf.md"),
+		);
+		expect(okfFiles).toHaveLength(1);
+		const okfPath = join(agentDir, "okf-memory", String(okfFiles[0]));
+		expect(readFileSync(okfPath, "utf-8")).toContain("type: Design Decision");
+	});
+
+	it("isolates same-title structured records for different project roots", async () => {
+		const firstCwd = join(testDir, "project-a");
+		const secondCwd = join(testDir, "project-b");
+		mkdirSync(join(firstCwd, ".git"), { recursive: true });
+		mkdirSync(join(secondCwd, ".git"), { recursive: true });
+		const first = new FileStoreProvider();
+		const second = new FileStoreProvider();
+		await first.initialize("first", { agentDir, cwd: firstCwd, isChildSession: false });
+		await second.initialize("second", { agentDir, cwd: secondCwd, isChildSession: false });
+		const write = async (provider: FileStoreProvider, content: string) =>
+			provider.getToolDefinitions()[0]!.execute(
+				"call-okf",
+				{
+					action: "add",
+					target: "okf",
+					type: "Design Decision",
+					title: "Shared title",
+					description: content,
+					scope: "project",
+					content,
+					evidenceRefs: ["transcript:project-isolation"],
+				},
+				undefined,
+				undefined,
+				{} as never,
+			);
+
+		expect((await write(first, "first project")).details).toEqual(expect.objectContaining({ success: true }));
+		expect((await write(second, "second project")).details).toEqual(expect.objectContaining({ success: true }));
+		const okfFiles = readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+			String(entry).endsWith(".okf.md"),
+		);
+		expect(okfFiles).toHaveLength(2);
+	});
+
+	it("rejects oversized structured fields even when execute is called directly", async () => {
+		const provider = new FileStoreProvider();
+		await provider.initialize("test-session", { agentDir, cwd: testDir, isChildSession: false });
+		const result = await provider.getToolDefinitions()[0]!.execute(
+			"call-oversized-okf",
+			{
+				action: "add",
+				target: "okf",
+				type: "Design Decision",
+				title: "x".repeat(300),
+				description: "bounded",
+				scope: "project",
+				content: "body",
+				evidenceRefs: ["transcript:bounds"],
+			},
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(result.details).toEqual(expect.objectContaining({ success: false }));
+		expect(readdirSync(agentDir, { recursive: true }).filter((entry) => String(entry).endsWith(".okf.md"))).toEqual(
+			[],
+		);
+	});
+
+	it.skipIf(process.platform === "win32")("rejects an OKF root symlink that escapes the agent directory", async () => {
+		const outside = join(testDir, "outside");
+		mkdirSync(outside, { recursive: true });
+		symlinkSync(outside, join(agentDir, "okf-memory"), "dir");
+		const provider = new FileStoreProvider();
+		await provider.initialize("test-session", { agentDir, cwd: testDir, isChildSession: false });
+		const result = await provider.getToolDefinitions()[0]!.execute(
+			"call-symlink-okf",
+			{
+				action: "add",
+				target: "okf",
+				type: "Design Decision",
+				title: "Escape attempt",
+				description: "Must stay inside the agent root.",
+				scope: "project",
+				content: "body",
+				evidenceRefs: ["transcript:symlink"],
+			},
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(result.details).toEqual(expect.objectContaining({ success: false }));
+		expect(readdirSync(outside)).toEqual([]);
+	});
+
+	it("keeps both copies when hot-memory cleanup is interrupted after the OKF write", async () => {
+		const provider = new FileStoreProvider({
+			beforeOrganizeHotRemoval: () => {
+				const memoryPath = join(agentDir, "MEMORY.md");
+				writeFileSync(memoryPath, `${readFileSync(memoryPath, "utf-8")}Concurrent edit\n`, "utf-8");
+			},
+		});
+		await provider.initialize("test-session", { agentDir, cwd: testDir, isChildSession: false });
+		await provider
+			.getToolDefinitions()[0]!
+			.execute(
+				"seed-hot-memory",
+				{ action: "add", target: "memory", content: "Decision to organize" },
+				undefined,
+				undefined,
+				{} as never,
+			);
+
+		const result = await provider.applyStructuredReflectionWrite({
+			kind: "okf_organize",
+			type: "Design Decision",
+			title: "Loss-safe organization",
+			description: "OKF creation precedes exact hot-memory cleanup.",
+			text: "Structured decision body.",
+			sourceText: "Decision to organize",
+			evidenceRefs: ["transcript:loss-safe"],
+		});
+
+		expect(result).toEqual(expect.objectContaining({ applied: true, created: true, sourceRemoved: false }));
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Decision to organize");
+		expect(
+			readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+				String(entry).endsWith(".okf.md"),
+			),
+		).toHaveLength(1);
 	});
 
 	it("should detect out-of-band drift, back up the file, and refuse to overwrite", async () => {

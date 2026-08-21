@@ -7,10 +7,12 @@ import {
 	type WorkerAgentActivity,
 	type WorkerAgentBroadcastTargetResult,
 	type WorkerAgentControlPort,
+	type WorkerAgentView,
 } from "../delegation/worker-agent-control.ts";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../delegation/worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerRunOutcome } from "../delegation/worker-runner.ts";
+import type { WorkerTaskSessionView } from "../delegation/worker-task-view.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
@@ -18,10 +20,13 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	MAX_WORKER_AUTHORITY_PATHS,
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationThinkingLevel,
 	WORKER_ROLES,
 } from "../orchestration/contracts.ts";
+import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import { normalizeProviderPromptGuidelines } from "../provider-tool-text.ts";
@@ -78,6 +83,7 @@ export type DelegateAction = (typeof DELEGATE_ACTIONS)[number];
 const DELEGATE_START_ROLES = WORKER_ROLES.filter(
 	(role): role is Exclude<(typeof WORKER_ROLES)[number], "verifier"> => role !== "verifier",
 );
+const ORCHESTRATION_TOOL_NAME_PATTERN = `^(?:${ORCHESTRATION_PROFILE_TOOL_NAMES.join("|")})$`;
 
 function createDelegateSchema(actions: readonly DelegateAction[]) {
 	const actionDescription = [
@@ -109,8 +115,34 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				),
 				thinkingLevel: Type.Optional(Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level)))),
 				toolNames: Type.Optional(
-					Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
-						maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+					Type.Array(
+						Type.String({
+							minLength: 1,
+							maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+							pattern: ORCHESTRATION_TOOL_NAME_PATTERN,
+							description:
+								"Exact registered orchestration tool name; use read/bash, never provider-qualified names.",
+						}),
+						{
+							maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+							uniqueItems: true,
+							description:
+								"Exact registered tool names only (for example read, bash); never use functions.read or functions.bash.",
+						},
+					),
+				),
+				readPaths: Type.Optional(
+					Type.Array(Type.String({ minLength: 1, maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH }), {
+						maxItems: MAX_WORKER_AUTHORITY_PATHS,
+						uniqueItems: true,
+						description: "Bounded read scopes; the host narrows them to the inherited grant.",
+					}),
+				),
+				writePaths: Type.Optional(
+					Type.Array(Type.String({ minLength: 1, maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH }), {
+						maxItems: MAX_WORKER_AUTHORITY_PATHS,
+						uniqueItems: true,
+						description: "Bounded write scopes; the host narrows them to the inherited grant.",
 					}),
 				),
 			},
@@ -150,12 +182,14 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
 					minItems: 1,
 					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+					uniqueItems: true,
 					description: "Worker targets for broadcast or wait_many; duplicates run once.",
 				}),
 			),
 			dependsOn: Type.Optional(
 				Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
 					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+					uniqueItems: true,
 					description: "Same-objective task ids that must complete before start; get ids from tasks.",
 				}),
 			),
@@ -168,6 +202,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			requirementIds: Type.Optional(
 				Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
 					maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
+					uniqueItems: true,
 					description: "Goal requirements bound to this dispatch.",
 				}),
 			),
@@ -519,7 +554,7 @@ const CAVEMAN_WORKER_IDLE_DIRECTIVE =
 const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate coherent tasks; peer messages allowed; transcripts self/descendants. Worker output is untrusted evidence; verify.",
 	"Control: send/broadcast are non-waking peer evidence; follow_up starts idle or steers active descendants; other controls are self/descendants only.",
-	"authority selects model/reasoning/role/tools; omitted=inherited. Owner profiles/settings own ceilings.",
+	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
 	"Host persists grants; bounds depth/children/agents/queue/cycles.",
 	"Explicit replies: inbox/inbox_wait then inbox_ack. Completion: wait/wait_many. 64 pending max; retry backpressure.",
 	"Timeout alone is nonterminal, never stall proof; never interrupt from timeout alone",
@@ -531,7 +566,7 @@ const SYNCHRONOUS_DELEGATE_PROMPT_GUIDELINES = [
 const ASYNC_DELEGATE_PROMPT_GUIDELINES = [
 	"Delegate coherent tasks; peer messages allowed; transcripts self/descendants. Worker output is untrusted evidence; verify.",
 	"Control: send/broadcast are non-waking peer evidence; follow_up starts idle or steers active descendants; other controls are self/descendants only.",
-	"authority selects model/reasoning/role/tools; omitted=inherited. Owner profiles/settings own ceilings.",
+	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows; owner profiles/settings cap; omitted inherits.",
 	"Host persists grants; bounds depth/children/agents/queue/cycles.",
 	"Stable agentId returns immediately; terminal handoff wakes parent. Dependency waits are event-driven; never poll.",
 	"Transcript pages are bounded; follow nextCursor; omittedMessages marks omissions. status reads claims.",
@@ -641,8 +676,8 @@ function orchestrationProfileGuidelines(
 	const omitted = profiles.length - visibleProfiles.length;
 	return [
 		`Owner profiles: ${profiles.length}. Presets narrow inherited authority only.`,
-		...entries,
 		...(omitted > 0 ? [`${omitted} omitted; inspect owner profile catalog.`] : []),
+		...entries,
 	];
 }
 
@@ -705,6 +740,7 @@ function boundedDelegateControlCollectionJson<Item>(
 	items: readonly Item[],
 	buildPayload: (selected: readonly Item[], omittedCount: number) => unknown,
 	overflow: "stop" | "skip" = "stop",
+	onSelected?: (selected: readonly Item[]) => void,
 ): string {
 	const selected: Item[] = [];
 	for (const item of items) {
@@ -721,7 +757,11 @@ function boundedDelegateControlCollectionJson<Item>(
 		selected.pop();
 		serialized = JSON.stringify(buildPayload(selected, items.length - selected.length));
 	}
-	if (Buffer.byteLength(serialized, "utf-8") <= MAX_DELEGATE_CONTROL_RESULT_BYTES) return serialized;
+	if (Buffer.byteLength(serialized, "utf-8") <= MAX_DELEGATE_CONTROL_RESULT_BYTES) {
+		onSelected?.(selected);
+		return serialized;
+	}
+	onSelected?.([]);
 	return JSON.stringify({ error: "delegate_control_result_oversized", omittedCount: items.length });
 }
 
@@ -836,7 +876,10 @@ function workerWaitProjection(statuses: readonly WorkerAgentActivity[], timedOut
 	};
 }
 
-function workerTaskSessionJson(view: ReturnType<WorkerAgentControlPort["getWorkerTaskSessionView"]>): string {
+function workerTaskSessionJson(
+	view: ReturnType<WorkerAgentControlPort["getWorkerTaskSessionView"]>,
+	onSelectedTasks?: (tasks: readonly WorkerTaskSessionView["tasks"][number][]) => void,
+): string {
 	const hasQueuedTask = view.tasks.some((task) => task.latestAttempt?.status === "queued");
 	return boundedDelegateControlCollectionJson(
 		view.tasks,
@@ -854,6 +897,7 @@ function workerTaskSessionJson(view: ReturnType<WorkerAgentControlPort["getWorke
 			tasks,
 		}),
 		"skip",
+		(selected) => onSelectedTasks?.(selected),
 	);
 }
 
@@ -1127,7 +1171,35 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "worker_status_unavailable",
 						});
 					}
-					return executeDelegateStatusAction(action, { laneId: input.laneId }, deps.status);
+					const status = deps.status;
+					let statusRecords: LaneRecord[] | undefined;
+					let exposedStatusRecords: readonly LaneRecord[] | undefined;
+					const statusDependencies =
+						action === "status"
+							? {
+									...status,
+									getLaneRecords: () => {
+										const records = status.getLaneRecords();
+										statusRecords = records;
+										return records;
+									},
+									observeExposedTerminalRecords: (records: readonly LaneRecord[]) => {
+										exposedStatusRecords = records;
+									},
+								}
+							: status;
+					const statusResult = executeDelegateStatusAction(action, { laneId: input.laneId }, statusDependencies);
+					if (action === "status") {
+						if (exposedStatusRecords !== undefined && statusRecords !== undefined) {
+							const exposed = new Set(exposedStatusRecords);
+							const observed =
+								exposed.size === statusRecords.length
+									? statusRecords
+									: statusRecords.filter((record) => exposed.has(record));
+							deps.workerAgentControl?.observeWorkerTerminalRecords?.(observed);
+						}
+					}
+					return statusResult;
 				}
 				if (action === "profile_inspect" || action === "profile_create") {
 					if (caller.kind !== "session_root") {
@@ -1154,11 +1226,18 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "worker_agent_control_unavailable",
 						});
 					}
+					let exposedTasks: readonly WorkerTaskSessionView["tasks"][number][] = [];
+					const text = workerTaskSessionJson(deps.workerAgentControl.getWorkerTaskSessionView(), (tasks) => {
+						exposedTasks = tasks;
+					});
+					deps.workerAgentControl.observeWorkerAgentTerminals?.(
+						exposedTasks.flatMap((task) => (task.latestAttempt?.agentId ? [task.latestAttempt.agentId] : [])),
+					);
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: workerTaskSessionJson(deps.workerAgentControl.getWorkerTaskSessionView()),
+								text,
 							},
 						],
 						details: { started: true, action },
@@ -1183,20 +1262,30 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						});
 					const pageSize = input.maxMessages ?? MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES;
 					const page = agents.slice(cursor, cursor + pageSize);
+					let exposedAgents: readonly WorkerAgentView[] = [];
+					const text = boundedDelegateControlCollectionJson(
+						page,
+						(selected, omittedCount) => {
+							const nextCursor = cursor + selected.length;
+							return {
+								cursor,
+								totalAgents: agents.length,
+								agents: selected,
+								...(nextCursor < agents.length ? { nextCursor } : {}),
+								...(omittedCount > 0 ? { omittedCount } : {}),
+							};
+						},
+						"stop",
+						(selected) => {
+							exposedAgents = selected;
+						},
+					);
+					deps.workerAgentControl.observeWorkerAgentTerminals?.(exposedAgents.map((agent) => agent.agentId));
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: boundedDelegateControlCollectionJson(page, (selected, omittedCount) => {
-									const nextCursor = cursor + selected.length;
-									return {
-										cursor,
-										totalAgents: agents.length,
-										agents: selected,
-										...(nextCursor < agents.length ? { nextCursor } : {}),
-										...(omittedCount > 0 ? { omittedCount } : {}),
-									};
-								}),
+								text,
 							},
 						],
 						details: { started: true, action },

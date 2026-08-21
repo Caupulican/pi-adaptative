@@ -103,6 +103,14 @@ export function okfMemoryDir(agentDir: string): string {
 	return join(agentDir, "okf-memory");
 }
 
+/** `<agentDir>/okf-memory/projects/<project-key>` -- managed project-isolated OKF records. */
+export function okfProjectMemoryDir(agentDir: string, projectKey: string): string {
+	if (!/^[a-f0-9]{16}$/i.test(projectKey)) {
+		throw new TypeError("OKF project key must be a 16-character hexadecimal digest.");
+	}
+	return join(okfMemoryDir(agentDir), "projects", projectKey.toLowerCase());
+}
+
 /** `<agentDir>/state` -- durable machine-managed state. Deleting it loses real history, not just cache. */
 export function stateDir(agentDir: string): string {
 	return join(agentDir, "state");

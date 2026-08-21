@@ -30,6 +30,16 @@ export const PI_OKF_TYPES = [
 
 export type PiOkfType = (typeof PI_OKF_TYPES)[number];
 
+export const OKF_MEMORY_LIMITS = Object.freeze({
+	titleChars: 160,
+	descriptionChars: 600,
+	bodyChars: 8_000,
+	tagCount: 16,
+	tagChars: 80,
+	evidenceRefCount: 24,
+	evidenceRefChars: 600,
+});
+
 export type OkfMemoryDiagnosticCode =
 	| "missing_frontmatter"
 	| "invalid_frontmatter"
@@ -41,6 +51,7 @@ export type OkfMemoryDiagnosticCode =
 	| "missing_pi"
 	| "invalid_scope"
 	| "invalid_authority"
+	| "invalid_project_id"
 	| "invalid_evidence_refs";
 
 export interface OkfMemoryDiagnostic {
@@ -58,6 +69,7 @@ export interface ParsedOkfMemoryDocument {
 	item?: MemoryItem;
 	body: string;
 	diagnostics: OkfMemoryDiagnostic[];
+	projectId?: string;
 }
 
 export interface OkfMemoryDocumentInput {
@@ -69,6 +81,37 @@ export interface OkfMemoryDocumentInput {
 	tags?: string[];
 	timestamp?: string;
 	evidenceRefs?: string[];
+	/** Stable project identity for project-scoped managed records. */
+	projectId?: string;
+}
+
+/** One bounded validation path shared by reflection parsing and the durable OKF writer. */
+export function validateOkfMemoryDocumentInput(
+	input: OkfMemoryDocumentInput,
+	options: { projectOnly?: boolean; requireEvidence?: boolean } = {},
+): string[] {
+	const errors: string[] = [];
+	const boundedText = (value: string, maxChars: number, field: string) => {
+		if (value.trim().length === 0) errors.push(`${field} must not be empty`);
+		else if (value.length > maxChars) errors.push(`${field} exceeds ${maxChars} characters`);
+	};
+	boundedText(input.title, OKF_MEMORY_LIMITS.titleChars, "title");
+	boundedText(input.description, OKF_MEMORY_LIMITS.descriptionChars, "description");
+	boundedText(input.body, OKF_MEMORY_LIMITS.bodyChars, "body");
+	if (options.projectOnly && input.scope !== "project") errors.push("scope must be project");
+	if ((input.tags?.length ?? 0) > OKF_MEMORY_LIMITS.tagCount) {
+		errors.push(`tags exceeds ${OKF_MEMORY_LIMITS.tagCount} items`);
+	}
+	for (const tag of input.tags ?? []) boundedText(tag, OKF_MEMORY_LIMITS.tagChars, "tag");
+	const evidenceRefs = input.evidenceRefs ?? [];
+	if (options.requireEvidence && evidenceRefs.length === 0) errors.push("evidenceRefs must not be empty");
+	if (evidenceRefs.length > OKF_MEMORY_LIMITS.evidenceRefCount) {
+		errors.push(`evidenceRefs exceeds ${OKF_MEMORY_LIMITS.evidenceRefCount} items`);
+	}
+	for (const ref of evidenceRefs) boundedText(ref, OKF_MEMORY_LIMITS.evidenceRefChars, "evidenceRef");
+	if (new Set(input.tags ?? []).size !== (input.tags?.length ?? 0)) errors.push("tags must be unique");
+	if (new Set(evidenceRefs).size !== evidenceRefs.length) errors.push("evidenceRefs must be unique");
+	return errors;
 }
 
 export interface OkfProjectRulePromotionRequest {
@@ -186,6 +229,10 @@ export function parseOkfMemoryDocument(content: string, options: ParseOkfMemoryO
 	if (isRecordObject(pi) && pi.evidence_refs !== undefined && evidenceRefs === undefined) {
 		diagnostics.push({ code: "invalid_evidence_refs", message: "pi.evidence_refs must be a string array." });
 	}
+	const projectId = isRecordObject(pi) ? stringField(pi, "project_id") : undefined;
+	if (projectId !== undefined && !/^[a-f0-9]{16}$/i.test(projectId)) {
+		diagnostics.push({ code: "invalid_project_id", message: "pi.project_id must be a 16-character hex digest." });
+	}
 
 	if (
 		diagnostics.length > 0 ||
@@ -204,6 +251,7 @@ export function parseOkfMemoryDocument(content: string, options: ParseOkfMemoryO
 	return {
 		body,
 		diagnostics,
+		...(projectId ? { projectId: projectId.toLowerCase() } : {}),
 		item: {
 			id,
 			providerId,
@@ -231,6 +279,7 @@ export function formatOkfMemoryDocument(input: OkfMemoryDocumentInput): string {
 		pi: {
 			scope: input.scope,
 			authority: PI_OKF_AUTHORITY,
+			project_id: input.projectId,
 			evidence_refs: input.evidenceRefs ?? [],
 		},
 	};

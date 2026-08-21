@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Added
+
+- Added orchestrator-owned project OKF organization with proactive local recall, bounded read-only worker queries, and loss-safe audited rollback.
+
+### Changed
+
+- Unified foreground tools, background tasks, and delegated workers under compact `Performed N actions` activity counters with details available through Ctrl+T.
+
+### Fixed
+
+- Suppressed already-observed background completions and late duplicate parent wakes while retaining durable terminal handoffs for explicit verification.
+- Kept reflection and durable memory lifecycle writes exclusive to the main orchestrator, including managed-worker and Auto Learn subprocesses.
+- Isolated project OKF records and rejected unsafe paths, symlink traversal, oversized fields, conflicting overwrites, and stale rollback deletion.
+
 ## [0.94.0] - 2026-08-21
 
 ### Breaking Changes

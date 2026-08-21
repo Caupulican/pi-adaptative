@@ -63,6 +63,8 @@ export interface DelegateStatusDependencies {
 	getWorkerClaimSnapshots(): WorkerClaim[];
 	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	acknowledgeWorkerReview?(requestId: string): AcknowledgeWorkerReviewResult;
+	/** Mark only terminal records that made it into this bounded status response as exposed. */
+	observeExposedTerminalRecords?(records: readonly LaneRecord[]): void;
 }
 
 function isUnreviewed(claim: WorkerClaim | undefined): boolean {
@@ -275,6 +277,9 @@ export function executeDelegateStatusAction(
 		const claim = claims.get(record.laneId);
 		const workerResult = deps.getWorkerResult?.(record.laneId);
 		const outputArtifact = workerTerminalOutputArtifact(workerResult);
+		if (record.status !== "queued" && record.status !== "running") {
+			deps.observeExposedTerminalRecords?.([record]);
+		}
 		return {
 			content: [{ type: "text", text: formatRecord(record, claim, workerResult) }],
 			details: {
@@ -311,6 +316,9 @@ export function executeDelegateStatusAction(
 	const olderUnreviewed = unreviewedRecords.filter((record) => !recentLaneIds.has(record.laneId));
 	const displayedRecords = [...recentRecords, ...olderUnreviewed.slice(0, 10)].filter(
 		(record, index, all) => all.findIndex((candidate) => candidate.laneId === record.laneId) === index,
+	);
+	deps.observeExposedTerminalRecords?.(
+		displayedRecords.filter((record) => record.status !== "queued" && record.status !== "running"),
 	);
 	const overviewLines = [`workers: ${running} running, ${queued} queued, ${terminal} terminal`];
 	if (unreviewedRecords.length > 0) {

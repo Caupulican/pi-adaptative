@@ -171,6 +171,40 @@ describe("ForegroundTerminalHandoffController", () => {
 		);
 	});
 
+	it("reports records omitted from the bounded parent handoff", async () => {
+		const { controller, startCustomMessageTurn } = createController();
+		const records = Array.from({ length: 10 }, (_, index) => ({
+			laneId: `worker-${index + 1}`,
+			status: index === 8 ? ("failed" as const) : index === 9 ? ("blocked" as const) : ("succeeded" as const),
+			goalId: "goal-active",
+		}));
+
+		await controller.notifyWorkers(records);
+
+		expect(startCustomMessageTurn).toHaveBeenCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining("2 additional terminal worker(s) omitted"),
+				details: expect.objectContaining({
+					records: expect.arrayContaining([expect.objectContaining({ laneId: "worker-8" })]),
+				}),
+			}),
+			expect.anything(),
+			"goal-active",
+		);
+		const calls = startCustomMessageTurn.mock.calls as unknown as Array<
+			[{ details?: { records?: readonly unknown[]; summary?: unknown } }]
+		>;
+		const message = calls[0]?.[0];
+		expect(message?.details?.records).toHaveLength(8);
+		expect(message?.details?.summary).toEqual({
+			kind: "agent",
+			totalCount: 10,
+			attentionCount: 1,
+			failedCount: 1,
+			canceledCount: 0,
+		});
+	});
+
 	it("still wakes for goal-independent work while the current goal is stopped", async () => {
 		const { controller, lease, startCustomMessageTurn } = createController({
 			goalId: "goal-blocked",
@@ -202,5 +236,72 @@ describe("ForegroundTerminalHandoffController", () => {
 		finishTurn();
 		await completion;
 		await vi.waitFor(() => expect(foreground.releaseSubmission).toHaveBeenCalledWith(lease));
+	});
+
+	it("silently consumes a worker terminal observed while it waits for the foreground lease", async () => {
+		const lease = {} as ForegroundSubmissionLease;
+		let releaseLease!: () => void;
+		const leaseAvailable = new Promise<void>((resolve) => {
+			releaseLease = resolve;
+		});
+		const foreground = {
+			acquireSubmission: vi.fn(async () => {
+				await leaseAvailable;
+				return lease;
+			}),
+			releaseSubmission: vi.fn(),
+		} as unknown as ForegroundRecoveryController;
+		const sendCustomMessage = vi.fn(async () => undefined);
+		const startCustomMessageTurn = vi.fn(async () => ({ completion: Promise.resolve() }));
+		const controller = new ForegroundTerminalHandoffController({
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" }),
+			startCustomMessageTurn,
+			sendCustomMessage,
+			warn: vi.fn(),
+		});
+		const record = {
+			laneId: "worker-observed",
+			status: "succeeded" as const,
+			goalId: "goal-active",
+			completedAt: "2026-08-21T20:00:00.000Z",
+		};
+
+		const notification = controller.notifyWorkers([record]);
+		Object.assign(record, { observedAt: "2026-08-21T20:00:01.000Z" });
+		releaseLease();
+		await notification;
+
+		expect(startCustomMessageTurn).not.toHaveBeenCalled();
+		expect(sendCustomMessage).not.toHaveBeenCalled();
+		expect(foreground.releaseSubmission).toHaveBeenCalledWith(lease);
+	});
+
+	it("silently consumes a background tool terminal observed before delivery", async () => {
+		const { controller, foreground, lease, sendCustomMessage, startCustomMessageTurn } = createController();
+
+		await controller.notifyTools(
+			[
+				{
+					sessionId: "session-a",
+					taskId: "tool-task-1",
+					toolCallId: "call-1",
+					toolName: "delegate",
+					status: "completed",
+					startedAt: "2026-08-21T20:00:00.000Z",
+					completedAt: "2026-08-21T20:00:01.000Z",
+					elapsedBeforeHandoffMs: 15_000,
+					summary: "delegate completed",
+					output: "done",
+					observedAt: "2026-08-21T20:00:02.000Z",
+				},
+			],
+			true,
+		);
+
+		expect(startCustomMessageTurn).not.toHaveBeenCalled();
+		expect(sendCustomMessage).not.toHaveBeenCalled();
+		expect(foreground.releaseSubmission).not.toHaveBeenCalledWith(lease);
 	});
 });

@@ -25,6 +25,7 @@ type Input = Static<typeof schema>;
 
 export interface ToolTaskDependencies {
 	list(): BackgroundToolTaskRecord[];
+	observe(taskIds: readonly string[]): void;
 	wait(taskId: string, signal?: AbortSignal): Promise<BackgroundToolTaskRecord>;
 	cancel(taskId: string): boolean;
 }
@@ -44,15 +45,21 @@ function validTaskId(value: string | undefined): string | undefined {
 	return taskId;
 }
 
-function listText(records: readonly BackgroundToolTaskRecord[]): string {
-	if (records.length === 0) return "No background tool tasks in this session.";
+function projectList(records: readonly BackgroundToolTaskRecord[]): {
+	included: readonly BackgroundToolTaskRecord[];
+	text: string;
+} {
+	if (records.length === 0) return { included: [], text: "No background tool tasks in this session." };
 	const included = records.slice(-MAX_LISTED_TASKS);
 	const omitted = records.length - included.length;
-	return [
-		...included.map((record) => `${record.taskId}: ${record.status} — ${record.summary}`),
-		...(omitted > 0 ? [`${omitted} older task(s) omitted from this bounded snapshot.`] : []),
-		"Do not poll. Continue independent work, or call wait once only when a running task is a dependency.",
-	].join("\n");
+	return {
+		included,
+		text: [
+			...included.map((record) => `${record.taskId}: ${record.status} — ${record.summary}`),
+			...(omitted > 0 ? [`${omitted} older task(s) omitted from this bounded snapshot.`] : []),
+			"Do not poll. Continue independent work, or call wait once only when a running task is a dependency.",
+		].join("\n"),
+	};
 }
 
 export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDefinition<typeof schema> {
@@ -70,8 +77,10 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 		async execute(_toolCallId, input: Input, signal) {
 			if (input.action === "list") {
 				const records = deps.list();
+				const projection = projectList(records);
+				deps.observe(projection.included.map((record) => record.taskId));
 				return {
-					content: [{ type: "text" as const, text: listText(records) }],
+					content: [{ type: "text" as const, text: projection.text }],
 					details: { kind: "list" as const, count: records.length },
 				};
 			}

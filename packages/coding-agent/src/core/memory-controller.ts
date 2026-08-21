@@ -38,15 +38,21 @@ import {
 } from "./context/memory-provider-contract.ts";
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
 import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
-import { createOkfMemoryProvider } from "./context/okf-memory-provider.ts";
+import { createOkfMemoryProvider, loadOkfMemoryBundle } from "./context/okf-memory-provider.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
-import { FILE_STORE_MEMORY_SYSTEM_NOTE, FileStoreProvider } from "./memory/providers/file-store.ts";
+import {
+	FILE_STORE_MEMORY_SYSTEM_NOTE,
+	FileStoreProvider,
+	type StructuredReflectionApplyResult,
+	type StructuredReflectionRollback,
+	type StructuredReflectionWrite,
+} from "./memory/providers/file-store.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import { getDirectoryResourceProfileInfo, type SettingsManager } from "./settings-manager.ts";
 
 /**
  * Text of the most recent user message, or "" if there is none (e.g. goal-continuation
@@ -126,6 +132,8 @@ export class MemoryController {
 	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
 	private _memoryManager: MemoryManager = new MemoryManager();
+	/** Active generation's single durable file/OKF writer, also used by parent-owned reflection. */
+	private _fileStoreWriter: FileStoreProvider | undefined;
 	/** R4: tracks whether injected recall is actually used, to adapt the recall gate. */
 	private readonly _effectivenessTracker = new EffectivenessTracker();
 	/** Memory providers registered by extensions via pi.registerMemoryProvider, applied on (re)init. */
@@ -170,6 +178,7 @@ export class MemoryController {
 	/** Flush write-side lifecycle hooks before releasing provider resources. Idempotent per session. */
 	shutdown(): Promise<void> {
 		this._shutdownPromise ??= (async () => {
+			this._fileStoreWriter = undefined;
 			await this._lifecycleTail;
 			await this._memoryManager.onSessionEnd();
 			await this._memoryManager.shutdownAll();
@@ -194,7 +203,12 @@ export class MemoryController {
 	 * creation; `createOkfMemoryProvider` itself never writes/mkdirs either way).
 	 */
 	private _getMemoryOkfProvider(): ContextMemoryProvider {
-		this._memoryOkfProvider ??= createOkfMemoryProvider({ rootDir: this._memoryOkfDir() });
+		const project = getDirectoryResourceProfileInfo(this.deps.getCwd(), this.deps.getAgentDir());
+		this._memoryOkfProvider ??= createOkfMemoryProvider({
+			rootDir: this._memoryOkfDir(),
+			projectId: project.hash,
+			projectRoot: project.root,
+		});
 		return this._memoryOkfProvider;
 	}
 
@@ -263,7 +277,15 @@ export class MemoryController {
 			});
 			const providers = this._shouldQueryFileStoreFallback(budget) ? [this._getFileStoreMemoryProvider()] : [];
 			if (longTermDecision.shouldQuery) {
-				providers.push(this._getMemoryOkfProvider(), ...this._pendingContextMemoryProviders);
+				providers.push(
+					this._getMemoryOkfProvider(),
+					...this._pendingContextMemoryProviders.filter((provider) => provider.capabilities.localOnly),
+				);
+				if (longTermDecision.shouldQueryExternal !== false) {
+					providers.push(
+						...this._pendingContextMemoryProviders.filter((provider) => !provider.capabilities.localOnly),
+					);
+				}
 				const graph = this._getLocalGraphProvider();
 				if (graph) providers.push(graph);
 			}
@@ -486,6 +508,32 @@ export class MemoryController {
 		});
 	}
 
+	/** Fresh bounded OKF snapshot for reflection's confront-before-write pass. */
+	getFreshOkfMemoryForReflection(): string {
+		try {
+			const project = getDirectoryResourceProfileInfo(this.deps.getCwd(), this.deps.getAgentDir());
+			const entries = loadOkfMemoryBundle({
+				rootDir: this._memoryOkfDir(),
+				projectId: project.hash,
+				projectRoot: project.root,
+				maxDocuments: 64,
+			}).entries;
+			const snapshot = entries
+				.map(({ relativePath, parsed }) => {
+					const item = parsed.item;
+					return item === undefined
+						? ""
+						: `[OKF ${relativePath}] ${item.title ?? "Untitled"}: ${item.summary}\n${item.content ?? ""}`;
+				})
+				.filter((entry) => entry.length > 0)
+				.join("\n\n")
+				.slice(0, 12_000);
+			return snapshot.length > 0 ? wrapUntrustedText(snapshot, "memory:reflection-okf") : "";
+		} catch {
+			return "";
+		}
+	}
+
 	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
 	async readMemoryForLane(query: string): Promise<string> {
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
@@ -494,14 +542,48 @@ export class MemoryController {
 		const staticBlock = this._memoryManager
 			.buildSystemPromptBlockFresh(budget)
 			.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, "[Read-only snapshot for a delegated worker.]");
-		const recalled = await this.prefetchRecall(query);
-		const combined = [staticBlock, recalled]
+		const [recalled, okfReport] = await Promise.all([
+			this.prefetchRecall(query),
+			retrieveMemoryForContext(
+				[this._getMemoryOkfProvider()],
+				{ query, maxResults: Math.min(3, settings.maxResults) },
+				{
+					createdAtTurn: this.deps.getTurnIndex(),
+					maxResults: Math.min(3, settings.maxResults),
+					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
+				},
+			),
+		]);
+		const okf = okfReport.results
+			.map(({ item }) => `[OKF ${item.title ?? item.id}] ${item.summary}\n${item.content ?? ""}`)
+			.join("\n\n");
+		const combined = [staticBlock, okf, recalled]
 			.filter((part) => part.trim().length > 0)
 			.join("\n\n")
 			.slice(0, 8000);
 		return combined.length > 0
 			? wrapUntrustedText(combined, "worker-memory")
 			: "No relevant standing memory was found.";
+	}
+
+	/** Parent reflection's only structured-memory mutation port. Workers never receive this capability. */
+	async applyStructuredReflectionWrite(
+		write: StructuredReflectionWrite,
+		signal?: AbortSignal,
+	): Promise<StructuredReflectionApplyResult> {
+		if (this.deps.isChildSession() || this._fileStoreWriter === undefined) {
+			return { applied: false, created: false, error: "Structured memory writes are unavailable." };
+		}
+		return this._fileStoreWriter.applyStructuredReflectionWrite(write, signal);
+	}
+
+	/** Parent-owned inverse for an audited structured reflection write. */
+	async rollbackStructuredReflectionWrite(
+		rollback: StructuredReflectionRollback,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		if (this.deps.isChildSession() || this._fileStoreWriter === undefined) return false;
+		return this._fileStoreWriter.rollbackStructuredReflectionWrite(rollback, signal);
 	}
 
 	/** R4: score whether the agent actually used an injected recall page, so the recall gate can adapt. */
@@ -516,6 +598,7 @@ export class MemoryController {
 	 */
 	async initialize(): Promise<void> {
 		try {
+			this._fileStoreWriter = undefined;
 			await this._lifecycleTail;
 			// Release the previous generation's providers (locks/handles) before recreating, so a
 			// reload does not orphan the old MemoryManager. No-op on first init / for file-store.
@@ -523,15 +606,14 @@ export class MemoryController {
 			this._localGraphProvider = undefined;
 			this._localGraphResolved = false;
 			const manager = new MemoryManager();
-			manager.registerProvider(
-				new FileStoreProvider({
-					onDurableMemoryChanged: () => {
-						// OKF providers cache one bounded directory load. A USER.md overflow can create or
-						// update a shard during this session, so discard only that read cache generation.
-						this._memoryOkfProvider = undefined;
-					},
-				}),
-			);
+			const fileStoreWriter = new FileStoreProvider({
+				onDurableMemoryChanged: () => {
+					// OKF providers cache one bounded directory load. A USER.md overflow can create or
+					// update a shard during this session, so discard only that read cache generation.
+					this._memoryOkfProvider = undefined;
+				},
+			});
+			manager.registerProvider(fileStoreWriter);
 			// Bundled read-only cross-session recall (R3): indexes past-session transcripts and answers
 			// prefetch() with a <memory_context> page. Never writes.
 			manager.registerProvider(new TranscriptRecallProvider());
@@ -548,6 +630,9 @@ export class MemoryController {
 				cwd: this.deps.getCwd(),
 				isChildSession: this.deps.isChildSession(),
 			});
+			this._fileStoreWriter = manager.getToolDefinitions().some((tool) => tool.name === "memory")
+				? fileStoreWriter
+				: undefined;
 			// Surface memory tools + the frozen memory block now that providers are initialized.
 			// refreshToolRegistry() ends in setActiveToolsByName(), which rebuilds AND assigns the
 			// system prompt (including the memory block), so no explicit _rebuildSystemPrompt is needed.

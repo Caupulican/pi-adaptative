@@ -22,7 +22,7 @@ import type {
 	ResearchLaneRunOutcome,
 	WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
-import { type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
+import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import type {
@@ -112,6 +112,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workerLifecycle: WorkerLifecycle | undefined;
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
+	/** Active event waits consume matching terminal edges before a redundant parent wake is admitted. */
+	private readonly _workerWaitConsumers = new Map<string, number>();
 	private readonly deps: BackgroundLaneControllerDeps;
 
 	/** Emit a warning without ever throwing — used from disposal-adjacent persistence where a
@@ -193,8 +195,50 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			notify: (records) => this.deps.notifyWorkerTerminalHandoff(records),
 			warn: (message) => this._safeWarn(message),
 			markDurableDelivered: (notificationIds) => this._workerLifecycle?.markNotificationsDelivered(notificationIds),
+			isObserved: (record) => this._isWorkerTerminalAwaited(record),
 		});
 		return this._workerNotifications;
+	}
+
+	private _workerAgentIdForRecord(record: Pick<LaneRecord, "laneId">): string {
+		const attempt =
+			this._workerLifecycle?.getActiveAttempt(record.laneId) ??
+			this._workerLifecycle?.getManagedAttempt(record.laneId);
+		return attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
+	}
+
+	private _isWorkerTerminalAwaited(record: Pick<LaneRecord, "laneId">): boolean {
+		return (this._workerWaitConsumers.get(this._workerAgentIdForRecord(record)) ?? 0) > 0;
+	}
+
+	private _retainWorkerWaitConsumers(agentIds: readonly string[]): () => void {
+		const unique = [...new Set(agentIds)];
+		for (const agentId of unique) {
+			this._workerWaitConsumers.set(agentId, (this._workerWaitConsumers.get(agentId) ?? 0) + 1);
+		}
+		return () => {
+			for (const agentId of unique) {
+				const remaining = (this._workerWaitConsumers.get(agentId) ?? 1) - 1;
+				if (remaining > 0) this._workerWaitConsumers.set(agentId, remaining);
+				else this._workerWaitConsumers.delete(agentId);
+			}
+		};
+	}
+
+	/** Observe only logical-agent terminals explicitly exposed by a bounded model result. */
+	observeWorkerAgentTerminals(agentIds: readonly string[]): void {
+		if (!this._workerLifecycle) return;
+		const targets = new Set(agentIds);
+		this.observeWorkerTerminalRecords(
+			this.getLaneRecords().filter(
+				(record) => isLaneTerminalStatus(record.status) && targets.has(this._workerAgentIdForRecord(record)),
+			),
+		);
+	}
+
+	observeWorkerTerminalRecords(records: readonly LaneRecord[]): void {
+		const terminal = records.filter((record) => isLaneTerminalStatus(record.status));
+		if (terminal.length > 0) this._getWorkerNotificationCoordinator().observeTerminals(terminal);
 	}
 
 	/**
@@ -419,7 +463,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	getWorkerAgentActivity(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentActivity {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().getWorkerAgentActivity(agentId, scope);
+		const activity = this._getWorkerController().getAgentControl().getWorkerAgentActivity(agentId, scope);
+		this.observeWorkerAgentTerminals([agentId]);
+		return activity;
 	}
 
 	readWorkerAgentTranscript(
@@ -428,7 +474,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): ReturnType<WorkerAgentControlPort["readWorkerAgentTranscript"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().readWorkerAgentTranscript(agentId, options);
+		const page = this._getWorkerController().getAgentControl().readWorkerAgentTranscript(agentId, options);
+		this.observeWorkerAgentTerminals([agentId]);
+		return page;
 	}
 
 	sendWorkerAgentMessage(
@@ -547,7 +595,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().waitForWorkerAgent(agentId, timeoutMs, scope);
+		const release = this._retainWorkerWaitConsumers([agentId]);
+		let wait: ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]>;
+		try {
+			wait = this._getWorkerController().getAgentControl().waitForWorkerAgent(agentId, timeoutMs, scope);
+		} catch (error) {
+			release();
+			throw error;
+		}
+		return wait
+			.then((result) => {
+				this.observeWorkerAgentTerminals([agentId]);
+				return result;
+			})
+			.finally(release);
 	}
 
 	waitForWorkerAgents(
@@ -558,7 +619,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): Promise<WorkerAgentWaitResult> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().waitForWorkerAgents(agentIds, mode, timeoutMs, scope);
+		const release = this._retainWorkerWaitConsumers(agentIds);
+		let wait: Promise<WorkerAgentWaitResult>;
+		try {
+			wait = this._getWorkerController().getAgentControl().waitForWorkerAgents(agentIds, mode, timeoutMs, scope);
+		} catch (error) {
+			release();
+			throw error;
+		}
+		return wait
+			.then((result) => {
+				this.observeWorkerAgentTerminals(agentIds);
+				return result;
+			})
+			.finally(release);
 	}
 
 	broadcastWorkerAgentMessage(

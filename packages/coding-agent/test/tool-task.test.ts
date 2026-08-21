@@ -43,8 +43,10 @@ const extensionContext = {} as ExtensionContext;
 
 describe("tool_task", () => {
 	it("lists bounded session tasks without encouraging polling", async () => {
+		const observe = vi.fn(() => [running]);
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
+			observe,
 			wait: vi.fn(),
 			cancel: vi.fn(),
 		});
@@ -53,11 +55,37 @@ describe("tool_task", () => {
 		expect(text).toContain("tool-task-1: running");
 		expect(text).toContain("Do not poll");
 		expect(result.details).toMatchObject({ kind: "list", count: 1 });
+		expect(observe).toHaveBeenCalledOnce();
+	});
+
+	it("observes only terminal tasks included in the bounded list result", async () => {
+		const records = Array.from({ length: 40 }, (_, index) => ({
+			...terminal,
+			taskId: `tool-task-${index + 1}`,
+			toolCallId: `call-${index + 1}`,
+		}));
+		const observe = vi.fn();
+		const tool = createToolTaskToolDefinition({
+			list: () => records,
+			observe,
+			wait: vi.fn(),
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute("call", { action: "list" }, undefined, undefined, extensionContext);
+
+		expect(observe).toHaveBeenCalledWith(records.slice(-32).map((record) => record.taskId));
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("8 older task(s) omitted") });
 	});
 
 	it("waits once on the controller's terminal event", async () => {
 		const wait = vi.fn(async () => terminal);
-		const tool = createToolTaskToolDefinition({ list: () => [running], wait, cancel: vi.fn() });
+		const tool = createToolTaskToolDefinition({
+			list: () => [running],
+			observe: () => [running],
+			wait,
+			cancel: vi.fn(),
+		});
 		const signal = new AbortController().signal;
 		const result = await tool.execute(
 			"call",
@@ -75,6 +103,7 @@ describe("tool_task", () => {
 	it("returns a running snapshot as nonterminal control flow instead of a tool failure", async () => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [running],
+			observe: () => [running],
 			wait: async () => running,
 			cancel: vi.fn(),
 		});
@@ -101,6 +130,7 @@ describe("tool_task", () => {
 	] as const)("projects a %s terminal task as a failed tool call", async (_status, record) => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [record],
+			observe: () => [record],
 			wait: async () => record,
 			cancel: vi.fn(),
 		});
@@ -120,6 +150,7 @@ describe("tool_task", () => {
 	it("projects an invalid or rejected wait as a failed tool call", async () => {
 		const tool = createToolTaskToolDefinition({
 			list: () => [],
+			observe: () => [],
 			wait: async () => {
 				throw new Error("Unknown background tool task tool-task-missing");
 			},
@@ -143,7 +174,12 @@ describe("tool_task", () => {
 
 	it("requests cancellation only for an addressed task", async () => {
 		const cancel = vi.fn((taskId: string) => taskId === "tool-task-1");
-		const tool = createToolTaskToolDefinition({ list: () => [running], wait: vi.fn(), cancel });
+		const tool = createToolTaskToolDefinition({
+			list: () => [running],
+			observe: () => [running],
+			wait: vi.fn(),
+			cancel,
+		});
 		const result = await tool.execute(
 			"call",
 			{ action: "cancel", taskId: "tool-task-1" },

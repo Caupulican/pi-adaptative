@@ -134,7 +134,7 @@ describe("BackgroundToolTaskController", () => {
 		expect(terminal.output.length).toBeLessThan(40_000);
 		expect(terminal.output).toContain("Full output: artifact tool-output:");
 		expect(first.artifactStore.read(terminal.artifactId!)).toMatchObject({ content: largeOutput });
-		expect(first.persisted.map((record) => record.status)).toEqual(["running", "completed"]);
+		expect(first.persisted.map((record) => record.status)).toEqual(["running", "completed", "completed"]);
 		expect(first.notifications).toEqual([terminal]);
 		expect(first.wakeSignals).toEqual([false]);
 		expect(first.liveSignals.at(-1)).toEqual([]);
@@ -208,6 +208,114 @@ describe("BackgroundToolTaskController", () => {
 		await controller.waitForNotifications();
 
 		expect(wakeSignals).toEqual([true]);
+		await controller.shutdown();
+	});
+
+	it("retries terminal delivery after notifyTerminal rejects without dropping the persisted terminal", async () => {
+		vi.useFakeTimers();
+		const persisted: BackgroundToolTaskRecord[] = [];
+		const delivered: BackgroundToolTaskRecord[] = [];
+		const notifyTerminal = vi
+			.fn<(records: readonly BackgroundToolTaskRecord[]) => Promise<void>>()
+			.mockRejectedValueOnce(new Error("temporary handoff failure"))
+			.mockResolvedValue(undefined);
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: (record) => persisted.push(record),
+			notifyTerminal: (records) => {
+				delivered.push(...records);
+				return notifyTerminal(records);
+			},
+		});
+		const call = controlledContext();
+		controller.handoff(call.context);
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "done" }], details: {} },
+			isError: false,
+		});
+
+		await vi.runAllTimersAsync();
+		await controller.waitForNotifications();
+
+		expect(notifyTerminal).toHaveBeenCalledTimes(2);
+		expect(delivered).toHaveLength(2);
+		expect(delivered[0]).toMatchObject({ taskId: "tool-task-1", status: "completed" });
+		expect(delivered[1]).toMatchObject({ taskId: "tool-task-1", status: "completed" });
+		expect(persisted).toEqual([
+			expect.objectContaining({ taskId: "tool-task-1", status: "running" }),
+			expect.objectContaining({ taskId: "tool-task-1", status: "completed" }),
+			expect.objectContaining({ taskId: "tool-task-1", status: "completed", terminalDelivery: "delivered" }),
+		]);
+		await controller.shutdown();
+	});
+
+	it("marks a terminal event observed when tool_task list views it before delivery", async () => {
+		let releaseDelivery!: () => void;
+		const deliveryGate = new Promise<void>((resolve) => {
+			releaseDelivery = resolve;
+		});
+		const delivered: BackgroundToolTaskRecord[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: () => {},
+			notifyTerminal: async (records) => {
+				await deliveryGate;
+				delivered.push(...records);
+			},
+		});
+		const call = controlledContext();
+		controller.handoff(call.context);
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "done" }], details: {} },
+			isError: false,
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const observed = controller.observe();
+		releaseDelivery();
+		await controller.waitForNotifications();
+
+		expect(observed).toEqual([expect.objectContaining({ taskId: "tool-task-1", status: "completed" })]);
+		expect(delivered).toEqual([expect.objectContaining({ taskId: "tool-task-1", observedAt: expect.any(String) })]);
+		await controller.shutdown();
+	});
+
+	it("never publishes a successful completion when its terminal record was not durable", async () => {
+		const notifications: BackgroundToolTaskRecord[] = [];
+		let writes = 0;
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: () => {
+				writes++;
+				if (writes > 1) throw new Error("terminal write failed");
+			},
+			notifyTerminal: (records) => {
+				notifications.push(...records);
+			},
+			onError: vi.fn(),
+		});
+		const call = controlledContext();
+		controller.handoff(call.context);
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "successful process output" }], details: {} },
+			isError: false,
+		});
+		await controller.waitForNotifications();
+
+		expect(controller.list()).toEqual([
+			expect.objectContaining({
+				status: "failed",
+				output: expect.stringContaining("could not be persisted"),
+			}),
+		]);
+		expect(notifications).toEqual([expect.objectContaining({ status: "failed" })]);
 		await controller.shutdown();
 	});
 
@@ -287,6 +395,95 @@ describe("BackgroundToolTaskController", () => {
 		expect(batches).toEqual([["tool-task-1"], ["tool-task-2"]]);
 		expect(maxActiveDeliveries).toBe(1);
 		await controller.shutdown();
+	});
+
+	it("replays only an explicitly pending terminal after restart", async () => {
+		const pending: BackgroundToolTaskRecord = {
+			sessionId: "session-a",
+			taskId: "tool-task-7",
+			toolCallId: "call-pending",
+			toolName: "slow",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:02.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "retained output",
+			terminalDelivery: "pending",
+		};
+		const delivered: BackgroundToolTaskRecord[] = [];
+		const persisted: BackgroundToolTaskRecord[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => [pending],
+			persist: (record) => persisted.push(record),
+			notifyTerminal: (records) => {
+				delivered.push(...records);
+			},
+		});
+
+		await controller.waitForNotifications();
+
+		expect(delivered).toEqual([expect.objectContaining({ taskId: "tool-task-7", terminalDelivery: "pending" })]);
+		expect(persisted).toEqual([expect.objectContaining({ taskId: "tool-task-7", terminalDelivery: "delivered" })]);
+		await controller.shutdown();
+	});
+
+	it("does not replay delivered or legacy terminal records after restart", async () => {
+		const delivered: BackgroundToolTaskRecord = {
+			sessionId: "session-a",
+			taskId: "tool-task-8",
+			toolCallId: "call-delivered",
+			toolName: "slow",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt: "2026-08-01T12:00:02.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed",
+			output: "retained output",
+			terminalDelivery: "delivered",
+		};
+		const legacy = { ...delivered, taskId: "tool-task-9", toolCallId: "call-legacy" };
+		delete (legacy as Partial<BackgroundToolTaskRecord>).terminalDelivery;
+		const notifyTerminal = vi.fn();
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => [delivered, legacy],
+			persist: vi.fn(),
+			notifyTerminal,
+		});
+
+		await controller.waitForNotifications();
+
+		expect(notifyTerminal).not.toHaveBeenCalled();
+		await controller.shutdown();
+	});
+
+	it("does not hot-loop on a permanent terminal notification failure during shutdown", async () => {
+		const notifyTerminal = vi.fn(async () => {
+			throw new Error("handoff unavailable");
+		});
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: vi.fn(),
+			notifyTerminal,
+		});
+		const call = controlledContext();
+		controller.handoff(call.context);
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "done" }], details: {} },
+			isError: false,
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		await controller.shutdown();
+
+		expect(notifyTerminal).toHaveBeenCalledOnce();
 	});
 
 	it("restores only the admitted session lineage and deterministically closes orphaned running tasks", async () => {

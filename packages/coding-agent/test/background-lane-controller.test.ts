@@ -149,6 +149,66 @@ describe("worker terminal handoffs", () => {
 		controller.abortInFlightLanes();
 	});
 
+	it("marks a terminal read before delivery when an event-driven agent wait already owns it", async () => {
+		const record = {
+			laneId: "task-1",
+			type: "worker" as const,
+			status: "succeeded" as const,
+			completedAt: "2026-08-21T20:00:00.000Z",
+		};
+		let resolveWait!: () => void;
+		const wait = new Promise<{ status: "idle"; timedOut: false }>((resolve) => {
+			resolveWait = () => resolve({ status: "idle", timedOut: false });
+		});
+		const agentControl = { waitForWorkerAgent: vi.fn(() => wait) };
+		const workers = {
+			getAgentControl: () => agentControl,
+			getRecords: () => [record],
+			abort: () => {},
+		};
+		const lifecycle = {
+			getActiveAttempt: (laneId: string) =>
+				laneId === record.laneId
+					? { agentId: "agent-1", taskId: record.laneId, dispatch: { logicalLaneId: "agent-1" } }
+					: undefined,
+			getManagedAttempt: () => undefined,
+			getManagedRecords: () => [],
+			getAllRecords: () => [record],
+			getTerminalNotification: () => undefined,
+			markNotificationsDelivered: vi.fn(),
+		};
+		let delivered!: readonly { laneId: string; observedAt?: string }[];
+		const notifyWorkerTerminalHandoff = vi.fn(async (records) => {
+			delivered = records;
+		});
+		const controller = new BackgroundLaneController({
+			isDelegateToolActive: () => true,
+			getSessionManager: () => ({ getEntries: () => [] }) as unknown as SessionManager,
+			emit: () => {},
+			notifyWorkerTerminalHandoff,
+		} as never);
+		Object.assign(controller as object, { _workers: workers, _workerLifecycle: lifecycle });
+
+		const waiting = controller.waitForWorkerAgent("agent-1");
+		(
+			controller as unknown as {
+				_recordWorkerTerminal(terminalRecord: typeof record, durableNotificationId: string): void;
+			}
+		)._recordWorkerTerminal(record, "notification-task-1");
+		await vi.waitFor(() => expect(notifyWorkerTerminalHandoff).toHaveBeenCalledOnce());
+
+		expect(delivered).toEqual([
+			expect.objectContaining({
+				laneId: record.laneId,
+				completedAt: record.completedAt,
+				observedAt: expect.any(String),
+			}),
+		]);
+		resolveWait();
+		await waiting;
+		controller.abortInFlightLanes();
+	});
+
 	it("serializes later terminal batches behind one unresolved durable handoff", async () => {
 		vi.useFakeTimers();
 		try {
@@ -435,6 +495,28 @@ describe("worker runtime construction", () => {
 			idempotencyKey: "broadcast-1",
 		});
 		expect(retireWorkerAgent).toHaveBeenCalledWith("child", scope);
+	});
+
+	it("releases an active wait-consumer receipt when a worker wait throws synchronously", () => {
+		const waitForWorkerAgent = vi.fn(() => {
+			throw new Error("worker wait unavailable");
+		});
+		const waitForWorkerAgents = vi.fn(() => {
+			throw new Error("worker waits unavailable");
+		});
+		const agentControl = { waitForWorkerAgent, waitForWorkerAgents };
+		const controller = new BackgroundLaneController({ isDelegateToolActive: () => true } as never);
+		(
+			controller as unknown as {
+				_workers: { getAgentControl(): typeof agentControl };
+			}
+		)._workers = { getAgentControl: () => agentControl };
+
+		expect(() => controller.waitForWorkerAgent("child")).toThrow("worker wait unavailable");
+		expect(() => controller.waitForWorkerAgents(["child", "peer"], "all")).toThrow("worker waits unavailable");
+		expect((controller as unknown as { _workerWaitConsumers: Map<string, number> })._workerWaitConsumers).toEqual(
+			new Map(),
+		);
 	});
 });
 

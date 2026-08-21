@@ -3,6 +3,12 @@ import { promises as fs } from "node:fs";
 import { type Static, Type } from "typebox";
 import { configFile, managedMemoryStateFile } from "../../agent-paths.ts";
 import type { MemoryPromptBudget } from "../../context/memory-prompt-budget.ts";
+import {
+	OKF_MEMORY_LIMITS,
+	PI_OKF_TYPES,
+	type PiOkfType,
+	validateOkfMemoryDocumentInput,
+} from "../../context/okf-memory.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import {
 	hasInvisibleUnicode,
@@ -10,8 +16,9 @@ import {
 	stripInvisibleUnicode,
 } from "../../security/context-threat-scanner.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
-import { withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
+import { isMissingFileError, withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
+import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
 import { UserMemoryArchive } from "./user-memory-archive.ts";
 
 /**
@@ -44,15 +51,64 @@ export function supersedeNearDuplicateLine(existing: string, content: string): s
 }
 
 const memorySchema = Type.Object({
-	action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove")], {
+	action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove"), Type.Literal("list")], {
 		description: "Action to perform: add new content, replace existing content, or remove content",
 	}),
-	target: Type.Union([Type.Literal("memory"), Type.Literal("user")], {
-		description: "Target file: 'memory' for MEMORY.md, 'user' for USER.md",
+	target: Type.Union([Type.Literal("memory"), Type.Literal("user"), Type.Literal("okf")], {
+		description: "Target: 'memory' for MEMORY.md, 'user' for USER.md, or 'okf' for structured project memory",
 	}),
-	content: Type.Optional(Type.String({ description: "Content to write (required for 'add' or 'replace')" })),
+	content: Type.Optional(
+		Type.String({
+			maxLength: OKF_MEMORY_LIMITS.bodyChars,
+			description: "Content to write (required for add/replace)",
+		}),
+	),
+	title: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: OKF_MEMORY_LIMITS.titleChars,
+			description: "Structured OKF title (required when target is 'okf')",
+		}),
+	),
 	oldContent: Type.Optional(
 		Type.String({ description: "Exact substring to replace or remove (required for 'replace' or 'remove')" }),
+	),
+	type: Type.Optional(
+		Type.Union(
+			PI_OKF_TYPES.map((value) => Type.Literal(value)) as [
+				ReturnType<typeof Type.Literal>,
+				...ReturnType<typeof Type.Literal>[],
+			],
+			{
+				description: "Structured OKF type (required when target is 'okf')",
+			},
+		),
+	),
+	description: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: OKF_MEMORY_LIMITS.descriptionChars,
+			description: "Structured OKF summary (required when target is 'okf')",
+		}),
+	),
+	scope: Type.Optional(Type.Literal("project", { description: "Structured OKF records are project-scoped" })),
+	tags: Type.Optional(
+		Type.Array(Type.String({ minLength: 1, maxLength: OKF_MEMORY_LIMITS.tagChars }), {
+			maxItems: OKF_MEMORY_LIMITS.tagCount,
+			uniqueItems: true,
+			description: "Structured OKF tags",
+		}),
+	),
+	evidenceRefs: Type.Optional(
+		Type.Array(Type.String({ minLength: 1, maxLength: OKF_MEMORY_LIMITS.evidenceRefChars }), {
+			minItems: 1,
+			maxItems: OKF_MEMORY_LIMITS.evidenceRefCount,
+			uniqueItems: true,
+			description: "Evidence references for structured OKF",
+		}),
+	),
+	expectedDigest: Type.Optional(
+		Type.String({ pattern: "^[a-f0-9]{64}$", description: "Optional conflict guard for structured removal" }),
 	),
 });
 
@@ -60,10 +116,49 @@ type MemoryParams = Static<typeof memorySchema>;
 
 export interface FileStoreProviderOptions {
 	onDurableMemoryChanged?: () => void;
+	/** Test seam between loss-safe OKF creation and exact hot-memory removal. */
+	beforeOrganizeHotRemoval?: () => void | Promise<void>;
+}
+
+export type StructuredReflectionWrite =
+	| {
+			kind: "okf_add";
+			type: PiOkfType;
+			title: string;
+			description: string;
+			text: string;
+			tags?: string[];
+			evidenceRefs: string[];
+	  }
+	| {
+			kind: "okf_organize";
+			type: PiOkfType;
+			title: string;
+			description: string;
+			text: string;
+			sourceText: string;
+			tags?: string[];
+			evidenceRefs: string[];
+	  };
+
+export interface StructuredReflectionApplyResult {
+	applied: boolean;
+	created: boolean;
+	digest?: string;
+	sourceRemoved?: boolean;
+	error?: string;
+}
+
+export interface StructuredReflectionRollback {
+	type: PiOkfType;
+	title: string;
+	expectedDigest?: string;
+	sourceText?: string;
+	removeRecord: boolean;
 }
 
 export const FILE_STORE_MEMORY_SYSTEM_NOTE =
-	"[System Note: Below is a snapshot of persistent memory. Proactively record verified reusable project facts and user preferences with the 'memory' tool; never store transient noise.]";
+	"[System Note: Below is a snapshot of persistent memory. Proactively record verified reusable project facts and user preferences with the 'memory' tool. Keep MEMORY.md for compact hot facts, USER.md for preferences, and use target 'okf' for durable project decisions, architecture, rules, findings, and references. Never store transient noise.]";
 
 interface ManagedMemoryState {
 	version: 1;
@@ -78,10 +173,6 @@ type ManagedMemoryStateRead =
 
 function contentDigest(content: string): string {
 	return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
-function isMissingFileError(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 function parseManagedMemoryState(raw: string): ManagedMemoryState | undefined {
@@ -184,6 +275,7 @@ export class FileStoreProvider implements MemoryProvider {
 	private lastWrittenMemory = "";
 	private lastWrittenUser = "";
 	private userArchive?: UserMemoryArchive;
+	private okfStore?: OkfProjectMemoryStore;
 	private readonly options: FileStoreProviderOptions;
 
 	// Character budgets
@@ -211,6 +303,7 @@ export class FileStoreProvider implements MemoryProvider {
 		this.userArchive = new UserMemoryArchive(ctx.agentDir);
 
 		await fs.mkdir(ctx.agentDir, { recursive: true });
+		this.okfStore = new OkfProjectMemoryStore(ctx.agentDir, ctx.cwd);
 		[this.lastWrittenMemory, this.lastWrittenUser] = await Promise.all([
 			this.initializeManagedFile(this.memoryFilePath, this.memoryStatePath),
 			this.initializeManagedFile(this.userFilePath, this.userStatePath),
@@ -299,6 +392,108 @@ export class FileStoreProvider implements MemoryProvider {
 		// no-op
 	}
 
+	private async executeMemoryCommand(
+		params: MemoryParams,
+		signal?: AbortSignal,
+	): Promise<{
+		details?: {
+			success?: boolean;
+			error?: string;
+			created?: boolean;
+			digest?: string;
+			removed?: boolean;
+		};
+	}> {
+		const tool = this.getToolDefinitions()[0];
+		if (tool === undefined) return { details: { success: false, error: "Memory tool unavailable" } };
+		const result = await tool.execute("reflection-memory", params, signal, undefined, undefined as never);
+		return result as {
+			details?: {
+				success?: boolean;
+				error?: string;
+				created?: boolean;
+				digest?: string;
+				removed?: boolean;
+			};
+		};
+	}
+
+	/** Reflection-owned structured write. Organization is OKF-first, then exact hot-memory removal. */
+	public async applyStructuredReflectionWrite(
+		write: StructuredReflectionWrite,
+		signal?: AbortSignal,
+	): Promise<StructuredReflectionApplyResult> {
+		const added = await this.executeMemoryCommand(
+			{
+				action: "add",
+				target: "okf",
+				type: write.type,
+				title: write.title,
+				description: write.description,
+				scope: "project",
+				content: write.text,
+				tags: write.tags,
+				evidenceRefs: write.evidenceRefs,
+			},
+			signal,
+		);
+		if (added.details?.success !== true) {
+			return { applied: false, created: false, error: added.details?.error ?? "OKF write failed" };
+		}
+		const created = added.details.created === true;
+		const storedDigest = added.details.digest;
+		if (write.kind === "okf_add") {
+			return {
+				applied: created,
+				created,
+				...(storedDigest ? { digest: storedDigest } : {}),
+				...(!created ? { error: "Exact OKF record already exists" } : {}),
+			};
+		}
+
+		await this.options.beforeOrganizeHotRemoval?.();
+		const removed = await this.executeMemoryCommand(
+			{ action: "remove", target: "memory", oldContent: write.sourceText },
+			signal,
+		);
+		const sourceRemoved = removed.details?.success === true;
+		return {
+			// A newly-created OKF record is a real durable change even if exact hot cleanup was
+			// interrupted. This records a reversible partial apply instead of hiding landed data.
+			applied: created || sourceRemoved,
+			created,
+			...(storedDigest ? { digest: storedDigest } : {}),
+			sourceRemoved,
+			...(!sourceRemoved ? { error: removed.details?.error ?? "Hot-memory removal failed" } : {}),
+		};
+	}
+
+	/** Restore hot memory first, then conditionally remove the exact audited OKF bytes. */
+	public async rollbackStructuredReflectionWrite(
+		rollback: StructuredReflectionRollback,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		if (rollback.sourceText !== undefined) {
+			const restored = await this.executeMemoryCommand(
+				{ action: "add", target: "memory", content: rollback.sourceText },
+				signal,
+			);
+			if (restored.details?.success !== true) return false;
+		}
+		if (!rollback.removeRecord) return true;
+		const removed = await this.executeMemoryCommand(
+			{
+				action: "remove",
+				target: "okf",
+				type: rollback.type,
+				title: rollback.title,
+				expectedDigest: rollback.expectedDigest,
+			},
+			signal,
+		);
+		return removed.details?.success === true;
+	}
+
 	public getContextMarkers(): string[] {
 		return [];
 	}
@@ -309,10 +504,11 @@ export class FileStoreProvider implements MemoryProvider {
 				name: "memory",
 				label: "Persistent Memory Manager",
 				description:
-					"Add, replace, or remove durable project facts and user preferences. Proactively store newly verified reusable facts; USER.md overflow is migrated into indexed OKF shards.",
-				promptSnippet: "Persist verified project facts and user preferences.",
+					"Add, replace, or remove durable facts and preferences. Use target 'okf' with structured metadata for durable project decisions, architecture, rules, debugging findings, and references; USER.md overflow is migrated into indexed OKF shards.",
+				promptSnippet: "Persist verified facts; route durable project knowledge to structured OKF records.",
 				promptGuidelines: [
-					"Store verified facts and preferences. Repeatable multi-step procedures become skills via skillify; reflection promotes them when the write is a workflow.",
+					"OKF=project decisions/rules/findings with type,title,summary,body,evidenceRefs; MEMORY=hot facts; USER=preferences.",
+					"Workers gather evidence read-only; only the parent or its reflection writes memory. Repeatable procedures become skills via skillify.",
 				],
 				parameters: memorySchema,
 				execute: async (_toolCallId, params: MemoryParams, _signal, _onUpdate, _execCtx) => {
@@ -328,7 +524,19 @@ export class FileStoreProvider implements MemoryProvider {
 						};
 					}
 
-					const { action, target, content, oldContent } = params;
+					const {
+						action,
+						target,
+						content,
+						oldContent,
+						title,
+						type,
+						description,
+						scope,
+						tags,
+						evidenceRefs,
+						expectedDigest,
+					} = params;
 
 					// Strict-scope injection guard on the high-privilege WRITE path (agy #31): a poisoned
 					// memory entry persists across sessions and is injected into every future system prompt,
@@ -358,6 +566,178 @@ export class FileStoreProvider implements MemoryProvider {
 								details: { success: false, error: "Threat in memory write" },
 							};
 						}
+					}
+
+					if (target === "okf") {
+						if (action === "list") {
+							if (this.okfStore === undefined) {
+								return {
+									content: [{ type: "text", text: "Error: Memory provider is not initialized." }],
+									details: { success: false },
+								};
+							}
+							const catalog = this.okfStore.list();
+							return {
+								content: [{ type: "text", text: catalog || "No structured OKF memory records found." }],
+								details: { success: true },
+							};
+						}
+						if (action !== "add" && action !== "remove") {
+							return {
+								content: [
+									{
+										type: "text",
+										text: "Error: structured OKF memory only supports action 'add' or 'remove'.",
+									},
+								],
+								details: { success: false, error: "Unsupported OKF action" },
+							};
+						}
+						if (action === "remove") {
+							if (
+								this.okfStore === undefined ||
+								type === undefined ||
+								title === undefined ||
+								!PI_OKF_TYPES.includes(type as PiOkfType)
+							) {
+								return {
+									content: [{ type: "text", text: "Error: OKF removal requires a valid type and title." }],
+									details: { success: false, error: "Incomplete OKF removal" },
+								};
+							}
+							try {
+								const removed = await this.okfStore.remove(type as PiOkfType, title, expectedDigest);
+								if (removed.removed) this.options.onDurableMemoryChanged?.();
+								return {
+									content: [
+										{
+											type: "text",
+											text: removed.removed
+												? "Successfully removed structured OKF project memory."
+												: "Structured OKF project memory was already absent.",
+										},
+									],
+									details: { success: true, removed: removed.removed },
+								};
+							} catch (err) {
+								const error = String(err);
+								return {
+									content: [{ type: "text", text: `Error: Failed to remove structured OKF memory: ${error}` }],
+									details: { success: false, error: /ENOENT/.test(error) ? "not found" : error },
+								};
+							}
+						}
+						if (
+							type === undefined ||
+							title === undefined ||
+							description === undefined ||
+							scope !== "project" ||
+							content === undefined ||
+							evidenceRefs === undefined ||
+							evidenceRefs.length === 0
+						) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: "Error: structured OKF memory requires type, title, description, scope, content, and evidenceRefs.",
+									},
+								],
+								details: { success: false, error: "Incomplete OKF memory" },
+							};
+						}
+						if (!PI_OKF_TYPES.includes(type as PiOkfType)) {
+							return {
+								content: [{ type: "text", text: `Error: unsupported OKF type '${type}'.` }],
+								details: { success: false, error: "Unsupported OKF type" },
+							};
+						}
+						const validationErrors = validateOkfMemoryDocumentInput(
+							{
+								type: type as PiOkfType,
+								title,
+								description,
+								scope,
+								body: content,
+								tags,
+								evidenceRefs,
+							},
+							{ projectOnly: true, requireEvidence: true },
+						);
+						if (validationErrors.length > 0) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: `Error: Invalid structured OKF memory: ${validationErrors.join("; ")}`,
+									},
+								],
+								details: { success: false, error: "Invalid OKF memory" },
+							};
+						}
+						const okfText = [type, title, description, scope, content, ...(tags ?? []), ...evidenceRefs].join(
+							"\n",
+						);
+						if (hasInvisibleUnicode(okfText)) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: "Error: OKF write rejected — contains hidden/bidirectional control characters.",
+									},
+								],
+								details: { success: false, error: "Invisible unicode in OKF write" },
+							};
+						}
+						const threats = scanContextFileThreats(okfText, "strict");
+						if (threats.length > 0) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: `Error: OKF write rejected — potential injection/exfiltration detected (${threats.join(", ")}).`,
+									},
+								],
+								details: { success: false, error: "Threat in OKF write" },
+							};
+						}
+						try {
+							if (this.okfStore === undefined) throw new Error("Memory provider is not initialized.");
+							const stored = await this.okfStore.put({
+								type: type as PiOkfType,
+								title,
+								description,
+								scope,
+								body: content,
+								tags,
+								evidenceRefs,
+							});
+							if (stored.created) this.options.onDurableMemoryChanged?.();
+							return {
+								content: [
+									{
+										type: "text",
+										text: stored.created
+											? "Successfully added structured OKF project memory."
+											: "Structured OKF project memory already contained this exact record.",
+									},
+								],
+								details: { success: true, created: stored.created, digest: stored.digest },
+							};
+						} catch (err) {
+							return {
+								content: [
+									{ type: "text", text: `Error: Failed to write structured OKF memory: ${String(err)}` },
+								],
+								details: { success: false, error: String(err) },
+							};
+						}
+					}
+					if (action === "list") {
+						return {
+							content: [{ type: "text", text: "Error: action 'list' is only supported for target 'okf'." }],
+							details: { success: false, error: "Unsupported list target" },
+						};
 					}
 
 					const filePath = target === "memory" ? this.memoryFilePath : this.userFilePath;

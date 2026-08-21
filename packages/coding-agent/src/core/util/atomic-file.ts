@@ -127,6 +127,11 @@ export interface AtomicFileWriteOptions {
 	fs?: FaultableFs;
 }
 
+/** Narrow an unknown Node filesystem failure without unsafe casts at every storage owner. */
+export function isMissingFileError(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
 const DEFAULT_RETRIES = 10;
 const DEFAULT_REALPATH = false;
 /**

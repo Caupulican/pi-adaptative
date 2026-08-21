@@ -138,6 +138,31 @@ describe("WorkerNotificationCoordinator", () => {
 		coordinator.dispose();
 	});
 
+	it("cancels an unsettled handoff watchdog when the owning session is disposed", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-disposed-handoff",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const warn = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify: () => new Promise<void>(() => {}),
+			warn,
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.recordTerminal(record, "notification-disposed-handoff");
+		await vi.advanceTimersByTimeAsync(0);
+		coordinator.dispose();
+		await vi.advanceTimersByTimeAsync(1_800_001);
+
+		expect(warn).not.toHaveBeenCalled();
+	});
+
 	it("retains goal ownership on a durable terminal notification", async () => {
 		vi.useFakeTimers();
 		const record: LaneRecord = {
@@ -164,6 +189,7 @@ describe("WorkerNotificationCoordinator", () => {
 				laneId: "worker-goal-terminal",
 				status: "succeeded",
 				goalId: "goal-runaway",
+				completedAt: "2026-08-12T00:00:00.000Z",
 			},
 		]);
 		coordinator.dispose();
@@ -196,6 +222,72 @@ describe("WorkerNotificationCoordinator", () => {
 		expect(notify).toHaveBeenCalledTimes(2);
 		expect(markDurableDelivered).toHaveBeenCalledOnce();
 		expect(markDurableDelivered).toHaveBeenCalledWith(["notification-terminal-retry"]);
+		coordinator.dispose();
+	});
+
+	it("does not wake twice when the same terminal is recorded while its notification is in flight", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-duplicate-in-flight",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-21T20:00:00.000Z",
+		};
+		let release!: () => void;
+		const notifyPending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const notify = vi.fn(() => notifyPending);
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.recordTerminal(record, "notification-duplicate-in-flight");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(notify).toHaveBeenCalledOnce();
+
+		coordinator.recordTerminal(record, "notification-duplicate-in-flight");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(notify).toHaveBeenCalledOnce();
+
+		release();
+		await vi.runAllTimersAsync();
+		expect(notify).toHaveBeenCalledOnce();
+		coordinator.dispose();
+	});
+
+	it("does not redispatch after delivery when durable acknowledgment fails", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-ack-failure",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-21T20:00:00.000Z",
+		};
+		const notify = vi.fn(async () => undefined);
+		const warn = vi.fn();
+		const markDurableDelivered = vi.fn(() => {
+			throw new Error("ledger unavailable");
+		});
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify,
+			warn,
+			markDurableDelivered,
+		});
+
+		coordinator.recordTerminal(record, "notification-ack-failure");
+		await vi.runAllTimersAsync();
+
+		expect(notify).toHaveBeenCalledOnce();
+		expect(markDurableDelivered).toHaveBeenCalledWith(["notification-ack-failure"]);
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("after delivery"));
+		expect(coordinator.getOutstandingRecords()).toEqual([]);
 		coordinator.dispose();
 	});
 
@@ -338,6 +430,74 @@ describe("WorkerNotificationCoordinator", () => {
 		};
 		expect(call.completedSinceFlush + call.failedSinceFlush + call.attentionSinceFlush).toBe(records.length);
 		expect(call).toMatchObject({ completedSinceFlush: 1, failedSinceFlush: 3, attentionSinceFlush: 3 });
+		coordinator.dispose();
+	});
+
+	it("marks only the exact observed completion so a reused worker can notify again", async () => {
+		vi.useFakeTimers();
+		const first: LaneRecord = {
+			laneId: "worker-reused",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-21T20:00:00.000Z",
+		};
+		const second: LaneRecord = {
+			...first,
+			completedAt: "2026-08-21T20:10:00.000Z",
+		};
+		const delivered: Array<{ completedAt?: string; observedAt?: string }> = [];
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [second],
+			emitStatus: vi.fn(),
+			notify: async (records) => {
+				delivered.push(...records);
+			},
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.observeTerminals([first], "2026-08-21T20:00:01.000Z");
+		coordinator.recordTerminal(first, "notification-first");
+		coordinator.recordTerminal(second, "notification-second");
+		await vi.runAllTimersAsync();
+
+		expect(delivered[0]).toMatchObject({
+			completedAt: first.completedAt,
+			observedAt: "2026-08-21T20:00:01.000Z",
+		});
+		expect(delivered[1]).toMatchObject({ completedAt: second.completedAt });
+		expect(delivered[1]).not.toHaveProperty("observedAt");
+		coordinator.dispose();
+	});
+
+	it("marks a terminal observed at record time while an event-driven parent wait owns it", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "task-waited",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-21T20:00:00.000Z",
+		};
+		const notify = vi.fn(async () => undefined);
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+			isObserved: () => true,
+		});
+
+		coordinator.recordTerminal(record, "notification-waited");
+		await vi.runAllTimersAsync();
+
+		expect(notify).toHaveBeenCalledWith([
+			expect.objectContaining({
+				laneId: record.laneId,
+				completedAt: record.completedAt,
+				observedAt: expect.any(String),
+			}),
+		]);
 		coordinator.dispose();
 	});
 });

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -432,6 +432,79 @@ describe("learning apply policy — audit and rollback", () => {
 		expect(second).toEqual({ ok: false, reason: "already_rolled_back" });
 
 		session.dispose();
+	});
+
+	it("organizes an exact hot-memory fact into project OKF and rolls it back loss-safely", async () => {
+		const session = await newSession({ enabled: false });
+		scriptReflection(session, [
+			{
+				kind: "okf_organize",
+				type: "Design Decision",
+				title: "Existing decision",
+				description: "An existing hot fact belongs in structured project memory.",
+				scope: "project",
+				text: "Structured decision body.",
+				sourceText: "Existing fact",
+				evidenceRefs: ["transcript:organize-1"],
+			},
+		]);
+
+		await runPass(session);
+
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain("Existing fact");
+		const okfFiles = readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+			String(entry).endsWith(".okf.md"),
+		);
+		expect(okfFiles).toHaveLength(1);
+		const audit = session.getLearningAuditRecords()[0];
+		expect(audit?.rollback).toEqual(
+			expect.objectContaining({
+				kind: "okf_organize",
+				previous: "Existing fact",
+				removeOkf: true,
+				expectedDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+			}),
+		);
+
+		expect(await session.rollbackLearningWrite(audit!.id)).toEqual({ ok: true, reason: "rollback_applied" });
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Existing fact");
+		expect(
+			readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+				String(entry).endsWith(".okf.md"),
+			),
+		).toEqual([]);
+		await session.disposeAndWait();
+	});
+
+	it("refuses an OKF rollback after the audited record changes", async () => {
+		const session = await newSession({ enabled: false });
+		scriptReflection(session, [
+			{
+				kind: "okf_add",
+				type: "Design Decision",
+				title: "Guarded decision",
+				description: "Rollback is compare-and-delete guarded.",
+				scope: "project",
+				text: "Original structured body.",
+				evidenceRefs: ["transcript:guard-1"],
+			},
+		]);
+		await runPass(session);
+		const audit = session.getLearningAuditRecords()[0];
+		const relative = readdirSync(join(agentDir, "okf-memory"), { recursive: true }).find((entry) =>
+			String(entry).endsWith(".okf.md"),
+		);
+		expect(relative).toBeDefined();
+		const recordPath = join(agentDir, "okf-memory", String(relative));
+		writeFileSync(recordPath, `${readFileSync(recordPath, "utf-8")}\nnewer change\n`, "utf-8");
+
+		expect(await session.rollbackLearningWrite(audit!.id)).toEqual({
+			ok: false,
+			reason: "rollback_apply_failed",
+		});
+		expect(existsSync(recordPath)).toBe(true);
+		expect(session.getLearningAuditRecords().some((record) => record.action === "rollback")).toBe(false);
+		await session.disposeAndWait();
 	});
 
 	it("a failed rollback inverse does not consume the once-only rollback (no self-lock)", async () => {

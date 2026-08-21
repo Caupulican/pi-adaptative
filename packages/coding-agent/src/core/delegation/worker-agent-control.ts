@@ -244,6 +244,10 @@ export interface WorkerAgentRetireResult {
 
 /** One canonical host port for model-facing logical-agent controls. */
 export interface WorkerAgentControlPort {
+	/** Session-root read receipt for exact terminal generations; distinct from mutation review. */
+	observeWorkerTerminalRecords?(records: readonly LaneRecord[]): void;
+	/** Observe only the bounded logical-agent identities exposed by a model-facing control result. */
+	observeWorkerAgentTerminals?(agentIds: readonly string[]): void;
 	listWorkerAgents(scope?: WorkerAgentControlScope): WorkerAgentView[];
 	getWorkerTaskSessionView(): WorkerTaskSessionView;
 	getWorkerAgentActivity(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentActivity;
