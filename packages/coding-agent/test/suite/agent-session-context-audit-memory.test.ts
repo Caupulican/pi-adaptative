@@ -12,8 +12,10 @@ import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { okfMemoryDir, okfProjectMemoryDir } from "../../src/core/agent-paths.ts";
 import type { MemoryRetrievalReport } from "../../src/core/context/memory-retrieval.ts";
 import { formatOkfMemoryDocument } from "../../src/core/context/okf-memory.ts";
+import { getDirectoryResourceProfileInfo } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const SECRET_MARKER = "SECRET-XYZ-9f3a1c";
@@ -31,12 +33,18 @@ function okfDocument(title: string, description: string, body: string): string {
 }
 
 function memoryDir(harness: Harness): string {
-	return join(harness.tempDir, "okf-memory");
+	return okfMemoryDir(harness.tempDir);
+}
+
+function projectMemoryDir(harness: Harness): string {
+	const project = getDirectoryResourceProfileInfo(harness.tempDir, harness.tempDir);
+	return okfProjectMemoryDir(harness.tempDir, project.hash);
 }
 
 function writeOkfFile(harness: Harness, filename: string, content: string): void {
-	mkdirSync(memoryDir(harness), { recursive: true });
-	writeFileSync(join(memoryDir(harness), filename), content, "utf8");
+	const directory = projectMemoryDir(harness);
+	mkdirSync(directory, { recursive: true });
+	writeFileSync(join(directory, filename), content, "utf8");
 }
 
 interface AuditToolResultLike {

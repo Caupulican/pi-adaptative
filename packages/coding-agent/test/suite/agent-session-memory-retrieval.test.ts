@@ -11,7 +11,9 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { Context } from "@caupulican/pi-ai";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { okfMemoryDir, okfProjectMemoryDir } from "../../src/core/agent-paths.ts";
 import { formatOkfMemoryDocument } from "../../src/core/context/okf-memory.ts";
+import { getDirectoryResourceProfileInfo } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function okfDocument(title: string, description: string, body: string): string {
@@ -27,12 +29,18 @@ function okfDocument(title: string, description: string, body: string): string {
 }
 
 function memoryDir(harness: Harness): string {
-	return join(harness.tempDir, "okf-memory");
+	return okfMemoryDir(harness.tempDir);
+}
+
+function projectMemoryDir(harness: Harness): string {
+	const project = getDirectoryResourceProfileInfo(harness.tempDir, harness.tempDir);
+	return okfProjectMemoryDir(harness.tempDir, project.hash);
 }
 
 function writeOkfFile(harness: Harness, filename: string, content: string): void {
-	mkdirSync(memoryDir(harness), { recursive: true });
-	writeFileSync(join(memoryDir(harness), filename), content, "utf8");
+	const directory = projectMemoryDir(harness);
+	mkdirSync(directory, { recursive: true });
+	writeFileSync(join(directory, filename), content, "utf8");
 }
 
 /**
