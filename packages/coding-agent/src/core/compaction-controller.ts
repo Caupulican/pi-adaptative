@@ -484,6 +484,7 @@ export class CompactionController {
 		if (!sessionModel) throw new Error(formatNoModelSelectedMessage());
 
 		const selectedCompactionModel = this.deps.resolveModel(sessionModel);
+		if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
 		const selectionReason = this.deps.getSelectionReason() ?? "unknown";
 		const settings = this.deps.getAdaptedSettings();
 		const initialBranch = this.getCompactionBranch();
@@ -494,7 +495,6 @@ export class CompactionController {
 			throw new Error("Nothing to compact (session too small)");
 		}
 		this.beginCompactionLifecycle(initialPreparation);
-		if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
 
 		// Resolve once for the complete retry ladder. Provider hooks can perform durable flushes and
 		// must not be repeated for every summarizer/gate retry.
