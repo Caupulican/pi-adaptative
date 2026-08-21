@@ -154,7 +154,12 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		await vi.waitFor(() => expect(notifyWorkerTerminalHandoff).toHaveBeenCalledTimes(1));
 
 		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledWith([
-			{ laneId: terminal?.laneId, status: "succeeded", reasonCode: "worker_completed" },
+			{
+				laneId: terminal?.laneId,
+				status: "succeeded",
+				completedAt: terminal?.completedAt,
+				reasonCode: "worker_completed",
+			},
 		]);
 	});
 
