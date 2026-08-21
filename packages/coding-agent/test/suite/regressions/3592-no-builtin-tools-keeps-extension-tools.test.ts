@@ -146,7 +146,9 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 
 		expect(session.getActiveToolNames()).toEqual(["memory"]);
 		expect(session.getToolDefinition("memory")).toBeDefined();
-		expect(session.systemPrompt).toContain("- memory: Persist verified project facts and user preferences.");
+		expect(session.systemPrompt).toContain(
+			"- memory: Persist verified facts; route durable project knowledge to structured OKF records.",
+		);
 		expect(session.systemPrompt).not.toContain("Available tools:\n(none)");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
