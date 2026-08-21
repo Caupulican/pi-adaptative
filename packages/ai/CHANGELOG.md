@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Projected object-union tool schemas into Bedrock-compatible object roots for Anthropic models while retaining the authoritative local validation schema.
+
 ## [0.94.0] - 2026-08-21
 
 ## [0.93.19] - 2026-08-21

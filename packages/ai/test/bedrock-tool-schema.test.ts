@@ -1,7 +1,9 @@
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Context, Model, Tool } from "../src/types.ts";
+import { validateToolArguments } from "../src/utils/validation.ts";
 
 class PayloadCaptured extends Error {
 	constructor() {
@@ -12,18 +14,15 @@ class PayloadCaptured extends Error {
 
 interface BedrockPayload {
 	toolConfig?: {
-		tools?: Array<{ toolSpec?: { inputSchema?: { json?: Record<string, unknown> } } }>;
+		tools?: Array<{ toolSpec?: { description?: string; inputSchema?: { json?: Record<string, unknown> } } }>;
 	};
 }
 
 function model(): Model<"bedrock-converse-stream"> {
-	return getModel("amazon-bedrock", "global.anthropic.claude-haiku-4-5-20251001-v1:0");
+	return getModel("amazon-bedrock", "us.anthropic.claude-sonnet-5");
 }
 
-async function captureToolConfig(
-	parameters: Record<string, unknown>,
-	options?: BedrockOptions,
-): Promise<BedrockPayload["toolConfig"]> {
+async function captureToolConfig(parameters: unknown, options?: BedrockOptions): Promise<BedrockPayload["toolConfig"]> {
 	let payload: BedrockPayload | undefined;
 	const context: Context = {
 		messages: [{ role: "user", content: "hello", timestamp: 1 }],
@@ -41,6 +40,43 @@ async function captureToolConfig(
 }
 
 describe("Bedrock tool input schemas", () => {
+	it("never emits a top-level combinator for object-union tools", async () => {
+		const toolConfig = await captureToolConfig({
+			anyOf: [
+				{
+					type: "object",
+					properties: { path: { type: "string" }, content: { type: "string" } },
+					required: ["path", "content"],
+					additionalProperties: false,
+				},
+				{
+					type: "object",
+					properties: { path: { type: "string" }, payloadRef: { type: "string" } },
+					required: ["path", "payloadRef"],
+					additionalProperties: false,
+				},
+			],
+		});
+
+		const schema = toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
+		expect(schema).toMatchObject({
+			type: "object",
+			properties: {
+				path: { type: "string" },
+				content: { type: "string" },
+				payloadRef: { type: "string" },
+			},
+			required: ["path"],
+		});
+		expect(schema).not.toHaveProperty("anyOf");
+		expect(schema).not.toHaveProperty("oneOf");
+		expect(schema).not.toHaveProperty("allOf");
+		expect(toolConfig?.tools?.[0]?.toolSpec?.description).toContain(
+			"provide parameters for at least one of the documented alternatives: (path, content) or (path, payloadRef)",
+		);
+		expect(toolConfig?.tools?.[0]?.toolSpec?.description).toMatch(/^Input constraint:/);
+	});
+
 	it("sends an object root for a union of object tool inputs", async () => {
 		const toolConfig = await captureToolConfig({
 			anyOf: [
@@ -81,17 +117,16 @@ describe("Bedrock tool input schemas", () => {
 		});
 	});
 
-	it("keeps an empty object union as an object-root schema", async () => {
+	it("projects an empty object union without a root combinator", async () => {
 		const toolConfig = await captureToolConfig({
 			anyOf: [{ type: "object" }, { type: "object", additionalProperties: false }],
 		});
 
 		const schema = toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
-		expect(schema?.type).toBe("object");
-		expect(schema?.anyOf).toEqual([{ type: "object" }, { type: "object", additionalProperties: false }]);
+		expect(schema).toEqual({ type: "object", properties: {}, required: [] });
 	});
 
-	it("preserves object references in local defs instead of flattening them away", async () => {
+	it("resolves local object references into the root projection", async () => {
 		const toolConfig = await captureToolConfig({
 			$defs: {
 				fromRef: { type: "object", properties: { path: { type: "string" } } },
@@ -101,10 +136,11 @@ describe("Bedrock tool input schemas", () => {
 
 		const schema = toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
 		expect(schema?.type).toBe("object");
-		expect(schema?.anyOf).toEqual([
-			{ $ref: "#/$defs/fromRef" },
-			{ type: "object", properties: { mode: { type: "string" } } },
-		]);
+		expect(schema?.properties).toEqual({ path: { type: "string" }, mode: { type: "string" } });
+		expect(schema?.$defs).toEqual({
+			fromRef: { type: "object", properties: { path: { type: "string" } } },
+		});
+		expect(schema).not.toHaveProperty("anyOf");
 	});
 
 	it.each(["oneOf", "allOf"] as const)("normalizes a root %s of object branches", async (combinator) => {
@@ -117,6 +153,68 @@ describe("Bedrock tool input schemas", () => {
 
 		const schema = toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
 		expect(schema?.type).toBe("object");
+		expect(schema).not.toHaveProperty(combinator);
+	});
+
+	it("keeps only common alternative requirements and merges allOf requirements", async () => {
+		const alternativeConfig = await captureToolConfig({
+			oneOf: [
+				{
+					type: "object",
+					properties: { shared: { type: "string" }, first: { type: "string" } },
+					required: ["shared", "first"],
+				},
+				{
+					type: "object",
+					properties: { shared: { type: "string" }, second: { type: "string" } },
+					required: ["shared", "second"],
+				},
+			],
+		});
+		const allConfig = await captureToolConfig({
+			allOf: [
+				{ type: "object", properties: { first: { type: "string" } }, required: ["first"] },
+				{ type: "object", properties: { second: { type: "string" } }, required: ["second"] },
+			],
+		});
+
+		expect(alternativeConfig?.tools?.[0]?.toolSpec?.inputSchema?.json?.required).toEqual(["shared"]);
+		expect(allConfig?.tools?.[0]?.toolSpec?.inputSchema?.json?.required).toEqual(["first", "second"]);
+		expect(alternativeConfig?.tools?.[0]?.toolSpec?.description).toContain("exactly one");
+		expect(allConfig?.tools?.[0]?.toolSpec?.description).toContain("all listed parameters apply together");
+	});
+
+	it("keeps an explicit root property when a branch defines it differently", async () => {
+		const toolConfig = await captureToolConfig({
+			properties: { value: { type: "boolean" } },
+			anyOf: [
+				{ type: "object", properties: { value: { type: "string" }, first: { type: "string" } } },
+				{ type: "object", properties: { second: { type: "string" } } },
+			],
+		});
+
+		expect(toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json?.properties).toEqual({
+			value: { type: "boolean" },
+			first: { type: "string" },
+			second: { type: "string" },
+		});
+	});
+
+	it("rejects a malformed root combinator instead of forwarding it", async () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+			tools: [
+				{
+					name: "malformed_tool",
+					description: "Malformed tool",
+					parameters: { type: "object", anyOf: { type: "object" } } as never,
+				},
+			],
+		};
+		const result = await streamBedrock(model(), context).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain('Bedrock tool "malformed_tool" requires an object input schema');
 	});
 
 	it("adds an object root only when a local root reference resolves to an object", async () => {
@@ -228,7 +326,7 @@ describe("Bedrock tool input schemas", () => {
 		expect(result.errorMessage).toContain('Bedrock tool "ambiguous_tool" requires an object input schema');
 	});
 
-	it("keeps conflicting object properties inside the root union", async () => {
+	it("uses the first conflicting property projection without retaining the root union", async () => {
 		const toolConfig = await captureToolConfig({
 			anyOf: [
 				{ type: "object", properties: { value: { type: "string" } }, required: ["value"] },
@@ -238,8 +336,85 @@ describe("Bedrock tool input schemas", () => {
 
 		const schema = toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
 		expect(schema?.type).toBe("object");
-		expect(schema?.anyOf).toBeDefined();
-		expect(schema?.properties).toBeUndefined();
+		expect(schema?.properties).toEqual({ value: { type: "string" } });
+		expect(schema).not.toHaveProperty("anyOf");
+	});
+
+	it("rejects mixed root combinators rather than silently discarding constraints", async () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+			tools: [
+				{
+					name: "mixed_composition_tool",
+					description: "Mixed composition tool",
+					parameters: {
+						anyOf: [{ type: "object", properties: { path: { type: "string" } } }],
+						allOf: [{ type: "object", properties: { mode: { type: "string" } } }],
+					} as never,
+				},
+			],
+		};
+		const result = await streamBedrock(model(), context).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain('Bedrock tool "mixed_composition_tool" requires an object input schema');
+	});
+
+	it("drops unsupported property names and malformed property schemas from the wire projection", async () => {
+		const toolConfig = await captureToolConfig({
+			anyOf: [
+				{
+					type: "object",
+					properties: {
+						valid_name: { type: "string" },
+						"invalid name": { type: "string" },
+						malformed: null,
+					},
+					required: ["valid_name", "invalid name", "malformed"],
+				},
+				{ type: "object", properties: { valid_name: { type: "string" } }, required: ["valid_name"] },
+			],
+		});
+
+		expect(toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json).toMatchObject({
+			type: "object",
+			properties: { valid_name: { type: "string" } },
+			required: ["valid_name"],
+		});
+	});
+
+	it("detaches the provider projection from the authoritative local schema", async () => {
+		const parameters = {
+			type: "object",
+			properties: { nested: { type: "object", properties: { value: { type: "string" } } } },
+		};
+		const toolConfig = await captureToolConfig(parameters);
+		const properties = toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json?.properties as
+			| Record<string, unknown>
+			| undefined;
+		const nested = properties?.nested;
+		expect(nested).toBeDefined();
+		(nested as Record<string, unknown>).description = "payload-only mutation";
+
+		expect(parameters.properties.nested).not.toHaveProperty("description");
+	});
+
+	it("keeps execution validation on the original union after flattening the wire schema", async () => {
+		const parameters = Type.Union([
+			Type.Object({ path: Type.String(), content: Type.String() }),
+			Type.Object({ path: Type.String(), payloadRef: Type.String() }),
+		]);
+		const tool: Tool = { name: "union_tool", description: "Union tool", parameters };
+		const toolConfig = await captureToolConfig(parameters);
+
+		expect(toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json?.required).toEqual(["path"]);
+		expect(() =>
+			validateToolArguments(
+				tool,
+				{ type: "toolCall", id: "call-1", name: tool.name, arguments: { path: "file.txt" } },
+				{ repairEnabled: false },
+			),
+		).toThrow('Validation failed for tool "union_tool"');
 	});
 
 	it("fails closed when an explicit tool choice includes another invalid schema", async () => {

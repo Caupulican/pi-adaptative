@@ -708,6 +708,7 @@ function sanitizeBedrockDocument(value: DocumentType): DocumentType {
 }
 
 const BEDROCK_ROOT_SCHEMA_COMBINATORS = ["anyOf", "oneOf", "allOf"] as const;
+const BEDROCK_TOOL_PROPERTY_NAME_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
 const BEDROCK_OBJECT_SCHEMA_KEYS = new Set([
 	"additionalProperties",
 	"dependentRequired",
@@ -719,10 +720,40 @@ const BEDROCK_OBJECT_SCHEMA_KEYS = new Set([
 	"required",
 	"unevaluatedProperties",
 ]);
-const BEDROCK_FLATTENABLE_BRANCH_KEYS = new Set(["properties", "required", "type"]);
+
+interface BedrockObjectSchemaProjection {
+	properties: Record<string, unknown>;
+	required: Set<string>;
+}
+
+interface NormalizedBedrockToolInputSchema {
+	schema: unknown;
+	constraintDescription?: string;
+}
 
 function isSchemaRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cloneBedrockSchemaValue(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+	if (Array.isArray(value)) {
+		const existing = seen.get(value);
+		if (existing !== undefined) return existing;
+		const clone: unknown[] = [];
+		seen.set(value, clone);
+		for (const entry of value) clone.push(cloneBedrockSchemaValue(entry, seen));
+		return clone;
+	}
+	if (!isSchemaRecord(value)) return value;
+
+	const existing = seen.get(value);
+	if (existing !== undefined) return existing;
+	const clone: Record<string, unknown> = {};
+	seen.set(value, clone);
+	for (const [key, entry] of Object.entries(value)) {
+		clone[key] = cloneBedrockSchemaValue(entry, seen);
+	}
+	return clone;
 }
 
 function resolveBedrockLocalSchemaRef(root: Record<string, unknown>, reference: string): unknown {
@@ -737,120 +768,162 @@ function resolveBedrockLocalSchemaRef(root: Record<string, unknown>, reference: 
 	return current;
 }
 
-function isObjectShapedBedrockSchema(
+function bedrockSchemaRequired(schema: Record<string, unknown>): string[] {
+	return Array.isArray(schema.required)
+		? schema.required.filter(
+				(key): key is string => typeof key === "string" && BEDROCK_TOOL_PROPERTY_NAME_PATTERN.test(key),
+			)
+		: [];
+}
+
+function bedrockSchemaProperties(schema: Record<string, unknown>): Record<string, unknown> {
+	if (!isSchemaRecord(schema.properties)) return {};
+	return Object.fromEntries(
+		Object.entries(schema.properties).filter(
+			([key, value]) => BEDROCK_TOOL_PROPERTY_NAME_PATTERN.test(key) && isSchemaRecord(value),
+		),
+	);
+}
+
+function mergeMissingBedrockSchemaProperties(target: Record<string, unknown>, source: Record<string, unknown>): void {
+	for (const [key, value] of Object.entries(source)) {
+		if (!(key in target)) target[key] = value;
+	}
+}
+
+function intersectBedrockRequiredSets(projections: readonly BedrockObjectSchemaProjection[]): Set<string> {
+	const common = new Set(projections[0]?.required ?? []);
+	for (const projection of projections.slice(1)) {
+		for (const key of common) if (!projection.required.has(key)) common.delete(key);
+	}
+	return common;
+}
+
+function projectBedrockObjectSchema(
 	schema: Record<string, unknown>,
 	root: Record<string, unknown>,
 	visitedRefs = new Set<string>(),
-): boolean {
-	if (schema.type === "object") return true;
-	if (schema.type !== undefined) return false;
+): BedrockObjectSchemaProjection | undefined {
+	if (schema.type !== undefined && schema.type !== "object") return undefined;
+
+	let objectShapeProven = schema.type === "object" || [...BEDROCK_OBJECT_SCHEMA_KEYS].some((key) => key in schema);
+	const properties = bedrockSchemaProperties(schema);
+	const required = new Set(bedrockSchemaRequired(schema));
+
 	if (typeof schema.$ref === "string") {
-		if (visitedRefs.has(schema.$ref)) return false;
+		if (visitedRefs.has(schema.$ref)) return undefined;
 		const target = resolveBedrockLocalSchemaRef(root, schema.$ref);
-		if (!isSchemaRecord(target)) return false;
+		if (!isSchemaRecord(target)) return undefined;
 		const nextVisitedRefs = new Set(visitedRefs);
 		nextVisitedRefs.add(schema.$ref);
-		return isObjectShapedBedrockSchema(target, root, nextVisitedRefs);
+		const targetProjection = projectBedrockObjectSchema(target, root, nextVisitedRefs);
+		if (!targetProjection) return undefined;
+		objectShapeProven = true;
+		mergeMissingBedrockSchemaProperties(properties, targetProjection.properties);
+		for (const key of targetProjection.required) required.add(key);
 	}
-	if ([...BEDROCK_OBJECT_SCHEMA_KEYS].some((key) => key in schema)) return true;
+
 	for (const combinator of BEDROCK_ROOT_SCHEMA_COMBINATORS) {
 		const branches = schema[combinator];
-		if (Array.isArray(branches) && branches.length > 0) {
-			return branches.every(
-				(branch) => isSchemaRecord(branch) && isObjectShapedBedrockSchema(branch, root, visitedRefs),
-			);
+		if (branches === undefined) continue;
+		if (!Array.isArray(branches) || branches.length === 0) return undefined;
+		const branchProjections: BedrockObjectSchemaProjection[] = [];
+		for (const branch of branches) {
+			if (!isSchemaRecord(branch)) return undefined;
+			const projection = projectBedrockObjectSchema(branch, root, visitedRefs);
+			if (!projection) return undefined;
+			branchProjections.push(projection);
 		}
+		objectShapeProven = true;
+		for (const projection of branchProjections) {
+			mergeMissingBedrockSchemaProperties(properties, projection.properties);
+		}
+		const combinatorRequired =
+			combinator === "allOf"
+				? new Set(branchProjections.flatMap((projection) => [...projection.required]))
+				: intersectBedrockRequiredSets(branchProjections);
+		for (const key of combinatorRequired) required.add(key);
 	}
-	return false;
+
+	return objectShapeProven ? { properties, required } : undefined;
 }
 
 /**
- * Bedrock Converse requires every tool inputSchema.json root to have type "object". TypeBox
- * unions used by tools such as write/edit are represented as top-level anyOf object branches,
- * which is valid JSON Schema but rejected by Bedrock before the model is invoked. Flatten only
- * unions whose every branch is an object; execution still validates against the authoritative
- * union schema after the provider response, so this projection cannot broaden the execution
- * contract.
+ * Bedrock requires an object root and Anthropic models on Bedrock reject root oneOf/anyOf/allOf
+ * tool schemas. TypeBox unions used by tools such as write/edit therefore need a provider-only
+ * object projection. The authoritative tool schema still validates every returned call after the
+ * provider response, so broadening this wire description cannot broaden execution authority.
  */
-function normalizeBedrockToolInputSchema(schema: unknown): unknown {
-	if (!isSchemaRecord(schema) || schema.type === "object") return schema;
+function normalizeBedrockToolInputSchema(schema: unknown): NormalizedBedrockToolInputSchema {
+	const detachedSchema = cloneBedrockSchemaValue(schema);
+	if (!isSchemaRecord(detachedSchema)) return { schema: detachedSchema };
 	// Never let a root combinator override an explicit non-object root type.
-	if (schema.type !== undefined) return schema;
+	if (detachedSchema.type !== undefined && detachedSchema.type !== "object") return { schema: detachedSchema };
 
-	const combinator = BEDROCK_ROOT_SCHEMA_COMBINATORS.find((key) => key in schema);
-	if (!combinator) {
-		return isObjectShapedBedrockSchema(schema, schema) ? { ...schema, type: "object" } : schema;
-	}
-	if (!Array.isArray(schema[combinator]) || schema[combinator].length === 0) return schema;
-
-	const branches = schema[combinator].filter(isSchemaRecord);
-	if (branches.length !== schema[combinator].length) return schema;
-	if (!branches.every((branch) => isObjectShapedBedrockSchema(branch, schema))) {
-		return schema;
-	}
-	// Preserve references, empty object branches, and branch constraints that cannot be safely
-	// represented by the flattened property projection. The added root type is sufficient for
-	// Bedrock's wire validator while retaining the authoritative schema semantics.
-	if (
-		branches.some(
-			(branch) =>
-				typeof branch.$ref === "string" ||
-				Object.keys(branch).some((key) => !BEDROCK_FLATTENABLE_BRANCH_KEYS.has(key)),
-		)
-	) {
-		return { ...schema, type: "object" };
-	}
-
-	const properties: Record<string, unknown> = isSchemaRecord(schema.properties) ? { ...schema.properties } : {};
-	const serializedProperties = new Map<string, string>();
-	for (const [key, value] of Object.entries(properties)) {
-		serializedProperties.set(key, JSON.stringify(value) ?? "<undefined>");
-	}
-	for (const branch of branches) {
-		if (!isSchemaRecord(branch.properties)) continue;
-		for (const [key, value] of Object.entries(branch.properties)) {
-			const serialized = JSON.stringify(value) ?? "<undefined>";
-			const previous = serializedProperties.get(key);
-			if (previous !== undefined && previous !== serialized) {
-				// Flattening would silently discard one branch's constraint. Keep the union intact and
-				// add only the object root required by Bedrock.
-				return { ...schema, type: "object" };
+	const combinators = BEDROCK_ROOT_SCHEMA_COMBINATORS.filter((key) => key in detachedSchema);
+	// Collapsing multiple independent compositions into one object would describe neither schema.
+	if (combinators.length > 1) return { schema: detachedSchema };
+	if (combinators.length === 0) {
+		if (!projectBedrockObjectSchema(detachedSchema, detachedSchema)) return { schema: detachedSchema };
+		const normalized: Record<string, unknown> = { ...detachedSchema, type: "object" };
+		if ("properties" in detachedSchema) {
+			normalized.properties = bedrockSchemaProperties(detachedSchema);
+			if ("required" in detachedSchema) {
+				normalized.required = bedrockSchemaRequired(detachedSchema).filter((key) =>
+					Object.hasOwn(normalized.properties as Record<string, unknown>, key),
+				);
 			}
-			serializedProperties.set(key, serialized);
-			properties[key] = value;
 		}
-	}
-	if (Object.keys(properties).length === 0) return { ...schema, type: "object" };
-
-	const normalized: Record<string, unknown> = { ...schema, type: "object", properties };
-	delete normalized[combinator];
-
-	const requiredSets = branches.map(
-		(branch) =>
-			new Set(
-				Array.isArray(branch.required)
-					? branch.required.filter((key): key is string => typeof key === "string")
-					: [],
-			),
-	);
-	const rootRequired = Array.isArray(schema.required)
-		? schema.required.filter((key): key is string => typeof key === "string")
-		: [];
-	if (combinator === "allOf") {
-		normalized.required = [...new Set([...rootRequired, ...requiredSets.flatMap((required) => [...required])])];
-	} else {
-		const commonRequired = requiredSets[0] ?? new Set<string>();
-		for (const required of requiredSets.slice(1)) {
-			for (const key of commonRequired) if (!required.has(key)) commonRequired.delete(key);
-		}
-		normalized.required = [...new Set([...rootRequired, ...commonRequired])];
+		return { schema: normalized };
 	}
 
-	return normalized;
+	const projection = projectBedrockObjectSchema(detachedSchema, detachedSchema);
+	if (!projection) return { schema: detachedSchema };
+	const required = [...projection.required].filter((key) => Object.hasOwn(projection.properties, key));
+	const normalized: Record<string, unknown> = {
+		...detachedSchema,
+		type: "object",
+		properties: projection.properties,
+		required,
+	};
+	for (const combinator of BEDROCK_ROOT_SCHEMA_COMBINATORS) delete normalized[combinator];
+
+	return {
+		schema: normalized,
+		constraintDescription: describeBedrockRootSchemaConstraint(detachedSchema, combinators),
+	};
 }
 
 function isBedrockToolInputSchema(value: unknown): value is Record<string, unknown> {
-	return isSchemaRecord(value) && value.type === "object";
+	return (
+		isSchemaRecord(value) &&
+		value.type === "object" &&
+		BEDROCK_ROOT_SCHEMA_COMBINATORS.every((combinator) => !(combinator in value))
+	);
+}
+
+function describeBedrockRootSchemaConstraint(
+	root: Record<string, unknown>,
+	combinators: readonly (typeof BEDROCK_ROOT_SCHEMA_COMBINATORS)[number][],
+): string {
+	const preferred = combinators.includes("oneOf") ? "oneOf" : combinators.includes("anyOf") ? "anyOf" : "allOf";
+	if (preferred === "allOf") {
+		return "Input constraint: all listed parameters apply together (flattened from a JSON Schema allOf).";
+	}
+
+	const branches = root[preferred];
+	const groups = Array.isArray(branches)
+		? branches.flatMap((branch) => {
+				if (!isSchemaRecord(branch)) return [];
+				const projection = projectBedrockObjectSchema(branch, root);
+				if (!projection) return [];
+				const names = projection.required.size > 0 ? [...projection.required] : Object.keys(projection.properties);
+				return names.length > 0 ? [`(${names.join(", ")})`] : [];
+			})
+		: [];
+	const choice = preferred === "oneOf" ? "exactly one" : "at least one";
+	const alternatives = groups.length > 0 ? `: ${groups.join(" or ")}` : "";
+	return `Input constraint: provide parameters for ${choice} of the documented alternatives${alternatives}.`;
 }
 
 function isExplicitBedrockToolChoice(
@@ -1062,15 +1135,17 @@ function convertToolConfig(
 
 	const bedrockTools: BedrockTool[] = [];
 	for (const tool of tools) {
-		const inputSchema = normalizeBedrockToolInputSchema(tool.parameters);
-		if (!isBedrockToolInputSchema(inputSchema)) {
+		const normalizedInput = normalizeBedrockToolInputSchema(tool.parameters);
+		if (!isBedrockToolInputSchema(normalizedInput.schema)) {
 			throw new Error(`Bedrock tool "${tool.name}" requires an object input schema`);
 		}
 		bedrockTools.push({
 			toolSpec: {
 				name: toolNameMap.toProviderName(tool.name),
-				description: tool.description,
-				inputSchema: { json: inputSchema as DocumentType },
+				description: normalizedInput.constraintDescription
+					? `${normalizedInput.constraintDescription}\n\n${tool.description}`
+					: tool.description,
+				inputSchema: { json: normalizedInput.schema as DocumentType },
 			},
 		});
 	}
