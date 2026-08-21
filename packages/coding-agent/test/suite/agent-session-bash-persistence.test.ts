@@ -162,8 +162,12 @@ describe("AgentSession bash and persistence characterization", () => {
 		expect(entries.map((entry) => entry.type)).toEqual([
 			"custom_message",
 			"message",
+			"request_snapshot",
 			"message",
+			"foreground_tool_start",
 			"message",
+			"foreground_tool_terminal",
+			"request_snapshot",
 			"message",
 		]);
 		expect(entries.some((entry) => entry.type === "custom" && entry.customType === "tool_argument_validation")).toBe(
