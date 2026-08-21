@@ -13,7 +13,6 @@ export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
-	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 
@@ -21,13 +20,11 @@ export class AssistantMessageComponent extends Container {
 		message?: AssistantMessage,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		hiddenThinkingLabel = "Thinking...",
 	) {
 		super();
 
 		this.hideThinkingBlock = hideThinkingBlock;
 		this.markdownTheme = markdownTheme;
-		this.hiddenThinkingLabel = hiddenThinkingLabel;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -52,13 +49,6 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	setHiddenThinkingLabel(label: string): void {
-		this.hiddenThinkingLabel = label;
-		if (this.lastMessage) {
-			this.updateContent(this.lastMessage);
-		}
-	}
-
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
@@ -77,7 +67,9 @@ export class AssistantMessageComponent extends Container {
 		this.contentContainer.clear();
 
 		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
+			(c) =>
+				(c.type === "text" && c.text.trim()) ||
+				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
 		);
 
 		if (hasVisibleContent) {
@@ -104,16 +96,10 @@ export class AssistantMessageComponent extends Container {
 
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
-
-				if (this.hideThinkingBlock) {
-					// Show one static label for each adjacent run of thinking blocks.
-					this.contentContainer.addChild(
-						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
-					);
-				} else {
+				if (!this.hideThinkingBlock) {
+					const hasVisibleContentAfter = message.content
+						.slice(i + 1)
+						.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 					// Adjacent thinking blocks form one section instead of repeated visual chrome.
 					this.contentContainer.addChild(
 						new Markdown(thinkingBlocks.join("\n\n"), 1, 0, this.markdownTheme, {
@@ -121,9 +107,9 @@ export class AssistantMessageComponent extends Container {
 							italic: true,
 						}),
 					);
-				}
-				if (hasVisibleContentAfter) {
-					this.contentContainer.addChild(new Spacer(1));
+					if (hasVisibleContentAfter) {
+						this.contentContainer.addChild(new Spacer(1));
+					}
 				}
 			}
 		}

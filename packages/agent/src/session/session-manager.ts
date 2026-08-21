@@ -28,11 +28,37 @@ import {
 import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { uuidv7 } from "../uuid.ts";
+import {
+	type CompactionEndEntry,
+	type CompactionStartEntry,
+	encodeSessionEntry,
+	type ForegroundToolStartEntry,
+	type ForegroundToolStartInput,
+	type ForegroundToolTerminalEntry,
+	indexSessionLifecycle,
+	inspectSessionLifecycle,
+	isSessionLifecycleEntry,
+	planSessionLifecycleRepair,
+	type RequestSnapshotEntry,
+	type SessionLifecycleEntry,
+	type SessionLifecycleIndex,
+	type SessionLifecycleInspection,
+	type SessionLifecycleRepairPlan,
+	type SessionRequestSnapshotInput,
+	sessionLifecycleToolIdentityKey,
+	validateLoadedLifecycleEntries,
+	validateSessionLifecycleEntry,
+} from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
+import { invalidSessionParentCycle, visitSessionAncestry } from "./session-tree.ts";
 
-export const CURRENT_SESSION_VERSION = 3;
+export * from "./lifecycle-ledger.ts";
+
+export const CURRENT_SESSION_VERSION = 4;
 /** Maximum borrowed entries one non-copying SessionManager visit may inspect. */
 export const MAX_SESSION_ENTRY_VISIT_COUNT = 1_024;
+/** Maximum normal message/custom-message records in one atomic append batch. */
+export const MAX_SESSION_MESSAGE_BATCH_ENTRIES = 256;
 const MAX_SESSION_LINEAGE_DEPTH = 64;
 
 export interface SessionHeader {
@@ -165,7 +191,8 @@ export type SessionEntry =
 	| CustomEntry
 	| CustomMessageEntry
 	| LabelEntry
-	| SessionInfoEntry;
+	| SessionInfoEntry
+	| SessionLifecycleEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -186,29 +213,32 @@ export interface SessionContext {
 	model: { provider: string; modelId: string } | null;
 }
 
-function invalidSessionParentCycle(entryId: string): Error {
-	return new Error(`Invalid session entry graph: parent cycle detected at entry "${entryId}".`);
-}
-
-/** Visit leaf-to-root ancestry through one bounded, cycle-rejecting implementation path. */
-function visitSessionAncestry(
-	start: SessionEntry | undefined,
-	byId: ReadonlyMap<string, SessionEntry>,
-	visitor: (entry: SessionEntry) => false | undefined,
-): void {
-	let current = start;
-	// One external start plus every indexed node is the longest possible acyclic walk.
-	let remainingEntries = byId.size + 1;
-	while (current) {
-		if (remainingEntries-- === 0) throw invalidSessionParentCycle(current.id);
-		if (visitor(current) === false) return;
-		current = current.parentId ? byId.get(current.parentId) : undefined;
-	}
-}
+/** One source-order item accepted by the atomic model-router/session append boundary. */
+export type SessionMessageBatchEntry =
+	| { kind: "message"; message: Message }
+	| { kind: "custom"; message: CustomMessage };
 
 interface SessionContextCache {
 	leafId: string | null;
 	context: SessionContext;
+}
+
+interface LifecycleActiveCache {
+	leafId: string | null;
+	currentRequestId?: string;
+	positions: Map<string, number>;
+	entryTypes: Map<string, string>;
+	requestIds: Set<string>;
+	startsByIdentity: Set<string>;
+	terminalsByIdentity: Set<string>;
+	compactionStarts: Map<string, CompactionStartEntry>;
+	compactionEnds: Set<string>;
+	assistantToolsByIdentity: Map<string, AssistantToolReference | "duplicate">;
+}
+
+interface AssistantToolReference {
+	requestId?: string;
+	toolName: string;
 }
 
 const synthesizedSessionContextMessages = new WeakSet<AgentMessage>();
@@ -264,6 +294,9 @@ export type ReadonlySessionManager = Pick<
 	| "readEntryJsonPrefix"
 	| "getTree"
 	| "getSessionName"
+	| "getSessionLifecycleIndex"
+	| "inspectSessionLifecycle"
+	| "planSessionLifecycleRepair"
 >;
 
 function createSessionId(): string {
@@ -290,6 +323,10 @@ function generateId(byId: { has(id: string): boolean }): string {
 	}
 	// Fallback to full UUID if somehow we have collisions
 	return randomUUID();
+}
+
+function assistantToolIdentityKey(assistantMessageEntryId: string, callId: string): string {
+	return JSON.stringify([assistantMessageEntryId, callId]);
 }
 
 /** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
@@ -340,6 +377,13 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
+/** Migrate v3 → v4: reserve the version for the typed lifecycle ledger. */
+function migrateV3ToV4(entries: FileEntry[]): void {
+	for (const entry of entries) {
+		if (entry.type === "session") entry.version = 4;
+	}
+}
+
 /**
  * Run all necessary migrations to bring entries to current version.
  * Mutates entries in place. Returns true if any migration was applied.
@@ -352,6 +396,7 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries);
 
 	return true;
 }
@@ -649,7 +694,9 @@ function loadEntriesFromFileInternal(
 
 /** Exported for testing */
 export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?: number }): FileEntry[] {
-	return loadEntriesFromFileInternal(filePath, options).entries;
+	const entries = loadEntriesFromFileInternal(filePath, options).entries;
+	validateLoadedLifecycleEntries(entries);
+	return entries;
 }
 
 const ENTRY_ID_PREFIX_BYTES = 64 * 1024;
@@ -1085,6 +1132,7 @@ export class SessionManager {
 	private readonly coldPayloadEntryIds = new Set<string>();
 	private indexedSessionFileBytes = 0;
 	private sessionContextCache: SessionContextCache | undefined;
+	private lifecycleActiveCache: LifecycleActiveCache | undefined;
 	private persistenceStateUncertain = false;
 	private inheritedSessionIds = new Set<string>();
 
@@ -1184,6 +1232,7 @@ export class SessionManager {
 			this._ensureEntryFileLocations(this.coldPayloadEntryIds);
 
 			const migrated = migrateToCurrentVersion(this.fileEntries);
+			validateLoadedLifecycleEntries(this.fileEntries);
 			// Validate and index the complete parent graph before a migration rewrite can
 			// mutate the source file. Malformed cycles must fail synchronously on cold open.
 			this._buildIndex();
@@ -1225,6 +1274,7 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.lifecycleActiveCache = undefined;
 		this.flushed = false;
 		this.persistenceStateUncertain = false;
 		this._invalidateSessionContextCache();
@@ -1296,6 +1346,7 @@ export class SessionManager {
 		this.labelsById = labelsById;
 		this.labelTimestampsById = labelTimestampsById;
 		this.leafId = leafId;
+		this.lifecycleActiveCache = undefined;
 		for (const id of this.coldPayloadEntryIds) {
 			if (!byId.has(id)) this.coldPayloadEntryIds.delete(id);
 		}
@@ -1316,7 +1367,7 @@ export class SessionManager {
 		const fd = openSync(tempFile, "wx");
 		try {
 			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				writeFileSync(fd, `${entry.type === "session" ? JSON.stringify(entry) : encodeSessionEntry(entry)}\n`);
 			}
 		} finally {
 			closeSync(fd);
@@ -1528,8 +1579,11 @@ export class SessionManager {
 		}
 	}
 
-	_persist(entry: SessionEntry): void {
+	private _persistEntries(entries: readonly SessionEntry[], encodedEntries: readonly string[]): void {
 		if (!this.persist || !this.sessionFile) return;
+		if (entries.length !== encodedEntries.length) {
+			throw new Error("Session persistence encoding count does not match the entry batch.");
+		}
 		if (this.persistenceStateUncertain) {
 			throw new Error(
 				"Session persistence state is uncertain after a failed write; reopen the session file or start a new session before appending.",
@@ -1538,50 +1592,151 @@ export class SessionManager {
 
 		try {
 			const hasAssistant =
-				(entry.type === "message" && entry.message.role === "assistant") ||
 				this.fileEntries.some(
 					(candidate) => candidate.type === "message" && candidate.message.role === "assistant",
-				);
-			if (!hasAssistant) {
-				if (this.flushed) {
+				) || entries.some((entry) => entry.type === "message" && entry.message.role === "assistant");
+			const forceFlush = entries.some((entry) => isSessionLifecycleEntry(entry));
+			if (!hasAssistant && !forceFlush) {
+				if (this.flushed && encodedEntries.length > 0) {
 					this._ensureSessionFileParent(this.sessionFile);
-					appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+					appendFileSync(this.sessionFile, `${encodedEntries.join("\n")}\n`);
 				}
 				return;
 			}
 
+			const encodedPayload = `${encodedEntries.join("\n")}\n`;
 			if (!this.flushed) {
 				this._ensureSessionFileParent(this.sessionFile);
 				const fd = openSync(this.sessionFile, "wx");
 				try {
-					for (const candidate of this.fileEntries) {
-						writeFileSync(fd, `${JSON.stringify(candidate)}\n`);
-					}
-					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+					const prefix = this.fileEntries.map((candidate) =>
+						candidate.type === "session" ? JSON.stringify(candidate) : encodeSessionEntry(candidate),
+					);
+					writeFileSync(fd, `${prefix.concat(encodedEntries).join("\n")}\n`);
 				} finally {
 					closeSync(fd);
 				}
 				this.flushed = true;
-			} else {
+			} else if (encodedEntries.length > 0) {
 				this._ensureSessionFileParent(this.sessionFile);
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				appendFileSync(this.sessionFile, encodedPayload);
 			}
 		} catch (error) {
 			// append/write/close failures may leave a partial JSONL suffix. Do not publish the
-			// entry in memory, and fence every later append until an explicit reload owns the
+			// entries in memory, and fence every later append until an explicit reload owns the
 			// surviving canonical prefix.
 			this.persistenceStateUncertain = true;
 			throw error;
 		}
 	}
 
+	_persist(entry: SessionEntry): void {
+		const encodedEntry = encodeSessionEntry(entry);
+		this._persistEntries([entry], [encodedEntry]);
+	}
+
+	private _appendEntries(entries: readonly SessionEntry[], preencodedEntries?: readonly string[]): void {
+		const encodedEntries =
+			preencodedEntries ??
+			(this.persist && this.sessionFile
+				? entries.map((entry) => {
+						if (isSessionLifecycleEntry(entry)) validateSessionLifecycleEntry(entry);
+						return encodeSessionEntry(entry);
+					})
+				: []);
+		if (preencodedEntries && preencodedEntries.length !== entries.length) {
+			throw new Error("Session append encoding count does not match the entry batch.");
+		}
+		if (encodedEntries.length > 0) {
+			this._persistEntries(entries, encodedEntries);
+		} else {
+			for (const entry of entries) {
+				if (isSessionLifecycleEntry(entry)) encodeSessionEntry(entry);
+			}
+		}
+		for (const entry of entries) {
+			this.fileEntries.push(entry);
+			this.entries.push(entry);
+			this.byId.set(entry.id, entry);
+			this.leafId = entry.id;
+			this._advanceLifecycleActiveCache(entry);
+			this._advanceSessionContextCache(entry);
+		}
+	}
+
 	private _appendEntry(entry: SessionEntry): void {
-		this._persist(entry);
-		this.fileEntries.push(entry);
-		this.entries.push(entry);
-		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
-		this._advanceSessionContextCache(entry);
+		this._appendEntries([entry]);
+	}
+
+	private _getLifecycleActiveCache(): LifecycleActiveCache {
+		if (this.lifecycleActiveCache?.leafId === this.leafId) return this.lifecycleActiveCache;
+		const branch: SessionEntry[] = [];
+		const leaf = this.leafId === null ? undefined : this.byId.get(this.leafId);
+		visitSessionAncestry(leaf, this.byId, (entry) => {
+			branch.push(entry);
+		});
+		branch.reverse();
+		const cache: LifecycleActiveCache = {
+			leafId: this.leafId,
+			positions: new Map(),
+			entryTypes: new Map(),
+			requestIds: new Set(),
+			startsByIdentity: new Set(),
+			terminalsByIdentity: new Set(),
+			compactionStarts: new Map(),
+			compactionEnds: new Set(),
+			assistantToolsByIdentity: new Map(),
+		};
+		for (let position = 0; position < branch.length; position += 1) {
+			this._applyLifecycleCacheEntry(cache, branch[position]!, position);
+		}
+		this.lifecycleActiveCache = cache;
+		return cache;
+	}
+
+	/** Apply one canonical branch entry to both rebuilt and incrementally advanced lifecycle caches. */
+	private _applyLifecycleCacheEntry(cache: LifecycleActiveCache, entry: SessionEntry, position: number): void {
+		cache.positions.set(entry.id, position);
+		cache.entryTypes.set(entry.id, entry.type);
+		if (entry.type === "request_snapshot") {
+			cache.currentRequestId = entry.requestId;
+			cache.requestIds.add(entry.requestId);
+		} else if (entry.type === "foreground_tool_start") {
+			cache.startsByIdentity.add(
+				sessionLifecycleToolIdentityKey(entry.requestId, entry.assistantMessageEntryId, entry.callId),
+			);
+		} else if (entry.type === "foreground_tool_terminal") {
+			cache.terminalsByIdentity.add(
+				sessionLifecycleToolIdentityKey(entry.requestId, entry.assistantMessageEntryId, entry.callId),
+			);
+		} else if (entry.type === "compaction_start" && !cache.compactionStarts.has(entry.compactionId)) {
+			cache.compactionStarts.set(entry.compactionId, entry);
+		} else if (entry.type === "compaction_end") {
+			cache.compactionEnds.add(entry.compactionId);
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			for (const block of entry.message.content) {
+				if (block.type !== "toolCall") continue;
+				const key = assistantToolIdentityKey(entry.id, block.id);
+				if (cache.assistantToolsByIdentity.has(key)) {
+					cache.assistantToolsByIdentity.set(key, "duplicate");
+				} else {
+					cache.assistantToolsByIdentity.set(key, {
+						requestId: cache.currentRequestId,
+						toolName: block.name,
+					});
+				}
+			}
+		}
+		cache.leafId = entry.id;
+	}
+
+	private _advanceLifecycleActiveCache(entry: SessionEntry): void {
+		const cache = this.lifecycleActiveCache;
+		if (!cache || cache.leafId !== entry.parentId) {
+			this.lifecycleActiveCache = undefined;
+			return;
+		}
+		this._applyLifecycleCacheEntry(cache, entry, cache.positions.size);
 	}
 
 	private _invalidateSessionContextCache(): void {
@@ -1647,6 +1802,63 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * Append a bounded mixed message/custom-message batch as one durable publication.
+	 * Every item is encoded before the session tree or persistence state is mutated.
+	 */
+	appendMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[] {
+		if (batch.length === 0) return [];
+		if (batch.length > MAX_SESSION_MESSAGE_BATCH_ENTRIES) {
+			throw new RangeError(
+				`Session message batch cannot contain more than ${MAX_SESSION_MESSAGE_BATCH_ENTRIES} entries.`,
+			);
+		}
+		const entries: SessionEntry[] = [];
+		const ids = new Set(this.byId.keys());
+		let parentId = this.leafId;
+		for (const item of batch) {
+			if (!item || typeof item !== "object") {
+				throw new TypeError("Session message batch items must be objects.");
+			}
+			const id = generateId(ids);
+			let entry: SessionEntry;
+			if (item.kind === "message") {
+				if (!item.message || typeof item.message !== "object") {
+					throw new TypeError("Session message batch message items require a message object.");
+				}
+				entry = {
+					type: "message",
+					id,
+					parentId,
+					timestamp: new Date().toISOString(),
+					message: item.message,
+				};
+			} else if (item.kind === "custom") {
+				if (!item.message || typeof item.message !== "object") {
+					throw new TypeError("Session message batch custom items require a message object.");
+				}
+				entry = {
+					type: "custom_message",
+					customType: item.message.customType,
+					content: item.message.content,
+					display: item.message.display,
+					details: item.message.details,
+					id,
+					parentId,
+					timestamp: new Date().toISOString(),
+				};
+			} else {
+				throw new TypeError("Session message batch items must use kind message or custom.");
+			}
+			entries.push(entry);
+			ids.add(id);
+			parentId = id;
+		}
+		const encodedEntries = entries.map((entry) => encodeSessionEntry(entry));
+		this._appendEntries(entries, encodedEntries);
+		return entries.map((entry) => entry.id);
+	}
+
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
 	appendThinkingLevelChange(thinkingLevel: string): string {
 		const entry: ThinkingLevelChangeEntry = {
@@ -1703,7 +1915,264 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a custom entry (for extensions) as child of current leaf, then advance leaf. Returns entry id. */
+	private _findAssistantToolCall(assistantMessageEntryId: string, callId: string): AssistantToolReference {
+		const cache = this._getLifecycleActiveCache();
+		if (!cache.positions.has(assistantMessageEntryId)) {
+			throw new Error(`Assistant message is outside the active branch: ${assistantMessageEntryId}.`);
+		}
+		const assistant = this.byId.get(assistantMessageEntryId);
+		if (!assistant || assistant.type !== "message") {
+			throw new Error(
+				`Foreground tool lifecycle identity requires an assistant message: ${assistantMessageEntryId}.`,
+			);
+		}
+		const reference = cache.assistantToolsByIdentity.get(assistantToolIdentityKey(assistantMessageEntryId, callId));
+		if (reference === "duplicate") {
+			throw new Error(
+				`Foreground tool lifecycle identity must resolve to exactly one assistant tool call: ${assistantMessageEntryId}/${callId}.`,
+			);
+		}
+		if (!reference) {
+			throw new Error(
+				`Foreground tool lifecycle identity must resolve to exactly one assistant tool call: ${assistantMessageEntryId}/${callId}.`,
+			);
+		}
+		return reference;
+	}
+
+	private _validateRequestSnapshot(entry: RequestSnapshotEntry): void {
+		const cache = this._getLifecycleActiveCache();
+		if (cache.requestIds.has(entry.requestId)) {
+			throw new Error(`Duplicate request snapshot identity: ${entry.requestId}.`);
+		}
+		for (const messageEntryId of entry.messageEntryIds) {
+			const messageEntry = this.byId.get(messageEntryId);
+			if (!messageEntry || messageEntry.type !== "message") {
+				throw new Error(`Request snapshot references a non-message entry: ${messageEntryId}.`);
+			}
+			if (!cache.positions.has(messageEntryId)) {
+				throw new Error(`Request snapshot message is outside the active branch: ${messageEntryId}.`);
+			}
+		}
+	}
+
+	private _validateForegroundToolStartBatch(entries: readonly ForegroundToolStartEntry[]): void {
+		const cache = this._getLifecycleActiveCache();
+		const seen = new Set<string>();
+		for (const entry of entries) {
+			validateSessionLifecycleEntry(entry);
+			const call = this._findAssistantToolCall(entry.assistantMessageEntryId, entry.callId);
+			if (call.requestId !== undefined && call.requestId !== entry.requestId) {
+				throw new Error(`Foreground tool start request does not match its assistant request: ${entry.id}.`);
+			}
+			const key = sessionLifecycleToolIdentityKey(entry.requestId, entry.assistantMessageEntryId, entry.callId);
+			if (seen.has(key) || cache.startsByIdentity.has(key)) {
+				throw new Error(
+					`Duplicate foreground tool start identity: ${entry.requestId}/${entry.assistantMessageEntryId}/${entry.callId}.`,
+				);
+			}
+			seen.add(key);
+			if (call.toolName !== entry.toolName) {
+				throw new Error(`Foreground tool start name does not match its assistant call: ${entry.id}.`);
+			}
+		}
+	}
+
+	private _validateForegroundToolTerminal(entry: ForegroundToolTerminalEntry): void {
+		validateSessionLifecycleEntry(entry);
+		const call = this._findAssistantToolCall(entry.assistantMessageEntryId, entry.callId);
+		if (call.requestId !== undefined && call.requestId !== entry.requestId) {
+			throw new Error(`Foreground tool terminal request does not match its assistant request: ${entry.id}.`);
+		}
+		if (call.toolName !== entry.toolName) {
+			throw new Error(`Foreground tool terminal name does not match its assistant call: ${entry.id}.`);
+		}
+		const cache = this._getLifecycleActiveCache();
+		const identityKey = sessionLifecycleToolIdentityKey(entry.requestId, entry.assistantMessageEntryId, entry.callId);
+		if (cache.terminalsByIdentity.has(identityKey)) {
+			throw new Error(`Duplicate foreground tool terminal identity: ${entry.id}.`);
+		}
+		if (!cache.startsByIdentity.has(identityKey)) {
+			throw new Error(`Foreground tool terminal has no matching durable start: ${entry.id}.`);
+		}
+		const resultEntry = this.byId.get(entry.resultMessageEntryId);
+		if (
+			!resultEntry ||
+			!cache.positions.has(entry.resultMessageEntryId) ||
+			resultEntry.type !== "message" ||
+			resultEntry.message.role !== "toolResult"
+		) {
+			throw new Error(`Foreground tool terminal references a non-result entry: ${entry.resultMessageEntryId}.`);
+		}
+		const resultErrorKind = resultEntry.message.isError
+			? (resultEntry.message.errorKind ?? "tool_failure")
+			: undefined;
+		if (
+			resultEntry.message.toolCallId !== entry.callId ||
+			resultEntry.message.toolName !== entry.toolName ||
+			entry.outcome !== (resultEntry.message.isError ? "error" : "success") ||
+			(resultEntry.message.errorKind !== undefined && !resultEntry.message.isError) ||
+			entry.errorKind !== resultErrorKind
+		) {
+			throw new Error(`Foreground tool terminal metadata contradicts its canonical result: ${entry.id}.`);
+		}
+	}
+
+	private _validateCompactionStart(entry: CompactionStartEntry): void {
+		validateSessionLifecycleEntry(entry);
+		const cache = this._getLifecycleActiveCache();
+		if (cache.compactionStarts.has(entry.compactionId)) {
+			throw new Error(`Duplicate compaction start identity: ${entry.compactionId}.`);
+		}
+		const firstKeptPosition = cache.positions.get(entry.firstKeptEntryId);
+		const leafPosition = this.leafId === null ? undefined : cache.positions.get(this.leafId);
+		if (firstKeptPosition === undefined || leafPosition === undefined || firstKeptPosition > leafPosition) {
+			throw new Error(
+				`Compaction start firstKeptEntryId is not an earlier active-branch entry: ${entry.firstKeptEntryId}.`,
+			);
+		}
+	}
+
+	private _validateCompactionEnd(entry: CompactionEndEntry): void {
+		validateSessionLifecycleEntry(entry);
+		const cache = this._getLifecycleActiveCache();
+		const start = cache.compactionStarts.get(entry.compactionId);
+		if (!start) throw new Error(`Compaction end has no matching start: ${entry.compactionId}.`);
+		if (cache.compactionEnds.has(entry.compactionId)) {
+			throw new Error(`Duplicate compaction end identity: ${entry.compactionId}.`);
+		}
+		if (entry.outcome !== "success") return;
+		const compactionPosition = entry.compactionEntryId ? cache.positions.get(entry.compactionEntryId) : undefined;
+		const compactionEntry = entry.compactionEntryId ? this.byId.get(entry.compactionEntryId) : undefined;
+		const finalFirstKeptPosition =
+			compactionEntry?.type === "compaction" ? cache.positions.get(compactionEntry.firstKeptEntryId) : undefined;
+		if (
+			!entry.compactionEntryId ||
+			cache.entryTypes.get(entry.compactionEntryId) !== "compaction" ||
+			compactionPosition === undefined ||
+			compactionPosition <= (cache.positions.get(start.id) ?? -1) ||
+			compactionEntry?.type !== "compaction" ||
+			finalFirstKeptPosition === undefined ||
+			finalFirstKeptPosition >= compactionPosition
+		) {
+			throw new Error(
+				`Compaction end references an invalid summary entry: ${entry.compactionEntryId ?? "missing"}.`,
+			);
+		}
+	}
+
+	/** Append a bounded provider request snapshot before its transport starts. */
+	appendRequestSnapshot(snapshot: SessionRequestSnapshotInput): string {
+		const entry: RequestSnapshotEntry = {
+			type: "request_snapshot",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			...snapshot,
+			messageEntryIds: [...snapshot.messageEntryIds],
+		};
+		validateSessionLifecycleEntry(entry);
+		this._validateRequestSnapshot(entry);
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a bounded batch of foreground tool execution start markers in one durable publication. */
+	appendForegroundToolStarts(starts: readonly ForegroundToolStartInput[]): string[] {
+		if (starts.length === 0) return [];
+		const entries: ForegroundToolStartEntry[] = [];
+		let parentId = this.leafId;
+		const ids = new Set(this.byId.keys());
+		for (const start of starts) {
+			const entry: ForegroundToolStartEntry = {
+				type: "foreground_tool_start",
+				id: generateId(ids),
+				parentId,
+				timestamp: new Date().toISOString(),
+				...start,
+			};
+			entries.push(entry);
+			ids.add(entry.id);
+			parentId = entry.id;
+		}
+		this._validateForegroundToolStartBatch(entries);
+		this._appendEntries(entries);
+		return entries.map((entry) => entry.id);
+	}
+
+	/** Append one bounded foreground tool execution start marker. */
+	appendForegroundToolStart(
+		requestId: string,
+		assistantMessageEntryId: string,
+		callId: string,
+		toolName: string,
+	): string {
+		return this.appendForegroundToolStarts([{ requestId, assistantMessageEntryId, callId, toolName }])[0]!;
+	}
+
+	/** Append a bounded foreground tool terminal marker. */
+	appendForegroundToolTerminal(
+		requestId: string,
+		assistantMessageEntryId: string,
+		callId: string,
+		toolName: string,
+		outcome: ForegroundToolTerminalEntry["outcome"],
+		metadata: Pick<ForegroundToolTerminalEntry, "resultMessageEntryId" | "errorKind">,
+	): string {
+		const entry: ForegroundToolTerminalEntry = {
+			type: "foreground_tool_terminal",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			requestId,
+			assistantMessageEntryId,
+			callId,
+			toolName,
+			outcome,
+			...metadata,
+		};
+		this._validateForegroundToolTerminal(entry);
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a bounded compaction transaction start marker. */
+	appendCompactionStart(compactionId: string, firstKeptEntryId: string, tokensBefore: number): string {
+		const entry: CompactionStartEntry = {
+			type: "compaction_start",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			compactionId,
+			firstKeptEntryId,
+			tokensBefore,
+		};
+		this._validateCompactionStart(entry);
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a bounded compaction transaction end marker. */
+	appendCompactionEnd(
+		compactionId: string,
+		outcome: CompactionEndEntry["outcome"],
+		metadata: Pick<CompactionEndEntry, "compactionEntryId" | "error"> = {},
+	): string {
+		const entry: CompactionEndEntry = {
+			type: "compaction_end",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			compactionId,
+			outcome,
+			...metadata,
+		};
+		this._validateCompactionEnd(entry);
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a custom entry (for extensions) as child of current leaf, then advance leaf. */
 	appendCustomEntry(customType: string, data?: unknown): string {
 		const entry: CustomEntry = {
 			type: "custom",
@@ -1742,6 +2211,21 @@ export class SessionManager {
 			}
 		}
 		return undefined;
+	}
+
+	/** Return lifecycle records on one branch without exposing lifecycle data to model context. */
+	getSessionLifecycleIndex(fromId?: string | null): SessionLifecycleIndex {
+		return indexSessionLifecycle(this.entries, fromId === undefined ? this.leafId : fromId);
+	}
+
+	/** Inspect lifecycle balance on one branch without mutating or appending repair records. */
+	inspectSessionLifecycle(fromId?: string | null): SessionLifecycleInspection {
+		return inspectSessionLifecycle(this.entries, fromId === undefined ? this.leafId : fromId);
+	}
+
+	/** Plan deterministic lifecycle repair for one branch without mutating the session. */
+	planSessionLifecycleRepair(fromId?: string | null): SessionLifecycleRepairPlan {
+		return planSessionLifecycleRepair(this.entries, fromId === undefined ? this.leafId : fromId);
 	}
 
 	/**
@@ -2139,6 +2623,7 @@ export class SessionManager {
 		}
 		this._invalidateSessionContextCache();
 		this.leafId = branchFromId;
+		this.lifecycleActiveCache = undefined;
 	}
 
 	/**
@@ -2149,6 +2634,7 @@ export class SessionManager {
 	resetLeaf(): void {
 		this._invalidateSessionContextCache();
 		this.leafId = null;
+		this.lifecycleActiveCache = undefined;
 	}
 
 	/**
@@ -2168,6 +2654,7 @@ export class SessionManager {
 		}
 		this._invalidateSessionContextCache();
 		this.leafId = branchFromId;
+		this.lifecycleActiveCache = undefined;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -2283,6 +2770,7 @@ export class SessionManager {
 		this.labelsById = branched.labelsById;
 		this.labelTimestampsById = branched.labelTimestampsById;
 		this.leafId = branched.leafId;
+		this.lifecycleActiveCache = undefined;
 		this.persistenceStateUncertain = branched.persistenceStateUncertain;
 		this.inheritedSessionIds = new Set(branched.inheritedSessionIds);
 		this.coldPayloadEntryIds.clear();

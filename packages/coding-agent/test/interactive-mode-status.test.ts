@@ -1,6 +1,13 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
-import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } from "@caupulican/pi-tui";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import {
+	type AutocompleteProvider,
+	CombinedAutocompleteProvider,
+	Container,
+	type Loader,
+	type TUI,
+} from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
@@ -8,6 +15,15 @@ import type { SourceInfo } from "../src/core/source-info.ts";
 import { ExtensionUiHost } from "../src/modes/interactive/extension-ui-host.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { type LoadedResourcesViewHost, renderLoadedResources } from "../src/modes/interactive/loaded-resources-view.ts";
+import {
+	applyRuntimeStatusLabel,
+	type RuntimeStatusPresentation,
+	resolveHiddenThinkingStatus,
+} from "../src/modes/interactive/runtime-status.ts";
+import {
+	RuntimeStatusController,
+	type RuntimeStatusControllerHost,
+} from "../src/modes/interactive/runtime-status-controller.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 function renderLastLine(container: Container, width = 120): string {
@@ -106,6 +122,94 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode runtime thinking status", () => {
+	test("updates one active loader in place from Thinking to configured Working", () => {
+		const loader = { setMessage: vi.fn() };
+		const requestRender = vi.fn();
+		let currentLabel: string | undefined;
+		const apply = (label: string) => {
+			const presentation: RuntimeStatusPresentation = {
+				hasHumanAudience: true,
+				currentLabel,
+				loadingAnimation: loader,
+				activityLane: undefined,
+				requestRender,
+			};
+			currentLabel = applyRuntimeStatusLabel(presentation, label);
+		};
+		apply("Thinking...");
+		apply("Working on it...");
+
+		expect(loader.setMessage).toHaveBeenNthCalledWith(1, "Thinking...");
+		expect(loader.setMessage).toHaveBeenNthCalledWith(2, "Working on it...");
+		expect(requestRender).toHaveBeenCalledTimes(2);
+	});
+
+	test("maps hidden thinking to the same status slot until text or a tool call begins", () => {
+		const loader = { setMessage: vi.fn() };
+		let currentLabel: string | undefined;
+		const apply = (message: AssistantMessage) => {
+			currentLabel = applyRuntimeStatusLabel(
+				{
+					hasHumanAudience: true,
+					currentLabel,
+					loadingAnimation: loader,
+					activityLane: undefined,
+					requestRender: vi.fn(),
+				},
+				resolveHiddenThinkingStatus(message, true, "Thinking...", "Working..."),
+			);
+		};
+
+		apply(fauxAssistantMessage([{ type: "thinking", thinking: "private reasoning" }]));
+		apply(fauxAssistantMessage([fauxToolCall("read", { path: "README.md" })]));
+		apply(fauxAssistantMessage("answer"));
+
+		expect(loader.setMessage).toHaveBeenNthCalledWith(1, "Thinking...");
+		expect(loader.setMessage).toHaveBeenNthCalledWith(2, "Working...");
+		expect(loader.setMessage).toHaveBeenCalledTimes(2);
+	});
+
+	test("changing the thinking label does not replace an active Working status after text begins", () => {
+		const loader = { setMessage: vi.fn() };
+		const streamingMessage = fauxAssistantMessage("answer in progress");
+		const runtimeStatusHost: RuntimeStatusControllerHost = {
+			ui: { requestRender: vi.fn() } as unknown as TUI,
+			statusContainer: new Container(),
+			activityLane: undefined,
+			hasHumanAudience: true,
+			isStreaming: () => true,
+			isThinkingHidden: () => true,
+		};
+		const runtimeStatus = new RuntimeStatusController(runtimeStatusHost);
+		runtimeStatus.loadingAnimation = loader as unknown as Loader;
+		runtimeStatus.updateRuntimeStatus(streamingMessage);
+		vi.mocked(loader.setMessage).mockClear();
+		type RuntimeStatusMode = {
+			updateRuntimeStatus(this: RuntimeStatusFixture, message?: AssistantMessage): void;
+			setHiddenThinkingLabel(this: RuntimeStatusFixture, label?: string): void;
+		};
+		type RuntimeStatusFixture = {
+			runtimeStatus: RuntimeStatusController;
+			streamingMessage: AssistantMessage | undefined;
+			ui: { requestRender(): void };
+			updateRuntimeStatus(message?: AssistantMessage): void;
+		};
+		const methods = InteractiveMode.prototype as unknown as RuntimeStatusMode;
+		const fakeThis: RuntimeStatusFixture = {
+			runtimeStatus,
+			streamingMessage,
+			ui: { requestRender: vi.fn() },
+			updateRuntimeStatus: (message) => runtimeStatus.updateRuntimeStatus(message),
+		};
+
+		methods.setHiddenThinkingLabel.call(fakeThis, "Reasoning...");
+
+		expect(fakeThis.runtimeStatus).toBe(runtimeStatus);
+		expect(loader.setMessage).not.toHaveBeenCalled();
 	});
 });
 

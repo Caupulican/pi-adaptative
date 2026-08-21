@@ -5,6 +5,7 @@ import { keyText } from "./keybinding-hints.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 const COLLAPSED_FILE_SNIPPET = 3;
+const MAX_COMPACT_COMMANDS = 32;
 
 /** Human nouns for collapsed group headers. Keys are toolGroup ids, not raw tool names. */
 const GROUP_NOUNS: Record<string, { singular: string; plural: string }> = {
@@ -59,6 +60,12 @@ export class ToolGroupComponent implements Component {
 		this.tools.push(tool);
 	}
 
+	canAccept(tool: ToolExecutionComponent): boolean {
+		if (tool.toolGroup?.trim() !== this.toolGroup) return false;
+		if (!this.isCommandGroup(tool)) return true;
+		return this.tools.length < MAX_COMPACT_COMMANDS;
+	}
+
 	removeTool(tool: ToolExecutionComponent): boolean {
 		const index = this.tools.indexOf(tool);
 		if (index === -1) return false;
@@ -95,12 +102,32 @@ export class ToolGroupComponent implements Component {
 		if (this.tools.length === 0) return [];
 		const safeWidth = Math.max(1, width);
 		if (this.expanded) return this.tools.flatMap((tool) => tool.render(safeWidth));
+		if (this.isCommandGroup()) return this.renderCommandGroup(safeWidth);
 
 		const collapsed = this.renderCollapsed(safeWidth);
 		if (collapsed.length === 0) return [];
 		const box = new Box(1, 1, (text) => theme.bg(this.getBackgroundColor(), text));
 		box.addChild({ render: (contentWidth) => this.renderCollapsed(contentWidth), invalidate: () => {} });
 		return [" ".repeat(safeWidth), ...box.render(safeWidth)];
+	}
+
+	private isCommandGroup(candidate?: ToolExecutionComponent): boolean {
+		return (
+			this.toolGroup === "bash" &&
+			this.tools.every((tool) => tool.getToolName() === "bash") &&
+			(candidate === undefined || candidate.getToolName() === "bash")
+		);
+	}
+
+	private renderCommandGroup(width: number): string[] {
+		const total = this.tools.length;
+		const pending = this.tools.filter((tool) => tool.isToolPartial()).length;
+		const failed = this.tools.filter((tool) => tool.isToolError()).length;
+		const status = pending > 0 ? "Running" : "Ran";
+		const noun = total === 1 ? "command" : "commands";
+		const failureSuffix = failed > 0 ? ` · ${failed} failed` : "";
+		const summary = `${theme.fg(failed > 0 ? "error" : pending > 0 ? "accent" : "success", "•")} ${theme.bold(`${status} ${total} ${noun}`)}${theme.fg("dim", `${failureSuffix} · ${keyText("app.transcript.open")} to view transcript`)}`;
+		return [truncateToWidth(summary, width, "...")];
 	}
 
 	private renderCollapsed(width: number): string[] {

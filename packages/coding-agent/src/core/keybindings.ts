@@ -117,7 +117,7 @@ export const KEYBINDINGS = {
 	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle the live agents panel" },
 	"app.agents.close": { defaultKeys: "escape", description: "Close the live agents panel" },
 	"app.thinking.toggle": {
-		defaultKeys: "ctrl+t",
+		defaultKeys: "shift+pageUp",
 		description: "Toggle thinking blocks",
 	},
 	"app.session.toggleNamedFilter": {
@@ -141,7 +141,7 @@ export const KEYBINDINGS = {
 		description: "Paste image from clipboard",
 	},
 	"app.transcript.open": {
-		defaultKeys: "shift+pageUp",
+		defaultKeys: "ctrl+t",
 		description: "Open transcript scrollback",
 	},
 	"app.transcript.scrollUp": { defaultKeys: "up", description: "Scroll transcript up" },

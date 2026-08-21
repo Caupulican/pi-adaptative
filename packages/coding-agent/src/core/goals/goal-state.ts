@@ -28,7 +28,7 @@ export function isGoalTerminalStatus(status: GoalStatus): boolean {
 }
 
 export function isGoalUnfinishedStatus(status: GoalStatus): boolean {
-	return status !== "completed" && status !== "cancelled";
+	return !isGoalTerminalStatus(status);
 }
 
 export interface GoalState {
@@ -182,6 +182,10 @@ function isStringArray(value: unknown): value is readonly string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function hasOptionalStringArray(record: Record<string, unknown>, key: string): boolean {
+	return record[key] === undefined || isStringArray(record[key]);
+}
+
 function isGoalStatus(value: unknown): value is GoalStatus {
 	return (
 		value === "active" ||
@@ -228,6 +232,7 @@ function isRequirement(value: unknown): value is Requirement {
 		typeof value.text === "string" &&
 		isRequirementStatus(value.status) &&
 		isStringArray(value.evidenceIds) &&
+		hasOptionalStringArray(value, "dependencies") &&
 		typeof value.createdAt === "string" &&
 		typeof value.updatedAt === "string" &&
 		hasOptionalString(value, "blockedReason") &&
@@ -254,7 +259,11 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 		case "edit_goal":
 			return typeof value.userGoal === "string" && hasOptionalFiniteNumber(value, "tokenBudget");
 		case "add_requirement":
-			return typeof value.id === "string" && typeof value.text === "string";
+			return (
+				typeof value.id === "string" &&
+				typeof value.text === "string" &&
+				hasOptionalStringArray(value, "dependencies")
+			);
 		case "satisfy_requirement":
 			return typeof value.id === "string" && isStringArray(value.evidenceIds);
 		case "block_requirement":
@@ -340,6 +349,7 @@ function cloneRequirement(requirement: Requirement): Requirement {
 	return {
 		...requirement,
 		evidenceIds: [...requirement.evidenceIds],
+		...(requirement.dependencies ? { dependencies: [...requirement.dependencies] } : {}),
 	};
 }
 

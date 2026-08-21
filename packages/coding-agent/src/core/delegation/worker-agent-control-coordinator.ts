@@ -2011,6 +2011,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			rootAgentId: agent.rootAgentId,
 			depth: agent.depth,
 			role: agent.role,
+			...(agent.resumeContext.modelRef ? { modelRef: agent.resumeContext.modelRef } : {}),
 			status: agent.status,
 			activity,
 			controllable: !callerAgentId || this.agentIsInCallerSubtree(agent, callerAgentId),

@@ -221,6 +221,51 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 
+	it("contains a synchronous public subscriber failure and notifies later subscribers", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const observed: string[] = [];
+		harness.session.subscribe(() => {
+			throw new Error("simulated public subscriber failure");
+		});
+		harness.session.subscribe((event) => observed.push(event.type));
+		harness.setResponses([fauxAssistantMessage("recovered")]);
+
+		await expect(harness.session.prompt("test")).resolves.toBeUndefined();
+
+		expect(observed).toContain("message_start");
+		expect(observed).toContain("agent_end");
+	});
+
+	it("contains a rejected async public subscriber without unhandled rejection", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const observed: string[] = [];
+		const unhandledReasons: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown): void => {
+			unhandledReasons.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandledRejection);
+		harness.session.subscribe(async (event) => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				await Promise.resolve();
+				throw new Error("simulated async public subscriber failure");
+			}
+		});
+		harness.session.subscribe((event) => observed.push(event.type));
+		harness.setResponses([fauxAssistantMessage("recovered")]);
+
+		try {
+			await expect(harness.session.prompt("test")).resolves.toBeUndefined();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
+
+		expect(observed).toContain("agent_end");
+		expect(unhandledReasons).toEqual([]);
+	});
+
 	it("waits for the full loop when retry recovery produces tool calls", async () => {
 		const toolRuns: string[] = [];
 		const echoTool: AgentTool = {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added a version 4 durable lifecycle ledger for accepted provider requests, foreground tool execution, and compaction recovery, including fail-closed request/tool hooks and deterministic reopen repair.
+
 ### Fixed
 
 - Fixed provider request estimates counting persisted diagnostics, usage, and tool details that are not sent to providers.

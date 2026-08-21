@@ -12,12 +12,49 @@ export interface MemoryPrefetchOptions {
 	externalEgressPolicy?: MemoryEgressPolicy;
 }
 
+export interface MemoryManagerOptions {
+	/** Maximum time a provider lifecycle call may keep the session waiting. */
+	lifecycleTimeoutMs?: number;
+}
+
+export type MemoryLifecycleOperation =
+	| "isAvailable"
+	| "initialize"
+	| "prefetch"
+	| "syncTurn"
+	| "onPreCompress"
+	| "onSessionEnd"
+	| "shutdown";
+
+export interface MemoryLifecycleDiagnostic {
+	provider: string;
+	operation: MemoryLifecycleOperation;
+	status: "timeout" | "error" | "abandoned";
+	message: string;
+}
+
+const DEFAULT_LIFECYCLE_TIMEOUT_MS = 8_000;
+const MAX_LIFECYCLE_DIAGNOSTICS = 32;
+
+type ProviderOperationResult<T> =
+	| { status: "ok"; value: T }
+	| { status: "timeout" }
+	| { status: "error"; error: unknown };
+
+interface AbandonedProviderState {
+	pendingOperations: number;
+}
+
 export class MemoryManager {
+	/** Provider identities remain fenced while late timed-out operations are still pending, without retaining them strongly. */
+	private static readonly ABANDONED_PROVIDERS = new WeakMap<MemoryProvider, AbandonedProviderState>();
 	private readonly providers: MemoryProvider[] = [];
 	private readonly activeProviders: Set<string> = new Set();
 	private readonly registeredToolNames: Set<string> = new Set();
 	private ctx?: MemoryLifecycleContext;
 	private systemPromptBlockCache?: { key: string; text: string };
+	private readonly lifecycleTimeoutMs: number;
+	private readonly lifecycleDiagnostics: MemoryLifecycleDiagnostic[] = [];
 
 	// Core reserved tool names to prevent hijacking or schema corruption.
 	private static readonly RESERVED_CORE_TOOL_NAMES = new Set([
@@ -34,6 +71,89 @@ export class MemoryManager {
 		"skill_search",
 		"skill_open",
 	]);
+
+	constructor(options: MemoryManagerOptions = {}) {
+		const timeout = options.lifecycleTimeoutMs ?? DEFAULT_LIFECYCLE_TIMEOUT_MS;
+		if (!Number.isFinite(timeout) || timeout <= 0) {
+			throw new Error("Memory lifecycle timeout must be a finite positive number.");
+		}
+		this.lifecycleTimeoutMs = timeout;
+	}
+
+	/** Bounded, source-labelled diagnostics for lifecycle failures; no provider payloads are retained. */
+	public getLifecycleDiagnostics(): MemoryLifecycleDiagnostic[] {
+		return this.lifecycleDiagnostics.map((diagnostic) => ({ ...diagnostic }));
+	}
+
+	private recordLifecycleDiagnostic(diagnostic: MemoryLifecycleDiagnostic): void {
+		if (this.lifecycleDiagnostics.length >= MAX_LIFECYCLE_DIAGNOSTICS) {
+			this.lifecycleDiagnostics.shift();
+		}
+		this.lifecycleDiagnostics.push(diagnostic);
+		console.error(
+			`Memory provider ${diagnostic.provider} ${diagnostic.operation} ${diagnostic.status}: ${diagnostic.message}`,
+		);
+	}
+
+	private abandonProvider(provider: MemoryProvider): void {
+		// A timed-out Promise cannot be cancelled. Removing the provider prevents a late completion
+		// from racing a later hook and makes abandonment the one mandatory recovery path.
+		this.activeProviders.delete(provider.name);
+		const state = MemoryManager.ABANDONED_PROVIDERS.get(provider) ?? { pendingOperations: 0 };
+		state.pendingOperations += 1;
+		MemoryManager.ABANDONED_PROVIDERS.set(provider, state);
+	}
+
+	private releaseAbandonedProvider(provider: MemoryProvider): void {
+		const state = MemoryManager.ABANDONED_PROVIDERS.get(provider);
+		if (state === undefined) return;
+		state.pendingOperations -= 1;
+		if (state.pendingOperations <= 0) MemoryManager.ABANDONED_PROVIDERS.delete(provider);
+	}
+
+	private async invokeProvider<T>(
+		provider: MemoryProvider,
+		operation: MemoryLifecycleOperation,
+		callback: () => T | Promise<T>,
+	): Promise<ProviderOperationResult<T>> {
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let timedOut = false;
+		const operationPromise = Promise.resolve()
+			.then(callback)
+			.then((value): ProviderOperationResult<T> => ({ status: "ok", value }))
+			.catch((error): ProviderOperationResult<T> => ({ status: "error", error }))
+			.finally(() => {
+				if (timedOut) this.releaseAbandonedProvider(provider);
+			});
+		const timeoutPromise = new Promise<ProviderOperationResult<T>>((resolve) => {
+			timeout = setTimeout(() => {
+				timedOut = true;
+				this.abandonProvider(provider);
+				this.recordLifecycleDiagnostic({
+					provider: provider.name,
+					operation,
+					status: "timeout",
+					message: `exceeded ${this.lifecycleTimeoutMs}ms`,
+				});
+				resolve({ status: "timeout" });
+			}, this.lifecycleTimeoutMs);
+		});
+		try {
+			const result = await Promise.race([operationPromise, timeoutPromise]);
+			if (result.status === "error") {
+				this.recordLifecycleDiagnostic({
+					provider: provider.name,
+					operation,
+					status: "error",
+					message: result.error instanceof Error ? result.error.name : typeof result.error,
+				});
+				return { status: "error", error: result.error };
+			}
+			return result;
+		} finally {
+			if (timeout !== undefined) clearTimeout(timeout);
+		}
+	}
 
 	public registerProvider(p: MemoryProvider): void {
 		if (this.providers.some((prov) => prov.name === p.name)) {
@@ -73,17 +193,20 @@ export class MemoryManager {
 		this.systemPromptBlockCache = undefined;
 
 		for (const p of this.providers) {
-			try {
-				const available = await p.isAvailable();
-				if (!available) {
-					continue;
-				}
-
-				await p.initialize(sessionId, ctx);
-				this.activeProviders.add(p.name);
-			} catch (err) {
-				console.error(`Memory provider ${p.name} failed to initialize and was deactivated:`, err);
+			if (MemoryManager.ABANDONED_PROVIDERS.has(p)) {
+				this.recordLifecycleDiagnostic({
+					provider: p.name,
+					operation: "initialize",
+					status: "abandoned",
+					message: "provider identity was abandoned by an earlier manager generation",
+				});
+				continue;
 			}
+			const availability = await this.invokeProvider(p, "isAvailable", () => p.isAvailable());
+			if (availability.status !== "ok" || !availability.value) continue;
+
+			const initialized = await this.invokeProvider(p, "initialize", () => p.initialize(sessionId, ctx));
+			if (initialized.status === "ok") this.activeProviders.add(p.name);
 		}
 	}
 
@@ -147,13 +270,9 @@ export class MemoryManager {
 					continue;
 				}
 			}
-			try {
-				const text = await p.prefetch(query);
-				if (text) {
-					results.push(wrapUntrustedText(text, `memory:${p.name}`));
-				}
-			} catch (err) {
-				console.error(`Memory provider ${p.name} failed during prefetch:`, err);
+			const result = await this.invokeProvider(p, "prefetch", () => p.prefetch!(query));
+			if (result.status === "ok" && result.value) {
+				results.push(wrapUntrustedText(result.value, `memory:${p.name}`));
 			}
 		}
 		return results.join("\n\n");
@@ -168,11 +287,7 @@ export class MemoryManager {
 			if (!this.activeProviders.has(p.name) || !p.syncTurn) {
 				continue;
 			}
-			try {
-				await p.syncTurn(user, assistant);
-			} catch (err) {
-				console.error(`Memory provider ${p.name} failed during syncTurn:`, err);
-			}
+			await this.invokeProvider(p, "syncTurn", () => p.syncTurn!(user, assistant));
 		}
 	}
 
@@ -182,13 +297,9 @@ export class MemoryManager {
 			if (!this.activeProviders.has(p.name) || !p.onPreCompress) {
 				continue;
 			}
-			try {
-				const insight = await p.onPreCompress();
-				if (insight) {
-					insights.push(insight);
-				}
-			} catch (err) {
-				console.error(`Memory provider ${p.name} failed during onPreCompress:`, err);
+			const result = await this.invokeProvider(p, "onPreCompress", () => p.onPreCompress!());
+			if (result.status === "ok" && result.value) {
+				insights.push(result.value);
 			}
 		}
 		return insights.join("\n\n");
@@ -203,11 +314,7 @@ export class MemoryManager {
 			if (!this.activeProviders.has(p.name) || !p.onSessionEnd) {
 				continue;
 			}
-			try {
-				await p.onSessionEnd();
-			} catch (err) {
-				console.error(`Memory provider ${p.name} failed during onSessionEnd:`, err);
-			}
+			await this.invokeProvider(p, "onSessionEnd", () => p.onSessionEnd!());
 		}
 	}
 
@@ -218,11 +325,7 @@ export class MemoryManager {
 			if (!this.activeProviders.has(p.name)) {
 				continue;
 			}
-			try {
-				await p.shutdown();
-			} catch (err) {
-				console.error(`Memory provider ${p.name} failed to shutdown cleanly:`, err);
-			}
+			await this.invokeProvider(p, "shutdown", () => p.shutdown());
 		}
 		this.activeProviders.clear();
 	}
@@ -266,5 +369,6 @@ export class MemoryManager {
 		this.registeredToolNames.clear();
 		this.systemPromptBlockCache = undefined;
 		this.ctx = undefined;
+		this.lifecycleDiagnostics.length = 0;
 	}
 }

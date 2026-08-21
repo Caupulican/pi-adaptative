@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import {
 	assessCompactionNeed,
@@ -23,7 +24,12 @@ import {
 	type RetryPolicy,
 	sleepAbortable,
 } from "@caupulican/pi-agent-core/reliability";
-import { type CompactionEntry, getLatestCompactionEntry, type SessionManager } from "@caupulican/pi-agent-core/session";
+import {
+	type CompactionEntry,
+	getLatestCompactionEntry,
+	isSessionLifecycleEntry,
+	type SessionManager,
+} from "@caupulican/pi-agent-core/session";
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
@@ -75,6 +81,24 @@ interface IneffectiveThresholdFrontier {
 	triggerPercent: number | undefined;
 	tokensAfter: number;
 	retryAtTokens: number;
+}
+
+interface ActiveCompactionLifecycle {
+	compactionId: string;
+	latestCompactionEntryId?: string;
+	endAttempted: boolean;
+}
+
+type CompactionLifecycleOutcome = "success" | "failure" | "cancelled";
+
+function boundedCompactionLifecycleError(error: unknown): string {
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "compaction failed";
+	const sanitized = message
+		.replace(/[\u0000-\u001F\u007F]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!sanitized) return "compaction failed";
+	return sanitized.length > 500 ? `${sanitized.slice(0, 500)}…` : sanitized;
 }
 
 function formatRequestTokenBreakdown(input: ProviderRequestCompactionInput): string {
@@ -170,6 +194,7 @@ export class CompactionController {
 	private manualAbortController: AbortController | undefined;
 	private autoAbortController: AbortController | undefined;
 	private autoRunPromise: Promise<boolean> | undefined;
+	private activeCompactionLifecycle: ActiveCompactionLifecycle | undefined;
 	private overflowRecoveryAttempted = false;
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
@@ -227,6 +252,69 @@ export class CompactionController {
 			cacheRetention: "short",
 		};
 		return options;
+	}
+
+	/**
+	 * Open the durable compaction transaction only after deterministic preparation has produced its cut.
+	 * The caller must invoke this before extension or provider work begins. A failed append deliberately
+	 * leaves no active lifecycle, so the caller fails closed before starting summarization.
+	 */
+	private beginCompactionLifecycle(preparation: CompactionPreparation): void {
+		if (this.activeCompactionLifecycle) return;
+		const compactionId = randomUUID();
+		this.deps.sessionManager.appendCompactionStart(
+			compactionId,
+			preparation.firstKeptEntryId,
+			preparation.tokensBefore,
+		);
+		this.activeCompactionLifecycle = { compactionId, endAttempted: false };
+	}
+
+	private recordAppliedCompaction(compactionEntryId: string): void {
+		if (this.activeCompactionLifecycle) this.activeCompactionLifecycle.latestCompactionEntryId = compactionEntryId;
+	}
+
+	/**
+	 * Lifecycle records are durable bookkeeping and must not become compaction input or alter the
+	 * loop's trailing-compaction guard. They remain in the real branch so recovery can inspect them.
+	 */
+	private getCompactionBranch(): ReturnType<SessionManager["getBranch"]> {
+		return this.deps.sessionManager.getBranch().filter((entry) => !isSessionLifecycleEntry(entry));
+	}
+
+	/**
+	 * Close the one transaction for this compaction retry ladder. The marker is attempted at most once;
+	 * an append failure is allowed to propagate because success must never be inferred from an unrecorded
+	 * terminal. A successful terminal always points at the canonical persisted compaction entry.
+	 */
+	private finishCompactionLifecycle(outcome: CompactionLifecycleOutcome, error?: unknown): void {
+		const lifecycle = this.activeCompactionLifecycle;
+		if (!lifecycle || lifecycle.endAttempted) return;
+		lifecycle.endAttempted = true;
+		let terminalOutcome = outcome;
+		let terminalError = error === undefined ? undefined : boundedCompactionLifecycleError(error);
+		let invalidSuccess = false;
+		if (terminalOutcome === "success" && !lifecycle.latestCompactionEntryId) {
+			terminalOutcome = "failure";
+			terminalError = "compaction succeeded without a persisted compaction entry";
+			invalidSuccess = true;
+		}
+		try {
+			if (terminalOutcome === "success") {
+				this.deps.sessionManager.appendCompactionEnd(lifecycle.compactionId, terminalOutcome, {
+					compactionEntryId: lifecycle.latestCompactionEntryId,
+				});
+			} else if (terminalError) {
+				this.deps.sessionManager.appendCompactionEnd(lifecycle.compactionId, terminalOutcome, {
+					error: terminalError,
+				});
+			} else {
+				this.deps.sessionManager.appendCompactionEnd(lifecycle.compactionId, terminalOutcome);
+			}
+		} finally {
+			if (this.activeCompactionLifecycle === lifecycle) this.activeCompactionLifecycle = undefined;
+		}
+		if (invalidSuccess) throw new Error(terminalError);
 	}
 
 	resetOverflowRecovery(): void {
@@ -349,6 +437,14 @@ export class CompactionController {
 			primaryError = error;
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			try {
+				this.finishCompactionLifecycle(aborted ? "cancelled" : "failure", aborted ? undefined : error);
+			} catch (lifecycleError) {
+				primaryError = new AggregateError(
+					[primaryError, lifecycleError],
+					"Compaction failed and its durable lifecycle terminal could not be recorded",
+				);
+			}
 			this.deps.emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -388,16 +484,17 @@ export class CompactionController {
 		if (!sessionModel) throw new Error(formatNoModelSelectedMessage());
 
 		const selectedCompactionModel = this.deps.resolveModel(sessionModel);
-		if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
 		const selectionReason = this.deps.getSelectionReason() ?? "unknown";
 		const settings = this.deps.getAdaptedSettings();
-		const initialBranch = this.deps.sessionManager.getBranch();
+		const initialBranch = this.getCompactionBranch();
 		const initialPreparation = prepareCompaction(initialBranch, settings);
 		if (!initialPreparation) {
 			const lastEntry = initialBranch[initialBranch.length - 1];
 			if (lastEntry?.type === "compaction") throw new Error("Already compacted");
 			throw new Error("Nothing to compact (session too small)");
 		}
+		this.beginCompactionLifecycle(initialPreparation);
+		if (this.deps.isRawStream()) await this.deps.getRequestAuth(selectedCompactionModel);
 
 		// Resolve once for the complete retry ladder. Provider hooks can perform durable flushes and
 		// must not be repeated for every summarizer/gate retry.
@@ -410,7 +507,8 @@ export class CompactionController {
 		);
 		if (extension.cancelled) throw new Error("Compaction cancelled");
 		if (extension.result) {
-			await this.applyResult(extension.result, true);
+			this.recordAppliedCompaction(await this.applyResult(extension.result, true));
+			this.finishCompactionLifecycle("success");
 			this.deps.emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -426,7 +524,7 @@ export class CompactionController {
 			measureLiveTokens: () => Math.max(this.deps.estimateCurrentContextTokens(this.deps.agent.state.messages), 1),
 			shouldCompact: () => true,
 			getPostApplyMargin: () => 0,
-			getBranch: () => this.deps.sessionManager.getBranch(),
+			getBranch: () => this.getCompactionBranch(),
 			getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 			resolveModelAndAuth: async (modelTier) => {
 				const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
@@ -470,7 +568,7 @@ export class CompactionController {
 			},
 			apply: async (result) => {
 				if (signal.aborted) throw new Error("Compaction cancelled");
-				await this.applyResult(result, false);
+				this.recordAppliedCompaction(await this.applyResult(result, false));
 				appliedResult = result;
 			},
 			verifyPostApplyEffect: () => false,
@@ -492,6 +590,7 @@ export class CompactionController {
 		if (outcome.kind === "skip" || !appliedResult) {
 			throw new Error(outcome.kind === "skip" ? outcome.reason : "Compaction failed");
 		}
+		this.finishCompactionLifecycle("success");
 		this.deps.emit({
 			type: "compaction_end",
 			reason: "manual",
@@ -628,6 +727,8 @@ export class CompactionController {
 		let fromExtension = false;
 		let lastCompaction: CompactionResult | undefined;
 		let extensionCancelled = false;
+		let effectiveInstructions: string | undefined;
+		let effectiveInstructionsReady = false;
 		try {
 			if (!model) {
 				this.deps.emit({
@@ -643,10 +744,24 @@ export class CompactionController {
 
 			const contextWindow = model.contextWindow;
 			const margin = Math.max(0, Math.floor(0.01 * contextWindow));
-			// One event-driven handoff per compaction run; every retry reuses this bounded value.
-			const effectiveInstructions = await this.buildCompactionInstructions();
+			// When the caller supplied the exact request total (or recovery makes compaction mandatory),
+			// open the transaction before model/auth resolution. Threshold runs without an admitted total
+			// stay lazy so a changing live measurement cannot create a marker for a later no-op skip.
+			const canPreflight = reason !== "threshold" || options.initialTokens !== undefined;
+			const preflightShouldCompact =
+				reason !== "threshold" ||
+				(options.initialTokens !== undefined &&
+					shouldCompact(options.initialTokens, contextWindow, settings, model.autoCompactionTriggerTokens));
+			if (canPreflight && preflightShouldCompact) {
+				const preflightPreparation = prepareCompaction(
+					this.getCompactionBranch(),
+					settings,
+					options.allowTrailingCompactionAsPrevious ? COMPACTION_RETRY_PREPARATION_OPTIONS : undefined,
+				);
+				if (preflightPreparation) this.beginCompactionLifecycle(preflightPreparation);
+			}
 			const outcome = await runCompactionLoop({
-				getBranch: () => this.deps.sessionManager.getBranch(),
+				getBranch: () => this.getCompactionBranch(),
 				measureLiveTokens: () => options.initialTokens ?? this.deps.measureLiveContextTokens(),
 				shouldCompact:
 					reason === "threshold"
@@ -667,6 +782,12 @@ export class CompactionController {
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
 					if (!preparation) throw new Error("already compacted");
+					this.beginCompactionLifecycle(preparation);
+					// One event-driven handoff per compaction run; every retry reuses this bounded value.
+					if (!effectiveInstructionsReady) {
+						effectiveInstructions = await this.buildCompactionInstructions();
+						effectiveInstructionsReady = true;
+					}
 					const compactionThinkingLevel = this.deps.resolveThinkingLevel(compactModel, model);
 					const extension = await this.getExtensionCompaction(
 						preparation,
@@ -703,17 +824,18 @@ export class CompactionController {
 				},
 				buildDeterministicCheckpoint: (params) => {
 					const preparation = prepareCompaction(
-						this.deps.sessionManager.getBranch(),
+						this.getCompactionBranch(),
 						{ ...settings, keepRecentTokens: params.keepRecentTokens },
 						COMPACTION_RETRY_PREPARATION_OPTIONS,
 					);
 					if (!preparation) throw new Error("already compacted");
+					this.beginCompactionLifecycle(preparation);
 					fromExtension = false;
 					return { result: createDeterministicCompaction(preparation) };
 				},
 				apply: async (result) => {
 					lastCompaction = result;
-					await this.applyResult(result, fromExtension);
+					this.recordAppliedCompaction(await this.applyResult(result, fromExtension));
 				},
 				verifyPostApplyEffect: reason !== "threshold" || options.singlePass ? () => false : undefined,
 				allowTrailingCompactionAsPrevious: options.allowTrailingCompactionAsPrevious,
@@ -728,6 +850,7 @@ export class CompactionController {
 			});
 
 			if (outcome.kind === "skip") {
+				this.finishCompactionLifecycle("failure", outcome.reason);
 				this.deps.emit({
 					type: "compaction_end",
 					reason,
@@ -740,12 +863,14 @@ export class CompactionController {
 			}
 			if (outcome.kind === "failed") {
 				if (outcome.reason === "aborted") {
+					this.finishCompactionLifecycle("cancelled");
 					this.deps.emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
 					return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 				}
 				throw new Error(outcome.reason);
 			}
 			if (extensionCancelled || signal.aborted) {
+				this.finishCompactionLifecycle("cancelled");
 				this.deps.emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
 				return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 			}
@@ -759,19 +884,23 @@ export class CompactionController {
 				this.dropTrailingAssistantErrors();
 				if (reason === "provider_recovery") this.appendProviderRecoveryContinuation();
 			}
+			this.finishCompactionLifecycle("success");
 			this.deps.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			if (willRetry) return true;
 			return hadQueuedMessages || this.deps.agent.hasQueuedMessages();
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const errorMessage = boundedCompactionLifecycleError(error);
+			const aborted = extensionCancelled || signal.aborted || errorMessage === "Compaction cancelled";
+			this.finishCompactionLifecycle(aborted ? "cancelled" : "failure", aborted ? undefined : error);
 			this.deps.emit({
 				type: "compaction_end",
 				reason,
 				result: undefined,
-				aborted: false,
+				aborted,
 				willRetry: false,
-				errorMessage:
-					reason === "overflow"
+				errorMessage: aborted
+					? undefined
+					: reason === "overflow"
 						? `Context overflow recovery failed: ${errorMessage}`
 						: reason === "provider_recovery"
 							? `Provider failure recovery failed: ${errorMessage}`
@@ -913,7 +1042,7 @@ export class CompactionController {
 		};
 	}
 
-	private async applyResult(result: CompactionResult, fromExtension: boolean): Promise<void> {
+	private async applyResult(result: CompactionResult, fromExtension: boolean): Promise<string> {
 		const sessionFile = this.deps.sessionManager.getSessionFile();
 		if (result.retention?.mode === "original-user" && sessionFile) {
 			const transcriptPointer = `Full pre-compaction transcript: ${sessionFile}`;
@@ -921,7 +1050,7 @@ export class CompactionController {
 				result.summary = `${result.summary.trimEnd()}\n\n${transcriptPointer}`;
 			}
 		}
-		this.deps.sessionManager.appendCompaction(
+		const compactionEntryId = this.deps.sessionManager.appendCompaction(
 			result.summary,
 			result.firstKeptEntryId,
 			result.tokensBefore,
@@ -943,5 +1072,6 @@ export class CompactionController {
 				fromExtension,
 			});
 		}
+		return compactionEntryId;
 	}
 }

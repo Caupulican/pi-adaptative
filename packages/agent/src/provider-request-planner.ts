@@ -8,10 +8,12 @@ import type {
 	AgentContextPlan,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentRequestId,
 	RequestPreflightContext,
 	RequestPreflightResult,
 	StreamFn,
 } from "./types.ts";
+import { uuidv7 } from "./uuid.ts";
 
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
 const MAX_PROVIDER_REQUEST_REPLANS = 2;
@@ -78,6 +80,11 @@ export async function resolveRequestPreflightMaxTokens(options: {
 	return narrowRequestMaxTokens(options.maxTokens, preflight?.maxTokens, options.model.maxTokens, "requestPreflight");
 }
 
+export interface StartedAgentProviderRequest {
+	requestId: AgentRequestId;
+	stream: Awaited<ReturnType<StreamFn>>;
+}
+
 async function buildContextPlan(
 	messages: AgentMessage[],
 	attempt: number,
@@ -135,6 +142,17 @@ export async function startPlannedAgentProviderRequest(
 	signal: AbortSignal | undefined,
 	streamFn?: StreamFn,
 ): Promise<Awaited<ReturnType<StreamFn>>> {
+	const started = await startPlannedAgentProviderRequestWithId(initialContext, config, signal, streamFn);
+	return started.stream;
+}
+
+/** Start one accepted request while retaining its opaque lifecycle identity for the agent loop. */
+export async function startPlannedAgentProviderRequestWithId(
+	initialContext: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	streamFn?: StreamFn,
+): Promise<StartedAgentProviderRequest> {
 	let sourceContext = initialContext;
 	let admissionAttempt = 0;
 	let stalePlanCount = 0;
@@ -229,10 +247,25 @@ export async function startPlannedAgentProviderRequest(
 				stalePlanCount = nextStalePlanCount(stalePlanCount);
 				continue;
 			}
+			const requestId = uuidv7() as AgentRequestId;
 			plan.commit?.();
 			adoptReplannedMessages(initialContext, sourceContext);
 			keepPlan = true;
-			return (await startMaterializedProviderStream(
+			await config.onProviderRequestSnapshot?.(
+				{
+					model: config.model,
+					context: materialized.context,
+					nonCompactableContext,
+					sourceContext,
+					maxTokens: requestMaxTokens,
+					requestId,
+					reasoning: requestReasoning,
+					attempt: admissionAttempt,
+				},
+				signal,
+			);
+			signal?.throwIfAborted();
+			const stream = (await startMaterializedProviderStream(
 				config.model,
 				materialized,
 				{
@@ -244,6 +277,7 @@ export async function startPlannedAgentProviderRequest(
 				},
 				(providerContext, providerOptions) => streamFunction(config.model, providerContext, providerOptions),
 			)) as Awaited<ReturnType<StreamFn>>;
+			return { requestId, stream };
 		} finally {
 			if (!keepPlan) plan.discard?.();
 		}

@@ -1,8 +1,18 @@
 ## [Unreleased]
 
+### Changed
+
+- Collapsed every agent Bash invocation into bounded command-counter rows, moved expanded transcript scrollback to Ctrl+T, and replaced hidden reasoning lines with one in-place Thinking/Working status; direct user shell output remains visible.
+
+### Added
+
+- Added fingerprint-only provider request snapshots, atomic foreground tool reservations, canonical result terminals, compaction lifecycle brackets, and deterministic interrupted-session repair.
+
 ### Fixed
 
 - Fixed auto-compaction preflight to anchor ongoing same-model sessions to provider-reported usage and account only request-envelope changes, preventing fixed character heuristics from compacting code/tool-heavy histories prematurely.
+- Fixed memory-provider lifecycle hooks so hung providers time out, are abandoned across reload generations until their late operation settles, and emit bounded source-labelled diagnostics.
+- Fixed budget-limited goals remaining projected as active, malformed requirement dependencies crossing storage boundaries, worker model pins being hidden from persistent-agent listings, and public subscriber failures escaping the session event boundary.
 
 ## [0.93.18] - 2026-08-21
 

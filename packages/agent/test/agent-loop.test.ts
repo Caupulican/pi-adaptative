@@ -1810,6 +1810,224 @@ describe("agentLoop with AgentMessage", () => {
 		expect(turnToolResultIds).toEqual(["tool-1", "tool-2"]);
 	});
 
+	it("reserves a prepared parallel wave once before any tool body starts", async () => {
+		const schema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		const reservations: string[][] = [];
+		const events: AgentEvent[] = [];
+		const tool: AgentTool<typeof schema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: schema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: params.value }], details: params };
+			},
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolCallStart: async (calls) => {
+				reservations.push(calls.map((call) => `${call.callId}:${call.toolName}`));
+				throw new Error("tool reservation failed");
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		let transportCalls = 0;
+		const stream = agentLoop([createUserMessage("run both")], context, config, undefined, () => {
+			transportCalls++;
+			const response = new MockAssistantStream();
+			queueMicrotask(() =>
+				response.push({
+					type: "done",
+					reason: "toolUse",
+					message: createAssistantMessage(
+						[
+							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "one" } },
+							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "two" } },
+						],
+						"toolUse",
+					),
+				}),
+			);
+			return response;
+		});
+
+		for await (const event of stream) events.push(event);
+
+		expect(reservations).toEqual([["tool-1:echo", "tool-2:echo"]]);
+		expect(executed).toEqual([]);
+		expect(transportCalls).toBe(1);
+		expect(events.filter((event) => event.type === "tool_execution_start")).toHaveLength(0);
+		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(0);
+		await expect(stream.result()).resolves.toEqual(
+			expect.arrayContaining([expect.objectContaining({ role: "assistant", stopReason: "error" })]),
+		);
+	});
+
+	it("reserves sequential prepared bodies individually and threads one request id", async () => {
+		const schema = Type.Object({ value: Type.String() });
+		const order: string[] = [];
+		const reservations: string[][] = [];
+		const requestIds: string[] = [];
+		const tool: AgentTool<typeof schema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: schema,
+			executionMode: "sequential",
+			async execute(_toolCallId, params) {
+				order.push(`execute:${params.value}`);
+				return { content: [{ type: "text", text: params.value }], details: params };
+			},
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolExecution: "sequential",
+			onToolCallStart: (calls) => {
+				reservations.push(calls.map((call) => call.toolCall.id));
+				requestIds.push(...calls.map((call) => call.requestId));
+				order.push(`reserve:${calls[0]?.toolCall.id}`);
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		let callIndex = 0;
+		const stream = agentLoop([createUserMessage("run both")], context, config, undefined, () => {
+			const response = new MockAssistantStream();
+			queueMicrotask(() => {
+				response.push({
+					type: "done",
+					reason: callIndex++ === 0 ? "toolUse" : "stop",
+					message:
+						callIndex === 1
+							? createAssistantMessage(
+									[
+										{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "one" } },
+										{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "two" } },
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return response;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(reservations).toEqual([["tool-1"], ["tool-2"]]);
+		expect(order).toEqual(["reserve:tool-1", "execute:one", "reserve:tool-2", "execute:two"]);
+		expect(requestIds).toHaveLength(2);
+		expect(requestIds[0]).toBe(requestIds[1]);
+	});
+
+	it("does not reserve immediate validation, policy, or replay outcomes", async () => {
+		const schema = Type.Object({ value: Type.String() });
+		let executions = 0;
+		let reservations = 0;
+		const tool: AgentTool<typeof schema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: schema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "ok" }], details: { value: "ok" } };
+			},
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onToolCallStart: () => {
+				reservations++;
+			},
+			beforeToolCall: async ({ args }) => {
+				if ((args as { value: string }).value === "blocked") return { block: true };
+				return undefined;
+			},
+		};
+		let callIndex = 0;
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{ type: "toolCall", id: "invalid", name: "echo", arguments: { value: 1 } },
+									{ type: "toolCall", id: "blocked", name: "echo", arguments: { value: "blocked" } },
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					callIndex++;
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(reservations).toBe(0);
+		expect(executions).toBe(0);
+
+		let replayCallIndex = 0;
+		reservations = 0;
+		executions = 0;
+		const replayStream = agentLoop(
+			[createUserMessage("repeat")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: `repeat-${replayCallIndex}`,
+						name: "echo",
+						arguments: { value: "same" },
+						source: "text-protocol" as const,
+					};
+					response.push(
+						replayCallIndex++ < 2
+							? { type: "done", reason: "toolUse", message: createAssistantMessage([toolCall], "toolUse") }
+							: {
+									type: "done",
+									reason: "stop",
+									message: createAssistantMessage([{ type: "text", text: "done" }]),
+								},
+					);
+				});
+				return response;
+			},
+		);
+		for await (const _event of replayStream) {
+			// consume
+		}
+		expect(reservations).toBe(1);
+		expect(executions).toBe(1);
+	});
+
 	it("should inject queued messages after all tool calls complete", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];

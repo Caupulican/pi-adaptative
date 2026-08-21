@@ -21,7 +21,10 @@ import {
 	collapseDegenerateAssistantMessage,
 	shouldAbortDegenerateStream,
 } from "./degenerate-assistant-text.ts";
-import { startPlannedAgentProviderRequest } from "./provider-request-planner.ts";
+import {
+	startPlannedAgentProviderRequest,
+	startPlannedAgentProviderRequestWithId,
+} from "./provider-request-planner.ts";
 import {
 	assessToolFailure,
 	clearToolFailure,
@@ -42,12 +45,14 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentRequestId,
 	AgentTool,
 	AgentToolCall,
 	AgentToolErrorKind,
 	AgentToolResult,
 	StreamFn,
 	ToolCallRepairInfo,
+	ToolCallStartContext,
 } from "./types.ts";
 import { AgentToolExecutionError, DEFAULT_MAX_PROVIDER_TURNS, DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
@@ -364,7 +369,8 @@ async function runLoop(
 			// Process pending messages (inject before next assistant response).
 			await processPendingMessages();
 			continuationState.providerTurns++;
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const response = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = response.message;
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -389,6 +395,7 @@ async function runLoop(
 				const executedToolBatch = await executeToolCalls(
 					currentContext,
 					message,
+					response.requestId,
 					config,
 					validationFailureTracker,
 					repairTeachTracker,
@@ -532,9 +539,10 @@ async function streamToollessClosingTurn(
 			: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
 		tools: [],
 	};
-	const message = await streamAssistantResponse(closingContext, config, signal, emit, streamFn, {
+	const response = await streamAssistantResponse(closingContext, config, signal, emit, streamFn, {
 		rejectToolCalls: true,
 	});
+	const message = response.message;
 	newMessages.push(message);
 	await emit({ type: "turn_end", message, toolResults: [] });
 }
@@ -555,6 +563,11 @@ export async function startAgentProviderRequest(
 	return startPlannedAgentProviderRequest(context, config, signal, streamFn);
 }
 
+type StartedAssistantResponse = {
+	message: AssistantMessage;
+	requestId: AgentRequestId;
+};
+
 /**
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
@@ -566,18 +579,18 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 	policy?: { rejectToolCalls: boolean },
-): Promise<AssistantMessage> {
+): Promise<StartedAssistantResponse> {
 	const degenerationAbort = new AbortController();
 	const onOuterAbort = (): void => degenerationAbort.abort();
 	if (signal?.aborted) degenerationAbort.abort();
 	else signal?.addEventListener("abort", onOuterAbort, { once: true });
-	const response = await startAgentProviderRequest(context, config, degenerationAbort.signal, streamFn);
+	const response = await startPlannedAgentProviderRequestWithId(context, config, degenerationAbort.signal, streamFn);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 	let abortedForDegeneration = false;
 
-	responseEvents: for await (const event of response) {
+	responseEvents: for await (const event of response.stream) {
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
@@ -622,7 +635,7 @@ async function streamAssistantResponse(
 	}
 
 	signal?.removeEventListener("abort", onOuterAbort);
-	const providerMessage = await response.result();
+	const providerMessage = await response.stream.result();
 	let finalMessage = policy?.rejectToolCalls
 		? rejectToolCallsFromToolFreeResponse(providerMessage)
 		: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], Boolean(config.textToolCallProtocol));
@@ -638,12 +651,13 @@ async function streamAssistantResponse(
 		await emit({ type: "message_start", message: { ...finalMessage } });
 	}
 	await emit({ type: "message_end", message: finalMessage });
-	return finalMessage;
+	return { message: finalMessage, requestId: response.requestId };
 }
 
 interface ToolExecutionContext {
 	context: AgentContext;
 	assistantMessage: AssistantMessage;
+	requestId: AgentRequestId;
 	config: AgentLoopConfig;
 	validationFailureTracker: ToolValidationFailureTracker;
 	repairTeachTracker: ToolRepairTeachTracker;
@@ -660,6 +674,7 @@ interface ToolExecutionContext {
 async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
+	requestId: AgentRequestId,
 	config: AgentLoopConfig,
 	validationFailureTracker: ToolValidationFailureTracker,
 	repairTeachTracker: ToolRepairTeachTracker,
@@ -676,6 +691,7 @@ async function executeToolCalls(
 	const execCtx: ToolExecutionContext = {
 		context: currentContext,
 		assistantMessage,
+		requestId,
 		config,
 		validationFailureTracker,
 		repairTeachTracker,
@@ -722,9 +738,10 @@ async function prepareAndStartToolCall(
 				execCtx.toolFailureMemory,
 				execCtx.toolFailureRecoveryGate,
 				execCtx.signal,
+				execCtx.requestId,
 			);
-	await emitToolExecutionStart(toolCall, execCtx.emit);
 	if (preparation.kind === "immediate") {
+		await emitToolExecutionStart(toolCall, execCtx.emit);
 		emitToolArgumentValidationTelemetry(execCtx.config, preparation.validationEvent, "not_run", "none");
 		return {
 			kind: "finalized",
@@ -748,6 +765,7 @@ async function finalizeStartedToolCall(
 		execCtx.context,
 		execCtx.assistantMessage,
 		started.preparation,
+		execCtx.requestId,
 		execCtx.config,
 		execCtx.repairTeachTracker,
 		execCtx.toolFailureMemory,
@@ -755,6 +773,30 @@ async function finalizeStartedToolCall(
 		execCtx.signal,
 		execCtx.emit,
 	);
+}
+
+async function reservePreparedToolCalls(
+	execCtx: ToolExecutionContext,
+	preparedCalls: readonly PreparedToolCall[],
+): Promise<void> {
+	if (preparedCalls.length === 0) return;
+	execCtx.signal?.throwIfAborted();
+	if (execCtx.config.onToolCallStart) {
+		const calls: ToolCallStartContext[] = preparedCalls.map((prepared) => ({
+			requestId: execCtx.requestId,
+			callId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			assistantMessage: execCtx.assistantMessage,
+			toolCall: prepared.toolCall,
+			args: prepared.args,
+			context: execCtx.context,
+		}));
+		await execCtx.config.onToolCallStart(calls, execCtx.signal);
+	}
+	execCtx.signal?.throwIfAborted();
+	for (const prepared of preparedCalls) {
+		await emitToolExecutionStart(prepared.toolCall, execCtx.emit);
+	}
 }
 
 async function executeToolCallsSequential(
@@ -766,6 +808,9 @@ async function executeToolCallsSequential(
 
 	for (const [index, toolCall] of toolCalls.entries()) {
 		const started = await prepareAndStartToolCall(execCtx, toolCall, index);
+		if (started.kind === "prepared") {
+			await reservePreparedToolCalls(execCtx, [started.preparation]);
+		}
 		const finalized = await finalizeStartedToolCall(execCtx, started);
 		execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
 
@@ -794,6 +839,7 @@ async function executeToolCallsParallel(
 	while (nextIndex < toolCalls.length && !execCtx.signal?.aborted) {
 		const waveEnd = Math.min(nextIndex + TOOL_EXECUTION_WAVE_SIZE, toolCalls.length);
 		const wave: FinalizedToolCallEntry[] = [];
+		const preparedWave: PreparedToolCall[] = [];
 		const completionOrder: FinalizedToolCallOutcome[] = [];
 		for (; nextIndex < waveEnd; nextIndex++) {
 			const toolCall = toolCalls[nextIndex];
@@ -802,6 +848,7 @@ async function executeToolCallsParallel(
 				await emitToolExecutionEnd(started.finalized, execCtx.emit);
 				wave.push(started.finalized);
 			} else {
+				preparedWave.push(started.preparation);
 				wave.push(async () => {
 					const finalized = await finalizeStartedToolCall(execCtx, started);
 					completionOrder.push(finalized);
@@ -813,6 +860,7 @@ async function executeToolCallsParallel(
 				break;
 			}
 		}
+		await reservePreparedToolCalls(execCtx, preparedWave);
 
 		const finalizedWave = await Promise.all(
 			wave.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
@@ -1054,6 +1102,7 @@ async function prepareToolCall(
 	toolFailureMemory: ToolFailureMemoryTracker,
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	signal: AbortSignal | undefined,
+	requestId: AgentRequestId,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
 	if (!tool) {
@@ -1120,6 +1169,7 @@ async function prepareToolCall(
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{
+					requestId,
 					assistantMessage,
 					toolCall,
 					args: validatedArgs,
@@ -1264,6 +1314,7 @@ async function executeAndFinalizePreparedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
+	requestId: AgentRequestId,
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
@@ -1281,6 +1332,7 @@ async function executeAndFinalizePreparedToolCall(
 			currentContext,
 			assistantMessage,
 			prepared,
+			requestId,
 			executed,
 			config,
 			repairTeachTracker,
@@ -1301,6 +1353,7 @@ async function executeAndFinalizePreparedToolCall(
 			currentContext,
 			assistantMessage,
 			prepared,
+			requestId,
 			executed,
 			config,
 			repairTeachTracker,
@@ -1356,6 +1409,7 @@ async function executeAndFinalizePreparedToolCall(
 	let handoff: ReturnType<NonNullable<AgentLoopConfig["handoffToolCall"]>>;
 	try {
 		handoff = config.handoffToolCall({
+			requestId,
 			assistantMessage,
 			toolCall: prepared.toolCall,
 			args: prepared.args,
@@ -1465,6 +1519,7 @@ async function finalizeExecutedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
+	requestId: AgentRequestId,
 	executed: ExecutedToolCallOutcome,
 	config: AgentLoopConfig,
 	repairTeachTracker: ToolRepairTeachTracker,
@@ -1485,6 +1540,7 @@ async function finalizeExecutedToolCall(
 		try {
 			const afterResult = await config.afterToolCall(
 				{
+					requestId,
 					assistantMessage,
 					toolCall: prepared.toolCall,
 					args: prepared.args,

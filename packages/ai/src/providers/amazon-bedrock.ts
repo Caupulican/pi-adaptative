@@ -707,6 +707,158 @@ function sanitizeBedrockDocument(value: DocumentType): DocumentType {
 	return value;
 }
 
+const BEDROCK_ROOT_SCHEMA_COMBINATORS = ["anyOf", "oneOf", "allOf"] as const;
+const BEDROCK_OBJECT_SCHEMA_KEYS = new Set([
+	"additionalProperties",
+	"dependentRequired",
+	"maxProperties",
+	"minProperties",
+	"patternProperties",
+	"properties",
+	"propertyNames",
+	"required",
+	"unevaluatedProperties",
+]);
+const BEDROCK_FLATTENABLE_BRANCH_KEYS = new Set(["properties", "required", "type"]);
+
+function isSchemaRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function resolveBedrockLocalSchemaRef(root: Record<string, unknown>, reference: string): unknown {
+	const match = reference.match(/^#\/(\$defs|definitions)\/(.+)$/);
+	if (!match) return undefined;
+	let current: unknown = root[match[1]];
+	for (const rawPart of match[2].split("/")) {
+		if (!isSchemaRecord(current)) return undefined;
+		const part = rawPart.replace(/~1/g, "/").replace(/~0/g, "~");
+		current = current[part];
+	}
+	return current;
+}
+
+function isObjectShapedBedrockSchema(
+	schema: Record<string, unknown>,
+	root: Record<string, unknown>,
+	visitedRefs = new Set<string>(),
+): boolean {
+	if (schema.type === "object") return true;
+	if (schema.type !== undefined) return false;
+	if (typeof schema.$ref === "string") {
+		if (visitedRefs.has(schema.$ref)) return false;
+		const target = resolveBedrockLocalSchemaRef(root, schema.$ref);
+		if (!isSchemaRecord(target)) return false;
+		const nextVisitedRefs = new Set(visitedRefs);
+		nextVisitedRefs.add(schema.$ref);
+		return isObjectShapedBedrockSchema(target, root, nextVisitedRefs);
+	}
+	if ([...BEDROCK_OBJECT_SCHEMA_KEYS].some((key) => key in schema)) return true;
+	for (const combinator of BEDROCK_ROOT_SCHEMA_COMBINATORS) {
+		const branches = schema[combinator];
+		if (Array.isArray(branches) && branches.length > 0) {
+			return branches.every(
+				(branch) => isSchemaRecord(branch) && isObjectShapedBedrockSchema(branch, root, visitedRefs),
+			);
+		}
+	}
+	return false;
+}
+
+/**
+ * Bedrock Converse requires every tool inputSchema.json root to have type "object". TypeBox
+ * unions used by tools such as write/edit are represented as top-level anyOf object branches,
+ * which is valid JSON Schema but rejected by Bedrock before the model is invoked. Flatten only
+ * unions whose every branch is an object; execution still validates against the authoritative
+ * union schema after the provider response, so this projection cannot broaden the execution
+ * contract.
+ */
+function normalizeBedrockToolInputSchema(schema: unknown): unknown {
+	if (!isSchemaRecord(schema) || schema.type === "object") return schema;
+	// Never let a root combinator override an explicit non-object root type.
+	if (schema.type !== undefined) return schema;
+
+	const combinator = BEDROCK_ROOT_SCHEMA_COMBINATORS.find((key) => key in schema);
+	if (!combinator) {
+		return isObjectShapedBedrockSchema(schema, schema) ? { ...schema, type: "object" } : schema;
+	}
+	if (!Array.isArray(schema[combinator]) || schema[combinator].length === 0) return schema;
+
+	const branches = schema[combinator].filter(isSchemaRecord);
+	if (branches.length !== schema[combinator].length) return schema;
+	if (!branches.every((branch) => isObjectShapedBedrockSchema(branch, schema))) {
+		return schema;
+	}
+	// Preserve references, empty object branches, and branch constraints that cannot be safely
+	// represented by the flattened property projection. The added root type is sufficient for
+	// Bedrock's wire validator while retaining the authoritative schema semantics.
+	if (
+		branches.some(
+			(branch) =>
+				typeof branch.$ref === "string" ||
+				Object.keys(branch).some((key) => !BEDROCK_FLATTENABLE_BRANCH_KEYS.has(key)),
+		)
+	) {
+		return { ...schema, type: "object" };
+	}
+
+	const properties: Record<string, unknown> = isSchemaRecord(schema.properties) ? { ...schema.properties } : {};
+	const serializedProperties = new Map<string, string>();
+	for (const [key, value] of Object.entries(properties)) {
+		serializedProperties.set(key, JSON.stringify(value) ?? "<undefined>");
+	}
+	for (const branch of branches) {
+		if (!isSchemaRecord(branch.properties)) continue;
+		for (const [key, value] of Object.entries(branch.properties)) {
+			const serialized = JSON.stringify(value) ?? "<undefined>";
+			const previous = serializedProperties.get(key);
+			if (previous !== undefined && previous !== serialized) {
+				// Flattening would silently discard one branch's constraint. Keep the union intact and
+				// add only the object root required by Bedrock.
+				return { ...schema, type: "object" };
+			}
+			serializedProperties.set(key, serialized);
+			properties[key] = value;
+		}
+	}
+	if (Object.keys(properties).length === 0) return { ...schema, type: "object" };
+
+	const normalized: Record<string, unknown> = { ...schema, type: "object", properties };
+	delete normalized[combinator];
+
+	const requiredSets = branches.map(
+		(branch) =>
+			new Set(
+				Array.isArray(branch.required)
+					? branch.required.filter((key): key is string => typeof key === "string")
+					: [],
+			),
+	);
+	const rootRequired = Array.isArray(schema.required)
+		? schema.required.filter((key): key is string => typeof key === "string")
+		: [];
+	if (combinator === "allOf") {
+		normalized.required = [...new Set([...rootRequired, ...requiredSets.flatMap((required) => [...required])])];
+	} else {
+		const commonRequired = requiredSets[0] ?? new Set<string>();
+		for (const required of requiredSets.slice(1)) {
+			for (const key of commonRequired) if (!required.has(key)) commonRequired.delete(key);
+		}
+		normalized.required = [...new Set([...rootRequired, ...commonRequired])];
+	}
+
+	return normalized;
+}
+
+function isBedrockToolInputSchema(value: unknown): value is Record<string, unknown> {
+	return isSchemaRecord(value) && value.type === "object";
+}
+
+function isExplicitBedrockToolChoice(
+	toolChoice: BedrockOptions["toolChoice"],
+): toolChoice is { type: "tool"; name: string } {
+	return typeof toolChoice === "object" && toolChoice !== null && toolChoice.type === "tool";
+}
+
 function convertToolResultContent(content: (TextContent | ImageContent)[]): ToolResultContentBlock[] {
 	const result: ToolResultContentBlock[] = [];
 	for (const c of content) {
@@ -908,14 +1060,20 @@ function convertToolConfig(
 ): ToolConfiguration | undefined {
 	if (!tools?.length || toolChoice === "none") return undefined;
 
-	const bedrockTools: BedrockTool[] = tools.map((tool) => ({
-		toolSpec: {
-			name: toolNameMap.toProviderName(tool.name),
-			description: tool.description,
-			inputSchema: { json: tool.parameters as unknown as DocumentType },
-		},
-	}));
-
+	const bedrockTools: BedrockTool[] = [];
+	for (const tool of tools) {
+		const inputSchema = normalizeBedrockToolInputSchema(tool.parameters);
+		if (!isBedrockToolInputSchema(inputSchema)) {
+			throw new Error(`Bedrock tool "${tool.name}" requires an object input schema`);
+		}
+		bedrockTools.push({
+			toolSpec: {
+				name: toolNameMap.toProviderName(tool.name),
+				description: tool.description,
+				inputSchema: { json: inputSchema as DocumentType },
+			},
+		});
+	}
 	let bedrockToolChoice: ToolChoice | undefined;
 	switch (toolChoice) {
 		case "auto":
@@ -925,8 +1083,12 @@ function convertToolConfig(
 			bedrockToolChoice = { any: {} };
 			break;
 		default:
-			if (toolChoice?.type === "tool") {
-				bedrockToolChoice = { tool: { name: toolNameMap.toProviderName(toolChoice.name) } };
+			if (isExplicitBedrockToolChoice(toolChoice)) {
+				const name = toolNameMap.toProviderName(toolChoice.name);
+				if (!bedrockTools.some((tool) => tool.toolSpec?.name === name)) {
+					throw new Error(`Bedrock tool "${toolChoice.name}" is not available in this request`);
+				}
+				bedrockToolChoice = { tool: { name } };
 			}
 	}
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { GoalEvent } from "../src/core/goals/goal-state.ts";
 import {
 	applyGoalEvent,
+	cloneGoalStateForStorage,
 	createGoalState,
 	MAX_GOAL_EVENT_HISTORY,
 	parseGoalState,
@@ -196,6 +197,47 @@ describe("Goal State (Phase 4)", () => {
 		const json = serializeGoalState(state);
 		const parsed = parseGoalState(json);
 		expect(parsed).toEqual(state);
+	});
+
+	it("rejects malformed dependency lists in persisted requirements and event history", () => {
+		const state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		const malformedRequirement = {
+			...state,
+			requirements: [
+				{
+					id: "req-1",
+					text: "Fix typo",
+					status: "open",
+					evidenceIds: [],
+					dependencies: "req-0",
+					createdAt: "T1",
+					updatedAt: "T1",
+				},
+			],
+		};
+		const malformedEvent = {
+			...state,
+			events: [{ type: "add_requirement", id: "req-1", text: "Fix typo", dependencies: "req-0", now: "T1" }],
+		};
+
+		expect(parseGoalState(JSON.stringify(malformedRequirement))).toBeUndefined();
+		expect(parseGoalState(JSON.stringify(malformedEvent))).toBeUndefined();
+	});
+
+	it("clones requirement dependencies across storage boundaries", () => {
+		const dependencies = ["req-0"];
+		const state = applyGoalEvent(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }), {
+			type: "add_requirement",
+			id: "req-1",
+			text: "Fix typo",
+			dependencies,
+			now: "T1",
+		});
+
+		const stored = cloneGoalStateForStorage(state);
+		(stored.requirements[0].dependencies as string[]).push("req-2");
+
+		expect(state.requirements[0].dependencies).toEqual(["req-0"]);
 	});
 
 	describe("dispatch_worker stamps boundAt only when a real lane binds (Phase: never-hang wait-timeout)", () => {

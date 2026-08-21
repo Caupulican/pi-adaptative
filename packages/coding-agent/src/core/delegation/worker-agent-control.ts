@@ -226,6 +226,8 @@ export interface WorkerAgentView {
 	rootAgentId: string;
 	depth: number;
 	role: WorkerRole;
+	/** Provider/model admitted for this persistent identity; it is retained across follow-up tasks. */
+	modelRef?: string;
 	status: AgentBindingStatus;
 	activity: WorkerAgentActivity;
 	/** True when this caller may start/transcript/cancel the agent. Session-root lists are all true. */

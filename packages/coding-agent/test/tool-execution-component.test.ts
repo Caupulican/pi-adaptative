@@ -1,9 +1,10 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI, visibleWidth } from "@caupulican/pi-tui";
+import { setKeybindings, Text, type TUI, visibleWidth } from "@caupulican/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createAllToolDefinitions } from "../src/core/tools/index.ts";
@@ -41,6 +42,7 @@ function createFakeTui(): TUI {
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
 		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
 	});
 	afterEach(() => vi.restoreAllMocks());
 
@@ -842,7 +844,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(text).not.toContain("ok");
 	});
 
-	test("keeps collapsed grouped bash summaries within render width when adding expand hint", () => {
+	test("collapses a pending Bash command to one status counter within render width", () => {
 		const command = `printf 'WSL_ADDRS\n'; ip -4 -o addr show scope global | sed 's/\\// /g' || true
 printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } | Select-Object InterfaceAlias,IPAddress,PrefixLength | Format-Table -AutoSize" 2>/dev/null | tr -d '\r' || true`;
 		const component = new ToolExecutionComponent(
@@ -858,13 +860,16 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 
 		const lines = group.render(112);
 
-		expect(stripAnsi(lines.join("\n"))).toContain("to expand");
+		const rendered = stripAnsi(lines.join("\n"));
+		expect(rendered).toContain("Running 1 command");
+		expect(rendered).toContain("ctrl+t to view transcript");
+		expect(rendered).not.toContain("WSL_ADDRS");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(112);
 		}
 	});
 
-	test("keeps collapsed grouped npm version checks within render width when adding expand hint", () => {
+	test("collapses active grouped npm version checks to one counter within render width", () => {
 		const firstCommand = `npm view @caupulican/pi-ai versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-agent-core versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-tui versions --json | tail -c 1000`;
 		const secondCommand = `cd /workspace/pi-adaptative && npm view @caupulican/pi-adaptative@0.80.2 dependencies --json && printf '\n---dist-tags---\n' && npm view @caupulican/pi-adaptative dist-tags --json`;
 		const components = [firstCommand, secondCommand].map(
@@ -882,8 +887,12 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 		const group = new ToolGroupComponent("bash", components);
 
 		const lines = group.render(112);
+		const rendered = stripAnsi(lines.join("\n"));
 
-		expect(stripAnsi(lines.join("\n"))).toContain("to expand");
+		expect(rendered).toContain("Running 2 commands");
+		expect(rendered).toContain("ctrl+t to view transcript");
+		expect(rendered).not.toContain("$ npm view");
+		expect(rendered).not.toContain("$ cd /workspace/pi-adaptative");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(112);
 		}

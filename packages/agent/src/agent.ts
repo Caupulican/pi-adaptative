@@ -33,6 +33,7 @@ import type {
 	ProviderRequestAdmissionResult,
 	QueueMode,
 	StreamFn,
+	ToolCallStartHook,
 	ToolExecutionMode,
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
@@ -104,6 +105,7 @@ export interface AgentOptions {
 		request: ProviderRequestAdmissionContext,
 		signal?: AbortSignal,
 	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
+	onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
@@ -112,6 +114,7 @@ export interface AgentOptions {
 	textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
 	onTextToolProtocolParse?: SimpleStreamOptions["onTextToolProtocolParse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+	onToolCallStart?: ToolCallStartHook;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
 	handoffToolCall?: AgentLoopConfig["handoffToolCall"];
@@ -205,6 +208,7 @@ export class Agent {
 		request: ProviderRequestAdmissionContext,
 		signal?: AbortSignal,
 	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
+	public onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	public resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
@@ -216,6 +220,7 @@ export class Agent {
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<BeforeToolCallResult | undefined>;
+	public onToolCallStart?: ToolCallStartHook;
 	public afterToolCall?: (
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
@@ -257,6 +262,7 @@ export class Agent {
 		this.transformContext = options.transformContext;
 		this.planContext = options.planContext;
 		this.admitProviderRequest = options.admitProviderRequest;
+		this.onProviderRequestSnapshot = options.onProviderRequestSnapshot;
 		this.resolveRequestReasoning = options.resolveRequestReasoning;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
@@ -265,6 +271,7 @@ export class Agent {
 		this.textToolCallProtocol = options.textToolCallProtocol;
 		this.onTextToolProtocolParse = options.onTextToolProtocolParse;
 		this.beforeToolCall = options.beforeToolCall;
+		this.onToolCallStart = options.onToolCallStart;
 		this.afterToolCall = options.afterToolCall;
 		this.backgroundToolCallAfterMs = options.backgroundToolCallAfterMs;
 		this.handoffToolCall = options.handoffToolCall;
@@ -518,6 +525,7 @@ export class Agent {
 			toolValidationEscalationThreshold: this.toolValidationEscalationThreshold,
 			onToolValidationEscalation: this.onToolValidationEscalation,
 			beforeToolCall: this.beforeToolCall,
+			onToolCallStart: this.onToolCallStart,
 			afterToolCall: this.afterToolCall,
 			backgroundToolCallAfterMs: this.backgroundToolCallAfterMs,
 			handoffToolCall: this.handoffToolCall,
@@ -530,6 +538,7 @@ export class Agent {
 			transformContext: this.transformContext,
 			planContext: this.planContext,
 			admitProviderRequest: this.admitProviderRequest,
+			onProviderRequestSnapshot: this.onProviderRequestSnapshot,
 			resolveRequestReasoning: this.resolveRequestReasoning,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {

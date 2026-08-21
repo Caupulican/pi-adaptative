@@ -30,6 +30,11 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
 
+declare const AGENT_REQUEST_ID: unique symbol;
+
+/** Opaque identity shared by one accepted provider request and its tool executions. */
+export type AgentRequestId = string & { readonly [AGENT_REQUEST_ID]: true };
+
 /**
  * Configuration for how tool calls from a single assistant message are executed.
  *
@@ -89,6 +94,8 @@ export interface AfterToolCallResult {
 
 /** Context passed to `beforeToolCall`. */
 export interface BeforeToolCallContext {
+	/** Opaque identity of the accepted provider request that produced this call. */
+	requestId?: AgentRequestId;
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
 	/** The raw tool call block from `assistantMessage.content`. */
@@ -101,6 +108,8 @@ export interface BeforeToolCallContext {
 
 /** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
+	/** Opaque identity of the accepted provider request that produced this call. */
+	requestId?: AgentRequestId;
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
 	/** The raw tool call block from `assistantMessage.content`. */
@@ -142,6 +151,25 @@ export interface BackgroundToolCallHandoff {
 	/** Optional foreground error classification. Defaults to `result.isError === true`. */
 	isError?: boolean;
 }
+
+/** Context passed to the durable tool-start reservation boundary. */
+export interface ToolCallStartContext extends BeforeToolCallContext {
+	/** Accepted provider request identity is mandatory at the durable reservation boundary. */
+	requestId: AgentRequestId;
+	/** Stable tool-call identity within the assistant message. */
+	callId: string;
+	/** Tool registry name used for this call. */
+	toolName: string;
+}
+
+/**
+ * Reserve one or more prepared tool calls before their side effects begin.
+ *
+ * Sequential execution invokes this once with one prepared call. Parallel execution invokes it
+ * once with the complete prepared wave, so a host can atomically persist the wave reservation before
+ * any body starts. Immediate validation, policy, and replay outcomes are never offered here.
+ */
+export type ToolCallStartHook = (calls: readonly ToolCallStartContext[], signal?: AbortSignal) => void | Promise<void>;
 
 /** Context passed to `shouldStopAfterTurn`. */
 export interface ShouldStopAfterTurnContext {
@@ -241,6 +269,16 @@ export interface ProviderRequestAdmissionContext extends RequestPreflightContext
 	attempt: number;
 }
 
+/** Exact accepted provider request offered to the host-owned durable lifecycle boundary. */
+export interface ProviderRequestSnapshotContext extends ProviderRequestAdmissionContext {
+	/** Opaque identity generated only after final plan validation and adoption. */
+	requestId: AgentRequestId;
+	/** Request-local reasoning value that will be sent to transport. */
+	reasoning: SimpleStreamOptions["reasoning"];
+	/** Zero-based admission generation for the accepted plan. */
+	attempt: number;
+}
+
 export type ProviderRequestAdmissionResult =
 	| { action: "send"; maxTokens?: number }
 	| { action: "replan"; context: AgentContext };
@@ -333,6 +371,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		context: RequestPreflightContext,
 		signal?: AbortSignal,
 	) => RequestPreflightResult | undefined | Promise<RequestPreflightResult | undefined>;
+
+	/**
+	 * Persist or otherwise reserve the accepted provider request before transport begins.
+	 *
+	 * This runs after final plan validation, plan commit, and source-context adoption. It is awaited;
+	 * throwing prevents the provider stream from being created and leaves the accepted plan committed.
+	 */
+	onProviderRequestSnapshot?: (context: ProviderRequestSnapshotContext, signal?: AbortSignal) => void | Promise<void>;
 
 	/**
 	 * Resolve the reasoning effort after context transformation and immediately before the provider
@@ -465,6 +511,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+
+	/** Reserve prepared tool calls before execution. See {@link ToolCallStartHook}. */
+	onToolCallStart?: ToolCallStartHook;
 
 	/**
 	 * Called after a tool finishes executing, before `tool_execution_end` and tool-result message events are emitted.

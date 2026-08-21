@@ -1,4 +1,5 @@
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
@@ -66,6 +67,7 @@ type RoutedRunContext = {
 			appendCustomEntry: (customType: string, data?: unknown) => string;
 			appendCustomMessageEntry: (customType: string, content: unknown, display: string, details?: unknown) => string;
 		};
+		appendSessionMessageBatch?: (batch: readonly SessionMessageBatchEntry[]) => string[];
 		getBaseSystemPrompt: () => string;
 		buildSystemPromptForToolNames: (toolNames: string[]) => string;
 		runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
@@ -148,6 +150,20 @@ const bashTool: AgentTool<typeof bashParameters> = {
 	execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
 };
 
+const lifecycleReadParameters = Type.Object({ value: Type.String() });
+function makeLifecycleReadTool(calls: string[]): AgentTool<typeof lifecycleReadParameters> {
+	return {
+		name: "read_probe",
+		label: "Read probe",
+		description: "Read-only lifecycle regression tool",
+		parameters: lifecycleReadParameters,
+		execute: async (_toolCallId, args) => {
+			calls.push(args.value);
+			return { content: [{ type: "text", text: "read result" }], details: {} };
+		},
+	};
+}
+
 function createUsage(): Usage {
 	return {
 		input: 0,
@@ -206,11 +222,58 @@ describe("AgentSession model router turn selection", () => {
 
 			const userStarts = harness.eventsOfType("message_start").filter((event) => event.message.role === "user");
 			expect(userStarts).toHaveLength(1);
+			const branch = harness.sessionManager.getBranch();
+			expect(branch.filter((entry) => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
+			expect(
+				branch.filter(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.model === "expensive" &&
+						entry.message.content.some((block) => block.type === "text" && block.text === "retried on expensive"),
+				),
+			).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(0);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(0);
 			expect(harness.session.getModelRouterStatus()).toContain(
 				"cheap/read-only -> faux/cheap (read_only_question, escalated -> faux/expensive)",
 			);
 		} finally {
 			harness.cleanup();
+		}
+	});
+
+	it("commits a cheap read-only assistant before tool execution and closes its lifecycle", async () => {
+		const calls: string[] = [];
+		const harness = await createHarness({
+			models: [{ id: "cheap" }, { id: "expensive" }],
+			tools: [makeLifecycleReadTool(calls)],
+			initialActiveToolNames: ["read_probe"],
+			settings: {
+				modelRouter: {
+					enabled: true,
+					cheapModel: "faux/cheap",
+					expensiveModel: "faux/expensive",
+				},
+			},
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("read_probe", { value: "bounded" }, { id: "read-probe-call" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("cheap complete"),
+			]);
+			await harness.session.prompt("Explain this read-only value");
+			expect(calls).toEqual(["bounded"]);
+			const branch = harness.sessionManager.getBranch();
+			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")).toHaveLength(
+				1,
+			);
+		} finally {
+			await harness.cleanup();
 		}
 	});
 
@@ -1109,6 +1172,10 @@ describe("speculative executor retry", () => {
 					appendCustomEntry: () => "custom",
 					appendCustomMessageEntry: () => "custom",
 				}),
+				appendSessionMessageBatch: (batch) => {
+					for (const entry of batch) if (entry.kind === "message") persisted.push(entry.message);
+					return batch.map(() => "entry");
+				},
 				getBaseSystemPrompt: () => "BASE_PROMPT",
 				buildSystemPromptForToolNames: (names) => `PROMPT_FOR:${names.join(",")}`,
 				runAgentPrompt: async (messages) => {

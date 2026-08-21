@@ -65,6 +65,84 @@ function toLlm(messages: AgentMessage[]): Message[] {
 }
 
 describe("provider request planning", () => {
+	it("runs the accepted request lifecycle in validation, commit, snapshot, transport order", async () => {
+		const order: string[] = [];
+		const initial: AgentContext = { systemPrompt: "SYSTEM", messages: [user("old")], tools: [] };
+		const config: AgentLoopConfig = {
+			model: model(),
+			convertToLlm: toLlm,
+			planContext: async ({ messages, attempt }) => ({
+				messages,
+				...(attempt === 0
+					? {}
+					: {
+							prepareCommit: () => {
+								order.push("final-validation");
+								return true;
+							},
+							commit: () => order.push("commit"),
+						}),
+			}),
+			onProviderRequestSnapshot: ({ requestId, sourceContext }) => {
+				order.push("snapshot");
+				expect(requestId).toMatch(/^[0-9a-f-]{36}$/u);
+				expect(sourceContext.messages).toEqual([user("accepted")]);
+				expect(initial.messages).toEqual([user("accepted")]);
+			},
+		};
+		let admissionCount = 0;
+		config.admitProviderRequest = ({ sourceContext, attempt }) => {
+			admissionCount++;
+			if (attempt === 0) {
+				return { action: "replan", context: { ...sourceContext, messages: [user("accepted")] } };
+			}
+			return { action: "send" };
+		};
+
+		const response = await startAgentProviderRequest(initial, config, undefined, () => {
+			order.push("transport");
+			return new MockAssistantStream(assistant("sent"));
+		});
+		await response.result();
+
+		expect(admissionCount).toBe(2);
+		expect(order).toEqual(["final-validation", "commit", "snapshot", "transport"]);
+	});
+
+	it("offers only an accepted plan to the snapshot hook and fails closed before transport", async () => {
+		let planCount = 0;
+		let snapshotCount = 0;
+		let transportCount = 0;
+		const config: AgentLoopConfig = {
+			model: model(),
+			convertToLlm: toLlm,
+			planContext: async ({ messages }) => {
+				planCount++;
+				if (planCount === 1) return { messages, isCurrent: () => false, commit: vi.fn() };
+				return { messages };
+			},
+			onProviderRequestSnapshot: async () => {
+				snapshotCount++;
+				throw new Error("snapshot persistence failed");
+			},
+		};
+
+		await expect(
+			startAgentProviderRequest(
+				{ systemPrompt: "SYSTEM", messages: [user("work")], tools: [] },
+				config,
+				undefined,
+				() => {
+					transportCount++;
+					return new MockAssistantStream(assistant("must not send"));
+				},
+			),
+		).rejects.toThrow("snapshot persistence failed");
+		expect(planCount).toBe(2);
+		expect(snapshotCount).toBe(1);
+		expect(transportCount).toBe(0);
+	});
+
 	it("replans before committing, then preflights and sends the same text-protocol materialization", async () => {
 		const schema = Type.Object({ value: Type.String() });
 		const tool: AgentTool<typeof schema> = {

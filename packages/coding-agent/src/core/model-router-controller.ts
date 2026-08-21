@@ -32,7 +32,7 @@
  */
 
 import type { Agent, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai/models";
 import type {
@@ -61,6 +61,7 @@ import {
 	bufferModelRouterSessionMessage,
 	createModelRouterSessionBuffer,
 	flushModelRouterSessionBuffer,
+	flushModelRouterSessionBufferPrefix,
 	type ModelRouterSessionBuffer,
 } from "./model-router/session-buffer.ts";
 import {
@@ -122,6 +123,8 @@ export interface ModelRouterControllerDeps {
 	getSettingsManager(): SettingsManager;
 	/** Session log: routed-turn message buffering/persistence, decision persistence, recent-decision status. */
 	getSessionManager(): SessionManager;
+	/** Canonical host-owned mixed message batch persistence; one validated publication for lifecycle linking. */
+	appendSessionMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[];
 	/** Resolves configured route/judge/executor model patterns against configured auth. */
 	getModelRegistry(): ModelRegistry;
 	/** Session-scoped provider/model quota exhaustion guard. */
@@ -136,6 +139,8 @@ export interface ModelRouterControllerDeps {
 	getBaseSystemPrompt(): string;
 	/** The session-owned foreground drive loop; the routed path delegates every turn here. */
 	runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void>;
+	/** Continue from canonical history after a committed cheap-route escalation. */
+	runAgentContinuation(): Promise<void>;
 	/** Rebuilds the system prompt for a filtered tool surface (routed-model capability shedding). */
 	buildSystemPromptForToolNames(toolNames: string[]): string;
 	/** Re-resolves the restored model against the registry after a routed turn (provider override safety). */
@@ -246,7 +251,7 @@ export class ModelRouterController {
 	 */
 	captureSessionMessage(message: AgentMessage): boolean {
 		const modelRouterBuffer = this._modelRouterSessionBuffer;
-		if (!modelRouterBuffer) return false;
+		if (!modelRouterBuffer || modelRouterBuffer.committed) return false;
 		if (message.role === "custom") {
 			bufferModelRouterSessionCustomMessage(modelRouterBuffer, message);
 			return true;
@@ -256,6 +261,35 @@ export class ModelRouterController {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Commit a cheap routed turn's buffered messages in their original source order.
+	 *
+	 * The lifecycle adapter uses this at the tool reservation boundary: once the assistant
+	 * message is durable, later tool-result messages must go through the normal message-end
+	 * path and an escalation may continue from canonical history instead of splicing it away.
+	 * The buffer is marked committed only after every append succeeds; a failed append therefore
+	 * rejects the reservation and the tool body is never entered.
+	 */
+	commitSessionBuffer(): Map<AgentMessage, string> {
+		const modelRouterBuffer = this._modelRouterSessionBuffer;
+		if (!modelRouterBuffer) return new Map();
+		return flushModelRouterSessionBuffer(modelRouterBuffer, (batch) => this.deps.appendSessionMessageBatch(batch));
+	}
+
+	/** Commit only the prompt prefix before a provider request; keep the assistant/tool suffix buffered. */
+	commitSessionBufferPrefix(): Map<AgentMessage, string> {
+		const modelRouterBuffer = this._modelRouterSessionBuffer;
+		if (!modelRouterBuffer) return new Map();
+		return flushModelRouterSessionBufferPrefix(modelRouterBuffer, (batch) =>
+			this.deps.appendSessionMessageBatch(batch),
+		);
+	}
+
+	/** Whether a cheap routed turn has crossed its durable tool-boundary commit. */
+	isSessionBufferCommitted(): boolean {
+		return this._modelRouterSessionBuffer?.committed === true;
 	}
 
 	private _isModelAvailableAndAuthed(pattern: string): boolean {
@@ -690,9 +724,11 @@ export class ModelRouterController {
 		routedModel: Model<Api> | undefined,
 		routeDecision: RouteDecision | undefined,
 		persistDecision = true,
+		continueFromCanonicalHistory = false,
 	): Promise<void> {
 		if (!routedModel) {
-			await this.deps.runAgentPrompt(messages);
+			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation();
+			else await this.deps.runAgentPrompt(messages);
 			return;
 		}
 
@@ -713,6 +749,7 @@ export class ModelRouterController {
 		const bufferRoutedTurn = routeDecision?.tier === "cheap";
 		const originalHistoryLength = agent.state.messages.length;
 		let retryModel: Model<Api> | undefined;
+		let retryFromCanonicalHistory = false;
 		let completedDecision: ModelRouterDecisionStatus | undefined = routeDecision
 			? {
 					route: routeDecision,
@@ -789,7 +826,8 @@ export class ModelRouterController {
 			}
 		}
 		try {
-			await this.deps.runAgentPrompt(messages);
+			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation();
+			else await this.deps.runAgentPrompt(messages);
 			// Speculative muscle-retry: an executor-routed turn is a bet that the
 			// small model can run the toolkit command directly. If it ends WITHOUT a successful
 			// run_toolkit_script execution, retry ONCE on the same executor with the brain's
@@ -802,8 +840,24 @@ export class ModelRouterController {
 			) {
 				const refined = await this._buildExecutorRefinedPrompt(messages);
 				if (refined) {
-					agent.state.messages.splice(originalHistoryLength);
-					if (bufferRoutedTurn) this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
+					// A prepared executor tool may already have crossed the lifecycle commit boundary.
+					// In that case the canonical tool/result history must remain visible to the retry;
+					// only an uncommitted speculative route may discard its live suffix and replace its
+					// buffer.
+					if (this._modelRouterSessionBuffer?.committed !== true) {
+						const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
+						const prefixMessageCount = this._modelRouterSessionBuffer?.prefixMessageCount ?? 0;
+						agent.state.messages.splice(
+							prefixCommitted ? originalHistoryLength + prefixMessageCount : originalHistoryLength,
+						);
+						if (bufferRoutedTurn) {
+							this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
+							if (prefixCommitted) {
+								this._modelRouterSessionBuffer.prefixCommitted = true;
+								this._modelRouterSessionBuffer.prefixMessageCount = prefixMessageCount;
+							}
+						}
+					}
 					await this.deps.runAgentPrompt([
 						{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() },
 					]);
@@ -834,7 +888,15 @@ export class ModelRouterController {
 				}
 			}
 			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
-				agent.state.messages.splice(originalHistoryLength);
+				const bufferCommitted = this._modelRouterSessionBuffer?.committed === true;
+				const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
+				retryFromCanonicalHistory = bufferCommitted || prefixCommitted;
+				if (prefixCommitted && !bufferCommitted) {
+					const prefixMessageCount = this._modelRouterSessionBuffer?.prefixMessageCount ?? 0;
+					agent.state.messages.splice(originalHistoryLength + prefixMessageCount);
+				} else if (!bufferCommitted) {
+					agent.state.messages.splice(originalHistoryLength);
+				}
 				retryModel = this._resolveModelRouterModelForIntent("modify") ?? previousModel;
 				completedDecision = {
 					route: routeDecision!,
@@ -845,14 +907,8 @@ export class ModelRouterController {
 				};
 				this._lastModelRouterDecision = completedDecision;
 			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
-				flushModelRouterSessionBuffer(
-					this._modelRouterSessionBuffer,
-					(message) => {
-						this.deps.getSessionManager().appendMessage(message);
-					},
-					(customType, content, display, details) => {
-						this.deps.getSessionManager().appendCustomMessageEntry(customType, content, display, details);
-					},
+				flushModelRouterSessionBuffer(this._modelRouterSessionBuffer, (batch) =>
+					this.deps.appendSessionMessageBatch(batch),
 				);
 			}
 		} catch (error) {
@@ -862,8 +918,12 @@ export class ModelRouterController {
 			// back to the pre-turn length here too — otherwise the never-persisted buffered messages
 			// permanently diverge from the persisted session (same shape as the W1.3 ghost-turn bug,
 			// but on the error path instead of the success/escalation paths).
-			if (bufferRoutedTurn) {
-				agent.state.messages.splice(originalHistoryLength);
+			if (bufferRoutedTurn && this._modelRouterSessionBuffer?.committed !== true) {
+				const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
+				const prefixMessageCount = this._modelRouterSessionBuffer?.prefixMessageCount ?? 0;
+				agent.state.messages.splice(
+					prefixCommitted ? originalHistoryLength + prefixMessageCount : originalHistoryLength,
+				);
 			}
 			if (completedDecision) {
 				completedDecision = { ...completedDecision, outcome: "failed" };
@@ -911,7 +971,7 @@ export class ModelRouterController {
 					fallbackFrom: "cheap",
 					model: formatModelRouterModel(retryModel),
 				};
-				await this.runRoutedTurn(messages, retryModel, retryDecision, false);
+				await this.runRoutedTurn(messages, retryModel, retryDecision, false, retryFromCanonicalHistory);
 				this._lastModelRouterDecision = completedDecision;
 			} catch (error) {
 				thrownError = error;

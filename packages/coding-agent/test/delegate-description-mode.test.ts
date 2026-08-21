@@ -17,6 +17,12 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(definition.description).toContain("page may be empty while nextCursor continues");
 		expect(definition.description).toContain("wait and wait_many are event-driven");
 		expect(definition.description).toContain("inbox_wait observes explicit replies only");
+		expect(definition.description).toContain(
+			"follow_up starts idle caller-subtree workers or steers active caller-subtree workers at a message boundary",
+		);
+		expect(definition.description).toContain(
+			"send/broadcast are non-waking peer evidence and do not control or complete workers",
+		);
 		expect(definition.description).toContain("timeout alone is never stall evidence");
 		expect(definition.description).not.toContain("delegate_status");
 		expect(definition.description).not.toContain("returns immediately");
@@ -64,6 +70,12 @@ describe("delegate tool description varies by wiring mode", () => {
 		expect(definition.description).toContain("Do not poll");
 		expect(definition.description).toContain("inbox_wait observes explicit replies only");
 		expect(definition.description).toContain("timeout alone is never stall evidence");
+		expect(definition.description).toContain(
+			"follow_up starts idle caller-subtree workers or steers active caller-subtree workers at a message boundary",
+		);
+		expect(definition.description).toContain(
+			"send/broadcast are non-waking peer evidence and do not control or complete workers",
+		);
 
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("Transcript pages are bounded"))).toBe(true);

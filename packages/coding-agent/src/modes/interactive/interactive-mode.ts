@@ -13,7 +13,7 @@ import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, 
 import {
 	type Component,
 	Container,
-	Loader,
+	type Loader,
 	type LoaderIndicatorOptions,
 	ProcessTerminal,
 	Spacer,
@@ -79,7 +79,7 @@ import {
 	shouldReuseToolPanelInPlace,
 	ToolPanelRegistry,
 } from "./components/tool-panel-registry.ts";
-import { TranscriptPager } from "./components/transcript-pager.ts";
+import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
@@ -94,6 +94,7 @@ import * as localModelCommands from "./local-model-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
+import { RuntimeStatusController } from "./runtime-status-controller.ts";
 import { SecretMenuController } from "./secret-menu-controller.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import * as sessionIoCommands from "./session-io-commands.ts";
@@ -201,6 +202,7 @@ export class InteractiveMode {
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
+	private readonly runtimeStatus: RuntimeStatusController;
 	private onInputCallback?: (submission: UserInputSubmission) => void;
 	private pendingUserInputs: UserInputSubmission[] = [];
 	private readonly clipboardQueue: clipboardInput.ClipboardQueueState = {
@@ -208,14 +210,6 @@ export class InteractiveMode {
 		clipboardImageCounter: 0,
 	};
 	private clipboardImageStore: SessionImageStore | undefined;
-	private loadingAnimation: Loader | undefined = undefined;
-	private workingMessage: string | undefined = undefined;
-	private workingVisible = true;
-	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
-	private readonly defaultWorkingMessage = "Working...";
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
-	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
-
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
 	private changelogMarkdown: string | undefined = undefined;
@@ -305,11 +299,34 @@ export class InteractiveMode {
 		return this.session.settingsManager;
 	}
 
+	private get loadingAnimation(): Loader | undefined {
+		return this.runtimeStatus.loadingAnimation;
+	}
+
+	private set loadingAnimation(value: Loader | undefined) {
+		this.runtimeStatus.loadingAnimation = value;
+	}
+
+	get workingVisible(): boolean {
+		return this.runtimeStatus.isWorkingVisible;
+	}
+
+	set workingVisible(value: boolean) {
+		this.runtimeStatus.isWorkingVisible = value;
+	}
+
+	get workingIndicatorOptions(): LoaderIndicatorOptions | undefined {
+		return this.runtimeStatus.indicatorOptions;
+	}
+
+	set workingIndicatorOptions(value: LoaderIndicatorOptions | undefined) {
+		this.runtimeStatus.indicatorOptions = value;
+	}
+
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
 		this.options = options;
 		this.hasHumanAudience = options.hasHumanAudience ?? true;
-		this.workingVisible = this.hasHumanAudience;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.extensionUiHost.resetExtensionUI();
 		});
@@ -328,6 +345,14 @@ export class InteractiveMode {
 		this.activityLane = this.hasHumanAudience
 			? new ActivityLaneComponent(theme, () => this.ui.requestRender())
 			: undefined;
+		this.runtimeStatus = new RuntimeStatusController({
+			ui: this.ui,
+			statusContainer: this.statusContainer,
+			activityLane: this.activityLane,
+			hasHumanAudience: this.hasHumanAudience,
+			isStreaming: () => this.session.isStreaming,
+			isThinkingHidden: () => this.hideThinkingBlock,
+		});
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -561,6 +586,7 @@ export class InteractiveMode {
 				hint("app.tools.expand", "to expand tools"),
 				hint("app.history.load", "to load session history"),
 				hint("app.agents.open", "to show live agents"),
+				hint("app.transcript.open", "to view transcript"),
 				hint("app.thinking.toggle", "to expand thinking"),
 				hint("app.editor.external", "for external editor"),
 				rawKeyHint("/", "for commands"),
@@ -1089,15 +1115,25 @@ export class InteractiveMode {
 
 		const children = this.chatContainer.children;
 		const lastChild = children[children.length - 1];
-		if (lastChild instanceof ToolGroupComponent && lastChild.toolGroup === toolGroup) {
+		if (lastChild instanceof ToolGroupComponent && lastChild.canAccept(component)) {
 			lastChild.addTool(component);
 			this.trimLiveTuiHistory();
 			return;
 		}
 		if (lastChild instanceof ToolExecutionComponent && lastChild.toolGroup?.trim() === toolGroup) {
-			const group = new ToolGroupComponent(toolGroup, [lastChild, component]);
+			const group = new ToolGroupComponent(toolGroup, [lastChild]);
+			if (group.canAccept(component)) {
+				group.addTool(component);
+				group.setExpanded(this.toolOutputExpanded);
+				children[children.length - 1] = group;
+				this.trimLiveTuiHistory();
+				return;
+			}
+		}
+		if (toolGroup === "bash") {
+			const group = new ToolGroupComponent(toolGroup, [component]);
 			group.setExpanded(this.toolOutputExpanded);
-			children[children.length - 1] = group;
+			this.chatContainer.addChild(group);
 			this.trimLiveTuiHistory();
 			return;
 		}
@@ -1118,7 +1154,7 @@ export class InteractiveMode {
 			const remaining = child.getToolCount();
 			if (remaining === 0) {
 				children.splice(i, 1);
-			} else if (remaining === 1) {
+			} else if (remaining === 1 && child.toolGroup !== "bash") {
 				const onlyTool = child.getOnlyTool();
 				if (onlyTool) children[i] = onlyTool;
 			}
@@ -1181,112 +1217,47 @@ export class InteractiveMode {
 	}
 
 	private getWorkingLoaderMessage(): string {
-		return this.workingMessage ?? this.defaultWorkingMessage;
+		return this.runtimeStatus.getWorkingLoaderMessage();
 	}
 
 	private createWorkingLoader(): Loader {
-		return new Loader(
-			this.ui,
-			(spinner) => theme.fg("accent", spinner),
-			(text) => theme.fg("muted", text),
-			this.getWorkingLoaderMessage(),
-			this.workingIndicatorOptions,
-		);
+		return this.runtimeStatus.createWorkingLoader();
 	}
 
 	private stopWorkingLoader(): void {
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
-		this.activityLane?.remove("runtime:routing");
-		this.activityLane?.remove("runtime:turn");
+		this.runtimeStatus.stopWorkingLoader();
 	}
 
 	private setWorkingVisible(visible: boolean): void {
-		if (!this.hasHumanAudience) {
-			this.workingVisible = false;
-			this.stopWorkingLoader();
-			return;
-		}
-		this.workingVisible = visible;
-		if (!visible) {
-			this.stopWorkingLoader();
-			this.ui.requestRender();
-			return;
-		}
-		if (this.session.isStreaming && !this.loadingAnimation) {
-			if (this.workingIndicatorOptions) {
-				this.statusContainer.clear();
-				this.loadingAnimation = this.createWorkingLoader();
-				this.statusContainer.addChild(this.loadingAnimation);
-			} else {
-				this.activityLane?.start({ id: "runtime:turn", kind: "runtime", label: this.getWorkingLoaderMessage() });
-			}
-		}
-		this.ui.requestRender();
+		this.runtimeStatus.setWorkingVisible(visible);
 	}
 
 	private setWorkingIndicator(options?: LoaderIndicatorOptions): void {
-		this.workingIndicatorOptions = options;
-		if (!this.hasHumanAudience) {
-			this.stopWorkingLoader();
-			return;
-		}
-		if (options) {
-			this.activityLane?.remove("runtime:turn");
-			if (this.session.isStreaming && this.workingVisible) {
-				this.stopWorkingLoader();
-				this.loadingAnimation = this.createWorkingLoader();
-				this.statusContainer.addChild(this.loadingAnimation);
-			}
-		} else {
-			this.loadingAnimation?.stop();
-			this.loadingAnimation = undefined;
-			this.statusContainer.clear();
-			if (this.session.isStreaming && this.workingVisible) {
-				this.activityLane?.start({ id: "runtime:turn", kind: "runtime", label: this.getWorkingLoaderMessage() });
-			}
-		}
-		this.ui.requestRender();
+		this.runtimeStatus.setWorkingIndicator(options);
 	}
 
 	private setHiddenThinkingLabel(label?: string): void {
-		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-			}
-		}
-		if (this.streamingComponent) {
-			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-		}
-		this.ui.requestRender();
+		this.runtimeStatus.setHiddenThinkingLabel(label);
+		if (this.streamingMessage) this.updateRuntimeStatus(this.streamingMessage);
+	}
+
+	public updateRuntimeStatus(message?: AssistantMessage): void {
+		this.runtimeStatus.updateRuntimeStatus(message);
 	}
 
 	/**
 	 * Set the extension-provided working-loader message (undefined restores the default).
 	 */
 	private setWorkingMessage(message: string | undefined): void {
-		this.workingMessage = message;
-		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(message ?? this.defaultWorkingMessage);
-		}
-		this.activityLane?.update("runtime:turn", message ?? this.defaultWorkingMessage);
+		this.runtimeStatus.setWorkingMessage(message, this.streamingMessage);
 	}
 
 	/**
 	 * Reset the working indicator and hidden-thinking label to their built-in defaults.
 	 */
 	private resetWorkingIndicators(): void {
-		this.workingMessage = undefined;
-		this.workingVisible = this.hasHumanAudience;
-		this.setWorkingIndicator();
-		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
-		}
-		this.setHiddenThinkingLabel();
+		this.runtimeStatus.resetWorkingIndicators();
+		if (this.streamingMessage) this.updateRuntimeStatus(this.streamingMessage);
 	}
 
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
@@ -1876,18 +1847,13 @@ export class InteractiveMode {
 	}
 
 	private showTranscriptPager(): void {
-		let handle: ReturnType<TUI["showOverlay"]> | undefined;
-		const pager = new TranscriptPager({
+		openTranscriptOverlay({
 			source: this.chatContainer,
 			viewportRows: () => this.ui.terminal.rows,
 			keybindings: this.keybindings,
-			onClose: () => handle?.hide(),
-		});
-		handle = this.ui.showOverlay(pager, {
-			width: "100%",
-			maxHeight: "100%",
-			row: 0,
-			col: 0,
+			getToolsExpanded: () => this.toolOutputExpanded,
+			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
+			showOverlay: (component, options) => this.ui.showOverlay(component, options),
 		});
 	}
 
@@ -1908,6 +1874,7 @@ export class InteractiveMode {
 
 	public applyStreamingMessageUpdate(message: AssistantMessage, options: { force?: boolean } = {}): void {
 		this.streamingMessage = message;
+		this.updateRuntimeStatus(message);
 		if (!this.streamingComponent) return;
 
 		const now = performance.now();
@@ -2089,7 +2056,6 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
-					this.hiddenThinkingLabel,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -2501,7 +2467,12 @@ export class InteractiveMode {
 		if (this.streamingComponent && this.streamingMessage) {
 			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 			this.streamingComponent.updateContent(this.streamingMessage);
+			this.updateRuntimeStatus(this.streamingMessage);
 			this.chatContainer.addChild(this.streamingComponent);
+			// Rebuilding the chat clears the rendered tool-panel registry. Reattach
+			// any tool calls that are still arriving so toggling thinking visibility
+			// cannot make an in-flight tool disappear from the TUI.
+			this.attachStreamingToolPanels(this.streamingMessage);
 		}
 
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);

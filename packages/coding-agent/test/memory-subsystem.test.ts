@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../src/core/memory/memory-provider.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
@@ -198,6 +198,177 @@ describe("Memory Subsystem - Registry & Manager", () => {
 
 		expect((result as any).details.success).toBe(false);
 		expect((result as any).details.error).toContain("Child session write-gated");
+	});
+
+	it("bounds a hung lifecycle hook and abandons that provider for later hooks", async () => {
+		vi.useFakeTimers();
+		const calls: string[] = [];
+		const manager = new MemoryManager({ lifecycleTimeoutMs: 10 });
+		const provider: MemoryProvider = {
+			name: "hung-lifecycle",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {},
+			syncTurn: () => new Promise<void>(() => {}),
+			onPreCompress: async () => {
+				calls.push("pre-compress");
+				return "should not run";
+			},
+			onSessionEnd: async () => {
+				calls.push("session-end");
+			},
+			shutdown: async () => {
+				calls.push("shutdown");
+			},
+		};
+
+		try {
+			manager.registerProvider(provider);
+			await manager.initializeAll("test-sess", { agentDir, cwd: testDir, isChildSession: false });
+
+			const sync = manager.syncTurn("user", "assistant");
+			await vi.advanceTimersByTimeAsync(10);
+			await expect(sync).resolves.toBeUndefined();
+			await expect(manager.onPreCompress()).resolves.toBe("");
+			await expect(manager.onSessionEnd()).resolves.toBeUndefined();
+			await expect(manager.shutdownAll()).resolves.toBeUndefined();
+
+			expect(calls).toEqual([]);
+			expect(manager.getLifecycleDiagnostics()).toEqual([
+				expect.objectContaining({
+					provider: "hung-lifecycle",
+					operation: "syncTurn",
+					status: "timeout",
+				}),
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("bounds a hung prefetch and keeps a healthy provider result available", async () => {
+		vi.useFakeTimers();
+		const manager = new MemoryManager({ lifecycleTimeoutMs: 10 });
+		const hungProvider: MemoryProvider = {
+			name: "hung-prefetch",
+			egress: "local",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {},
+			prefetch: () => new Promise<string>(() => {}),
+			shutdown: async () => {},
+		};
+		const healthyProvider: MemoryProvider = {
+			name: "healthy-prefetch",
+			egress: "local",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {},
+			prefetch: async () => "healthy result",
+			shutdown: async () => {},
+		};
+
+		try {
+			manager.registerProvider(hungProvider);
+			manager.registerProvider(healthyProvider);
+			await manager.initializeAll("test-sess", { agentDir, cwd: testDir, isChildSession: false });
+
+			const prefetch = manager.prefetch("query");
+			await vi.advanceTimersByTimeAsync(10);
+			await expect(prefetch).resolves.toContain("healthy result");
+			expect(manager.getLifecycleDiagnostics()).toEqual([
+				expect.objectContaining({
+					provider: "hung-prefetch",
+					operation: "prefetch",
+					status: "timeout",
+				}),
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps the lifecycle timeout referenced until the terminal diagnostic is emitted", async () => {
+		vi.useFakeTimers();
+		const manager = new MemoryManager({ lifecycleTimeoutMs: 10 });
+		const provider: MemoryProvider = {
+			name: "referenced-timeout",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {},
+			syncTurn: () => new Promise<void>(() => {}),
+			shutdown: async () => {},
+		};
+		manager.registerProvider(provider);
+		await manager.initializeAll("test-sess", { agentDir, cwd: testDir, isChildSession: false });
+
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		try {
+			const sync = manager.syncTurn("user", "assistant");
+			const timeoutHandle = setTimeoutSpy.mock.results[0]?.value;
+			expect(timeoutHandle).toBeDefined();
+			expect((timeoutHandle as NodeJS.Timeout).hasRef()).toBe(true);
+			await vi.advanceTimersByTimeAsync(10);
+			await sync;
+		} finally {
+			setTimeoutSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not re-admit a provider object abandoned by an earlier manager generation", async () => {
+		vi.useFakeTimers();
+		let initializeCalls = 0;
+		let resolveSync: () => void = () => {};
+		const provider: MemoryProvider = {
+			name: "cross-generation-abandoned",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {
+				initializeCalls += 1;
+			},
+			syncTurn: () =>
+				new Promise<void>((resolve) => {
+					resolveSync = resolve;
+				}),
+			shutdown: async () => {},
+		};
+
+		try {
+			const firstManager = new MemoryManager({ lifecycleTimeoutMs: 10 });
+			firstManager.registerProvider(provider);
+			await firstManager.initializeAll("first-generation", { agentDir, cwd: testDir, isChildSession: false });
+			const sync = firstManager.syncTurn("user", "assistant");
+			await vi.advanceTimersByTimeAsync(10);
+			await sync;
+
+			const reloadedManager = new MemoryManager({ lifecycleTimeoutMs: 10 });
+			reloadedManager.registerProvider(provider);
+			await reloadedManager.initializeAll("second-generation", { agentDir, cwd: testDir, isChildSession: false });
+
+			expect(initializeCalls).toBe(1);
+			expect(reloadedManager.getLifecycleDiagnostics()).toEqual([
+				expect.objectContaining({
+					provider: "cross-generation-abandoned",
+					operation: "initialize",
+					status: "abandoned",
+				}),
+			]);
+			await expect(reloadedManager.syncTurn("user", "assistant")).resolves.toBeUndefined();
+
+			resolveSync();
+			await vi.advanceTimersByTimeAsync(0);
+			const recoveredManager = new MemoryManager({ lifecycleTimeoutMs: 10 });
+			recoveredManager.registerProvider(provider);
+			await recoveredManager.initializeAll("recovered-generation", {
+				agentDir,
+				cwd: testDir,
+				isChildSession: false,
+			});
+			expect(initializeCalls).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

@@ -115,6 +115,7 @@ import type {
 	TurnStartEvent,
 } from "./extensions/index.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
+import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
 import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
@@ -379,6 +380,7 @@ export class AgentSession {
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
 	 * {@link ForegroundRecoveryController.runAgentPrompt} so the drive loop stays host-side. */
 	private readonly _modelRouter: ModelRouterController;
+	private readonly _foregroundLifecycle: ForegroundLifecycleAdapter;
 	private readonly _foregroundRecovery: ForegroundRecoveryController;
 	/** Submission authority inherited by every routed retry within the current prompt lifecycle. */
 	private _foregroundPromptLease: ForegroundSubmissionLease | undefined;
@@ -799,6 +801,7 @@ export class AgentSession {
 			getModel: () => this.model ?? undefined,
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
+			appendSessionMessageBatch: (batch) => this._foregroundLifecycle.appendMessageBatch(batch),
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getFailoverStatus: () => ({
@@ -809,6 +812,7 @@ export class AgentSession {
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			getBaseSystemPrompt: () => this._baseSystemPrompt,
 			runAgentPrompt: (messages) => this._foregroundRecovery.runAgentPrompt(messages, this._foregroundPromptLease),
+			runAgentContinuation: () => this._foregroundRecovery.runAgentContinuation(this._foregroundPromptLease),
 			buildSystemPromptForToolNames: (toolNames) => this._buildSystemPromptForToolNames(toolNames),
 			refreshCurrentModelFromRegistry: () => this._refreshCurrentModelFromRegistry(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -819,6 +823,8 @@ export class AgentSession {
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
 		});
+		this._foregroundLifecycle = new ForegroundLifecycleAdapter(this.agent, this.sessionManager, this._modelRouter);
+		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({
 			getModel: () => this.model,
 			getAgent: () => this.agent,
@@ -1806,8 +1812,18 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
-		for (const l of this._eventListeners) {
-			l(event);
+		for (const listener of this._eventListeners) {
+			try {
+				// Public listeners are observers. Invoke them synchronously to preserve existing ordering,
+				// but contain both synchronous failures and rejected thenables so one observer cannot
+				// reject the session operation or prevent later observers from receiving the event.
+				const result = listener(event) as unknown;
+				if (result !== null && (typeof result === "object" || typeof result === "function") && "then" in result) {
+					void Promise.resolve(result).catch(() => {});
+				}
+			} catch {
+				// Listener failures must not affect session event dispatch or operation completion.
+			}
 		}
 	}
 
@@ -1891,20 +1907,12 @@ export class AgentSession {
 			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 		}
 
-		// Handle session/context retention. Tool result details are UI/log metadata,
-		// not provider-visible content, and large graph/search payloads can otherwise
-		// accumulate until the interactive Node process hits the V8 heap limit.
 		if (event.type === "message_end") {
 			compactToolResultDetailsForRetention(event.message);
 			let messagePersisted = false;
-			// While a cheap routed turn is buffering, its messages are captured for later flush/discard
-			// instead of persisted here (see ModelRouterController.captureSessionMessage).
 			if (this._modelRouter.captureSessionMessage(event.message)) {
 				// buffered by the router; persistence is deferred to the routed-turn flush
-			}
-			// Check if this is a custom message from extensions
-			else if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
+			} else if (event.message.role === "custom") {
 				this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
@@ -1918,12 +1926,9 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				this._foregroundLifecycle.appendMessage(event.message);
 				messagePersisted = true;
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
-
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
@@ -2071,6 +2076,7 @@ export class AgentSession {
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this._eventListeners.push(listener);
+		this._foregroundLifecycle.emitPendingWarnings((message) => this._emit({ type: "warning", message }));
 
 		// Return unsubscribe function for this specific listener
 		return () => {
@@ -3428,6 +3434,8 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
+		this._foregroundLifecycle.reload();
+		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		return this._runtimeBuilder.reload();
 	}
 

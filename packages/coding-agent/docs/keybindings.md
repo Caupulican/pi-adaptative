@@ -122,13 +122,14 @@ These actions apply while the built-in `ask_question` interaction has focus. The
 | `app.model.cycleForward` | `ctrl+p` | Cycle to next model |
 | `app.model.cycleBackward` | `shift+ctrl+p` | Cycle to previous model |
 | `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
-| `app.thinking.toggle` | `ctrl+t` | Show or hide thinking blocks (hidden by default) |
+| `app.thinking.toggle` | `shift+pageUp` | Show or hide thinking blocks (hidden by default) |
 
 ### Display and Message Queue
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Expand or collapse tool output (file groups stay as a count + short list until then) |
+| `app.transcript.open` | `ctrl+t` | Open expanded transcript scrollback |
 | `app.history.load` | `ctrl+shift+h` | Load deferred session history into the chat |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `alt+up` | Restore queued messages to editor |

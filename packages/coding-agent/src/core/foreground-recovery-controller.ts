@@ -140,6 +140,19 @@ export class ForegroundRecoveryController {
 		messages: AgentMessage | AgentMessage[],
 		submissionLease?: ForegroundSubmissionLease,
 	): Promise<void> {
+		await this.runAgentExecution("prompt", messages, submissionLease);
+	}
+
+	/** Continue from the already canonical agent history without replaying the original user message. */
+	async runAgentContinuation(submissionLease?: ForegroundSubmissionLease): Promise<void> {
+		await this.runAgentExecution("continue", undefined, submissionLease);
+	}
+
+	private async runAgentExecution(
+		mode: "prompt" | "continue",
+		messages: AgentMessage | AgentMessage[] | undefined,
+		submissionLease?: ForegroundSubmissionLease,
+	): Promise<void> {
 		let lease = submissionLease;
 		let releaseLease = false;
 		if (lease) {
@@ -161,7 +174,12 @@ export class ForegroundRecoveryController {
 			const maxGoalLoopRounds = this.deps.settingsManager.getAutonomySettings().maxStallTurns;
 			await this.deps.prepareRun();
 			let goalLoopRounds = 1;
-			await this.deps.agent.prompt(messages);
+			if (mode === "prompt") {
+				if (!messages) throw new Error("Foreground prompt execution requires messages.");
+				await this.deps.agent.prompt(messages);
+			} else {
+				await this.deps.agent.continue();
+			}
 			while ((maxGoalLoopRounds === 0 || goalLoopRounds < maxGoalLoopRounds) && (await this.handlePostAgentRun())) {
 				await this.deps.agent.continue();
 				goalLoopRounds++;

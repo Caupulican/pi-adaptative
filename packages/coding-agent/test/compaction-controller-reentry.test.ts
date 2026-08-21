@@ -74,6 +74,11 @@ function createFixture(options: {
 		strategy?: "session-replacement";
 	};
 	onCompactionRun?: (run: () => Promise<CompactionResult>) => void;
+	compactWithRetry?: (
+		run: () => Promise<CompactionResult>,
+		attempt: number,
+		entryIds: string[],
+	) => Promise<CompactionResult>;
 	sessionManager?: SessionManager;
 	extensionCompaction?: (preparation: CompactionPreparation) => CompactionResult;
 	estimatedContextTokens?: number;
@@ -109,6 +114,7 @@ function createFixture(options: {
 	const compactWithRetry = vi.fn(async (run: () => Promise<CompactionResult>): Promise<CompactionResult> => {
 		options.onCompactionRun?.(run);
 		const attempt = compactionAttempt++;
+		if (options.compactWithRetry) return options.compactWithRetry(run, attempt, entryIds);
 		return options.createResult(attempt, entryIds);
 	});
 	const extensionRunner = {
@@ -218,7 +224,7 @@ describe("CompactionController auto-compaction re-entry", () => {
 		const result = await fixture.controller.compact();
 
 		expect(result.retention).toEqual({ mode: "original-user", userEntryId: fixture.entryIds[0] });
-		expect(fixture.sessionManager.getBranch().at(-1)).toMatchObject({
+		expect(fixture.sessionManager.getBranch().findLast((entry) => entry.type === "compaction")).toMatchObject({
 			type: "compaction",
 			retention: { mode: "original-user", userEntryId: fixture.entryIds[0] },
 		});
@@ -226,6 +232,17 @@ describe("CompactionController auto-compaction re-entry", () => {
 			"user",
 			"compactionSummary",
 		]);
+		const lifecycleRecords = [...fixture.sessionManager.getSessionLifecycleIndex().compactionsById.values()];
+		expect(lifecycleRecords).toHaveLength(1);
+		expect(lifecycleRecords[0]?.start).toMatchObject({
+			type: "compaction_start",
+			firstKeptEntryId: fixture.entryIds[0],
+		});
+		expect(lifecycleRecords[0]?.end).toMatchObject({
+			type: "compaction_end",
+			outcome: "success",
+			compactionEntryId: expect.any(String),
+		});
 	});
 
 	it("adds a durable transcript pointer to an applied session-replacement checkpoint", async () => {
@@ -267,7 +284,7 @@ describe("CompactionController auto-compaction re-entry", () => {
 			const result = await fixture.controller.compact();
 
 			expect(result.summary).toContain(`Full pre-compaction transcript: ${sessionFile}`);
-			expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			expect(sessionManager.getBranch().findLast((entry) => entry.type === "compaction")).toMatchObject({
 				type: "compaction",
 				summary: expect.stringContaining(sessionFile),
 			});
@@ -389,7 +406,7 @@ describe("CompactionController auto-compaction re-entry", () => {
 			display: false,
 		});
 		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
-		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+		expect(sessionManager.getBranch().findLast((entry) => entry.type === "message")).toMatchObject({
 			type: "message",
 			message: { role: "custom", customType: "provider_recovery_continuation" },
 		});
@@ -496,6 +513,14 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(events.filter((event) => event.type === "warning")).toEqual([
 			expect.objectContaining({ message: expect.stringContaining("cycle 2: effect-not-restored") }),
 		]);
+		const lifecycleRecords = [...sessionManager.getSessionLifecycleIndex().compactionsById.values()];
+		expect(lifecycleRecords).toHaveLength(1);
+		expect(lifecycleRecords[0]?.starts).toHaveLength(1);
+		expect(lifecycleRecords[0]?.ends).toHaveLength(1);
+		expect(lifecycleRecords[0]?.end?.outcome).toBe("success");
+		expect(lifecycleRecords[0]?.end?.compactionEntryId).toBe(
+			sessionManager.getBranch().findLast((entry) => entry.type === "compaction")?.id,
+		);
 	});
 
 	it("does not re-enter an ineffective threshold frontier after one small message", async () => {
@@ -710,5 +735,101 @@ describe("CompactionController auto-compaction re-entry", () => {
 		await expect(controller.compact()).rejects.toThrow("abortForeground failed");
 		expect(onCompactionSettled).toHaveBeenCalledOnce();
 		expect(controller.isCompacting).toBe(false);
+	});
+
+	it("does not write a lifecycle start or invoke summarization when auto-compaction is skipped", async () => {
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 900,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+
+		await expect(fixture.controller.runAuto("threshold", false)).resolves.toBe(false);
+		expect(fixture.compactWithRetry).not.toHaveBeenCalled();
+		expect(fixture.sessionManager.getSessionLifecycleIndex().compactionsById.size).toBe(0);
+	});
+
+	it("does not let lifecycle markers turn a completed compaction into new compactable history", async () => {
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+
+		await fixture.controller.compact();
+		const lifecycleCount = fixture.sessionManager.getSessionLifecycleIndex().compactionsById.size;
+
+		await expect(fixture.controller.compact()).rejects.toThrow("Already compacted");
+		await expect(fixture.controller.runAuto("threshold", false)).resolves.toBe(false);
+
+		expect(fixture.compactWithRetry).toHaveBeenCalledOnce();
+		expect(fixture.sessionManager.getSessionLifecycleIndex().compactionsById.size).toBe(lifecycleCount);
+		expect(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("fails closed before summarization when the lifecycle start cannot be persisted", async () => {
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+		vi.spyOn(fixture.sessionManager, "appendCompactionStart").mockImplementation(() => {
+			throw new Error("lifecycle start unavailable");
+		});
+
+		await expect(fixture.controller.compact()).rejects.toThrow("lifecycle start unavailable");
+		expect(fixture.compactWithRetry).not.toHaveBeenCalled();
+		expect(fixture.sessionManager.getSessionLifecycleIndex().compactionsById.size).toBe(0);
+	});
+
+	it("records a bounded provider failure and closes the one retry-ladder transaction", async () => {
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			compactWithRetry: async () => {
+				throw new Error(`network timeout\n${"secret ".repeat(200)}`);
+			},
+		});
+
+		await expect(fixture.controller.compact()).rejects.toThrow("manual compaction failed after retry ladder");
+		const records = [...fixture.sessionManager.getSessionLifecycleIndex().compactionsById.values()];
+		expect(records).toHaveLength(1);
+		expect(records[0]?.starts).toHaveLength(1);
+		expect(records[0]?.ends).toHaveLength(1);
+		expect(records[0]?.end).toMatchObject({ outcome: "failure", error: expect.stringContaining("network timeout") });
+		expect(records[0]?.end?.error?.length).toBeLessThanOrEqual(501);
+		expect(records[0]?.end?.error).not.toContain("\n");
+	});
+
+	it("closes an aborted retry ladder as cancelled", async () => {
+		let controller: CompactionController | undefined;
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			compactWithRetry: async () => {
+				controller?.abort();
+				throw new Error("request aborted");
+			},
+		});
+		controller = fixture.controller;
+
+		await expect(controller.compact()).rejects.toThrow("Compaction cancelled");
+		const records = [...fixture.sessionManager.getSessionLifecycleIndex().compactionsById.values()];
+		expect(records).toHaveLength(1);
+		expect(records[0]?.ends).toHaveLength(1);
+		expect(records[0]?.end?.outcome).toBe("cancelled");
+	});
+
+	it("propagates a terminal append failure instead of reporting success", async () => {
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+		vi.spyOn(fixture.sessionManager, "appendCompactionEnd").mockImplementation(() => {
+			throw new Error("lifecycle terminal unavailable");
+		});
+
+		await expect(fixture.controller.compact()).rejects.toThrow("lifecycle terminal unavailable");
+		const records = [...fixture.sessionManager.getSessionLifecycleIndex().compactionsById.values()];
+		expect(records).toHaveLength(1);
+		expect(records[0]?.starts).toHaveLength(1);
+		expect(records[0]?.ends).toHaveLength(0);
 	});
 });

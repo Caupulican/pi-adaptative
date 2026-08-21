@@ -96,6 +96,15 @@ function modelChange(id: string, parentId: string | null): ModelChangeEntry {
 	};
 }
 
+function lifecycleEntry(id: string, parentId: string | null, type: string): SessionEntry {
+	return {
+		type,
+		id,
+		parentId,
+		timestamp: new Date().toISOString(),
+	} as SessionEntry;
+}
+
 // Helper to build a tree from entries using parentId relationships
 function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 	if (entries.length === 0) return [];
@@ -125,6 +134,42 @@ function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
 }
 
 describe("TreeSelectorComponent", () => {
+	describe("lifecycle bookkeeping entries", () => {
+		test("hides lifecycle entries in every user-facing filter and selects their visible ancestor", () => {
+			const entries = [
+				userMessage("user-1", null, "hello"),
+				assistantMessage("asst-1", "user-1", "response"),
+				lifecycleEntry("snapshot-1", "asst-1", "request_snapshot"),
+				lifecycleEntry("tool-start-1", "snapshot-1", "foreground_tool_start"),
+				lifecycleEntry("tool-end-1", "tool-start-1", "foreground_tool_terminal"),
+				lifecycleEntry("compact-start-1", "tool-end-1", "compaction_start"),
+				lifecycleEntry("compact-end-1", "compact-start-1", "compaction_end"),
+				userMessage("user-2", "asst-1", "sibling branch"),
+			];
+			const tree = buildTree(entries);
+
+			for (const filterMode of ["default", "no-tools", "user-only", "labeled-only", "all"] as const) {
+				const selector = new TreeSelectorComponent(
+					tree,
+					"compact-end-1",
+					24,
+					() => {},
+					() => {},
+					undefined,
+					undefined,
+					filterMode,
+				);
+				const list = selector.getTreeList();
+				const rendered = list.render(200).join("\n");
+
+				expect(rendered).not.toMatch(/snapshot-1|tool-start-1|tool-end-1|compact-start-1|compact-end-1/);
+				expect(list.getSelectedNode()?.entry.id).toBe(
+					filterMode === "labeled-only" ? undefined : filterMode === "user-only" ? "user-1" : "asst-1",
+				);
+			}
+		});
+	});
+
 	describe("initial selection with metadata entries", () => {
 		test("focuses nearest visible ancestor when currentLeafId is a model_change with sibling branch", () => {
 			// Tree structure:

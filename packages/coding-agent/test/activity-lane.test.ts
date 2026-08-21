@@ -1,5 +1,6 @@
 import { visibleWidth } from "@caupulican/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { addTaskStep, createTaskStepsState, updateTaskStep } from "../src/core/tasks/task-state.ts";
 import {
 	ActivityLaneComponent,
@@ -117,6 +118,32 @@ describe("activity lane", () => {
 		vi.advanceTimersByTime(2_000);
 		expect(lane.getItems()).toEqual([]);
 		lane.dispose();
+	});
+
+	it("projects budget-limited goals as terminal while keeping blocked goals live", () => {
+		const budgetLimited = applyGoalEvent(createGoalState({ goalId: "budget", userGoal: "Spend less", now: "T0" }), {
+			type: "system_stop_goal",
+			status: "budget_limited",
+			reason: "token ceiling",
+			now: "T1",
+		});
+		const blocked = applyGoalEvent(createGoalState({ goalId: "blocked", userGoal: "Need access", now: "T0" }), {
+			type: "block_goal",
+			reason: "waiting for owner",
+			now: "T1",
+		});
+
+		const budgetProjection = projectActivityLane({ goalState: budgetLimited, laneRecords: [] });
+		const blockedProjection = projectActivityLane({ goalState: blocked, laneRecords: [] });
+
+		expect(budgetProjection.active).toEqual([]);
+		expect(budgetProjection.terminal).toEqual([
+			expect.objectContaining({ kind: "goal", status: "neutral", label: "Goal closed" }),
+		]);
+		expect(blockedProjection.active).toEqual([
+			expect.objectContaining({ kind: "goal", status: "waiting", label: expect.stringContaining("Goal blocked") }),
+		]);
+		expect(blockedProjection.terminal).toEqual([]);
 	});
 });
 

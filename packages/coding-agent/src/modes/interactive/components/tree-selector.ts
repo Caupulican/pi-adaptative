@@ -1,4 +1,4 @@
-import type { SessionTreeNode } from "@caupulican/pi-agent-core/node";
+import { isSessionLifecycleEntry, type SessionTreeNode } from "@caupulican/pi-agent-core/node";
 import {
 	type Component,
 	Container,
@@ -170,12 +170,14 @@ class TreeList implements Component {
 			// Apply filter mode
 			let passesFilter = true;
 			// Entry types hidden in default view (settings/bookkeeping)
+			const isLifecycleEntry = isSessionLifecycleEntry(entry);
 			const isSettingsEntry =
 				entry.type === "label" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
 				entry.type === "thinking_level_change" ||
-				entry.type === "session_info";
+				entry.type === "session_info" ||
+				isLifecycleEntry;
 
 			switch (this.filterMode) {
 				case "user-only":
@@ -188,11 +190,11 @@ class TreeList implements Component {
 					break;
 				case "labeled-only":
 					// Just labeled entries
-					passesFilter = flatNode.node.label !== undefined;
+					passesFilter = !isLifecycleEntry && flatNode.node.label !== undefined;
 					break;
 				case "all":
-					// Show everything
-					passesFilter = true;
+					// Show all user-facing entries; lifecycle records remain internal bookkeeping.
+					passesFilter = !isLifecycleEntry;
 					break;
 				default:
 					// Default mode: hide settings/bookkeeping entries

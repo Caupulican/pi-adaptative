@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Amazon Bedrock tool requests by normalizing object-shaped root schemas to Bedrock's required `type: "object"` form and rejecting unsupported non-object tool inputs before transport.
+
 ## [0.93.18] - 2026-08-21
 
 ## [0.93.17] - 2026-08-21

@@ -54,7 +54,6 @@ export interface InteractiveEventHost {
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	hideThinkingBlock: boolean;
-	hiddenThinkingLabel: string;
 	lastStreamingUiUpdateAt: number;
 	toolPanels: ToolPanelRegistry;
 	init(): Promise<void>;
@@ -72,6 +71,7 @@ export interface InteractiveEventHost {
 	clearPendingStreamingUiUpdate(): void;
 	getMarkdownThemeWithSettings(): MarkdownTheme;
 	applyStreamingMessageUpdate(message: AssistantMessage, options?: { force?: boolean }): void;
+	updateRuntimeStatus(message?: AssistantMessage): void;
 	trimLiveTuiHistory(): void;
 	attachToolExecutionComponent(
 		toolName: string,
@@ -202,7 +202,6 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 					undefined,
 					host.hideThinkingBlock,
 					host.getMarkdownThemeWithSettings(),
-					host.hiddenThinkingLabel,
 				);
 				host.streamingMessage = event.message;
 				host.chatContainer.addChild(host.streamingComponent);
@@ -248,6 +247,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "tool_execution_start": {
+			host.updateRuntimeStatus();
 			host.activityLane?.start({
 				id: `tool:${event.toolCallId}`,
 				kind: host.toolActivityKind(event.toolName),

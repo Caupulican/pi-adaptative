@@ -27,6 +27,7 @@ const luna = { provider: "faux", modelId: "pinned", thinkingLevel: "high" as con
 const terra = { provider: "faux", modelId: "requested", thinkingLevel: "medium" as const };
 
 interface BackgroundLanesControl {
+	listWorkerAgents(): Array<{ agentId: string; modelRef?: string }>;
 	startWorkerAgentTask(
 		agentId: string,
 		message: string,
@@ -370,6 +371,66 @@ describe("worker model pin lifecycle", () => {
 			expect(fresh.started).toBe(true);
 			expect(fresh.record).toMatchObject({ modelRef: "faux/requested", thinkingLevel: "medium" });
 			expect(observedModelIds).toEqual(["pinned", "pinned", "requested"]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("exposes an explicitly selected model on the persistent agent and keeps it after settings change", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "requested", contextWindow: 128_000, reasoning: true },
+				{ id: "pinned", contextWindow: 128_000, reasoning: true },
+			],
+		});
+		const observedModelIds: string[] = [];
+		try {
+			const routeResponse = (
+				context: { systemPrompt?: string },
+				_options: unknown,
+				_state: unknown,
+				model: Model<Api>,
+			) => {
+				if (!context.systemPrompt?.includes("Autonomous orchestration-tree agent")) {
+					return fauxAssistantMessage("Terminal handoff observed.");
+				}
+				observedModelIds.push(model.id);
+				return fauxAssistantMessage('{"summary":"worker task complete","status":"completed"}');
+			};
+			harness.setResponses([routeResponse, routeResponse, routeResponse]);
+
+			const initial = await harness.session.runWorkerDelegationOnce({
+				instructions: "Create a reusable specialist on the requested model.",
+				authority: {
+					role: "implementer",
+					model: { provider: "faux", modelId: "requested" },
+				},
+			});
+			if (!initial.started || !initial.record) throw new Error("Expected the explicitly selected worker to start.");
+			const initialRecord = initial.record;
+			const control = getBackgroundControl(harness.session);
+			const listed = control.listWorkerAgents().find((agent) => agent.agentId === initialRecord.laneId);
+			expect(listed?.modelRef).toBe("faux/requested");
+
+			harness.settingsManager.setWorkerDelegationSettings({
+				modelPins: { roles: { implementer: luna } },
+			});
+			const reused = control.startWorkerAgentTask(initialRecord.laneId, "Continue on the selected model.", {
+				idempotencyKey: "explicit-model-reuse-after-settings-change",
+			});
+			expect(reused.started, reused.skipReason).toBe(true);
+			expect((await control.waitForWorkerAgent(initialRecord.laneId)).timedOut).toBe(false);
+			const fresh = await harness.session.runWorkerDelegationOnce({
+				instructions: "Create a fresh pinned implementer.",
+				authority: { role: "implementer" },
+			});
+			expect(fresh.started, fresh.skipReason).toBe(true);
+			if (!fresh.started || !fresh.record) throw new Error("Expected the freshly pinned worker to start.");
+			const freshRecord = fresh.record;
+			expect((await control.waitForWorkerAgent(freshRecord.laneId)).timedOut).toBe(false);
+			expect(freshRecord).toMatchObject({ modelRef: "faux/pinned" });
+			expect(observedModelIds).toEqual(["requested", "requested"]);
 		} finally {
 			await harness.cleanup();
 		}

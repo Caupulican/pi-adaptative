@@ -23,13 +23,14 @@ Sessions have a version field in the header:
 - **Version 1**: Linear entry sequence (legacy, auto-migrated on load)
 - **Version 2**: Tree structure with `id`/`parentId` linking
 - **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
+- **Version 4**: Added bounded provider-request, foreground-tool, and compaction lifecycle records for crash recovery
 
-Existing sessions are automatically migrated to the current version (v3) when loaded.
+Existing sessions are automatically migrated to the current version (v4) when loaded.
 
 ## Source Files
 
 Source on GitHub ([pi-mono](https://github.com/earendil-works/pi-mono)):
-- [`packages/coding-agent/src/core/session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts) - Session entry types and SessionManager
+- [`packages/agent/src/session/session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/session/session-manager.ts) - Session entry types and SessionManager
 - [`packages/coding-agent/src/core/messages.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/messages.ts) - Extended message types (BashExecutionMessage, CustomMessage, etc.)
 - [`packages/ai/src/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
 - [`packages/agent/src/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts) - AgentMessage union type
@@ -188,13 +189,13 @@ interface SessionEntryBase {
 First line of the file. Metadata only, not part of the tree (no `id`/`parentId`).
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
+{"type":"session","version":4,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
 ```
 
 For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ parentSession })`):
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
+{"type":"session","version":4,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
 ```
 
 ### SessionMessageEntry
@@ -290,6 +291,37 @@ Session metadata (e.g., user-defined display name). Set via `/name`, `--name` / 
 
 The session name is displayed in the session selector (`/resume`) instead of the first message when set.
 
+### Lifecycle Entries (v4)
+
+Lifecycle entries make interrupted foreground work recoverable without duplicating provider-visible data. They participate in tree ancestry but are excluded from model context and hidden from ordinary `/tree` views.
+
+`RequestSnapshotEntry` is force-flushed before provider transport. It contains only the accepted model identity, bounded SHA-256 fingerprints, and bounded message-entry IDs; it never stores prompt text, tool arguments, results, credentials, or headers.
+
+```json
+{"type":"request_snapshot","id":"r1","parentId":"u1","timestamp":"2026-08-21T12:00:00.000Z","requestId":"0198...","reason":"initial","api":"anthropic-messages","provider":"amazon-bedrock","modelId":"global.anthropic.claude-haiku-4-5-20251001-v1:0","effectiveConfigFingerprint":"...","systemFingerprint":"...","toolsFingerprint":"...","historyFingerprint":"...","messageEntryIds":["u1"]}
+```
+
+`ForegroundToolStartEntry` is written after validation/policy checks and before a prepared tool body starts. Parallel waves are appended in one bounded batch.
+
+```json
+{"type":"foreground_tool_start","id":"t1","parentId":"a1","timestamp":"2026-08-21T12:00:01.000Z","requestId":"0198...","assistantMessageEntryId":"a1","callId":"toolu_123","toolName":"bash"}
+```
+
+`ForegroundToolTerminalEntry` is written only after the canonical `toolResult` message. Its composite identity is `(requestId, assistantMessageEntryId, callId)`.
+
+```json
+{"type":"foreground_tool_terminal","id":"t2","parentId":"result1","timestamp":"2026-08-21T12:00:02.000Z","requestId":"0198...","assistantMessageEntryId":"a1","callId":"toolu_123","toolName":"bash","outcome":"success","resultMessageEntryId":"result1"}
+```
+
+`CompactionStartEntry` and `CompactionEndEntry` bracket one complete compaction retry ladder. A successful end references the canonical `compaction` entry; interrupted runs are closed as `interrupted` during reopen repair.
+
+```json
+{"type":"compaction_start","id":"c1","parentId":"m1","timestamp":"2026-08-21T12:01:00.000Z","compactionId":"...","firstKeptEntryId":"m1","tokensBefore":50000}
+{"type":"compaction_end","id":"c3","parentId":"c2","timestamp":"2026-08-21T12:01:03.000Z","compactionId":"...","outcome":"success","compactionEntryId":"c2"}
+```
+
+On reopen, deterministic repair distinguishes calls that were never started from started calls whose outcome is unknown. Duplicate, contradictory, ambiguous, or out-of-order records are refused and surfaced for manual review rather than guessed.
+
 ## Tree Structure
 
 Entries form a tree:
@@ -315,6 +347,7 @@ Entries form a tree:
    - Then messages from `firstKeptEntryId` to compaction
    - Then messages after compaction
 4. Converts `BranchSummaryEntry` and `CustomMessageEntry` to appropriate message formats
+5. Ignores lifecycle-only entries while preserving their ancestry for recovery
 
 ## Parsing Example
 
@@ -354,6 +387,21 @@ for (const line of lines) {
     case "thinking_level_change":
       console.log(`[${entry.id}] Thinking: ${entry.thinkingLevel}`);
       break;
+    case "request_snapshot":
+      console.log(`[${entry.id}] Request ${entry.requestId}: ${entry.provider}/${entry.modelId}`);
+      break;
+    case "foreground_tool_start":
+      console.log(`[${entry.id}] Tool started: ${entry.toolName}/${entry.callId}`);
+      break;
+    case "foreground_tool_terminal":
+      console.log(`[${entry.id}] Tool ${entry.outcome}: ${entry.toolName}/${entry.callId}`);
+      break;
+    case "compaction_start":
+      console.log(`[${entry.id}] Compaction started: ${entry.compactionId}`);
+      break;
+    case "compaction_end":
+      console.log(`[${entry.id}] Compaction ${entry.outcome}: ${entry.compactionId}`);
+      break;
   }
 }
 ```
@@ -380,6 +428,7 @@ Key methods for working with sessions programmatically.
 
 ### Instance Methods - Appending (all return entry ID)
 - `appendMessage(message)` - Add message
+- `appendMessageBatch(entries)` - Atomically append a bounded source-order message/custom-message batch
 - `appendThinkingLevelChange(level)` - Record thinking change
 - `appendModelChange(provider, modelId)` - Record model change
 - `appendCompaction(summary, firstKeptEntryId, tokensBefore, details?, fromHook?)` - Add compaction
@@ -387,6 +436,10 @@ Key methods for working with sessions programmatically.
 - `appendSessionInfo(name)` - Set session display name
 - `appendCustomMessageEntry(customType, content, display, details?)` - Extension message (in context)
 - `appendLabelChange(targetId, label)` - Set/clear label
+- `appendRequestSnapshot(snapshot)` - Force-flush a bounded accepted-request record
+- `appendForegroundToolStarts(starts)` - Atomically reserve one prepared tool wave
+- `appendForegroundToolTerminal(...)` - Link a started call to its canonical result
+- `appendCompactionStart(...)` / `appendCompactionEnd(...)` - Bracket a compaction retry ladder
 
 ### Instance Methods - Tree Navigation
 - `getLeafId()` - Current position
@@ -402,6 +455,8 @@ Key methods for working with sessions programmatically.
 
 ### Instance Methods - Context & Info
 - `buildSessionContext()` - Get messages, thinkingLevel, and model for LLM
+- `inspectSessionLifecycle()` - Validate the active branch lifecycle and classify incomplete work
+- `planSessionLifecycleRepair()` - Produce a deterministic repair plan or a refusal with reasons
 - `getEntries()` - All entries (excluding header)
 - `getHeader()` - Session header metadata
 - `getSessionName()` - Get display name from latest session_info entry
