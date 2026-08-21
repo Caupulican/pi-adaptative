@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
-import type { Context } from "@caupulican/pi-ai";
+import type { AssistantMessage, Context } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
 	ProviderRequestCompactionDecision,
@@ -140,5 +140,82 @@ describe("provider request compaction integration", () => {
 				Array.isArray(message.content) ? message.content.filter((block) => block.type === "image") : [],
 			),
 		).toHaveLength(9);
+	});
+
+	it("anchors long same-model history to provider usage instead of the fixed character ratio", async () => {
+		harness = createHarness({ responses: ["delivered"] });
+		const providerMeasuredHistory: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "const compactValue = true;\n".repeat(16_000) }],
+			api: "anthropic-messages",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 55_000,
+				output: 5_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 60_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		};
+		harness.agent.state.messages.push(
+			{ role: "user", content: [{ type: "text", text: "produce the fixture" }], timestamp: 1 },
+			providerMeasuredHistory,
+		);
+		const internals = harness.session as unknown as {
+			_compaction: {
+				admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision>;
+			};
+		};
+		const admissions: ProviderRequestCompactionInput[] = [];
+		vi.spyOn(internals._compaction, "admitProviderRequest").mockImplementation(async (input) => {
+			admissions.push(input);
+			return { action: "send" };
+		});
+
+		await harness.agent.prompt("continue");
+
+		expect(admissions).toHaveLength(1);
+		expect(admissions[0]?.requestTokens).toBeGreaterThanOrEqual(60_000);
+		expect(admissions[0]?.requestTokens).toBeLessThan(70_000);
+	});
+
+	it("keeps the conservative full-request estimate when history usage belongs to another model", async () => {
+		harness = createHarness({ responses: ["delivered"] });
+		harness.agent.state.messages.push({
+			role: "assistant",
+			content: [{ type: "text", text: "const compactValue = true;\n".repeat(16_000) }],
+			api: "anthropic-messages",
+			provider: "another-provider",
+			model: "another-model",
+			usage: {
+				input: 1_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		const internals = harness.session as unknown as {
+			_compaction: {
+				admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision>;
+			};
+		};
+		const admissions: ProviderRequestCompactionInput[] = [];
+		vi.spyOn(internals._compaction, "admitProviderRequest").mockImplementation(async (input) => {
+			admissions.push(input);
+			return { action: "send" };
+		});
+
+		await harness.agent.prompt("continue");
+
+		expect(admissions).toHaveLength(1);
+		expect(admissions[0]?.requestTokens).toBeGreaterThan(100_000);
 	});
 });

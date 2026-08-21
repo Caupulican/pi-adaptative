@@ -137,24 +137,36 @@ function semanticImageContent(
 	return changed ? projected : content;
 }
 
-function semanticMessages(messages: Message[], addImageChars: () => void): Message[] {
-	let changed = false;
-	const projected = messages.map((message) => {
-		if (message.role === "user" && Array.isArray(message.content)) {
-			const content = semanticImageContent(message.content, addImageChars);
-			if (content === message.content) return message;
-			changed = true;
-			return { ...message, content };
+function semanticMessages(messages: Message[], addImageChars: () => void): unknown[] {
+	return messages.map((message) => {
+		switch (message.role) {
+			case "user":
+				return {
+					role: message.role,
+					content: Array.isArray(message.content)
+						? semanticImageContent(message.content, addImageChars)
+						: message.content,
+				};
+			case "assistant":
+				return {
+					role: message.role,
+					content: message.content,
+					api: message.api,
+					provider: message.provider,
+					model: message.model,
+				};
+			case "toolResult":
+				return {
+					role: message.role,
+					toolCallId: message.toolCallId,
+					toolName: message.toolName,
+					content: semanticImageContent(message.content, addImageChars),
+					isError: message.isError,
+				};
 		}
-		if (message.role === "toolResult") {
-			const content = semanticImageContent(message.content, addImageChars);
-			if (content === message.content) return message;
-			changed = true;
-			return { ...message, content };
-		}
-		return message;
+		const exhaustive: never = message;
+		return exhaustive;
 	});
-	return changed ? projected : messages;
 }
 
 /** Bounded semantic planning estimate over the complete, already-materialized provider Context. */

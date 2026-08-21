@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auto-compaction preflight to anchor ongoing same-model sessions to provider-reported usage and account only request-envelope changes, preventing fixed character heuristics from compacting code/tool-heavy histories prematurely.
+
 ## [0.93.18] - 2026-08-21
 
 ### Fixed

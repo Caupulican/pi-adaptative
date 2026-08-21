@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed provider request estimates counting persisted diagnostics, usage, and tool details that are not sent to providers.
+
 ## [0.93.18] - 2026-08-21
 
 ### Fixed

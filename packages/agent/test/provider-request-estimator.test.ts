@@ -25,7 +25,7 @@ function model(input: ("text" | "image")[]): Model<"openai-responses"> {
 }
 
 describe("provider request estimator", () => {
-	it("budgets every field of the materialized context without constructing a JSON copy", () => {
+	it("budgets every provider-visible field without constructing a JSON copy", () => {
 		const context: Context = {
 			systemPrompt: "system contract",
 			messages: [
@@ -49,9 +49,14 @@ describe("provider request estimator", () => {
 			messages: context.messages,
 			tools: context.tools,
 		};
+		const providerVisiblePayload = {
+			systemPrompt: context.systemPrompt,
+			messages: context.messages.map((message) => ({ role: message.role, content: message.content })),
+			tools: context.tools,
+		};
 
 		expect(measureJsonLength(payload)).toBe(JSON.stringify(payload).length);
-		expect(estimateProviderRequestTokens(context)).toBe(Math.ceil(JSON.stringify(payload).length / 4));
+		expect(estimateProviderRequestTokens(context)).toBe(Math.ceil(JSON.stringify(providerVisiblePayload).length / 4));
 		expect(estimateProviderRequestTokens({ ...context, messages: context.messages.slice(0, 1) })).toBeLessThan(
 			estimateProviderRequestTokens(context),
 		);
@@ -101,5 +106,54 @@ describe("provider request estimator", () => {
 		expect(estimateProviderRequestTokens(textContext, model(["text", "image"]))).toBeGreaterThan(700_000);
 		expect(estimateProviderRequestTokens(imageContext, model(["text"]))).toBeLessThan(100);
 		expect(dataReads).toBe(0);
+	});
+
+	it("excludes persisted harness bookkeeping that providers never receive", () => {
+		const usage = {
+			input: 10,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }],
+					api: "openai-responses",
+					provider: "xai",
+					model: "grok-4.6",
+					diagnostics: [
+						{
+							type: "transport-retry",
+							timestamp: 2,
+							details: { trace: "not-provider-input".repeat(20_000) },
+						},
+					],
+					usage,
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "visible result" }],
+					details: { audit: "not-provider-input".repeat(20_000) },
+					usage,
+					isError: false,
+					timestamp: 3,
+				},
+			],
+		};
+
+		expect(estimateProviderRequestTokens(context)).toBeLessThan(500);
+		expect(
+			estimateProviderRequestTokens({
+				messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(100_000) }], timestamp: 1 }],
+			}),
+		).toBeGreaterThan(20_000);
 	});
 });

@@ -1,12 +1,24 @@
 import type { Agent } from "@caupulican/pi-agent-core/agent";
+import { getApplicableAssistantUsageInfo } from "@caupulican/pi-agent-core/compaction/compaction";
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
+import type { ProviderRequestAdmissionContext } from "@caupulican/pi-agent-core/types";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { CompactionController } from "./compaction-controller.ts";
 import type { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 
+interface RequestEnvelopeSnapshot {
+	modelKey: string;
+	tokens: number;
+}
+
+interface UsageEnvelopeAnchor extends RequestEnvelopeSnapshot {
+	message: AssistantMessage;
+}
+
 export interface ProviderRequestRuntimeControllerDeps {
 	agent: Agent;
-	compaction: Pick<CompactionController, "admitProviderRequest">;
+	compaction: Pick<CompactionController, "admitProviderRequest" | "measureLiveContextTokens">;
 	context: ProviderRequestContextController;
 	admitGoalRequest(): number | undefined;
 	/**
@@ -29,9 +41,56 @@ export class ProviderRequestRuntimeController {
 	private installedPlanContext: Agent["planContext"];
 	private installedAdmission: Agent["admitProviderRequest"];
 	private installedShouldStopAfterTurn: Agent["shouldStopAfterTurn"];
+	private pendingSentEnvelope: RequestEnvelopeSnapshot | undefined;
+	private usageEnvelopeAnchor: UsageEnvelopeAnchor | undefined;
 
 	constructor(deps: ProviderRequestRuntimeControllerDeps) {
 		this.deps = deps;
+	}
+
+	private modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
+		return `${model.provider}\u0000${model.id}`;
+	}
+
+	/**
+	 * A provider usage sample already includes the system/tool envelope of the request that produced
+	 * it. Reuse that authoritative same-model total and charge only the envelope change plus trailing
+	 * conversation. A resumed or restored controller treats the current envelope as the baseline;
+	 * first requests and model switches retain the conservative full-payload fallback.
+	 */
+	private estimateRequestTokens(
+		request: ProviderRequestAdmissionContext,
+		fallbackTokens: number,
+		nonCompactableTokens: number,
+	): number {
+		const usageInfo = getApplicableAssistantUsageInfo(request.sourceContext.messages);
+		if (!usageInfo) return fallbackTokens;
+		const usageMessage = request.sourceContext.messages[usageInfo.index];
+		if (
+			usageMessage?.role !== "assistant" ||
+			usageMessage.provider !== request.model.provider ||
+			usageMessage.model !== request.model.id
+		) {
+			return fallbackTokens;
+		}
+
+		const modelKey = this.modelKey(request.model);
+		if (this.usageEnvelopeAnchor?.message !== usageMessage || this.usageEnvelopeAnchor.modelKey !== modelKey) {
+			this.usageEnvelopeAnchor = {
+				message: usageMessage,
+				modelKey,
+				tokens:
+					this.pendingSentEnvelope?.modelKey === modelKey ? this.pendingSentEnvelope.tokens : nonCompactableTokens,
+			};
+		}
+
+		const envelopeDelta = nonCompactableTokens - this.usageEnvelopeAnchor.tokens;
+		const measuredTokens = this.deps.compaction.measureLiveContextTokens() + envelopeDelta;
+		return Math.max(nonCompactableTokens, measuredTokens);
+	}
+
+	private recordSentEnvelope(model: Model<Api>, tokens: number): void {
+		this.pendingSentEnvelope = { modelKey: this.modelKey(model), tokens };
 	}
 
 	install(): void {
@@ -85,10 +144,12 @@ export class ProviderRequestRuntimeController {
 			}
 		};
 		this.installedAdmission = async (request, signal) => {
-			const requestTokens = estimateProviderRequestTokens(request.context, request.model);
+			const fallbackTokens = estimateProviderRequestTokens(request.context, request.model);
+			const nonCompactableTokens = estimateProviderRequestTokens(request.nonCompactableContext, request.model);
+			const requestTokens = this.estimateRequestTokens(request, fallbackTokens, nonCompactableTokens);
 			const decision = await this.deps.compaction.admitProviderRequest({
 				requestTokens,
-				nonCompactableTokens: estimateProviderRequestTokens(request.nonCompactableContext, request.model),
+				nonCompactableTokens,
 				attempt: request.attempt,
 			});
 			if (decision.action === "replan") {
@@ -109,6 +170,7 @@ export class ProviderRequestRuntimeController {
 				request.model.maxTokens,
 				"goal execution budget",
 			);
+			this.recordSentEnvelope(request.model, nonCompactableTokens);
 			return maxTokens === undefined ? previous : { action: "send", maxTokens };
 		};
 		this.installedShouldStopAfterTurn = async (signal) => {
@@ -138,5 +200,7 @@ export class ProviderRequestRuntimeController {
 		this.installedPlanContext = undefined;
 		this.installedAdmission = undefined;
 		this.installedShouldStopAfterTurn = undefined;
+		this.pendingSentEnvelope = undefined;
+		this.usageEnvelopeAnchor = undefined;
 	}
 }
