@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Collapsed repeated OpenAI-compatible thinking summaries and included reasoning in live generation-loop detection without rewriting opaque signed thinking.
+- Attached structured phase and elapsed-time evidence to stream-watchdog aborts while preserving the stable retryable error text.
+
 ## [0.93.16] - 2026-08-20
 
 ### Fixed

@@ -90,6 +90,16 @@ function neverRespondingStreamFn(): { streamFn: StreamFn; signal: () => AbortSig
 	};
 }
 
+function headersThenSilentStreamFn(): StreamFn {
+	return (model, _context, options) => {
+		const inner = createAssistantMessageEventStream();
+		setTimeout(() => {
+			void options?.onResponse?.({ status: 200, headers: {} }, model);
+		}, 100);
+		return inner;
+	};
+}
+
 describe("model perf profile", () => {
 	const dirs: string[] = [];
 
@@ -154,6 +164,81 @@ describe("model perf profile", () => {
 				ceilingMs: 20_000,
 			}),
 		).toMatchObject({ firstProgressMs: 6_000 });
+	});
+
+	it("ladders a censored first-progress stall once without contaminating a much smaller prompt", () => {
+		const first = updateModelPerfProfile(undefined, {
+			promptTokens: 100_000,
+			firstProgressStallMs: 120_000,
+			at: "2026-08-20T00:00:00.000Z",
+		});
+
+		expect(first).toMatchObject({
+			firstProgressStall: { elapsedMs: 120_000, promptTokens: 100_000, consecutive: 1 },
+			samples: 0,
+		});
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				base: { ...BASE_IDLE, firstProgressMs: 120_000 },
+				profile: first,
+				promptTokens: 100_000,
+				ceilingMs: 600_000,
+			}),
+		).toMatchObject({ firstProgressMs: 240_000 });
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				base: { ...BASE_IDLE, firstProgressMs: 120_000 },
+				profile: first,
+				promptTokens: 10_000,
+				ceilingMs: 600_000,
+			}),
+		).toEqual({});
+
+		const second = updateModelPerfProfile(first, {
+			promptTokens: 100_000,
+			firstProgressStallMs: 240_000,
+			at: "2026-08-20T00:04:00.000Z",
+		});
+		expect(second?.firstProgressStall).toMatchObject({ elapsedMs: 240_000, consecutive: 2 });
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				base: { ...BASE_IDLE, firstProgressMs: 120_000 },
+				profile: second,
+				promptTokens: 100_000,
+				ceilingMs: 600_000,
+			}),
+		).toMatchObject({ firstProgressMs: 480_000 });
+
+		const recovered = updateModelPerfProfile(second, {
+			promptTokens: 100_000,
+			completionTokens: 100,
+			requestToFirstTokenMs: 180_000,
+			firstTokenToDoneMs: 1_000,
+			at: "2026-08-20T00:07:00.000Z",
+		});
+		expect(recovered?.firstProgressStall).toBeUndefined();
+	});
+
+	it("persists the first-progress retry ladder across store instances", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-perf-profile-"));
+		dirs.push(agentDir);
+		const options = {
+			fingerprint: () => ({ id: "host-a", cpu: "cpu", cores: 8, totalMemGb: 32 }),
+		};
+		ModelAdaptationStore.forAgentDir(agentDir, options).recordPerfSample("xai/grok-4.6", {
+			promptTokens: 130_000,
+			firstProgressStallMs: 343_176,
+			at: "2026-08-20T23:23:09.000Z",
+		});
+
+		expect(ModelAdaptationStore.forAgentDir(agentDir, options).get("xai/grok-4.6").perf).toMatchObject({
+			firstProgressStall: {
+				elapsedMs: 343_176,
+				promptTokens: 130_000,
+				consecutive: 1,
+			},
+			samples: 0,
+		});
 	});
 
 	it("estimates the serialized context without materializing one accumulated prompt string", () => {
@@ -224,6 +309,30 @@ describe("model perf profile", () => {
 				ceilingMs: 20_000,
 			}),
 		).toEqual({ firstProgressMs: 6_000, quietIdleMs: 6_000, connectMs: 6_000 });
+	});
+
+	it("records the watchdog first-progress stall through the profiled inner stream", async () => {
+		vi.useFakeTimers();
+		const samples: Array<{ promptTokens?: number; firstProgressStallMs?: number }> = [];
+		const profiled = withModelPerfProfile(headersThenSilentStreamFn(), {
+			modelKey: () => "faux/stalled",
+			recordSample: (_key, sample) => samples.push(sample),
+			nowMs: () => Date.now(),
+		});
+		const wrapped = withStreamIdleWatchdog(profiled, {
+			...BASE_IDLE,
+			connectMs: 500,
+			firstProgressMs: 500,
+		});
+
+		const stream = await wrapped(MODEL, CONTEXT, {});
+		await vi.advanceTimersByTimeAsync(600);
+		const result = await stream.result();
+
+		expect(result.errorMessage).toContain("(first-progress phase)");
+		expect(samples).toEqual([
+			expect.objectContaining({ promptTokens: expect.any(Number), firstProgressStallMs: 500 }),
+		]);
 	});
 
 	it("profiles the full prompt footprint including cache reads and writes", async () => {

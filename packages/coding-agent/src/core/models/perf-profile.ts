@@ -1,5 +1,5 @@
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
-import type { StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
+import { isStreamStallError, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import type { StreamFn } from "@caupulican/pi-agent-core/types";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type {
@@ -21,6 +21,12 @@ export interface ModelPerfProfile {
 	prefillTokensPerSecond?: number;
 	decodeTokensPerSecond?: number;
 	loadMs?: number;
+	firstProgressStall?: {
+		elapsedMs: number;
+		promptTokens: number;
+		consecutive: number;
+		observedAt: string;
+	};
 	samples: number;
 	updatedAt: string;
 }
@@ -32,6 +38,8 @@ export interface ModelPerfSample {
 	requestToFirstTokenMs?: number;
 	firstTokenToDoneMs?: number;
 	loadMs?: number;
+	/** Censored observation: transport connected but emitted no model token before this bound. */
+	firstProgressStallMs?: number;
 	at?: string;
 }
 
@@ -58,6 +66,7 @@ export function isModelPerfProfile(value: unknown): value is ModelPerfProfile {
 		(record.prefillTokensPerSecond === undefined || isPositiveFiniteNumber(record.prefillTokensPerSecond)) &&
 		(record.decodeTokensPerSecond === undefined || isPositiveFiniteNumber(record.decodeTokensPerSecond)) &&
 		(record.loadMs === undefined || isPositiveFiniteNumber(record.loadMs)) &&
+		(record.firstProgressStall === undefined || isFirstProgressStall(record.firstProgressStall)) &&
 		typeof samples === "number" &&
 		Number.isInteger(samples) &&
 		samples >= 0 &&
@@ -69,7 +78,8 @@ export function hasUsableModelPerfSample(sample: ModelPerfSample): boolean {
 	return (
 		prefillRateFromSample(sample) !== undefined ||
 		decodeRateFromSample(sample) !== undefined ||
-		isPositiveFiniteNumber(sample.loadMs)
+		isPositiveFiniteNumber(sample.loadMs) ||
+		(isPositiveFiniteNumber(sample.firstProgressStallMs) && isPositiveFiniteNumber(sample.promptTokens))
 	);
 }
 
@@ -81,6 +91,34 @@ export function updateModelPerfProfile(
 	const prefillRate = prefillRateFromSample(sample);
 	const decodeRate = decodeRateFromSample(sample);
 	const loadMs = isPositiveFiniteNumber(sample.loadMs) ? sample.loadMs : undefined;
+	const firstProgressStallMs = isPositiveFiniteNumber(sample.firstProgressStallMs)
+		? sample.firstProgressStallMs
+		: undefined;
+	const stallPromptTokens = isPositiveFiniteNumber(sample.promptTokens) ? sample.promptTokens : undefined;
+	if (
+		prefillRate === undefined &&
+		decodeRate === undefined &&
+		loadMs === undefined &&
+		firstProgressStallMs !== undefined &&
+		stallPromptTokens !== undefined
+	) {
+		const previous = current?.firstProgressStall;
+		const comparablePrompt =
+			previous !== undefined &&
+			stallPromptTokens >= previous.promptTokens / 2 &&
+			stallPromptTokens <= previous.promptTokens * 2;
+		return {
+			...current,
+			firstProgressStall: {
+				elapsedMs: firstProgressStallMs,
+				promptTokens: stallPromptTokens,
+				consecutive: comparablePrompt ? previous.consecutive + 1 : 1,
+				observedAt: at,
+			},
+			samples: current?.samples ?? 0,
+			updatedAt: at,
+		};
+	}
 	if (prefillRate === undefined && decodeRate === undefined && loadMs === undefined) return current;
 
 	const previousSamples = current?.samples ?? 0;
@@ -124,6 +162,12 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 		const quietIdleMs = adaptiveBound(input.base.quietIdleMs, quietCeilingMs, expectedPrefillMs);
 		if (quietIdleMs > input.base.quietIdleMs) result.quietIdleMs = quietIdleMs;
 	}
+	const firstProgressStall = profile?.firstProgressStall;
+	if (firstProgressStall && input.promptTokens >= firstProgressStall.promptTokens / 2) {
+		const nextAttemptBoundMs = Math.min(Math.ceil(firstProgressStall.elapsedMs * 2), firstProgressCeilingMs);
+		const currentBoundMs = result.firstProgressMs ?? input.base.firstProgressMs;
+		if (nextAttemptBoundMs > currentBoundMs) result.firstProgressMs = nextAttemptBoundMs;
+	}
 
 	if (input.localClass) {
 		const expectedConnectWorkMs =
@@ -149,7 +193,34 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 		const requestStartedAtMs = nowMs();
 		let responseHeadersAtMs: number | undefined;
 		let firstTokenAtMs: number | undefined;
+		let firstProgressStallRecorded = false;
 		const originalOnResponse = streamOptions?.onResponse;
+		const signal = streamOptions?.signal;
+		const recordFirstProgressStall = (): void => {
+			const reason = signal?.reason;
+			if (
+				firstProgressStallRecorded ||
+				firstTokenAtMs !== undefined ||
+				!isStreamStallError(reason) ||
+				reason.phase !== "first-progress"
+			) {
+				return;
+			}
+			firstProgressStallRecorded = true;
+			const modelKey = recorder.modelKey(model);
+			if (!modelKey) return;
+			try {
+				recorder.recordSample(modelKey, {
+					promptTokens: estimateContextPromptTokens(context),
+					firstProgressStallMs: reason.elapsedMs,
+					at: nowIso(),
+				});
+			} catch {
+				// Perf profiling must never fail the user turn.
+			}
+		};
+		if (signal?.aborted) recordFirstProgressStall();
+		else signal?.addEventListener("abort", recordFirstProgressStall, { once: true });
 		const outer = createAssistantMessageEventStream();
 		let latest = emptyAssistantMessage(model);
 		let inner: Awaited<ReturnType<StreamFn>>;
@@ -162,6 +233,7 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 				},
 			});
 		} catch (error) {
+			signal?.removeEventListener("abort", recordFirstProgressStall);
 			outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true, error));
 			return outer;
 		}
@@ -197,6 +269,8 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 				outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true));
 			} catch (error) {
 				outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true, error));
+			} finally {
+				signal?.removeEventListener("abort", recordFirstProgressStall);
 			}
 		})();
 
@@ -317,4 +391,17 @@ function updateEwma(previous: number | undefined, next: number, previousSamples:
 
 function isPositiveFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isFirstProgressStall(value: unknown): value is NonNullable<ModelPerfProfile["firstProgressStall"]> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		isPositiveFiniteNumber(record.elapsedMs) &&
+		isPositiveFiniteNumber(record.promptTokens) &&
+		typeof record.consecutive === "number" &&
+		Number.isSafeInteger(record.consecutive) &&
+		record.consecutive > 0 &&
+		typeof record.observedAt === "string"
+	);
 }

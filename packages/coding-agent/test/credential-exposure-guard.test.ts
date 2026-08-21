@@ -109,6 +109,36 @@ describe("credential exposure guard", () => {
 		);
 	});
 
+	it("allows source-only brace globs and explicit source paths even when one path is stale", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-secret-source-scope-"));
+		tempDirs.push(root);
+		const rustPath = join(root, "commands.rs");
+		const pythonPath = join(root, "probe.py");
+		const staleRustPath = join(root, "moved-context-menu.rs");
+		const sourceNamedDirectory = join(root, "generated.rs");
+		writeFileSync(rustPath, "pub fn format_drive() {}\n");
+		writeFileSync(pythonPath, "def probe(): pass\n");
+		mkdirSync(sourceNamedDirectory);
+		writeFileSync(join(sourceNamedDirectory, ".env"), "TOKEN=hidden\n");
+
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `rg -n "format_drive|probe" ${root} --glob '*.{rs,py}' | head -80` },
+				root,
+			),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason("bash", { command: `rg -n "format_drive" ${rustPath} ${staleRustPath}` }, root),
+		).toBeUndefined();
+		expect(
+			credentialToolBlockReason("bash", { command: `rg -n "TOKEN" ${root} --glob '*.{rs,env}'` }, root),
+		).toContain("narrow non-dotenv");
+		expect(credentialToolBlockReason("bash", { command: `rg -n "TOKEN" ${sourceNamedDirectory}` }, root)).toContain(
+			"narrow non-dotenv",
+		);
+	});
+
 	it("resolves symlink aliases before read, shell, or Python inspection", () => {
 		if (process.platform === "win32") return;
 		const root = mkdtempSync(join(tmpdir(), "pi-secret-alias-"));

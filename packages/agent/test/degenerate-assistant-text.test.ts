@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import { describe, expect, it } from "vitest";
 import {
+	assistantMessageText,
 	collapseDegenerateAssistantMessage,
 	collapseRepeatedLines,
 	isCollapsedDegenerateAssistantMessage,
@@ -49,6 +50,46 @@ describe("degenerate assistant text", () => {
 		const line = "Edits are in. Running targeted tests, then `npm run check`.";
 		const message = collapseDegenerateAssistantMessage(assistant(Array.from({ length: 6 }, () => line).join("\n")));
 		expect(message.content).toEqual([{ type: "text", text: line }]);
+	});
+
+	it("collapses repeated thinking and exposes it to the live-stream loop guard", () => {
+		const line =
+			"The product test is passing. Re-running the live card, then recording evidence and finishing the remaining work.";
+		const looping = Array.from({ length: 14 }, () => line).join("\n");
+		const original = assistant("");
+		original.content = [{ type: "thinking", thinking: looping, thinkingSignature: "reasoning_content" }];
+
+		const collapsed = collapseDegenerateAssistantMessage(original);
+
+		expect(collapsed.content).toEqual([{ type: "thinking", thinking: line, thinkingSignature: "reasoning_content" }]);
+		expect(assistantMessageText(original)).toBe(looping);
+		expect(shouldAbortDegenerateStream(assistantMessageText(original))).toBe(true);
+		expect(isCollapsedDegenerateAssistantMessage(collapsed)).toBe(true);
+	});
+
+	it("keeps opaque signed thinking byte-for-byte for provider replay", () => {
+		const line = "Signed reasoning must remain byte-for-byte stable for replay.";
+		const original = assistant("");
+		original.api = "anthropic-messages";
+		original.content = [
+			{
+				type: "thinking",
+				thinking: Array.from({ length: 8 }, () => line).join("\n"),
+				thinkingSignature: "opaque-cryptographic-signature",
+			},
+		];
+
+		expect(collapseDegenerateAssistantMessage(original)).toBe(original);
+	});
+
+	it("keeps distinct reasoning items even when their summaries match", () => {
+		const original = assistant("");
+		original.content = [
+			{ type: "thinking", thinking: "Same summary.", thinkingSignature: '{"id":"reasoning-1"}' },
+			{ type: "thinking", thinking: "Same summary.", thinkingSignature: '{"id":"reasoning-2"}' },
+		];
+
+		expect(collapseDegenerateAssistantMessage(original)).toBe(original);
 	});
 
 	it("collapses a single-line sentence generation loop", () => {

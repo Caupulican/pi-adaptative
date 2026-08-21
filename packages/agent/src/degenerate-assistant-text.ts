@@ -123,18 +123,34 @@ export function collapseDegenerateAssistantMessage(message: AssistantMessage): A
 	const seenText = new Set<string>();
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
-		if (block.type !== "text") {
+		if (block.type !== "text" && block.type !== "thinking") {
 			content.push(block);
 			continue;
 		}
-		const collapsed = collapseRepeatedLines(block.text);
-		if (collapsed !== block.text) changed = true;
-		if (collapsed.trim() !== "" && seenText.has(collapsed)) {
+		const isThinking = block.type === "thinking";
+		const source = isThinking ? block.thinking : block.text;
+		const canRewriteThinking =
+			!isThinking ||
+			(!block.redacted &&
+				(!block.thinkingSignature ||
+					message.api === "openai-completions" ||
+					message.api === "openai-responses" ||
+					message.api === "azure-openai-responses" ||
+					message.api === "openai-codex-responses"));
+		if (!canRewriteThinking) {
+			content.push(block);
+			continue;
+		}
+		const collapsed = collapseRepeatedLines(source);
+		if (collapsed !== source) changed = true;
+		if (!isThinking && collapsed.trim() !== "" && seenText.has(collapsed)) {
 			changed = true;
 			continue;
 		}
-		if (collapsed.trim() !== "") seenText.add(collapsed);
-		content.push(collapsed === block.text ? block : { ...block, text: collapsed });
+		if (!isThinking && collapsed.trim() !== "") seenText.add(collapsed);
+		content.push(
+			collapsed === source ? block : isThinking ? { ...block, thinking: collapsed } : { ...block, text: collapsed },
+		);
 	}
 	if (!changed) return message;
 	const next = { ...message, content };
@@ -149,7 +165,8 @@ export function isCollapsedDegenerateAssistantMessage(message: AssistantMessage)
 
 export function assistantMessageText(message: AssistantMessage): string {
 	return message.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
+		.flatMap((block) =>
+			block.type === "text" ? [block.text] : block.type === "thinking" && !block.redacted ? [block.thinking] : [],
+		)
 		.join("\n");
 }

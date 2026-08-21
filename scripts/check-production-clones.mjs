@@ -13,6 +13,7 @@ import {
 	validateCloneReport,
 	validateCoverageSummary,
 } from "./production-clone-gate.mjs";
+import { pruneTemporaryJscpdReports } from "./jscpd-report-retention.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const jscpdRunner = resolve(repositoryRoot, "node_modules", "jscpd", "run-jscpd.js");
@@ -47,6 +48,17 @@ function boundedProcessOutput(result) {
 	return output.length <= 4_000 ? output : `${output.slice(0, 4_000)}\n... scanner output truncated`;
 }
 
+function pruneOwnedReports(protectedDirectories = []) {
+	try {
+		const cleanup = pruneTemporaryJscpdReports({ root: tmpdir(), protectedDirectories });
+		for (const failure of cleanup.failures) {
+			console.error(`jscpd report cleanup skipped ${failure.directory}: ${failure.message}`);
+		}
+	} catch (error) {
+		console.error(`jscpd report cleanup failed safely: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 let temporaryReport = false;
 let reportDirectory;
 let report;
@@ -56,6 +68,7 @@ let belowMinimumCandidates = [];
 
 try {
 	const requestedReportDirectory = parseArguments(process.argv.slice(2));
+	pruneOwnedReports(requestedReportDirectory ? [requestedReportDirectory] : []);
 	reportDirectory = requestedReportDirectory ?? mkdtempSync(join(tmpdir(), "pi-jscpd-"));
 	temporaryReport = requestedReportDirectory === undefined;
 	if (requestedReportDirectory !== undefined) mkdirSync(reportDirectory, { recursive: true });
@@ -138,6 +151,7 @@ try {
 	);
 	if (temporaryReport) rmSync(reportDirectory, { recursive: true, force: true });
 } catch (error) {
+	pruneOwnedReports(reportDirectory ? [reportDirectory] : []);
 	console.error(`Production clone gate failed: ${error instanceof Error ? error.message : String(error)}`);
 	if (candidates.length > 0) {
 		console.error(

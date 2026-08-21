@@ -60,6 +60,23 @@ import type { StreamFn } from "../types.ts";
 
 export type StallPhase = "connect" | "first-progress" | "quiet" | "active";
 
+/** Structured abort reason shared with profilers; the user-facing message remains stable. */
+export class StreamStallError extends Error {
+	readonly phase: StallPhase;
+	readonly elapsedMs: number;
+
+	constructor(phase: StallPhase, elapsedMs: number) {
+		super(`stream stalled: no events for ${elapsedMs}ms (${phase} phase)`);
+		this.name = "StreamStallError";
+		this.phase = phase;
+		this.elapsedMs = elapsedMs;
+	}
+}
+
+export function isStreamStallError(value: unknown): value is StreamStallError {
+	return value instanceof StreamStallError;
+}
+
 export interface StreamIdleOptions {
 	/** Max ms to wait for the FIRST event (connection/first-token allowance). */
 	connectMs: number;
@@ -208,8 +225,9 @@ export function withStreamIdleWatchdog(
 			if (callerAborted || stalled || terminalPushed) return;
 			stalled = true;
 			opts.onStall?.({ phase, elapsedMs });
-			const description = `stream stalled: no events for ${elapsedMs}ms (${phase} phase)`;
-			controller.abort(new Error(description));
+			const stallError = new StreamStallError(phase, elapsedMs);
+			const description = stallError.message;
+			controller.abort(stallError);
 			const message: AssistantMessage = {
 				...latest,
 				stopReason: "error",

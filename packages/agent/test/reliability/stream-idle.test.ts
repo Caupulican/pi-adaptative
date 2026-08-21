@@ -1,7 +1,7 @@
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyFailure } from "../../src/reliability/classifier.ts";
-import { type StreamIdleOptions, withStreamIdleWatchdog } from "../../src/reliability/watchdogs.ts";
+import { isStreamStallError, type StreamIdleOptions, withStreamIdleWatchdog } from "../../src/reliability/watchdogs.ts";
 import type { StreamFn } from "../../src/types.ts";
 import {
 	makeErrorAssistantMessage,
@@ -85,6 +85,8 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		expect(fake.signal()?.aborted).toBe(false);
 		await vi.advanceTimersByTimeAsync(1);
 		expect(fake.signal()?.aborted).toBe(true);
+		expect(isStreamStallError(fake.signal()?.reason)).toBe(true);
+		expect(fake.signal()?.reason).toMatchObject({ phase: "first-progress", elapsedMs: 45_000 });
 		const result = await stream.result();
 		expect(result.errorMessage).toContain("stream stalled: no events for 45000ms (first-progress phase)");
 	});
@@ -197,6 +199,7 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		const result = await stream.result();
 		expect(result.stopReason).toBe("aborted");
 		expect(result.errorMessage).not.toMatch(/stream stalled/);
+		expect(isStreamStallError(fake.signal()?.reason)).toBe(false);
 	});
 
 	it("settles as aborted when caller abort makes the inner stream end without a terminal event", async () => {

@@ -117,7 +117,7 @@ function shellCredentialRisk(
 					scope.positiveGlobs.length > 0 && scope.positiveGlobs.every((glob) => isCredentialSafeGlob(glob));
 				const hasOnlyExplicitFiles =
 					scope.targets.length > 0 &&
-					scope.targets.every((target) => target === "-" || isExistingRegularFile(target, cwd));
+					scope.targets.every((target) => target === "-" || isCredentialSafeExplicitFile(target, cwd));
 				if (!scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles) return "broad_search";
 				continue;
 			}
@@ -178,8 +178,13 @@ function jqFilterReadsProcessEnvironment(filter: string): boolean {
 function isCredentialSafeGlob(glob: string): boolean {
 	if (/(?:^|[\\/])?\.env(?:\.|\*|$)/i.test(glob)) return false;
 	const filePattern = glob.replace(/\\/g, "/").split("/").at(-1) ?? "";
-	const suffix = filePattern.match(/\.([A-Za-z0-9_-]+)$/)?.[1]?.toLowerCase();
-	return suffix !== undefined && suffix !== "env";
+	const braceSuffixes = filePattern.match(/\.\{([A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)+)\}$/)?.[1];
+	const suffixes = braceSuffixes
+		? braceSuffixes.split(",").map((suffix) => suffix.toLowerCase())
+		: [filePattern.match(/\.([A-Za-z0-9_-]+)$/)?.[1]?.toLowerCase()].filter(
+				(suffix): suffix is string => suffix !== undefined,
+			);
+	return suffixes.length > 0 && suffixes.every((suffix) => suffix !== "env");
 }
 
 function isExistingRegularFile(rawPath: string, cwd: string): boolean {
@@ -187,6 +192,14 @@ function isExistingRegularFile(rawPath: string, cwd: string): boolean {
 		return statSync(resolve(cwd, rawPath)).isFile();
 	} catch {
 		return false;
+	}
+}
+
+function isCredentialSafeExplicitFile(rawPath: string, cwd: string): boolean {
+	try {
+		return statSync(resolve(cwd, rawPath)).isFile();
+	} catch {
+		return isCredentialSafeGlob(rawPath);
 	}
 }
 

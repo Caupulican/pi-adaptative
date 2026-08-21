@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -15,6 +15,7 @@ import {
 	validateCloneReport,
 	validateCoverageSummary,
 } from "./production-clone-gate.mjs";
+import { JSCPD_REPORT_MAX_AGE_MS, pruneTemporaryJscpdReports } from "./jscpd-report-retention.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const productionCandidates = discoverCloneCandidates(repositoryRoot);
@@ -138,6 +139,79 @@ test("jscpd configuration and root check keep the zero-clone gate enforceable", 
 	assert.deepEqual(packageLock.packages["node_modules/jscpd-windows-x64-msvc"].cpu, ["x64"]);
 	assert.match(packageJson.scripts.check, /npm run check:clone-config/);
 	assert.match(packageJson.scripts.check, /npm run check:clones/);
+});
+
+test("temporary jscpd evidence retention removes stale and excess reports without touching active or explicit paths", (context) => {
+	assert.equal(JSCPD_REPORT_MAX_AGE_MS, 24 * 60 * 60 * 1000);
+	const root = mkdtempSync(join(tmpdir(), "pi-jscpd-retention-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const nowMs = Date.parse("2026-08-20T12:00:00.000Z");
+	const createReport = (name, ageMs) => {
+		const directory = join(root, name);
+		mkdirSync(directory);
+		writeFileSync(join(directory, "jscpd-report.json"), "{}\n");
+		const modified = new Date(nowMs - ageMs);
+		utimesSync(join(directory, "jscpd-report.json"), modified, modified);
+		utimesSync(directory, modified, modified);
+		return directory;
+	};
+	const day = 24 * 60 * 60 * 1000;
+	const hour = 60 * 60 * 1000;
+	const expired = createReport("pi-jscpd-AAAAAA", 2 * day);
+	const excess = createReport("pi-jscpd-BBBBBB", 20 * hour);
+	const retained = [
+		createReport("pi-jscpd-CCCCCC", 16 * hour),
+		createReport("pi-jscpd-DDDDDD", 12 * hour),
+		createReport("pi-jscpd-EEEEEE", 8 * hour),
+	];
+	const active = createReport("pi-jscpd-FFFFFF", 10 * 60 * 1000);
+	const explicit = createReport("pi-jscpd-GGGGGG", 3 * day);
+	const unrelated = createReport("pi-jscpd-not-owned", 30 * day);
+
+	const result = pruneTemporaryJscpdReports({
+		root,
+		nowMs,
+		maxRetained: 3,
+		activeGraceMs: 60 * 60 * 1000,
+		protectedDirectories: [explicit],
+	});
+
+	assert.deepEqual(result.removedDirectories.sort(), [excess, expired].sort());
+	for (const directory of [...retained, active, explicit, unrelated]) assert.equal(existsSync(directory), true);
+	assert.equal(existsSync(expired), false);
+	assert.equal(existsSync(excess), false);
+	const checkScript = readFileSync(join(repositoryRoot, "scripts/check-production-clones.mjs"), "utf8");
+	assert.match(checkScript, /pruneTemporaryJscpdReports/);
+});
+
+test("temporary jscpd evidence retention enforces a total byte budget", (context) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jscpd-retention-bytes-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const nowMs = Date.parse("2026-08-20T12:00:00.000Z");
+	const createReport = (name, ageMs) => {
+		const directory = join(root, name);
+		mkdirSync(directory);
+		writeFileSync(join(directory, "jscpd-report.json"), "12345678");
+		const modified = new Date(nowMs - ageMs);
+		utimesSync(join(directory, "jscpd-report.json"), modified, modified);
+		utimesSync(directory, modified, modified);
+		return directory;
+	};
+	const newest = createReport("pi-jscpd-HHHHHH", 2 * 60 * 60 * 1000);
+	const older = createReport("pi-jscpd-IIIIII", 3 * 60 * 60 * 1000);
+
+	const result = pruneTemporaryJscpdReports({
+		root,
+		nowMs,
+		maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+		maxRetained: 10,
+		maxRetainedBytes: 10,
+		activeGraceMs: 60 * 60 * 1000,
+	});
+
+	assert.equal(existsSync(newest), true);
+	assert.equal(existsSync(older), false);
+	assert.deepEqual(result.removedDirectories, [older]);
 });
 
 test("incremental line decoding has one package-level implementation owner", () => {

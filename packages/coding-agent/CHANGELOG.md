@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Learned a bounded next-attempt first-progress timeout from censored stream stalls, scoped it to comparable prompt sizes, and cleared it after a successful stream instead of repeating identical Grok timeout windows.
+- Allowed credential-safe source brace globs and explicit source filenames even when one path is stale, while retaining directory and dotenv protections.
+- Bounded retained failed jscpd evidence by age, count, and total bytes while protecting concurrent scans and explicit report directories.
+
 ## [0.93.16] - 2026-08-20
 
 ### Fixed
