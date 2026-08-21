@@ -72,11 +72,20 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	modelId: string;
 }
 
+/** Sparse history retained after a full session-replacement compaction. */
+export interface CompactionRetention {
+	mode: "original-user";
+	/** User-message entry that anchors the owner's original request on the active branch. */
+	userEntryId: string;
+}
+
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Optional non-contiguous retention policy for provider-native session replacement. */
+	retention?: CompactionRetention;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Usage from every LLM call that produced or verified this summary. */
@@ -439,11 +448,9 @@ export function buildSessionContext(
 		}
 	}
 
-	// Build messages and collect corresponding entries
-	// When there's a compaction, we need to:
-	// 1. Emit summary first (entry = compaction)
-	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
-	// 3. Emit messages after compaction
+	// Build messages and collect corresponding entries. Standard compaction emits the summary followed
+	// by a contiguous recent tail. Session replacement instead retains one sparse original-user anchor
+	// before the summary, matching providers whose compactor atomically replaces the live transcript.
 	const messages: AgentMessage[] = [];
 
 	const appendMessage = (entry: SessionEntry) => {
@@ -465,25 +472,36 @@ export function buildSessionContext(
 	};
 
 	if (compaction) {
-		// Emit summary first
+		// Find compaction index in path
+		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
+		const originalUserEntry =
+			compaction.retention?.mode === "original-user"
+				? path
+						.slice(0, compactionIdx)
+						.find(
+							(entry): entry is SessionMessageEntry =>
+								entry.id === compaction.retention?.userEntryId &&
+								entry.type === "message" &&
+								entry.message.role === "user",
+						)
+				: undefined;
+
+		if (originalUserEntry) appendMessage(originalUserEntry);
 		messages.push(
 			retainSynthesizedSessionContextMessage(
 				createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp),
 			),
 		);
 
-		// Find compaction index in path
-		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
-
-		// Emit kept messages (before compaction, starting from firstKeptEntryId)
-		let foundFirstKept = false;
-		for (let i = 0; i < compactionIdx; i++) {
-			const entry = path[i];
-			if (entry.id === compaction.firstKeptEntryId) {
-				foundFirstKept = true;
-			}
-			if (foundFirstKept) {
-				appendMessage(entry);
+		if (!compaction.retention) {
+			// Emit the standard contiguous tail before compaction, starting from firstKeptEntryId.
+			let foundFirstKept = false;
+			for (let i = 0; i < compactionIdx; i++) {
+				const entry = path[i];
+				if (entry.id === compaction.firstKeptEntryId) {
+					foundFirstKept = true;
+				}
+				if (foundFirstKept) appendMessage(entry);
 			}
 		}
 
@@ -1450,24 +1468,49 @@ export class SessionManager {
 		const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
 		visitSessionAncestry(leaf, this.byId, (current) => {
 			if (current.type === "compaction") {
-				this._releaseCompactedMessagePayloads(current.firstKeptEntryId, current.parentId);
+				this._releaseCompactedMessagePayloads(
+					current.firstKeptEntryId,
+					current.parentId,
+					current.retention,
+					current.id,
+				);
 				return false;
 			}
 		});
 	}
 
-	private _releaseCompactedMessagePayloads(firstKeptEntryId: string, compactionParentId: string | null): void {
+	private _releaseCompactedMessagePayloads(
+		firstKeptEntryId: string,
+		compactionParentId: string | null,
+		retention?: CompactionRetention,
+		compactionEntryId?: string,
+	): void {
 		if (!this.persist || !this.flushed || !this.sessionFile) return;
 		const keptEntryIds = new Set<string>();
 		let foundFirstKept = false;
 		const compactionParent = compactionParentId ? this.byId.get(compactionParentId) : undefined;
-		visitSessionAncestry(compactionParent, this.byId, (current) => {
-			keptEntryIds.add(current.id);
-			if (current.id === firstKeptEntryId) {
-				foundFirstKept = true;
-				return false;
-			}
-		});
+		if (retention?.mode === "original-user") {
+			visitSessionAncestry(compactionParent, this.byId, (current) => {
+				if (current.id === retention.userEntryId && current.type === "message" && current.message.role === "user") {
+					keptEntryIds.add(current.id);
+					foundFirstKept = true;
+					return false;
+				}
+			});
+			const leaf = this.leafId ? this.byId.get(this.leafId) : undefined;
+			visitSessionAncestry(leaf, this.byId, (current) => {
+				if (current.id === compactionEntryId) return false;
+				if (current.type === "message") keptEntryIds.add(current.id);
+			});
+		} else {
+			visitSessionAncestry(compactionParent, this.byId, (current) => {
+				keptEntryIds.add(current.id);
+				if (current.id === firstKeptEntryId) {
+					foundFirstKept = true;
+					return false;
+				}
+			});
+		}
 		if (!foundFirstKept) return;
 		const retainedIds = new Set<string>();
 		const releases: Array<{ entry: SessionMessageEntry; properties: Array<"content" | "output"> }> = [];
@@ -1639,6 +1682,7 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		usage?: Usage,
+		retention?: CompactionRetention,
 	): string {
 		const compactionParentId = this.leafId;
 		const entry: CompactionEntry<T> = {
@@ -1649,12 +1693,13 @@ export class SessionManager {
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
+			retention,
 			details,
 			usage,
 			fromHook,
 		};
 		this._appendEntry(entry);
-		this._releaseCompactedMessagePayloads(firstKeptEntryId, compactionParentId);
+		this._releaseCompactedMessagePayloads(firstKeptEntryId, compactionParentId, retention, entry.id);
 		return entry.id;
 	}
 

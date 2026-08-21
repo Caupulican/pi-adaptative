@@ -16,6 +16,13 @@ import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
+const XAI_SUBSCRIPTION_COMPACTION_TRIGGER_PERCENT = 0.8;
+
+function usesXaiSubscriptionSessionReplacement(model: Model<Api>): boolean {
+	if (model.provider !== "xai" || model.api !== "openai-responses") return false;
+	return model.compat !== undefined && "requestFormat" in model.compat && model.compat.requestFormat === "xai-cli";
+}
+
 export interface CompactionSupportDeps {
 	getModel(): Model<Api> | undefined;
 	getSettingsManager(): SettingsManager;
@@ -51,7 +58,8 @@ export class CompactionSupport {
 	}
 
 	getAdaptedSettings(): CompactionSettings {
-		const settings = this.deps.getSettingsManager().getCompactionSettings();
+		const settingsManager = this.deps.getSettingsManager();
+		const settings = settingsManager.getCompactionSettings();
 		const model = this.deps.getModel();
 		if (!model) return settings;
 		const contextWindow = model.contextWindow ?? 0;
@@ -64,11 +72,20 @@ export class CompactionSupport {
 		// Adapt keepRecentTokens: at most 50% of context window
 		const maxKeepRecent = Math.floor(contextWindow * 0.5);
 		const keepRecentTokens = Math.min(settings.keepRecentTokens, maxKeepRecent);
+		const sessionReplacement = usesXaiSubscriptionSessionReplacement(model);
 
 		return {
 			...settings,
 			reserveTokens,
 			keepRecentTokens,
+			...(sessionReplacement
+				? {
+						strategy: "session-replacement" as const,
+						triggerPercent: settingsManager.hasExplicitCompactionTriggerPercent()
+							? settings.triggerPercent
+							: XAI_SUBSCRIPTION_COMPACTION_TRIGGER_PERCENT,
+					}
+				: {}),
 		};
 	}
 
@@ -187,6 +204,10 @@ export class CompactionSupport {
 	}
 
 	private resolveDefaultModel(sessionModel: Model<Api>): Model<Api> {
+		if (usesXaiSubscriptionSessionReplacement(sessionModel)) {
+			this.lastSelectionReason = "session_replacement";
+			return sessionModel;
+		}
 		const router = this.deps.getSettingsManager().getModelRouterSettings();
 		if (!router.enabled || !router.cheapModel) {
 			this.lastSelectionReason = "session_default";

@@ -6,7 +6,14 @@
  */
 
 import { completeSimple } from "@caupulican/pi-ai/stream";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai/types";
+import type {
+	AssistantMessage,
+	CacheRetention,
+	Context,
+	Model,
+	SimpleStreamOptions,
+	Usage,
+} from "@caupulican/pi-ai/types";
 import { uuidv7 } from "@caupulican/pi-ai/uuid";
 import {
 	convertToLlm,
@@ -14,8 +21,13 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import { ESTIMATED_IMAGE_CHARS } from "../provider-request-estimator.ts";
-import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session/session-manager.ts";
+import { ESTIMATED_IMAGE_CHARS, estimateProviderRequestTokens } from "../provider-request-estimator.ts";
+import {
+	buildSessionContext,
+	type CompactionEntry,
+	type CompactionRetention,
+	type SessionEntry,
+} from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "../types.ts";
 import { addUsage, createEmptyUsage } from "../usage.ts";
 import {
@@ -147,6 +159,8 @@ export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Sparse history retained when compaction atomically replaces the provider-visible session. */
+	retention?: CompactionRetention;
 	/** Provider usage spent generating this checkpoint, including chunk and verification retries. */
 	usage?: Usage;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
@@ -162,6 +176,19 @@ export type CompactionCompletion = (
 	context: Context,
 	options: SimpleStreamOptions,
 ) => Promise<AssistantMessage>;
+
+/** Existing provider-visible prefix reused by a session-replacement summary request. */
+export interface StructuredCompactionRequest {
+	context: Context;
+	sessionId: string;
+	cacheRetention: Exclude<CacheRetention, "none">;
+}
+
+export interface CompactionExecutionOptions {
+	chunked?: boolean;
+	completion?: CompactionCompletion;
+	structuredRequest?: StructuredCompactionRequest;
+}
 
 /**
  * Carry failed LLM verification attempts into the result that the retry ladder eventually applies.
@@ -236,6 +263,8 @@ export interface CompactionSettings {
 	 * reserve-based behavior while large windows compact earlier. `0`/`1`+ disables the fractional cap.
 	 */
 	triggerPercent?: number;
+	/** Provider-neutral request/history strategy selected by the host adapter. */
+	strategy?: "session-replacement";
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -644,21 +673,41 @@ function createSummarizationOptions(
 	headers: Record<string, string> | undefined,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
+	affinity?: Pick<StructuredCompactionRequest, "sessionId" | "cacheRetention">,
 ): SimpleStreamOptions {
-	// Summaries are one-shot prompts. A fresh affinity identity prevents them from contaminating the
-	// foreground continuation cache, while "none" prevents cache writes that cannot be reused.
+	// Standalone summaries are isolated one-shot prompts. A session-replacement request deliberately
+	// reuses the live affinity so the provider can reuse and validate the exact structured prefix.
 	const options: SimpleStreamOptions = {
 		maxTokens,
 		signal,
 		apiKey,
 		headers,
-		cacheRetention: "none",
-		sessionId: uuidv7(),
+		cacheRetention: affinity?.cacheRetention ?? "none",
+		sessionId: affinity?.sessionId ?? uuidv7(),
 	};
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
 	return options;
+}
+
+const STRUCTURED_SUMMARIZATION_CONTROL = `Create a replacement checkpoint for the conversation above.
+The preceding messages are source history; this final temporary message is control data and must not appear in the checkpoint.
+Do not continue the task and do not call tools. Return only the checkpoint.
+Preserve the owner's exact active request and prohibitions, durable decisions, paths, commands, errors, completed work, pending work, and immediate next step. Never include secrets, credentials, or tokens; write [REDACTED].`;
+
+function buildStructuredSummarizationContext(promptText: string, request: StructuredCompactionRequest): Context {
+	return {
+		...request.context,
+		messages: [
+			...request.context.messages,
+			{
+				role: "user",
+				content: [{ type: "text", text: `${STRUCTURED_SUMMARIZATION_CONTROL}\n\n${promptText}` }],
+				timestamp: Date.now(),
+			},
+		],
+	};
 }
 
 async function completeSummarization(
@@ -674,6 +723,18 @@ async function completeSummarization(
 	}
 	const stream = await streamFn(model, context, options);
 	return stream.result();
+}
+
+function accountAndValidateSummarization(
+	response: AssistantMessage,
+	usage: Usage | undefined,
+	failureLabel: string,
+): AssistantMessage {
+	if (usage) addUsage(usage, response.usage);
+	if (response.stopReason === "error") {
+		throw new Error(`${failureLabel} failed: ${response.errorMessage || "Unknown error"}`);
+	}
+	return response;
 }
 
 async function completeSummarizationPrompt(
@@ -705,11 +766,43 @@ async function completeSummarizationPrompt(
 		streamFn,
 		completion,
 	);
-	if (usage) addUsage(usage, response.usage);
-	if (response.stopReason === "error") {
-		throw new Error(`${failureLabel} failed: ${response.errorMessage || "Unknown error"}`);
+	return accountAndValidateSummarization(response, usage, failureLabel);
+}
+
+async function completeStructuredSummarizationPrompt(
+	context: Context,
+	request: StructuredCompactionRequest,
+	model: Model<any>,
+	maxTokens: number,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn: StreamFn | undefined,
+	completion: CompactionCompletion | undefined,
+	usage?: Usage,
+): Promise<AssistantMessage> {
+	const response = await completeSummarization(
+		model,
+		context,
+		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel, request),
+		streamFn,
+		completion,
+	);
+	return accountAndValidateSummarization(response, usage, "Summarization");
+}
+
+function finalizeSummaryResponse(
+	response: AssistantMessage,
+	summaryBudget: number,
+	usage: Usage,
+): { text: string; usage: Usage } {
+	// A length-stopped checkpoint silently lost its tail sections — gating it as if complete
+	// guarantees a verification failure. Fail loudly so the compaction ladder escalates instead.
+	if (response.stopReason === "length") {
+		throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
 	}
-	return response;
+	return { text: truncateSummaryToBudget(extractTextContent(response), summaryBudget), usage };
 }
 
 /**
@@ -764,6 +857,7 @@ export async function generateSummary(
 	chunked = false,
 	precomputedConversationText?: string,
 	completion?: CompactionCompletion,
+	structuredRequest?: StructuredCompactionRequest,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -782,6 +876,7 @@ export async function generateSummary(
 			chunked,
 			precomputedConversationText,
 			completion,
+			structuredRequest,
 		)
 	).text;
 }
@@ -802,6 +897,7 @@ export async function generateSummaryWithUsage(
 	chunked = false,
 	precomputedConversationText?: string,
 	completion?: CompactionCompletion,
+	structuredRequest?: StructuredCompactionRequest,
 ): Promise<{ text: string; usage: Usage }> {
 	const usage = createEmptyUsage();
 	const summaryBudget = getSummaryBudget(reserveTokens, model, factsBlock);
@@ -816,12 +912,35 @@ export async function generateSummaryWithUsage(
 		promptSuffix = `${promptSuffix}\n\nAdditional focus: ${customInstructions}`;
 	}
 
+	const inputBound = getSummarizerInputBound(model, maxTokens);
+	if (structuredRequest) {
+		const structuredContext = buildStructuredSummarizationContext(promptSuffix, structuredRequest);
+		if (estimateProviderRequestTokens(structuredContext, model) <= inputBound) {
+			const response = await completeStructuredSummarizationPrompt(
+				structuredContext,
+				structuredRequest,
+				model,
+				maxTokens,
+				apiKey,
+				headers,
+				signal,
+				thinkingLevel,
+				streamFn,
+				completion,
+				usage,
+			);
+			return finalizeSummaryResponse(response, summaryBudget, usage);
+		}
+		if (!chunked) {
+			throw new Error("input-overflow: structured summarization request exceeds summarizer window");
+		}
+	}
+
 	let conversationText =
 		precomputedConversationText !== undefined
 			? precomputedConversationText
 			: await prepareSummarizationConversationText(currentMessages, preDigest, signal);
 
-	const inputBound = getSummarizerInputBound(model, maxTokens);
 	const initialPromptText = buildSummarizationPrompt(conversationText, previousSummary, promptSuffix);
 	if (estimateStringTokens(initialPromptText) > inputBound) {
 		if (!chunked) {
@@ -860,13 +979,7 @@ export async function generateSummaryWithUsage(
 		completion,
 		usage,
 	);
-	// A length-stopped checkpoint silently lost its tail sections — gating it as if complete
-	// guarantees a verification failure. Fail loudly so the compaction ladder escalates instead.
-	if (response.stopReason === "length") {
-		throw new Error("summary-length-stop: summarizer hit its output cap before completing the checkpoint");
-	}
-
-	return { text: truncateSummaryToBudget(extractTextContent(response), summaryBudget), usage };
+	return finalizeSummaryResponse(response, summaryBudget, usage);
 }
 
 function fillPromptTemplate(template: string, factsBlock: string, budget: number): string {
@@ -1096,6 +1209,8 @@ export interface CompactionPreparation {
 	tokensBefore: number;
 	/** Summary from previous compaction, for iterative update */
 	previousSummary?: string;
+	/** Sparse history contract persisted with a session-replacement checkpoint. */
+	retention?: CompactionRetention;
 	/** File operations extracted from messagesToSummarize */
 	fileOps: FileOperations;
 	/** Facts extracted from the compacted span for verification gating */
@@ -1137,7 +1252,40 @@ export function prepareCompaction(
 			? pathEntries.length - 1
 			: pathEntries.length;
 
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
+	const liveMessages = buildSessionContext(pathEntries).messages;
+	const tokensBefore = estimateContextTokens(liveMessages).tokens;
+
+	if (settings.strategy === "session-replacement") {
+		const previousRetention =
+			prevCompactionIndex >= 0 ? (pathEntries[prevCompactionIndex] as CompactionEntry).retention : undefined;
+		const originalUserEntry = pathEntries.find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "user" &&
+				(previousRetention?.mode !== "original-user" || entry.id === previousRetention.userEntryId),
+		);
+		if (!originalUserEntry?.id) return undefined;
+
+		const fileOps = extractFileOperations(liveMessages, pathEntries, prevCompactionIndex);
+		const factStart = prevCompactionIndex >= 0 ? prevCompactionIndex + 1 : 0;
+		let facts = extractCompactionFacts(pathEntries, factStart, boundaryEnd);
+		if (prevCompactionIndex >= 0) {
+			const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd);
+			facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
+		}
+
+		return {
+			firstKeptEntryId: originalUserEntry.id,
+			messagesToSummarize: liveMessages,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore,
+			retention: { mode: "original-user", userEntryId: originalUserEntry.id },
+			fileOps,
+			facts,
+			settings,
+		};
+	}
 
 	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
@@ -1221,6 +1369,7 @@ async function generateVerifiedSummary(options: {
 	thinkingLevel: ThinkingLevel | undefined;
 	streamFn: StreamFn | undefined;
 	completion: CompactionCompletion | undefined;
+	structuredRequest: StructuredCompactionRequest | undefined;
 	preDigest: ((conversationText: string, signal?: AbortSignal) => Promise<string>) | undefined;
 	facts: CompactionFacts;
 	factsBlock: string;
@@ -1229,11 +1378,9 @@ async function generateVerifiedSummary(options: {
 	let retryInstructions = options.customInstructions;
 	const usage = createEmptyUsage();
 	const verificationGateFailures: VerificationReport[] = [];
-	const precomputedConversationText = await prepareSummarizationConversationText(
-		options.messages,
-		options.preDigest,
-		options.signal,
-	);
+	const precomputedConversationText = options.structuredRequest
+		? undefined
+		: await prepareSummarizationConversationText(options.messages, options.preDigest, options.signal);
 
 	for (let attempt = 0; attempt < 2; attempt++) {
 		const generated = await generateSummaryWithUsage(
@@ -1252,6 +1399,7 @@ async function generateVerifiedSummary(options: {
 			options.chunked,
 			precomputedConversationText,
 			options.completion,
+			options.structuredRequest,
 		);
 		addUsage(usage, generated.usage);
 		const summary = generated.text;
@@ -1299,7 +1447,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	preDigest?: (conversationText: string, signal?: AbortSignal) => Promise<string>,
-	executionOptions?: { chunked?: boolean; completion?: CompactionCompletion },
+	executionOptions?: CompactionExecutionOptions,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -1308,6 +1456,7 @@ export async function compact(
 		isSplitTurn,
 		tokensBefore,
 		previousSummary,
+		retention,
 		fileOps,
 		settings,
 		facts: factsFromPreparation,
@@ -1336,6 +1485,7 @@ export async function compact(
 		thinkingLevel,
 		streamFn,
 		completion: executionOptions?.completion,
+		structuredRequest: executionOptions?.structuredRequest,
 		preDigest,
 		facts,
 		factsBlock,
@@ -1359,6 +1509,7 @@ export async function compact(
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
+			retention,
 			usage: summaryUsage,
 			details: {
 				readFiles,
@@ -1377,7 +1528,7 @@ export async function compact(
 }
 
 export function createDeterministicCompaction(preparation: CompactionPreparation): CompactionResult {
-	const { firstKeptEntryId, tokensBefore, fileOps, facts } = preparation;
+	const { firstKeptEntryId, tokensBefore, retention, fileOps, facts } = preparation;
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
@@ -1452,6 +1603,7 @@ export function createDeterministicCompaction(preparation: CompactionPreparation
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
+		retention,
 		details: {
 			readFiles,
 			modifiedFiles,

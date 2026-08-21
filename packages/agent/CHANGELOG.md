@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Added atomic session-replacement compaction with structured-history replay, temporary non-persisted summary instructions, sparse original-request retention, and disk-backed release of discarded payloads.
+
 ## [0.93.17] - 2026-08-21
 
 ### Fixed

@@ -156,4 +156,40 @@ describe("SessionManager compacted payload release", () => {
 		if (!entry || entry.type !== "message") return;
 		expect(Object.getOwnPropertyDescriptor(entry.message, "content")?.get).toBeUndefined();
 	});
+
+	it("releases the discarded middle while retaining sparse original and post-compaction messages", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-session-replacement-payload-"));
+		tempDirs.push(dir);
+		const session = SessionManager.create(dir, dir, dir);
+		const originalId = session.appendMessage({ role: "user", content: "original request", timestamp: 1 });
+		session.appendMessage(assistantMessage());
+		const discardedPayload = `discarded-prefix-${"x".repeat(32 * 1024)}-discarded-tail`;
+		const discardedId = session.appendMessage(toolResultMessage(discardedPayload));
+		session.appendCompaction("replacement summary", originalId, 400_000, undefined, false, undefined, {
+			mode: "original-user",
+			userEntryId: originalId,
+		});
+		const postPayload = `post-prefix-${"y".repeat(32 * 1024)}-post-tail`;
+		const postId = session.appendMessage({ role: "user", content: postPayload, timestamp: 4 });
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session replacement fixture");
+
+		const reopened = SessionManager.open(sessionFile, dir, dir);
+		const original = reopened.getEntry(originalId);
+		const discarded = reopened.getEntry(discardedId);
+		const post = reopened.getEntry(postId);
+		expect(original?.type).toBe("message");
+		expect(discarded?.type).toBe("message");
+		expect(post?.type).toBe("message");
+		if (original?.type !== "message" || discarded?.type !== "message" || post?.type !== "message") return;
+		expect(Object.getOwnPropertyDescriptor(original.message, "content")?.get).toBeUndefined();
+		expect(Object.getOwnPropertyDescriptor(discarded.message, "content")?.get).toBeTypeOf("function");
+		expect(Object.getOwnPropertyDescriptor(post.message, "content")?.get).toBeTypeOf("function");
+		if (post.message.role !== "user") throw new Error("Expected retained post-compaction user message");
+		expect(post.message.content).toBe(postPayload);
+		const liveContext = reopened.buildSessionContext();
+		expect(liveContext.messages.map((message) => message.role)).toEqual(["user", "compactionSummary", "user"]);
+		expect(JSON.stringify(liveContext.messages)).toContain("post-tail");
+		expect(JSON.stringify(liveContext.messages)).not.toContain("discarded-tail");
+	});
 });

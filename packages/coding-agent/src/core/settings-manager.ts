@@ -2675,6 +2675,10 @@ export class SettingsManager {
 		return triggerPercent;
 	}
 
+	hasExplicitCompactionTriggerPercent(): boolean {
+		return this.settings.compaction?.triggerPercent !== undefined;
+	}
+
 	/**
 	 * Skill curator (#32). Auto-archive of stale reflection-promoted skills is ON by default (restorable,
 	 * announced, promoted-only). Set `autoArchive: false` to make it propose-only (`/curate`).

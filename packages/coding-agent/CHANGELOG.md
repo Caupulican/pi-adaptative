@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Matched Grok subscription compaction to the installed CLI lane: reuse the live structured session prefix, tool catalog, cache affinity, priority-processing wrapper, 80% trigger, original-request-plus-checkpoint replacement, and a durable full-transcript pointer while leaving API-key xAI behavior unchanged.
+
 ## [0.93.17] - 2026-08-21
 
 ### Fixed

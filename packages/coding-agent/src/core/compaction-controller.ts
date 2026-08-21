@@ -1,6 +1,7 @@
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import {
 	assessCompactionNeed,
+	type CompactionExecutionOptions,
 	type CompactionPreparation,
 	type CompactionResult,
 	type CompactionSettings,
@@ -12,7 +13,7 @@ import {
 	shouldCompact,
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { runCompactionLoop } from "@caupulican/pi-agent-core/compaction/loop";
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
+import { convertToLlm, createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
 import {
@@ -194,6 +195,38 @@ export class CompactionController {
 			this.autoAbortController !== undefined ||
 			this.autoRunPromise !== undefined
 		);
+	}
+
+	private buildExecutionOptions(
+		preparation: CompactionPreparation,
+		settings: CompactionSettings,
+		compactionModel: Model<Api>,
+		sessionModel: Model<Api>,
+		chunked: boolean,
+	): CompactionExecutionOptions {
+		const options: CompactionExecutionOptions = { chunked };
+		const reusesSessionLane =
+			settings.strategy === "session-replacement" &&
+			compactionModel.provider === sessionModel.provider &&
+			compactionModel.id === sessionModel.id &&
+			compactionModel.api === sessionModel.api &&
+			compactionModel.baseUrl === sessionModel.baseUrl;
+		if (!reusesSessionLane) return options;
+
+		const request = materializeProviderRequest(
+			{
+				systemPrompt: this.deps.agent.state.systemPrompt,
+				messages: convertToLlm(preparation.messagesToSummarize),
+				tools: projectToolsForProvider(this.deps.agent.state.tools),
+			},
+			{ textToolCallProtocol: this.deps.agent.textToolCallProtocol },
+		);
+		options.structuredRequest = {
+			context: request.context,
+			sessionId: this.deps.sessionManager.getSessionId(),
+			cacheRetention: "short",
+		};
+		return options;
 	}
 
 	resetOverflowRecovery(): void {
@@ -419,7 +452,7 @@ export class CompactionController {
 							compactionThinkingLevel,
 							this.deps.agent.streamFn,
 							this.deps.buildPreDigest(),
-							{ chunked: params.chunked },
+							this.buildExecutionOptions(preparation, settings, model, sessionModel, params.chunked),
 						),
 					signal,
 					model.provider,
@@ -661,7 +694,7 @@ export class CompactionController {
 								compactionThinkingLevel,
 								this.deps.agent.streamFn,
 								this.deps.buildPreDigest(),
-								{ chunked: params.chunked },
+								this.buildExecutionOptions(preparation, settings, compactModel, model, params.chunked),
 							),
 						signal,
 						compactModel.provider,
@@ -866,10 +899,28 @@ export class CompactionController {
 			customInstructions,
 			signal,
 		})) as SessionBeforeCompactResult | undefined;
-		return { cancelled: extensionResult?.cancel === true, result: extensionResult?.compaction };
+		const result = extensionResult?.compaction;
+		return {
+			cancelled: extensionResult?.cancel === true,
+			result:
+				result && preparation.retention
+					? {
+							...result,
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							retention: preparation.retention,
+						}
+					: result,
+		};
 	}
 
 	private async applyResult(result: CompactionResult, fromExtension: boolean): Promise<void> {
+		const sessionFile = this.deps.sessionManager.getSessionFile();
+		if (result.retention?.mode === "original-user" && sessionFile) {
+			const transcriptPointer = `Full pre-compaction transcript: ${sessionFile}`;
+			if (!result.summary.includes(transcriptPointer)) {
+				result.summary = `${result.summary.trimEnd()}\n\n${transcriptPointer}`;
+			}
+		}
 		this.deps.sessionManager.appendCompaction(
 			result.summary,
 			result.firstKeptEntryId,
@@ -877,6 +928,7 @@ export class CompactionController {
 			result.details,
 			fromExtension,
 			result.usage,
+			result.retention,
 		);
 		this.deps.refreshAfterCompaction();
 		const savedEntry = this.deps.sessionManager
