@@ -442,8 +442,6 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isError: boolean;
 	/** Repair metadata when the harness validated and changed tool arguments before execution. */
 	repair?: ToolCallRepairInfo;
-	/** True when renderCall is producing a collapsed grouped-tool summary. */
-	toolGroupSummary?: boolean;
 }
 
 /**
@@ -462,8 +460,6 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	promptGuidelines?: string[];
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
-	/** Optional freeform group identifier for collapsed tool-call aggregation. */
-	toolGroup?: string;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */
 	renderShell?: "default" | "self";
 

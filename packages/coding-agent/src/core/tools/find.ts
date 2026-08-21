@@ -365,7 +365,6 @@ export function createFindToolDefinition(
 		promptSnippet: "Find paths by glob; respects .gitignore",
 		promptGuidelines: ["Use narrowest root/glob. Never recursively scan repo/home/filesystem without concrete need."],
 		parameters: findSchema,
-		toolGroup: "explore",
 		async execute(
 			toolCallId,
 			{

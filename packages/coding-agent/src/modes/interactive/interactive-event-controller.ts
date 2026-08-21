@@ -14,6 +14,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import type { ActiveToolCallRegistry } from "./components/active-tool-call-registry.ts";
 import {
 	type ActivityLaneComponent,
 	type ActivityLaneKind,
@@ -26,11 +27,6 @@ import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { keyText } from "./components/keybinding-hints.ts";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
-import {
-	getToolPanelResultActionKeys,
-	type ToolPanelRegistry,
-	type ToolPanelTenantScope,
-} from "./components/tool-panel-registry.ts";
 import { theme } from "./theme/theme.ts";
 
 /** Structural host consumed by the event owner. InteractiveMode deliberately remains a thin facade. */
@@ -55,7 +51,7 @@ export interface InteractiveEventHost {
 	streamingMessage: AssistantMessage | undefined;
 	hideThinkingBlock: boolean;
 	lastStreamingUiUpdateAt: number;
-	toolPanels: ToolPanelRegistry;
+	activeToolCalls: ActiveToolCallRegistry;
 	init(): Promise<void>;
 	createWorkingLoader(): Loader;
 	stopWorkingLoader(): void;
@@ -82,7 +78,6 @@ export interface InteractiveEventHost {
 	toolActivityKind(toolName: string): ActivityLaneKind;
 	toolActivityLabel(toolName: string): string;
 	toolActivityTerminalStatus(isError: boolean, details: unknown): "success" | "failure" | "neutral";
-	getToolPanelScope(): ToolPanelTenantScope;
 	isNativeReflectionEnabled(): boolean;
 	maybeRunNativeReflection(messages: AgentMessage[]): void;
 	maybeStartAutoLearn(): boolean;
@@ -165,7 +160,9 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			break;
 
 		case "warning":
-			host.showWarning(event.message);
+			// AgentSession warnings are operational diagnostics. Keep them in the transient status lane;
+			// direct local UI validation still uses InteractiveMode.showWarning() and remains chat-local.
+			host.activityLane?.announce(event.message, "warning");
 			break;
 
 		case "delegate_workers":
@@ -232,12 +229,12 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				host.applyStreamingMessageUpdate(host.streamingMessage, { force: true });
 				if (host.streamingMessage.stopReason === "aborted" || host.streamingMessage.stopReason === "error") {
 					errorMessage ??= host.streamingMessage.errorMessage || "Error";
-					for (const [, component] of host.toolPanels.activeEntries()) {
+					for (const [, component] of host.activeToolCalls.activeEntries()) {
 						component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 					}
 					host.clearActiveToolCalls();
 				} else {
-					for (const [, component] of host.toolPanels.activeEntries()) component.setArgsComplete();
+					for (const [, component] of host.activeToolCalls.activeEntries()) component.setArgsComplete();
 				}
 				host.streamingComponent = undefined;
 				host.streamingMessage = undefined;
@@ -254,7 +251,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				label: host.toolActivityLabel(event.toolName),
 				tag: event.toolName,
 			});
-			let component = host.toolPanels.getActive(event.toolCallId);
+			let component = host.activeToolCalls.getActive(event.toolCallId);
 			if (!component) {
 				component = host.attachToolExecutionComponent(event.toolName, event.toolCallId, event.args, event.repair);
 			} else {
@@ -266,7 +263,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 		}
 
 		case "tool_execution_update": {
-			const component = host.toolPanels.getActive(event.toolCallId);
+			const component = host.activeToolCalls.getActive(event.toolCallId);
 			if (component) {
 				component.updateArgs(event.args, event.repair);
 				component.updateResult({ ...event.partialResult, isError: false }, true);
@@ -290,14 +287,10 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 					host.activityLane.remove(toolActivityId);
 				}
 			}
-			const component = host.toolPanels.getActive(event.toolCallId);
+			const component = host.activeToolCalls.getActive(event.toolCallId);
 			if (component) {
 				component.updateResult({ ...event.result, isError: event.isError });
-				host.toolPanels.registerAliases(
-					component,
-					getToolPanelResultActionKeys(host.getToolPanelScope(), event.toolName, event.result),
-				);
-				host.toolPanels.finish(event.toolCallId);
+				host.activeToolCalls.finish(event.toolCallId);
 				host.ui.requestRender();
 			}
 			if (["task_steps", "goal", "delegate"].includes(event.toolName)) {

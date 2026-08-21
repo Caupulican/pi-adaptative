@@ -7,9 +7,9 @@ UI type: dense keyboard-first terminal tool. Phase: transient-status consolidati
 1. Task, goal, worker, routing, retry, compaction, queue, and tool progress used separate transcript, footer, widget, and loader paths. This duplicated truth and polluted scrollback. They now project into one event-driven horizontal line immediately above the editor.
 2. Completed work needed feedback without becoming permanent history. The lane uses a muted active dot, holds green/red terminal feedback for two seconds, then removes it by timer event.
 3. Resumed state could replay old terminal work as new. Session replacement primes terminal identities without displaying them; only later transitions flash.
-4. Successful orchestration bookkeeping still produced empty or multiline tool cards. Collapsed successful task, goal, and worker tools now render nothing; explicit tool expansion retains the structured detail.
+4. Tool history still used separate Bash, file, skill, task, goal, worker, and extension summaries. Every model tool invocation now contributes once to one append-only `Performing N actions` / `Performed N actions` transcript row; Ctrl+T retains the structured detail.
 5. A terminal process did not prove a human was watching. `--session-mode user|worker` feeds the authoritative session-role contract; unattended workers do not receive approval UI, extension TUI context, widgets, footer, loaders, or activity-lane routing.
-6. Loading session history still invoked collapsed tool-result renderers and image conversion. Retained results now stay behind their existing payload accessor until expansion; one expansion materializes once, and collapse releases the display cache.
+6. Loading session history still invoked collapsed tool-result renderers and image conversion. The collapsed action transcript does not invoke per-tool renderers; retained results stay behind their payload accessor until expansion, and collapse releases the display cache.
 
 ## Acceptance battery
 
@@ -20,8 +20,8 @@ UI type: dense keyboard-first terminal tool. Phase: transient-status consolidati
 | State clarity | PASS | Glyph plus text plus semantic theme color; status is never color-only. |
 | Completion lifecycle | PASS | Event/timer driven; success/failure disappears after a bounded hold. |
 | Resume correctness | PASS | Existing terminal identities are primed and do not replay. |
-| History cleanliness | PASS | Successful orchestration calls are absent while collapsed; retained tool-result payloads are not read or rendered until the existing expansion key is used. |
-| Failure honesty | PASS | Tool errors, compaction failures, and final retry failures remain textual and actionable. |
+| History cleanliness | PASS | One action counter replaces category-specific cards; retained tool-result payloads are not read or rendered until Ctrl+T expands the transcript. |
+| Failure honesty | PASS | Failed calls remain counted and marked on the action row; details stay in the transcript, while operational warnings use the transient activity lane. |
 | Audience isolation | PASS | Worker role disables human UI capability and does not mount transient visual surfaces. |
 | Focus and interruption | PASS | The lane never captures focus; cancellation remains on the existing interrupt binding. |
 

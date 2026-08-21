@@ -20,7 +20,7 @@ Edit directly or use `/settings` for common options.
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | model default | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, or `"ultra"` |
-| `hideThinkingBlock` | boolean | `true` | Hide thinking blocks in output. Press the thinking toggle (default Ctrl+T) to show them. |
+| `hideThinkingBlock` | boolean | `true` | Hide thinking blocks in output. Press the thinking toggle (default Shift+PageUp) to show them. |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
 #### thinkingBudgets

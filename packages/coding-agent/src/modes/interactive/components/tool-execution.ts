@@ -57,7 +57,7 @@ function formatToolDuration(durationMs: number): string {
 	return `${Math.floor(totalSeconds / 3_600)}h ${Math.floor((totalSeconds % 3_600) / 60)}m`;
 }
 
-/** One allocation per tool panel; render reads the monotonic clock without scheduling per-tool timers. */
+/** One allocation per action detail; render reads the monotonic clock without scheduling per-tool timers. */
 class ToolTimingComponent implements Component {
 	private readonly clock: MonotonicClock;
 	private startedAt: number | undefined;
@@ -80,11 +80,6 @@ class ToolTimingComponent implements Component {
 		const now = this.clock();
 		if (!Number.isFinite(now)) return;
 		this.endedAt = Math.max(this.startedAt, now);
-	}
-
-	reset(): void {
-		this.startedAt = undefined;
-		this.endedAt = undefined;
 	}
 
 	hasStarted(): boolean {
@@ -170,7 +165,6 @@ export class ToolExecutionComponent extends Container {
 	private isPartial = true;
 	private toolDefinition?: ToolDefinition<any, any>;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
-	toolGroup: string | undefined;
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
@@ -198,7 +192,6 @@ export class ToolExecutionComponent extends Container {
 		this.deferResultUntilExpanded = options.deferResultUntilExpanded ?? false;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = getBuiltInToolDefinitions(cwd)[toolName as ToolName];
-		this.toolGroup = this.resolveToolGroup();
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.ui = ui;
@@ -256,17 +249,7 @@ export class ToolExecutionComponent extends Container {
 		return this.toolDefinition.renderShell ?? this.builtInToolDefinition.renderShell ?? "default";
 	}
 
-	private resolveToolGroup(): string | undefined {
-		const configuredGroup = this.toolDefinition?.toolGroup ?? this.builtInToolDefinition?.toolGroup;
-		if (configuredGroup !== undefined) {
-			const trimmed = configuredGroup.trim();
-			return trimmed || undefined;
-		}
-		const defaultGroup = this.toolName.trim();
-		return defaultGroup || undefined;
-	}
-
-	private getRenderContext(lastComponent: Component | undefined, toolGroupSummary = false): ToolRenderContext {
+	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
 		return {
 			args: this.args,
 			toolCallId: this.toolCallId,
@@ -284,7 +267,6 @@ export class ToolExecutionComponent extends Container {
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
 			repair: this.repair,
-			toolGroupSummary,
 		};
 	}
 
@@ -304,35 +286,6 @@ export class ToolExecutionComponent extends Container {
 		if (this.builtInToolDefinition) return label || this.humanizeToolName(this.toolName);
 		if (!label || label === this.toolName) return this.humanizeToolName(this.toolName);
 		return label;
-	}
-
-	resetInvocation(
-		toolName: string,
-		toolCallId: string,
-		args: any,
-		toolDefinition: ToolDefinition<any, any> | undefined,
-		repair?: ToolCallRepairInfo,
-		deferResultUntilExpanded = false,
-	): void {
-		this.toolName = toolName;
-		this.toolCallId = toolCallId;
-		this.args = args;
-		this.repair = repair;
-		this.deferResultUntilExpanded = deferResultUntilExpanded;
-		this.toolDefinition = toolDefinition;
-		this.builtInToolDefinition = getBuiltInToolDefinitions(this.cwd)[toolName as ToolName];
-		this.toolGroup = this.resolveToolGroup();
-		this.executionStarted = false;
-		this.argsComplete = false;
-		this.isPartial = true;
-		this.result = undefined;
-		this.materializedResult = undefined;
-		this.callRendererComponent = undefined;
-		this.resultRendererComponent = undefined;
-		this.rendererState = {};
-		this.convertedImages.clear();
-		this.timing.reset();
-		this.updateDisplay();
 	}
 
 	private titleBadgeStatus(): "pending" | "running" | "success" | "error" {
@@ -505,10 +458,6 @@ export class ToolExecutionComponent extends Container {
 		return "toolSuccessBg";
 	}
 
-	getToolName(): string {
-		return this.toolName;
-	}
-
 	isToolPartial(): boolean {
 		return this.isPartial;
 	}
@@ -517,42 +466,9 @@ export class ToolExecutionComponent extends Container {
 		return this.result?.isError === true;
 	}
 
-	isToolSuccess(): boolean {
-		return this.result !== undefined && !this.isPartial && this.result.isError !== true;
-	}
-
-	getDisplayPath(): string | undefined {
-		const raw = this.args?.path ?? this.args?.file_path;
-		if (typeof raw !== "string") return undefined;
-		const trimmed = raw.trim();
-		return trimmed.length > 0 ? trimmed : undefined;
-	}
-
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
-	}
-
-	renderCallSummary(width: number): string[] {
-		const callRenderer = this.getCallRenderer();
-		let component: Component;
-		if (!callRenderer) {
-			component = this.createCallFallback();
-		} else {
-			try {
-				component = callRenderer(this.args, theme, this.getRenderContext(undefined, true));
-			} catch {
-				component = this.createCallFallback();
-			}
-		}
-		const lines = [...component.render(width)];
-		const timing = this.timing.getText();
-		if (!timing) return lines;
-		const prefix = theme.fg("dim", `${timing} · `);
-		const firstContentLine = lines.findIndex((line) => line.trim().length > 0);
-		if (firstContentLine === -1) return this.timing.render(width);
-		lines[firstContentLine] = truncateToWidth(`${prefix}${lines[firstContentLine]}`, Math.max(0, width), "...");
-		return lines;
 	}
 
 	override render(width: number): string[] {

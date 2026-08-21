@@ -43,7 +43,7 @@ Example project settings:
 
 ## Visible signals
 
-- Interactive tool panels show `[repaired arguments]` when execution used repaired arguments.
+- Expanded Ctrl+T action details show `[repaired arguments]` when execution used repaired arguments.
 - RPC `tool_execution_start`, `tool_execution_update`, and `tool_execution_end` events include a `repair` object when arguments were repaired.
 - `/toolhealth` prints model adaptation records for this host: tool-probe verdicts, calibrated or failed text protocol, learned standing rules, teach statistics, recovery-log worker counters, and execution-failure counts by phase.
 - `/toolrule-remove <provider/model> <mode>` removes one learned standing rule from the host-local adaptation store.

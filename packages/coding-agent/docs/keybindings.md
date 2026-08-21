@@ -128,8 +128,8 @@ These actions apply while the built-in `ask_question` interaction has focus. The
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.tools.expand` | `ctrl+o` | Expand or collapse tool output (file groups stay as a count + short list until then) |
-| `app.transcript.open` | `ctrl+t` | Open expanded transcript scrollback |
+| `app.tools.expand` | `ctrl+o` | Expand or collapse non-action inline details |
+| `app.transcript.open` | `ctrl+t` | Open transcript scrollback with action details expanded |
 | `app.history.load` | `ctrl+shift+h` | Load deferred session history into the chat |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `alt+up` | Restore queued messages to editor |

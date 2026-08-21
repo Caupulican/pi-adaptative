@@ -8,17 +8,21 @@ export interface TranscriptOverlayOptions {
 	keybindings: KeybindingsManager;
 	getToolsExpanded: () => boolean;
 	setToolsExpanded: (expanded: boolean) => void;
+	getActionsExpanded: () => boolean;
+	setActionsExpanded: (expanded: boolean) => void;
 	showOverlay: (component: Component, options: OverlayOptions) => OverlayHandle;
 }
 
-/** Owns the expanded transcript overlay and restores the caller's tool-detail state exactly once. */
+/** Owns the detailed transcript projection and restores both expansion states exactly once. */
 export function openTranscriptOverlay(options: TranscriptOverlayOptions): OverlayHandle {
 	const previousToolsExpanded = options.getToolsExpanded();
+	const previousActionsExpanded = options.getActionsExpanded();
 	let handle: OverlayHandle | undefined;
 	let restored = false;
-	const restoreToolState = () => {
+	const restoreProjectionState = () => {
 		if (restored) return;
 		restored = true;
+		options.setActionsExpanded(previousActionsExpanded);
 		options.setToolsExpanded(previousToolsExpanded);
 	};
 	const pager = new TranscriptPager({
@@ -28,18 +32,19 @@ export function openTranscriptOverlay(options: TranscriptOverlayOptions): Overla
 		onClose: () => handle?.hide(),
 	});
 
-	options.setToolsExpanded(true);
 	try {
+		options.setToolsExpanded(true);
+		options.setActionsExpanded(true);
 		handle = options.showOverlay(pager, {
 			width: "100%",
 			maxHeight: "100%",
 			row: 0,
 			col: 0,
-			onRemove: restoreToolState,
+			onRemove: restoreProjectionState,
 		});
 		return handle;
 	} catch (error) {
-		restoreToolState();
+		restoreProjectionState();
 		throw error;
 	}
 }

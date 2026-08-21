@@ -238,9 +238,10 @@ See `/hotkeys` for the full list. Customize via `~/.pi/agent/keybindings.json`. 
 | Ctrl+L | Open model selector |
 | Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
 | Shift+Tab | Cycle thinking level |
-| Ctrl+O | Expand or collapse tool output (edits stay as a count + short file list until then) |
+| Ctrl+O | Expand or collapse non-action inline details |
 | Ctrl+Shift+H | Load deferred session history into the chat |
-| Ctrl+T | Show or hide thinking blocks (hidden by default) |
+| Ctrl+T | Open the action transcript with tool details |
+| Shift+PageUp | Show or hide thinking blocks (hidden by default) |
 
 ### Message Queue
 

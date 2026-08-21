@@ -120,6 +120,21 @@ describe("activity lane", () => {
 		lane.dispose();
 	});
 
+	it("shows transient warning announcements and expires them", () => {
+		vi.useFakeTimers();
+		const lane = new ActivityLaneComponent(theme, () => {});
+		const message = 'Provider tool guideline dropped: guidelines budget exhausted: "..."';
+
+		lane.announce(message, "warning");
+
+		expect(lane.getItems()).toEqual([expect.objectContaining({ kind: "notice", label: message, status: "warning" })]);
+		vi.advanceTimersByTime(1_999);
+		expect(lane.getItems()).toHaveLength(1);
+		vi.advanceTimersByTime(1);
+		expect(lane.getItems()).toEqual([]);
+		lane.dispose();
+	});
+
 	it("projects budget-limited goals as terminal while keeping blocked goals live", () => {
 		const budgetLimited = applyGoalEvent(createGoalState({ goalId: "budget", userGoal: "Spend less", now: "T0" }), {
 			type: "system_stop_goal",

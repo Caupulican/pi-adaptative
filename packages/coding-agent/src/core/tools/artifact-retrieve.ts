@@ -87,7 +87,6 @@ export function createArtifactRetrieveToolDefinition(
 			"Retrieve a bounded slice of a packed tool-output artifact by id, from a 'Full output: artifact tool-output:<id>' reference in a prior tool result. Returns metadata, or a bounded head/tail slice -- never the full raw payload in one call.",
 		promptSnippet: "Retrieve a bounded slice of a packed tool-output artifact",
 		parameters: artifactRetrieveSchema,
-		toolGroup: "explore",
 		async execute(
 			_toolCallId,
 			{ artifactId, mode, maxLines }: { artifactId: string; mode?: ArtifactRetrievalMode; maxLines?: number },

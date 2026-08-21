@@ -2149,7 +2149,7 @@ By default, tool output is wrapped in a `Box` that handles padding and backgroun
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 
-Adjacent tool calls collapse into grouped panels by default using the tool name as the group id. Set `toolGroup` to a stable freeform group id when related tools should share one grouped panel in the TUI, or set it to an empty string to opt out for a specific tool. Grouping is display-only: renderer state remains per tool call, and reusable panels are still scoped to the active session/cwd so different sessions cannot share display state.
+Adjacent model-invoked tool calls use one append-only transcript row. While calls are active it shows `Performing N actions`; after they settle it shows `Performed N actions`. Each call contributes exactly once, including pending and failed calls; later calls append and never reuse or replace earlier action history. The collapsed row hides tool details, including custom renderers; press Ctrl+T to expand the transcript and view each call's details.
 
 ```typescript
 pi.registerTool({
@@ -2173,8 +2173,6 @@ pi.registerTool({
 - `lastComponent` - the previously returned component for that slot, if any
 - `invalidate()` - request a rerender of this tool row
 - `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
-- `toolGroupSummary` - true when `renderCall` is rendering a collapsed grouped-panel summary; avoid adding per-row expand hints in this mode
-
 Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
 
 #### renderCall
@@ -2224,18 +2222,12 @@ If a slot intentionally has no visible content, return an empty `Component` such
 
 #### Keybinding Hints
 
-Use `keyHint()` to display keybinding hints that respect the active keybinding configuration:
+Use `keyHint()` to display keybinding hints that respect the active keybinding configuration. Tool renderers must not add their own expansion hint: the collapsed action transcript owns the Ctrl+T hint and does not invoke per-tool renderers.
 
 ```typescript
 import { keyHint } from "@caupulican/pi-adaptative";
 
-renderResult(result, { expanded }, theme, context) {
-  let text = theme.fg("success", "✓ Done");
-  if (!expanded) {
-    text += ` (${keyHint("app.tools.expand", "to expand")})`;
-  }
-  return new Text(text, 0, 0);
-}
+const confirmHint = keyHint("tui.select.confirm", "to confirm");
 ```
 
 Available functions:
@@ -2244,7 +2236,7 @@ Available functions:
 - `rawKeyHint(key, description)` - Format a raw key string
 
 Use namespaced keybinding ids:
-- Coding-agent ids use the `app.*` namespace, for example `app.tools.expand`, `app.editor.external`, `app.session.rename`
+- Coding-agent ids use the `app.*` namespace, for example `app.transcript.open`, `app.editor.external`, `app.session.rename`
 - Shared TUI ids use the `tui.*` namespace, for example `tui.select.confirm`, `tui.select.cancel`, `tui.input.tab`
 
 For the exhaustive list of keybinding ids and defaults, see [keybindings.md](keybindings.md). `keybindings.json` uses those same namespaced ids.

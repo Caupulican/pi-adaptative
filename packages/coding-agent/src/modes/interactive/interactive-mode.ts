@@ -57,6 +57,8 @@ import * as autocompleteProvider from "./autocomplete-provider.ts";
 import * as autonomyCommands from "./autonomy-commands.ts";
 import * as clipboardInput from "./clipboard-input.ts";
 import * as compactionQueue from "./compaction-queue.ts";
+import { ActionTranscriptComponent } from "./components/action-transcript.ts";
+import { ActiveToolCallRegistry } from "./components/active-tool-call-registry.ts";
 import { ActivityLaneComponent, type ActivityLaneKind } from "./components/activity-lane.ts";
 import { AgentsOverlay } from "./components/agents-overlay.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -73,12 +75,6 @@ import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
-import { ToolGroupComponent } from "./components/tool-group.ts";
-import {
-	getToolPanelActionKey,
-	shouldReuseToolPanelInPlace,
-	ToolPanelRegistry,
-} from "./components/tool-panel-registry.ts";
 import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import * as configBackup from "./config-backup.ts";
@@ -232,11 +228,12 @@ export class InteractiveMode {
 	private streamingUiUpdateTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private lastStreamingUiUpdateAt = 0;
 
-	// Tool execution tracking and session-scoped reusable panels
-	private toolPanels = new ToolPanelRegistry();
+	// Active execution identity. Completed actions are owned by the transcript.
+	private activeToolCalls = new ActiveToolCallRegistry();
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
+	private transcriptActionsExpanded = false;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = true;
@@ -1086,7 +1083,7 @@ export class InteractiveMode {
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
-		this.clearRenderedToolPanelState();
+		this.clearActiveToolCallState();
 		void this.renderInitialMessages();
 	}
 
@@ -1097,69 +1094,25 @@ export class InteractiveMode {
 		return this.session.getToolDefinition(toolName);
 	}
 
-	private getToolPanelScope() {
-		return {
-			sessionId: this.sessionManager.getSessionId?.(),
-			sessionFile: this.sessionManager.getSessionFile?.(),
-			cwd: this.sessionManager.getCwd(),
-		};
-	}
-
-	private appendToolExecutionComponent(component: ToolExecutionComponent, allowGrouping: boolean): void {
-		const toolGroup = allowGrouping ? component.toolGroup?.trim() : undefined;
-		if (!toolGroup) {
-			this.chatContainer.addChild(component);
-			this.trimLiveTuiHistory();
-			return;
-		}
-
+	private appendTranscriptAction(component: ToolExecutionComponent): void {
 		const children = this.chatContainer.children;
-		const lastChild = children[children.length - 1];
-		if (lastChild instanceof ToolGroupComponent && lastChild.canAccept(component)) {
-			lastChild.addTool(component);
-			this.trimLiveTuiHistory();
-			return;
-		}
-		if (lastChild instanceof ToolExecutionComponent && lastChild.toolGroup?.trim() === toolGroup) {
-			const group = new ToolGroupComponent(toolGroup, [lastChild]);
-			if (group.canAccept(component)) {
-				group.addTool(component);
-				group.setExpanded(this.toolOutputExpanded);
-				children[children.length - 1] = group;
-				this.trimLiveTuiHistory();
-				return;
+		for (let index = children.length - 1; index >= 0; index--) {
+			const candidate = children[index];
+			if (candidate instanceof ActionTranscriptComponent) {
+				if (candidate.canAccept()) {
+					candidate.addAction(component);
+					this.trimLiveTuiHistory();
+					return;
+				}
+				break;
 			}
+			if (candidate instanceof AssistantMessageComponent && !candidate.hasVisibleOutput()) continue;
+			break;
 		}
-		if (toolGroup === "bash") {
-			const group = new ToolGroupComponent(toolGroup, [component]);
-			group.setExpanded(this.toolOutputExpanded);
-			this.chatContainer.addChild(group);
-			this.trimLiveTuiHistory();
-			return;
-		}
-		this.chatContainer.addChild(component);
+		const transcript = new ActionTranscriptComponent([component]);
+		transcript.setTranscriptExpanded(this.transcriptActionsExpanded);
+		this.chatContainer.addChild(transcript);
 		this.trimLiveTuiHistory();
-	}
-
-	private detachToolExecutionComponent(component: ToolExecutionComponent): void {
-		const children = this.chatContainer.children;
-		const directIndex = children.indexOf(component);
-		if (directIndex !== -1) {
-			children.splice(directIndex, 1);
-			return;
-		}
-		for (let i = 0; i < children.length; i++) {
-			const child = children[i];
-			if (!(child instanceof ToolGroupComponent) || !child.removeTool(component)) continue;
-			const remaining = child.getToolCount();
-			if (remaining === 0) {
-				children.splice(i, 1);
-			} else if (remaining === 1 && child.toolGroup !== "bash") {
-				const onlyTool = child.getOnlyTool();
-				if (onlyTool) children[i] = onlyTool;
-			}
-			return;
-		}
 	}
 
 	private attachToolExecutionComponent(
@@ -1169,25 +1122,7 @@ export class InteractiveMode {
 		repair?: ToolCallRepairInfo,
 		deferResultUntilExpanded = false,
 	): ToolExecutionComponent {
-		const actionKey = getToolPanelActionKey(this.getToolPanelScope(), toolName, args);
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
-		const reuseInPlace = shouldReuseToolPanelInPlace(toolName, args);
-		const existing = this.toolPanels.getReusable(actionKey, { allowActive: reuseInPlace });
-		if (existing) {
-			if (reuseInPlace && actionKey) {
-				existing.resetInvocation(toolName, toolCallId, args, toolDefinition, repair, deferResultUntilExpanded);
-				existing.setExpanded(this.toolOutputExpanded);
-				this.toolPanels.replaceActiveForAction(toolCallId, existing, actionKey);
-				this.ui.requestRender();
-				return existing;
-			}
-			this.detachToolExecutionComponent(existing);
-			existing.resetInvocation(toolName, toolCallId, args, toolDefinition, repair, deferResultUntilExpanded);
-			existing.setExpanded(this.toolOutputExpanded);
-			this.appendToolExecutionComponent(existing, true);
-			this.toolPanels.register(toolCallId, existing, actionKey);
-			return existing;
-		}
 		const component = new ToolExecutionComponent(
 			toolName,
 			toolCallId,
@@ -1202,18 +1137,17 @@ export class InteractiveMode {
 			this.ui,
 			this.sessionManager.getCwd(),
 		);
-		component.setExpanded(this.toolOutputExpanded);
-		this.appendToolExecutionComponent(component, true);
-		this.toolPanels.register(toolCallId, component, actionKey);
+		this.appendTranscriptAction(component);
+		this.activeToolCalls.register(toolCallId, component);
 		return component;
 	}
 
 	public clearActiveToolCalls(): void {
-		this.toolPanels.clearActive();
+		this.activeToolCalls.clearActive();
 	}
 
-	private clearRenderedToolPanelState(): void {
-		this.toolPanels.clearAll();
+	private clearActiveToolCallState(): void {
+		this.activeToolCalls.clearActive();
 	}
 
 	private getWorkingLoaderMessage(): string {
@@ -1762,7 +1696,7 @@ export class InteractiveMode {
 	private showDeferredHistoryPlaceholder(options: { requestRender?: boolean } = {}): void {
 		this.chatContainer.children = [];
 		this.resetLiveTuiHistoryTrim();
-		this.clearRenderedToolPanelState();
+		this.clearActiveToolCallState();
 
 		const entryCount = this.getSessionEntryCount();
 		if (entryCount > 0) {
@@ -1853,18 +1787,20 @@ export class InteractiveMode {
 			keybindings: this.keybindings,
 			getToolsExpanded: () => this.toolOutputExpanded,
 			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
+			getActionsExpanded: () => this.transcriptActionsExpanded,
+			setActionsExpanded: (expanded) => this.setTranscriptActionsExpanded(expanded),
 			showOverlay: (component, options) => this.ui.showOverlay(component, options),
 		});
 	}
 
-	private attachStreamingToolPanels(message: AssistantMessage): void {
+	private attachStreamingToolActions(message: AssistantMessage): void {
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
 			const repair = getToolCallRepairInfo(content);
-			if (!this.toolPanels.hasActive(content.id)) {
+			if (!this.activeToolCalls.hasActive(content.id)) {
 				this.attachToolExecutionComponent(content.name, content.id, content.arguments, repair);
 			} else {
-				const component = this.toolPanels.getActive(content.id);
+				const component = this.activeToolCalls.getActive(content.id);
 				if (component) {
 					component.updateArgs(content.arguments, repair);
 				}
@@ -1885,7 +1821,7 @@ export class InteractiveMode {
 		const update = () => {
 			if (!this.streamingComponent || !this.streamingMessage) return;
 			this.streamingComponent.updateContent(this.streamingMessage);
-			this.attachStreamingToolPanels(this.streamingMessage);
+			this.attachStreamingToolActions(this.streamingMessage);
 			this.lastStreamingUiUpdateAt = performance.now();
 			this.ui.requestRender();
 		};
@@ -1920,8 +1856,12 @@ export class InteractiveMode {
 		protect(this.streamingComponent);
 		protect(this.lastStatusSpacer);
 		protect(this.lastStatusText);
-		for (const [, component] of this.toolPanels.activeEntries()) {
-			protect(component);
+		for (const [, action] of this.activeToolCalls.activeEntries()) {
+			const transcript = children.find(
+				(child): child is ActionTranscriptComponent =>
+					child instanceof ActionTranscriptComponent && child.containsAction(action),
+			);
+			protect(transcript);
 		}
 
 		const trimStart = children[0] === this.liveHistoryHiddenNotice ? 1 : 0;
@@ -2114,7 +2054,7 @@ export class InteractiveMode {
 
 			this.chatContainer = stagingChatContainer;
 			this.resetLiveTuiHistoryTrim();
-			this.clearRenderedToolPanelState();
+			this.clearActiveToolCallState();
 			const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
 			try {
@@ -2163,7 +2103,7 @@ export class InteractiveMode {
 										errorMessage = message.errorMessage || "Error";
 									}
 									component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-									this.toolPanels.finish(content.id);
+									this.activeToolCalls.finish(content.id);
 								} else {
 									renderedPendingTools.set(content.id, component);
 								}
@@ -2175,7 +2115,7 @@ export class InteractiveMode {
 						if (component) {
 							component.updateResult(message);
 							renderedPendingTools.delete(message.toolCallId);
-							this.toolPanels.finish(message.toolCallId);
+							this.activeToolCalls.finish(message.toolCallId);
 						}
 					} else {
 						// All other messages use standard rendering
@@ -2456,6 +2396,14 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private setTranscriptActionsExpanded(expanded: boolean): void {
+		this.transcriptActionsExpanded = expanded;
+		for (const child of this.chatContainer.children) {
+			if (child instanceof ActionTranscriptComponent) child.setTranscriptExpanded(expanded);
+		}
+		this.ui.requestRender();
+	}
+
 	private async toggleThinkingBlockVisibility(): Promise<void> {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
@@ -2469,10 +2417,10 @@ export class InteractiveMode {
 			this.streamingComponent.updateContent(this.streamingMessage);
 			this.updateRuntimeStatus(this.streamingMessage);
 			this.chatContainer.addChild(this.streamingComponent);
-			// Rebuilding the chat clears the rendered tool-panel registry. Reattach
+			// Rebuilding the chat clears active call identity. Reattach
 			// any tool calls that are still arriving so toggling thinking visibility
 			// cannot make an in-flight tool disappear from the TUI.
-			this.attachStreamingToolPanels(this.streamingMessage);
+			this.attachStreamingToolActions(this.streamingMessage);
 		}
 
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);

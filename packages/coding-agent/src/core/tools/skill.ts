@@ -50,7 +50,6 @@ export function createSkillVaultToolDefinition(vault: SkillVaultController): Too
 	return {
 		name: "skill",
 		label: "Skill",
-		toolGroup: "skills",
 		description:
 			"Skill vault, up to 3 concurrent skills under one byte budget. Specialist guidance useful: search, load exact name before work. Load may evict the oldest-loaded unpinned skill and reports it; pin protects up to 2 task-critical skills from eviction (they still expire idle). Host injects bodies transiently starting next request, expires idle; unload one name or all.",
 		promptSnippet: "Search/load skill.",

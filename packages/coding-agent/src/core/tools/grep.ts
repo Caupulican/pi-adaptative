@@ -429,7 +429,6 @@ export function createGrepToolDefinition(
 			"Use narrowest known root/glob; discover paths first. Never repeatedly scan repo/home/filesystem.",
 		],
 		parameters: grepSchema,
-		toolGroup: "explore",
 		async execute(
 			toolCallId,
 			{

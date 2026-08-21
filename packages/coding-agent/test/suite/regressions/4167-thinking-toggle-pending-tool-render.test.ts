@@ -4,8 +4,9 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@caupulican/pi-
 import { Container, Text, type TUI } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
-import { ToolPanelRegistry } from "../../../src/modes/interactive/components/tool-panel-registry.ts";
+import { ActionTranscriptComponent } from "../../../src/modes/interactive/components/action-transcript.ts";
+import { ActiveToolCallRegistry } from "../../../src/modes/interactive/components/active-tool-call-registry.ts";
+import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
@@ -29,7 +30,7 @@ const EMPTY_USAGE: Usage = {
 };
 
 type RenderSessionContextThis = {
-	toolPanels: ToolPanelRegistry;
+	activeToolCalls: ActiveToolCallRegistry;
 	chatContainer: Container;
 	footer: { invalidate(): void };
 	ui: TUI;
@@ -40,14 +41,14 @@ type RenderSessionContextThis = {
 	sessionManager: { getCwd(): string };
 	session: { retryAttempt: number };
 	toolOutputExpanded: boolean;
+	transcriptActionsExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
-	appendToolExecutionComponent(component: ToolExecutionComponent, allowGrouping: boolean): void;
+	appendTranscriptAction(component: ToolExecutionComponent): void;
 	attachToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
-	getToolPanelScope(): { sessionId?: string; sessionFile?: string; cwd: string };
-	clearRenderedToolPanelState(): void;
+	clearActiveToolCallState(): void;
 };
 
 type RenderSessionContext = (
@@ -60,10 +61,10 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
-	const toolPanels = new ToolPanelRegistry();
+	const activeToolCalls = new ActiveToolCallRegistry();
 	const proto = InteractiveMode.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
 	return {
-		toolPanels,
+		activeToolCalls,
 		chatContainer,
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
@@ -74,6 +75,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		sessionManager: { getCwd: () => process.cwd() },
 		session: { retryAttempt: 0 },
 		toolOutputExpanded: false,
+		transcriptActionsExpanded: false,
 		isInitialized: true,
 		renderGeneration: 0,
 		liveHistoryHiddenNotice: undefined,
@@ -85,15 +87,12 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		addMessageToChat(this: RenderSessionContextThis, message: AgentMessage) {
 			this.chatContainer.addChild(new Text(message.role, 0, 0));
 		},
-		appendToolExecutionComponent(this: RenderSessionContextThis, component: ToolExecutionComponent) {
-			this.chatContainer.addChild(component);
-		},
+		appendTranscriptAction: proto.appendTranscriptAction,
 		attachToolExecutionComponent: (
 			InteractiveMode.prototype as unknown as {
 				attachToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
 			}
 		).attachToolExecutionComponent,
-		getToolPanelScope: () => ({ cwd: process.cwd() }),
 		resetLiveTuiHistoryTrim: proto.resetLiveTuiHistoryTrim,
 		trimLiveTuiHistory: proto.trimLiveTuiHistory,
 		messagesForTuiHistoryReload: proto.messagesForTuiHistoryReload,
@@ -104,8 +103,8 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		getMessageTuiText: proto.getMessageTuiText,
 		getContentText: proto.getContentText,
 		getUserMessageText: proto.getUserMessageText,
-		clearRenderedToolPanelState() {
-			toolPanels.clearAll();
+		clearActiveToolCallState() {
+			activeToolCalls.clearActive();
 		},
 	} as unknown as RenderSessionContextThis;
 }
@@ -167,7 +166,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 
 		await renderSessionContext.call(fakeThis, createSessionContext([createAssistantToolCallMessage()]));
 
-		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(true);
+		expect(fakeThis.activeToolCalls.hasActive(TOOL_CALL_ID)).toBe(true);
 
 		await handleEvent.call(fakeThis, {
 			type: "tool_execution_end",
@@ -177,12 +176,12 @@ describe("InteractiveMode.renderSessionContext", () => {
 			isError: false,
 		});
 
-		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(false);
+		expect(fakeThis.activeToolCalls.hasActive(TOOL_CALL_ID)).toBe(false);
 		expect(renderChat(fakeThis.chatContainer)).not.toContain("FINAL_RESULT");
-		const panel = fakeThis.chatContainer.children.find(
-			(component): component is ToolExecutionComponent => component instanceof ToolExecutionComponent,
+		const transcript = fakeThis.chatContainer.children.find(
+			(component): component is ActionTranscriptComponent => component instanceof ActionTranscriptComponent,
 		);
-		panel?.setExpanded(true);
+		transcript?.setTranscriptExpanded(true);
 		expect(renderChat(fakeThis.chatContainer)).toContain("FINAL_RESULT");
 	});
 
@@ -197,12 +196,12 @@ describe("InteractiveMode.renderSessionContext", () => {
 			createSessionContext([createAssistantToolCallMessage(), createToolResultMessage("HISTORICAL_RESULT")]),
 		);
 
-		expect(fakeThis.toolPanels.hasActive(TOOL_CALL_ID)).toBe(false);
+		expect(fakeThis.activeToolCalls.hasActive(TOOL_CALL_ID)).toBe(false);
 		expect(renderChat(fakeThis.chatContainer)).not.toContain("HISTORICAL_RESULT");
-		const panel = fakeThis.chatContainer.children.find(
-			(component): component is ToolExecutionComponent => component instanceof ToolExecutionComponent,
+		const transcript = fakeThis.chatContainer.children.find(
+			(component): component is ActionTranscriptComponent => component instanceof ActionTranscriptComponent,
 		);
-		panel?.setExpanded(true);
+		transcript?.setTranscriptExpanded(true);
 		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");
 	});
 });

@@ -19,12 +19,11 @@ import type {
 	SettingsManager,
 	SettingsScope,
 } from "../../core/settings-manager.ts";
+import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
-import { ToolExecutionComponent } from "./components/tool-execution.ts";
-import { ToolGroupComponent } from "./components/tool-group.ts";
 import { getAvailableThemes, setTheme } from "./theme/theme.ts";
 
 export interface SettingsSelectorHost {
@@ -148,7 +147,7 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				onShowImagesChange: (enabled) => {
 					host.settingsManager.setShowImages(enabled);
 					for (const child of host.chatContainer.children) {
-						if (child instanceof ToolExecutionComponent || child instanceof ToolGroupComponent) {
+						if (child instanceof ActionTranscriptComponent) {
 							child.setShowImages(enabled);
 						}
 					}
@@ -157,7 +156,7 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				onImageWidthCellsChange: (width) => {
 					host.settingsManager.setImageWidthCells(width);
 					for (const child of host.chatContainer.children) {
-						if (child instanceof ToolExecutionComponent || child instanceof ToolGroupComponent) {
+						if (child instanceof ActionTranscriptComponent) {
 							child.setImageWidthCells(width);
 						}
 					}

@@ -255,7 +255,6 @@ function createLazyToolDefinition(
 		promptGuidelines: Array.isArray(manifest.promptGuidelines)
 			? manifest.promptGuidelines.filter((item): item is string => typeof item === "string")
 			: undefined,
-		toolGroup: typeof manifest.toolGroup === "string" ? manifest.toolGroup : undefined,
 		executionMode:
 			manifest.executionMode === "parallel" || manifest.executionMode === "sequential"
 				? manifest.executionMode
@@ -422,7 +421,6 @@ interface LazyToolManifest {
 	parameters?: unknown;
 	promptSnippet?: unknown;
 	promptGuidelines?: unknown;
-	toolGroup?: unknown;
 	executionMode?: unknown;
 	/** Optional extension entry this tool belongs to when a package declares multiple entries. */
 	extension?: unknown;

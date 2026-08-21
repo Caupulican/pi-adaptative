@@ -2,8 +2,8 @@ import type { TUI } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTaskStepsState } from "../src/core/tasks/task-state.ts";
 import { createTaskStepsToolDefinition } from "../src/core/tools/task-steps.ts";
+import { ActionTranscriptComponent } from "../src/modes/interactive/components/action-transcript.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
-import { ToolGroupComponent } from "../src/modes/interactive/components/tool-group.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -39,14 +39,14 @@ describe("orchestration history collapse", () => {
 			});
 
 			expect(component.render(100)).toEqual([]);
-			const group = new ToolGroupComponent("task_steps", [component]);
+			const group = new ActionTranscriptComponent([component]);
 			const collapsed = stripAnsi(group.render(100).join("\n"));
-			expect(collapsed).toContain("1 Task Step");
+			expect(collapsed).toContain("Performed 1 action");
 			expect(collapsed).not.toContain("task_steps");
 			expect(collapsed).not.toContain("[task steps] list");
 			expect(collapsed).not.toContain("No tracked steps.");
 
-			group.setExpanded(true);
+			group.setTranscriptExpanded(true);
 			expect(stripAnsi(group.render(100).join("\n"))).toContain("[task steps] list");
 		}
 	});

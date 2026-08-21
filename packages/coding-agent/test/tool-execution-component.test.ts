@@ -1,22 +1,15 @@
 import { join, resolve } from "node:path";
-import { setKeybindings, Text, type TUI, visibleWidth } from "@caupulican/pi-tui";
+import { setKeybindings, Text, type TUI } from "@caupulican/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
-import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createAllToolDefinitions } from "../src/core/tools/index.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
-import { ToolGroupComponent } from "../src/modes/interactive/components/tool-group.ts";
-import {
-	getToolPanelActionKey,
-	getToolPanelResultActionKeys,
-	ToolPanelRegistry,
-} from "../src/modes/interactive/components/tool-panel-registry.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -113,51 +106,6 @@ describe("ToolExecutionComponent parity", () => {
 		}
 	});
 
-	test("resets timing when a reusable panel starts a new invocation", () => {
-		const now = vi.spyOn(performance, "now");
-		const component = new ToolExecutionComponent(
-			"first_tool",
-			"timed-first",
-			{},
-			{},
-			createBaseToolDefinition("first_tool"),
-			createFakeTui(),
-			process.cwd(),
-		);
-		now.mockReturnValue(100);
-		component.markExecutionStarted();
-		now.mockReturnValue(300);
-		component.updateResult({ content: [], isError: false });
-		expect(stripAnsi(component.render(120).join("\n"))).toContain("Took 200ms");
-
-		component.resetInvocation("second_tool", "timed-second", {}, createBaseToolDefinition("second_tool"));
-		expect(stripAnsi(component.render(120).join("\n"))).not.toMatch(/Elapsed|Took/);
-		now.mockReturnValue(1_000);
-		component.markExecutionStarted();
-		now.mockReturnValue(1_000.4);
-		component.updateResult({ content: [], isError: false });
-		expect(stripAnsi(component.render(120).join("\n"))).toContain("Took <1ms");
-	});
-
-	test("keeps timing visible in collapsed grouped tool summaries", () => {
-		const now = vi.spyOn(performance, "now");
-		const component = new ToolExecutionComponent(
-			"summary_tool",
-			"timed-summary",
-			{},
-			{},
-			{ ...createBaseToolDefinition("summary_tool"), toolGroup: "summary" },
-			createFakeTui(),
-			process.cwd(),
-		);
-		now.mockReturnValue(100);
-		component.markExecutionStarted();
-		now.mockReturnValue(223);
-		component.updateResult({ content: [], isError: false });
-
-		expect(stripAnsi(component.renderCallSummary(120).join("\n"))).toContain("Took 123ms · [Summary Tool]");
-	});
-
 	test("does not schedule a timer per running tool", () => {
 		vi.useFakeTimers();
 		try {
@@ -210,97 +158,6 @@ describe("ToolExecutionComponent parity", () => {
 		expect((recreated as unknown as { builtInToolDefinition?: unknown }).builtInToolDefinition).not.toBe(
 			firstDefinition,
 		);
-	});
-
-	test("session-scoped tool panel keys isolate tenants", () => {
-		const first = getToolPanelActionKey({ sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" }, "read", {
-			path: "README.md",
-		});
-		const second = getToolPanelActionKey({ sessionId: "b", sessionFile: "/tmp/b.jsonl", cwd: "/repo" }, "read", {
-			path: "README.md",
-		});
-		const sameSessionOtherFile = getToolPanelActionKey(
-			{ sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" },
-			"read",
-			{ path: "CHANGELOG.md" },
-		);
-		expect(first).toBeDefined();
-		expect(second).toBeDefined();
-		expect(sameSessionOtherFile).toBeDefined();
-		expect(first).not.toEqual(second);
-		expect(first).not.toEqual(sameSessionOtherFile);
-	});
-
-	test("background_script status reuses the start panel by job name", () => {
-		const scope = { sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" };
-		const start = getToolPanelActionKey(scope, "background_script", {
-			action: "start",
-			name: "build-watch",
-		});
-		const status = getToolPanelActionKey(scope, "background_script", {
-			action: "status",
-			id: "build-watch",
-		});
-		const logs = getToolPanelActionKey(scope, "background_script", {
-			action: "logs",
-			id: "build-watch",
-		});
-
-		expect(start).toBeDefined();
-		expect(status).toEqual(start);
-		expect(logs).toEqual(start);
-		expect(getToolPanelActionKey(scope, "background_script", { action: "list" })).toBeUndefined();
-	});
-
-	test("background_script in-place reuse supersedes earlier active calls for the same job", () => {
-		const scope = { sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" };
-		const key = getToolPanelActionKey(scope, "background_script", { action: "start", name: "build-watch" });
-		expect(key).toBeDefined();
-		const registry = new ToolPanelRegistry();
-		const panel = new ToolExecutionComponent(
-			"background_script",
-			"tool-script-1",
-			{ action: "start", name: "build-watch" },
-			{},
-			createBaseToolDefinition("background_script"),
-			createFakeTui(),
-			process.cwd(),
-		);
-
-		registry.register("tool-script-1", panel, key);
-		expect(registry.getReusable(key)).toBeUndefined();
-		expect(registry.getReusable(key, { allowActive: true })).toBe(panel);
-
-		registry.replaceActiveForAction("tool-script-2", panel, key as string);
-
-		expect(registry.getActive("tool-script-1")).toBeUndefined();
-		expect(registry.getActive("tool-script-2")).toBe(panel);
-	});
-
-	test("background_script result aliases allow status by generated job id to reuse the start panel", () => {
-		const scope = { sessionId: "a", sessionFile: "/tmp/a.jsonl", cwd: "/repo" };
-		const startKey = getToolPanelActionKey(scope, "background_script", { action: "start", name: "build-watch" });
-		const statusKey = getToolPanelActionKey(scope, "background_script", { action: "status", id: "job-123" });
-		const aliases = getToolPanelResultActionKeys(scope, "background_script", {
-			details: { job: { id: "job-123", name: "build-watch" } },
-		});
-		const registry = new ToolPanelRegistry();
-		const panel = new ToolExecutionComponent(
-			"background_script",
-			"tool-script-1",
-			{ action: "start", name: "build-watch" },
-			{},
-			createBaseToolDefinition("background_script"),
-			createFakeTui(),
-			process.cwd(),
-		);
-
-		registry.register("tool-script-1", panel, startKey);
-		registry.finish("tool-script-1");
-		registry.registerAliases(panel, aliases);
-
-		expect(statusKey).toBeDefined();
-		expect(registry.getReusable(statusKey)).toBe(panel);
 	});
 
 	test("stacks custom call and result renderers after output expansion", () => {
@@ -664,240 +521,6 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).not.toContain("learning_auto_learn_state");
 	});
 
-	test("can reset a reusable tool panel to the latest invocation", () => {
-		const firstDefinition: ToolDefinition = { ...createBaseToolDefinition("first_tool"), label: "First Tool" };
-		const secondDefinition: ToolDefinition = { ...createBaseToolDefinition("second_tool"), label: "Second Tool" };
-		const component = new ToolExecutionComponent(
-			"first_tool",
-			"tool-reset-1",
-			{ path: "first.txt" },
-			{},
-			firstDefinition,
-			createFakeTui(),
-			process.cwd(),
-		);
-		component.updateResult({ content: [{ type: "text", text: "first result" }], details: {}, isError: false }, false);
-		component.setExpanded(true);
-
-		component.resetInvocation("second_tool", "tool-reset-2", { path: "second.txt" }, secondDefinition);
-		component.updateResult(
-			{ content: [{ type: "text", text: "second result" }], details: {}, isError: false },
-			false,
-		);
-
-		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("Second Tool");
-		expect(rendered).toContain("second result");
-		expect(rendered).not.toContain("First Tool");
-		expect(rendered).not.toContain("first result");
-	});
-
-	test("assigns default tool groups from tool names", () => {
-		const component = new ToolExecutionComponent(
-			"custom_tool",
-			"tool-default-group",
-			{},
-			{},
-			createBaseToolDefinition("custom_tool"),
-			createFakeTui(),
-			process.cwd(),
-		);
-		expect(component.toolGroup).toBe("custom_tool");
-
-		component.resetInvocation("second_tool", "tool-default-group-reset", {}, createBaseToolDefinition("second_tool"));
-		expect(component.toolGroup).toBe("second_tool");
-	});
-
-	test("allows explicit blank tool group opt-out", () => {
-		const component = new ToolExecutionComponent(
-			"custom_tool",
-			"tool-blank-group",
-			{},
-			{},
-			{ ...createBaseToolDefinition("custom_tool"), toolGroup: "" },
-			createFakeTui(),
-			process.cwd(),
-		);
-		expect(component.toolGroup).toBeUndefined();
-	});
-
-	test("removes tools from grouped components for reusable panel relocation", () => {
-		const first = new ToolExecutionComponent(
-			"custom_tool",
-			"tool-group-first",
-			{},
-			{},
-			createBaseToolDefinition("custom_tool"),
-			createFakeTui(),
-			process.cwd(),
-		);
-		const second = new ToolExecutionComponent(
-			"custom_tool",
-			"tool-group-second",
-			{},
-			{},
-			createBaseToolDefinition("custom_tool"),
-			createFakeTui(),
-			process.cwd(),
-		);
-		const group = new ToolGroupComponent("custom_tool", [first, second]);
-
-		expect(group.getToolCount()).toBe(2);
-		expect(group.removeTool(first)).toBe(true);
-		expect(group.getToolCount()).toBe(1);
-		expect(group.getOnlyTool()).toBe(second);
-		expect(group.removeTool(first)).toBe(false);
-		expect(group.removeTool(second)).toBe(true);
-		expect(group.getToolCount()).toBe(0);
-	});
-
-	test("renders grouped call summaries without result output", () => {
-		const toolDefinition: ToolDefinition = {
-			...createBaseToolDefinition("summary_tool"),
-			label: "Summary Tool",
-			toolGroup: "summary",
-		};
-		const component = new ToolExecutionComponent(
-			"summary_tool",
-			"tool-summary",
-			{ foo: "bar" },
-			{},
-			toolDefinition,
-			createFakeTui(),
-			process.cwd(),
-		);
-		component.updateResult(
-			{ content: [{ type: "text", text: "hidden grouped result" }], details: {}, isError: false },
-			false,
-		);
-		const summary = stripAnsi(component.renderCallSummary(120).join("\n"));
-		expect(summary).toContain("Summary Tool");
-		expect(summary).not.toContain("hidden grouped result");
-	});
-
-	test("collapsed task and skill groups use human nouns instead of raw tool ids", () => {
-		const steps = new ToolExecutionComponent(
-			"task_steps",
-			"tool-steps-1",
-			{ action: "list" },
-			{},
-			{ ...createBaseToolDefinition("task_steps"), label: "Task Steps" },
-			createFakeTui(),
-			process.cwd(),
-		);
-		const skill = new ToolExecutionComponent(
-			"skill",
-			"tool-skill-1",
-			{ action: "status" },
-			{},
-			{ ...createBaseToolDefinition("skill"), label: "Skill", toolGroup: "skills" },
-			createFakeTui(),
-			process.cwd(),
-		);
-		const audit = new ToolExecutionComponent(
-			"skill_audit",
-			"tool-skill-2",
-			{ draftName: "x", draftDescription: "y", draftBody: "z" },
-			{},
-			createAllToolDefinitions(process.cwd()).skill_audit,
-			createFakeTui(),
-			process.cwd(),
-		);
-
-		const stepText = stripAnsi(new ToolGroupComponent("task_steps", [steps]).render(100).join("\n"));
-		expect(stepText).toContain("1 Task Step");
-		expect(stepText).not.toContain("task_steps");
-
-		const skillText = stripAnsi(new ToolGroupComponent("skills", [skill, audit]).render(100).join("\n"));
-		expect(skillText).toContain("2 Skills");
-		expect(skillText).not.toContain("skill_audit");
-		expect(skill.toolGroup).toBe("skills");
-		expect(audit.toolGroup).toBe("skills");
-	});
-
-	test("collapsed file group shows counts, a short file list, and only the last success", () => {
-		const paths = ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"];
-		const components = paths.map((path, index) => {
-			const component = new ToolExecutionComponent(
-				"edit",
-				`tool-files-${index}`,
-				{ path, edits: [{ oldText: "x", newText: "y" }] },
-				{},
-				createEditToolDefinition(process.cwd()),
-				createFakeTui(),
-				process.cwd(),
-			);
-			component.updateResult({ content: [{ type: "text", text: "ok" }], details: {}, isError: false }, false);
-			return component;
-		});
-		const group = new ToolGroupComponent("files", components);
-		const text = stripAnsi(group.render(120).join("\n"));
-		const contentLines = text.split("\n").filter((line) => line.trim().length > 0);
-
-		expect(text).toContain("4 edits");
-		expect(text).toContain("4 files");
-		expect(text).toContain("src/a.ts, src/b.ts, src/c.ts, +1");
-		expect(text).toContain("last:");
-		expect(text).toContain("src/d.ts");
-		expect(text).toContain("to expand");
-		expect(contentLines.length).toBeLessThanOrEqual(4);
-		expect(text).not.toContain("ok");
-	});
-
-	test("collapses a pending Bash command to one status counter within render width", () => {
-		const command = `printf 'WSL_ADDRS\n'; ip -4 -o addr show scope global | sed 's/\\// /g' || true
-printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } | Select-Object InterfaceAlias,IPAddress,PrefixLength | Format-Table -AutoSize" 2>/dev/null | tr -d '\r' || true`;
-		const component = new ToolExecutionComponent(
-			"bash",
-			"tool-group-long-bash",
-			{ command, timeout: 15 },
-			{},
-			createBashToolDefinition(process.cwd()),
-			createFakeTui(),
-			process.cwd(),
-		);
-		const group = new ToolGroupComponent("bash", [component]);
-
-		const lines = group.render(112);
-
-		const rendered = stripAnsi(lines.join("\n"));
-		expect(rendered).toContain("Running 1 command");
-		expect(rendered).toContain("ctrl+t to view transcript");
-		expect(rendered).not.toContain("WSL_ADDRS");
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(112);
-		}
-	});
-
-	test("collapses active grouped npm version checks to one counter within render width", () => {
-		const firstCommand = `npm view @caupulican/pi-ai versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-agent-core versions --json | tail -c 1000 && printf '\n---\n' && npm view @caupulican/pi-tui versions --json | tail -c 1000`;
-		const secondCommand = `cd /workspace/pi-adaptative && npm view @caupulican/pi-adaptative@0.80.2 dependencies --json && printf '\n---dist-tags---\n' && npm view @caupulican/pi-adaptative dist-tags --json`;
-		const components = [firstCommand, secondCommand].map(
-			(command, index) =>
-				new ToolExecutionComponent(
-					"bash",
-					`tool-group-npm-version-${index}`,
-					{ command, timeout: 60 },
-					{},
-					createBashToolDefinition(process.cwd()),
-					createFakeTui(),
-					process.cwd(),
-				),
-		);
-		const group = new ToolGroupComponent("bash", components);
-
-		const lines = group.render(112);
-		const rendered = stripAnsi(lines.join("\n"));
-
-		expect(rendered).toContain("Running 2 commands");
-		expect(rendered).toContain("ctrl+t to view transcript");
-		expect(rendered).not.toContain("$ npm view");
-		expect(rendered).not.toContain("$ cd /workspace/pi-adaptative");
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(112);
-		}
-	});
-
 	test("trims trailing blank display lines from write previews", () => {
 		const component = new ToolExecutionComponent(
 			"write",
@@ -962,8 +585,8 @@ printf '\nWINDOWS_IPV4\n'; powershell.exe -NoProfile -Command "Get-NetIPAddress 
 			});
 			component.setArgsComplete();
 			readsAfterFinalCount = largeCodeUnitReads;
-			component.renderCallSummary(120);
-			component.renderCallSummary(120);
+			component.render(120);
+			component.render(120);
 			rendered = stripAnsi(component.render(120).join("\n"));
 		} finally {
 			Object.defineProperty(String.prototype, "split", {

@@ -15,6 +15,7 @@ export class AssistantMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
+	private visibleOutput = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -49,6 +50,10 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	hasVisibleOutput(): boolean {
+		return this.visibleOutput;
+	}
+
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
@@ -71,6 +76,9 @@ export class AssistantMessageComponent extends Container {
 				(c.type === "text" && c.text.trim()) ||
 				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
 		);
+		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
+		this.visibleOutput =
+			hasVisibleContent || (!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error"));
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -116,7 +124,6 @@ export class AssistantMessageComponent extends Container {
 
 		// Check if aborted - show after partial content
 		// But only if there are no tool calls (tool execution components will show the error)
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
 		this.hasToolCalls = hasToolCalls;
 		if (!hasToolCalls) {
 			if (message.stopReason === "aborted") {

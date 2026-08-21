@@ -6,6 +6,22 @@ import {
 } from "../src/modes/interactive/interactive-event-controller.ts";
 
 describe("InteractiveMode compaction events", () => {
+	test("projects AgentSession warnings into the transient activity lane", async () => {
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			activityLane: { announce: vi.fn() },
+			showWarning: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+		const message = 'Provider tool guideline dropped: guidelines budget exhausted: "..."';
+
+		await handleInteractiveEvent(fakeThis as unknown as InteractiveEventHost, { type: "warning", message });
+
+		expect(fakeThis.activityLane.announce).toHaveBeenCalledWith(message, "warning");
+		expect(fakeThis.showWarning).not.toHaveBeenCalled();
+	});
+
 	test.each([
 		{
 			name: "agent start",

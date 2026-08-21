@@ -453,7 +453,7 @@ export class ActivityLaneComponent implements Component {
 		this.requestRender();
 	}
 
-	announce(label: string, status: "success" | "failure" | "neutral" = "success"): void {
+	announce(label: string, status: "success" | "warning" | "failure" | "neutral" = "success"): void {
 		this.addTransient({ id: "notice", kind: "notice", label: boundedLabel(label), status });
 		this.requestRender();
 	}

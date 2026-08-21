@@ -383,7 +383,7 @@ function buildEditCallComponent(
 	args: RenderableEditArgs | undefined,
 	theme: Theme,
 	cwd: string,
-	options?: { expanded?: boolean; toolGroupSummary?: boolean },
+	options?: { expanded?: boolean },
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
@@ -391,11 +391,6 @@ function buildEditCallComponent(
 	const blockCount = countEditBlocks(args);
 	const blockMeta =
 		blockCount === undefined ? "" : theme.fg("dim", ` · ${blockCount} block${blockCount === 1 ? "" : "s"}`);
-
-	if (options?.toolGroupSummary) {
-		component.addChild(new Text(header, 0, 0));
-		return component;
-	}
 
 	if (!options?.expanded) {
 		component.addChild(new Text(`${header}${blockMeta}`, 0, 0));
@@ -455,7 +450,6 @@ export function createEditToolDefinition(
 	return {
 		name: "edit",
 		label: "edit",
-		toolGroup: "files",
 		description:
 			"Edit existing UTF-8 text in one call. Send path and all edits; after a path-only failure, reuse the returned payloadRef with only the corrected path. The harness preflights, revalidates, and stale-checks every exact replacement.",
 		promptSnippet: "Preflight existing files; apply exact, stale-safe edits",
@@ -706,7 +700,6 @@ export function createEditToolDefinition(
 
 			return buildEditCallComponent(component, args, theme, context.cwd, {
 				expanded: context.expanded,
-				toolGroupSummary: context.toolGroupSummary,
 			});
 		},
 		renderResult(result, options, theme, context) {
@@ -735,7 +728,6 @@ export function createEditToolDefinition(
 						context.cwd,
 						{
 							expanded: context.expanded,
-							toolGroupSummary: context.toolGroupSummary,
 						},
 					);
 				}

@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed extension `toolGroup` and `toolGroupSummary` rendering hooks; every model tool invocation now follows the native action-transcript contract.
+
+### Changed
+
+- Replaced Bash, file, skill, goal, task, worker, and extension-specific collapsed cards with one append-only `Performing N actions` / `Performed N actions` row. Main-chat actions stay collapsed; their only detailed projection opens through Ctrl+T.
+
+### Fixed
+
+- Kept repeated calls as distinct transcript actions instead of relocating presentation instances, and moved operational session warnings from permanent chat lines to the transient activity lane.
+
 ## [0.93.19] - 2026-08-21
 
 ### Changed

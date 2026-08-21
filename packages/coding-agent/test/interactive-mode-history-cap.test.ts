@@ -1,6 +1,8 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Container, Text } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import { ActionTranscriptComponent } from "../src/modes/interactive/components/action-transcript.ts";
+import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { messagesForTuiHistoryReload } from "../src/modes/interactive/history-reload-math.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -92,7 +94,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 	test("caps live chat component tree to protect redraw FPS", () => {
 		const ctx = Object.create((InteractiveMode as any).prototype);
 		ctx.chatContainer = new Container();
-		ctx.toolPanels = { activeEntries: () => [] };
+		ctx.activeToolCalls = { activeEntries: () => [] };
 		ctx.liveHistoryHiddenNotice = undefined;
 		ctx.liveHistoryHiddenComponents = 0;
 		ctx.lastStatusSpacer = undefined;
@@ -110,14 +112,37 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(ctx.chatContainer.children[0]).toBe(ctx.liveHistoryHiddenNotice);
 	});
 
+	test("retains the transcript owner of an active nested tool call", () => {
+		const activeAction = {
+			setExpanded: () => {},
+		} as unknown as ToolExecutionComponent;
+		const transcript = new ActionTranscriptComponent([activeAction]);
+		const ctx = Object.create((InteractiveMode as any).prototype);
+		ctx.chatContainer = new Container();
+		ctx.activeToolCalls = { activeEntries: () => [["active-call", activeAction]] };
+		ctx.liveHistoryHiddenNotice = undefined;
+		ctx.liveHistoryHiddenComponents = 0;
+		ctx.lastStatusSpacer = undefined;
+		ctx.lastStatusText = undefined;
+		ctx.streamingComponent = undefined;
+
+		for (let i = 0; i < 40; i++) ctx.chatContainer.addChild(new Text(`old-${i}`, 0, 0));
+		ctx.chatContainer.addChild(transcript);
+		for (let i = 0; i < 260; i++) ctx.chatContainer.addChild(new Text(`new-${i}`, 0, 0));
+
+		(InteractiveMode as any).prototype.trimLiveTuiHistory.call(ctx);
+
+		expect(ctx.chatContainer.children).toContain(transcript);
+	});
+
 	test("loads input recall while deferring initial render history", async () => {
 		const ctx = Object.create((InteractiveMode as any).prototype);
 		ctx.chatContainer = new Container();
 		ctx.ui = { requestRender: vi.fn() };
 		ctx.footer = { invalidate: vi.fn() };
 		ctx.updateEditorBorderColor = vi.fn();
-		ctx.clearRenderedToolPanelState = vi.fn();
-		ctx.toolPanels = { activeEntries: () => [] };
+		ctx.clearActiveToolCallState = vi.fn();
+		ctx.activeToolCalls = { activeEntries: () => [] };
 		ctx.editor = { setHistory: vi.fn() };
 		const sessionManager = {
 			getEntryCount: () => 42,
@@ -152,7 +177,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 			ctx.streamingUiUpdateTimer = undefined;
 			ctx.lastStreamingUiUpdateAt = performance.now();
 			ctx.ui = { requestRender: vi.fn() };
-			ctx.toolPanels = { hasActive: () => false, activeEntries: () => [] };
+			ctx.activeToolCalls = { hasActive: () => false, activeEntries: () => [] };
 			ctx.updateRuntimeStatus = vi.fn();
 
 			const first = makeAssistantMessage("first");
@@ -180,10 +205,10 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.ui = { requestRender: vi.fn() };
 		ctx.footer = { invalidate: vi.fn() };
 		ctx.updateEditorBorderColor = vi.fn();
-		ctx.toolPanels = { activeEntries: () => [], hasActive: () => false };
+		ctx.activeToolCalls = { activeEntries: () => [], hasActive: () => false };
 		Object.defineProperty(ctx, "session", { value: { retryAttempt: 0 } });
 		ctx.defaultEditor = { addToHistory: vi.fn() };
-		ctx.clearRenderedToolPanelState = vi.fn();
+		ctx.clearActiveToolCallState = vi.fn();
 		ctx.getMarkdownThemeWithSettings = vi.fn(() => undefined);
 		ctx.renderGeneration = 0;
 		ctx.renderQueue = Promise.resolve();
@@ -238,7 +263,7 @@ describe("InteractiveMode TUI reload history cap", () => {
 		});
 		const deferredComponent = { updateResult: vi.fn() };
 		ctx.attachToolExecutionComponent = vi.fn(() => deferredComponent);
-		ctx.toolPanels = { activeEntries: () => [], hasActive: () => false, finish: vi.fn() };
+		ctx.activeToolCalls = { activeEntries: () => [], hasActive: () => false, finish: vi.fn() };
 
 		await (InteractiveMode as any).prototype.renderSessionContext.call(ctx, {
 			messages: [assistant, toolResult],

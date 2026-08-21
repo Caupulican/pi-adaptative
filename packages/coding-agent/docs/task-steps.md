@@ -86,11 +86,11 @@ Native worker lanes emit terminal handoff notifications and retain bounded resul
 
 ## Native orchestration UI
 
-Interactive sessions render task steps, worker dispatch, and worker status through one shared orchestration panel. The compact tool result shows status and counts first; expanding tool output reveals bounded notes, evidence, changed files, blockers, and untrusted worker claims. Checklist IDs stay out of the collapsed task view.
+Interactive history uses the same action transcript as every other model tool: task, goal, delegation, skill, file, shell, and extension calls contribute once to the adjacent `Performing N actions` / `Performed N actions` row. Tool-specific cards never compete in collapsed history. Ctrl+T opens the transcript with bounded notes, evidence, changed files, blockers, and untrusted worker claims.
 
-While work is open, a host-owned panel below the editor combines the active checklist with queued or running `worker` and `tmux-worker` lanes. It updates from session and terminal-lane events, never by polling output. It disappears when no checklist item or worker is active and survives extension reloads without becoming extension-owned state.
+While work is open, the host-owned activity lane below the editor combines the active checklist with queued or running `worker` and `tmux-worker` lanes. It updates from session and terminal-lane events, never by polling output. It disappears when no checklist item or worker is active and survives extension reloads without becoming extension-owned state.
 
-The visual contract is deliberately restrained for a keyboard-first terminal: semantic theme colors, status glyphs that remain meaningful without color, no animation, no hard frame, bounded rows, and width-safe truncation. Extension widgets still render independently; reloading or clearing them does not remove the native orchestration panel.
+The visual contract is deliberately restrained for a keyboard-first terminal: semantic theme colors, status glyphs that remain meaningful without color, no animation, no hard frame, bounded rows, and width-safe truncation. Extension widgets still render independently; reloading or clearing them does not remove the native activity lane.
 
 ## Persistence and isolation
 

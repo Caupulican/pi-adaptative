@@ -14,7 +14,7 @@ type ToggleThinkingHost = {
 	rebuildChatFromMessages(): Promise<void>;
 	streamingComponent: StreamingMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
-	attachStreamingToolPanels(message: AssistantMessage): void;
+	attachStreamingToolActions(message: AssistantMessage): void;
 	updateRuntimeStatus(message: AssistantMessage): void;
 	chatContainer: Container;
 	showStatus(message: string): void;
@@ -33,14 +33,14 @@ function createStreamingComponent(): StreamingMessageComponent {
 describe("InteractiveMode streaming thinking toggle", () => {
 	let fakeThis: ToggleThinkingHost;
 	let message: AssistantMessage;
-	let toolPanel: Component;
+	let toolAction: Component;
 
 	beforeEach(() => {
 		message = fauxAssistantMessage([
 			{ type: "thinking", thinking: "reasoning" },
 			fauxToolCall("bash", { command: "printf in-flight" }),
 		]);
-		toolPanel = { render: () => [], invalidate: () => {} };
+		toolAction = { render: () => [], invalidate: () => {} };
 		const chatContainer = new Container();
 		fakeThis = {
 			hideThinkingBlock: true,
@@ -48,7 +48,7 @@ describe("InteractiveMode streaming thinking toggle", () => {
 			rebuildChatFromMessages: vi.fn(async () => {}),
 			streamingComponent: createStreamingComponent(),
 			streamingMessage: message,
-			attachStreamingToolPanels: vi.fn(() => chatContainer.addChild(toolPanel)),
+			attachStreamingToolActions: vi.fn(() => chatContainer.addChild(toolAction)),
 			updateRuntimeStatus: vi.fn(),
 			chatContainer,
 			showStatus: vi.fn(),
@@ -60,7 +60,7 @@ describe("InteractiveMode streaming thinking toggle", () => {
 	test("reattaches in-flight tool panels after rebuilding the chat", async () => {
 		await fakeThis.toggleThinkingBlockVisibility.call(fakeThis);
 
-		expect(fakeThis.attachStreamingToolPanels).toHaveBeenCalledWith(message);
-		expect(fakeThis.chatContainer.children).toEqual([fakeThis.streamingComponent, toolPanel]);
+		expect(fakeThis.attachStreamingToolActions).toHaveBeenCalledWith(message);
+		expect(fakeThis.chatContainer.children).toEqual([fakeThis.streamingComponent, toolAction]);
 	});
 });

@@ -140,7 +140,6 @@ export function createLsToolDefinition(
 					]
 				: [],
 		},
-		toolGroup: "explore",
 		async execute(
 			_toolCallId,
 			{ path, limit, metadata }: { path?: string; limit?: number; metadata?: boolean },
