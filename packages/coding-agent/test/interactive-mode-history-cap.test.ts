@@ -153,11 +153,16 @@ describe("InteractiveMode TUI reload history cap", () => {
 			ctx.lastStreamingUiUpdateAt = performance.now();
 			ctx.ui = { requestRender: vi.fn() };
 			ctx.toolPanels = { hasActive: () => false, activeEntries: () => [] };
+			ctx.updateRuntimeStatus = vi.fn();
 
-			(InteractiveMode as any).prototype.applyStreamingMessageUpdate.call(ctx, makeAssistantMessage("first"));
-			(InteractiveMode as any).prototype.applyStreamingMessageUpdate.call(ctx, makeAssistantMessage("second"));
+			const first = makeAssistantMessage("first");
+			const second = makeAssistantMessage("second");
+			(InteractiveMode as any).prototype.applyStreamingMessageUpdate.call(ctx, first);
+			(InteractiveMode as any).prototype.applyStreamingMessageUpdate.call(ctx, second);
 
 			expect(ctx.streamingComponent.updateContent).not.toHaveBeenCalled();
+			expect(ctx.updateRuntimeStatus).toHaveBeenNthCalledWith(1, first);
+			expect(ctx.updateRuntimeStatus).toHaveBeenNthCalledWith(2, second);
 			await vi.advanceTimersByTimeAsync(80);
 
 			expect(ctx.streamingComponent.updateContent).toHaveBeenCalledTimes(1);
