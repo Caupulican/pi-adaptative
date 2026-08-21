@@ -104,14 +104,21 @@ describe("AgentSession background tool tasks", () => {
 			expect(result.content).toEqual([{ type: "text", text: "slow result" }]);
 			expect(result.details).toMatchObject({ taskId: "tool-task-1", status: "completed" });
 
-			const persistedStatuses = harness.sessionManager
-				.getEntries()
-				.flatMap((entry) =>
-					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
-						? [(entry.data as { status?: unknown } | undefined)?.status]
-						: [],
-				);
-			expect(persistedStatuses).toEqual(["running", "completed"]);
+			const persistedTransitions = harness.sessionManager.getEntries().flatMap((entry) =>
+				entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+					? [
+							{
+								status: (entry.data as { status?: unknown } | undefined)?.status,
+								terminalDelivery: (entry.data as { terminalDelivery?: unknown } | undefined)?.terminalDelivery,
+							},
+						]
+					: [],
+			);
+			expect(persistedTransitions).toEqual([
+				{ status: "running", terminalDelivery: undefined },
+				{ status: "completed", terminalDelivery: "pending" },
+				{ status: "completed", terminalDelivery: "delivered" },
+			]);
 		} finally {
 			unsubscribe();
 			releaseSlow?.();
