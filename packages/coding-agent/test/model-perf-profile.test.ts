@@ -241,7 +241,7 @@ describe("model perf profile", () => {
 		});
 	});
 
-	it("estimates the serialized context without materializing one accumulated prompt string", () => {
+	it("estimates the provider-visible context without materializing one accumulated prompt string", () => {
 		let contentReads = 0;
 		const content = {
 			get text() {
@@ -257,7 +257,7 @@ describe("model perf profile", () => {
 		} as unknown as Context;
 		const baseline = JSON.stringify({
 			systemPrompt: context.systemPrompt,
-			messages: context.messages,
+			messages: context.messages.map((message) => ({ role: message.role, content: message.content })),
 			tools: context.tools,
 		});
 		contentReads = 0;
