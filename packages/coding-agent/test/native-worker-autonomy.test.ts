@@ -8,7 +8,7 @@ import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { workerMachinePathRoots } from "../src/core/delegation/worker-machine-scope.ts";
 import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
 import type { DelegateProfileToolDetails } from "../src/core/tools/profile-writer.ts";
-import { createHarness } from "./suite/harness.ts";
+import { createHarness, getMessageText } from "./suite/harness.ts";
 
 function externalWorkspace(parent: string, suffix: string): string {
 	const workspace = join(realpathSync.native(tmpdir()), `${basename(parent)}-${suffix}`);
@@ -229,7 +229,10 @@ describe("native worker autonomy", () => {
 					{ stopReason: "toolUse" },
 				),
 				(context) => {
-					processResult = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
+					processResult = context.messages
+						.filter((message) => message.role === "toolResult")
+						.map(getMessageText)
+						.join("\n");
 					return fauxAssistantMessage('{"summary":"focused workspace complete","status":"completed"}');
 				},
 			]);
