@@ -165,6 +165,44 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(prompt).not.toContain("wildcard profile");
 	});
 
+	it("bounds aggregate constrained guidance while retaining each tool's highest-priority rule", () => {
+		const criticalRule = "AUTHORIZATION: preserve this late tool's highest-priority rule.";
+		const duplicateRule = "Shared safety guidance appears once.";
+		const builder = new SystemPromptBuilder(
+			makeDeps({
+				getToolPromptGuidelines: (name) =>
+					name === "early"
+						? [
+								"EARLY PRIORITY: preserve the first rule.",
+								duplicateRule,
+								...Array.from(
+									{ length: 64 },
+									(_, index) => `early-low-priority-${index}: ${"bounded filler ".repeat(6)}`,
+								),
+							]
+						: [criticalRule, duplicateRule],
+				getModelCapabilityProfile: () => ({
+					class: "lean",
+					contextWindow: 16_384,
+					reasonCode: "test",
+					systemPromptMaxChars: 8_192,
+					backgroundLanesEnabled: false,
+					laneMaxOutputTokens: 2_048,
+				}),
+			}),
+		);
+
+		const prompt = builder.rebuildSystemPrompt(["early", "late"]);
+
+		expect(prompt.length).toBeLessThanOrEqual(8_192);
+		expect(prompt).toContain("EARLY PRIORITY");
+		expect(prompt).toContain(criticalRule);
+		expect(prompt.match(new RegExp(duplicateRule, "g"))).toHaveLength(1);
+		expect(prompt).not.toContain("early-low-priority-63");
+		expect(prompt).toContain("Ask before destructive actions");
+		expect(prompt).toContain("explicit human approval required");
+	});
+
 	it.each(["lean", "minimal"] as const)(
 		"teaches the world-cursor retry rule to the %s execution profile",
 		(capabilityClass) => {

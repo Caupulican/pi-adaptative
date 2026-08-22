@@ -18,7 +18,11 @@ import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
-import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
+import {
+	enforceModelCapabilitySystemPromptBudget,
+	MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS,
+	type ModelCapabilityProfile,
+} from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
 import { DELEGATION_DECISION_RULE } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
@@ -76,6 +80,41 @@ export function collectSelfModificationSourceCandidates(settings: {
 	const legacyCandidate = settings.sourcePath?.trim();
 	if (legacyCandidate) candidates.push(legacyCandidate);
 	return candidates;
+}
+
+/**
+ * Constrained profiles admit tool guidance in priority rounds: every tool's first rule is
+ * considered before any tool's second. Tool definitions already list mandatory guidance first;
+ * this prevents an early verbose tool from starving a later security or authorization rule.
+ */
+function collectPromptGuidelines(
+	groups: readonly (readonly string[])[],
+	maxRenderedChars: number | undefined,
+): string[] {
+	if (maxRenderedChars === undefined) return groups.flat();
+
+	const accepted: string[] = [];
+	const seen = new Set<string>();
+	let renderedChars = 0;
+	for (let priority = 0; ; priority++) {
+		let foundCandidate = false;
+		for (const group of groups) {
+			const guideline = group[priority]?.trim();
+			if (!guideline) continue;
+			foundCandidate = true;
+			if (seen.has(guideline)) continue;
+			seen.add(guideline);
+
+			// "- " plus the separating newline. Charging three for the first bullet too is a
+			// conservative upper bound and keeps the policy independent of renderer position.
+			const candidateChars = guideline.length + 3;
+			if (renderedChars + candidateChars > maxRenderedChars) continue;
+			accepted.push(guideline);
+			renderedChars += candidateChars;
+		}
+		if (!foundCandidate) break;
+	}
+	return accepted;
 }
 
 export class SystemPromptBuilder {
@@ -231,7 +270,7 @@ export class SystemPromptBuilder {
 		const modelCapability = this.deps.getModelCapabilityProfile();
 		const validToolNames = toolNames.filter((name) => this.deps.hasTool(name));
 		const toolSnippets: Record<string, string> = {};
-		const promptGuidelines: string[] = [];
+		const promptGuidelineGroups: string[][] = [];
 		for (const name of validToolNames) {
 			const snippet = this.deps.getToolPromptSnippet(name);
 			if (snippet) {
@@ -239,10 +278,14 @@ export class SystemPromptBuilder {
 			}
 
 			const toolGuidelines = this.deps.getToolPromptGuidelines(name);
-			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
+			if (toolGuidelines && toolGuidelines.length > 0) {
+				promptGuidelineGroups.push(toolGuidelines);
 			}
 		}
+		const promptGuidelines = collectPromptGuidelines(
+			promptGuidelineGroups,
+			MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS[modelCapability.class],
+		);
 
 		const loaderSystemPrompt = this.deps.getResourceLoader().getSystemPrompt();
 		const loaderAppendSystemPrompt = this.deps.getResourceLoader().getAppendSystemPrompt();

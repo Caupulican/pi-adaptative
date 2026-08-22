@@ -50,6 +50,19 @@ export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapa
 	chat: 2_048,
 };
 
+/**
+ * Aggregate rendered budget for tool-guideline bullets. Individual tool definitions retain their
+ * own prose bound; constrained profiles additionally need one cross-tool ceiling so platform-only
+ * guidance cannot overflow the stable system-prompt envelope. The builder admits one rule per tool
+ * before lower-priority rules, preserving each tool owner's first-rule priority convention.
+ */
+export const MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS: Readonly<Record<ModelCapabilityClass, number | undefined>> = {
+	full: undefined,
+	lean: 3_072,
+	minimal: 1_536,
+	chat: 0,
+};
+
 export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"delegate",
 	"context_audit",

@@ -1,5 +1,6 @@
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
+import { DELEGATION_DECISION_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const DELEGATION_POLICY_HEADING = "PI DELEGATION";
@@ -44,6 +45,9 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 				model.thinkingLevelMap = { max: "max", ultra: "max" };
 				harness.session.setThinkingLevel("ultra");
 				expect(harness.session.systemPrompt).not.toContain(DELEGATION_POLICY_HEADING);
+				expect(harness.session.systemPrompt).not.toContain(DELEGATION_DECISION_RULE);
+				expect(harness.session.systemPrompt).not.toContain("Parent owns integration, verification");
+				expect(harness.session.systemPrompt).not.toContain("Delegate independent work within host bounds");
 			}
 		} finally {
 			disabledHarness.cleanup();

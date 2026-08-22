@@ -192,17 +192,22 @@ describe("model capability auto-detection", () => {
 		try {
 			const fullSet = harness.session.getActiveToolNames();
 			expect(fullSet).toContain("goal");
-			const delegateSnippet = "Coordinate persistent workers with bounded authority.";
+			const delegateSnippet =
+				"Delegate useful independent research, implementation, tests, or specialist review early";
 			expect(harness.session.systemPrompt).toContain(delegateSnippet);
+			expect(harness.session.systemPrompt).toContain("Parent owns integration, verification");
 
 			await harness.session.setModel(harness.getModel("small-model")!);
 			expect(harness.session.getActiveToolNames()).toEqual(MINIMAL_ACTIVE_TOOL_NAMES);
 			expect(harness.session.systemPrompt).not.toContain(delegateSnippet);
+			expect(harness.session.systemPrompt).not.toContain("Parent owns integration, verification");
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 
 			await harness.session.setModel(harness.getModel("big-model")!);
 			expect(harness.session.getActiveToolNames()).toEqual(fullSet);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative: self-evolving assistant\./);
+			expect(harness.session.systemPrompt).toContain(delegateSnippet);
+			expect(harness.session.systemPrompt).toContain("Parent owns integration, verification");
 		} finally {
 			harness.cleanup();
 		}
