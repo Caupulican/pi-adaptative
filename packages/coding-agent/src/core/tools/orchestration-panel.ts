@@ -1,7 +1,8 @@
 import type { Component } from "@caupulican/pi-tui";
-import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@caupulican/pi-tui";
 import { renderTitleBadge, type TitleBadgeStatus } from "../../modes/interactive/components/tool-title.ts";
 import type { Theme, ThemeColor } from "../../modes/interactive/theme/theme.ts";
+import type { GoalEvidenceRef, Requirement } from "../goals/goal-state.ts";
 import type { TaskStep } from "../tasks/task-state.ts";
 
 export type OrchestrationRowStatus =
@@ -43,6 +44,10 @@ export interface OrchestrationPanelModel {
 	notices?: readonly OrchestrationPanelNotice[];
 	emptyText?: string;
 	hiddenRowCount?: number;
+	/** Full context shown beneath the title. Detailed inspector surfaces wrap this instead of truncating it. */
+	description?: string;
+	/** Preserve complete row/detail text across wrapped lines. Compact tool surfaces keep the legacy one-line form. */
+	wrapRows?: boolean;
 }
 
 interface RowStyle {
@@ -77,6 +82,39 @@ const NOTICE_STYLES: Record<OrchestrationPanelNotice["status"], { icon: string; 
 	error: { icon: "×", color: "error" },
 };
 
+export function goalRequirementPanelRow(requirement: Requirement): OrchestrationPanelRow {
+	return {
+		status:
+			requirement.status === "satisfied" ? "completed" : requirement.status === "blocked" ? "blocked" : "pending",
+		label: requirement.text,
+		section: "Requirements",
+		meta: [
+			requirement.id,
+			requirement.evidenceIds.length > 0 ? `${requirement.evidenceIds.length} evidence` : undefined,
+			requirement.boundLaneId ? `worker: ${requirement.boundLaneId}` : undefined,
+		].filter((value): value is string => value !== undefined),
+		details: [
+			requirement.blockedReason ? `blocked: ${requirement.blockedReason}` : undefined,
+			requirement.dependencies?.length ? `depends on: ${requirement.dependencies.join(", ")}` : undefined,
+			requirement.evidenceIds.length ? `evidence: ${requirement.evidenceIds.join(", ")}` : undefined,
+		].filter((value): value is string => value !== undefined),
+	};
+}
+
+export function goalEvidencePanelRow(evidence: GoalEvidenceRef): OrchestrationPanelRow {
+	return {
+		status: "reviewed",
+		label: evidence.summary,
+		section: "Evidence",
+		meta: [
+			evidence.id,
+			evidence.kind,
+			evidence.verified === true ? "verified" : evidence.verified === false ? "unverified" : undefined,
+		].filter((value): value is string => value !== undefined),
+		details: evidence.uri ? [`source: ${evidence.uri}`] : undefined,
+	};
+}
+
 export function taskStepPanelRow(step: TaskStep): OrchestrationPanelRow {
 	const meta = [
 		step.priority === "high" ? "high priority" : undefined,
@@ -99,19 +137,37 @@ export function taskStepPanelRow(step: TaskStep): OrchestrationPanelRow {
 	};
 }
 
-function renderRow(theme: Theme, row: OrchestrationPanelRow, width: number, expanded: boolean): string[] {
+function styledRowLabel(theme: Theme, text: string, style: RowStyle): string {
+	let label = style.bold ? theme.bold(text) : text;
+	if (style.strike) label = theme.strikethrough(label);
+	return theme.fg(style.strike ? "dim" : "text", label);
+}
+
+function renderRow(
+	theme: Theme,
+	row: OrchestrationPanelRow,
+	width: number,
+	expanded: boolean,
+	wrap: boolean,
+): string[] {
 	const style = ROW_STYLES[row.status];
 	const prefix = `  ${theme.fg(style.color, style.icon)} `;
+	const continuationPrefix = " ".repeat(visibleWidth(prefix));
 	const meta = row.meta?.filter(Boolean).join(" · ") ?? "";
 	const suffix = meta ? `  ${theme.fg("dim", meta)}` : "";
 	const labelWidth = Math.max(4, width - visibleWidth(prefix) - visibleWidth(suffix));
-	const clippedLabel = truncateToWidth(row.label, labelWidth, "…");
-	let label = style.bold ? theme.bold(clippedLabel) : clippedLabel;
-	if (style.strike) label = theme.strikethrough(label);
-	const lines = [`${prefix}${theme.fg(style.strike ? "dim" : "text", label)}${suffix}`];
+	const labelLines = wrap ? wrapTextWithAnsi(row.label, labelWidth) : [truncateToWidth(row.label, labelWidth, "…")];
+	const firstLabel = labelLines[0] ?? "";
+	const lines = [`${prefix}${styledRowLabel(theme, firstLabel, style)}${suffix}`];
+	for (const continuation of labelLines.slice(1)) {
+		lines.push(`${continuationPrefix}${styledRowLabel(theme, continuation, style)}`);
+	}
 	if (expanded) {
 		for (const detail of row.details ?? []) {
-			lines.push(`    ${theme.fg("dim", truncateToWidth(detail, Math.max(4, width - 4), "…"))}`);
+			const detailLines = wrap
+				? wrapTextWithAnsi(detail, Math.max(4, width - 4))
+				: [truncateToWidth(detail, Math.max(4, width - 4), "…")];
+			for (const detailLine of detailLines) lines.push(`    ${theme.fg("dim", detailLine)}`);
 		}
 	}
 	return lines;
@@ -131,6 +187,12 @@ export function renderOrchestrationPanelLines(
 	});
 	const summary = model.summary?.filter(Boolean).join(theme.fg("dim", " · ")) ?? "";
 	const lines = [summary ? `${title}  ${theme.fg("dim", summary)}` : title];
+	if (model.description) {
+		const descriptionLines = model.wrapRows
+			? wrapTextWithAnsi(model.description, Math.max(4, safeWidth - 2))
+			: [truncateToWidth(model.description, Math.max(4, safeWidth - 2), "…")];
+		for (const line of descriptionLines) lines.push(`  ${theme.fg("text", line)}`);
+	}
 	const rows = model.rows ?? [];
 	if (rows.length > 0) {
 		let section: string | undefined;
@@ -139,7 +201,7 @@ export function renderOrchestrationPanelLines(
 				section = row.section;
 				lines.push(`  ${theme.fg("muted", theme.bold(row.section))}`);
 			}
-			lines.push(...renderRow(theme, row, safeWidth, expanded));
+			lines.push(...renderRow(theme, row, safeWidth, expanded, model.wrapRows === true));
 		}
 	} else if (model.emptyText) {
 		lines.push(`  ${theme.fg("muted", model.emptyText)}`);

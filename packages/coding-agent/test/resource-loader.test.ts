@@ -224,12 +224,15 @@ Project skill`,
 			await loader.reload();
 
 			const extensionsResult = loader.getExtensions();
-			expect(extensionsResult.extensions).toHaveLength(1);
+			const linkedExtensions = extensionsResult.extensions.filter(
+				(extension) => !extension.path.includes(join("extensions", "tps")),
+			);
+			expect(linkedExtensions).toHaveLength(1);
 			expect(extensionsResult.errors).toEqual([]);
 
 			// mergePaths processes project paths before user paths, so the project
 			// alias is the canonical survivor.
-			expect(extensionsResult.extensions[0].path).toBe(join(cwd, ".pi", "extensions", "shared.ts"));
+			expect(linkedExtensions[0]?.path).toBe(join(cwd, ".pi", "extensions", "shared.ts"));
 		});
 
 		it("should keep both extensions loaded when command names collide", async () => {
@@ -274,7 +277,10 @@ Project skill`,
 			await loader.reload();
 
 			const extensionsResult = loader.getExtensions();
-			expect(extensionsResult.extensions).toHaveLength(2);
+			const commandExtensions = extensionsResult.extensions.filter(
+				(extension) => !extension.path.includes(join("extensions", "tps")),
+			);
+			expect(commandExtensions).toHaveLength(2);
 			expect(extensionsResult.errors.some((e) => e.error.includes('Command "/deploy" conflicts'))).toBe(false);
 
 			const sessionManager = SessionManager.inMemory();
@@ -517,7 +523,7 @@ Content`,
 			expect(activePromptNames).toContain("allowed");
 		});
 
-		it("should expose bundled extensions without loading them when no resource profile is active", async () => {
+		it("loads only passive default-on bundled extensions when no resource profile is active", async () => {
 			const settingsManager = SettingsManager.inMemory({ activeResourceProfiles: [] });
 			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 			await loader.reload();
@@ -526,10 +532,40 @@ Content`,
 			expect(
 				discoverablePaths.some((candidate) => candidate.includes(join("extensions", "tmux-agent-manager"))),
 			).toBe(true);
-			const loadedPaths = loader.getExtensions().extensions.map((extension) => extension.path);
-			expect(loadedPaths.some((candidate) => candidate.includes(join("extensions", "tmux-agent-manager")))).toBe(
+			const loaded = loader.getExtensions().extensions;
+			expect(loaded.some((candidate) => candidate.path.includes(join("extensions", "tmux-agent-manager")))).toBe(
 				false,
 			);
+			const tps = loaded.find((candidate) => candidate.path.includes(join("extensions", "tps")));
+			expect(tps, JSON.stringify(loader.getExtensions().errors)).toBeDefined();
+			expect(tps?.tools.size).toBe(0);
+			expect(tps?.commands.size).toBe(0);
+		});
+
+		it("keeps an explicit TPS disable authoritative", async () => {
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfiles: [],
+				disabledResources: { extensions: ["tps"] },
+			});
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			expect(
+				loader.getExtensions().extensions.some((candidate) => candidate.path.includes(join("extensions", "tps"))),
+			).toBe(false);
+		});
+
+		it("keeps an active profile TPS block authoritative without requiring an allow entry", async () => {
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfile: "no-meter",
+				resourceProfiles: { "no-meter": { extensions: { block: ["tps"] } } },
+			});
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			expect(
+				loader.getExtensions().extensions.some((candidate) => candidate.path.includes(join("extensions", "tps"))),
+			).toBe(false);
 		});
 
 		it(

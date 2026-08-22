@@ -86,6 +86,8 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `app.clear` | `ctrl+c` | Clear editor |
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
+| `app.agents.open` | `ctrl+q` | Inspect the full goal, requirements, evidence, task plan, agents, and background work |
+| `app.agents.close` | `escape` | Close the work inspector |
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
 | `app.clipboard.pasteImage` | `ctrl+v` (Unix/macOS), `alt+v` (Windows), both (WSL) | Paste image or clipboard text |
 

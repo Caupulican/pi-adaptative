@@ -42,7 +42,7 @@ starts every provider with the initial prompt file as part of the same CLI comma
 On deadline, the watcher persists `timeout` first and then terminates its owned pane. A timed-out
 provider process therefore cannot remain live and continue spending resources.
 
-The parent Pi session watches result-file events. Once a turn's worker is terminal, it records a per-agent notification marker (`notifiedTurn`) and sends a bounded, source-labelled untrusted handoff with `triggerTurn: true`. Startup performs one reconciliation pass for terminal events produced while Pi was offline, and also reconciles tmux **sessions**: see [Persistence](#persistence-follow-ups-reconcile-dismiss) below.
+The parent Pi session watches result-file events. Once a turn's worker is terminal, it records a per-agent notification marker (`notifiedTurn`) and sends a bounded, source-labelled untrusted handoff with `triggerTurn: true`. Startup reconciles every persisted terminal turn into host lane state, including turns whose user-facing handoff was already delivered, so a rehydrated running projection cannot outlive the worker. It also reconciles tmux **sessions**: see [Persistence](#persistence-follow-ups-reconcile-dismiss) below.
 
 Do not poll pane state, capture pane output, or inspect logs merely to detect completion. Use `job_status` or terminal artifacts after the handoff only when its bounded evidence is insufficient.
 

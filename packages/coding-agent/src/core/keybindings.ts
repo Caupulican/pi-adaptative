@@ -114,8 +114,8 @@ export const KEYBINDINGS = {
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
 	"app.history.load": { defaultKeys: "ctrl+shift+h", description: "Load deferred session history" },
 	"app.tools.background": { defaultKeys: "ctrl+b", description: "Move active tool calls to background" },
-	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle the live agents panel" },
-	"app.agents.close": { defaultKeys: "escape", description: "Close the live agents panel" },
+	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle goal, plan, and agent details" },
+	"app.agents.close": { defaultKeys: "escape", description: "Close work details" },
 	"app.thinking.toggle": {
 		defaultKeys: "shift+pageUp",
 		description: "Toggle thinking blocks",

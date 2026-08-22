@@ -10,7 +10,11 @@
 
 import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { type ExtensionImportAuthority, isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
+import {
+	type ExtensionImportAuthority,
+	isDefaultOnBundledExtension,
+	isExtensionPathAllowedForImport,
+} from "./extension-import-authority.ts";
 import type { Extension } from "./extensions/index.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
@@ -141,6 +145,9 @@ export class ProfileFilterController {
 			// This baseline is not a profile denial, so it is not counted as withheld.
 			return extensions.filter((extension) => {
 				if (extension.sourceInfo.source === "inline") return true;
+				if (isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source)) {
+					return this.isExtensionPathAllowed(extension.path, "default-on", extension.sourceInfo.baseDir);
+				}
 				const explicitlyApproved =
 					extension.sourceInfo.source === "cli" ||
 					explicitLiveExtensionPaths?.has(extension.path) === true ||
@@ -153,7 +160,11 @@ export class ProfileFilterController {
 		}
 		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
 		const allowedExtensions = extensions.filter((extension) =>
-			this.isExtensionPathAllowed(extension.path, "profile", extension.sourceInfo.baseDir),
+			this.isExtensionPathAllowed(
+				extension.path,
+				isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source) ? "default-on" : "profile",
+				extension.sourceInfo.baseDir,
+			),
 		);
 		this._profileDeniedExtensionCount = extensions.length - allowedExtensions.length;
 		return allowedExtensions.map((extension) => {

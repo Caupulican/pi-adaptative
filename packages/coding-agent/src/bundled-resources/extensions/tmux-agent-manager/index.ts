@@ -1940,6 +1940,7 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 	let handoffContext: ExtensionContext | undefined;
 	let handoffTail = Promise.resolve();
 	const jobWatchers = new Map<string, fs.FSWatcher>();
+	const reconciledTerminalTurns = new Set<string>();
 	const bridge: HostBridge = pi;
 
 	const closeJobWatchers = () => {
@@ -1954,12 +1955,36 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 		);
 		for (const job of jobs) {
 			if (!isFireTaskTerminal(job)) continue;
+			// A fresh host may rehydrate a legacy running lane after this external job already persisted
+			// its terminal result. Reconcile that terminal truth once per process/turn even when the
+			// completion handoff was delivered earlier; ManagedLaneController makes the replay inert
+			// when its own lifecycle is already terminal.
+			for (const agent of job.agents) {
+				const turn = agent.currentTurn ?? 1;
+				if ((agent.notifiedTurn ?? 0) < turn) continue;
+				const reconciliationKey = `${job.id}:${agent.id}:${turn}:${agent.result?.status ?? "failed"}`;
+				if (reconciledTerminalTurns.has(reconciliationKey)) continue;
+				bridge.reportManagedLane?.({
+					laneId: agentLaneId(job.id, agent.id),
+					phase: "terminal",
+					status: agent.result?.status,
+					reasonCode: "tmux_terminal_reconciled",
+				});
+				reconciledTerminalTurns.add(reconciliationKey);
+				while (reconciledTerminalTurns.size > 1_024) {
+					const oldest = reconciledTerminalTurns.values().next().value;
+					if (oldest === undefined) break;
+					reconciledTerminalTurns.delete(oldest);
+				}
+			}
 			// Per-turn notify: a job is not permanently "closed" after its first terminal turn — a
 			// follow-up reopens it, so the gate is per-agent (notifiedTurn < currentTurn), not a
 			// single whole-job notifiedAt flag.
 			const pendingAgents = job.agents.filter((agent) => (agent.notifiedTurn ?? 0) < (agent.currentTurn ?? 1));
 			if (pendingAgents.length === 0) continue;
 			for (const agent of pendingAgents) {
+				const reconciliationKey = `${job.id}:${agent.id}:${agent.currentTurn ?? 1}:${agent.result?.status ?? "failed"}`;
+				reconciledTerminalTurns.add(reconciliationKey);
 				// Advisory-only, and only ever reported when the worker itself chose to write the
 				// claim file — never fabricated, never a hard cross-process cap.
 				const usage = readWorkerUsageClaim(job, agent);

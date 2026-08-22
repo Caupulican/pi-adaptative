@@ -247,23 +247,30 @@ describe.skipIf(process.platform === "win32")("tmux orphan-release", () => {
 		await harness.triggerSessionShutdown();
 	});
 
-	it("does not release the lane for a job that already reached a terminal state (session dead)", async () => {
+	it("reconciles a previously notified terminal job without misclassifying it as an active orphan", async () => {
 		const jobId = "already-terminal-job";
 		const jobDir = jobDirFor(jobId);
 		const jobPath = writeJob(jobDir, {
 			id: jobId,
 			sessionName: "dead-session-3",
 			parentSessionFile: parentSessionFilePath(),
-			// notifiedTurn === currentTurn (both default to 1) so the completion-handoff path (a
-			// separate reportManagedLane caller) has nothing pending and stays quiet too — isolating
-			// this assertion to the orphan-release branch under test.
+			// notifiedTurn === currentTurn (both default to 1): the user-facing handoff is already
+			// delivered, but a fresh host still needs one terminal reconciliation to replace any
+			// rehydrated legacy running projection.
 			agents: [{ id: "worker", name: "worker", result: { status: "done" }, notifiedTurn: 1 }],
 		});
 
 		const harness = setUp([]); // session is dead, but the job is already terminal
 		await harness.triggerSessionStart();
 
-		expect(harness.managedLaneEvents).toEqual([]);
+		expect(harness.managedLaneEvents).toEqual([
+			expect.objectContaining({
+				laneId: "tmux:already-terminal-job:worker",
+				phase: "terminal",
+				status: "done",
+				reasonCode: "tmux_terminal_reconciled",
+			}),
+		]);
 		// A terminal job is never marked orphaned — the guard is `!isFireTaskTerminal(job)`.
 		expect(JSON.parse(fs.readFileSync(jobPath, "utf8"))).not.toHaveProperty("orphanedAt");
 

@@ -147,6 +147,8 @@ Additional paths and filters via `settings.json`:
 
 Resource arrays support include/exclude patterns: plain entries include local paths, `!pattern` excludes matching auto-discovered resources, `+path` force-includes an exact path, and `-path` force-excludes an exact path. `disabledResources.extensions` remains as the legacy explicit reversible unload form and is merged as a `resourceProfiles` block filter. Prefer `resourceProfiles` when you need focused per-session, per-repo, or subagent-specific loading.
 
+Pi ships the passive `tps` status-line meter as a default-on bundled extension. It loads without an active resource profile, but explicit user authority remains final: add `"tps"` to `disabledResources.extensions`, block it in an active profile, or start with `--no-extensions` to disable it. Other bundled extensions still require an active profile allow rule.
+
 Extensions may carry profile blocks inside comments. Pi reads only matching `<resource-profile>` blocks as JSON config before filtering, and ignores the rest of the extension file for profile parsing:
 
 ```ts

@@ -10,7 +10,11 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { configFile, resourceDir } from "./agent-paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
-import { hasProfileExtensionImportAuthority } from "./extension-import-authority.ts";
+import {
+	hasProfileExtensionImportAuthority,
+	isDefaultOnBundledExtension,
+	isExtensionPathAllowedForImport,
+} from "./extension-import-authority.ts";
 import {
 	createExtensionRuntime,
 	disposeExtensionEventSubscriptions,
@@ -875,7 +879,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] =>
 				this.filterPathsByProfile(paths, kind);
 
-			// Bundled extensions ship with Pi but remain opt-in through an active resource profile.
+			// Authority-bearing bundled extensions stay profile-gated. Passive default-on extensions
+			// are the narrow exception and still honor explicit user/profile blocks.
 			const bundledExtensions = this.discoverBundledExtensionPaths();
 			for (const entryPath of bundledExtensions) {
 				metadataByPath.set(entryPath, {
@@ -898,6 +903,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// the import boundary; discovery remains metadata-only when no profile is active.
 			const profileFilteredCliExtensions = filterPathsByProfile(cliEnabledExtensions, "extensions");
 			const profileFilteredConfiguredExtensions = hasProfileExtensionAuthority ? enabledExtensions : [];
+			const defaultOnBundledExtensions = bundledExtensions.filter(
+				(entryPath) =>
+					isDefaultOnBundledExtension(entryPath, "bundled") &&
+					isExtensionPathAllowedForImport(
+						this.settingsManager,
+						entryPath,
+						"default-on",
+						getBundledExtensionsDir(),
+					),
+			);
 			const profileFilteredBundledExtensions =
 				!hasProfileExtensionAuthority || extensionProfileFilter.allow.length === 0
 					? []
@@ -909,6 +924,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const extensionPaths = this.noExtensions
 				? profileFilteredCliExtensions
 				: this.mergePaths(profileFilteredCliExtensions, [
+						...defaultOnBundledExtensions,
 						...profileFilteredBundledExtensions,
 						...profileFilteredConfiguredExtensions,
 						...profileFilteredExternalExtensions,

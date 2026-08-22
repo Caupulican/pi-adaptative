@@ -17,6 +17,8 @@ import {
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import {
 	emptyOrchestrationCall,
+	goalEvidencePanelRow,
+	goalRequirementPanelRow,
 	type OrchestrationPanelModel,
 	renderOrchestrationToolResult,
 } from "./orchestration-panel.ts";
@@ -388,21 +390,9 @@ function goalPanelModel(details: GoalToolDetails | undefined): OrchestrationPane
 			`${state.evidence.length} evidence`,
 			...(state.tokenBudget !== undefined ? [`${state.tokensUsed ?? 0}/${state.tokenBudget} tokens`] : []),
 		],
-		rows: state.requirements.map((requirement) => ({
-			status:
-				requirement.status === "satisfied"
-					? ("completed" as const)
-					: requirement.status === "open"
-						? ("pending" as const)
-						: ("blocked" as const),
-			label: requirement.text,
-			meta: [
-				requirement.id,
-				requirement.evidenceIds.length > 0 ? `${requirement.evidenceIds.length} evidence` : undefined,
-				requirement.boundLaneId ? `worker ${requirement.boundLaneId}` : undefined,
-			].filter((value): value is string => value !== undefined),
-			details: requirement.blockedReason ? [`blocked: ${requirement.blockedReason}`] : undefined,
-		})),
+		description: state.userGoal,
+		wrapRows: true,
+		rows: [...state.requirements.map(goalRequirementPanelRow), ...state.evidence.map(goalEvidencePanelRow)],
 		notices: [
 			...(details.dispatchSkipReason
 				? [{ status: "warning" as const, text: `Worker dispatch skipped: ${details.dispatchSkipReason}` }]
@@ -450,7 +440,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			return renderOrchestrationToolResult(theme, goalPanelModel(details), {
 				isPartial,
 				collapse: !expanded && details?.applied === true,
-				expanded: true,
+				expanded,
 			});
 		},
 		async execute(

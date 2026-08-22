@@ -3,11 +3,14 @@ import { join } from "node:path";
 import { type OverlayHandle, type Terminal, TUI, visibleWidth } from "@caupulican/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
+import type { GoalState } from "../src/core/goals/goal-state.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import type { TaskStepsState } from "../src/core/tasks/task-state.ts";
 import type { ActivityLaneItem } from "../src/modes/interactive/components/activity-lane.ts";
 import {
 	AgentsOverlay,
 	buildAgentsPanelModel,
+	buildWorkPanelModel,
 	formatElapsed,
 } from "../src/modes/interactive/components/agents-overlay.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -49,7 +52,13 @@ class OverlayLifecycleTerminal implements Terminal {
 }
 
 interface AgentsOverlayOwnerProbe {
-	runtimeHost: { session: { getLaneRecords: () => LaneRecord[] } };
+	runtimeHost: {
+		session: {
+			getGoalStateSnapshot: () => GoalState | undefined;
+			getTaskStepsStateSnapshot: () => TaskStepsState | undefined;
+			getLaneRecords: () => LaneRecord[];
+		};
+	};
 	ui: TUI;
 	keybindings: KeybindingsManager;
 	activityLane: { getItems: () => ActivityLaneItem[] } | undefined;
@@ -157,9 +166,35 @@ describe("agents overlay", () => {
 		});
 		for (const width of [40, 80, 120]) {
 			const lines = overlay.render(width);
-			expect(stripAnsi(lines.join("\n"))).toContain("No agents or background work");
+			expect(stripAnsi(lines.join("\n"))).toContain("No goal, plan, agents, or background");
 			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+
+	it("scrolls through work rows instead of truncating details to the first viewport", () => {
+		const keybindings = KeybindingsManager.create(join(tmpdir(), "pi-agents-overlay-test-scroll"));
+		const requestRender = vi.fn();
+		const overlay = new AgentsOverlay({
+			keybindings,
+			snapshot: () => ({
+				laneRecords: [],
+				items: Array.from({ length: 12 }, (_, index) => tool(String(index + 1), `Background probe ${index + 1}`)),
+			}),
+			requestRender,
+			onClose: vi.fn(),
+			now: () => NOW,
+			viewportRows: () => 8,
+		});
+
+		const firstPage = stripAnsi(overlay.render(80).join("\n"));
+		expect(firstPage).toContain("Background probe 1");
+		expect(firstPage).not.toContain("Background probe 12");
+
+		overlay.handleInput("\x1b[6~");
+		overlay.handleInput("\x1b[6~");
+		const lastPage = stripAnsi(overlay.render(80).join("\n"));
+		expect(lastPage).toContain("Background probe 12");
+		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 
 	it("closes on the close key and on the toggle key, not on other input", () => {
@@ -229,6 +264,8 @@ describe("agents overlay", () => {
 		Object.assign(owner, {
 			runtimeHost: {
 				session: {
+					getGoalStateSnapshot: () => undefined,
+					getTaskStepsStateSnapshot: () => undefined,
 					getLaneRecords: () => [
 						worker({
 							laneId: "lane-live",
@@ -286,5 +323,95 @@ describe("agents overlay", () => {
 		expect(owner.agentsOverlay).toBeUndefined();
 		expect(owner.agentsOverlayHandle).toBeUndefined();
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("projects an inspectable work model with full goal, plan, and truthful terminal worker details", () => {
+		const goalState: GoalState = {
+			goalId: "goal-1",
+			userGoal:
+				"Refactor the terminal work experience so every requirement remains inspectable without relying on truncated inline text.",
+			status: "blocked",
+			requirements: [
+				{
+					id: "req-1",
+					text: "Expose complete goal details in a scrollable work inspector",
+					status: "blocked",
+					evidenceIds: ["ev-1"],
+					dependencies: ["req-0"],
+					blockedReason: "Waiting for the terminal projection to reconcile",
+					createdAt: "2026-08-22T00:00:00.000Z",
+					updatedAt: "2026-08-22T00:01:00.000Z",
+				},
+			],
+			evidence: [
+				{
+					id: "ev-1",
+					kind: "test",
+					summary: "Focused regression",
+					createdAt: "2026-08-22T00:01:00.000Z",
+				},
+			],
+			events: [],
+			createdAt: "2026-08-22T00:00:00.000Z",
+			updatedAt: "2026-08-22T00:01:00.000Z",
+			lastProgressAt: "2026-08-22T00:00:30.000Z",
+			stallTurns: 1,
+			blockedReason: "runaway guard",
+		};
+		const taskState: TaskStepsState = {
+			version: 1,
+			revision: 1,
+			nextStepNumber: 2,
+			steps: [
+				{
+					id: "step-1",
+					content: "Implement the unified work inspector",
+					activeForm: "Implementing the unified work inspector",
+					status: "in_progress",
+					priority: "high",
+					requirementIds: ["req-1"],
+					notes: ["Keep one canonical projection"],
+					evidence: [],
+					createdAt: "2026-08-22T00:00:00.000Z",
+					updatedAt: "2026-08-22T00:01:00.000Z",
+				},
+			],
+			archive: { completed: 0, cancelled: 0 },
+			createdAt: "2026-08-22T00:00:00.000Z",
+			updatedAt: "2026-08-22T00:01:00.000Z",
+		};
+		const terminalWorker: LaneRecord = {
+			laneId: "tmux:job:agent",
+			type: "tmux-worker",
+			status: "timeout",
+			label: "stale auditor",
+			reasonCode: "tmux_session_orphaned",
+			startedAt: "2026-08-22T00:00:00.000Z",
+			completedAt: "2026-08-22T00:02:00.000Z",
+		};
+
+		const model = buildWorkPanelModel(
+			{ goalState, taskState, laneRecords: [terminalWorker], items: [] },
+			Date.parse("2026-08-22T00:03:00.000Z"),
+		);
+
+		expect(model.label).toBe("Work");
+		expect(model.description).toBe(goalState.userGoal);
+		expect(model.summary).toContain("goal blocked");
+		expect(model.summary).not.toContain("1 running");
+		expect(model.rows).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ section: "Requirements", label: goalState.requirements[0]?.text }),
+				expect.objectContaining({ section: "Plan", label: "Implementing the unified work inspector" }),
+				expect.objectContaining({ section: "Workers", label: "stale auditor", status: "timeout" }),
+			]),
+		);
+		expect(model.rows?.[0]?.details).toEqual(
+			expect.arrayContaining(["blocked: Waiting for the terminal projection to reconcile", "depends on: req-0"]),
+		);
+		expect(model.rows?.find((row) => row.label === "stale auditor")?.details).toContain(
+			"reason: tmux_session_orphaned",
+		);
+		expect(model.notices).toContainEqual({ status: "warning", text: "runaway guard" });
 	});
 });

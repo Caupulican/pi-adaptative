@@ -1586,6 +1586,31 @@ export class SettingsManager {
 	}
 
 	/**
+	 * Explicit off-switch for passive default-on resources. Unlike the strict profile grant,
+	 * an omitted allow entry is not a disable: only disabledResources or an authored profile
+	 * block wins. This keeps default-on cosmetic resources available without weakening the
+	 * import boundary for ordinary authority-bearing extensions.
+	 */
+	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir = ""): boolean {
+		const userDisabled = mergeResourceProfileFilters(
+			collectLegacyDisabledFilterFromSettings(this.globalSettings, kind),
+			collectLegacyDisabledFilterFromSettings(this.projectSettings, kind),
+			collectLegacyDisabledFilterFromSettings(this.directoryProfileSettings, kind),
+		).block;
+		if (matchesResourceProfilePattern(resourcePath, userDisabled ?? [], baseDir)) return true;
+
+		const registry = this.getProfileRegistry();
+		const seen = new Set<string>();
+		for (const profileName of this.getActiveResourceProfileNames()) {
+			if (seen.has(profileName)) continue;
+			seen.add(profileName);
+			const explicitBlocks = this.resolveProfileFromRegistry(registry, profileName)?.resources[kind]?.block ?? [];
+			if (matchesResourceProfilePattern(resourcePath, explicitBlocks, baseDir)) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Profile grants the user's own disable list overrides. RATIFIED precedence: a user disable
 	 * (`disabledResources` / `!` overrides) is a hard off-switch that always WINS over a profile
 	 * allow (the legacy disabled filter merges into every profile filter as a block, and blocks

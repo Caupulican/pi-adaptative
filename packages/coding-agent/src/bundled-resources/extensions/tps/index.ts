@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { ExtensionAPI } from "@caupulican/pi-adaptative";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
 	if (!message || typeof message !== "object") return false;

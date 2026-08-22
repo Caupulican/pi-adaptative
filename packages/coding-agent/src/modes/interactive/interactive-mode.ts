@@ -582,7 +582,7 @@ export class InteractiveMode {
 				hint("app.model.select", "to select model"),
 				hint("app.tools.expand", "to expand tools"),
 				hint("app.history.load", "to load session history"),
-				hint("app.agents.open", "to show live agents"),
+				hint("app.agents.open", "to inspect goal, plan, and agents"),
 				hint("app.transcript.open", "to view transcript"),
 				hint("app.thinking.toggle", "to expand thinking"),
 				hint("app.editor.external", "for external editor"),
@@ -1765,16 +1765,17 @@ export class InteractiveMode {
 		const overlay = new AgentsOverlay({
 			keybindings: this.keybindings,
 			snapshot: () => ({
-				laneRecords: this.session.getLaneRecords(),
+				...this.activityLaneSnapshot(),
 				items: this.activityLane?.getItems() ?? [],
 			}),
 			requestRender: () => this.ui.requestRender(),
 			onClose: () => this.closeAgentsOverlay(overlay),
+			viewportRows: () => this.ui.terminal.rows,
 		});
 		this.agentsOverlay = overlay;
 		this.agentsOverlayHandle = this.ui.showOverlay(overlay, {
-			width: "80%",
-			maxHeight: "70%",
+			width: "90%",
+			maxHeight: "100%",
 			onRemove: () => this.handleAgentsOverlayRemoved(overlay),
 		});
 		overlay.mount();

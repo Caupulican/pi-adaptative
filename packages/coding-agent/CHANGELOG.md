@@ -3,6 +3,8 @@
 ### Added
 
 - Added one canonical five-phase work lifecycle—Survey, Contract, Plan/Route, Execute, Prove/Deliver—wired through the existing goal, task, delegation, evidence, and approval owners, with project-relative POC/MVP versus complete-feature delivery contracts.
+- Added a scrollable Ctrl+Q work inspector for full goal, requirement, evidence, task-plan, worker, and background-tool details.
+- Bundled the passive TPS footer meter as a default-on extension for fresh installations.
 
 ### Changed
 
@@ -12,6 +14,7 @@
 ### Fixed
 
 - Preserved active-branch ancestry when excluding lifecycle-ledger records from compaction input, preventing context accounting from collapsing to only the newest tool result.
+- Reconciled already-notified terminal tmux jobs into freshly hydrated host lane state so absent workers cannot remain displayed as active.
 
 ## [0.95.0] - 2026-08-22
 
