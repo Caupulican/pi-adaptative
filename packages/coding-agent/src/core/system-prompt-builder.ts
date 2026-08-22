@@ -260,7 +260,9 @@ export class SystemPromptBuilder {
 
 	private _buildWorkLifecyclePrompt(toolNames: readonly string[]): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
-		if (this.deps.getModelCapabilityProfile().class === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
+		const capabilityClass = this.deps.getModelCapabilityProfile().class;
+		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
+		if (capabilityClass === "minimal") return `PI WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;
 		const hasWorkPlanningTool = toolNames.some(
 			(name) =>
 				name === "goal" ||

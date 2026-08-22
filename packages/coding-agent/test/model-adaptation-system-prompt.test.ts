@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
+import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -145,6 +146,7 @@ describe("model adaptation system prompt", () => {
 		const created = await createSession(cwd, agentDir, model);
 		try {
 			expect(created.session.agent.state.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
+			expect(created.session.agent.state.systemPrompt).toContain(CHAT_WORK_LIFECYCLE_SYSTEM_RULE);
 			expect(created.session.agent.state.systemPrompt).toContain(ruleText);
 		} finally {
 			await created.session.disposeAndWait();

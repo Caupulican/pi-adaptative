@@ -195,7 +195,9 @@ describe("lazy extension loading", () => {
 
 		await resourceLoader.reload();
 
-		expect(resourceLoader.getExtensions().extensions).toEqual([]);
+		expect(resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual([
+			expect.stringContaining(path.join("extensions", "tps")),
+		]);
 		expect(counters().imports).toEqual([]);
 		expect(counters().factories).toEqual([]);
 	});

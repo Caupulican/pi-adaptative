@@ -101,7 +101,9 @@ describe("profile-gated disk reads", () => {
 		await loader.reload();
 
 		expect(existsSync(importMarker)).toBe(false);
-		expect(loader.getExtensions().extensions).toEqual([]);
+		expect(loader.getExtensions().extensions.map((extension) => extension.path)).toEqual([
+			expect.stringContaining(join("extensions", "tps")),
+		]);
 		expect(await loader.getDiscoverableExtensionPaths()).toContain(extensionPath);
 	});
 

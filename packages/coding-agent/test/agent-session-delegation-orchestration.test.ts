@@ -15,9 +15,7 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 
 			harness.session.setThinkingLevel("max");
 			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);
-			expect(harness.session.systemPrompt).toContain(
-				"Delegate useful independent research, implementation, tests, or specialist review early",
-			);
+			expect(harness.session.systemPrompt).toContain(DELEGATION_DECISION_RULE);
 			expect(harness.session.systemPrompt).toContain(
 				"ceilings come only from host settings or an owner-authored profileId",
 			);
