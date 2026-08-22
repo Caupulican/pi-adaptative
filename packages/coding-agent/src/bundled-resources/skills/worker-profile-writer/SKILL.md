@@ -9,7 +9,7 @@ description: "Use only when you need a reusable session-scoped worker preset (pr
 
 Use this skill only to create a session-scoped task preset. Do not load it to start workers.
 
-Native `delegate start` does not need an owner-authored base. Omit `profileId` to inherit the foreground model, live reasoning level, compatible tools, and machine scope. Use only the optional top-level `model`, `thinkingLevel`, `path`, and `toolNames` fields to narrow or focus that inheritance. Empty `profile_inspect` bases are not a start block. Never add an authority object or budget: the host compiles grants and owns ceilings.
+Native `delegate start` does not need an owner-authored base. Omit `profileId` to inherit the foreground model, live reasoning level, compatible tools, and machine scope. Use only the optional top-level `model`, `thinkingLevel`, `path`, and `toolNames` fields to narrow or focus that inheritance. Empty `profile_inspect` bases are not a start block. Never add a budget or authority object: the host compiles grants and owns ceilings. Every generated profile inherits the base budget unchanged.
 
 Freedom Dial: high freedom for describing and composing the bounded task; low freedom for authority, persistence, model availability, and budget checks. Pi's core engineering and evidence rules remain mandatory.
 
