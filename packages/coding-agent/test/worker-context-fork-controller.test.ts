@@ -122,52 +122,36 @@ describe("worker controller birth-context integration", () => {
 		}
 	});
 
-	it("defaults nested workers to self-contained context while preserving explicit inheritance", async () => {
-		const run = async (forkTurns?: string) => {
-			const harness = await createHarness({ settings: { workerDelegation: { maxConcurrent: 1 } } });
-			let childHistory: string[] = [];
-			try {
-				harness.sessionManager.appendMessage({
-					role: "user",
-					content: "FOREGROUND_GLOBAL_ORCHESTRATION_INSTRUCTION",
-					timestamp: 1,
-				});
-				harness.setResponses([
-					fauxAssistantMessage('{"summary":"parent ready","status":"completed"}'),
-					(context) => {
-						childHistory = context.messages.map(messageText);
-						return fauxAssistantMessage('{"summary":"nested verifier complete","status":"completed"}');
-					},
-				]);
-				const parent = await harness.session.runWorkerDelegationOnce({
-					instructions: "Own the scoped implementation stream.",
-					forkTurns: "all",
-				});
-				if (!parent.record) throw new Error("Expected parent worker.");
+	it("rejects nested workers before omitted or explicit context inheritance can persist", async () => {
+		const harness = await createHarness({ settings: { workerDelegation: { maxConcurrent: 1 } } });
+		try {
+			harness.sessionManager.appendMessage({
+				role: "user",
+				content: "FOREGROUND_GLOBAL_ORCHESTRATION_INSTRUCTION",
+				timestamp: 1,
+			});
+			harness.setResponses([fauxAssistantMessage('{"summary":"parent ready","status":"completed"}')]);
+			const parent = await harness.session.runWorkerDelegationOnce({
+				instructions: "Own the scoped implementation stream.",
+				forkTurns: "all",
+			});
+			if (!parent.record) throw new Error("Expected parent worker.");
+			const before = controlsFor(harness.session)._getWorkerLifecycle().getTaskRuntimeSnapshot();
+
+			for (const forkTurns of [undefined, "all"] as const) {
 				const child = await harness.session.runWorkerDelegationOnce({
 					instructions: "Verify only the assigned seam with the admitted read-only tools.",
 					parentAgentId: parent.record.laneId,
 					...(forkTurns ? { forkTurns } : {}),
 				});
-				expect(child.started).toBe(true);
-				const childAttempt = Object.values(
-					controlsFor(harness.session)._getWorkerLifecycle().getTaskRuntimeSnapshot().attempts,
-				).find((attempt) => attempt.dispatch.parentAgentId === parent.record?.laneId);
-				return {
-					childHistory,
-					messageCount: childAttempt?.dispatch.birthContextForkReference?.messageCount,
-				};
-			} finally {
-				harness.cleanup();
+				expect(child).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			}
-		};
 
-		const [implicit, explicit] = await Promise.all([run(), run("all")]);
-		expect(implicit.childHistory).toEqual([
-			expect.stringContaining("Verify only the assigned seam with the admitted read-only tools."),
-		]);
-		expect(implicit.messageCount).toBe(0);
-		expect(explicit.childHistory).toContain("FOREGROUND_GLOBAL_ORCHESTRATION_INSTRUCTION");
-		expect(explicit.messageCount).toBeGreaterThan(0);
+			const after = controlsFor(harness.session)._getWorkerLifecycle().getTaskRuntimeSnapshot();
+			expect(Object.keys(after.tasks)).toEqual(Object.keys(before.tasks));
+			expect(Object.keys(after.attempts)).toEqual(Object.keys(before.attempts));
+		} finally {
+			harness.cleanup();
+		}
 	});
 });
