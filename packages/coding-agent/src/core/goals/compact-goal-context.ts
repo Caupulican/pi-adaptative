@@ -29,12 +29,10 @@ function isGoalContextMessage(message: AgentMessage): boolean {
 
 export function formatCompactGoalContext(state: GoalState, continuationTurn: boolean): string {
 	const record = projectGoalRecord(state);
-	const instruction = continuationTurn
-		? "Continue now: pursue full objective."
-		: "current user message steers this turn.";
+	const instruction = continuationTurn ? "Continue objective." : "User steers.";
 	const recoveryInstruction =
 		continuationTurn && state.stallTurns > 0
-			? `RECOVERY REQUIRED: ${state.stallTurns} consecutive turns made no authoritative progress. Inspect failure evidence and use a different approach, tool, or route; do not repeat the unchanged operation. Do not ask the owner unless a true approval boundary is proven.`
+			? `RECOVERY REQUIRED: ${state.stallTurns} turns without authoritative progress. Inspect evidence; change approach/tool/route. Do not repeat unchanged work or ask owner without a proven approval boundary.`
 			: undefined;
 	const compactRecord =
 		record.tokenBudget === undefined
@@ -42,15 +40,13 @@ export function formatCompactGoalContext(state: GoalState, continuationTurn: boo
 			: { untrustedObjective: record.objective, tokenBudget: String(record.tokenBudget) };
 	const encodedRecord = JSON.stringify(compactRecord).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
 	return [
-		"ACTIVE GOAL — HOST-OWNED CONTINUATION",
+		"ACTIVE GOAL — HOST-OWNED",
 		encodedRecord,
 		instruction,
 		recoveryInstruction,
-		"get_goal; task_steps for decomposition.",
-		"Bound worker/tool waits: inspect authoritative status; stale or timed-out work must be recovered or reassigned, never escalated to the owner merely because it timed out.",
-		"Blocked requirements are not terminal by themselves: verify each blocker, reopen recoverable work, and ask the owner only for a proven owner/approval boundary.",
-		'Progress: update_goal status "active".',
-		'update_goal with status "complete" after requirement-by-requirement audit; "blocked" only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; else continue.',
+		"get_goal; task_steps",
+		"Recover/reassign timeouts; verify/reopen blocks.",
+		"update_goal: complete=audited requirements; blocked=proven owner/approval boundary or impossible capability after 3 no-progress turns and distinct recoveries requiring owner/external change; else continue.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n");

@@ -151,7 +151,7 @@ describe("goal/task custom-entry snapshot resolution survives compaction", () =>
 		}
 		expect(projection.display).toBe(false);
 		expect(projection.content).toContain(objective);
-		expect(projection.content.match(/ACTIVE GOAL — HOST-OWNED CONTINUATION/g)).toHaveLength(1);
+		expect(projection.content.match(/ACTIVE GOAL — HOST-OWNED/g)).toHaveLength(1);
 		expect(projection.content.length).toBeLessThan(2_500);
 		expect(projection.content).not.toContain("Continue active goal.");
 		expect(warnings).toEqual([]);

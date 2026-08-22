@@ -31,7 +31,7 @@ describe("compact active-goal context", () => {
 		expect(result[1].customType).toBe(ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE);
 		expect(result[1].content).toContain("Ship it");
 		expect(result[1].content).toContain('"tokenBudget":"1000"');
-		expect(result[1].content).toContain("Continue now:");
+		expect(result[1].content).toContain("Continue objective.");
 		expect(result[1].display).toBe(false);
 		expect(messages).toHaveLength(4);
 	});
@@ -43,9 +43,9 @@ describe("compact active-goal context", () => {
 
 		const text = formatCompactGoalContext(state, true);
 
-		expect(text).toContain("2 consecutive turns made no authoritative progress");
-		expect(text).toContain("use a different approach");
-		expect(text).toContain("Do not ask the owner unless a true approval boundary is proven");
+		expect(text).toContain("2 turns without authoritative progress");
+		expect(text).toContain("change approach/tool/route");
+		expect(text).toContain("ask owner without a proven approval boundary");
 	});
 
 	it("escapes objective markup and keeps detailed ledgers out of the projection", () => {
@@ -63,15 +63,16 @@ describe("compact active-goal context", () => {
 		expect(text).not.toContain("<active_goal");
 		expect(text).not.toContain("secret-req");
 		expect(text).not.toContain("ledger detail");
-		expect(text).toContain("task_steps for decomposition");
-		expect(text).toContain("stale or timed-out work must be recovered or reassigned");
-		expect(text).toContain("Blocked requirements are not terminal by themselves");
-		expect(text).toContain("current user message steers this turn");
+		expect(text).toContain("task_steps");
+		expect(text).toContain("Recover/reassign timeouts");
+		expect(text).toContain("verify/reopen blocks");
+		expect(text).toContain("User steers.");
 		expect(text).toContain("get_goal");
-		expect(text).toContain("requirement-by-requirement audit");
-		expect(text).toContain("verified owner/approval boundary");
-		expect(text).toContain("3 consecutive no-progress goal turns despite distinct recovery approaches");
-		expect(text).toContain('update_goal with status "complete"');
+		expect(text).toContain("complete=audited requirements");
+		expect(text).toContain("proven owner/approval boundary");
+		expect(text).toContain("impossible capability");
+		expect(text).toContain("3 no-progress turns and distinct recoveries");
+		expect(text).toContain("update_goal");
 	});
 
 	it("removes stale goal context without injecting a record for terminal or missing goals", () => {
