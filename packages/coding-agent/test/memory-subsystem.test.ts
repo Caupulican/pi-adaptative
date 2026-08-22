@@ -167,10 +167,11 @@ describe("Memory Subsystem - Registry & Manager", () => {
 		expect(() => manager.registerProvider(p2)).toThrow(/tool name collision/);
 	});
 
-	it("should enforce write-gating in subagent sessions (isChildSession = true)", async () => {
+	it("should omit root memory surfaces in subagent sessions (isChildSession = true)", async () => {
 		const manager = new MemoryManager();
 		const provider = new FileStoreProvider();
 		manager.registerProvider(provider);
+		writeFileSync(join(agentDir, "MEMORY.md"), "CHILD_PROVIDER_MEMORY_MUST_STAY_PRIVATE\n", "utf-8");
 
 		const ctx: MemoryLifecycleContext = {
 			agentDir,
@@ -183,21 +184,9 @@ describe("Memory Subsystem - Registry & Manager", () => {
 		// syncTurn should be a no-op / skip
 		await manager.syncTurn("user", "assistant");
 
-		// Tools returned by provider should block execution in child session
-		const tools = manager.getToolDefinitions();
-		const memoryTool = tools.find((t) => t.name === "memory");
-		expect(memoryTool).toBeDefined();
-
-		const result = await memoryTool!.execute(
-			"call-id",
-			{ action: "add", target: "memory", content: "some note" },
-			undefined,
-			undefined,
-			{} as any,
-		);
-
-		expect((result as any).details.success).toBe(false);
-		expect((result as any).details.error).toContain("Child session write-gated");
+		expect(manager.getToolDefinitions().map((tool) => tool.name)).not.toContain("memory");
+		expect(manager.buildSystemPromptBlock()).not.toContain("CHILD_PROVIDER_MEMORY_MUST_STAY_PRIVATE");
+		expect(manager.buildSystemPromptBlock()).not.toContain("Persistent Memory (file-store)");
 	});
 
 	it("bounds a hung lifecycle hook and abandons that provider for later hooks", async () => {

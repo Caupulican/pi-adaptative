@@ -5,6 +5,7 @@
 - Removed tmux standing dispatch grants and the public `workerDelegation.writePaths` setting. Workers now receive one immutable launch profile; an omitted path inherits machine-wide project access and an explicit path narrows the worker.
 - Native delegated workers are leaf agents. Fresh nested delegation is rejected, and worker profiles no longer expose recursive-agent limits.
 - Replaced delegated `readPaths`/`writePaths` and task-profile resource/budget overrides with focused model, thinking-level, path, and tool controls that can only inherit or narrow the foreground authority.
+- Renamed delegated query-only memory retrieval from `memory` to `memory_read`; the raw root `memory` tool is no longer valid in worker profiles.
 
 ### Added
 
@@ -32,6 +33,7 @@
 - Moved provider tool-guideline budget diagnostics out of the chat renderer and into `/context` diagnostics.
 - Dismissed pending current-session reflection cues and refreshed the root prompt synchronously when reflection is disabled, preventing stale learning work from resurfacing after re-enable.
 - Bounded reflection response scanning, accepted writes, memory and skill fields, automatic overlap audits, and `skillify` draft bodies; truncated automatic promotion audits now fail closed.
+- Omitted raw root memory tools and prompt snapshots from child sessions; managed workers receive memory only through the bounded, source-labeled query broker.
 
 ## [0.94.1] - 2026-08-21
 

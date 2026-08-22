@@ -2207,8 +2207,9 @@ describe("AgentSession worker delegation", () => {
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
 		expect(resolution.shipment.profile.toolNames).toEqual(
-			expect.arrayContaining(["read", "grep", "find", "ls", "write", "edit", "memory", "python", "bash"]),
+			expect.arrayContaining(["read", "grep", "find", "ls", "write", "edit", "python", "bash"]),
 		);
+		expect(resolution.shipment.profile.toolNames).not.toContain("memory");
 		expect(resolution.shipment.profile.toolNames).not.toContain("delegate");
 		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
 		expect(resolution.shipment.profile.delegationLimits).toEqual({

@@ -224,18 +224,31 @@ describe("classified lane tool surface", () => {
 		]);
 	});
 
-	it("rejects an oversized memory query before invoking the memory boundary", async () => {
+	it("materializes only the bounded memory_read adapter in an isolated lane", async () => {
 		const readMemory = vi.fn(async () => "memory");
 		const surface = createLaneToolSurface({
 			cwd,
-			profile: profile({ tools: { allow: ["memory"] } }),
+			profile: profile({ tools: { allow: ["memory_read"] } }),
 			readMemory,
 		});
-		const memory = surface.tools.find((tool) => tool.name === "memory");
-		if (!memory) throw new Error("Expected the memory tool.");
+		expect(surface.allowedTools).toEqual(["memory_read"]);
+		const memoryRead = surface.tools.find((tool) => tool.name === "memory_read");
+		if (!memoryRead) throw new Error("Expected the bounded memory_read adapter.");
 
-		await expect(memory.execute("memory-1", { query: "x".repeat(4_097) })).rejects.toThrow("memory_query_invalid");
+		await expect(memoryRead.execute("memory-1", { query: "x".repeat(4_097) })).rejects.toThrow(
+			"memory_query_invalid",
+		);
 		expect(readMemory).not.toHaveBeenCalled();
+	});
+
+	it("never materializes the root-only memory tool in an isolated lane", () => {
+		const surface = createLaneToolSurface({
+			cwd,
+			profile: profile({ tools: { allow: ["memory"] } }),
+			readMemory: vi.fn(async () => "memory"),
+		});
+		expect(surface.allowedTools).not.toContain("memory");
+		expect(surface.tools.find((tool) => tool.name === "memory")).toBeUndefined();
 	});
 
 	it("seeds the compiled gateway from durable cumulative usage and rejects invalid seeds", () => {

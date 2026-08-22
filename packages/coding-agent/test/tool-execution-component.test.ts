@@ -313,11 +313,12 @@ describe("ToolExecutionComponent parity", () => {
 		component.updateResult({ ...result, isError: false }, false);
 
 		const rendered = stripAnsi(component.render(200).join("\n"));
+		const logicalRendered = rendered.replace(/\s+/gu, " ");
 		expect(rendered.match(/Full output:/g)?.length ?? 0).toBe(1);
 		expect(rendered).toMatch(/line-4000[^\n]*\n[^\S\n]*\n \[Full output:/);
 		expect(rendered).not.toMatch(/line-4000[^\n]*\n[^\S\n]*\n[^\S\n]*\n \[Full output:/);
-		expect(rendered).toContain("Truncated: head+tail preview of 4000 lines");
-		expect(rendered).not.toContain("[Showing head+tail preview of 4000 lines. Full output:");
+		expect(logicalRendered).toContain("Truncated: head+tail preview of 4000 lines");
+		expect(logicalRendered).not.toContain("[Showing head+tail preview of 4000 lines. Full output:");
 	});
 
 	test("does not duplicate built-in headers when passed the active built-in definition", () => {

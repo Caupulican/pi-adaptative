@@ -15,6 +15,7 @@
  * var is additive evidence for "worker", never a downgrade signal.
  */
 
+import { ROOT_MEMORY_TOOL_NAME } from "./memory/worker-memory-tools.ts";
 import { getParentPid } from "./process-identity.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
@@ -60,7 +61,7 @@ export function isWorkerSession(env: NodeJS.ProcessEnv = process.env): boolean {
 export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"goal",
 	"secret_store",
-	"memory",
+	ROOT_MEMORY_TOOL_NAME,
 	"delegate",
 	"improvement_loop",
 	"model_fitness",

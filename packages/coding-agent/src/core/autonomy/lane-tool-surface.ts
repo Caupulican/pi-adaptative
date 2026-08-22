@@ -2,6 +2,7 @@ import path from "node:path";
 import type { AgentLoopConfig, AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import {
 	CapabilityGateway,
 	CapabilityGatewayDeniedError,
@@ -36,7 +37,6 @@ import { evaluateToolGate } from "./gates.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
 const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
-const MEMORY_LANE_TOOL_NAME = "memory" as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
 const PYTHON_LANE_TOOL_NAME = "python" as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
@@ -148,8 +148,8 @@ function createLaneTools(
 		);
 	}
 	if (readMemory) {
-		factories.set(MEMORY_LANE_TOOL_NAME, () => ({
-			name: MEMORY_LANE_TOOL_NAME,
+		factories.set(WORKER_MEMORY_READ_TOOL_NAME, () => ({
+			name: WORKER_MEMORY_READ_TOOL_NAME,
 			label: "Read Memory",
 			description:
 				"Retrieve bounded, source-labeled standing memory relevant to this delegated task. Read-only: no memory writes or lifecycle actions are available.",
@@ -192,7 +192,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
-		...(options.readMemory ? [MEMORY_LANE_TOOL_NAME] : []),
+		...(options.readMemory ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
 		...(pythonCapable ? [PYTHON_LANE_TOOL_NAME] : []),
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
@@ -252,7 +252,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		id: "isolated-lane-read-tools",
 		capabilities: [
 			"filesystem.read",
-			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory.query"] as const) : []),
+			...(allowedToolSet.has(WORKER_MEMORY_READ_TOOL_NAME) ? (["memory.query"] as const) : []),
 			...(allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
 			allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ||
 			allowedToolSet.has(STABLE_SHELL_TOOL_NAME)

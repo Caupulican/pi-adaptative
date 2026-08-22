@@ -120,6 +120,40 @@ describe("worker execution contract resource bounds", () => {
 		).not.toThrow();
 	});
 
+	it("rejects the root memory tool while accepting the bounded worker memory_read contract", () => {
+		const rootMemoryProfile = createTestWorkerOrchestrationProfile({
+			profileId: "root-memory-profile",
+			model: { provider: "faux", id: "faux-worker" },
+			capabilityCeiling: ["memory.query"],
+			toolNames: ["memory"],
+		});
+		expect(() =>
+			createWorkerExecutionContract({
+				worker: {
+					profile: rootMemoryProfile,
+					modelBinding: rootMemoryProfile.modelPolicy.candidates[0]!,
+					authority: createTestWorkerExecutionAuthority(rootMemoryProfile),
+				},
+			}),
+		).toThrow("contains unclassified orchestration tools: memory");
+
+		const boundedMemoryProfile = createTestWorkerOrchestrationProfile({
+			profileId: "bounded-memory-read-profile",
+			model: { provider: "faux", id: "faux-worker" },
+			capabilityCeiling: ["memory.query"],
+			toolNames: ["memory_read"],
+		});
+		expect(() =>
+			createWorkerExecutionContract({
+				worker: {
+					profile: boundedMemoryProfile,
+					modelBinding: boundedMemoryProfile.modelPolicy.candidates[0]!,
+					authority: createTestWorkerExecutionAuthority(boundedMemoryProfile),
+				},
+			}),
+		).not.toThrow();
+	});
+
 	it("rejects unknown raw budget fields before cloning nested values", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "budget-bound-profile",

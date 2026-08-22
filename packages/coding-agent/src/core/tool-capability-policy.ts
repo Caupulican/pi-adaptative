@@ -1,5 +1,6 @@
 import type { HarnessCapability } from "./capability-contract.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
+import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 
 export interface ToolCapabilityPolicy {
@@ -54,7 +55,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	[GOAL_LIFECYCLE_TOOL_NAMES[0], policy([["memory.mutate"]], "memory-broker")],
 	[GOAL_LIFECYCLE_TOOL_NAMES[1], policy([["memory.query"]], "memory-broker")],
 	[GOAL_LIFECYCLE_TOOL_NAMES[2], policy([["memory.mutate"]], "memory-broker")],
-	["memory", policy([["memory.mutate", "memory.query"]], "memory-broker")],
+	[ROOT_MEMORY_TOOL_NAME, policy([["memory.mutate", "memory.query"]], "memory-broker")],
+	[WORKER_MEMORY_READ_TOOL_NAME, policy([["memory.query"]], "memory-broker")],
 	["secret_store", policy([["credentials.use"]], ["service-proxy", "path-scope"])],
 	["delegate", DELEGATE_POLICY],
 	["model_fitness", policy([["research.execute"]], "control-plane")],
@@ -99,7 +101,7 @@ export function toolCapabilityRequirementClauses(
 	args?: unknown,
 ): readonly (readonly HarnessCapability[])[] {
 	const name = toolName.toLowerCase();
-	if (name === "memory" && args !== undefined) {
+	if (name === ROOT_MEMORY_TOOL_NAME && args !== undefined) {
 		const record =
 			args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
 		const isUnambiguousQuery =

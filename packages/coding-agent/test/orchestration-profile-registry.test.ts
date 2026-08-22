@@ -205,14 +205,24 @@ describe("OrchestrationProfileRegistry", () => {
 		expect(() => validateOrchestrationProfile(profile({ toolNames: ["read", "read"] }))).toThrow(
 			"duplicate toolNames",
 		);
+		expect(() => validateOrchestrationProfile(profile({ toolNames: ["memory"] }))).toThrow(
+			"unclassified orchestration tools",
+		);
 		const { executionPolicy: _executionPolicy, ...withoutProcessPolicy } = profile();
 		expect(() =>
 			validateOrchestrationProfile({
 				...withoutProcessPolicy,
-				toolNames: ["memory"],
+				toolNames: ["memory_read"],
 				capabilityCeiling: ["filesystem.read"],
 			}),
 		).toThrow("lacks memory authority");
+		expect(() =>
+			validateOrchestrationProfile({
+				...withoutProcessPolicy,
+				toolNames: ["memory_read"],
+				capabilityCeiling: ["memory.query"],
+			}),
+		).not.toThrow();
 	});
 
 	it("pins a fixed model and exact reasoning level", () => {

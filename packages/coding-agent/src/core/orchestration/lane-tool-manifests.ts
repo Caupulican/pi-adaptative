@@ -1,4 +1,5 @@
 import { mapToolNamesForPlatform } from "../default-tool-surface.ts";
+import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
 
@@ -9,7 +10,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"ls",
 	"write",
 	"edit",
-	"memory",
+	WORKER_MEMORY_READ_TOOL_NAME,
 	"python",
 	"run_process",
 	"bash",

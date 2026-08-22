@@ -4,6 +4,11 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import {
+	ROOT_MEMORY_TOOL_NAME,
+	WORKER_MEMORY_READ_TOOL_NAME,
+	WORKER_ROOT_MEMORY_TOOL_NAMES,
+} from "../memory/worker-memory-tools.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import {
 	type HarnessCapability,
@@ -37,7 +42,6 @@ const DEFAULT_TOOL_NAMES = [
 	"ls",
 	"write",
 	"edit",
-	"memory",
 	"python",
 	STABLE_SHELL_TOOL_NAME,
 	"artifact_retrieve",
@@ -53,7 +57,6 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"process.exec",
 	"network.http",
 	"service.mcp",
-	"memory.query",
 	"skill.read",
 ];
 export interface WorkerAuthorityResolutionInput {
@@ -181,10 +184,22 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 
 	const inheritedForegroundToolNames = mapToolNamesForPlatform(
 		input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES,
-	).filter((toolName) => AVAILABLE_TOOL_NAMES.has(toolName));
+	).filter((toolName) => AVAILABLE_TOOL_NAMES.has(toolName) && !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
+	const requestedForbiddenTool = input.authority?.toolNames?.find((toolName) =>
+		WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName),
+	);
+	if (requestedForbiddenTool) {
+		return { ok: false, reason: `orchestration_tool_unavailable:${requestedForbiddenTool}` };
+	}
+	const baseForbiddenTool = input.base?.profile.toolNames.find((toolName) =>
+		WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName),
+	);
+	if (baseForbiddenTool) {
+		return { ok: false, reason: `orchestration_tool_unavailable:${baseForbiddenTool}` };
+	}
 	const configuredToolNames = mapToolNamesForPlatform(
 		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedForegroundToolNames,
-	);
+	).filter((toolName) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
 	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
 	const uniqueToolNames = [
 		...new Set(
@@ -202,7 +217,16 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		const inheritedSurface = new Set(
 			input.base ? mapToolNamesForPlatform(input.base.profile.toolNames) : inheritedForegroundToolNames,
 		);
-		const uninheritedTools = uniqueToolNames.filter((toolName) => !inheritedSurface.has(toolName));
+		const foregroundTools = input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES;
+		const boundedMemoryReadInherited =
+			uniqueToolNames.includes(WORKER_MEMORY_READ_TOOL_NAME) &&
+			foregroundTools.includes(ROOT_MEMORY_TOOL_NAME) &&
+			input.foregroundEnvelope?.capabilities.includes("memory.query") === true;
+		const uninheritedTools = uniqueToolNames.filter(
+			(toolName) =>
+				!inheritedSurface.has(toolName) &&
+				!(toolName === WORKER_MEMORY_READ_TOOL_NAME && boundedMemoryReadInherited),
+		);
 		if (uninheritedTools.length > 0) {
 			return { ok: false, reason: `orchestration_tool_unavailable:${uninheritedTools.join(",")}` };
 		}

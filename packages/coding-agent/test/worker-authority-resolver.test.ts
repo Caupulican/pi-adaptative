@@ -53,7 +53,7 @@ describe("resolveWorkerAuthority", () => {
 		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
 	});
 
-	it("admits the read-only memory surface with memory.query authority", () => {
+	it("rejects the root-only memory tool for a worker authority request", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: {
 				capabilities: ["memory.query"],
@@ -65,16 +65,32 @@ describe("resolveWorkerAuthority", () => {
 			isModelExhausted: () => false,
 		});
 
+		expect(resolution).toEqual({ ok: false, reason: "orchestration_tool_unavailable:memory" });
+	});
+
+	it("admits the bounded memory_read adapter from an active root memory surface", () => {
+		const resolution = resolveWorkerAuthority({
+			authority: {
+				capabilities: ["memory.query"],
+				toolNames: ["memory_read"],
+			},
+			foregroundModel: model,
+			foregroundToolNames: ["memory"],
+			foregroundEnvelope: { id: "memory-root", capabilities: ["memory.query"], allowedTools: ["memory"] },
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["memory"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["memory_read"]);
 		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["memory.query"]);
 	});
 
 	it("inherits every compatible active foreground tool and strips root-only tools", () => {
 		const resolution = resolveWorkerAuthority({
 			foregroundModel: model,
-			foregroundToolNames: ["read", "python", "delegate", "goal", "reflection"],
+			foregroundToolNames: ["read", "python", "memory", "delegate", "goal", "reflection"],
 			modelRegistry,
 			isModelExhausted: () => false,
 		});

@@ -1,6 +1,7 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
+import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
 import { createArtifactRetrieveTool } from "../tools/artifact-retrieve.ts";
 import {
@@ -44,7 +45,8 @@ export const WORKER_TOOL_ADAPTER_FORBIDDEN_NAMES: ReadonlySet<string> = new Set(
 	"tmux_dispatch",
 	"tmux_agent_manager",
 	"context_scout",
-	"memory",
+	ROOT_MEMORY_TOOL_NAME,
+	WORKER_MEMORY_READ_TOOL_NAME,
 	"goal",
 	"get_goal",
 	"update_goal",

@@ -24,9 +24,9 @@ import {
 import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 /**
- * Side M + Side H integration: the bundled file-store provider must surface the `memory` tool
- * (active/model-callable) and inject the MEMORY.md/USER.md snapshot into the system prompt; child
- * sessions must not be able to persist.
+ * Side M + Side H integration: the bundled file-store provider must surface the root `memory` tool
+ * (active/model-callable) and inject the MEMORY.md/USER.md snapshot into the root system prompt;
+ * child sessions receive neither root memory surface.
  */
 describe("Memory subsystem integration (file-store)", () => {
 	let tempDir: string;
@@ -55,7 +55,7 @@ describe("Memory subsystem integration (file-store)", () => {
 				profileId: "memory-worker-profile",
 				model: selectedModel,
 				capabilityCeiling: ["filesystem.read", "memory.query"],
-				toolNames: ["read", "memory"],
+				toolNames: ["read", "memory_read"],
 			}),
 		});
 		if (opts.memoryEnabled !== undefined) {
@@ -132,7 +132,7 @@ describe("Memory subsystem integration (file-store)", () => {
 		session.dispose();
 	});
 
-	it("gives an orchestrator-authorized worker bounded read-only file-store memory", async () => {
+	it("gives a delegated worker only the bounded memory_read adapter", async () => {
 		writeFileSync(join(agentDir, "MEMORY.md"), "LANE_MEMORY_READ_OK is the standing marker.\n", "utf-8");
 		writeFileSync(join(agentDir, "USER.md"), "", "utf-8");
 		const faux = registerFauxProvider({ models: [{ id: "memory-worker", contextWindow: 128_000 }] });
@@ -147,8 +147,8 @@ describe("Memory subsystem integration (file-store)", () => {
 			faux.setResponses([
 				(context) => {
 					workerTools = context.tools?.map((tool) => tool.name) ?? [];
-					memorySchema = JSON.stringify(context.tools?.find((tool) => tool.name === "memory")?.parameters);
-					return fauxAssistantMessage([fauxToolCall("memory", { query: "standing marker" })], {
+					memorySchema = JSON.stringify(context.tools?.find((tool) => tool.name === "memory_read")?.parameters);
+					return fauxAssistantMessage([fauxToolCall("memory_read", { query: "standing marker" })], {
 						stopReason: "toolUse",
 					});
 				},
@@ -156,7 +156,7 @@ describe("Memory subsystem integration (file-store)", () => {
 					const recalled = JSON.stringify(context.messages).includes("LANE_MEMORY_READ_OK");
 					return fauxAssistantMessage(
 						recalled
-							? completedWorkerOutput("read-only memory recall succeeded")
+							? completedWorkerOutput("bounded memory_read recall succeeded")
 							: '{"summary":"memory recall failed","status":"blocked","blockers":["marker absent"]}',
 					);
 				},
@@ -167,11 +167,14 @@ describe("Memory subsystem integration (file-store)", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(run.outcome?.claim.summary).toBe("read-only memory recall succeeded");
-			expect(workerTools).toContain("memory");
+			expect(run.outcome?.claim.summary).toBe("bounded memory_read recall succeeded");
+			expect(workerTools).toContain("memory_read");
+			expect(workerTools).not.toContain("memory");
 			expect(memorySchema).toContain("query");
 			expect(memorySchema).not.toContain("action");
 			const request = getWorkerRequestSnapshots(session.sessionManager.getEntries()).at(-1);
+			expect(request?.envelope.allowedTools).toContain("memory_read");
+			expect(request?.envelope.allowedTools).not.toContain("memory");
 			expect(request?.envelope.capabilities).toContain("memory.query");
 			expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toBe(
 				"LANE_MEMORY_READ_OK is the standing marker.\n",
@@ -193,7 +196,9 @@ describe("Memory subsystem integration (file-store)", () => {
 		const session = await newSession({ model, authStorage, memoryEnabled: false });
 		try {
 			faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("memory", { query: "disabled marker" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("memory_read", { query: "disabled marker" })], {
+					stopReason: "toolUse",
+				}),
 				(context) =>
 					fauxAssistantMessage(
 						JSON.stringify(context.messages).includes("DISABLED_MEMORY_MARKER")
@@ -238,20 +243,13 @@ describe("Memory subsystem integration (file-store)", () => {
 		session.dispose();
 	});
 
-	it("blocks memory writes in a child session", async () => {
+	it("omits root memory tools and prompt snapshots from child sessions", async () => {
+		writeFileSync(join(agentDir, "MEMORY.md"), "CHILD_MEMORY_MUST_STAY_PRIVATE\n", "utf-8");
 		const session = await newSession({ isChildSession: true });
-		const memoryTool = session.getToolDefinition("memory");
-		expect(memoryTool).toBeDefined();
-
-		const result = await memoryTool!.execute(
-			"call-1",
-			{ action: "add", target: "memory", content: "secret" },
-			new AbortController().signal,
-			() => {},
-			{} as never,
-		);
-		const text = result.content.map((c) => ("text" in c ? c.text : "")).join("");
-		expect(text.toLowerCase()).toContain("child session");
+		expect(session.getToolDefinition("memory")).toBeUndefined();
+		expect(session.getAllTools().map((tool) => tool.name)).not.toContain("memory");
+		expect(session.systemPrompt).not.toContain("CHILD_MEMORY_MUST_STAY_PRIVATE");
+		expect(session.systemPrompt).not.toContain("Persistent Memory (file-store)");
 
 		session.dispose();
 	});

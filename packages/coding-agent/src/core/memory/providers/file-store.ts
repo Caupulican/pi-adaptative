@@ -19,6 +19,7 @@ import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import { isMissingFileError, withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
+import { ROOT_MEMORY_TOOL_NAME } from "../worker-memory-tools.ts";
 import { UserMemoryArchive } from "./user-memory-archive.ts";
 
 /**
@@ -353,6 +354,7 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	public systemPromptBlock(budget?: MemoryPromptBudget): string {
+		if (this.ctx?.isChildSession) return "";
 		const sanitize = (content: string) => {
 			// Strip hidden/bidi-control chars before injecting memory into the prompt (defence in depth: the
 			// write path already blocks them, but a file edited out-of-band could carry them). Strip #31.
@@ -557,9 +559,10 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	public getToolDefinitions(): ToolDefinition[] {
+		if (this.ctx?.isChildSession) return [];
 		return [
 			{
-				name: "memory",
+				name: ROOT_MEMORY_TOOL_NAME,
 				label: "Persistent Memory Manager",
 				description:
 					"Add, replace, or remove durable facts and preferences. Use target 'okf' with structured metadata for durable project decisions, architecture, rules, debugging findings, and references; USER.md overflow is migrated into indexed OKF shards.",
@@ -570,18 +573,6 @@ export class FileStoreProvider implements MemoryProvider {
 				],
 				parameters: memorySchema,
 				execute: async (_toolCallId, params: MemoryParams, _signal, _onUpdate, _execCtx) => {
-					if (this.ctx?.isChildSession) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Error: Writes to persistent memory are not allowed in child sessions (subagents).",
-								},
-							],
-							details: { success: false, error: "Child session write-gated" },
-						};
-					}
-
 					const {
 						action,
 						target,

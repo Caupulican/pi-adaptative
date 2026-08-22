@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import { WORKER_MEMORY_READ_TOOL_NAME, WORKER_ROOT_MEMORY_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
 import type {
 	ExecutionGrant,
 	HarnessCapability,
@@ -14,6 +15,7 @@ import type {
 import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts";
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../session-role.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
 import { getToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
@@ -22,7 +24,7 @@ const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
 
 function delegatedToolCapabilities(toolName: string): readonly HarnessCapability[] {
-	return toolName === "memory" ? ["memory.query"] : requiredEnvelopeCapabilities(toolName);
+	return requiredEnvelopeCapabilities(toolName);
 }
 
 export interface WorkerExecutionPlan {
@@ -71,6 +73,7 @@ export function narrowWorkerExecutionPlan(
 	const admittedCapabilities = new Set(admitted.capabilities);
 	const toolManifests = current.toolManifests.filter(
 		(manifest) =>
+			!WORKER_ROOT_MEMORY_TOOL_NAMES.has(manifest.toolName) &&
 			admittedTools.has(manifest.toolName) &&
 			manifest.capabilities.every((capability) => admittedCapabilities.has(capability)),
 	);
@@ -93,7 +96,7 @@ export function narrowWorkerExecutionPlan(
 				),
 			),
 		],
-		readMemory: grantedTools.has("memory"),
+		readMemory: grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
 		writeEnabled,
 		processEnabled:
 			grantedTools.has("python") ||
@@ -118,7 +121,9 @@ export function buildWorkerExecutionPlan(args: {
 		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
 		: parentCwd;
 	const pathScopes = args.profile.workspacePath ? [cwd] : workerMachinePathRoots(cwd);
-	const profileToolNames = new Set(mapToolNamesForPlatform(args.profile.toolNames));
+	const profileToolNames = new Set(
+		mapToolNamesForPlatform(args.profile.toolNames).filter((name) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(name)),
+	);
 	const grantsRead =
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
 		args.profile.capabilityCeiling.includes("worktree.read");
@@ -126,7 +131,10 @@ export function buildWorkerExecutionPlan(args: {
 		args.settings.writeEnabled &&
 		(args.profile.capabilityCeiling.includes("filesystem.write") ||
 			args.profile.capabilityCeiling.includes("worktree.mutate"));
-	const memoryEligible = args.memoryEnabled && profileToolNames.has("memory");
+	const memoryEligible =
+		args.memoryEnabled &&
+		profileToolNames.has(WORKER_MEMORY_READ_TOOL_NAME) &&
+		args.profile.capabilityCeiling.includes("memory.query");
 	const processEligible =
 		args.profile.capabilityCeiling.includes("process.exec") ||
 		args.profile.capabilityCeiling.includes("tests.execute");
@@ -141,25 +149,16 @@ export function buildWorkerExecutionPlan(args: {
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
+		...(memoryEligible ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
 		...enabledProcessToolNames,
 		...enabledAdapterToolNames,
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
-	if (memoryEligible) {
-		toolManifests.push({
-			toolName: "memory",
-			moduleSpecifier: "../tools/memory.ts",
-			capabilities: delegatedToolCapabilities("memory"),
-			roles: [args.profile.role],
-			enforcements: ["memory-broker"],
-		});
-	}
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
 	const readEnabled = toolManifests.some((manifest) =>
 		manifest.capabilities.some((capability) => capability === "filesystem.read" || capability === "worktree.read"),
 	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
-	const readMemory = grantedTools.has("memory");
 	const processEnabled =
 		grantedTools.has("python") ||
 		grantedTools.has("run_process") ||
@@ -184,7 +183,7 @@ export function buildWorkerExecutionPlan(args: {
 				),
 			),
 		],
-		readMemory,
+		readMemory: memoryEligible && grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
 		writeEnabled,
 		processEnabled,
 		budget,
@@ -197,10 +196,6 @@ export function compileWorkerExecutionGrant(args: {
 	plan: WorkerExecutionPlan;
 	resources: readonly ResourcePointer[];
 }): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
-	const authorityCapabilities =
-		args.plan.readMemory && !args.profile.capabilityCeiling.includes("memory.query")
-			? [...args.profile.capabilityCeiling, "memory.query" as const]
-			: args.profile.capabilityCeiling;
 	const compiled = new ExecutionPolicyCompiler().compile({
 		objectiveId: args.target.objectiveId,
 		taskId: args.target.taskId,
@@ -209,7 +204,7 @@ export function compileWorkerExecutionGrant(args: {
 		role: args.profile.role,
 		requiredCapabilities: args.plan.requiredCapabilities,
 		requestedCapabilities: args.plan.requiredCapabilities,
-		authorityCapabilities,
+		authorityCapabilities: args.profile.capabilityCeiling,
 		requestedTools: args.plan.toolManifests.map((manifest) => manifest.toolName),
 		toolManifests: args.plan.toolManifests,
 		resources: args.resources,
@@ -239,6 +234,10 @@ export function compileManagedProcessExecutionGrant(args: {
 	const manifests: ToolCapabilityManifest[] = [];
 	const unknownTools: string[] = [];
 	for (const toolName of [...new Set(args.allowedTools)]) {
+		if (WORKER_FORBIDDEN_TOOLS.has(toolName) || toolName === WORKER_MEMORY_READ_TOOL_NAME) {
+			unknownTools.push(toolName);
+			continue;
+		}
 		const policy = getToolCapabilityPolicy(toolName);
 		const capabilities = delegatedToolCapabilities(toolName);
 		if (!policy || capabilities.length === 0) {

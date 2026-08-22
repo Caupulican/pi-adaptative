@@ -68,12 +68,12 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(plan.readMemory).toBe(false);
 	});
 
-	it("materializes delegated memory as query-only even when the profile also permits mutation", () => {
+	it("materializes only the bounded memory_read adapter when the profile permits query access", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "bounded-memory",
 			model: { provider: "test", id: "model" },
 			capabilityCeiling: ["memory.query", "memory.mutate"],
-			toolNames: ["memory"],
+			toolNames: ["memory_read"],
 		});
 
 		const plan = buildWorkerExecutionPlan({
@@ -85,12 +85,34 @@ describe("buildWorkerExecutionPlan", () => {
 		});
 
 		expect(plan.toolManifests).toMatchObject([
-			{ toolName: "memory", capabilities: ["memory.query"], enforcements: ["memory-broker"] },
+			{ toolName: "memory_read", capabilities: ["memory.query"], enforcements: ["memory-broker"] },
 		]);
 		expect(plan.requiredCapabilities).toEqual(["memory.query"]);
+		expect(plan.readMemory).toBe(true);
 	});
 
-	it("never grants managed workers memory mutation authority", () => {
+	it("preserves the bounded memory_read adapter when narrowing an admitted plan", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "narrow-memory-read",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["filesystem.read", "memory.query"],
+			toolNames: ["memory_read"],
+		});
+		const plan = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: true,
+		});
+
+		const narrowed = narrowWorkerExecutionPlan(workerExecutionAuthorityFromPlan(plan), plan);
+
+		expect(narrowed.toolManifests.map((manifest) => manifest.toolName)).toEqual(["memory_read"]);
+		expect(narrowed.readMemory).toBe(true);
+	});
+
+	it("rejects the root-only memory tool from managed worker grants", () => {
 		const compiled = compileManagedProcessExecutionGrant({
 			target: { objectiveId: "objective-1", taskId: "task-1", attemptId: "attempt-1" },
 			laneId: "lane-1",
@@ -103,9 +125,7 @@ describe("buildWorkerExecutionPlan", () => {
 			budget: {},
 		});
 
-		expect(compiled.ok).toBe(true);
-		if (!compiled.ok) throw new Error(compiled.reasonCodes.join(", "));
-		expect(compiled.grant.capabilities).toEqual(["memory.query"]);
+		expect(compiled).toEqual({ ok: false, reasonCodes: ["unknown_tool:memory"] });
 	});
 
 	it("treats the global zero wall-clock setting as disabled without creating an infinite budget value", () => {
