@@ -45,6 +45,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toContain("Retry unchanged only after any other tool succeeds or a new user turn.");
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
+		expect(prompt).toContain("Current working directory: /repo");
 		expect(prompt.length).toBeLessThanOrEqual(4_096);
 	});
 
@@ -74,6 +75,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
+		expect(prompt).not.toContain("Current working directory:");
 		expect(prompt.length).toBeLessThanOrEqual(2_048);
 	});
 

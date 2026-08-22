@@ -106,6 +106,8 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getActiveToolNames()).toEqual(["create_goal", "get_goal", "update_goal"]);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
 			expect(harness.session.systemPrompt).toContain(CHAT_WORK_LIFECYCLE_SYSTEM_RULE);
+			expect(harness.session.systemPrompt).not.toContain("Current working directory:");
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(2_000);
 		} finally {
 			harness.cleanup();
 		}

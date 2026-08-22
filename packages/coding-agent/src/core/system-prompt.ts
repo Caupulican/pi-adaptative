@@ -185,7 +185,11 @@ function appendPromptResources(
 	}
 	// Day-granularity only; keep this tail stable across every call on the same calendar day.
 	result += `\nCurrent date: ${options.date}`;
-	result += `\nCurrent working directory: ${options.promptCwd}`;
+	// Chat-class models have no filesystem tools, so cwd is unusable context and makes the hard
+	// prompt budget depend on host checkout-path length. Tool-capable profiles retain it.
+	if (options.modelCapability?.class !== "chat") {
+		result += `\nCurrent working directory: ${options.promptCwd}`;
+	}
 	// Prompt resources can come from CRLF checkouts or user files. Canonicalize once at the final
 	// assembly boundary so capability budgets and provider cache keys are host-independent.
 	const normalizedResult = result.replace(/\r\n?/g, "\n");

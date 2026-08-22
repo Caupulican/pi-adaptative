@@ -15,7 +15,7 @@
 
 - Preserved active-branch ancestry when excluding lifecycle-ledger records from compaction input, preventing context accounting from collapsing to only the newest tool result.
 - Reconciled already-notified terminal tmux jobs into freshly hydrated host lane state so absent workers cannot remain displayed as active.
-- Kept the five-phase lifecycle contract within chat and minimal model prompt budgets while retaining the full contract for larger profiles.
+- Kept the five-phase lifecycle contract within chat and minimal model prompt budgets across host checkout-path formats while retaining the full contract for larger profiles.
 
 ## [0.95.0] - 2026-08-22
 
