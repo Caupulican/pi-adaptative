@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, parse, resolve } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { workerMachinePathRoots } from "../src/core/delegation/worker-machine-scope.ts";
 import { WorkerWriteReservationStore } from "../src/core/delegation/worker-write-reservation.ts";
 import { WorkerWriteReservationCoordinator } from "../src/core/delegation/worker-write-reservation-coordinator.ts";
 
@@ -79,8 +80,11 @@ describe("WorkerWriteReservationCoordinator", () => {
 
 	it("does not serialize machine-wide workers but still fences an explicit workspace", () => {
 		const state = fixture();
-		const machineRoot = parse(resolve(state.workspace)).root;
-		const machinePlan = { cwd: state.workspace, writeEnabled: true, writePaths: [machineRoot] };
+		const machinePlan = {
+			cwd: state.workspace,
+			writeEnabled: true,
+			writePaths: workerMachinePathRoots(state.workspace),
+		};
 		expect(state.coordinator.acquire("machine-1", { attemptId: "machine-attempt-1" }, machinePlan)).toEqual({
 			kind: "granted",
 		});
