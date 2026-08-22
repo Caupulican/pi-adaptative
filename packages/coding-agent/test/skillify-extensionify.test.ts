@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../src/core/skill-vault.ts";
 import { createExtensionifyToolDefinition } from "../src/core/tools/extensionify.ts";
 import { createSkillifyToolDefinition } from "../src/core/tools/skillify.ts";
 
@@ -84,6 +85,46 @@ describe("skillify", () => {
 
 		expect(result.details.valid).toBe(false);
 		expect(result.details.errors.some((e) => e.includes("required"))).toBe(true);
+	});
+
+	it("accepts a draft body at the active skill byte limit", async () => {
+		const tool = createSkillifyToolDefinition(process.cwd());
+
+		const result = await tool.execute(
+			"test-body-limit",
+			{
+				name: "exact-body-limit-skill",
+				description: "A skill body at the active byte limit",
+				body: "x".repeat(MAX_ACTIVE_SKILL_BODY_BYTES),
+			},
+			undefined,
+			undefined,
+			createMockContext(),
+		);
+
+		expect(result.details.valid).toBe(true);
+		expect(result.details.errors).toHaveLength(0);
+	});
+
+	it("rejects a draft body above the active skill byte limit", async () => {
+		const tool = createSkillifyToolDefinition(process.cwd());
+
+		const result = await tool.execute(
+			"test-body-limit-plus-one",
+			{
+				name: "oversized-body-skill",
+				description: "A skill body above the active byte limit",
+				body: "x".repeat(MAX_ACTIVE_SKILL_BODY_BYTES + 1),
+			},
+			undefined,
+			undefined,
+			createMockContext(),
+		);
+
+		expect(result.details.valid).toBe(false);
+		expect(result.details.errors).toContain(
+			`body exceeds ${MAX_ACTIVE_SKILL_BODY_BYTES} bytes (${MAX_ACTIVE_SKILL_BODY_BYTES + 1})`,
+		);
 	});
 
 	it("returns audit report with existing skills", async () => {

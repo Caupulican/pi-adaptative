@@ -6,6 +6,14 @@ import { loadSkills, type Skill } from "../skills.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const DUPLICATE_THRESHOLD = 0.55;
+export const DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS = Object.freeze({
+	maxSkills: 256,
+	maxComparisonPairs: 32_768,
+	maxDraftFieldChars: 16_384,
+});
+export const DEFAULT_WORKER_SKILL_AUDIT_MAX_SKILLS = DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS.maxSkills;
+export const DEFAULT_WORKER_SKILL_AUDIT_MAX_COMPARISON_PAIRS = DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS.maxComparisonPairs;
+export const DEFAULT_WORKER_SKILL_AUDIT_MAX_DRAFT_FIELD_CHARS = DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS.maxDraftFieldChars;
 
 const STOPWORDS = new Set(
 	"the a an and or of for to with when use using from into this that skill task work working project agent agents code files file in on by as is are be do not should about".split(
@@ -69,7 +77,22 @@ export interface SkillAuditReport {
 		name: string;
 		paths: string[];
 	}>;
+	truncated?: boolean;
 	recommendations?: string[];
+}
+
+export interface SkillAuditRunOptions {
+	signal?: AbortSignal;
+	/** Maximum number of host-provided skills considered by a bounded worker audit. */
+	maxSkills?: number;
+	/** Maximum number of pair comparisons performed by a bounded worker audit. */
+	maxComparisonPairs?: number;
+	/** Maximum characters accepted in each draft field before any discovery or comparison work. */
+	maxDraftFieldChars?: number;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw new Error("Operation aborted");
 }
 
 /**
@@ -78,25 +101,45 @@ export interface SkillAuditReport {
 export function runSkillAudit(
 	cwd: string,
 	draftSkill?: { name?: string; description?: string; body?: string },
+	providedSkills?: readonly Skill[],
+	redactPath?: (path: string) => string,
+	runOptions?: SkillAuditRunOptions,
 ): SkillAuditReport {
+	throwIfAborted(runOptions?.signal);
+	const maxDraftFieldChars = runOptions?.maxDraftFieldChars;
+	if (draftSkill && maxDraftFieldChars !== undefined) {
+		for (const [field, value] of [
+			["draftName", draftSkill.name],
+			["draftDescription", draftSkill.description],
+			["draftBody", draftSkill.body],
+		] as const) {
+			if (value !== undefined && value.length > maxDraftFieldChars) {
+				throw new Error(`skill_audit_draft_too_large:${field}`);
+			}
+		}
+	}
 	// Load existing skills
-	const result = loadSkills({
-		cwd,
-		agentDir: getAgentDir(),
-		skillPaths: [],
-		includeDefaults: true,
-	});
+	const skillsResult = providedSkills
+		? { skills: providedSkills }
+		: loadSkills({ cwd, agentDir: getAgentDir(), skillPaths: [], includeDefaults: true });
+	const maxSkills = runOptions?.maxSkills;
+	const sourceSkills =
+		maxSkills === undefined
+			? skillsResult.skills
+			: skillsResult.skills.slice(0, Math.max(0, maxSkills - (draftSkill ? 1 : 0)));
+	let truncated = sourceSkills.length < skillsResult.skills.length;
 
-	const skills: SkillSummary[] = result.skills.map((skill: Skill) => ({
+	const skills: SkillSummary[] = sourceSkills.map((skill: Skill) => ({
 		name: skill.name,
 		description: skill.description,
-		path: skill.filePath,
+		path: redactPath?.(skill.filePath) ?? skill.filePath,
 		scope: skill.sourceInfo.scope ?? "unknown",
 		keywords: tokenize(`${skill.name} ${skill.description}`),
 	}));
 
 	// If a draft skill is provided, add it to the set for comparison
 	if (draftSkill) {
+		throwIfAborted(runOptions?.signal);
 		const draftName = draftSkill.name || "draft-skill";
 		const draftDesc = draftSkill.description || "";
 		skills.push({
@@ -110,8 +153,19 @@ export function runSkillAudit(
 
 	// Find near-duplicates based on Jaccard similarity
 	const nearDuplicates: SkillAuditReport["nearDuplicates"] = [];
-	for (let i = 0; i < skills.length; i++) {
+	let comparisonPairs = 0;
+	comparisonLoop: for (let i = 0; i < skills.length; i++) {
+		throwIfAborted(runOptions?.signal);
 		for (let j = i + 1; j < skills.length; j++) {
+			throwIfAborted(runOptions?.signal);
+			if (
+				runOptions?.maxComparisonPairs !== undefined &&
+				comparisonPairs >= Math.max(0, runOptions.maxComparisonPairs)
+			) {
+				truncated = true;
+				break comparisonLoop;
+			}
+			comparisonPairs++;
 			const similarity = jaccard(skills[i].keywords, skills[j].keywords);
 			if (similarity >= DUPLICATE_THRESHOLD) {
 				const reason =
@@ -161,6 +215,7 @@ export function runSkillAudit(
 		nearDuplicates,
 		compartmentWarnings: [],
 		nameCollisions,
+		...(truncated ? { truncated: true } : {}),
 		recommendations,
 	};
 }
@@ -177,12 +232,22 @@ export interface SkillAuditToolDetails {
 	reportPath?: string;
 }
 
-export interface SkillAuditToolOptions {}
+export interface SkillAuditToolOptions {
+	/** Host-owned metadata source. Omitted uses the foreground global discovery path. */
+	getSkills?: () => readonly Skill[];
+	/** Redacts host paths in the structured report before they can reach a worker. */
+	redactPath?: (path: string) => string;
+	/** Optional host-enforced bounds used by worker adapters; foreground callers remain unbounded. */
+	maxSkills?: number;
+	maxComparisonPairs?: number;
+	maxDraftFieldChars?: number;
+}
 
 export function createSkillAuditToolDefinition(
 	cwd: string,
 	_options?: SkillAuditToolOptions,
 ): ToolDefinition<typeof skillAuditSchema, SkillAuditReport> {
+	const options = _options;
 	return {
 		name: "skill_audit",
 		label: "Skill Audit",
@@ -197,7 +262,7 @@ export function createSkillAuditToolDefinition(
 		async execute(
 			_toolCallId,
 			{ draftName, draftDescription, draftBody }: SkillAuditInput,
-			_signal?: AbortSignal,
+			signal?: AbortSignal,
 			_onUpdate?,
 			_ctx?,
 		): Promise<{
@@ -213,7 +278,12 @@ export function createSkillAuditToolDefinition(
 						}
 					: undefined;
 
-			const report = runSkillAudit(cwd, draftSkill);
+			const report = runSkillAudit(cwd, draftSkill, options?.getSkills?.(), options?.redactPath, {
+				signal,
+				maxSkills: options?.maxSkills,
+				maxComparisonPairs: options?.maxComparisonPairs,
+				maxDraftFieldChars: options?.maxDraftFieldChars,
+			});
 
 			// Format the report as readable text
 			const lines: string[] = [];

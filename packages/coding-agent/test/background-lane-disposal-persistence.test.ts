@@ -60,7 +60,6 @@ describe("background lane disposal persistence", () => {
 				orchestrationProfile: "disposal-worker",
 				maxConcurrent: 3,
 				writeEnabled: true,
-				writePaths: ["/repo"],
 			},
 		});
 		saveTestWorkerOrchestrationProfile({
@@ -88,6 +87,7 @@ describe("background lane disposal persistence", () => {
 			getResourceLoader: () => createTestResourceLoader(),
 			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
+			getForegroundThinkingLevel: () => "off",
 			isModelExhausted: () => false,
 			isDelegateToolActive: () => true,
 			getCapabilityEnvelope: () => undefined,
@@ -185,6 +185,7 @@ describe("background lane disposal persistence", () => {
 			getResourceLoader: () => createTestResourceLoader(),
 			getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 			getModel: () => model,
+			getForegroundThinkingLevel: () => "off",
 			isModelExhausted: () => false,
 			isDelegateToolActive: () => true,
 			getCapabilityEnvelope: () => undefined,

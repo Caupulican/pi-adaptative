@@ -14,10 +14,10 @@ import { sameFileVersion } from "./util/bounded-file.ts";
 export const MAX_SKILL_FRONTMATTER_BYTES = 16 * 1024;
 const SKILL_FRONTMATTER_READ_CHUNK_BYTES = 1024;
 
-const MAX_NAME_LENGTH = 64;
+export const MAX_SKILL_NAME_LENGTH = 64;
 
 /** Max description length per spec */
-const MAX_DESCRIPTION_LENGTH = 1024;
+export const MAX_SKILL_DESCRIPTION_LENGTH = 1024;
 
 // Kept local rather than imported from settings-manager.ts's ThinkingLevel validation: that module
 // already imports validateSkillName FROM this file, so importing back would cycle. The literal set
@@ -71,8 +71,8 @@ export interface LoadSkillsResult {
 export function validateSkillName(name: string): string[] {
 	const errors: string[] = [];
 
-	if (name.length > MAX_NAME_LENGTH) {
-		errors.push(`name exceeds ${MAX_NAME_LENGTH} characters (${name.length})`);
+	if (name.length > MAX_SKILL_NAME_LENGTH) {
+		errors.push(`name exceeds ${MAX_SKILL_NAME_LENGTH} characters (${name.length})`);
 	}
 
 	if (!/^[a-z0-9-]+$/.test(name)) {
@@ -98,8 +98,8 @@ function validateDescription(description: string | undefined): string[] {
 
 	if (!description || description.trim() === "") {
 		errors.push("description is required");
-	} else if (description.length > MAX_DESCRIPTION_LENGTH) {
-		errors.push(`description exceeds ${MAX_DESCRIPTION_LENGTH} characters (${description.length})`);
+	} else if (description.length > MAX_SKILL_DESCRIPTION_LENGTH) {
+		errors.push(`description exceeds ${MAX_SKILL_DESCRIPTION_LENGTH} characters (${description.length})`);
 	}
 
 	return errors;

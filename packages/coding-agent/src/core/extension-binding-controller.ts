@@ -45,7 +45,7 @@ import type { MemoryProvider } from "./memory/memory-provider.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 
 export interface ExtensionBindingControllerDeps {
@@ -105,6 +105,23 @@ export interface ExtensionBindingControllerDeps {
 	setExtensionShutdownHandler(handler: ShutdownHandler | undefined): void;
 	getExtensionErrorListener(): ExtensionErrorListener | undefined;
 	setExtensionErrorListener(listener: ExtensionErrorListener | undefined): void;
+}
+
+/** Compile the current session's effective resource authority into a self-contained profile.
+ * Empty allows become explicit wildcards so activating this snapshot in a child preserves the
+ * parent's unrestricted kinds instead of triggering strict-profile deny-all semantics. */
+export function compileEffectiveResourceProfileSnapshot(
+	settingsManager: Pick<SettingsManager, "getResourceProfileFilter">,
+): ResourceProfileSettings {
+	const snapshot: ResourceProfileSettings = {};
+	for (const kind of ["extensions", "skills", "prompts", "themes", "agents", "tools"] as const) {
+		const filter = settingsManager.getResourceProfileFilter(kind);
+		snapshot[kind] = {
+			allow: filter.allow.length > 0 ? [...filter.allow] : ["*"],
+			block: [...filter.block],
+		};
+	}
+	return snapshot;
 }
 
 export class ExtensionBindingController {
@@ -281,6 +298,7 @@ export class ExtensionBindingController {
 				getThinkingLevel: () => this.deps.getThinkingLevel(),
 				setThinkingLevel: (level) => this.deps.setThinkingLevel(level),
 				getExternalResourceRoots: () => this.deps.getSettingsManager().getEffectiveExternalResourceRoots(),
+				getEffectiveResourceProfile: () => compileEffectiveResourceProfileSnapshot(this.deps.getSettingsManager()),
 				registerMemoryProvider: (provider) => this.deps.registerMemoryProvider(provider),
 				registerContextMemoryProvider: (provider) => this.deps.registerContextMemoryProvider(provider),
 				reportSpawnedUsage: (usage, opts) => {

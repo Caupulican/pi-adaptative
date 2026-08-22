@@ -592,4 +592,43 @@ describe("Agent", () => {
 		expect(providerToolCounts).toEqual([1, 1, 0]);
 		expect(toolExecutions).toBe(2); // the closing request cannot execute another tool
 	});
+
+	it("runs the host steering-boundary hook after an asynchronous stop check", async () => {
+		let providerCalls = 0;
+		let terminalReady = false;
+		let hookCalls = 0;
+		let agent: Agent;
+		agent = new Agent({
+			shouldStopAfterTurn: async () => {
+				terminalReady = providerCalls === 1;
+				return false;
+			},
+			beforeSteeringPoll: () => {
+				hookCalls++;
+				if (!terminalReady) return;
+				terminalReady = false;
+				agent.steer({ role: "user", content: "terminal handoff", timestamp: Date.now() });
+			},
+			streamFn: () => {
+				providerCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage(`response ${providerCalls}`),
+					});
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("start");
+
+		expect(providerCalls).toBe(2);
+		expect(hookCalls).toBeGreaterThanOrEqual(2);
+		expect(agent.state.messages).toContainEqual(
+			expect.objectContaining({ role: "user", content: "terminal handoff" }),
+		);
+	});
 });

@@ -9,8 +9,9 @@
  * route state — the active intent/route, the cheap-turn session buffer, the escalation-requested and
  * retry-in-flight flags — and the sticky last-decision/last-skip-reason/last-intent used by the
  * status report. Everything else it needs — the live agent + its state, the current model, the
- * session/settings managers, the model registry, the agent dir, the reflection abort signal, the
- * base system prompt, the isolated-completion primitive, spawned-usage accounting, the event/telemetry
+ * session/settings managers, the model registry, the agent dir, the session-disposal abort signal for
+ * isolated judge completions, the base system prompt, the isolated-completion primitive, spawned-usage
+ * accounting, the event/telemetry
  * emitters, and the recently-extracted BackgroundLaneController (resolveLaneModel) / ContextPipeline
  * (resolveCurationModelIfFit) collaborators — is reached through narrow deps accessors rather than the
  * whole AgentSession.

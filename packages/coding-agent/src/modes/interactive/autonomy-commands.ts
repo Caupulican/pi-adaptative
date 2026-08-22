@@ -55,8 +55,8 @@ export function formatAutonomyStatus(host: AutonomyHost): string {
 			: "proposal-gated outside configured high-confidence memory policy";
 	const reflectionLine =
 		autonomy.mode === "full"
-			? `Reflection review: ${settings.reflectionReview ? "enabled" : "disabled"}; post-turn when concurrency allows; cooldown=${settings.reflectionCooldownMinutes}m`
-			: `Reflection review: ${settings.reflectionReview ? "enabled" : "disabled"}; tool trigger=${settings.reflectionMinToolCalls}; cooldown=${settings.reflectionCooldownMinutes}m`;
+			? `Reflection cue: ${settings.reflectionReview ? "enabled" : "disabled"}; root-only durable cue for the next ordinary turn; cooldown=${settings.reflectionCooldownMinutes}m`
+			: `Reflection cue: ${settings.reflectionReview ? "enabled" : "disabled"}; tool trigger=${settings.reflectionMinToolCalls}; next ordinary turn; cooldown=${settings.reflectionCooldownMinutes}m`;
 	return [
 		"Autonomy status",
 		`Mode: ${autonomy.mode}${autonomy.mode === "full" ? " (standing autonomy)" : ""}`,

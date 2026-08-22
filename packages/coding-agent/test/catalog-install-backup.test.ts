@@ -8,6 +8,7 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 let mockSelectorChoice: string | null = null;
+const originalAgentDir = process.env[ENV_AGENT_DIR];
 
 // Mock SelectSubmenu in the local components file where it is imported from
 vi.mock("../src/modes/interactive/components/settings-selector.ts", () => {
@@ -66,7 +67,8 @@ describe("Catalog, Install Resources, Config Backup & Restore", () => {
 	});
 
 	afterEach(() => {
-		delete process.env[ENV_AGENT_DIR];
+		if (originalAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+		else process.env[ENV_AGENT_DIR] = originalAgentDir;
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true, force: true });
 		}

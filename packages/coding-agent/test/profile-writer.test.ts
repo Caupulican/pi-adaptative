@@ -47,20 +47,22 @@ describe("delegate profile actions", () => {
 		const text = formatTaskProfileInspection({
 			baseProfiles: [],
 			models: [{ provider: "faux", modelId: "m", thinkingLevels: ["off"] }],
+			inheritedToolNames: ["read", "python"],
 		});
-		expect(text).toContain("Reusable owner-authored bases for profile_create: none");
-		expect(text).toContain("Native delegate start does not need a base");
+		expect(text).toContain("Optional owner-authored bases for profile_create: none");
+		expect(text).toContain("Omit baseProfileId to derive the foreground model");
+		expect(text).toContain("Effective inherited native tools: read, python");
 		expect(text).not.toContain("Authorized bases:");
 
 		const inspected = executeDelegateProfileAction(
 			"profile_inspect",
 			{},
 			{
-				inspectTaskProfileOptions: () => ({ baseProfiles: [], models: [] }),
+				inspectTaskProfileOptions: () => ({ baseProfiles: [], models: [], inheritedToolNames: [] }),
 				createTaskProfile: () => ({ created: false }),
 			},
 		);
-		expect(inspected.content[0]?.text).toContain("Native delegate start does not need a base");
+		expect(inspected.content[0]?.text).toContain("Omit baseProfileId to derive the foreground model");
 	});
 
 	it("creates one immutable session profile and dispatches the selected fast model with only requested tools", async () => {
@@ -84,9 +86,9 @@ describe("delegate profile actions", () => {
 					action: "profile_create",
 					task: "Search the owned source and implement the smallest verified fix.",
 					baseProfileId: base.profileId,
-					model: { provider: "faux", modelId: "fast-worker", thinkingLevel: "low" },
+					model: { provider: "faux", modelId: "fast-worker" },
+					thinkingLevel: "low",
 					toolNames: ["read", "grep"],
-					resourceProfileNames: [],
 				},
 				undefined,
 				undefined,
@@ -117,14 +119,14 @@ describe("delegate profile actions", () => {
 
 			expect(run.started).toBe(true);
 			expect(selectedModel).toBe("fast-worker");
-			expect(selectedTools.sort()).toEqual(["grep", "memory", "read"]);
+			expect(selectedTools.sort()).toEqual(["grep", "read"]);
 			expect(run.record?.profileId).toBe(details.profileId);
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("rejects authority, resource, model, and budget expansion before persistence", async () => {
+	it("rejects tool, resource, model, and budget expansion before persistence", async () => {
 		const base = workerProfile("bounded-base", "base-worker");
 		const harness = await createHarness({
 			models: [
@@ -141,19 +143,15 @@ describe("delegate profile actions", () => {
 			const invalidInputs = [
 				{ task: "Escalate tools", baseProfileId: base.profileId, toolNames: ["read", "edit"] },
 				{
-					task: "Escalate resources",
-					baseProfileId: base.profileId,
-					resourceProfileNames: ["unapproved-resource"],
-				},
-				{
 					task: "Use an unavailable model",
 					baseProfileId: base.profileId,
-					model: { provider: "faux", modelId: "missing-model", thinkingLevel: "off" },
+					model: { provider: "faux", modelId: "missing-model" },
 				},
 				{
 					task: "Use unsupported thinking",
 					baseProfileId: base.profileId,
-					model: { provider: "faux", modelId: "base-worker", thinkingLevel: "ultra" },
+					model: { provider: "faux", modelId: "base-worker" },
+					thinkingLevel: "ultra",
 				},
 			] as const;
 
@@ -167,6 +165,23 @@ describe("delegate profile actions", () => {
 				);
 				expect(result.details).toMatchObject({ created: false });
 			}
+			const resourceAttempt = await tool.execute(
+				"invalid-profile-resources",
+				{
+					action: "profile_create",
+					task: "Attempt a model-authored resource grant",
+					baseProfileId: base.profileId,
+					resourceProfileNames: ["unapproved-resource"],
+				} as never,
+				undefined,
+				undefined,
+				undefined as never,
+			);
+			expect(resourceAttempt.details).toMatchObject({
+				started: false,
+				action: "profile_create",
+				skipReason: "action_field_forbidden",
+			});
 			expect(
 				harness.sessionManager
 					.getEntries()

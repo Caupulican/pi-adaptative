@@ -218,26 +218,16 @@ describe("WorktreeLaneGate path envelope (D5, real git)", () => {
 		expect(escapeResult.allowed).toBe(false);
 		if (!escapeResult.allowed) expect(escapeResult.code).toBe("path_outside_lane");
 
-		// bash keeps its existing (targetPath-less) behavior unchanged for an
-		// interactive lane, while the worker profile is hard-restricted.
+		// Process execution remains a host-trust boundary in every lane. The gate keeps only
+		// integration-sensitive Git refusals; it does not pretend to sandbox arbitrary commands.
 		expect(await gate.checkMutation("bash", "git status")).toEqual({ allowed: true });
-		const hardGate = new WorktreeLaneGate({
-			laneKey: "a",
-			engineDeps: () => deps,
-			policy: () => "on_land_mandatory",
-			hardShell: true,
-		});
-		expect((await hardGate.checkMutation("bash", "git status")).allowed).toBe(true);
-		expect((await hardGate.checkMutation("bash", "rm -rf build")).allowed).toBe(false);
-		expect((await hardGate.checkMutation("bash", "git branch --force main")).allowed).toBe(false);
-		const missingHardGate = new WorktreeLaneGate({
+		expect((await gate.checkMutation("bash", "rm -rf build")).allowed).toBe(true);
+		expect((await gate.checkMutation("bash", "git branch --force main")).allowed).toBe(false);
+		const missingGate = new WorktreeLaneGate({
 			laneKey: "missing",
 			engineDeps: () => deps,
 			policy: () => "on_land_mandatory",
-			hardShell: true,
 		});
-		const missingResult = await missingHardGate.checkMutation("edit");
-		expect(missingResult.allowed).toBe(false);
-		if (!missingResult.allowed) expect(missingResult.code).toBe("lane_state_unavailable");
+		expect(await missingGate.checkMutation("edit")).toEqual({ allowed: true });
 	}, 60_000);
 });

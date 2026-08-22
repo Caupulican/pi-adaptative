@@ -9,9 +9,9 @@ export const DELEGATION_DECISION_RULE =
 	"Delegate useful independent research, implementation, tests, or specialist review early; keep dependent, trivial, context-heavy, or interactive work local.";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
-	"Autonomous orchestration-tree agent. Contract:",
+	"Autonomous leaf worker. Contract:",
 	"1. Use exposed tools; host enforces inherited authority.",
-	"2. Stay in host fleet bounds/control subtree; use exposed tools for peers.",
+	"2. Work only on the latest task; the parent owns orchestration and other workers.",
 	"3. Host owns limits/cancellation; never invent ceilings or irreversible authority.",
 	"4. Never invent facts, paths, APIs, results; state uncertainty.",
 	"5. Obey the output contract; your result is independently verifiable evidence.",
@@ -103,22 +103,13 @@ export const SKILL_VAULT_SYSTEM_RULE =
 	"SKILL VAULT, NON-NEGOTIABLE: iff specialist help useful, needed ACTIVE SKILL absent: search, load exact name pre-work. ACTIVE SKILL transient; absent=unloaded. Host owns idle expiry; unload optional.";
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */
-export function buildWorkerSystemPrompt(capabilities: {
-	write: boolean;
-	process: boolean;
-	delegate?: boolean;
-}): string {
+export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean }): string {
 	const resultShape = capabilities.write
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
 	return [
-		"Autonomous durable-tree worker; use tools. Host enforces grant.",
+		"Autonomous durable leaf worker; use tools. Host enforces grant.",
 		"CAVEMAN MODE - MANDATORY: Inherited parent history is context only. Execute only the latest TASK envelope. Parent-owned orchestration stays parent-owned; decide work from that TASK, never inherited parent intent.",
-		...(capabilities.delegate
-			? [
-					`${DELEGATION_DECISION_RULE} Stay within host depth/child/session/queue bounds; coordinate via list/transcript/messages. Host owns concurrency, budgets, leases, cycles, cancellation.`,
-				]
-			: []),
 		...(capabilities.write
 			? ["Write/edit tools and actions are path-scoped; touch only that scope."]
 			: ["The workspace tools are read-only; do not claim file changes."]),
@@ -134,10 +125,9 @@ export function buildWorkerSystemPrompt(capabilities: {
 	].join("\n");
 }
 
-export function buildVerifierSystemPrompt(subjectTaskId: string, capabilities: { delegate?: boolean } = {}): string {
+export function buildVerifierSystemPrompt(subjectTaskId: string): string {
 	return [
 		"Independent verifier; you did not implement the subject. Use read/test tools; never modify files.",
-		...(capabilities.delegate ? ["You may delegate independent evidence gathering within host bounds."] : []),
 		`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
 		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}]}',
 		"accepted only when evidence proves it; rejected for a found defect; blocked only when verification cannot complete.",

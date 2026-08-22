@@ -119,7 +119,7 @@ export async function runProviderCompletionWithBackoff(args: {
  * The provider/tool-loop portion of a prepared worker attempt.
  *
  * Admission, durable leasing, grant compilation, terminalization, notification, verification, and
- * scheduling remain outside this boundary. This unit owns only the ordered child conversation:
+ * scheduling remain outside this boundary. This unit owns only the ordered worker conversation:
  * persist assistant tool requests before execution, append messages before mailbox acknowledgements,
  * checkpoint cumulative usage before later boundaries, and compact only the provider projection.
  */
@@ -440,7 +440,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				signal: options.signal,
 				cwd: options.cwd,
 				processCapable: options.processCapable,
-				delegationCapable: options.toolSurface.allowedTools.includes("delegate"),
 				...(options.verificationSubjectTaskId
 					? { verificationSubjectTaskId: options.verificationSubjectTaskId }
 					: {}),

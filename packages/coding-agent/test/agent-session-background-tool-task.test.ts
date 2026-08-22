@@ -15,6 +15,108 @@ import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
 const slowParameters = Type.Object({});
 
 describe("AgentSession background tool tasks", () => {
+	it("injects a terminal into the next provider boundary of the same multi-request run", async () => {
+		let releaseSlow!: () => void;
+		const slowCompletion = new Promise<void>((resolve) => {
+			releaseSlow = resolve;
+		});
+		const slowTool: AgentTool<typeof slowParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic slow test tool",
+			parameters: slowParameters,
+			execute: async () => {
+				await slowCompletion;
+				return { content: [{ type: "text" as const, text: "slow result" }], details: {} };
+			},
+		};
+		const sessionManager = SessionManager.inMemory();
+		appendGoalStateSnapshot(
+			sessionManager,
+			createGoalState({ goalId: "goal-boundary", userGoal: "Finish boundary work", now: "T0" }),
+		);
+		let releaseSecondStopCheck!: () => void;
+		const secondStopCheckGate = new Promise<void>((resolve) => {
+			releaseSecondStopCheck = resolve;
+		});
+		let markSecondStopCheck!: () => void;
+		const secondStopCheckEntered = new Promise<void>((resolve) => {
+			markSecondStopCheck = resolve;
+		});
+		const harness = createHarness({
+			sessionManager,
+			baseToolsOverride: { slow: slowTool },
+			responses: [
+				{ toolCalls: [{ id: "slow-call", name: "slow", args: {} }] },
+				"foreground still working",
+				"background completion acknowledged in-run",
+			],
+		});
+		const previousShouldStopAfterTurn = harness.agent.shouldStopAfterTurn?.bind(harness.agent);
+		let stopCheckCount = 0;
+		harness.agent.shouldStopAfterTurn = async (signal) => {
+			const shouldStop = (await previousShouldStopAfterTurn?.(signal)) ?? false;
+			stopCheckCount++;
+			if (stopCheckCount !== 2) return shouldStop;
+			markSecondStopCheck();
+			await secondStopCheckGate;
+			return shouldStop;
+		};
+		harness.session.setActiveToolsByName(["slow", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+		let agentStarts = 0;
+		let terminalMessages = 0;
+		let sawRunningTask = false;
+		let markTaskTerminal!: () => void;
+		const taskTerminal = new Promise<void>((resolve) => {
+			markTaskTerminal = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "agent_start") agentStarts++;
+			if (event.type === "background_tools") {
+				if (event.tasks.length > 0) sawRunningTask = true;
+				if (sawRunningTask && event.tasks.length === 0) markTaskTerminal();
+			}
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "background-tool-completion"
+			) {
+				terminalMessages++;
+			}
+		});
+
+		try {
+			const prompt = harness.session.prompt("continue the owned work", {
+				autoContinueGoal: false,
+				goalExecutionId: "goal-boundary",
+			});
+			await secondStopCheckEntered;
+			releaseSlow();
+			await taskTerminal;
+			releaseSecondStopCheck();
+			await prompt;
+
+			expect(harness.faux.callCount).toBe(3);
+			expect(agentStarts).toBe(1);
+			expect(terminalMessages).toBe(1);
+			const taskEdges = sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				);
+			expect(taskEdges).not.toHaveLength(0);
+			expect(taskEdges.every((record) => record.goalId === "goal-boundary")).toBe(true);
+		} finally {
+			unsubscribe();
+			releaseSlow();
+			releaseSecondStopCheck();
+			harness.cleanup();
+		}
+	});
+
 	it("hands a slow call off, continues the provider loop, persists it, and wakes only its owning session", async () => {
 		let releaseSlow: (() => void) | undefined;
 		const slowCompletion = new Promise<void>((resolve) => {
@@ -210,7 +312,7 @@ describe("AgentSession background tool tasks", () => {
 		}
 	});
 
-	it("waits for asynchronous foreground preflight before delivering a terminal handoff", async () => {
+	it("does not buy a late provider call for a terminal whose owning goal was superseded during preflight", async () => {
 		let releaseSlow: (() => void) | undefined;
 		const slowCompletion = new Promise<void>((resolve) => {
 			releaseSlow = resolve;
@@ -250,7 +352,6 @@ describe("AgentSession background tool tasks", () => {
 				{ toolCalls: [{ id: "slow-call", name: "slow", args: {} }] },
 				"foreground continued",
 				"preflight owner completed",
-				"background completion acknowledged",
 			],
 		});
 		harness.session.setActiveToolsByName(["slow", "tool_task"]);
@@ -260,21 +361,11 @@ describe("AgentSession background tool tasks", () => {
 		const taskTerminal = new Promise<void>((resolve) => {
 			markTaskTerminal = resolve;
 		});
-		let markHandoffReply: (() => void) | undefined;
-		const handoffReply = new Promise<void>((resolve) => {
-			markHandoffReply = resolve;
-		});
 		const unsubscribe = harness.session.subscribe((event) => {
 			if (event.type === "background_tools") {
 				if (event.tasks.length > 0) sawRunning = true;
 				if (sawRunning && event.tasks.length === 0) markTaskTerminal?.();
 			}
-			if (event.type !== "message_end" || event.message.role !== "assistant") return;
-			const text = event.message.content
-				.filter((block) => block.type === "text")
-				.map((block) => block.text)
-				.join("\n");
-			if (text.includes("background completion acknowledged")) markHandoffReply?.();
 		});
 
 		try {
@@ -293,8 +384,8 @@ describe("AgentSession background tool tasks", () => {
 
 			releasePreflight?.();
 			await foregroundPrompt;
-			await handoffReply;
-			expect(harness.faux.callCount).toBe(4);
+			expect(harness.faux.callCount).toBe(3);
+			expect(JSON.stringify(harness.faux.contexts[2]?.messages)).not.toContain("Background tool terminal handoff");
 		} finally {
 			unsubscribe();
 			releaseSlow?.();

@@ -1,6 +1,13 @@
 import type { Usage } from "@caupulican/pi-ai";
-import { PI_OKF_TYPES, type PiOkfType, validateOkfMemoryDocumentInput } from "../context/okf-memory.ts";
+import {
+	OKF_MEMORY_LIMITS,
+	PI_OKF_TYPES,
+	type PiOkfType,
+	validateOkfMemoryDocumentInput,
+} from "../context/okf-memory.ts";
 import { REFLECTION_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
+import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
+import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH } from "../skills.ts";
 
 export { REFLECTION_SYSTEM_PROMPT };
 
@@ -104,6 +111,11 @@ export interface ReflectionResult {
 	rationale: string;
 }
 
+/** Maximum number of durable writes accepted from one isolated reflection response. */
+export const MAX_REFLECTION_WRITES = 32;
+/** Maximum number of response entries inspected while looking for accepted writes. */
+export const MAX_REFLECTION_SCAN_ENTRIES = MAX_REFLECTION_WRITES * 4;
+
 type StructuredReflectionWrite = Extract<ReflectionWrite, { kind: "okf_add" | "okf_organize" }>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -112,6 +124,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function currentHotMemory(existingMemory: string): string {
+	const marker = "## MEMORY.md:\n";
+	const markerIndex = existingMemory.indexOf(marker);
+	if (markerIndex === -1) {
+		// Unit callers may provide a raw MEMORY.md snapshot. A rendered persistent-memory block
+		// without this section, however, proves that MEMORY.md is empty; never treat OKF text as hot memory.
+		return existingMemory.includes("=== Persistent Memory (file-store) ===") ||
+			/<\s*untrusted_content\b/i.test(existingMemory)
+			? ""
+			: existingMemory;
+	}
+	const afterMemory = existingMemory.slice(markerIndex + marker.length);
+	const boundaries = [afterMemory.indexOf("\n## USER.md:"), afterMemory.search(/<\s*untrusted_content\b/i)].filter(
+		(index) => index >= 0,
+	);
+	const boundaryIndex = boundaries.length > 0 ? Math.min(...boundaries) : -1;
+	return boundaryIndex === -1 ? afterMemory : afterMemory.slice(0, boundaryIndex);
+}
+
+function containsExactHotMemoryItem(existingMemory: string, sourceText: string): boolean {
+	if (sourceText.length === 0) return false;
+	const memoryLines = currentHotMemory(existingMemory).split("\n");
+	const sourceLines = sourceText.split("\n");
+	return memoryLines.some((_, index) => sourceLines.every((line, offset) => memoryLines[index + offset] === line));
+}
+
+function boundedText(value: unknown, maxChars: number): value is string {
+	return typeof value === "string" && value.length <= maxChars;
+}
+
+function boundedSkillBody(value: unknown): value is string {
+	return typeof value === "string" && Buffer.byteLength(value, "utf8") <= MAX_ACTIVE_SKILL_BODY_BYTES;
 }
 
 /** One parser/validation path for both structured reflection operations. */
@@ -143,7 +189,8 @@ function parseStructuredReflectionWrite(value: unknown, existingMemory: string):
 		if (
 			typeof value.sourceText !== "string" ||
 			value.sourceText.length === 0 ||
-			!existingMemory.includes(value.sourceText)
+			value.sourceText.length > OKF_MEMORY_LIMITS.bodyChars ||
+			!containsExactHotMemoryItem(existingMemory, value.sourceText)
 		) {
 			return undefined;
 		}
@@ -211,30 +258,32 @@ Return JSON updates.`;
 			const writes: ReflectionWrite[] = [];
 
 			if (Array.isArray(parsed.writes)) {
-				for (const w of parsed.writes) {
+				const scanCount = Math.min(parsed.writes.length, MAX_REFLECTION_SCAN_ENTRIES);
+				for (let index = 0; index < scanCount && writes.length < MAX_REFLECTION_WRITES; index++) {
+					const w = parsed.writes[index];
 					if (w && typeof w === "object") {
 						const structuredWrite = parseStructuredReflectionWrite(w, input.existingMemory);
 						if (
 							w.kind === "memory_add" &&
 							(w.section === "MEMORY" || w.section === "USER") &&
-							typeof w.text === "string"
+							boundedText(w.text, OKF_MEMORY_LIMITS.bodyChars)
 						) {
 							writes.push({ kind: "memory_add", section: w.section, text: w.text });
 						} else if (structuredWrite) {
 							writes.push(structuredWrite);
 						} else if (
 							w.kind === "memory_replace" &&
-							typeof w.target === "string" &&
-							typeof w.text === "string"
+							boundedText(w.target, OKF_MEMORY_LIMITS.bodyChars) &&
+							boundedText(w.text, OKF_MEMORY_LIMITS.bodyChars)
 						) {
 							writes.push({ kind: "memory_replace", target: w.target, text: w.text });
-						} else if (w.kind === "memory_remove" && typeof w.target === "string") {
+						} else if (w.kind === "memory_remove" && boundedText(w.target, OKF_MEMORY_LIMITS.bodyChars)) {
 							writes.push({ kind: "memory_remove", target: w.target });
 						} else if (
 							w.kind === "promote_skill" &&
-							typeof w.name === "string" &&
-							typeof w.description === "string" &&
-							typeof w.body === "string"
+							boundedText(w.name, MAX_SKILL_NAME_LENGTH) &&
+							boundedText(w.description, MAX_SKILL_DESCRIPTION_LENGTH) &&
+							boundedSkillBody(w.body)
 						) {
 							writes.push({ kind: "promote_skill", name: w.name, description: w.description, body: w.body });
 						}

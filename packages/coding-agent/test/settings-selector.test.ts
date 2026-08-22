@@ -12,6 +12,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 	return {
 		autoCompact: true,
+		costGuard: { enabled: false, maxTurnUsd: 0, action: "warn" },
 		showImages: false,
 		imageWidthCells: 60,
 		autoResizeImages: true,
@@ -69,6 +70,7 @@ function makeConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
 function makeCallbacks(overrides: Partial<SettingsCallbacks> = {}): SettingsCallbacks {
 	return {
 		onAutoCompactChange: vi.fn(),
+		onCostGuardChange: vi.fn(),
 		onShowImagesChange: vi.fn(),
 		onImageWidthCellsChange: vi.fn(),
 		onAutoResizeImagesChange: vi.fn(),
@@ -130,6 +132,35 @@ describe("settings selector", () => {
 
 		expect(output).toContain("Maximum reasoning depth for the hardest problems");
 		expect(output).toContain("Maximum available reasoning effort (provider permitting)");
+	});
+
+	it("shows the foreground cost guard as disabled until explicitly selected", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ costGuard: { enabled: false, maxTurnUsd: 0.5, action: "warn" } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("cost guard");
+		const output = selector.render(140).join("\n");
+
+		expect(output).toContain("Foreground cost guard");
+		expect(output).toContain("disabled");
+		expect(output).not.toContain("enabled at $0.5");
+	});
+
+	it("explicitly enables the foreground cost guard while preserving its dormant threshold", () => {
+		const onCostGuardChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ costGuard: { enabled: false, maxTurnUsd: 0.5, action: "warn" } }),
+			makeCallbacks({ onCostGuardChange }),
+		);
+
+		selector.getSettingsList().handleInput("cost guard");
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		selector.getSettingsList().handleInput("\r");
+
+		expect(onCostGuardChange).toHaveBeenCalledWith({ enabled: true, maxTurnUsd: 0.5, action: "warn" }, "global");
 	});
 
 	it("exposes project AGENTS.md opt-in in the searchable settings TUI", () => {
@@ -233,14 +264,14 @@ describe("settings selector", () => {
 		expect(output).toContain("unbounded turns, stall 20, auto on");
 	});
 
-	it("labels the default worker tree as unbounded", () => {
+	it("labels the default worker task as unbounded", () => {
 		const selector = new SettingsSelectorComponent(makeConfig({ workerDelegation: {} }), makeCallbacks());
 
 		selector.getSettingsList().handleInput("worker delegation");
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("enabled (unbounded)");
-		expect(output).not.toContain("$0/tree");
+		expect(output).not.toContain("$0/worker");
 	});
 
 	it("labels an explicit zero-dollar opt-in as unbounded", () => {
@@ -250,10 +281,10 @@ describe("settings selector", () => {
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("enabled (unbounded)");
-		expect(output).not.toContain("$0/tree");
+		expect(output).not.toContain("$0/worker");
 	});
 
-	it("presents delegation as a recursive tree and does not clamp scheduler concurrency to three", () => {
+	it("presents delegation as persistent leaf workers and does not clamp scheduler concurrency to three", () => {
 		const onWorkerDelegationChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({
@@ -268,7 +299,10 @@ describe("settings selector", () => {
 		);
 
 		selector.getSettingsList().handleInput("worker delegation");
-		expect(selector.render(180).join("\n")).toContain("$0.5/tree");
+		const overview = selector.render(180).join("\n");
+		expect(overview).toContain("$0.5/worker");
+		expect(overview).toContain("leaf workers");
+		expect(overview).not.toContain("recursive");
 		selector.getSettingsList().handleInput("\r");
 		for (let index = 0; index < 5; index++) selector.getSettingsList().handleInput("\x1b[B");
 		expect(selector.render(180).join("\n")).toContain("Global scheduler concurrency");
@@ -284,7 +318,7 @@ describe("settings selector", () => {
 		);
 	});
 
-	it("accepts arbitrary nonnegative tree budgets from the delegation settings UI", () => {
+	it("accepts arbitrary nonnegative per-worker budgets from the delegation settings UI", () => {
 		const onWorkerDelegationChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({
@@ -320,7 +354,7 @@ describe("settings selector", () => {
 		expect(onWorkerDelegationChange).toHaveBeenCalledTimes(2);
 	});
 
-	it("does not persist a tree budget that the settings manager would reject", () => {
+	it("does not persist a worker-task budget that the settings manager would reject", () => {
 		const onWorkerDelegationChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({
@@ -385,6 +419,18 @@ describe("settings selector", () => {
 		expect(output).toContain("openai/gpt-5.4");
 	});
 
+	it("shows Auto Learn as enabled by default without pinning optional settings", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ autoLearn: {}, autonomy: { mode: "off" } }),
+			makeCallbacks(),
+		);
+
+		selector.getSettingsList().handleInput("auto learn");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("enabled (active)");
+	});
+
 	it("lists configured subscription and API models in Auto Learn model picker", () => {
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ autoLearn: { enabled: true, model: "openai/gpt-5.4" } }),
@@ -413,9 +459,11 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("auto learn");
 		selector.getSettingsList().handleInput("\r");
+		for (let index = 0; index < 9; index++) selector.getSettingsList().handleInput("\x1b[B");
 		const output = selector.render(180).join("\n");
 
 		expect(output).toContain("Reflection review");
+		expect(output).toContain("durable root-session reflection cue");
 	});
 
 	it("exposes Learning Policy and Model Capability submenus (G5)", () => {
@@ -432,6 +480,15 @@ describe("settings selector", () => {
 		const capabilityOutput = capabilitySelector.render(180).join("\n");
 		expect(capabilityOutput).toContain("Mode");
 		expect(capabilityOutput).toContain("auto");
+	});
+
+	it("shows the effective default-on learning policy", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ learningPolicy: {} }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("learning policy");
+		const output = selector.render(180).join("\n");
+
+		expect(output).toContain("on · auto-apply on · conf>=50");
 	});
 
 	it("exposes context/prompt-policy enforcement settings in the searchable settings TUI", () => {
@@ -724,7 +781,7 @@ describe("settings selector", () => {
 		expect(output).toContain("Cheap model");
 		expect(output).toContain("Medium model");
 		expect(output).toContain("Expensive model");
-		expect(output).toContain("Learning/reflection model");
+		expect(output).toContain("Learning model");
 		expect(output).toContain("true");
 		expect(output).toContain("anthropic/claude-haiku-4-5");
 		expect(output).toContain("anthropic/claude-medium-4-5");

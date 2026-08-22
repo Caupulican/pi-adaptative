@@ -28,11 +28,11 @@ export const DEFAULT_WORKER_FLEET_LIMITS: Readonly<WorkerFleetLimits> = Object.f
 	maxQueuedDispatches: 256,
 });
 
-/** Profile-free workers get one useful nested identity without an open-ended recursive fleet. */
-export const LEAN_WORKER_DELEGATION_LIMITS: Readonly<OrchestrationDelegationLimits> = Object.freeze({
-	maxDepth: 1,
-	maxChildrenPerAgent: 1,
-	maxNestedAgentsPerSession: 1,
+/** Every newly compiled native worker is a leaf; legacy wider limits are narrowed to this contract. */
+export const LEAF_WORKER_DELEGATION_LIMITS: Readonly<OrchestrationDelegationLimits> = Object.freeze({
+	maxDepth: 0,
+	maxChildrenPerAgent: 0,
+	maxNestedAgentsPerSession: 0,
 });
 
 /** Materialize an optional profile limit inside the process-independent host safety ceiling. */
@@ -56,7 +56,7 @@ export function resolveWorkerFleetLimits(
 	};
 }
 
-/** Descendant routing may preserve or narrow an ancestor's recursive authority, never widen it. */
+/** Legacy recovery may preserve or narrow a persisted lineage boundary, never widen it. */
 export function intersectWorkerDelegationLimits(
 	requested?: Readonly<OrchestrationDelegationLimits>,
 	boundary?: Readonly<OrchestrationDelegationLimits>,
@@ -197,7 +197,7 @@ export function evaluateNewWorkerAdmission(
 		// A retired agent's durable identity slot is still reserved (evaluateWorkerIdentityHeadroom
 		// above already bounds total agent count), but it no longer occupies a live nested-fleet
 		// slot. Counting it here permanently blocks all future nested delegation once any nested
-		// child has ever finished — with LEAN_WORKER_DELEGATION_LIMITS (=1), a single retired child.
+		// child has ever finished when a recovered legacy contract retains a nested-session limit of one.
 		if (agent.parentAgentId && agent.status !== "retired") nestedAgents += 1;
 	}
 	if (nestedAgents >= limits.maxNestedAgentsPerSession) {

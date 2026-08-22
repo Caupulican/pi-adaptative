@@ -8,18 +8,18 @@ import {
 } from "../src/core/settings-manager.ts";
 
 describe("learning policy settings", () => {
-	it("returns proposal-first defaults when nothing is configured", () => {
+	it("returns autonomous additive-memory defaults when nothing is configured", () => {
 		const resolved = SettingsManager.inMemory().getLearningPolicySettings();
 
 		expect(resolved.enabled).toBe(true);
-		expect(resolved.autoApplyEnabled).toBe(false);
+		expect(resolved.autoApplyEnabled).toBe(true);
 		expect(resolved.confidenceThreshold).toBe(DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD);
 		expect(resolved.minObservations).toBe(DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS);
-		expect(resolved.allowedAutoApplyLayers).toEqual(["memory"]);
+		expect(resolved.allowedAutoApplyLayers).toEqual(["memory", "skill"]);
 		expect(resolved.requireRollbackPlan).toBe(true);
 		expect(resolved.reflectionSourceConfidence).toBe(DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE);
-		// Bug F: a supersession (memory_replace/memory_remove) must stay proposal-first by default too —
-		// only an explicit opt-in lets it fall through to the standard auto-apply eligibility chain.
+		// A supersession (memory_replace/memory_remove) remains proposal-first even though safe additive
+		// and organizational memory writes auto-apply by default.
 		expect(resolved.autoApplySupersessions).toBe(DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS);
 		expect(resolved.autoApplySupersessions).toBe(false);
 	});

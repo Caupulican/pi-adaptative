@@ -152,17 +152,15 @@ describe("buildWorkerUserPrompt", () => {
 });
 
 describe("buildWorkerSystemPrompt", () => {
-	it("keeps inherited parent orchestration outside the task while enabling scoped delegation decisions", () => {
-		const prompt = buildWorkerSystemPrompt({ write: false, process: false, delegate: true });
+	it("keeps inherited parent orchestration outside the leaf worker task", () => {
+		const prompt = buildWorkerSystemPrompt({ write: false, process: false });
 		expect(prompt).toContain("CAVEMAN MODE - MANDATORY");
+		expect(prompt).toContain("durable leaf worker");
 		expect(prompt).toContain("Inherited parent history is context only");
 		expect(prompt).toContain("Execute only the latest TASK envelope");
 		expect(prompt).toContain("Parent-owned orchestration stays parent-owned");
-		expect(prompt).toContain(
-			"Delegate useful independent research, implementation, tests, or specialist review early",
-		);
-		expect(prompt).toContain("keep dependent, trivial, context-heavy, or interactive work local");
-		expect(prompt).not.toContain("delegate only when that TASK explicitly assigns delegation");
+		expect(prompt).not.toContain("Delegate useful independent");
+		expect(prompt).not.toContain("depth/child/session/queue");
 	});
 
 	it("describes combined write and process grants without denying either capability", () => {

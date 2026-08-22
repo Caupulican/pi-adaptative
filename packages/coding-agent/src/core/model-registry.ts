@@ -28,6 +28,7 @@ import { warnDeprecation } from "../utils/deprecation.ts";
 import { stripJsonComments } from "../utils/json.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
+import { MODEL_DEFAULT_THINKING_LEVEL_SCHEMA } from "./orchestration/thinking-level-schema.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
 import { hasAuthenticationHeaders, hasUsableRequestAuth } from "./request-auth.ts";
 import {
@@ -100,16 +101,6 @@ const ThinkingLevelMapSchema = Type.Object({
 	ultra: Type.Optional(ThinkingLevelMapValueSchema),
 });
 
-const ModelDefaultThinkingLevelSchema = Type.Union([
-	Type.Literal("minimal"),
-	Type.Literal("low"),
-	Type.Literal("medium"),
-	Type.Literal("high"),
-	Type.Literal("xhigh"),
-	Type.Literal("max"),
-	Type.Literal("ultra"),
-]);
-
 const SessionAffinityCompatFields = {
 	sessionAffinityFormat: Type.Optional(
 		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
@@ -175,7 +166,7 @@ const ModelCostSchema = Type.Object({
 const SharedModelConfigurationFields = {
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
-	defaultThinkingLevel: Type.Optional(ModelDefaultThinkingLevelSchema),
+	defaultThinkingLevel: Type.Optional(MODEL_DEFAULT_THINKING_LEVEL_SCHEMA),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	contextWindow: Type.Optional(Type.Number()),

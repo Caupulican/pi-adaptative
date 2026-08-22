@@ -7,7 +7,7 @@ import {
 	evaluateNewWorkerAdmission,
 	evaluateReusableWorkerTaskAdmission,
 	intersectWorkerDelegationLimits,
-	LEAN_WORKER_DELEGATION_LIMITS,
+	LEAF_WORKER_DELEGATION_LIMITS,
 	pendingVerifierSubjectTaskIds,
 	resolveWorkerFleetLimits,
 	workerQueueHasCapacity,
@@ -68,19 +68,19 @@ function binding(
 }
 
 describe("worker fleet admission limits", () => {
-	it("materializes the lean adaptive limit without changing session or queue safety ceilings", () => {
-		expect(resolveWorkerFleetLimits(LEAN_WORKER_DELEGATION_LIMITS)).toEqual({
+	it("materializes the mandatory leaf limit without changing session or queue safety ceilings", () => {
+		expect(resolveWorkerFleetLimits(LEAF_WORKER_DELEGATION_LIMITS)).toEqual({
 			...DEFAULT_WORKER_FLEET_LIMITS,
-			maxDepth: 1,
-			maxChildrenPerAgent: 1,
-			maxNestedAgentsPerSession: 1,
+			maxDepth: 0,
+			maxChildrenPerAgent: 0,
+			maxNestedAgentsPerSession: 0,
 		});
 	});
 
-	it("intersects descendant recursion with its ancestor instead of permitting escalation", () => {
+	it("intersects a recovered lineage boundary with the mandatory leaf ceiling", () => {
 		expect(
-			intersectWorkerDelegationLimits({ maxDepth: 8, maxChildrenPerAgent: 8 }, LEAN_WORKER_DELEGATION_LIMITS),
-		).toEqual({ maxDepth: 1, maxChildrenPerAgent: 1, maxNestedAgentsPerSession: 1 });
+			intersectWorkerDelegationLimits({ maxDepth: 8, maxChildrenPerAgent: 8 }, LEAF_WORKER_DELEGATION_LIMITS),
+		).toEqual({ maxDepth: 0, maxChildrenPerAgent: 0, maxNestedAgentsPerSession: 0 });
 		expect(intersectWorkerDelegationLimits(undefined, undefined)).toBeUndefined();
 	});
 
@@ -120,7 +120,7 @@ describe("worker fleet admission limits", () => {
 		});
 	});
 
-	it("rejects a second nested identity across separate lean root workers", () => {
+	it("rejects a second nested identity under a recovered legacy fleet boundary", () => {
 		const firstRoot = binding("first-root");
 		const secondRoot = binding("second-root");
 		const firstChild = binding("first-child", {
@@ -128,7 +128,11 @@ describe("worker fleet admission limits", () => {
 			rootAgentId: firstRoot.agentId,
 			depth: 1,
 		});
-		const limits = resolveWorkerFleetLimits(LEAN_WORKER_DELEGATION_LIMITS);
+		const limits = resolveWorkerFleetLimits({
+			maxDepth: 1,
+			maxChildrenPerAgent: 1,
+			maxNestedAgentsPerSession: 1,
+		});
 
 		expect(
 			evaluateNewWorkerAdmission(
@@ -161,8 +165,8 @@ describe("worker fleet admission limits", () => {
 		// Root-cause regression: a retired agent's durable identity slot stays reserved
 		// (evaluateWorkerIdentityHeadroom / maxAgentsPerSession still bounds total agent count
 		// separately, per the sibling test above), but it no longer occupies a live nested-fleet
-		// slot. With LEAN_WORKER_DELEGATION_LIMITS (maxNestedAgentsPerSession=1), one finished
-		// child must not permanently block all future nested delegation.
+		// slot. A recovered legacy boundary with maxNestedAgentsPerSession=1 must not let one
+		// finished child permanently block later recovery work.
 		const firstRoot = binding("first-root");
 		const secondRoot = binding("second-root");
 		const retiredChild = binding("retired-child", {
@@ -171,7 +175,11 @@ describe("worker fleet admission limits", () => {
 			depth: 1,
 			status: "retired",
 		});
-		const limits = resolveWorkerFleetLimits(LEAN_WORKER_DELEGATION_LIMITS);
+		const limits = resolveWorkerFleetLimits({
+			maxDepth: 1,
+			maxChildrenPerAgent: 1,
+			maxNestedAgentsPerSession: 1,
+		});
 
 		expect(
 			evaluateNewWorkerAdmission(

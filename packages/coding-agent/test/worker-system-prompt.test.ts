@@ -53,7 +53,7 @@ describe("worker-system-prompt", () => {
 			workerResourceSystemPrompt: "Tool: edit.",
 		});
 
-		expect(prompt).toContain("Autonomous orchestration-tree agent");
+		expect(prompt).toContain("Autonomous leaf worker");
 		expect(prompt).toContain("Expert Refactoring Specialist");
 		expect(prompt).toContain("Analyze dependency graphs.");
 		expect(prompt).toContain("Tool: edit.");

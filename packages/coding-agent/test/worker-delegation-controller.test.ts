@@ -304,7 +304,7 @@ describe("WorkerDelegationController integration invariants", () => {
 		).toBeUndefined();
 	});
 
-	it("automatically injects memory query capability into worker execution plan when memory retrieval is enabled", () => {
+	it("grants memory query only when retrieval is enabled and the profile retains the memory tool", () => {
 		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
 			deps: {
 				getCwd: () => "/tmp",
@@ -323,8 +323,8 @@ describe("WorkerDelegationController integration invariants", () => {
 
 		const mockProfile = {
 			role: "implementer",
-			toolNames: ["read"],
-			capabilityCeiling: ["filesystem.read"],
+			toolNames: ["read", "memory"],
+			capabilityCeiling: ["filesystem.read", "memory.query"],
 			budget: {},
 		};
 		const mockSettings = {

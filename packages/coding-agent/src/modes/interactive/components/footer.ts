@@ -247,7 +247,7 @@ export class FooterComponent implements Component {
 		// Keep the warning-only guard proactive without duplicating the authoritative
 		// CURRENT/TODAY/SUBAGENTS totals rendered above.
 		const costGuard = this.session.getLastCostGuardDecision?.();
-		if (costGuard?.over) {
+		if (this.session.settingsManager.getCostGuardSettings().enabled && costGuard?.over) {
 			statsParts.push(theme.fg("warning", `GUARD:$${costGuard.estUsd.toFixed(2)}/turn`));
 		}
 

@@ -15,7 +15,6 @@ function settings(overrides: Partial<ResolvedWorkerDelegationSettings> = {}): Re
 		maxUsd: 1,
 		maxWallClockMs: 120_000,
 		writeEnabled: false,
-		writePaths: [],
 		maxConcurrent: 1,
 		...overrides,
 	};
@@ -46,7 +45,7 @@ describe("buildWorkerExecutionPlan", () => {
 		});
 	});
 
-	it("derives effective capabilities from materialized profile tools, not the broader ceiling", () => {
+	it("derives effective capabilities only from tools named by the profile", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "read-only",
 			model: { provider: "test", id: "model" },
@@ -56,17 +55,17 @@ describe("buildWorkerExecutionPlan", () => {
 
 		const plan = buildWorkerExecutionPlan({
 			profile,
-			settings: settings({ writeEnabled: true, writePaths: ["src"] }),
+			settings: settings({ writeEnabled: true }),
 			cwd: "/repo",
 			deniedPaths: [],
 			memoryEnabled: true,
 		});
 
-		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read", "memory"]);
-		expect(plan.requiredCapabilities).toEqual(["filesystem.read", "memory.query"]);
+		expect(plan.toolManifests.map((manifest) => manifest.toolName)).toEqual(["read"]);
+		expect(plan.requiredCapabilities).toEqual(["filesystem.read"]);
 		expect(plan.writeEnabled).toBe(false);
 		expect(plan.writePaths).toEqual([]);
-		expect(plan.readMemory).toBe(true);
+		expect(plan.readMemory).toBe(false);
 	});
 
 	it("materializes delegated memory as query-only even when the profile also permits mutation", () => {
@@ -179,14 +178,14 @@ describe("buildWorkerExecutionPlan", () => {
 		});
 		const admitted = buildWorkerExecutionPlan({
 			profile,
-			settings: settings({ writeEnabled: false, writePaths: [] }),
+			settings: settings({ writeEnabled: false }),
 			cwd: "/repo",
 			deniedPaths: ["/repo/private"],
 			memoryEnabled: false,
 		});
 		const widened = buildWorkerExecutionPlan({
 			profile,
-			settings: settings({ writeEnabled: true, writePaths: ["/repo"] }),
+			settings: settings({ writeEnabled: true }),
 			cwd: "/repo",
 			deniedPaths: ["/repo/new-private"],
 			memoryEnabled: true,
@@ -198,7 +197,11 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(effective.requiredCapabilities).toEqual(["filesystem.read"]);
 		expect(effective.writeEnabled).toBe(false);
 		expect(effective.writePaths).toEqual([]);
-		expect(effective.deniedPaths).toEqual([resolve("/repo/private"), resolve("/repo/new-private")]);
+		expect(effective.deniedPaths).toEqual([
+			resolve("/repo/private"),
+			resolve("/repo/.pi/settings.json"),
+			resolve("/repo/new-private"),
+		]);
 	});
 
 	it("does not invent readPaths or filesystem.read authority for process-only lanes", () => {
@@ -242,7 +245,37 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(managed.grant.writePaths).toEqual([]);
 	});
 
-	it("narrows root read requests to the worker cwd instead of granting outside paths", () => {
+	it("includes run_toolkit_script only through an explicitly admitted worker adapter", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "toolkit-adapter",
+			model: { provider: "test", id: "model" },
+			capabilityCeiling: ["process.exec"],
+			toolNames: ["run_toolkit_script"],
+		});
+		const withoutAdapter = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+		expect(withoutAdapter.toolManifests).toEqual([]);
+
+		const withAdapter = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			workerToolAdapterNames: ["run_toolkit_script"],
+		});
+		expect(withAdapter.toolManifests).toMatchObject([
+			{ toolName: "run_toolkit_script", capabilities: ["process.exec"] },
+		]);
+		expect(withAdapter.processEnabled).toBe(true);
+	});
+
+	it("uses machine scope by default and one profile workspace as cwd plus symmetric scope", () => {
 		const profile = createTestWorkerOrchestrationProfile({
 			profileId: "root-read-boundary",
 			model: { provider: "test", id: "model" },
@@ -250,33 +283,24 @@ describe("buildWorkerExecutionPlan", () => {
 			toolNames: ["read"],
 		});
 
-		const nested = buildWorkerExecutionPlan({
+		const machineWide = buildWorkerExecutionPlan({
 			profile,
 			settings: settings(),
 			cwd: "/repo",
 			deniedPaths: [],
 			memoryEnabled: false,
-			requestedReadPaths: ["/repo/src"],
 		});
-		const outside = buildWorkerExecutionPlan({
-			profile,
+		const focused = buildWorkerExecutionPlan({
+			profile: { ...profile, workspacePath: "/other/project" },
 			settings: settings(),
 			cwd: "/repo",
 			deniedPaths: [],
 			memoryEnabled: false,
-			requestedReadPaths: ["/etc"],
-		});
-		const parent = buildWorkerExecutionPlan({
-			profile,
-			settings: settings(),
-			cwd: "/repo",
-			deniedPaths: [],
-			memoryEnabled: false,
-			requestedReadPaths: ["/"],
 		});
 
-		expect(nested.readPaths).toEqual([resolve("/repo/src")]);
-		expect(outside.readPaths).toEqual([]);
-		expect(parent.readPaths).toEqual([resolve("/repo")]);
+		expect(machineWide.cwd).toBe(resolve("/repo"));
+		expect(machineWide.readPaths).toEqual([resolve("/")]);
+		expect(focused.cwd).toBe(resolve("/other/project"));
+		expect(focused.readPaths).toEqual([resolve("/other/project")]);
 	});
 });

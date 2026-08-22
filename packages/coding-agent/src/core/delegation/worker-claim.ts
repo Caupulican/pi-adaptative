@@ -474,8 +474,7 @@ export function validateWorkerClaim(args: {
  */
 export function reviewManagedLaneChangedFiles(args: {
 	changedFiles: readonly string[];
-	/** The scope to validate against -- e.g. the session's active `CapabilityEnvelope`, until a
-	 * per-launch tmux standing grant envelope lands in a later wave (documented follow-up). */
+	/** The immutable managed-launch profile scope to validate against. */
 	envelope: Pick<CapabilityEnvelope, "allowedPaths" | "deniedPaths">;
 	cwd?: string;
 }): { reviewRequired: boolean; reasonCode: string } {

@@ -74,6 +74,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const context = host.session.getContextUsage();
 	const autoLearn = host.getCurrentAutoLearnSettings();
 	const costGuard = host.session.getLastCostGuardDecision();
+	const costGuardSettings = host.session.settingsManager.getCostGuardSettings();
 	const activeModel = host.session.model;
 	const usingSubscription = activeModel ? host.session.modelRegistry.isUsingSubscription(activeModel) : false;
 	const isChatGptSubscription = usingSubscription && activeModel?.provider === "openai-codex";
@@ -139,17 +140,19 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		}
 		info += `${theme.fg("dim", "Failing compaction checks:")} ${visibleChecks.join("; ")}\n`;
 	}
-	if (isChatGptSubscription) {
+	if (!costGuardSettings.enabled) {
+		info += `${theme.fg("dim", "Cost guard:")} disabled\n`;
+	} else if (isChatGptSubscription) {
 		info += `${theme.fg("dim", "Cost guard:")} not applicable to ChatGPT subscription usage\n`;
 	} else if (costGuard) {
 		const status = costGuard.over ? "over" : "ok";
 		info += `${theme.fg("dim", "Cost guard:")} ${status} $${costGuard.estUsd.toFixed(4)}/$${costGuard.thresholdUsd.toFixed(4)} (${costGuard.action})\n`;
 	} else {
-		info += `${theme.fg("dim", "Cost guard:")} disabled\n`;
+		info += `${theme.fg("dim", "Cost guard:")} enabled; awaiting the next provider projection\n`;
 	}
 	info += `${theme.fg("dim", "Auto Learn:")} ${autoLearn.enabled ? "enabled" : "disabled"}\n`;
 	info += `${theme.fg("dim", "Scavenger model:")} ${autoLearn.model || "active"}\n`;
-	info += `${theme.fg("dim", "Reflection review:")} ${autoLearn.reflectionReview ? "enabled" : "disabled"} (${autoLearn.reflectionMinToolCalls} tool-call trigger)\n`;
+	info += `${theme.fg("dim", "Reflection cue:")} ${autoLearn.reflectionReview ? "enabled" : "disabled"} (root-only durable cue; ${autoLearn.reflectionMinToolCalls} tool-call trigger)\n`;
 	info += `${theme.fg("dim", "Auto Learn concurrency:")} ${autoLearn.maxConcurrentLearners} learner(s), ${autoLearn.cooldownMinutes}m cooldown\n\n`;
 
 	info += `${theme.bold("Model Router")}\n`;
@@ -158,7 +161,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	info += `${theme.bold("Manual controls")}\n`;
 	info += `${theme.fg("dim", "/compact")}: compact the active context now\n`;
 	info += `${theme.fg("dim", "/settings")}: adjust Auto Learn, cost guard, compaction, and model-router config\n`;
-	info += `${theme.fg("dim", "/auto-learn status|run")}: inspect or launch background learning\n`;
+	info += `${theme.fg("dim", "/auto-learn status|run")}: inspect status or explicitly launch background learning\n`;
 	info += `${theme.fg("dim", "/context")}: inspect provider-visible context contributors without model tokens\n`;
 
 	host.chatContainer.addChild(new Spacer(1));

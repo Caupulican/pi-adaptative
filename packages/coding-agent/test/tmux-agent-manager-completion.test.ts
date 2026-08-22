@@ -31,10 +31,7 @@ type RegisteredTool = {
 		context: TestContext,
 	): Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
-/** A minimal in-memory session custom-entry store backing appendEntry/getLatestCustomEntryOnBranch/
- * getBranch — just enough to exercise the STANDING GRANT lifecycle (grant_dispatch/revoke_grant, and
- * the approval gate in front of a real fire_task/send_followup dispatch). See tmux-dispatch-grant.test.ts
- * for the dedicated, exhaustive grant-lifecycle coverage. */
+/** Minimal in-memory custom-entry support for the extension host contract. */
 function makeCustomEntryStore() {
 	const entries: StoredEntry[] = [];
 	let leafId: string | null = null;
@@ -162,7 +159,21 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 		const binDir = path.join(tempDir, "deadline-bin");
 		fs.mkdirSync(jobDir, { recursive: true });
 		fs.mkdirSync(binDir, { recursive: true });
-		fs.writeFileSync(path.join(binDir, "tmux"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+		const tmuxCallsPath = path.join(jobDir, "tmux-calls.log");
+		const managedPidPath = path.join(jobDir, "managed.pid");
+		fs.writeFileSync(
+			path.join(binDir, "tmux"),
+			[
+				"#!/bin/sh",
+				`printf '%s\\n' "$*" >> ${JSON.stringify(tmuxCallsPath)}`,
+				// biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX shell parameter expansion.
+				'if [ "${1:-}" = "kill-pane" ]; then',
+				`  kill -TERM "$(cat ${JSON.stringify(managedPidPath)})" 2>/dev/null || true`,
+				"fi",
+				"exit 0",
+			].join("\n"),
+			{ mode: 0o700 },
+		);
 		const resultPath = path.join(jobDir, "worker.result.json");
 		const watcherPath = path.join(jobDir, "pane-watcher.sh");
 		// Assigned to a named `job` const (matching the sibling test above) rather than passed as an
@@ -199,6 +210,13 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 			],
 		};
 		fs.writeFileSync(watcherPath, makePaneWatcherScript(job), { mode: 0o700 });
+		const managedChild = spawn("tail", ["-f", "/dev/null"], { stdio: "ignore" });
+		if (managedChild.pid === undefined) throw new Error("managed child did not start");
+		fs.writeFileSync(managedPidPath, String(managedChild.pid));
+		const managedExit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+			managedChild.once("error", reject);
+			managedChild.once("exit", (code, signal) => resolve({ code, signal }));
+		});
 		const child = spawn("sh", [watcherPath, "worker"], {
 			env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
 			stdio: ["pipe", "pipe", "pipe"],
@@ -212,17 +230,23 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 			child.once("error", reject);
 			child.once("exit", (code) => resolve(code));
 		});
-		const guard = setTimeout(() => child.kill("SIGKILL"), 5_000);
+		const guard = setTimeout(() => {
+			child.kill("SIGKILL");
+			managedChild.kill("SIGKILL");
+		}, 5_000);
 		try {
 			expect(await terminalExit, stderr).toBe(0);
+			expect(await managedExit).toEqual({ code: null, signal: "SIGTERM" });
 		} finally {
 			clearTimeout(guard);
 			child.stdin.destroy();
+			if (managedChild.exitCode === null && managedChild.signalCode === null) managedChild.kill("SIGKILL");
 		}
 		expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({
 			status: "timeout",
 			notifiedBy: "deadline-event",
 		});
+		expect(fs.readFileSync(tmuxCallsPath, "utf8")).toContain("kill-pane -t %2");
 	});
 
 	it("wakes the parent exactly once from a terminal result-file event without polling or peeking", async () => {
@@ -280,6 +304,7 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 
 		const handlers = new Map<string, Handler[]>();
 		const sent: SentMessage[] = [];
+		const uiNotifications: Array<{ message: string; level: string }> = [];
 		let registeredTool: RegisteredTool | undefined;
 		let resolveHandoff: ((message: SentMessage) => void) | undefined;
 		const handoff = new Promise<SentMessage>((resolve) => {
@@ -317,7 +342,12 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 				getLatestCustomEntryOnBranch: customEntries.getLatestCustomEntryOnBranch,
 				getBranch: customEntries.getBranch,
 			},
-			ui: { notify() {}, confirm: async () => true },
+			ui: {
+				notify(message: string, level: string) {
+					uiNotifications.push({ message, level });
+				},
+				confirm: async () => true,
+			},
 		};
 		tmuxAgentManagerExtension(pi as never);
 		if (!registeredTool) throw new Error("tmux_agent_manager tool was not registered");
@@ -349,12 +379,20 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 		const delivered = await Promise.race([handoff, timeout]);
 
 		expect(delivered.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
-		expect(delivered.message.customType).toBe("tmux-background-completion");
+		expect(delivered.message.customType).toBe("background-worker-completion");
+		expect(delivered.message.details).toEqual(
+			expect.objectContaining({
+				records: [expect.objectContaining({ laneId: expect.stringContaining(`tmux:${jobId}:worker`) })],
+			}),
+		);
 		expect(delivered.message.content).toContain("bounded-worker-marker");
 		expect(delivered.message.content).toContain("worker: stopped");
 		expect(delivered.message.content).toContain("<untrusted_content");
 		expect(delivered.message.content.length).toBeLessThan(16_000);
 		expect(intervalSpy).not.toHaveBeenCalled();
+		expect(
+			uiNotifications.filter(({ message }) => message.includes("background task") && message.includes("completed")),
+		).toEqual([]);
 
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);
 		for (const handler of handlers.get("session_start") ?? []) await handler({}, context);
@@ -473,71 +511,5 @@ describe.skipIf(process.platform === "win32")("bundled tmux agent manager comple
 		expect(spawnedUsageReports).toHaveLength(1);
 
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, context);
-	});
-
-	it("fire_task refuses a real launch with NO standing grant and NO interactive approval (doctrine-regression)", async () => {
-		const tmuxBinDir = path.join(tempDir, "doctrine-bin");
-		fs.mkdirSync(tmuxBinDir, { recursive: true });
-		fs.writeFileSync(
-			path.join(tmuxBinDir, "tmux"),
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX shell parameter expansion.
-			'#!/bin/sh\nif [ "${1:-}" = "-V" ]; then printf \'tmux test\\n\'; exit 0; fi\nif [ "${1:-}" = "has-session" ]; then exit 1; fi\nexit 0\n',
-			{ mode: 0o700 },
-		);
-		process.env.PATH = `${tmuxBinDir}:${process.env.PATH ?? ""}`;
-
-		let registeredTool: RegisteredTool | undefined;
-		const customEntries = makeCustomEntryStore();
-		const pi = {
-			on() {},
-			registerTool(tool: RegisteredTool) {
-				registeredTool = tool;
-			},
-			registerCommand() {},
-			registerFlag() {},
-			getFlag() {
-				return undefined;
-			},
-			appendEntry: customEntries.appendEntry,
-			reportManagedLane() {},
-			reportSpawnedUsage() {},
-			sendMessage() {},
-		};
-		const context: TestContext = {
-			cwd: tempDir,
-			hasUI: false,
-			sessionManager: {
-				getSessionFile: () => path.join(tempDir, "doctrine-session.jsonl"),
-				getLatestCustomEntryOnBranch: customEntries.getLatestCustomEntryOnBranch,
-				getBranch: customEntries.getBranch,
-			},
-			ui: {
-				notify() {},
-				confirm: async () => {
-					throw new Error("no UI is available in this test; confirm must never be reached");
-				},
-			},
-		};
-		tmuxAgentManagerExtension(pi as never);
-		if (!registeredTool) throw new Error("tmux_agent_manager tool was not registered");
-
-		// No grant was ever appended (customEntries starts empty) and hasUI is false, so a REAL
-		// (non-dryRun) fire_task launch must be refused outright — never a silent dispatch.
-		await expect(
-			registeredTool.execute(
-				"fire-call",
-				{
-					action: "fire_task",
-					task: "do the thing",
-					jobId: "doctrine-job",
-					agents: [{ provider: "pi" }],
-					dryRun: false,
-				},
-				new AbortController().signal,
-				() => {},
-				context,
-			),
-		).rejects.toThrow(/no standing grant for tmux dispatch; run grant_dispatch first/);
-		expect(customEntries.entries).toHaveLength(0);
 	});
 });

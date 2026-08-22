@@ -14,7 +14,11 @@ import type {
 	ToolCapabilityManifest,
 } from "../orchestration/contracts.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
-import { wrapToolWithCredentialExposureGuard } from "../secrets/credential-exposure-guard.ts";
+import {
+	type CredentialExposureBoundary,
+	wrapToolWithCredentialExposureGuard,
+} from "../secrets/credential-exposure-guard.ts";
+import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { createBashTool } from "../tools/bash.ts";
 import { createEditTool } from "../tools/edit.ts";
@@ -22,16 +26,19 @@ import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { createFindTool } from "../tools/find.ts";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
+import { createPythonTool } from "../tools/python.ts";
 import { createReadTool } from "../tools/read.ts";
 import { createRunProcessTool } from "../tools/run-process.ts";
 import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
+import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
 const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const MEMORY_LANE_TOOL_NAME = "memory" as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
+const PYTHON_LANE_TOOL_NAME = "python" as const;
 const PROCESS_LANE_TOOL_NAME = "run_process" as const;
 const MAX_LANE_MEMORY_QUERY_CHARS = 4_096;
 const laneMemorySchema = Type.Object({
@@ -54,7 +61,7 @@ export interface LaneToolSurface {
 	deniedTools: string[];
 	/** Explicit grants that bind to no classified lane candidate (opaque tools stay fail-closed). */
 	unboundAllowPatterns: string[];
-	/** Per-call path and capability gate for the isolated child loop. */
+	/** Per-call path and capability gate for the isolated worker loop. */
 	beforeToolCall: NonNullable<AgentLoopConfig["beforeToolCall"]>;
 	/** Canonical cumulative authority/budget meter for a compiled worker grant. */
 	gateway?: CapabilityGateway;
@@ -80,12 +87,12 @@ export interface LaneToolSurfaceOptions {
 	/** Compiled policy path. When present, it is the only authorization source for this surface. */
 	grant?: ExecutionGrant;
 	toolManifests?: readonly ToolCapabilityManifest[];
-	/** Runtime-owned classified tools composed specifically for this lane (for example delegation control). */
-	additionalTools?: readonly AgentTool[];
 	/** Durable cumulative active usage to seed the compiled grant's gateway on resume. */
 	initialUsage?: GatewayInitialUsage;
-	/** Root-tree aggregate meter shared by this attempt and every descendant. */
+	/** Owner aggregate meter shared across retries and verification for this durable worker task. */
 	sharedBudget?: SharedCapabilityBudget;
+	/** Host-owned fresh factories for worker-safe foreground/extension tools. */
+	workerToolAdapters?: WorkerToolAdapterRegistry;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -109,12 +116,13 @@ function createLaneTools(
 	cwd: string,
 	names: readonly string[],
 	fileMutationIntents: FileMutationIntentController,
-	additionalTools: ReadonlyMap<string, AgentTool>,
+	privatePathBoundary?: CredentialExposureBoundary,
 	readMemory?: (query: string) => Promise<string>,
 	executionPolicy?: OrchestrationExecutionPolicy,
 	processMaxWallClockMs = 0,
 	shellSessionKey?: string,
 	shellOutputDirectory?: string,
+	workerToolAdapters?: WorkerToolAdapterRegistry,
 ): AgentTool[] {
 	const factories = new Map<string, () => AgentTool>([
 		["read", () => createReadTool(cwd)],
@@ -123,6 +131,7 @@ function createLaneTools(
 		["ls", () => createLsTool(cwd)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { intentController: fileMutationIntents })],
+		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd)],
 	]);
 	if (executionPolicy) {
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>
@@ -160,45 +169,48 @@ function createLaneTools(
 		}));
 	}
 	return names.flatMap((name) => {
-		const additional = additionalTools.get(name);
-		if (additional) return [additional];
 		const factory = factories.get(name);
-		return factory ? [wrapToolWithCredentialExposureGuard(factory(), cwd)] : [];
+		if (factory) return [wrapToolWithCredentialExposureGuard(factory(), cwd, privatePathBoundary)];
+		if (!workerToolAdapters) return [];
+		const materialized = workerToolAdapters.materialize(name, { cwd, credentialBoundary: privatePathBoundary });
+		if (!materialized.ok) throw new Error(materialized.reason);
+		return [wrapToolWithCredentialExposureGuard(materialized.tool, cwd, privatePathBoundary)];
 	});
 }
 
 /**
  * Materialize a fresh, fail-closed tool surface for one isolated lane.
  *
- * Admission selects classified built-ins plus runtime-owned injected controls. A compiled grant is
- * the only authority source for worker lanes; host shell and recursive delegation are materialized
- * when named by that grant. Write/edit additionally require the global write switch and a positive
- * path scope.
+ * Admission selects only tools this isolated lane can materialize. A compiled grant is the only
+ * authority source for worker lanes. Write/edit additionally require the global write switch and a
+ * positive path scope.
  */
 export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneToolSurface {
 	const fileMutationIntents = new FileMutationIntentController();
-	const additionalTools = new Map<string, AgentTool>();
-	for (const tool of options.additionalTools ?? []) {
-		if (!tool.name.trim()) throw new Error("An injected lane tool must have a name.");
-		if (additionalTools.has(tool.name)) throw new Error(`Injected lane tool '${tool.name}' is duplicated.`);
-		additionalTools.set(tool.name, tool);
-	}
 	const writeCapable = options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0;
+	const pythonCapable =
+		options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(options.readMemory ? [MEMORY_LANE_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
+		...(pythonCapable ? [PYTHON_LANE_TOOL_NAME] : []),
 		...(options.executionPolicy ? [PROCESS_LANE_TOOL_NAME] : []),
 		...(options.shellSessionKey ? [STABLE_SHELL_TOOL_NAME] : []),
 	];
-	for (const name of additionalTools.keys()) {
-		if (builtInCandidateNames.includes(name as (typeof builtInCandidateNames)[number])) {
-			throw new Error(`Injected lane tool '${name}' conflicts with a built-in lane tool.`);
-		}
+	const builtInNameSet = new Set<string>(builtInCandidateNames);
+	const conflictingAdapter = options.workerToolAdapters?.names().find((name) => builtInNameSet.has(name));
+	if (conflictingAdapter) {
+		throw new Error(`Worker tool adapter '${conflictingAdapter}' conflicts with a built-in lane tool.`);
 	}
-	const candidateNames = [...builtInCandidateNames, ...additionalTools.keys()];
+	const candidateNames = [...builtInCandidateNames, ...(options.workerToolAdapters?.names() ?? [])];
+	const candidateNameSet = new Set<string>(candidateNames);
 	const patterns = strictLaneProfilePatterns(options.profile);
 	const compiledToolNames = new Set(options.grant?.allowedTools ?? []);
+	const unmaterializedGrantTool = options.grant?.allowedTools.find((name) => !candidateNameSet.has(name));
+	if (unmaterializedGrantTool) {
+		throw new Error(`Compiled lane grant references unmaterializable tool '${unmaterializedGrantTool}'.`);
+	}
 	const deniedTools = candidateNames.filter((name) =>
 		options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block),
 	);
@@ -228,12 +240,22 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			})
 		: undefined;
 	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
+	const privatePathBoundary =
+		deniedPaths && deniedPaths.length > 0
+			? {
+					redactSensitiveText: redactKnownSecrets,
+					protectedFiles: deniedPaths,
+					protectedDirectories: deniedPaths,
+				}
+			: undefined;
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
 		capabilities: [
 			"filesystem.read",
 			...(allowedToolSet.has(MEMORY_LANE_TOOL_NAME) ? (["memory.query"] as const) : []),
-			...(allowedToolSet.has(PROCESS_LANE_TOOL_NAME) || allowedToolSet.has(STABLE_SHELL_TOOL_NAME)
+			...(allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
+			allowedToolSet.has(PROCESS_LANE_TOOL_NAME) ||
+			allowedToolSet.has(STABLE_SHELL_TOOL_NAME)
 				? (["process.exec"] as const)
 				: []),
 		],
@@ -256,12 +278,13 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			options.cwd,
 			allowedTools,
 			fileMutationIntents,
-			additionalTools,
+			privatePathBoundary,
 			options.readMemory,
 			options.executionPolicy,
 			options.processMaxWallClockMs,
 			options.shellSessionKey,
 			options.shellOutputDirectory,
+			options.workerToolAdapters,
 		),
 		dispose: async () => {
 			if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);

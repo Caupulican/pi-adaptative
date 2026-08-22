@@ -59,7 +59,7 @@ describe("pipeline order: transformContext completes before the cost-guard estim
 				// the SAME round trip that produced the huge tool result already sees it packed on the
 				// very next transform pass -- no padding messages needed to push it out of the window.
 				contextGc: { preserveRecentMessages: 0, tools: ["big_output"] },
-				costGuard: { maxTurnUsd: 2.5, action: "warn" },
+				costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 			},
 			tools: [makeBigOutputTool(hugeBlob)],
 		});

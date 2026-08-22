@@ -123,9 +123,19 @@ function parseAuthority(
 ): WorkerExecutionAuthorityContract {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["capabilities", "toolNames", "readPaths", "writePaths", "deniedPaths", "budget"])
+		!hasOnlyKeys(value, ["cwd", "capabilities", "toolNames", "readPaths", "writePaths", "deniedPaths", "budget"])
 	) {
 		throw new WorkerExecutionContractError(`${label} authority is invalid.`);
+	}
+	const cwd = value.cwd;
+	if (
+		cwd !== undefined &&
+		(typeof cwd !== "string" ||
+			!cwd.trim() ||
+			cwd.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
+			(!path.isAbsolute(cwd) && !path.win32.isAbsolute(cwd)))
+	) {
+		throw new WorkerExecutionContractError(`${label} authority cwd must be an absolute path.`);
 	}
 	const capabilities = stringArray(value.capabilities, `${label} authority capabilities`);
 	if (!capabilities.every(isHarnessCapability)) {
@@ -185,6 +195,7 @@ function parseAuthority(
 		throw new WorkerExecutionContractError(`${label} write authority lacks a positive path scope.`);
 	}
 	return {
+		...(typeof cwd === "string" ? { cwd } : {}),
 		capabilities: capabilities as WorkerExecutionAuthorityContract["capabilities"],
 		toolNames,
 		readPaths,

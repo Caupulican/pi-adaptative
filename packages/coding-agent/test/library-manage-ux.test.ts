@@ -204,6 +204,7 @@ describe("Library Manage UX - Increment 2", () => {
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: true,
+					costGuard: { enabled: false, maxTurnUsd: 0, action: "warn" },
 					showImages: false,
 					imageWidthCells: 80,
 					autoResizeImages: true,

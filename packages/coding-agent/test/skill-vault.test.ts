@@ -70,6 +70,35 @@ describe("SkillVaultController", () => {
 		expect(vault.search("unrelated-needle").candidates).toEqual([]);
 	});
 
+	it("reads one eligible skill without changing vault slots or exposing its path", () => {
+		const skills = createSkills([
+			{ name: "read-only-guidance", description: "Bounded worker guidance.", body: "PRIVATE GUIDANCE BODY" },
+		]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+
+		expect(vault.read("read-only-guidance")).toEqual({
+			ok: true,
+			name: "read-only-guidance",
+			description: "Bounded worker guidance.",
+			body: "PRIVATE GUIDANCE BODY",
+		});
+		expect(vault.status().slots).toEqual([]);
+		expect(JSON.stringify(vault.read("read-only-guidance"))).not.toContain(root);
+	});
+
+	it("bounds read failures without disclosing the host skill path", () => {
+		const skills = createSkills([{ name: "unavailable", description: "Unavailable guidance.", body: "BODY" }]);
+		const vault = new SkillVaultController({ getSkills: () => skills });
+		rmSync(skills[0].filePath);
+
+		expect(vault.read("unavailable")).toEqual({
+			ok: false,
+			reason: "read_failed",
+			message: "Skill could not be read.",
+		});
+		expect(JSON.stringify(vault.read("unavailable"))).not.toContain(root);
+	});
+
 	it("loads one exact skill as a request-local system prompt section", () => {
 		const skills = createSkills([
 			{

@@ -2,8 +2,7 @@
  * Worktree-sync SSOT for tagged result codes and shared record types.
  *
  * Every worktree-sync operation reports its outcome through one of these string-literal codes in
- * a typed result -- callers branch on `code`, NEVER on message/stderr substrings (the
- * `classifyDispatchError` substring compromise is deliberately not repeated here). Git stderr is
+ * a typed result -- callers branch on `code`, NEVER on message/stderr substrings. Git stderr is
  * carried alongside as evidence for humans, not as a branch condition.
  */
 

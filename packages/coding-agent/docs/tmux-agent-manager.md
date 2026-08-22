@@ -31,11 +31,16 @@ Run `/tmux-agents` or call `tmux_agent_manager` with `action: "status"` to check
 
 ## Completion contract
 
-`fire_task` creates panes, injects prompts, and arms one event-driven `tmux pipe-pane` watcher per worker before returning. Each watcher:
+`fire_task` creates idle panes and arms one event-driven `tmux pipe-pane` watcher per worker. It then
+starts every provider with the initial prompt file as part of the same CLI command
+(`--prompt-interactive` for Agy), so task delivery cannot race TUI startup. Each watcher:
 
 1. consumes pane output as it arrives;
 2. writes one atomic terminal result when it sees the worker's `DONE` or `BLOCKED` marker, the pane closes, or its one-shot deadline expires;
 3. updates tmux status metadata and emits a display notification.
+
+On deadline, the watcher persists `timeout` first and then terminates its owned pane. A timed-out
+provider process therefore cannot remain live and continue spending resources.
 
 The parent Pi session watches result-file events. Once a turn's worker is terminal, it records a per-agent notification marker (`notifiedTurn`) and sends a bounded, source-labelled untrusted handoff with `triggerTurn: true`. Startup performs one reconciliation pass for terminal events produced while Pi was offline, and also reconciles tmux **sessions**: see [Persistence](#persistence-follow-ups-reconcile-dismiss) below.
 
@@ -53,13 +58,14 @@ actions manage that persistence:
   (relaunch with `fire_task` instead) or if the job was `dismiss`ed.
 - **`dismiss`** — stops tracking a job (no more re-arming, no more handoffs) without killing its tmux
   session; the pane keeps running and can still be attached to (`tmux attach -t <session>`) or stopped
-  later with `stop_job`/`stop_session`.
+  later with `stop_job`/`stop_session`. Dismiss detaches the completion watcher, so its old deadline no
+  longer owns that pane.
 - **Session reconcile** — on session start, Pi diffs live tmux sessions against its own job records for
   jobs it started. A session that has disappeared while its job was not yet terminal is marked orphaned
-  (informational only — nothing is ever killed to produce this state, and the job directory is never
+  (informational only — reconciliation never kills it to produce this state, and the job directory is never
   deleted automatically). A session that is still alive with a pending turn has its watcher re-armed so
-  the job can still complete normally. Killing a session always stays behind the explicit
-  `stop_job`/`stop_session` confirm path.
+  the job can still complete normally. Manual early termination stays behind the explicit
+  `stop_job`/`stop_session` confirm path; a managed deadline terminates only its owned pane.
 
 An idle worker (no turn currently dispatched) does not hold this session's reload-quiesce; `/reload` is
 never blocked merely because a persistent tmux worker exists between turns.
@@ -68,33 +74,36 @@ Running managed lanes are checkpointed at dispatch and rehydrated with the same 
 `/reload`. A later terminal event therefore completes the existing goal binding instead of minting a
 replacement lane or risking a duplicate dispatch.
 
-## Approval-gated dispatch: the standing grant
+## Autonomous dispatch profiles
 
-A real (non-dry-run) `fire_task` or `send_followup` launch requires either a **standing grant** or a
-one-shot interactive approval — never a silent launch:
+A real `fire_task` or `send_followup` runs autonomously without a UI prompt or CLI allow flag. Tmux
+availability detection happens inside every action; `guard` is diagnostic only and is never a required
+handshake.
 
-- **`grant_dispatch`** authorizes repeated unattended dispatch. Set `agent` (required), `maxLaunches`
-  (required), and optionally `goalId` (an unscoped grant covers any goal), `allowedTools`,
-  `resourceProfile`, `writePaths`, and `expiresInMinutes`. Requires interactive confirmation when a UI is
-  attached; in print/rpc/non-interactive mode, requires the `--allow-tmux-dispatch` CLI flag instead.
-  Once granted, matching launches proceed unattended. Team launches validate every child against the
-  grant and consume one unit of `maxLaunches` for each child process launched; a single-provider grant
-  cannot authorize a mixed-provider team.
-- **`revoke_grant`** ends a standing grant early (defaults to whichever grant is currently active).
-- With **no covering grant**: an interactive session is prompted for a one-shot approval; a
-  non-interactive session (no UI, no grant) is **refused** with a clear error — never launched silently.
+Before `fire_task` creates any pane, watcher, prompt, or job artifact, it derives one immutable internal
+execution profile per worker and durably reserves that worker's managed lane. Omitted tool and thinking
+fields inherit the orchestrator's eligible worker surface. Omitted `path` uses the normal process cwd
+while inheriting the host-derived full-machine scope except private harness paths. An explicit `path`
+sets the process cwd and passes an immutable child-scope channel that enforces that workspace for Pi's
+structured filesystem tools. Follow-up turns reuse the persisted profile and may change instructions,
+never authority.
 
-A grant-covered (or one-shot-approved) `pi` child is launched with a **restricted profile**: `--tools`
-(or a read-biased default), `--resource-profile` (or `--no-extensions --no-skills`), and a scoped
-`--append-system-prompt` naming the grant and a fixed hard-stop list (publish/push/tag/credential
-changes/destructive deletion must come back BLOCKED, never self-approved). This pushes the envelope into
-the **child's own** launch configuration — it is not an in-process sandbox, and non-`pi` agents
-(`agy`/`claude`/`codex`/`opencode`/custom) are bounded only at the launch layer; their internal tool-loop
-behavior is that CLI's own responsibility.
+For `pi` workers, `tools`, `resourceProfile`, `thinkingLevel`, and `worktreeLane` become Pi CLI flags. The shared worker
+ceiling removes memory, root-owned durable state, and agent-launching controls while retaining ordinary
+inherited capabilities such as Python. When `resourceProfile` is omitted, the host compiles the
+orchestrator's effective extension/skill/prompt/theme/agent/tool filters into a one-shot child profile;
+an explicit value overrides that inheritance. The structured read/write/edit/search tools hard-deny
+Pi's private auth, session, memory, settings, state, and work roots, and an explicit `path` further
+restricts those structural calls to that workspace. Arbitrary process tools such as bash and
+Python remain deliberate host-trust boundaries and can reach OS-visible files; this profile is not
+misrepresented as process sandboxing. These fields are rejected for non-Pi providers because arbitrary
+external CLIs own their own tool, thinking, and workspace controls; put native provider options in
+`command` instead. A non-Pi `path` changes its cwd only. Its durable profile records one machine-wide,
+host-trusted process (`bash` capability) rather than projecting the parent's Pi tool names or claiming
+CLI/OS sandbox enforcement.
 
-Grant budget (`maxLaunches`, `expiresInMinutes`) is real and enforced. `maxUsdAdvisory` and any
-self-reported worker usage are **advisory** — a claim to review, never a hard cap across the process
-boundary (the child bills under its own authentication).
+Any cooperative self-reported worker usage is **advisory** — a claim to review, never a hard cap across
+the process boundary (the child bills under its own authentication).
 
 Dispatched tmux workers appear as `tmux-worker` lanes alongside in-process worker lanes in `/autonomy`
 and `delegate { action: "status" }`; a worker's self-reported changed files are re-checked against the session's active
@@ -105,16 +114,14 @@ write scope and flagged for parent review when out of scope, exactly like an in-
 The `goal` tool's `dispatch_worker` action can bind a single open requirement to a persistent tmux worker
 instead of the default in-process one: pass `dispatchTarget: "tmux"`. Core invokes `fire_task` itself (the
 same call the model would make) with exactly one `pi` agent, so the dispatch maps 1:1 to the
-requirement's bound lane; the launch still goes through the standing-grant authorization above unchanged
-— an unattended goal/idle loop with no covering grant is honestly refused, never silently launched. The
-requirement's binding is recorded either way; a successful tmux dispatch waits and resumes through the
-same lane machinery as an in-process worker.
+requirement's bound lane. The same autonomous profile derivation and pre-launch durable reservation
+apply. A successful tmux dispatch waits and resumes through the same lane machinery as an in-process
+worker.
 
 When no worker was dispatched, the tool response's `dispatchSkipReason` explains why:
 
-- `no_standing_grant` — no covering grant, and this call had no UI to prompt (run `grant_dispatch` first).
 - `tmux_extension_not_loaded` — `tmux_agent_manager` is not loaded in this session (see Enable above).
-- `tmux_dispatch_failed` — the `fire_task` launch threw for a reason other than the grant (a bad jobId, a
+- `tmux_dispatch_failed` — the `fire_task` launch threw (an invalid `launchKey`, a
   live session-name collision, an environment failure).
 - `tmux_dispatch_incomplete` — the launch call returned without the job/agent details needed to identify
   the new lane.
@@ -130,8 +137,8 @@ When no worker was dispatched, the tool response's `dispatchSkipReason` explains
 
 ## Safety
 
-Launch actions run directly unless `dryRun: true` is requested, and are approval-gated per the standing
-grant above. Stop actions can discard active pane work, so they remain previews by default and require
+Launch actions run directly unless `dryRun: true` is requested. Stop actions can discard active pane
+work, so they remain previews by default and require
 `confirm: "yes-tmux-stop"` for execution. Existing sessions are never replaced silently; `force: true`
 archives an old job directory but does not kill a live tmux session.
 

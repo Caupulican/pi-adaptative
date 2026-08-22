@@ -1,5 +1,38 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed tmux standing dispatch grants and the public `workerDelegation.writePaths` setting. Workers now receive one immutable launch profile; an omitted path inherits machine-wide project access and an explicit path narrows the worker.
+- Native delegated workers are leaf agents. Fresh nested delegation is rejected, and worker profiles no longer expose recursive-agent limits.
+- Replaced delegated `readPaths`/`writePaths` and task-profile resource/budget overrides with focused model, thinking-level, path, and tool controls that can only inherit or narrow the foreground authority.
+
+### Added
+
+- Added lightweight worker profile controls for model, thinking level, path, and tools, with exact model-pin conflict handling and inherited foreground defaults.
+- Added fresh, worker-safe adapters for bounded artifact retrieval, toolkit scripts, skill search/read, and skill audits without sharing foreground extension/session instances.
+- Added a root-only, default-on reflection cue consumed inside the orchestrator's next ordinary provider turn, with audited automatic application for safe additive memory and skill writes.
+
+### Changed
+
+- Collapsed the remaining worker, background-tool, worktree, and process-supervision messages into one-line TUI activity summaries, with one in-place thinking/working lane and compact verification identifiers.
+- Made native and tmux workers autonomous by default: routine dispatch needs no grant, Pi workers inherit compatible parent tools and resources, and managed tmux panes receive their initial task only after capture is armed.
+- Made the foreground cost guard an explicit opt-in; legacy positive thresholds remain dormant until enabled.
+- Goal completion now refuses every open task step, active goal-owned worker or tool task, cited unfinished tool task, and active pipeline.
+- Moved automatic reflection into the current root session with no isolated/background model request; automatic background Auto Learn launches are disabled while explicit `/auto-learn run` remains available.
+
+### Fixed
+
+- Prevented duplicate or stale background terminal wakes by rechecking durable observation and goal ownership at the provider boundary.
+- Prevented OKF organization from matching or deleting a substring of a hot-memory fact; exact removal now occurs under the managed memory lock.
+- Isolated default AgentSession test storage from the real user agent directory.
+- Made tmux deadline handling terminate the owned pane, while dismiss only detaches supervision.
+- Rejected every fresh-only model, thinking, path, tool, profile, or fork override when reusing a persistent worker instead of silently ignoring it.
+- Blocked direct `run_process` argv access to worker-private auth, session, settings, and memory paths while preserving ordinary machine-wide project access.
+- Bounded and made cancellable worker skill audits, and rejected explicit profiles whose requested worker adapter is not active instead of silently narrowing them.
+- Moved provider tool-guideline budget diagnostics out of the chat renderer and into `/context` diagnostics.
+- Dismissed pending current-session reflection cues and refreshed the root prompt synchronously when reflection is disabled, preventing stale learning work from resurfacing after re-enable.
+- Bounded reflection response scanning, accepted writes, memory and skill fields, automatic overlap audits, and `skillify` draft bodies; truncated automatic promotion audits now fail closed.
+
 ## [0.94.1] - 2026-08-21
 
 ### Added

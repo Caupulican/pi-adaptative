@@ -5,7 +5,6 @@ import {
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
-	MAX_WORKER_AUTHORITY_PATHS,
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationThinkingLevel,
 	type RiskBudget,
@@ -43,8 +42,8 @@ export interface WorkerDelegationAuthorityRequest {
 	thinkingLevel?: OrchestrationThinkingLevel;
 	capabilities?: readonly HarnessCapability[];
 	toolNames?: readonly string[];
-	readPaths?: readonly string[];
-	writePaths?: readonly string[];
+	/** One model-selectable workspace focus. The host derives cwd plus symmetric read/write scope. */
+	path?: string;
 	budget?: RiskBudget;
 }
 
@@ -68,18 +67,7 @@ function uniqueStringArray(value: unknown, label: string, options: { maxEntries?
 /** Parse a caller authority request before it reaches admission or durable state. */
 export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDelegationAuthorityRequest {
 	if (!isPlainRecord(value)) throw new WorkerDelegationRequestError("Delegation authority must be an object.");
-	if (
-		!hasOnlyKeys(value, [
-			"role",
-			"model",
-			"thinkingLevel",
-			"capabilities",
-			"toolNames",
-			"readPaths",
-			"writePaths",
-			"budget",
-		])
-	) {
+	if (!hasOnlyKeys(value, ["role", "model", "thinkingLevel", "capabilities", "toolNames", "path", "budget"])) {
 		throw new WorkerDelegationRequestError("Delegation authority contains an unsupported field.");
 	}
 	if (value.role !== undefined && !WORKER_ROLES.includes(value.role as WorkerRole)) {
@@ -117,15 +105,18 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	}
 	const toolNames =
 		value.toolNames === undefined ? undefined : uniqueStringArray(value.toolNames, "Delegation authority toolNames");
-	const pathOptions = { maxEntries: MAX_WORKER_AUTHORITY_PATHS, maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH };
-	const readPaths =
-		value.readPaths === undefined
+	const workspacePath =
+		value.path === undefined
 			? undefined
-			: uniqueStringArray(value.readPaths, "Delegation authority readPaths", pathOptions);
-	const writePaths =
-		value.writePaths === undefined
-			? undefined
-			: uniqueStringArray(value.writePaths, "Delegation authority writePaths", pathOptions);
+			: typeof value.path === "string" &&
+					value.path.trim() &&
+					!value.path.includes("\0") &&
+					value.path.length <= MAX_WORKER_AUTHORITY_PATH_LENGTH
+				? value.path.trim()
+				: undefined;
+	if (value.path !== undefined && workspacePath === undefined) {
+		throw new WorkerDelegationRequestError("Delegation authority path must be a bounded, non-empty string.");
+	}
 	let budget: RiskBudget | undefined;
 	try {
 		budget = value.budget === undefined ? undefined : parseRiskBudget(value.budget, "Delegation authority budget");
@@ -138,8 +129,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 		...(value.thinkingLevel ? { thinkingLevel: value.thinkingLevel as OrchestrationThinkingLevel } : {}),
 		...(capabilities ? { capabilities } : {}),
 		...(toolNames ? { toolNames } : {}),
-		...(readPaths ? { readPaths } : {}),
-		...(writePaths ? { writePaths } : {}),
+		...(workspacePath ? { path: workspacePath } : {}),
 		...(budget ? { budget } : {}),
 	};
 }
@@ -151,7 +141,7 @@ export interface WorkerDelegationRequest {
 	authority?: WorkerDelegationAuthorityRequest;
 	/** Tool-facing immutable birth-context selection for a newly admitted logical worker. */
 	forkTurns?: string;
-	/** Runtime-owned creator identity for recursive delegation; never accepted from a model argument. */
+	/** Runtime-owned creator identity retained for recovery of legacy durable records. */
 	parentAgentId?: string;
 	/** Runtime-owned correlation for an automatically dispatched verifier; never model-settable. */
 	verificationOfTaskId?: string;

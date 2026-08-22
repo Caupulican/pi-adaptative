@@ -50,6 +50,7 @@ function makeDeps(overrides: Partial<SystemPromptBuilderDeps> = {}): SystemPromp
 			backgroundLanesEnabled: true,
 			laneMaxOutputTokens: 2_048,
 		}),
+		isChildSession: () => false,
 		...overrides,
 	};
 }
@@ -64,6 +65,48 @@ const readHint: ToolSelectionHint = {
 };
 
 describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
+	it("gives a constrained root the current-session reflection contract without background lanes", () => {
+		const settingsManager = {
+			...makeDeps().getSettingsManager(),
+			getAutoLearnSettings: () => ({ enabled: true, reflectionReview: true }),
+			getAutonomySettings: () => ({ mode: "balanced" }),
+		} as SettingsManager;
+		const prompt = new SystemPromptBuilder(
+			makeDeps({
+				getSettingsManager: () => settingsManager,
+				getModelCapabilityProfile: () => ({
+					class: "lean",
+					contextWindow: 16_384,
+					reasonCode: "test",
+					systemPromptMaxChars: 8_192,
+					backgroundLanesEnabled: false,
+					laneMaxOutputTokens: 2_048,
+				}),
+			}),
+		).rebuildSystemPrompt(["read"]);
+
+		expect(prompt).toContain("ROOT REFLECTION");
+		expect(prompt).toContain("current root provider turn");
+		expect(prompt).not.toContain("background learner");
+	});
+
+	it("never gives a child session the root autonomy or reflection contract", () => {
+		const settingsManager = {
+			...makeDeps().getSettingsManager(),
+			getAutoLearnSettings: () => ({ enabled: true, reflectionReview: true }),
+			getAutonomySettings: () => ({ mode: "full" }),
+		} as SettingsManager;
+		const prompt = new SystemPromptBuilder(
+			makeDeps({
+				getSettingsManager: () => settingsManager,
+				isChildSession: () => true,
+			}),
+		).rebuildSystemPrompt(["read"]);
+
+		expect(prompt).not.toContain("PI AUTONOMY");
+		expect(prompt).not.toContain("ROOT REFLECTION");
+	});
+
 	it("makes optional connector availability subordinate to current-task relevance", () => {
 		const trelloExtension = {
 			path: "/missing/trello/index.ts",

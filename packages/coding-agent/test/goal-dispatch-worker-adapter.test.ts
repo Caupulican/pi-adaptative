@@ -157,7 +157,7 @@ describe("goal action 'dispatch_worker' (live adapter)", () => {
 });
 
 /**
- * `dispatchTarget:"tmux"` routing: an explicit, grant-gated opt-in that
+ * `dispatchTarget:"tmux"` routing: an explicit persistent-worker opt-in that
  * defaults OFF. Selected ONLY when both `input.dispatchTarget === "tmux"` AND `dispatchTmuxWorker`
  * is wired; every other combination falls back to the EXISTING `startWorkerDelegation` in-process
  * path, byte-identical to before this field existed.
@@ -236,9 +236,9 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 		expect(result.details.dispatchedLaneId).toBe("lane-for-r1");
 	});
 
-	it("surfaces the tmux adapter's honest skip reasons (e.g. no_standing_grant) through the existing dispatchSkipReason contract, with no laneId bound", async () => {
+	it("surfaces the tmux adapter's honest launch failures through dispatchSkipReason, with no laneId bound", async () => {
 		const { run, getState } = createProducer({
-			dispatchTmuxWorker: async () => ({ skipReason: "no_standing_grant" }),
+			dispatchTmuxWorker: async () => ({ skipReason: "tmux_dispatch_failed" }),
 		});
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
@@ -252,9 +252,9 @@ describe("goal action 'dispatch_worker' (dispatchTarget routing)", () => {
 
 		expect(result.details.applied).toBe(true);
 		expect(result.details.dispatchedLaneId).toBeUndefined();
-		expect(result.details.dispatchSkipReason).toBe("no_standing_grant");
+		expect(result.details.dispatchSkipReason).toBe("tmux_dispatch_failed");
 		expect(getState()?.requirements.find((r) => r.id === "r1")?.boundLaneId).toBeUndefined();
-		expect(firstText(result.content)).toContain("no_standing_grant");
+		expect(firstText(result.content)).toContain("tmux_dispatch_failed");
 	});
 
 	it.each(["tmux_extension_not_loaded", "tmux_unavailable"])(

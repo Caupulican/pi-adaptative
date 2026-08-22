@@ -49,12 +49,12 @@ second line of defense, not the main implementation.
   context paths before content loading. Live extension loading repeats the profile check before
   import.
 - Isolated research and worker lanes create fresh tools only for their expanded lane grant. They do
-  not copy the foreground registry, extensions, or skills. Native agents may materialize fresh
-  memory, write/edit, platform-shell, and recursive-delegation adapters when their immutable grant
-  and live service switches admit them.
-- Worker orchestration state is lazily materialized only when the active surface grants `delegate`
-  (or a managed-lane terminal report requires the shared notifier); worker-role sessions allocate no
-  worker scheduler, lifecycle store, or notification coordinator.
+  not copy the foreground registry, extensions, or skills. Native workers may materialize fresh
+  read/write, process, Python, and platform-shell tools when their immutable host grant and live
+  service switches admit them; the worker surface never materializes `delegate`.
+- Worker orchestration state is owned by the root and is lazily materialized for root dispatch and
+  managed-lane terminal reporting. Worker-role sessions do not receive a scheduler, lifecycle
+  control surface, reflection, or memory-mutation adapter.
 - Managed children carry parent identity. A valid parent PID classifies the process as a worker before
   settings, stores, resources, or tools are built, so the hard worker ceiling cannot be re-granted by
   a permissive profile.
@@ -67,14 +67,13 @@ footprint must omit that extension at the resource layer, not merely block one o
 
 ## Child work contracts
 
-The model-facing `delegate` request can choose role label, authenticated model, exact supported
-reasoning level, classified tools, semantic capabilities, read/write paths, and budget. An optional
-owner-authored orchestration profile supplies reusable defaults; it is not a dispatch allowlist.
-Profile-free roots start from the foreground model and maximum host-permitted classified core
-surface. Descendants inherit immutable parent execution authority by default. The host validates and
-materializes every choice, intersects it with parent authority and live global switches, and persists
-the exact resulting contract before execution. Built-in roles are routing/audit labels unless an
-embedding supplies an explicit role ceiling.
+The model-facing `delegate` start request exposes only top-level `model`, `thinkingLevel`, `path`,
+and `toolNames` overrides. An optional owner-authored orchestration profile supplies reusable
+defaults. Omitted fields inherit the live compatible foreground model, thinking level, classified
+tools, and machine scope. The host validates and materializes every choice, intersects it with live
+global switches, and persists the exact execution grant before execution. Budgets, leases, role and
+capability ceilings, and tool-call limits are host-owned; the model does not submit an authority
+envelope. Every native worker is a root-managed leaf and cannot spawn another worker.
 
 The durable control plane is an append-only session event store projected into objectives, DAG
 tasks, attempts, leases, checkpoints, logical agent bindings, typed results, and a notification
@@ -106,23 +105,20 @@ Acceptance is a runtime invariant, not a worker claim. Task criterion IDs must r
 objective, a completed criterion-bound result must carry trusted evidence for every linked criterion,
 and an objective cannot close until all required criteria have trusted evidence in its task results.
 
-In-process agents have immutable birth context, a synthetic cache-affinity key, a selected model and
-exact reasoning level, and a construction-filtered tool surface. They inherit `delegate`, may inspect
-bounded raw-transcript pages only for themselves and their control subtree, exchange non-waking
-threaded evidence with discoverable session peers, broadcast to a bounded peer set, wait for one or
-many workers through state-change events, and may materialize a persistent per-agent platform shell.
-Wake, interrupt, resume, cancel, and retirement authority remains subtree-scoped. Retirement closes
-only an idle leaf with no unresolved mailbox/reply obligations; it preserves the durable binding and
-transcript for audit. Fleet admission runs before task, conversation, agent, or queue creation and
-bounds depth to 8, direct children to 64, session identities to 256, and queued dispatches to 256.
+In-process workers have immutable birth context, a synthetic cache-affinity key, a selected model and
+exact reasoning level, and a construction-filtered tool surface. They do not inherit `delegate` or
+any descendant-spawning control surface. The root coordinates worker status, bounded transcript
+reads, wake, interrupt, resume, cancel, and retirement. Retirement closes only an idle leaf with no
+unresolved mailbox/reply obligations; it preserves the durable binding and transcript for audit.
+Fleet admission runs before task, conversation, agent, or queue creation and bounds root-dispatched
+workers, session identities, and queued dispatches. There is no worker-child depth or descendant
+authority to inherit.
 Admission preserves queue, task, attempt, and agent headroom for every already-admitted pending
 verifier plus the current contract's future verifier. Failed mandatory-verifier dispatch remains
 durably derivable and replays on queue-capacity events. One global scheduler owns concurrency and
 durable queuing, one root coordinator owns cumulative token/cost/tool/active-time/attempt budgets, and exact
-ancestor task cycles are rejected. Descendant profile selection may vary model and role, but its
-resource pointers must be a full-identity subset of the ancestral contract, its soul text must match
-exactly, and verifier context/authority stays within the previously admitted verifier or worker
-boundary. `run_process`
+task cycles are rejected. Each worker's host execution grant remains immutable for its lifetime and
+is narrowed only by explicit root-owned policy. `run_process`
 keeps its separate exact executable allowlist, direct argv, scoped environment, bounded output, and
 process-tree termination contract. The platform shell is real host process authority, not container
 isolation or a path-scoped substitute for `write`/`edit`.
@@ -139,11 +135,11 @@ assistant output. A compacted prefix can enter only as its bounded checkpoint at
 real user turn. The snapshot and its durable reference are immutable; reusing a persistent worker
 continues its existing transcript and cannot install a second birth context.
 
-Worker output remains untrusted evidence. The parent receives a bounded terminal event and retrieves
-lane results explicitly; child/subtree transcript pages require an explicit `transcript` action,
-and the subtree authority check happens before bounded pagination. Transcript cursors are opaque raw
-session-entry offsets: a page can contain no messages but still return `nextCursor`, and an individual
-message that exceeds the byte bound is omitted with an explicit omission count. A preset that requires independent
+Worker output remains untrusted evidence. The root receives a bounded terminal event and retrieves
+lane results explicitly; worker transcript pages require an explicit root-owned `transcript` action.
+Transcript cursors are opaque raw session-entry offsets: a page can contain no messages but still
+return `nextCursor`, and an individual message that exceeds the byte bound is omitted with an explicit
+omission count. A preset that requires independent
 verification names a separate owner-pinned verifier profile. The runtime automatically dispatches
 that verifier as a durable task, withholds the implementation's terminal handoff, and reconciles the
 typed verdict before the implementation can become accepted. Restart recovery closes both

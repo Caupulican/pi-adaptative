@@ -6,12 +6,12 @@ describe("subagent level-0 prompt composition", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(140);
 	});
 
-	it("keeps the immutable core capability-neutral and bounds peer coordination", () => {
+	it("keeps the immutable core capability-neutral and assigns orchestration to the parent", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("Delegate useful independent");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("never invent ceilings");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host fleet bounds/control subtree");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("use exposed tools for peers");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("inspect exact peer transcripts");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Autonomous leaf worker");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("parent owns orchestration and other workers");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toMatch(/subtree|peer|descendant|spawn/i);
 	});
 
 	it("always starts with the immutable core", () => {

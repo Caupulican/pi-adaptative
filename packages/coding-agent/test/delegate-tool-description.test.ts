@@ -8,13 +8,11 @@ import {
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
-	MAX_WORKER_AUTHORITY_PATHS,
 } from "../src/core/orchestration/contracts.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition, DELEGATE_ACTIONS } from "../src/core/tools/delegate.ts";
 
-const EXPECTED_AUTHORITY_GUIDELINE =
-	"authority selects model/reasoning/role/tools/paths; toolNames unprefixed; host narrows. Owner profiles/settings own ceilings. Omit=inherits.";
+const EXPECTED_AUTHORITY_GUIDELINE = "Optional model/thinkingLevel/path/toolNames only";
 
 describe("delegate tool capability description", () => {
 	it("derives the tool action schema from the canonical action registry", () => {
@@ -40,7 +38,7 @@ describe("delegate tool capability description", () => {
 				}),
 			},
 			profileWriter: {
-				inspectTaskProfileOptions: () => ({ baseProfiles: [], models: [] }),
+				inspectTaskProfileOptions: () => ({ baseProfiles: [], models: [], inheritedToolNames: [] }),
 				createTaskProfile: () => ({ created: false, reason: "test" }),
 			},
 		});
@@ -74,12 +72,7 @@ describe("delegate tool capability description", () => {
 				}
 			>;
 		};
-		const authority = parameters.properties.authority as unknown as {
-			properties: Record<
-				string,
-				{ maxItems?: number; items?: { maxLength?: number }; properties?: Record<string, { maxLength?: number }> }
-			>;
-		};
+		const model = parameters.properties.model as { properties: Record<string, { maxLength?: number }> };
 
 		expect(parameters.properties.instructions.maxLength).toBe(MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH);
 		for (const field of [
@@ -98,13 +91,13 @@ describe("delegate tool capability description", () => {
 		expect((parameters.properties.agentIds as { uniqueItems?: boolean }).uniqueItems).toBe(true);
 		expect(parameters.properties.agentIds.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
 		expect(parameters.properties.maxMessages.maximum).toBe(MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES);
-		expect(authority.properties.model.properties?.provider?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH);
-		expect(authority.properties.model.properties?.modelId?.maxLength).toBe(MAX_ORCHESTRATION_MODEL_ID_LENGTH);
-		expect(authority.properties.toolNames.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
-		expect((authority.properties.toolNames as { uniqueItems?: boolean }).uniqueItems).toBe(true);
-		expect(authority.properties.toolNames.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
-		expect((authority.properties.readPaths as { uniqueItems?: boolean }).uniqueItems).toBe(true);
-		expect((authority.properties.writePaths as { uniqueItems?: boolean }).uniqueItems).toBe(true);
+		expect(model.properties.provider.maxLength).toBe(MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH);
+		expect(model.properties.modelId.maxLength).toBe(MAX_ORCHESTRATION_MODEL_ID_LENGTH);
+		expect(parameters.properties.toolNames.maxItems).toBe(MAX_ORCHESTRATION_COLLECTION_LENGTH);
+		expect((parameters.properties.toolNames as { uniqueItems?: boolean }).uniqueItems).toBe(true);
+		expect(parameters.properties.toolNames.items?.maxLength).toBe(MAX_ORCHESTRATION_IDENTIFIER_LENGTH);
+		expect(parameters.properties.path.maxLength).toBe(MAX_WORKER_AUTHORITY_PATH_LENGTH);
+		expect(parameters.properties).not.toHaveProperty("authority");
 	});
 
 	it("requires exact registered unprefixed authority tool names", () => {
@@ -112,32 +105,32 @@ describe("delegate tool capability description", () => {
 			caller: { kind: "session_root" },
 			runWorkerDelegation: async () => ({ started: false, skipReason: "test" }),
 		});
-		expect(definition.promptGuidelines).toContain(EXPECTED_AUTHORITY_GUIDELINE);
+		expect((definition.promptGuidelines ?? []).join("\n")).toContain(EXPECTED_AUTHORITY_GUIDELINE);
 
 		expect(
 			Value.Check(definition.parameters, {
 				action: "start",
 				instructions: "Inspect the repository",
-				authority: { toolNames: ["read", "bash"] },
+				toolNames: ["read", "bash"],
 			}),
 		).toBe(true);
 		expect(
 			Value.Check(definition.parameters, {
 				action: "start",
 				instructions: "Inspect the repository",
-				authority: { toolNames: ["functions.read"] },
+				toolNames: ["functions.read"],
 			}),
 		).toBe(false);
 		expect(
 			Value.Check(definition.parameters, {
 				action: "start",
 				instructions: "Inspect the repository",
-				authority: { toolNames: ["functions.bash"] },
+				toolNames: ["functions.bash"],
 			}),
 		).toBe(false);
 	});
 
-	it("bounds authority path scopes and forwards them unchanged to fresh workers", async () => {
+	it("bounds one workspace path and lowers lightweight overrides into the host request", async () => {
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
 			startWorkerDelegation: vi.fn(() => ({
@@ -146,32 +139,21 @@ describe("delegate tool capability description", () => {
 			})),
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
-		const authority = {
-			toolNames: ["read", "bash"],
-			readPaths: [".", "src"],
-			writePaths: ["src"],
-		};
-		expect(definition.promptGuidelines).toContain(EXPECTED_AUTHORITY_GUIDELINE);
+		const overrides = { toolNames: ["read", "bash"], path: "src" };
+		expect((definition.promptGuidelines ?? []).join("\n")).toContain(EXPECTED_AUTHORITY_GUIDELINE);
 
 		expect(
 			Value.Check(definition.parameters, {
 				action: "start",
 				instructions: "Inspect the repository",
-				authority,
+				...overrides,
 			}),
 		).toBe(true);
 		expect(
 			Value.Check(definition.parameters, {
 				action: "start",
 				instructions: "Inspect the repository",
-				authority: { readPaths: Array.from({ length: MAX_WORKER_AUTHORITY_PATHS + 1 }, () => ".") },
-			}),
-		).toBe(false);
-		expect(
-			Value.Check(definition.parameters, {
-				action: "start",
-				instructions: "Inspect the repository",
-				authority: { writePaths: ["x".repeat(MAX_WORKER_AUTHORITY_PATH_LENGTH + 1)] },
+				path: "x".repeat(MAX_WORKER_AUTHORITY_PATH_LENGTH + 1),
 			}),
 		).toBe(false);
 
@@ -189,12 +171,15 @@ describe("delegate tool capability description", () => {
 		});
 		await forwardingDefinition.execute(
 			"call-path-scopes",
-			{ action: "start", instructions: "Inspect the repository", authority },
+			{ action: "start", instructions: "Inspect the repository", ...overrides },
 			new AbortController().signal,
 			() => {},
 			{} as never,
 		);
-		expect(received).toMatchObject({ instructions: "Inspect the repository", authority });
+		expect(received).toMatchObject({
+			instructions: "Inspect the repository",
+			authority: overrides,
+		});
 	});
 
 	it("observes terminal records for status reads without observing mutation review", async () => {
@@ -230,7 +215,7 @@ describe("delegate tool capability description", () => {
 
 	it("stays accurate when worker write settings change without a runtime rebuild", () => {
 		const settings = SettingsManager.inMemory({
-			workerDelegation: { writeEnabled: false, writePaths: [] },
+			workerDelegation: { writeEnabled: false },
 		});
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
@@ -238,14 +223,15 @@ describe("delegate tool capability description", () => {
 		});
 		const descriptionBefore = definition.description;
 
-		settings.setWorkerDelegationSettings({ writeEnabled: true, writePaths: ["src"] });
+		settings.setWorkerDelegationSettings({ writeEnabled: true });
 
-		expect(settings.getWorkerDelegationSettings()).toMatchObject({ writeEnabled: true, writePaths: ["src"] });
+		expect(settings.getWorkerDelegationSettings()).toMatchObject({ writeEnabled: true });
+		expect(settings.getWorkerDelegationSettings()).not.toHaveProperty("writePaths");
 		expect(definition.description).toBe(descriptionBefore);
-		expect(definition.description).toContain("inherits the caller's execution authority by default");
-		expect(definition.description).toContain("loaded profile as a preset");
-		expect(definition.description).toContain("host scheduler manages bounded depth");
-		expect(definition.description).toContain("Workers are persistent specialists");
+		expect(definition.description).toContain("inherits the foreground model, reasoning, every compatible tool");
+		expect(definition.description).toContain("loaded profile is a reusable preset");
+		expect(definition.description).toContain("persistent leaf workers");
+		expect(definition.description).not.toMatch(/descendant|subtree|recursive/i);
 		expect(definition.description).toContain("start with agentId dispatches a new task onto an existing idle worker");
 		expect(definition.description).toContain("New workers default to their self-contained instructions only");
 		expect(definition.description).toContain("Explicitly set forkTurns to all");
@@ -257,26 +243,27 @@ describe("delegate tool capability description", () => {
 				maxMessages?: { description?: string };
 				profileId?: { description?: string };
 				forkTurns?: { description?: string };
-				authority?: object;
+				path?: { description?: string };
+				toolNames?: { description?: string };
 			};
 		};
 		expect(parameters.properties?.forkTurns?.description).toContain("Omitted starts use none");
 		expect(parameters.properties?.forkTurns?.description).not.toContain("inherit bounded all");
-		expect(parameters.properties?.instructions?.description).toContain("inherits the caller's admitted grant");
-		expect(parameters.properties?.instructions?.description).toContain("may recursively delegate");
-		expect(parameters.properties?.instructions?.description).toContain("bounds depth");
+		expect(parameters.properties?.instructions?.description).toContain("machine-wide project access");
+		expect(parameters.properties?.instructions?.description).toContain("leaf-worker task");
 		expect(parameters.properties?.message?.description).toContain("reply");
 		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
 		expect(parameters.properties?.profileId?.description).toContain("profile preset");
-		expect(parameters.properties?.authority).toBeDefined();
+		expect(parameters.properties?.path?.description).toContain("workspace and cwd");
+		expect(parameters.properties?.toolNames?.description).toContain("inherits every compatible foreground tool");
+		expect(parameters.properties).not.toHaveProperty("authority");
 		const promptGuidelines = (definition.promptGuidelines ?? []).join("\n");
-		expect(promptGuidelines).toContain("authority selects model");
+		expect(promptGuidelines).toContain("Optional model/thinkingLevel/path/toolNames only");
 		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: fresh=no agentId");
 		expect(promptGuidelines).toContain("reuse=returned agentId");
 		expect(promptGuidelines).toContain("task=instructions");
-		expect(promptGuidelines).toContain("Owner profiles/settings own ceilings");
+		expect(promptGuidelines.toLowerCase()).toContain("compiles and persists grant");
 		expect(promptGuidelines).toContain("queued=admitted");
-		expect(promptGuidelines).toContain("parallel read-only=no write/edit");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 

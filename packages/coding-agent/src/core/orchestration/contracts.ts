@@ -39,9 +39,9 @@ export const MAX_ORCHESTRATION_NOTIFICATIONS = 512;
 export const MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE = 512;
 export const MAX_ORCHESTRATION_EVIDENCE = 4_096;
 export const MAX_ORCHESTRATION_CHECKPOINT_SUMMARY_LENGTH = 4 * 1024;
-/** Absolute durable lineage bound enforced even when a profile requests broader recursion. */
+/** Absolute lineage bound retained for legacy durable-record recovery. New native workers are leaves. */
 export const MAX_ORCHESTRATION_AGENT_DEPTH = 8;
-/** Retained direct-child identity bound enforced even when a profile requests broader fan-out. */
+/** Direct-child bound retained for legacy durable-record recovery. New native workers admit none. */
 export const MAX_ORCHESTRATION_DIRECT_CHILDREN = 64;
 /** One changed retained map value; aggregate projection accounting remains the authoritative ceiling. */
 export const MAX_ORCHESTRATION_RETAINED_RECORD_BYTES = 1024 * 1024;
@@ -96,13 +96,13 @@ export interface OrchestrationExecutionPolicy {
 	maxOutputBytes: number;
 }
 
-/** Outbound recursive delegation authority retained with an immutable worker profile snapshot. */
+/** Legacy lineage limits retained in immutable snapshots; newly compiled native profiles use zeros. */
 export interface OrchestrationDelegationLimits {
-	/** Greatest absolute AgentBindingContract.depth that this worker may create. */
+	/** Greatest recovered AgentBindingContract.depth the durable host may retain. */
 	maxDepth: number;
-	/** Greatest number of retained direct child identities that this worker may create. */
+	/** Greatest number of recovered direct-child identities the durable host may retain. */
 	maxChildrenPerAgent: number;
-	/** Greatest number of retained non-root identities across this durable session. */
+	/** Greatest number of recovered non-root identities across this durable session. */
 	maxNestedAgentsPerSession?: number;
 }
 
@@ -154,11 +154,11 @@ export interface AgentIdentityContract {
 /** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
 export interface AgentBindingContract extends AgentIdentityContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
-	/** Direct creator in the durable orchestration tree. Root agents omit this field. */
+	/** Legacy direct creator retained for recovery. Fresh leaf workers omit this field. */
 	parentAgentId?: string;
-	/** Stable root identity retained across bounded recursive delegation depth. */
+	/** Stable root identity retained across legacy recovered lineage. */
 	rootAgentId: string;
-	/** Durable lineage depth. Fleet admission enforces the host-configured depth ceiling. */
+	/** Durable legacy lineage depth. Fresh leaf workers are always depth zero. */
 	depth: number;
 	role: WorkerRole;
 	status: AgentBindingStatus;
@@ -268,11 +268,13 @@ export interface OrchestrationProfile {
 	modelPolicy: OrchestrationModelPolicy;
 	capabilityCeiling: readonly HarnessCapability[];
 	toolNames: readonly string[];
+	/** Optional worker cwd and symmetric filesystem focus. Omitted means host-level machine scope. */
+	workspacePath?: string;
 	resourceProfileNames: readonly string[];
 	/** Optional preset-routing metadata retained for authored profiles; never an admission allowlist. */
 	dispatchProfileIds: readonly string[];
 	executionPolicy?: OrchestrationExecutionPolicy;
-	/** Omitted authored profiles use the host ceiling; adaptive profiles carry a lean explicit limit. */
+	/** Newly compiled native profiles carry the mandatory zero-child leaf limit. */
 	delegationLimits?: OrchestrationDelegationLimits;
 	budget: RiskBudget;
 	/** Authored scheduling hint retained in the snapshot; the global scheduler owns actual concurrency. */
@@ -301,6 +303,8 @@ export interface WorkerProfileExecutionContract {
 
 /** Effective authority admitted for one materialized worker profile. */
 export interface WorkerExecutionAuthorityContract {
+	/** Process cwd fixed at admission. Legacy contracts omit it and recover from the session cwd. */
+	cwd?: string;
 	capabilities: readonly HarnessCapability[];
 	toolNames: readonly string[];
 	readPaths: readonly string[];
@@ -322,7 +326,7 @@ export interface OrchestrationDispatchRequest {
 	profileId: string;
 	instructions: string;
 	resourcePointerIds: readonly string[];
-	/** Direct logical-agent creator for recursively delegated in-process work. */
+	/** Legacy logical-agent creator retained only to recover previously persisted nested work. */
 	parentAgentId?: string;
 	/** Runtime-owned goal/task correlation. Omitted by legacy records and normalized to an empty list. */
 	requirementIds?: readonly string[];
@@ -336,7 +340,7 @@ export interface OrchestrationDispatchRequest {
 	controlMessageId?: string;
 	/** External provider identity retained for routing and diagnostics. */
 	provider?: string;
-	/** Owner approval or standing-grant record that authorized an external launch. */
+	/** Immutable profile identity used to audit the external launch authority. */
 	authorizationId?: string;
 	/** Worktree-sync lane claimed by the external dispatcher. */
 	worktreeLaneKey?: string;

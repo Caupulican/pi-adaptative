@@ -329,6 +329,14 @@ export class GoalSessionController {
 		this.executionLease = undefined;
 	}
 
+	/** Goal identity authoritatively owned by the current foreground execution, if one was adopted. */
+	getExecutionGoalId(): string | undefined {
+		const lease = this.executionLease;
+		if (!lease) return undefined;
+		this.resolveExecutionState(lease);
+		return lease.goalId;
+	}
+
 	/** Charge one observed assistant response exactly once, including routed responses buffered from persistence. */
 	recordExecutionUsage(message: AssistantMessage): void {
 		const lease = this.executionLease;

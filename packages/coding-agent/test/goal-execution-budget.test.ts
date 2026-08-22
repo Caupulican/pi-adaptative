@@ -11,6 +11,31 @@ import { budgetedTokens } from "../src/core/orchestration/capability-gateway.ts"
 import { createHarness } from "./suite/harness.ts";
 
 describe("goal-owned execution budget", () => {
+	it("exposes goal correlation only while an authoritative execution lease owns it", () => {
+		const sessionManager = SessionManager.inMemory();
+		appendGoalStateSnapshot(
+			sessionManager,
+			createGoalState({ goalId: "goal-tool-owner", userGoal: "Own background work", now: "T0" }),
+		);
+		const controller = new GoalSessionController({
+			getSessionManager: () => sessionManager,
+			getModelProvider: () => "faux",
+			getLaneRecords: () => [],
+			getTaskRuntimeSnapshot: () => undefined,
+			getBackgroundToolTasks: () => [],
+			synchronizeGoalState: () => undefined,
+			scheduleGoalAutoContinueFromIdle: () => undefined,
+			prompt: async () => undefined,
+			emitWarning: () => undefined,
+		});
+
+		expect(controller.getExecutionGoalId()).toBeUndefined();
+		const lease = controller.beginExecution("goal-tool-owner");
+		expect(controller.getExecutionGoalId()).toBe("goal-tool-owner");
+		controller.endExecution(lease);
+		expect(controller.getExecutionGoalId()).toBeUndefined();
+	});
+
 	it("allows a model-created goal for ordinary work while stripping its invented token budget", async () => {
 		const harness = await createHarness();
 		harness.setResponses([

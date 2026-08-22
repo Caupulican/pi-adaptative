@@ -102,6 +102,26 @@ describe("background activity summary", () => {
 		},
 	);
 
+	it.each([
+		["worktree-sync-notice", "worktree sync changed main"],
+		["process-matrix-notice", "process matrix recovered a worker"],
+	] as const)("collapses %s supervision notices through the background contract", (customType, content) => {
+		const message: CustomMessage<unknown> = {
+			role: "custom",
+			customType,
+			content: `${content}\nverbose durable guidance remains model-visible`,
+			display: true,
+			timestamp: Date.now(),
+		};
+
+		const text = stripAnsi(new CustomMessageComponent(message).render(160).join("\n"));
+
+		expect(text.split("\n").filter((line) => line.trim())).toHaveLength(1);
+		expect(text).toContain(customType === "worktree-sync-notice" ? "Worktree sync" : "Process supervision");
+		expect(text).not.toContain(content);
+		expect(text).not.toContain("verbose durable guidance");
+	});
+
 	it("truncates the collapsed summary safely at narrow widths", () => {
 		const message: CustomMessage<unknown> = {
 			role: "custom",

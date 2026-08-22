@@ -7,7 +7,6 @@ import { getPrivateLaneDeniedPaths } from "../src/core/autonomy/lane-private-pat
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { getWorkerRequestSnapshots } from "../src/core/delegation/session-worker-claim.ts";
 import { WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
-import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import {
@@ -131,6 +130,29 @@ describe("AgentSession worker delegation", () => {
 			expect(harness.session.getToolDefinition("run_process")).toBeUndefined();
 		} finally {
 			harness.cleanup();
+		}
+	});
+
+	it("fails closed when an explicit worker profile names an inactive adapter", async () => {
+		const profile = {
+			...workerProfile("faux-1"),
+			profileId: "explicit-skill-profile",
+			capabilityCeiling: ["filesystem.read", "skill.read"] as const,
+			toolNames: ["read", "skill"] as const,
+		};
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 128_000 }],
+			initialActiveToolNames: ["read", "delegate"],
+			workerOrchestrationProfile: profile,
+			settings: { workerDelegation: { enabled: true } },
+		});
+		try {
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Use the explicitly configured skill adapter.",
+			});
+			expect(run).toEqual({ started: false, skipReason: "orchestration_tool_unavailable:skill" });
+		} finally {
+			await harness.cleanup();
 		}
 	});
 
@@ -308,8 +330,6 @@ describe("AgentSession worker delegation", () => {
 			expect(getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0]?.envelope.capabilities).toEqual([
 				"filesystem.read",
 				"filesystem.write",
-				"workflow.delegate",
-				"memory.query",
 			]);
 		} finally {
 			harness.cleanup();
@@ -759,67 +779,27 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("recovers an idle-parent handoff after one wake failure without reopening child evidence", async () => {
+	it("rejects a descendant before creating child evidence or consuming a provider response", async () => {
 		const harness = await createHarness();
-		let prepareAgentTurn: { mockRestore(): void } | undefined;
 		try {
 			harness.setResponses([fauxAssistantMessage('{"summary":"parent complete","status":"completed"}')]);
 			const parent = await harness.session.runWorkerDelegationOnce({ instructions: "Establish the parent agent." });
 			if (!parent.record) throw new Error("Expected a durable parent agent.");
 
-			prepareAgentTurn = vi.spyOn(WorkerLifecycle.prototype, "prepareAgentTurn").mockImplementationOnce(() => {
-				throw new Error("simulated idle-parent handoff start failure");
-			});
 			harness.setResponses([fauxAssistantMessage('{"summary":"child complete","status":"completed"}')]);
 			const child = await harness.session.runWorkerDelegationOnce({
-				instructions: "Produce child terminal evidence.",
+				instructions: "Attempt forbidden descendant work.",
 				parentAgentId: parent.record.laneId,
 			});
-			if (!child.record) throw new Error("Expected a durable child agent.");
-			const childLaneId = child.record.laneId;
-
-			const lifecycle = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
-			});
-			expect(lifecycle.getTerminalNotification(child.record.laneId)).toMatchObject({ status: "delivered" });
-			const handoffAttempt = Object.values(lifecycle.getTaskRuntimeSnapshot().attempts).find(
-				(attempt) =>
-					attempt.dispatch.logicalLaneId === parent.record?.laneId &&
-					attempt.dispatch.controlMessageId !== undefined &&
-					attempt.dispatch.instructions.includes(`childAgentId=${childLaneId}`),
-			);
-			expect(handoffAttempt).toBeDefined();
-			const controlMessageId = handoffAttempt?.dispatch.controlMessageId;
-			if (!controlMessageId) throw new Error("Expected the recovered terminal handoff control message.");
-			const parentMailbox = new WorkerAgentMailbox({
-				agentDir: harness.tempDir,
-				parentSessionId: harness.session.sessionId,
-				agentId: parent.record.laneId,
-			});
-			await vi.waitFor(() =>
-				expect(parentMailbox.getMessage(controlMessageId)).toMatchObject({
-					deliveredAt: expect.any(String),
-					senderAgentId: childLaneId,
-					task: {
-						kind: "terminal_handoff",
-						sourceAttemptId: expect.any(String),
-					},
-				}),
-			);
-			expect(parentMailbox.pendingTaskBearing()).toEqual([]);
-			const rootTerminalProjections = harness
-				.eventsOfType("delegate_workers")
-				.flatMap((event) => event.terminalSinceFlush)
-				.filter((record) => record.laneId === childLaneId);
-			expect(rootTerminalProjections).toEqual([]);
+			expect(child).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(workerLaneRecords(harness)).toHaveLength(1);
 		} finally {
-			prepareAgentTurn?.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
-	it("rejects nested start at admission when the tree already holds maxAttempts", async () => {
+	it("rejects nested start at the leaf-worker depth boundary before attempt-budget checks", async () => {
 		const limited = workerProfile("faux-1");
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 128_000 }],
@@ -841,7 +821,7 @@ describe("AgentSession worker delegation", () => {
 				instructions: "Produce child terminal evidence.",
 				parentAgentId: parent.record.laneId,
 			});
-			expect(child).toMatchObject({ started: false, skipReason: "worker_tree_attempt_budget_exhausted" });
+			expect(child).toMatchObject({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 		} finally {
 			harness.cleanup();
 		}
@@ -913,7 +893,7 @@ describe("AgentSession worker delegation", () => {
 			if (!initial.started || !initial.record) throw new Error("Expected the initial worker task to complete.");
 
 			const routeFollowUp: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("Autonomous orchestration-tree agent")
+				context.systemPrompt?.includes("Autonomous leaf worker")
 					? fauxAssistantMessage('{"summary":"second task done","status":"completed"}')
 					: fauxAssistantMessage("Background handoff acknowledged.");
 			harness.setResponses([routeFollowUp, routeFollowUp, routeFollowUp]);
@@ -1073,7 +1053,7 @@ describe("AgentSession worker delegation", () => {
 
 	it("executes a direct scoped write and reports it for parent review", async () => {
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, writeEnabled: true } },
 		});
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
@@ -1101,17 +1081,8 @@ describe("AgentSession worker delegation", () => {
 			// Parent agent decides; do not queue an owner Review now / Keep blocked interrupt.
 			expect(getWorkerHumanInputsRequiringDelivery(harness.sessionManager)).toEqual([]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
-			expect(request?.envelope.allowedTools).toEqual([
-				"read",
-				"grep",
-				"find",
-				"ls",
-				"memory",
-				"write",
-				"edit",
-				"delegate",
-			]);
-			expect(request?.envelope.allowedTools).toContain("delegate");
+			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
+			expect(request?.envelope.allowedTools).not.toContain("delegate");
 		} finally {
 			harness.cleanup();
 		}
@@ -1126,7 +1097,7 @@ describe("AgentSession worker delegation", () => {
 			maxConcurrent: 2,
 		};
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, maxConcurrent: 2, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, maxConcurrent: 2, writeEnabled: true } },
 			workerOrchestrationProfile: profile,
 		});
 		let resolveFirst!: (message: AssistantMessage) => void;
@@ -1155,12 +1126,21 @@ describe("AgentSession worker delegation", () => {
 			const controls = (
 				harness.session as unknown as {
 					_backgroundLanes: {
-						startWorkerDelegation(request: { instructions: string }): { started: boolean; skipReason?: string };
+						startWorkerDelegation(request: { instructions: string; authority?: { path?: string } }): {
+							started: boolean;
+							skipReason?: string;
+						};
 					};
 				}
 			)._backgroundLanes;
-			expect(controls.startWorkerDelegation({ instructions: "First scoped write" }).started).toBe(true);
-			expect(controls.startWorkerDelegation({ instructions: "Second scoped write" })).toMatchObject({
+			const workspace = join(harness.tempDir, "src");
+			expect(
+				controls.startWorkerDelegation({ instructions: "First scoped write", authority: { path: workspace } })
+					.started,
+			).toBe(true);
+			expect(
+				controls.startWorkerDelegation({ instructions: "Second scoped write", authority: { path: workspace } }),
+			).toMatchObject({
 				started: true,
 			});
 			await vi.waitFor(() => expect(providerCalls).toBe(1));
@@ -1179,20 +1159,27 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("fails closed before provider execution when a write reservation scope escapes the workspace", async () => {
+	it("accepts an explicit workspace outside the parent project", async () => {
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["../outside"] } },
+			settings: { workerDelegation: { enabled: true, writeEnabled: true } },
 		});
 		try {
-			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute"}')]);
+			harness.setResponses([fauxAssistantMessage('{"summary":"cross-project work complete","status":"completed"}')]);
+			const siblingWorkspace = dirname(harness.tempDir);
 
-			await expect(
-				harness.session.runWorkerDelegationOnce({ instructions: "Write outside the workspace" }),
-			).resolves.toMatchObject({
-				started: false,
-				skipReason: "write_reservation_scope_invalid",
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Work in a sibling workspace without asking for a grant.",
+				authority: { path: siblingWorkspace },
 			});
-			expect(harness.getPendingResponseCount()).toBe(1);
+
+			expect(run.record?.status).toBe("succeeded");
+			const snapshot = new WorkerLifecycle({
+				agentDir: harness.tempDir,
+				sessionId: harness.session.sessionId,
+			}).getTaskRuntimeSnapshot();
+			expect(Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.authority.cwd).toBe(
+				siblingWorkspace,
+			);
 		} finally {
 			harness.cleanup();
 		}
@@ -1200,7 +1187,7 @@ describe("AgentSession worker delegation", () => {
 
 	it("publishes one terminal handoff when durable conversation setup fails before worker start", async () => {
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, writeEnabled: true } },
 		});
 		const ensureConversation = vi.spyOn(WorkerConversationStore.prototype, "ensure").mockImplementationOnce(() => {
 			throw new Error("synthetic durable conversation failure");
@@ -1245,7 +1232,7 @@ describe("AgentSession worker delegation", () => {
 
 	it("durably journals runner-applied structured mutations under the active attempt fence", async () => {
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, writeEnabled: true } },
 		});
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
@@ -1282,20 +1269,23 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("blocks and reports a direct write outside the configured scope", async () => {
+	it("blocks and reports a direct write outside the explicit worker workspace", async () => {
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, writeEnabled: true } },
 		});
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("write", { path: "outside.ts", content: "must not be written" })], {
+				fauxAssistantMessage([fauxToolCall("write", { path: "../outside.ts", content: "must not be written" })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage('{"summary":"write was refused","status":"completed"}'),
 			]);
 
-			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Try the scoped write" });
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Try the scoped write",
+				authority: { path: join(harness.tempDir, "src") },
+			});
 
 			expect(existsSync(join(harness.tempDir, "outside.ts"))).toBe(false);
 			expect(run.outcome?.claim.changedFiles).toEqual([]);
@@ -1308,7 +1298,7 @@ describe("AgentSession worker delegation", () => {
 
 	it("does not block worker on a failed direct edit target, allowing it to recover", async () => {
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, writeEnabled: true } },
 		});
 		try {
 			mkdirSync(join(harness.tempDir, "src"), { recursive: true });
@@ -1424,7 +1414,7 @@ describe("AgentSession worker delegation", () => {
 			const workerReasoning: unknown[] = [];
 			const workerToolNames: string[][] = [];
 			const routeResponse: FauxResponseFactory = (context, options, _state, model) => {
-				if (!context.systemPrompt?.includes("Autonomous orchestration-tree agent")) {
+				if (!context.systemPrompt?.includes("Autonomous leaf worker")) {
 					return fauxAssistantMessage("Delegations started.");
 				}
 				workerModelIds.push(model.id);
@@ -1468,7 +1458,6 @@ describe("AgentSession worker delegation", () => {
 			harness.settingsManager.setWorkerDelegationSettings({
 				orchestrationProfile: replacement.profileId,
 				writeEnabled: true,
-				writePaths: ["src"],
 			});
 			releaseFirst();
 
@@ -1480,8 +1469,8 @@ describe("AgentSession worker delegation", () => {
 			]);
 			expect(workerReasoning).toEqual(["low", "low"]);
 			expect(workerToolNames).toEqual([
-				["read", "memory", "write"],
-				["read", "memory", "write"],
+				["read", "write"],
+				["read", "write"],
 			]);
 		} finally {
 			unsubscribe();
@@ -1501,7 +1490,7 @@ describe("AgentSession worker delegation", () => {
 			};
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("Autonomous orchestration-tree agent")
+			context.systemPrompt?.includes("Autonomous leaf worker")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
 		let resolveTerminal!: () => void;
@@ -1600,7 +1589,7 @@ describe("AgentSession worker delegation", () => {
 			signalWakeStarted = resolve;
 		});
 		const routeResponse: FauxResponseFactory = (context) =>
-			context.systemPrompt?.includes("Autonomous orchestration-tree agent")
+			context.systemPrompt?.includes("Autonomous leaf worker")
 				? workerResponse
 				: fauxAssistantMessage("Foreground remained responsive.");
 		const heldForegroundResponse: FauxResponseFactory = () => {
@@ -1665,7 +1654,8 @@ describe("AgentSession worker delegation", () => {
 			).toBe(false);
 
 			resolveForeground(fauxAssistantMessage("Foreground released."));
-			await foregroundRun;
+			// The authoritative provider boundary persists the queued custom handoff and may
+			// continue the same foreground run. Observe that boundary before releasing its reply.
 			await wakeStarted;
 			await vi.waitFor(() => {
 				expect(eventStore.readAll().some((event) => event.type === "notification.delivered")).toBe(true);
@@ -1677,7 +1667,7 @@ describe("AgentSession worker delegation", () => {
 			).toBe(true);
 
 			resolveWake(fauxAssistantMessage("Durable handoff acknowledged."));
-			await wakeReply;
+			await Promise.all([foregroundRun, wakeReply]);
 			expect(eventStore.readAll().filter((event) => event.type === "notification.delivered")).toHaveLength(1);
 			expect(
 				harness.sessionManager
@@ -1699,7 +1689,7 @@ describe("AgentSession worker delegation", () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
 			const routeResponse: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("Autonomous orchestration-tree agent")
+				context.systemPrompt?.includes("Autonomous leaf worker")
 					? fauxAssistantMessage(WORKER_JSON)
 					: fauxAssistantMessage("Delegation reviewed.");
 			harness.setResponses([
@@ -2202,7 +2192,7 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("defaults to bounded recursive authority while explicit empty capabilities remain a leaf", () => {
+	it("defaults to a full leaf authority while explicit empty capabilities remain a restricted leaf", () => {
 		const modelRegistry = {
 			find: () => ({ id: "m1", provider: "faux" }),
 			hasConfiguredAuth: () => true,
@@ -2216,8 +2206,16 @@ describe("AgentSession worker delegation", () => {
 		});
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toContain("delegate");
-		expect(resolution.shipment.profile.capabilityCeiling).toContain("workflow.delegate");
+		expect(resolution.shipment.profile.toolNames).toEqual(
+			expect.arrayContaining(["read", "grep", "find", "ls", "write", "edit", "memory", "python", "bash"]),
+		);
+		expect(resolution.shipment.profile.toolNames).not.toContain("delegate");
+		expect(resolution.shipment.profile.capabilityCeiling).not.toContain("workflow.delegate");
+		expect(resolution.shipment.profile.delegationLimits).toEqual({
+			maxDepth: 0,
+			maxChildrenPerAgent: 0,
+			maxNestedAgentsPerSession: 0,
+		});
 
 		const leaf = resolveWorkerAuthority({
 			authority: { capabilities: [] },
@@ -2318,23 +2316,33 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
-	it("maps tool aliases and admits delegate capability when explicitly requested in authority", () => {
+	it("maps compatible tool aliases but rejects an explicit delegate request", () => {
 		const modelRegistry = {
 			find: () => ({ id: "m1", provider: "faux" }),
 			hasConfiguredAuth: () => true,
 		} as any;
-		const resolution = resolveWorkerAuthority({
+		const aliases = resolveWorkerAuthority({
 			authority: {
-				toolNames: ["bash_tool", "python_tool", "delegate"],
+				toolNames: ["bash_tool", "python_tool"],
 			},
 			base: undefined,
 			foregroundModel: { id: "m1", provider: "faux" } as any,
+			foregroundToolNames: ["bash", "python"],
 			modelRegistry,
 			isModelExhausted: () => false,
 		});
-		expect(resolution.ok).toBe(true);
-		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["bash", "python", "delegate"]);
-		expect(resolution.shipment.profile.capabilityCeiling).toContain("workflow.delegate");
+		expect(aliases.ok).toBe(true);
+		if (!aliases.ok) return;
+		expect(aliases.shipment.profile.toolNames).toEqual(["bash", "python"]);
+
+		const rejected = resolveWorkerAuthority({
+			authority: { toolNames: ["delegate"] },
+			base: undefined,
+			foregroundModel: { id: "m1", provider: "faux" } as any,
+			foregroundToolNames: ["delegate"],
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(rejected).toEqual({ ok: false, reason: "orchestration_tool_unavailable:delegate" });
 	});
 });

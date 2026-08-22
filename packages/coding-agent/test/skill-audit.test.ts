@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { jaccard, tokenize } from "../src/core/tools/skill-audit.ts";
+import type { Skill } from "../src/core/skills.ts";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
+import { jaccard, runSkillAudit, tokenize } from "../src/core/tools/skill-audit.ts";
+
+function skill(index: number): Skill {
+	const baseDir = `/skills/${index}`;
+	const filePath = `${baseDir}/SKILL.md`;
+	return {
+		name: `fixture-${index}`,
+		description: "shared duplicate workflow metadata",
+		filePath,
+		baseDir,
+		sourceInfo: createSyntheticSourceInfo(filePath, { source: "local", scope: "user", baseDir }),
+		disableModelInvocation: false,
+	};
+}
 
 describe("skill-audit helpers", () => {
 	describe("tokenize", () => {
@@ -94,6 +109,34 @@ describe("skill-audit helpers", () => {
 	});
 
 	describe("integration: skill similarity detection", () => {
+		it("enforces draft-field bounds inside the shared audit primitive", () => {
+			expect(() =>
+				runSkillAudit(
+					"/repo",
+					{ name: "bounded", description: "bounded", body: "x".repeat(17) },
+					[skill(0)],
+					undefined,
+					{ maxSkills: 8, maxComparisonPairs: 8, maxDraftFieldChars: 16 },
+				),
+			).toThrow("skill_audit_draft_too_large:draftBody");
+		});
+
+		it("stops pairwise work at the caller-owned comparison bound", () => {
+			const report = runSkillAudit(
+				"/repo",
+				undefined,
+				Array.from({ length: 10 }, (_, index) => skill(index)),
+				undefined,
+				{
+					maxSkills: 10,
+					maxComparisonPairs: 4,
+				},
+			);
+
+			expect(report.truncated).toBe(true);
+			expect(report.nearDuplicates).toHaveLength(4);
+		});
+
 		it("should detect high similarity between very similar skill names/descriptions", () => {
 			const skillA = tokenize("auto-learn background agent continuous learning");
 			const skillB = tokenize("auto-learn agent continuous learning task");

@@ -174,7 +174,12 @@ export class WorkerRecoveryCoordinator {
 				);
 			}
 
-			const terminalRecords = lifecycle.getPendingTerminalNotifications().map((notification) => notification.record);
+			const terminalRecords = lifecycle
+				.getPendingTerminalNotifications()
+				.map((notification) => notification.record)
+				// ManagedLaneController owns tmux projection and durable delivery; replaying it here
+				// creates a second publisher every time unrelated foreground state triggers recovery.
+				.filter((record) => record.type !== "tmux-worker");
 			if (terminalRecords.length > 0) {
 				if (this.options.publishTerminalRecords) this.options.publishTerminalRecords(terminalRecords);
 				else for (const record of terminalRecords) this.options.publishTerminalRecord(record);

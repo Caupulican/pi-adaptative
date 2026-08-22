@@ -7,6 +7,7 @@ import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { injectCompactGoalContext } from "./goals/compact-goal-context.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 
 export interface ProviderRequestContextControllerDeps {
@@ -31,6 +32,7 @@ export interface ProviderRequestContextControllerDeps {
 	enqueueRelevanceCuration(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
 	maybeDrainBrainCuration(): void;
 	appendMemoryEvidence(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
+	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
 }
@@ -46,13 +48,18 @@ export class ProviderRequestContextController {
 	async plan(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
 		const extensionPlan = await this.deps.transformExtensions(transformed);
+		const reflectionCuePlan = this.deps.previewReflectionCue?.();
+		const providerTransients = [
+			...extensionPlan.transientMessages,
+			...(reflectionCuePlan ? [reflectionCuePlan.message] : []),
+		];
 		const durableMessages = injectCompactGoalContext(extensionPlan.messages, undefined);
-		const extensionMessages = [...durableMessages, ...extensionPlan.transientMessages];
+		const extensionMessages = [...durableMessages, ...providerTransients];
 		const auditReport = this.deps.runContextAudit(extensionMessages);
 		const shadowReport = this.deps.runPromptPolicyPlanning(auditReport);
 		const memoryReport = await this.deps.runMemoryRetrieval(extensionMessages);
 		const previewGc = this.deps.applyContextGc(durableMessages, false);
-		const previewProviderMessages = [...previewGc.messages, ...extensionPlan.transientMessages];
+		const previewProviderMessages = [...previewGc.messages, ...providerTransients];
 		const previewEnforcement = this.deps.runPromptEnforcement(previewProviderMessages, shadowReport);
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {
 			throw new Error("Provider request enforcement changed message cardinality");
@@ -73,11 +80,12 @@ export class ProviderRequestContextController {
 		const skillRevision = this.deps.skillVault.getContextRevision();
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
+			reflectionCuePlan?.isCurrent() !== false &&
 			this.deps.skillVault.getContextRevision() === skillRevision &&
 			isDeepStrictEqual(this.deps.getGoalState(), goalState);
 		const projectCommit = (writePayloads: boolean) => {
 			const gc = this.deps.applyContextGc(durableMessages, writePayloads);
-			const providerMessages = [...gc.messages, ...extensionPlan.transientMessages];
+			const providerMessages = [...gc.messages, ...providerTransients];
 			const enforcement = this.deps.runPromptEnforcement(providerMessages, shadowReport);
 			return { enforcement, gc, providerMessages };
 		};
@@ -106,6 +114,7 @@ export class ProviderRequestContextController {
 				if (this.deps.skillVault.commitSystemPromptSection() !== transientSystemPrompt) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
+				reflectionCuePlan?.commit();
 			},
 		};
 	}

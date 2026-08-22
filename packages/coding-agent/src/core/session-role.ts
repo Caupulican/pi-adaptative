@@ -15,7 +15,6 @@
  * var is additive evidence for "worker", never a downgrade signal.
  */
 
-import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import { getParentPid } from "./process-identity.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
 
@@ -51,30 +50,20 @@ export function isWorkerSession(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * Tools a worker session may never activate: the orchestration/self-adaptation surface that would
- * let a worker spawn its own sub-orchestration, bypass its parent to request owner input, mutate
- * settings-driven learning/model state, or shell out to the unbounded `python` execution contract.
- * `python` is load-bearing for the zero-footprint guarantee (it can write anywhere the interpreter
- * can reach); `context_scout` is
- * sub-orchestration (spawns its own isolated agent loop). `bash` is deliberately NOT included: it
- * stays available as the documented cooperative boundary (see docs/worktree-sync.md) — the same
- * trust model the lane gate already applies to foreign CLIs it cannot structurally contain.
+ * Tools a worker session may never activate: agent launchers plus root-owned reflection, memory,
+ * and machine credential state. The legacy `goal` tool is excluded because its composite action
+ * surface can dispatch workers; the non-dispatching create/get/update lifecycle tools remain
+ * eligible. `bash` and `python` remain available as explicit host-trust boundaries; the structural
+ * path envelope does not confine arbitrary process code, and banning one execution route while
+ * retaining the other would not create a meaningful filesystem boundary.
  */
 export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"goal",
-	...GOAL_LIFECYCLE_TOOL_NAMES,
-	"pipeline",
-	"ask_question",
 	"secret_store",
-	"skill",
 	"memory",
 	"delegate",
 	"improvement_loop",
-	"extensionify",
-	"skillify",
-	"run_toolkit_script",
 	"model_fitness",
 	"tmux_agent_manager",
 	"context_scout",
-	"python",
 ]);

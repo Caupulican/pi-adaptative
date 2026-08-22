@@ -326,7 +326,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 			"Batch transitions; work the first open step; record evidence/blockers; skip unchanged narration.",
 			"intake keeps every item; link goal requirementIds.",
 			"advance completes current, then starts next pending.",
-			"Attach completed tool_task IDs as evidence; goal completion rejects open linked steps.",
+			"Attach completed tool_task IDs as evidence; goal completion rejects every open step.",
 			"Before final, resolve or defer open work. goal owns outcomes; delegate owns workers.",
 		],
 		parameters: taskStepsSchema,

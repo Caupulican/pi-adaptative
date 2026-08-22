@@ -302,6 +302,76 @@ describe("WorkerRecoveryCoordinator", () => {
 		expect(publishTerminalRecord).not.toHaveBeenCalled();
 	});
 
+	it("leaves managed-process terminal projection to the managed lane owner", () => {
+		const nativeTerminal: LaneRecord = { laneId: "native-terminal", type: "worker", status: "succeeded" };
+		const managedTerminal: LaneRecord = {
+			laneId: "tmux-terminal",
+			type: "tmux-worker",
+			status: "failed",
+		};
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
+			getPendingVerificationRecoveries: () => [],
+			getPendingTerminalNotifications: () => [
+				{ notificationId: "native-notification", record: nativeTerminal },
+				{ notificationId: "managed-notification", record: managedTerminal },
+			],
+		} as unknown as WorkerLifecycle;
+		const publishTerminalRecord = vi.fn();
+		const publishTerminalRecords = vi.fn();
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue: vi.fn() },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord,
+			publishTerminalRecords,
+			dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		expect(publishTerminalRecords).toHaveBeenCalledOnce();
+		expect(publishTerminalRecords).toHaveBeenCalledWith([nativeTerminal]);
+		expect(publishTerminalRecord).not.toHaveBeenCalled();
+	});
+
+	it("never republishes a retained managed-process terminal across repeated recovery boundaries", () => {
+		const managedTerminal: LaneRecord = {
+			laneId: "tmux-terminal",
+			type: "tmux-worker",
+			status: "failed",
+		};
+		const lifecycle = {
+			suspendBoundInProcessAttemptsForRestart: () => [],
+			recoverQueued: () => [],
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
+			getPendingVerificationRecoveries: () => [],
+			getPendingTerminalNotifications: () => [{ notificationId: "managed-notification", record: managedTerminal }],
+		} as unknown as WorkerLifecycle;
+		const publishTerminalRecord = vi.fn();
+		const publishTerminalRecords = vi.fn();
+		const recovery = new WorkerRecoveryCoordinator({
+			lifecycle,
+			scheduler: { enqueue: vi.fn() },
+			recoverWriteReservations: vi.fn(),
+			publishTerminalRecord,
+			publishTerminalRecords,
+			dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+			recoverTaskBearingMailboxTurns: vi.fn(),
+			recoverSessionRootReplies: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		recovery.recover();
+		recovery.recover();
+		expect(publishTerminalRecords).not.toHaveBeenCalled();
+		expect(publishTerminalRecord).not.toHaveBeenCalled();
+	});
+
 	it("replays every retained mandatory verifier when a saturated queue releases capacity", async () => {
 		const agentDir = root();
 		const records = new Map<string, LaneRecord>();

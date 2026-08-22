@@ -6,7 +6,10 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import { getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { SKILL_OVERLAP_CONSOLIDATION_REASON_CODE } from "../src/core/reflection-controller.ts";
+import {
+	SKILL_AUDIT_UNAVAILABLE_REASON_CODE,
+	SKILL_OVERLAP_CONSOLIDATION_REASON_CODE,
+} from "../src/core/reflection-controller.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -198,6 +201,77 @@ describe("reflection skill promotion (R7)", () => {
 		expect(proposal?.action).toBe("propose");
 		expect(proposal?.summary).toContain("release-workflow");
 
+		session.dispose();
+	});
+
+	it("holds automatic promotion when the visible skill universe exceeds its audit bound", async () => {
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		settingsManager.setLearningPolicySettings({ enabled: false });
+		for (let index = 0; index < 256; index++) {
+			const directory = join(agentDir, "skills", `fixture-${index}`);
+			mkdirSync(directory, { recursive: true });
+			writeFileSync(
+				join(directory, "SKILL.md"),
+				[
+					"---",
+					`name: fixture-${index}`,
+					`description: Bounded audit fixture number ${index}`,
+					"---",
+					"",
+					"Fixture body.",
+				].join("\n"),
+				"utf-8",
+			);
+		}
+
+		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+		});
+		await session.bindExtensions({});
+		(session.agent as unknown as { streamFn: unknown }).streamFn = async () =>
+			({
+				result: async () =>
+					reply(
+						JSON.stringify({
+							rationale: "unique recurring workflow",
+							writes: [
+								{
+									kind: "promote_skill",
+									name: "unique-procedure",
+									description: "A singular procedure with unrelated vocabulary",
+									body: "Perform the singular bounded procedure.",
+								},
+							],
+						}),
+					),
+			}) as never;
+
+		await session.runReflectionPass({
+			signals: {
+				trigger: "complex",
+				toolCallCount: 12,
+				hadCorrection: false,
+				contextHeadroomPct: 90,
+				usefulLately: 0,
+			},
+			recentTurnText: "user: preserve this unique recurring workflow",
+			reportId: "bounded-universe",
+		});
+
+		expect(existsSync(join(agentDir, "skills", "unique-procedure", "SKILL.md"))).toBe(false);
+		expect(session.getLearningAuditRecords()).toContainEqual(
+			expect.objectContaining({
+				action: "propose",
+				reasonCode: SKILL_AUDIT_UNAVAILABLE_REASON_CODE,
+			}),
+		);
 		session.dispose();
 	});
 });

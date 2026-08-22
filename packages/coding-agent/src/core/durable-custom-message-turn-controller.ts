@@ -5,6 +5,7 @@ import type { GoalExecutionLease, GoalSessionController } from "./goals/goal-ses
 interface DurableCustomMessageTurnControllerDeps {
 	foreground: ForegroundRecoveryController;
 	goals: Pick<GoalSessionController, "beginExecution" | "endExecution">;
+	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
 }
 
 /**
@@ -29,26 +30,31 @@ export class DurableCustomMessageTurnController {
 		return true;
 	}
 
+	/** Reject queued delivery receipts that can no longer reach persistence during session shutdown. */
+	shutdown(): void {
+		const error = new Error("Session disposed before a custom message was persisted");
+		for (const acceptance of this.pending.values()) acceptance.reject(error);
+		this.pending.clear();
+	}
+
+	/** Queue a custom message for the next provider boundary and resolve only after durable append. */
+	async enqueue<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): Promise<void> {
+		const { appMessage, acceptedPromise } = this.prepare(message);
+		try {
+			this.deps.enqueueSteeringMessage(appMessage);
+		} catch (error) {
+			this.pending.delete(appMessage);
+			throw error;
+		}
+		await acceptedPromise;
+	}
+
 	async start<T>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		submissionLease: ForegroundSubmissionLease,
 		goalId?: string,
 	): Promise<{ completion: Promise<void> }> {
-		const appMessage = {
-			role: "custom" as const,
-			customType: message.customType,
-			content: message.content,
-			display: message.display,
-			details: message.details,
-			timestamp: Date.now(),
-		} satisfies CustomMessage<T>;
-		let resolveAccepted!: () => void;
-		let rejectAccepted!: (error: unknown) => void;
-		const acceptedPromise = new Promise<void>((resolve, reject) => {
-			resolveAccepted = resolve;
-			rejectAccepted = reject;
-		});
-		this.pending.set(appMessage, { resolve: resolveAccepted, reject: rejectAccepted });
+		const { appMessage, acceptedPromise, rejectAccepted } = this.prepare(message);
 		let goalExecutionLease: GoalExecutionLease | undefined;
 		try {
 			goalExecutionLease = this.deps.goals.beginExecution(goalId);
@@ -81,5 +87,28 @@ export class DurableCustomMessageTurnController {
 		);
 		await acceptedPromise;
 		return { completion };
+	}
+
+	private prepare<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): {
+		appMessage: CustomMessage<T>;
+		acceptedPromise: Promise<void>;
+		rejectAccepted(error: unknown): void;
+	} {
+		const appMessage = {
+			role: "custom" as const,
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+			timestamp: Date.now(),
+		} satisfies CustomMessage<T>;
+		let resolveAccepted!: () => void;
+		let rejectAccepted!: (error: unknown) => void;
+		const acceptedPromise = new Promise<void>((resolve, reject) => {
+			resolveAccepted = resolve;
+			rejectAccepted = reject;
+		});
+		this.pending.set(appMessage, { resolve: resolveAccepted, reject: rejectAccepted });
+		return { appMessage, acceptedPromise, rejectAccepted };
 	}
 }

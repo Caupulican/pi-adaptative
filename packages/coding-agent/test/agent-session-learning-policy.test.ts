@@ -113,25 +113,24 @@ describe("learning apply policy — audit and rollback", () => {
 		session.dispose();
 	});
 
-	it("policy enabled, stock thresholds: low-confidence cue proposes (audited), nothing auto-applies", async () => {
-		// Stock settings put reflectionSourceConfidence (50) below confidenceThreshold (90), and reflection
-		// writes carry no evidenceIds. This must degrade to an approval-gated proposal that is AUDITED, not a
-		// silent no-op that disables learning entirely. Fail-closed is preserved: nothing is auto-applied.
+	it("stock main-reflection policy autonomously applies an additive memory write with audit", async () => {
+		// Fresh main sessions own reflection and may persist safe additive/organizational memory without
+		// waking the user. Destructive supersessions remain independently approval-gated below.
 		const session = await newSession({ enabled: true });
-		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Speculative fact" }]);
+		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Durable reflected fact" }]);
 
 		await runPass(session);
 
-		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).not.toContain("Speculative fact");
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf-8")).toContain("Durable reflected fact");
 		const decisions = session.getLearningDecisionSnapshots();
 		expect(decisions).toHaveLength(1);
-		expect(decisions[0]?.kind).toBe("proposal");
-		expect(decisions[0]?.reasonCode).toBe("below_confidence_threshold");
-		expect(decisions[0]?.requiresApproval).toBe(true);
+		expect(decisions[0]?.kind).toBe("apply");
+		expect(decisions[0]?.reasonCode).toBe("eligible_auto_apply");
+		expect(decisions[0]?.requiresApproval).toBe(false);
 		const audits = session.getLearningAuditRecords();
 		expect(audits).toHaveLength(1);
-		expect(audits[0]?.action).toBe("propose");
-		expect(audits[0]?.reasonCode).toBe("below_confidence_threshold");
+		expect(audits[0]?.action).toBe("apply");
+		expect(audits[0]?.reasonCode).toBe("eligible_auto_apply");
 
 		session.dispose();
 	});
@@ -391,8 +390,7 @@ describe("learning apply policy — audit and rollback", () => {
 
 	it("audit ids reseed from stored snapshots so passes never reuse an id", async () => {
 		// Each pass reseeds its audit sequence from the stored snapshot count, so ids stay sequential and
-		// unique across passes (rollback keys on the id — a collision would misdirect it). The first
-		// enabled/stock pass now proposes (audited) rather than silently no-op'ing.
+		// unique across passes (rollback keys on the id — a collision would misdirect it).
 		const session = await newSession({ enabled: true });
 		scriptReflection(session, [{ kind: "memory_add", section: "MEMORY", text: "Speculative fact" }]);
 		await runPass(session, "turn-1");
@@ -434,8 +432,8 @@ describe("learning apply policy — audit and rollback", () => {
 		session.dispose();
 	});
 
-	it("organizes an exact hot-memory fact into project OKF and rolls it back loss-safely", async () => {
-		const session = await newSession({ enabled: false });
+	it("stock policy organizes an exact hot-memory fact into project OKF and rolls it back loss-safely", async () => {
+		const session = await newSession();
 		scriptReflection(session, [
 			{
 				kind: "okf_organize",

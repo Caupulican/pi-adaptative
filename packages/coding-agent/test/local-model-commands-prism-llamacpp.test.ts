@@ -12,6 +12,8 @@ import {
 } from "../src/core/models/llamacpp-runtime.ts";
 import { addPrismLlamaCppModel, type LocalModelHost } from "../src/modes/interactive/local-model-commands.ts";
 
+const originalAgentDir = process.env[ENV_AGENT_DIR];
+
 /**
  * Orchestration tests for addPrismLlamaCppModel: the pipeline's OWN call-order and stage-failure
  * handling, against a fake runtime that implements PrismLlamaCppRuntime's public surface. The
@@ -98,7 +100,8 @@ describe("addPrismLlamaCppModel", () => {
 	});
 
 	afterEach(() => {
-		delete process.env[ENV_AGENT_DIR];
+		if (originalAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+		else process.env[ENV_AGENT_DIR] = originalAgentDir;
 		if (agentDir && existsSync(agentDir)) rmSync(agentDir, { recursive: true, force: true });
 	});
 

@@ -35,7 +35,7 @@ export interface RunToolkitScriptDetails {
 
 export interface RunToolkitScriptDependencies {
 	getScripts: () => ToolkitScript[];
-	execute: (script: ToolkitScript, args: readonly string[]) => Promise<ScriptExecution>;
+	execute: (script: ToolkitScript, args: readonly string[], signal?: AbortSignal) => Promise<ScriptExecution>;
 	artifactStore?: ArtifactStore;
 	/**
 	 * Optional reflex interpreter (local brain): consulted ONLY when the deterministic Level-0
@@ -62,6 +62,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 		async execute(
 			toolCallId,
 			input: RunToolkitScriptInput,
+			signal?: AbortSignal,
 		): Promise<{
 			content: Array<{ type: "text"; text: string }>;
 			details: RunToolkitScriptDetails;
@@ -133,7 +134,7 @@ export function createRunToolkitScriptToolDefinition(deps: RunToolkitScriptDepen
 			}
 
 			// Explicit args from the caller win; a brain-extracted arg list fills in for fuzzy requests.
-			const execution = await deps.execute(script, input.args ?? interpreted?.args ?? []);
+			const execution = await deps.execute(script, input.args ?? interpreted?.args ?? [], signal);
 			const failed = execution.exitCode !== 0 || execution.timedOut;
 			const header = failed
 				? `FAILED: ${script.name} exited ${execution.timedOut ? "by timeout" : execution.exitCode} after ${execution.durationMs}ms`

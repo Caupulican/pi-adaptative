@@ -271,7 +271,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(summary).toContain("Legacy ledger: 1 requirements, 0 evidence; open: r1.");
 	});
 
-	it("refuses agent complete while linked open task_steps remain", () => {
+	it("refuses agent complete or terminal increment while any open task_steps remain", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
 		state = expectOk(
@@ -284,13 +284,32 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T3"),
 		);
-		const blocked = applyGoalAction(state, { action: "complete" }, "T4", {
-			openTaskSteps: [{ id: "step-1", content: "Finish Do X", requirementIds: ["r1"] }],
-		});
-		expect(blocked.ok).toBe(false);
-		if (blocked.ok) return;
-		expect(blocked.error).toContain("open task_steps");
-		expect(blocked.error).toContain("step-1");
+		for (const action of [{ action: "complete" }, { action: "increment" }] as const) {
+			const blocked = applyGoalAction(state, action, "T4", {
+				openTaskSteps: [
+					{ id: "step-1", content: "Finish Do X", requirementIds: ["r1"] },
+					{ id: "step-2", content: "Report the completed work", requirementIds: [] },
+				],
+			});
+			expect(blocked.ok).toBe(false);
+			if (blocked.ok) continue;
+			expect(blocked.error).toContain("open task_steps");
+			expect(blocked.error).toContain("step-1, step-2");
+		}
+	});
+
+	it("refuses agent complete or terminal increment while goal-owned worker lanes remain active", () => {
+		const state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		for (const action of [{ action: "complete" }, { action: "increment" }] as const) {
+			const blocked = applyGoalAction(state, action, "T1", {
+				activeGoalLaneIds: ["worker-2", "worker-1", "worker-2"],
+			});
+
+			expect(blocked.ok).toBe(false);
+			if (blocked.ok) continue;
+			expect(blocked.error).toContain("goal-owned worker lane(s) are still active");
+			expect(blocked.error).toContain("worker-2, worker-1");
+		}
 	});
 
 	it("refuses agent complete while a cited tool_task is still running", () => {
@@ -322,6 +341,21 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(blocked.error).toContain("tool-task-1");
 	});
 
+	it("refuses agent complete while an uncited goal-owned tool_task is still running", () => {
+		const state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		const blocked = applyGoalAction(state, { action: "complete" }, "T1", {
+			backgroundToolTasks: [
+				{ taskId: "tool-task-1", toolCallId: "call-1", goalId: "g1", status: "running" },
+				{ taskId: "tool-task-2", toolCallId: "call-2", goalId: "g2", status: "running" },
+			],
+		});
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("tool_task");
+		expect(blocked.error).toContain("tool-task-1");
+		expect(blocked.error).not.toContain("tool-task-2");
+	});
+
 	it("increments by satisfying the first open requirement from unused evidence", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
@@ -336,6 +370,30 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(applyGoalAction(state, { action: "increment" }, "T4"));
 		expect(state.requirements[0].status).toBe("satisfied");
 		expect(state.requirements[1].status).toBe("open");
+	});
+
+	it("allows a nonterminal increment while independent work remains active", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r2", text: "Do Y" }, "T2"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "X confirmed" },
+				"T3",
+			),
+		);
+		const incremented = applyGoalAction(state, { action: "increment" }, "T4", {
+			activeGoalLaneIds: ["worker-for-r2"],
+			openTaskSteps: [{ id: "step-r2", content: "Do Y", requirementIds: ["r2"] }],
+			backgroundToolTasks: [{ taskId: "tool-task-r2", toolCallId: "call-r2", goalId: "g1", status: "running" }],
+			activePipeline: { runId: "run-r2", pipelineName: "remaining-work", status: "active", goalId: "g1" },
+		});
+		expect(incremented.ok).toBe(true);
+		if (!incremented.ok) return;
+		expect(incremented.state.status).toBe("active");
+		expect(incremented.state.requirements[0]?.status).toBe("satisfied");
+		expect(incremented.state.requirements[1]?.status).toBe("open");
 	});
 
 	it("refuses increment when the current requirement has no unused evidence", () => {
@@ -362,6 +420,17 @@ describe("applyGoalAction (goal producer core)", () => {
 		);
 		const blocked = applyGoalAction(state, { action: "complete" }, "T4", {
 			activePipeline: { runId: "run-1", pipelineName: "draft", status: "active", goalId: "g1" },
+		});
+		expect(blocked.ok).toBe(false);
+		if (blocked.ok) return;
+		expect(blocked.error).toContain("pipeline");
+		expect(blocked.error).toContain("run-1");
+	});
+
+	it("refuses agent complete while an active unjoined pipeline remains", () => {
+		const state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+		const blocked = applyGoalAction(state, { action: "complete" }, "T1", {
+			activePipeline: { runId: "run-1", pipelineName: "draft", status: "active" },
 		});
 		expect(blocked.ok).toBe(false);
 		if (blocked.ok) return;

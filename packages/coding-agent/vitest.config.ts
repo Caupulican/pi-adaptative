@@ -68,6 +68,7 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		setupFiles: ["./test/test-agent-dir-isolation-setup.ts"],
 		execArgv: ["--conditions=pi-source"],
 		experimental: {
 			// Node 24 executes this repository's erasable TypeScript directly. Keep Vitest's loader

@@ -127,6 +127,7 @@ export interface AgentOptions {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	shouldStopAfterTurn?: (signal?: AbortSignal) => boolean | Promise<boolean>;
+	beforeSteeringPoll?: (signal?: AbortSignal) => void | Promise<void>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -236,6 +237,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	public shouldStopAfterTurn?: (signal?: AbortSignal) => boolean | Promise<boolean>;
+	/** Host-owned inbox refresh run immediately before each steering-queue drain. */
+	public beforeSteeringPoll?: (signal?: AbortSignal) => void | Promise<void>;
 	private activeRun?: ActiveRun;
 	/** No-progress gates shared only by host continuations of the current logical prompt. */
 	private loopContinuationState: AgentLoopContinuationState | undefined;
@@ -282,6 +285,7 @@ export class Agent {
 		this.onToolValidationEscalation = options.onToolValidationEscalation;
 		this.prepareNextTurn = options.prepareNextTurn;
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
+		this.beforeSteeringPoll = options.beforeSteeringPoll;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
 		this.sessionId = options.sessionId;
@@ -542,6 +546,7 @@ export class Agent {
 			resolveRequestReasoning: this.resolveRequestReasoning,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
+				await this.beforeSteeringPoll?.(this.signal);
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];

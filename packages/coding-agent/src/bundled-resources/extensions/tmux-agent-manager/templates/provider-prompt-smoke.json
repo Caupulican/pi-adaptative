@@ -9,6 +9,6 @@
   ],
   "notes": [
     "Use only when model-token/auth validation is intended.",
-    "The manager opens each CLI in tmux, injects the prompt, captures pane output, and watches DONE/BLOCKED markers."
+    "The manager arms pane capture, starts each CLI with its initial prompt, and watches DONE/BLOCKED markers."
   ]
 }

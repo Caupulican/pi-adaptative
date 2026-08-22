@@ -164,24 +164,22 @@ environment value a lane-bound process can set to shed the worker ceiling below.
 
 ### Forbidden-tool ceiling
 
-A worker session can never activate: `goal`, `pipeline`, `delegate`, `improvement_loop`,
-`extensionify`, `skillify`, `run_toolkit_script`, `model_fitness`, `tmux_agent_manager`,
-`context_scout`, `python`. This is enforced as the FIRST line of the tool registry's allow
+A worker session can never activate: the legacy composite `goal`, `secret_store`, `memory`, `delegate`,
+`improvement_loop`, `model_fitness`, `tmux_agent_manager`, or `context_scout`. This is enforced as the FIRST line of the tool registry's allow
 predicate (`RuntimeBuilder.refreshToolRegistry`'s `isAllowedTool`) -- it wins over an allow-list,
-an exclude-list, or an active resource profile that names the tool explicitly. `goal`/`delegate`/
-`tmux_agent_manager` are sub-orchestration (a worker dispatching its own workers
-defeats single-owner lane accountability); `improvement_loop`/`extensionify`/`skillify` are
-self-adaptation surface a worker should never mutate; `run_toolkit_script`/`model_fitness` spend
-budget a worker's dispatcher does not control. **`python`** is included because it is a bounded but
-still largely unrestricted execution contract -- excluding it is load-bearing for the zero-footprint
-guarantee below (an unbounded interpreter can write state anywhere it can reach on disk).
-**`context_scout`** is excluded because it is itself sub-orchestration: it spawns its own isolated
-agent loop.
+an exclude-list, or an active resource profile that names the tool explicitly. The legacy `goal`
+stays root-only because its composite action set embeds `dispatch_worker`; its non-dispatching
+`create_goal`/`get_goal`/`update_goal` lifecycle tools inherit normally. `delegate`,
+`tmux_agent_manager`, `context_scout`, and `model_fitness` launch agent/provider worker loops.
+`memory` and `improvement_loop` mutate root-owned reflection state, while `secret_store` mutates
+machine credential/project bindings. Ordinary tools including `pipeline`, `ask_question`, `skill`,
+`extensionify`, `skillify`, and `run_toolkit_script` inherit when the orchestrator exposes them.
 
-`bash` is deliberately **not** forbidden. It stays available as the same documented cooperative
-boundary the lane gate already applies to foreign (non-`pi`) CLIs it cannot structurally contain --
-a worker's bash access is bounded by the lane gate's G8/G10 rules and the path envelope below, not
-by removing the tool.
+`bash` and `python` are deliberately **not** forbidden. Removing only one execution route would not
+create a meaningful filesystem boundary. Pi hard-denies private harness roots for structural
+read/write/edit/search calls, but arbitrary process code remains a deliberate host-trust boundary and
+can reach any file visible to the OS account. The harness does not claim a process sandbox it does not
+have; lane G8/G10 and the land gate remain the backstops for repository integration.
 
 ### `worktree_sync` tool scoping for a worker
 
@@ -207,7 +205,15 @@ deliberately engine-level and applies to `land`/`release_lane` ONLY -- `sync`/`c
 from the tool-layer `laneKey` check above. `release_lane`'s existing G11 discard-confirm requirement
 is unaffected: it still applies once ownership no longer conflicts.
 
-### Edit/write path envelope
+### Structural path envelopes
+
+Every worker session wraps structural read/write/edit/grep/find/ls calls in a symlink-safe private-path
+envelope. `auth.json`, `MEMORY.md`, `USER.md`, settings/model files, session/state/work roots, and the
+active project's `.pi/settings.json` are denied before the underlying tool runs. The positive scope is
+empty for an unrestricted worker, meaning arbitrary sibling projects and machine paths remain available
+as required by the inherited full-machine profile. A managed Pi worker launched with an explicit profile
+`path` receives that path through an immutable startup channel, and the same envelope then denies
+structural access outside it.
 
 For a lane-bound session, `edit`/`write` targets are checked against the lane's own worktree root
 (`WorktreeLaneGate.checkMutation`'s `targetPath` parameter, resolved by `RuntimeBuilder`'s tool
@@ -216,8 +222,8 @@ lane's worktree root and the target are both resolved through `realpath` (walkin
 nearest EXISTING ancestor when the target itself does not exist yet, so a not-yet-created file
 cannot be smuggled through a symlink that escapes the lane). A target outside the resolved lane root
 is refused (`path_outside_lane`). No active lane record leaves the existing fail-open behavior
-unchanged. `bash` is untouched by this check -- its containment stays the G10 cooperative boundary
-described above.
+unchanged. Arbitrary process code is untouched by the structural envelope and retains the explicit
+host-trust semantics described above.
 
 ### Zero state/settings footprint
 

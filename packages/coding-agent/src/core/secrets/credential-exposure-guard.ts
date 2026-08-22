@@ -109,16 +109,8 @@ function shellCredentialRisk(
 			const searchTool: ShellContentSearchTool | undefined =
 				toolName === "rg" || toolName === "ripgrep" ? "rg" : toolName === "grep" ? "grep" : undefined;
 			if (searchTool) {
-				const scope = parseShellSearchInvocationScope(searchTool, args, readsPipe);
-				if (scope.targets.some((target) => target !== "-" && isProtectedCredentialPath(target, cwd, boundary))) {
-					return "credential_path";
-				}
-				const hasSafeGlob =
-					scope.positiveGlobs.length > 0 && scope.positiveGlobs.every((glob) => isCredentialSafeGlob(glob));
-				const hasOnlyExplicitFiles =
-					scope.targets.length > 0 &&
-					scope.targets.every((target) => target === "-" || isCredentialSafeExplicitFile(target, cwd));
-				if (!scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles) return "broad_search";
+				const searchRisk = searchCredentialRisk(searchTool, args, readsPipe, cwd, boundary);
+				if (searchRisk) return searchRisk;
 				continue;
 			}
 			for (const token of args) {
@@ -203,6 +195,26 @@ function isCredentialSafeExplicitFile(rawPath: string, cwd: string): boolean {
 	}
 }
 
+function searchCredentialRisk(
+	searchTool: ShellContentSearchTool,
+	args: readonly string[],
+	readsPipe: boolean,
+	cwd: string,
+	boundary?: CredentialExposureBoundary,
+): "broad_search" | "credential_path" | undefined {
+	const scope = parseShellSearchInvocationScope(searchTool, [...args], readsPipe);
+	if (scope.targets.some((target) => target !== "-" && isProtectedCredentialPath(target, cwd, boundary))) {
+		return "credential_path";
+	}
+	const hasSafeGlob =
+		scope.positiveGlobs.length > 0 && scope.positiveGlobs.every((glob) => isCredentialSafeGlob(glob));
+	const hasOnlyExplicitFiles =
+		scope.targets.length > 0 &&
+		scope.targets.every((target) => target === "-" || isCredentialSafeExplicitFile(target, cwd));
+	if (!scope.metaOnly && !scope.readsStdin && !hasSafeGlob && !hasOnlyExplicitFiles) return "broad_search";
+	return undefined;
+}
+
 function pythonInspectsCredentialPath(code: string, cwd: string, boundary?: CredentialExposureBoundary): boolean {
 	if (!PYTHON_INSPECTION_RE.test(code)) return false;
 	QUOTED_TEXT_RE.lastIndex = 0;
@@ -211,6 +223,33 @@ function pythonInspectsCredentialPath(code: string, cwd: string, boundary?: Cred
 		if (candidate && isProtectedCredentialPath(candidate, cwd, boundary)) return true;
 	}
 	return false;
+}
+
+/**
+ * Inspect direct argv values only. A process may still construct paths inside its own code or
+ * environment; that host-trust residual requires OS-level isolation and is deliberately outside
+ * this lexical boundary.
+ */
+function runProcessCredentialRisk(
+	executable: string,
+	args: readonly string[],
+	cwd: string,
+	boundary?: CredentialExposureBoundary,
+): "broad_search" | "credential_path" | "process_environment" | undefined {
+	if (isProtectedCredentialPath(executable, cwd, boundary)) return "credential_path";
+	if (args.some((argument) => isProtectedCredentialPath(argument, cwd, boundary))) return "credential_path";
+
+	const executableName = basename(executable)
+		.toLowerCase()
+		.replace(/\.exe$/u, "");
+	if (executableName === "jq") {
+		const filter = jqFilterFromArgs([...args]);
+		if (filter && jqFilterReadsProcessEnvironment(filter)) return "process_environment";
+	}
+	const searchTool: ShellContentSearchTool | undefined =
+		executableName === "rg" || executableName === "ripgrep" ? "rg" : executableName === "grep" ? "grep" : undefined;
+	if (!searchTool) return undefined;
+	return searchCredentialRisk(searchTool, args, false, cwd, boundary);
 }
 
 function directPathFromArgs(args: unknown): string | undefined {
@@ -255,7 +294,23 @@ export function credentialToolBlockReason(
 			return "Credential dotenv files are model-blind. Use secret_store discover instead of searching their contents.";
 		}
 	}
-	if (toolName === "bash" || toolName === "powershell" || toolName === "run_process") {
+	if (toolName === "run_process") {
+		const executable = typeof args.executable === "string" ? args.executable : undefined;
+		const processArgs = Array.isArray(args.args)
+			? args.args.filter((argument): argument is string => typeof argument === "string")
+			: [];
+		const processRisk = executable ? runProcessCredentialRisk(executable, processArgs, cwd, boundary) : undefined;
+		if (processRisk === "broad_search") {
+			return "Credential-safe shell search requires a narrow non-dotenv file glob (for example -g '*.ts') or one explicit regular file. Refine the rg/grep command before retrying.";
+		}
+		if (processRisk === "process_environment") {
+			return "Direct process-environment projection is blocked because it can expose credentials. Use secret_store discover to list eligible source names without exposing values.";
+		}
+		if (processRisk === "credential_path") {
+			return "Direct shell inspection of credential files is blocked. Use secret_store migrate with the file path, then run the credential-consuming command normally.";
+		}
+	}
+	if (toolName === "bash" || toolName === "powershell") {
 		const command = typeof args.command === "string" ? args.command : "";
 		const shellRisk = shellCredentialRisk(command, cwd, boundary);
 		if (shellRisk === "broad_search") {

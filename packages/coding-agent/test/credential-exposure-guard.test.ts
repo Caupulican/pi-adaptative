@@ -34,6 +34,87 @@ describe("credential exposure guard", () => {
 		expect(credentialToolBlockReason("bash", { command: "npm run deploy" }, cwd)).toBeUndefined();
 	});
 
+	it("blocks recognizable process reads under a worker private-path boundary", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worker-private-process-"));
+		tempDirs.push(root);
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const authPath = join(agentDir, "auth.json");
+		const memoryPath = join(agentDir, "MEMORY.md");
+		const sessionsDir = join(agentDir, "sessions");
+		mkdirSync(join(agentDir, "sessions"), { recursive: true });
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(authPath, "{}\n");
+		writeFileSync(memoryPath, "private\n");
+		writeFileSync(join(sessionsDir, "session.jsonl"), "private\n");
+		const boundary = {
+			redactSensitiveText: (text: string) => text,
+			protectedDirectories: [agentDir, sessionsDir],
+		};
+
+		expect(credentialToolBlockReason("read", { path: authPath }, projectDir, boundary)).toContain("model-blind");
+		expect(credentialToolBlockReason("read", { path: memoryPath }, projectDir, boundary)).toContain("model-blind");
+		expect(credentialToolBlockReason("bash", { command: `cat ${authPath}` }, projectDir, boundary)).toContain(
+			"blocked",
+		);
+		expect(
+			credentialToolBlockReason(
+				"python",
+				{ code: `open(${JSON.stringify(memoryPath)}).read()` },
+				projectDir,
+				boundary,
+			),
+		).toContain("blocked");
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `cat ${join(sessionsDir, "session.jsonl")}` },
+				projectDir,
+				boundary,
+			),
+		).toContain("blocked");
+		expect(
+			credentialToolBlockReason(
+				"bash",
+				{ command: `cat ${join(root, "sibling", "source.ts")}` },
+				projectDir,
+				boundary,
+			),
+		).toBeUndefined();
+	});
+
+	it("blocks run_process argv reads under a worker private-path boundary", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worker-private-run-process-"));
+		tempDirs.push(root);
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const memoryPath = join(agentDir, "MEMORY.md");
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(projectDir, { recursive: true });
+		writeFileSync(memoryPath, "private\n");
+		const boundary = {
+			redactSensitiveText: (text: string) => text,
+			protectedDirectories: [agentDir],
+		};
+
+		expect(
+			credentialToolBlockReason(
+				"run_process",
+				{ executable: process.execPath, args: ["-e", "read", memoryPath] },
+				projectDir,
+				boundary,
+			),
+		).toContain("blocked");
+		expect(
+			credentialToolBlockReason(
+				"run_process",
+				{ executable: process.execPath, args: ["-e", "read", join(root, "sibling", "source.ts")] },
+				projectDir,
+				boundary,
+			),
+		).toBeUndefined();
+	});
+
 	it("blocks jq process-environment projection without blocking ordinary env fields", () => {
 		const cwd = "/workspace";
 		expect(credentialToolBlockReason("bash", { command: "jq -n 'env'" }, cwd)).toContain("secret_store discover");

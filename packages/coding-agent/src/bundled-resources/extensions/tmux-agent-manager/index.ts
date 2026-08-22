@@ -10,31 +10,23 @@ import {
 	getProcessWorkRun,
 	PI_ORCHESTRATION_AGENT_ID_ENV,
 } from "@caupulican/pi-adaptative";
-import type { AgentToolResult } from "@caupulican/pi-agent-core";
+import type { AgentToolResult, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import {
-	buildGrant,
-	buildGrantUsageEntry,
+	encodeWorkerSessionAllowedPaths,
+	PI_WORKER_ALLOWED_PATHS_ENV,
+} from "../../../core/autonomy/worker-session-private-scope.ts";
+import { orchestrationThinkingLevelSchema } from "../../../core/orchestration/thinking-level-schema.ts";
+import {
 	buildLaunchProfileFlags,
-	buildTombstone,
-	countGrantUsages,
-	DEFAULT_READ_BIASED_TOOLS,
+	DEFAULT_MANAGED_WORKER_TOOLS,
 	decodeTmuxWorkerUsageClaim,
-	describeGrant,
-	GRANT_CUSTOM_TYPE,
-	GRANT_USAGE_CUSTOM_TYPE,
-	type GrantDispatchParams,
-	grantCovers,
-	isTmuxDispatchGrant,
-	isTmuxDispatchGrantTombstone,
+	deriveWorkerLaunchProfile,
 	type LaunchProfileFlag,
-	type LaunchProfileSource,
-	launchProfileSourceFromGrant,
-	ONE_SHOT_LAUNCH_PROFILE_SOURCE,
 	type Provider,
-	type TmuxDispatchGrant,
-} from "./dispatch-grant.ts";
+	type WorkerLaunchProfile,
+} from "./launch-profile.ts";
 
 export const piConfig = { tools: ["tmux_agent_manager"] };
 
@@ -57,22 +49,23 @@ type Action =
 	| "list_templates"
 	| "show_template"
 	| "stop_job"
-	| "stop_session"
-	| "grant_dispatch"
-	| "revoke_grant";
+	| "stop_session";
 
 type AgentSpec = {
 	provider?: Provider;
 	name?: string;
 	command?: string;
+	/** Optional workspace. Sets cwd; narrows Pi structured file tools but not external host processes. */
+	path?: string;
+	/** Legacy process cwd override. Does not narrow the managed profile. */
 	cwd?: string;
 	tools?: string[];
+	resourceProfile?: string;
+	thinkingLevel?: ThinkingLevel;
 	/**
-	 * Worktree-sync lane key this agent is bound to (core-internal only -- set by the goal->tmux
-	 * lane-first dispatch adapter, `tmux-dispatch.ts`'s `dispatchTmuxWorker`, never by the model's own
-	 * `fire_task` params). A `provider:"pi"` agent carrying this launches with `--worktree-lane <key>`
-	 * appended and one extra lane-doctrine sentence in its scoped `--append-system-prompt` -- see
-	 * `applyLaunchProfile`/`dispatch-grant.ts`'s `buildLaunchProfileFlags`.
+	 * Pi-only worktree-sync lane binding. Goal dispatch supplies this automatically; an explicit
+	 * fire_task profile may also narrow a Pi worker to a named lane. The launch adds
+	 * `--worktree-lane <key>` and the lane doctrine through the immutable profile.
 	 */
 	worktreeLane?: string;
 };
@@ -105,26 +98,12 @@ type Params = {
 	dryRun?: boolean;
 	force?: boolean;
 	confirm?: string;
-	/** Goal this dispatch/grant is scoped to. Goal-bound dispatch wires this through to grant
-	 * coverage, managed-lane ownership, and the child process's task-recovery fence. */
+	/** Non-retained launch identity for a fresh fire_task. Unlike jobId, extension identity memory
+	 * never auto-fills this field from an earlier result. */
+	launchKey?: string;
+	/** Goal this dispatch is scoped to. Goal-bound dispatch wires this through to managed-lane
+	 * ownership and the child process's task-recovery fence. */
 	goalId?: string;
-	/** grant_dispatch: target agent for the standing grant. revoke_grant: unused (the active grant's own
-	 * agent is used for its tombstone; this field is not required to revoke). */
-	agent?: Provider;
-	/** grant_dispatch: allowlisted tool names pushed into the child `pi`'s own --tools flag. */
-	allowedTools?: string[];
-	/** grant_dispatch: resource profile name pushed into the child `pi`'s own --resource-profile flag. */
-	resourceProfile?: string;
-	/** grant_dispatch: write paths the grant's scoped system prompt tells the child worker to stay within. */
-	writePaths?: string[];
-	/** grant_dispatch: number of real launches (fire_task/send_followup dispatches) this grant authorizes. */
-	maxLaunches?: number;
-	/** grant_dispatch: grant validity window from creation time. Omit for a grant that never expires (until revoke_grant). */
-	expiresInMinutes?: number;
-	/** grant_dispatch: advisory USD ceiling. Never enforced across the process boundary — a claim to review only. */
-	maxUsdAdvisory?: number;
-	/** revoke_grant: grantId to revoke. Optional — omitted means "revoke whichever grant is currently active". */
-	grantId?: string;
 };
 
 type RunResult = { ok: boolean; status: number | null; stdout: string; stderr: string; error?: string; args: string[] };
@@ -158,6 +137,8 @@ type FireAgentPlan = {
 	resultPath: string;
 	paneId?: string;
 	result?: AgentResult;
+	resourceProfile?: string;
+	thinkingLevel?: ThinkingLevel;
 	/** Last turn dispatched to this agent's pane via fire_task (1) or send_followup (>=2). Absent means 1. */
 	currentTurn?: number;
 	/** Last turn whose terminal handoff was delivered to the parent. Absent means 0 (never notified). */
@@ -169,11 +150,11 @@ type FireAgentPlan = {
 	 * flags) and the dispatch-phase `reportManagedLane` call can both read it after `buildFireTaskPlan`. */
 	worktreeLane?: string;
 	/** Durable host-lifecycle metadata for the current turn. */
+	dispatchProfileId?: string;
 	dispatchAuthorizationId?: string;
-	dispatchAuthorizationKind?: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+	dispatchAuthorizationKind?: "profile-derived" | "legacy-recovery";
 	dispatchAllowedTools?: string[];
 	dispatchWritePaths?: string[];
-	dispatchMaxCostUsd?: number;
 	dispatchInstructions?: string;
 	dispatchGoalId?: string;
 	dispatchLeaseTtlMs?: number;
@@ -200,7 +181,7 @@ type FireTaskPlan = {
 	currentTurn?: number;
 	/** Set when session-level reconcile finds the tmux session gone while the job was not terminal. Informational only; nothing is ever killed to produce this state. */
 	orphanedAt?: string;
-	/** Set by action=dismiss: the manager stops tracking/re-arming this job. The tmux session is left running. */
+	/** Set by action=dismiss after its pane watchers are detached. The tmux session is left running. */
 	dismissedAt?: string;
 };
 /** The subset of FireTaskPlan the pane watcher generator actually reads — narrow on purpose so a
@@ -213,10 +194,9 @@ type ManagedLaneDispatchBridge = {
 	profileId: string;
 	provider: string;
 	authorizationId: string;
-	authorizationKind: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+	authorizationKind: "profile-derived" | "legacy-recovery";
 	allowedTools: readonly string[];
 	writePaths: readonly string[];
-	maxCostUsd?: number;
 	leaseTtlMs: number;
 };
 type ManagedLaneBridgeEventBase = {
@@ -238,19 +218,14 @@ type ManagedLaneBridgeEvent =
  * exercises. Production hosts provide `reportManagedLane`, making its pre-launch durable reservation a
  * hard gate. The optional shape only preserves standalone extension-test hosts; without the bridge,
  * lifecycle durability is explicitly unavailable. `reportSpawnedUsage` remains an advisory claim sink.
- * `appendEntry`/`getFlag`/`registerFlag` back the STANDING GRANT itself (session persistence + the
- * non-interactive opt-in flag); `registerFlag` is called unconditionally at extension load so it stays
- * optional-chained too, while `appendEntry`/`getFlag` are asserted present at the point a grant action
- * actually needs them (a host that can't persist a grant should fail that action clearly, not pretend). */
+ * `getActiveTools` supplies the parent's current tool surface so a new worker profile can inherit its
+ * policy-owned worker-compatible subset without asking the model to reconstruct it. */
 type HostBridge = {
 	reportManagedLane?: (event: ManagedLaneBridgeEvent) => void;
 	reportSpawnedUsage?: (usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }) => void;
-	appendEntry?: (customType: string, data?: unknown) => void;
-	getFlag?: (name: string) => boolean | string | undefined;
-	registerFlag?: (
-		name: string,
-		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
-	) => void;
+	getActiveTools?: () => string[];
+	getThinkingLevel?: () => ThinkingLevel;
+	getEffectiveResourceProfile?: ExtensionAPI["getEffectiveResourceProfile"];
 };
 function agentLaneId(jobId: string, agentId: string): string {
 	return `tmux:${jobId}:${agentId}`;
@@ -263,50 +238,33 @@ function managedDispatch(job: FireTaskPlan, agent: FireAgentPlan): ManagedLaneDi
 	return {
 		sequence,
 		instructions,
-		profileId: `tmux:${agent.provider}`,
+		profileId: agent.dispatchProfileId ?? `tmux:${agent.provider}`,
 		provider: agent.provider,
 		authorizationId,
 		authorizationKind: agent.dispatchAuthorizationKind ?? "legacy-recovery",
-		allowedTools: agent.dispatchAllowedTools ?? DEFAULT_READ_BIASED_TOOLS,
+		allowedTools: agent.dispatchAllowedTools ?? DEFAULT_MANAGED_WORKER_TOOLS,
 		writePaths: agent.dispatchWritePaths ?? [],
-		...(agent.dispatchMaxCostUsd !== undefined ? { maxCostUsd: agent.dispatchMaxCostUsd } : {}),
 		leaseTtlMs: agent.dispatchLeaseTtlMs ?? job.deadlineSeconds * 1_000,
 	};
 }
 
-function managedAuthorization(
-	grant: TmuxDispatchGrant | undefined,
-	fallbackId: string,
-): {
-	authorizationId: string;
-	authorizationKind: "standing-grant" | "one-shot-owner-approval";
-	launchSource: LaunchProfileSource;
-	allowedTools: string[];
-	writePaths: string[];
-	maxCostUsd?: number;
-} {
-	const launchSource = grant ? launchProfileSourceFromGrant(grant) : ONE_SHOT_LAUNCH_PROFILE_SOURCE;
-	return {
-		authorizationId: grant?.grantId ?? fallbackId,
-		authorizationKind: grant ? "standing-grant" : "one-shot-owner-approval",
-		launchSource,
-		allowedTools: [...(launchSource.allowedTools?.length ? launchSource.allowedTools : DEFAULT_READ_BIASED_TOOLS)],
-		writePaths: [...(launchSource.writePaths ?? [])],
-		...(grant?.budget.maxUsdAdvisory !== undefined ? { maxCostUsd: grant.budget.maxUsdAdvisory } : {}),
-	};
-}
-
-function applyManagedAuthorization(
+function applyManagedProfile(
 	agent: FireAgentPlan,
-	authorization: ReturnType<typeof managedAuthorization>,
+	profile: WorkerLaunchProfile,
 	args: { instructions: string; goalId?: string; leaseTtlMs: number },
 ): void {
-	agent.dispatchAuthorizationId = authorization.authorizationId;
-	agent.dispatchAuthorizationKind = authorization.authorizationKind;
-	agent.dispatchAllowedTools = [...authorization.allowedTools];
-	agent.dispatchWritePaths = [...authorization.writePaths];
-	if (authorization.maxCostUsd !== undefined) agent.dispatchMaxCostUsd = authorization.maxCostUsd;
-	else delete agent.dispatchMaxCostUsd;
+	agent.dispatchProfileId = profile.identity;
+	agent.dispatchAuthorizationId = profile.identity;
+	agent.dispatchAuthorizationKind = "profile-derived";
+	agent.dispatchAllowedTools = [...profile.allowedTools];
+	agent.dispatchWritePaths = [...profile.writePaths];
+	applyManagedTurn(agent, args);
+}
+
+function applyManagedTurn(
+	agent: FireAgentPlan,
+	args: { instructions: string; goalId?: string; leaseTtlMs: number },
+): void {
 	agent.dispatchInstructions = args.instructions;
 	agent.dispatchGoalId = args.goalId;
 	agent.dispatchLeaseTtlMs = args.leaseTtlMs;
@@ -369,13 +327,6 @@ function reportManagedAgentFailure(bridge: HostBridge, jobId: string, agentId: s
 	}
 }
 
-function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
-	if (left.length !== right.length) return false;
-	const sortedLeft = [...left].sort();
-	const sortedRight = [...right].sort();
-	return sortedLeft.every((value, index) => value === sortedRight[index]);
-}
-
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
 export function getTmuxAgentManagerDataRoot(): string {
 	const agentDir =
@@ -433,7 +384,7 @@ const TEAM_TEMPLATES: TeamTemplate[] = [
 		],
 		notes: [
 			"Use only when model-token/auth validation is intended.",
-			"The manager opens each CLI in tmux, injects the prompt, captures pane output, and watches DONE/BLOCKED markers.",
+			"The manager arms pane capture, starts each CLI with its task, and watches DONE/BLOCKED markers.",
 		],
 	},
 	{
@@ -464,7 +415,7 @@ const TEAM_TEMPLATES: TeamTemplate[] = [
 			{ provider: "pi", name: "coordinator" },
 		],
 		notes: [
-			"Use for owner-approved implementation/QA batches; never claim complete until result files and validation evidence are inspected.",
+			"Use for implementation/QA batches; never claim complete until result files and validation evidence are inspected.",
 		],
 	},
 ];
@@ -592,7 +543,7 @@ function formatDetection(d: TmuxDetection): string {
 }
 function setupHelp(d: TmuxDetection): string {
 	if (d.cliAvailable)
-		return `tmux CLI available: ${d.tmuxBin || "tmux"}\nUse native delegate for ordinary subagents. Use tmux_agent_manager only for an owner-requested persistent interactive pane; set dryRun=true only when a preview is useful.`;
+		return `tmux CLI available: ${d.tmuxBin || "tmux"}\nUse native delegate for ordinary subagents. Use tmux_agent_manager when a persistent interactive provider pane benefits the task; set dryRun=true only when a preview is useful.`;
 	return [
 		"tmux CLI not found.",
 		"Ordinary subagents remain available through native delegate; do not abort delegation.",
@@ -614,10 +565,10 @@ async function guardTmux(_ctx: ExtensionContext, detection: TmuxDetection, purpo
 }
 function tmuxManagerInstructions(toolName: string, detection: TmuxDetection): string {
 	return [
-		`tmux is available (${detection.version || detection.tmuxBin || "tmux"}). Native delegate remains the standard subagent route. Use tmux_agent_manager for managed ${toolName} panes only when the owner explicitly requested persistent interactive provider processes.`,
+		`tmux is available (${detection.version || detection.tmuxBin || "tmux"}). Native delegate remains the standard subagent route. Use tmux_agent_manager when managed ${toolName} panes need persistent interactive provider processes.`,
 		"Suggested next call:",
 		'tmux_agent_manager({ action: "fire_task", teamTemplate: "builder-validator", task: "<objective>" })',
-		"The launch returns immediately after panes, event watchers, and prompt handoffs are armed.",
+		"The launch returns after pane capture is armed and each provider command receives its initial task.",
 		"Managed mode creates panes, prompt files, result files, event-driven terminal handoffs, tmux display-message notifications, @pi_* status options, shared variables, and one-shot deadlines.",
 	].join("\n");
 }
@@ -710,11 +661,26 @@ function normalizeAgents(params: Params): AgentSpec[] {
 		if (!Object.hasOwn(PROVIDER_COMMANDS, provider)) throw new Error(`unsupported provider: ${provider}`);
 		const name =
 			firstString(agent.name, provider === "custom" ? `custom-${index + 1}` : provider) || `agent-${index + 1}`;
-		const baseCommand = firstString(agent.command, PROVIDER_COMMANDS[provider]);
-		if (!baseCommand) throw new Error(`agent ${name} needs command when provider=custom`);
+		const command = firstString(agent.command, PROVIDER_COMMANDS[provider]);
+		if (!command) throw new Error(`agent ${name} needs command when provider=custom`);
 		const tools = Array.isArray(agent.tools) && agent.tools.length > 0 ? agent.tools : undefined;
-		const command = tools ? `${baseCommand} --tools ${tools.join(",")}` : baseCommand;
-		return { provider, name, command, cwd: agent.cwd, tools, worktreeLane: agent.worktreeLane };
+		const resourceProfile = firstString(agent.resourceProfile);
+		if (provider !== "pi" && (tools || resourceProfile || agent.thinkingLevel || agent.worktreeLane)) {
+			throw new Error(
+				`agent ${name}: tools, resourceProfile, thinkingLevel, and worktreeLane overrides are Pi-only; configure ${provider}'s native CLI in command instead`,
+			);
+		}
+		return {
+			provider,
+			name,
+			command,
+			path: firstString(agent.path),
+			cwd: agent.cwd,
+			tools,
+			resourceProfile,
+			thinkingLevel: agent.thinkingLevel,
+			worktreeLane: agent.worktreeLane,
+		};
 	});
 }
 function defaultProviderInvocation(provider: Provider): string {
@@ -735,6 +701,13 @@ function defaultProviderInvocation(provider: Provider): string {
 }
 function interactivePromptText(prompt: string): string {
 	return prompt.replace(/\r?\n/g, "\\n");
+}
+function initialPromptInvocation(command: string, provider: Provider, promptPath: string): string {
+	const promptArgument = `"$(cat ${quoteShell(promptPath)})"`;
+	if (provider === "agy" && !/(?:^|\s)(?:-i|--prompt-interactive)(?:\s|$)/.test(command)) {
+		return `${command} --prompt-interactive ${promptArgument}`;
+	}
+	return `${command} ${promptArgument}`;
 }
 function spellMarker(marker: string): string {
 	return marker.split("").join(" ");
@@ -758,7 +731,7 @@ function managedPrompt(
 		"Rules:",
 		"- Work autonomously until honest PASS or BLOCKED.",
 		"- Verify important claims before PASS; include concise evidence.",
-		"- If user input, credentials, destructive approval, publishing, or unavailable dependency blocks you, report BLOCKED instead of waiting silently.",
+		"- Use the assigned profile without asking for routine permission. Report BLOCKED only when missing external information or an unavailable dependency makes the objective impossible.",
 		"- Never print secrets/tokens. Prompts, commands, and logs persist under ~/.pi/agent/work/background/tmux-agent-manager/state/jobs.",
 		"- If a task names an external decision variable, read it only at the decision point; never loop or poll the shared JSON file.",
 		"",
@@ -773,7 +746,7 @@ function buildWorkspacePlan(ctx: ExtensionContext, params: Params) {
 	const cwd = resolveCwd(ctx, params.cwd);
 	const agents = normalizeAgents(params).map((agent, index) => ({
 		...agent,
-		cwd: resolveCwd(ctx, agent.cwd || cwd),
+		cwd: resolveCwd(ctx, agent.path || agent.cwd || cwd),
 		id: `${safeName(agent.name || agent.provider || "agent")}-${index + 1}`,
 	}));
 	const workspaceName = firstString(params.workspaceName, `pi-agents-${Date.now().toString(36)}`) || "pi-agents";
@@ -853,7 +826,12 @@ export function makePaneWatcherScript(job: PaneWatcherJobSpec): string {
 		"  sleep_pid=$!",
 		'  wait "$sleep_pid" 2>/dev/null || exit 0',
 		"  sleep_pid=",
-		'  if [ -e "$stop_request_path" ]; then finish stopped stop-requested-event; else finish timeout deadline-event; fi',
+		'  if [ -e "$stop_request_path" ]; then',
+		"    finish stopped stop-requested-event",
+		"  else",
+		"    finish timeout deadline-event",
+		'    [ -z "$pane_id" ] || tmux kill-pane -t "$pane_id" >/dev/null 2>&1 || true',
+		"  fi",
 		'  kill -TERM "$parent_pid" 2>/dev/null || true',
 		") &",
 		"timer_pid=$!",
@@ -897,15 +875,16 @@ function buildFireTaskPlan(ctx: ExtensionContext, params: Params): FireTaskPlan 
 	const task = firstString(params.task, params.body);
 	if (!task) throw new Error("fire_task requires task (or body) with the worker objective");
 	const cwd = resolveCwd(ctx, params.cwd);
-	const id = firstString(params.jobId) || makeJobId();
+	const id = firstString(params.launchKey) || makeJobId();
 	if (!/^[a-zA-Z0-9_.:-]{4,80}$/.test(id))
-		throw new Error("jobId must be 4-80 chars: letters, numbers, _, ., :, or -");
+		throw new Error("launchKey must be 4-80 chars: letters, numbers, _, ., :, or -");
 	const jobDir = path.join(jobsRoot(), id);
 	const workspaceName = firstString(params.workspaceName, `Pi job ${id}`) || `Pi job ${id}`;
 	const sessionName = safeName(workspaceName, id);
 	const rawAgents = normalizeAgents(params);
 	const agents: FireAgentPlan[] = rawAgents.map((agent, index) => {
 		const provider = agent.provider || "custom";
+		const agentCwd = resolveCwd(ctx, agent.path || agent.cwd || cwd);
 		const slug = `${safeName(agent.name || provider)}-${index + 1}`;
 		const markerBase = `TMUX_${crypto.createHash("sha1").update(`${id}:${slug}`).digest("hex").slice(0, 10).toUpperCase()}`;
 		const doneMarker = `${markerBase}_DONE`;
@@ -915,14 +894,17 @@ function buildFireTaskPlan(ctx: ExtensionContext, params: Params): FireTaskPlan 
 			name: firstString(agent.name, provider) || slug,
 			provider,
 			command: firstString(agent.command, PROVIDER_COMMANDS[provider]),
-			cwd: resolveCwd(ctx, agent.cwd || cwd),
-			// tools already baked into command by normalizeAgents
+			cwd: agentCwd,
+			dispatchAllowedTools: agent.tools ? [...agent.tools] : undefined,
+			dispatchWritePaths: agent.path ? [agentCwd] : undefined,
 			doneMarker,
 			blockedMarker,
 			promptPath: path.join(jobDir, `${slug}.prompt.md`),
 			logPath: path.join(jobDir, `${slug}.log`),
 			resultPath: path.join(jobDir, `${slug}.result.json`),
 			worktreeLane: agent.worktreeLane,
+			resourceProfile: agent.resourceProfile,
+			thinkingLevel: agent.thinkingLevel,
 		};
 	});
 	const job: FireTaskPlan = {
@@ -949,7 +931,7 @@ function buildFireTaskPlan(ctx: ExtensionContext, params: Params): FireTaskPlan 
 	};
 	job.launchCommands = agents.map(
 		(agent) =>
-			`${agent.command || defaultProviderInvocation(agent.provider)} then inject ${path.basename(agent.promptPath)}`,
+			`${agent.command || defaultProviderInvocation(agent.provider)} with initial task from ${path.basename(agent.promptPath)}`,
 	);
 	return job;
 }
@@ -964,7 +946,7 @@ function prepareJobDirForLaunch(job: FireTaskPlan, force?: boolean): string | un
 	if (!fs.existsSync(job.jobDir)) return undefined;
 	if (!force)
 		throw new Error(
-			`tmux job already exists: ${job.id}. Use a new jobId, or pass force:true to archive the old job before launching.`,
+			`tmux job already exists: ${job.id}. Use a new launchKey, or pass force:true to archive the old job before launching.`,
 		);
 	return archiveExistingJobDir(job.jobDir);
 }
@@ -1092,6 +1074,7 @@ function launchTmuxSession(
 	sessionName: string,
 	cwd: string,
 	panes: Array<{ title: string; cwd: string; command: string }>,
+	options: { deferCommands?: boolean } = {},
 ): { runs: RunResult[]; paneIds: string[] } {
 	if (tmuxSessionExists(sessionName))
 		throw new Error(
@@ -1110,7 +1093,7 @@ function launchTmuxSession(
 	try {
 		const firstPane = create.stdout.trim();
 		paneIds.push(firstPane);
-		sendCommandToPane(firstPane, first.command);
+		if (!options.deferCommands) sendCommandToPane(firstPane, first.command);
 		for (const pane of panes.slice(1)) {
 			const split = runTmux(
 				["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${sessionName}:0`, "-c", pane.cwd || cwd],
@@ -1121,7 +1104,7 @@ function launchTmuxSession(
 				throw new Error(`tmux split-window failed: ${split.error || split.stderr || `exit ${split.status}`}`);
 			const paneId = split.stdout.trim();
 			paneIds.push(paneId);
-			sendCommandToPane(paneId, pane.command);
+			if (!options.deferCommands) sendCommandToPane(paneId, pane.command);
 		}
 		runs.push(runTmux(["select-layout", "-t", `${sessionName}:0`, "tiled"], 3_000));
 		return { runs, paneIds };
@@ -1411,110 +1394,66 @@ function setVariable(jobId: string, name: string, value: string) {
 	fs.writeFileSync(job.varsPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
 	return { varsPath: job.varsPath, variables: current.variables, updatedAt: current.updatedAt };
 }
-// ---------------------------------------------------------------------------
-// STANDING GRANT — approval-gated tmux dispatch. The pure decode/decision logic lives in
-// dispatch-grant.ts; the functions below are the session-access GLUE: read the latest grant custom
-// entry (skipping past malformed payloads, but stopping DEAD on a tombstone — never resurrecting an
-// older grant beneath a revocation), count spend, and gate a real launch.
-// ---------------------------------------------------------------------------
-
-/** Most recent VALID `tmux-dispatch-grant` entry on the active branch, or undefined when there is
- * none, it was revoked (a tombstone is a hard stop — never skipped to find an older grant), or every
- * entry found fails to decode. Mirrors the branch-walk idiom used by goal/task session state. */
-function resolveLatestGrantEntry(ctx: ExtensionContext): TmuxDispatchGrant | undefined {
-	let fromId: string | undefined;
-	for (;;) {
-		const entry = ctx.sessionManager.getLatestCustomEntryOnBranch(GRANT_CUSTOM_TYPE, fromId);
-		if (!entry) return undefined;
-		if (isTmuxDispatchGrantTombstone(entry.data)) return undefined;
-		if (isTmuxDispatchGrant(entry.data)) return entry.data;
-		if (!entry.parentId) return undefined;
-		fromId = entry.parentId;
-	}
-}
-/** Decoded `data` payloads of every custom entry of `customType` on the active branch (root→leaf
- * order), for spend-counting — a single `getLatestCustomEntryOnBranch` call only ever returns ONE
- * entry, but budget spend requires ALL of them. */
-function collectCustomEntryData(ctx: ExtensionContext, customType: string): unknown[] {
-	const result: unknown[] = [];
-	for (const entry of ctx.sessionManager.getBranch()) {
-		const loose = entry as unknown as { type?: string; customType?: string; data?: unknown };
-		if (loose.type === "custom" && loose.customType === customType) result.push(loose.data);
-	}
-	return result;
-}
-/** Gate a REAL tmux dispatch (fire_task non-dryRun, send_followup) per the standing-grant doctrine:
- * a valid covering grant dispatches UNATTENDED (spending one usage); absent that, an
- * interactive host may approve a ONE-SHOT launch; absent BOTH, this REFUSES — never a silent launch.
- * Returns the covering grant when one authorized this launch (so the caller can derive launch-profile
- * flags from its envelope), or `{}` for a one-shot approval (no envelope to derive from — the caller
- * falls back to the conservative default profile). */
-async function authorizeLaunch(
-	bridge: HostBridge,
-	ctx: ExtensionContext,
-	request: { agents: readonly Provider[]; goalId?: string; jobId: string; description: string },
-): Promise<{ grant?: TmuxDispatchGrant }> {
-	if (request.agents.length === 0) throw new Error("tmux dispatch refused: launch has no agents");
-	const grant = resolveLatestGrantEntry(ctx);
-	// A standing grant names one provider. It must cover every child and spend one unit for every
-	// child process; a matching first pane must never authorize an unrestricted mixed team.
-	if (grant && request.agents.every((agent) => grantCovers(grant, { agent, goalId: request.goalId }))) {
-		const used = countGrantUsages(grant.grantId, collectCustomEntryData(ctx, GRANT_USAGE_CUSTOM_TYPE));
-		if (grant.budget.maxLaunches - used >= request.agents.length) {
-			if (!bridge.appendEntry)
-				throw new Error("this host does not support session custom entries; cannot spend the tmux dispatch grant.");
-			for (let index = 0; index < request.agents.length; index++) {
-				bridge.appendEntry(
-					GRANT_USAGE_CUSTOM_TYPE,
-					buildGrantUsageEntry(grant.grantId, `${request.jobId}:${index}`),
-				);
-			}
-			return { grant };
-		}
-	}
-	if (ctx.hasUI) {
-		const approved = await ctx.ui.confirm(
-			"tmux dispatch approval",
-			[
-				`No standing grant currently authorizes every child of: ${request.description}.`,
-				`Agents: ${request.agents.join(", ")}${request.goalId ? `, goal: ${request.goalId}` : ""}.`,
-				"Approve this ONE-SHOT launch? Run tmux_agent_manager action=grant_dispatch to authorize future launches without this prompt.",
-			].join("\n"),
-		);
-		if (!approved) throw new Error(`tmux dispatch declined by the owner: ${request.description}`);
-		return {};
-	}
-	throw new Error(
-		`no standing grant for tmux dispatch; run grant_dispatch first: every child must be covered. ${request.description}. Refusing to launch without a grant or interactive approval.`,
-	);
-}
-/** Render grant/one-shot-derived launch-profile flags into a pi child's start command. Values
- * are shell-quoted; flags are not (they're fixed literals, never user input). */
+/** Render a host-derived launch profile into a Pi child's start command. Values are shell-quoted;
+ * flags are fixed literals. */
 function appendLaunchProfileFlags(command: string, flags: LaunchProfileFlag[]): string {
 	const rendered = flags.map((flag) =>
 		flag.value !== undefined ? `${flag.flag} ${quoteShell(flag.value)}` : flag.flag,
 	);
 	return [command, ...rendered].join(" ");
 }
-/** Apply the launch profile to every provider="pi" agent in the job (fire_task only — send_followup
- * reuses an already-launched pane, so there is no new child command to configure). Non-pi agents are
- * bounded by the grant only at the launch layer (agent/budget/count); their internal tool-loop
- * enforcement is the target CLI's own responsibility (documented limitation, not a hidden gap). */
-function applyLaunchProfile(job: FireTaskPlan, source: LaunchProfileSource): void {
-	for (const agent of job.agents) {
-		if (agent.provider !== "pi") continue;
-		// Per-agent flags: `worktreeLane` is a per-agent property (only a lane-first goal->tmux
-		// dispatch sets it), so the shared `source` envelope is extended with it just for this agent's
-		// flag build -- every other agent in a multi-agent team keeps the plain grant-derived profile.
-		const flags = buildLaunchProfileFlags(
-			agent.worktreeLane ? { ...source, worktreeLane: agent.worktreeLane } : source,
-		);
-		const profiledCommand = appendLaunchProfileFlags(
-			agent.command || defaultProviderInvocation(agent.provider),
-			flags,
-		);
-		agent.command = `env ${PI_ORCHESTRATION_AGENT_ID_ENV}=${quoteShell(agentLaneId(job.id, agent.id))} ${profiledCommand}`;
+function deriveLaunchProfile(
+	bridge: HostBridge,
+	ctx: ExtensionContext,
+	job: FireTaskPlan,
+	agent: FireAgentPlan,
+	goalId?: string,
+): WorkerLaunchProfile {
+	if (agent.provider !== "pi") {
+		return deriveWorkerLaunchProfile({
+			identity: `tmux-profile:${job.id}:${agent.id}`,
+			// External interactive CLIs expose their own native, unrestricted tool surfaces. Model the
+			// managed boundary honestly as one host-trusted process instead of projecting Pi tool names.
+			allowedTools: ["bash"],
+			writePaths: [],
+			parentPid: process.pid,
+			parentSession: ctx.sessionManager.getSessionId?.() ?? ctx.sessionManager.getSessionFile(),
+			taskRef: goalId,
+		});
 	}
+	const effectiveResources = agent.resourceProfile ? undefined : bridge.getEffectiveResourceProfile?.();
+	const serializedResources =
+		effectiveResources && Object.keys(effectiveResources).length > 0 ? JSON.stringify(effectiveResources) : undefined;
+	const inheritedResourceProfile = serializedResources
+		? `tmux-inherited-${crypto.createHash("sha256").update(serializedResources).digest("hex").slice(0, 12)}`
+		: undefined;
+	return deriveWorkerLaunchProfile({
+		identity: `tmux-profile:${job.id}:${agent.id}`,
+		inheritedTools: bridge.getActiveTools?.(),
+		allowedTools: agent.dispatchAllowedTools,
+		resourceProfile: agent.resourceProfile ?? inheritedResourceProfile,
+		resourceProfileJson:
+			inheritedResourceProfile && effectiveResources
+				? JSON.stringify({ [inheritedResourceProfile]: effectiveResources })
+				: undefined,
+		writePaths: agent.dispatchWritePaths ?? (agent.worktreeLane ? [agent.cwd] : []),
+		thinkingLevel: agent.thinkingLevel ?? bridge.getThinkingLevel?.(),
+		worktreeLane: agent.worktreeLane,
+		parentPid: process.pid,
+		parentSession: ctx.sessionManager.getSessionId?.() ?? ctx.sessionManager.getSessionFile(),
+		taskRef: goalId,
+	});
+}
+
+/** Apply the already-compiled immutable profile to a Pi child. Other provider CLIs retain their own
+ * native tool surface; the profile remains the host's durable audit contract for every provider. */
+function applyLaunchProfile(job: FireTaskPlan, agent: FireAgentPlan, profile: WorkerLaunchProfile): void {
+	if (agent.provider !== "pi") return;
+	const profiledCommand = appendLaunchProfileFlags(
+		agent.command || defaultProviderInvocation(agent.provider),
+		buildLaunchProfileFlags(profile),
+	);
+	agent.command = `env ${PI_ORCHESTRATION_AGENT_ID_ENV}=${quoteShell(agentLaneId(job.id, agent.id))} ${PI_WORKER_ALLOWED_PATHS_ENV}=${quoteShell(encodeWorkerSessionAllowedPaths(profile.writePaths))} ${profiledCommand}`;
 }
 /** Read an OPTIONAL, cooperative worker-reported usage claim for the turn that just went terminal (a
  * sibling `<result-path>.usage.json` file next to the watcher's own result file). Absent file ⇒ no
@@ -1587,62 +1526,6 @@ async function executeTool(
 			details: { action, jobId: params.jobId, variableName: params.variableName, result },
 		};
 	}
-	if (action === "grant_dispatch") {
-		if (!params.agent) throw new Error("grant_dispatch requires agent");
-		if (!Object.hasOwn(PROVIDER_COMMANDS, params.agent))
-			throw new Error(`grant_dispatch: unsupported agent: ${params.agent}`);
-		const grantParams: GrantDispatchParams = {
-			agent: params.agent,
-			goalId: params.goalId,
-			allowedTools: params.allowedTools,
-			resourceProfile: params.resourceProfile,
-			writePaths: params.writePaths,
-			maxLaunches: typeof params.maxLaunches === "number" ? params.maxLaunches : Number.NaN,
-			expiresInMinutes: params.expiresInMinutes,
-			maxUsdAdvisory: params.maxUsdAdvisory,
-		};
-		const grant = buildGrant(grantParams);
-		const summary = describeGrant(grant);
-		// OWNER-AUTHORIZED, NEVER SILENT: an interactive host must explicitly confirm the exact
-		// grant details; a non-interactive host (print/rpc, or the unattended goal loop) has no confirm
-		// surface, so it needs an explicit opt-in flag instead — absent either, refuse to create the grant.
-		if (ctx.hasUI) {
-			const approved = await ctx.ui.confirm("Authorize tmux dispatch grant", summary);
-			if (!approved) throw new Error("grant_dispatch was declined by the owner.");
-		} else if (bridge.getFlag?.("allow-tmux-dispatch") !== true) {
-			throw new Error(
-				"grant_dispatch requires interactive approval; no UI is available in this mode. Pass --allow-tmux-dispatch to authorize grant creation non-interactively.",
-			);
-		}
-		if (!bridge.appendEntry)
-			throw new Error("this host does not support session custom entries; cannot persist a tmux dispatch grant.");
-		bridge.appendEntry(GRANT_CUSTOM_TYPE, grant);
-		return {
-			content: [{ type: "text", text: `Created tmux dispatch grant ${grant.grantId}.\n${summary}` }],
-			details: { action, grant },
-		};
-	}
-	if (action === "revoke_grant") {
-		const activeGrant = resolveLatestGrantEntry(ctx);
-		const targetGrantId = firstString(params.grantId) || activeGrant?.grantId;
-		if (!targetGrantId) throw new Error("revoke_grant: no active tmux dispatch grant to revoke.");
-		if (activeGrant && activeGrant.grantId !== targetGrantId)
-			throw new Error(
-				`revoke_grant: grantId ${targetGrantId} is not the active grant (active: ${activeGrant.grantId}).`,
-			);
-		if (!bridge.appendEntry)
-			throw new Error("this host does not support session custom entries; cannot revoke a tmux dispatch grant.");
-		bridge.appendEntry(GRANT_CUSTOM_TYPE, buildTombstone(targetGrantId));
-		return {
-			content: [
-				{
-					type: "text",
-					text: `Revoked tmux dispatch grant ${targetGrantId}. Future launches need a new grant_dispatch or interactive/opt-in approval.`,
-				},
-			],
-			details: { action, grantId: targetGrantId },
-		};
-	}
 	const guard = await guardTmux(ctx, detection, `tmux ${action}`);
 	if (!guard.allowed)
 		return { content: [{ type: "text", text: guard.text }], details: { action, detection, guard, skipped: true } };
@@ -1707,33 +1590,19 @@ async function executeTool(
 			throw new Error(
 				`tmux session already exists: ${job.sessionName}. Use stop_job/stop_session first or choose a different workspaceName.`,
 			);
-		// APPROVAL-GATED LAUNCH: resolved before any tmux/FS side effect. A standing grant must
-		// authorize every child provider and spend its budget per child process.
-		const authorization = await authorizeLaunch(bridge, ctx, {
-			agents: job.agents.map((agent) => agent.provider),
-			goalId: params.goalId,
-			jobId: job.id,
-			description: `fire_task launch of job ${job.id} (${job.agents.length} child process${job.agents.length === 1 ? "" : "es"}: ${job.agents.map((agent) => `${agent.name}/${agent.provider}`).join(", ")})`,
-		});
-		const managedAuthority = managedAuthorization(authorization.grant, `one-shot:${job.id}:turn:1`);
+		// Compile each immutable worker profile from the parent surface plus per-agent overrides before
+		// any durable reservation, filesystem artifact, pane, watcher, or prompt side effect.
 		for (const agent of job.agents) {
+			const profile = deriveLaunchProfile(bridge, ctx, job, agent, params.goalId);
 			agent.currentTurn = 1;
-			applyManagedAuthorization(agent, managedAuthority, {
+			applyManagedProfile(agent, profile, {
 				instructions: job.task,
 				goalId: params.goalId,
 				leaseTtlMs: job.deadlineSeconds * 1_000,
 			});
+			applyLaunchProfile(job, agent, profile);
 		}
-		applyLaunchProfile(job, {
-			...managedAuthority.launchSource,
-			...(params.goalId ? { taskRef: params.goalId } : {}),
-			// Process-matrix parent identity: the dispatched child self-registers as a worker of THIS
-			// session and winds down gracefully if this session disappears (see dispatch-grant.ts's
-			// `LaunchProfileSource.parentPid`/`parentSession` doc).
-			parentPid: process.pid,
-			parentSession: ctx.sessionManager.getSessionId?.() ?? ctx.sessionManager.getSessionFile(),
-		});
-		// The host commits the full execution grant and starts the durable lease before any child
+		// The host commits the full execution profile and starts the durable lease before any child
 		// process, job artifact, watcher, or prompt side effect occurs.
 		reportManagedDispatchReservations(bridge, job, job.agents);
 		let sessionCreated = false;
@@ -1744,7 +1613,9 @@ async function executeTool(
 				cwd: agent.cwd,
 				command: agent.command || defaultProviderInvocation(agent.provider),
 			}));
-			const launch = launchTmuxSession(job.sessionName, job.cwd, panes);
+			// Create idle panes first. The initial provider task is part of the provider command, but no
+			// command starts until its output watcher owns the pane stream.
+			const launch = launchTmuxSession(job.sessionName, job.cwd, panes, { deferCommands: true });
 			sessionCreated = true;
 			job.agents.forEach((agent, index) => {
 				agent.paneId = launch.paneIds[index];
@@ -1753,7 +1624,14 @@ async function executeTool(
 			const watcherPanes = startPaneWatchers(job);
 			for (const agent of job.agents) {
 				if (!agent.paneId) continue;
-				injectPromptToPane(agent.paneId, fs.readFileSync(agent.promptPath, "utf8"), agent.provider);
+				sendCommandToPane(
+					agent.paneId,
+					initialPromptInvocation(
+						agent.command || defaultProviderInvocation(agent.provider),
+						agent.provider,
+						agent.promptPath,
+					),
+				);
 			}
 			return {
 				content: [
@@ -1831,26 +1709,8 @@ async function executeTool(
 			throw new Error(
 				`tmux pane ${targetAgent.paneId} for ${targetAgent.name} is gone. The worker cannot receive a follow-up; use fire_task to relaunch.`,
 			);
-		// APPROVAL-GATED LAUNCH (doctrine-regression mandatory): a follow-up dispatches a fresh
-		// turn into an already-running child, so there is no new child command to profile — only the
-		// grant/one-shot authorization is resolved here (no applyLaunchProfile call).
-		const authorization = await authorizeLaunch(bridge, ctx, {
-			agents: [targetAgent.provider],
-			goalId: params.goalId,
-			jobId: `${job.id}:turn:${turn}`,
-			description: `send_followup turn ${turn} to ${targetAgent.name} in job ${job.id}`,
-		});
-		const managedAuthority = managedAuthorization(authorization.grant, `one-shot:${job.id}:turn:${turn}`);
-		const launchAllowedTools = targetAgent.dispatchAllowedTools ?? [...DEFAULT_READ_BIASED_TOOLS];
-		const launchWritePaths = targetAgent.dispatchWritePaths ?? [];
-		if (
-			!sameStringValues(launchAllowedTools, managedAuthority.allowedTools) ||
-			!sameStringValues(launchWritePaths, managedAuthority.writePaths)
-		) {
-			throw new Error(
-				`send_followup refused: authorization scope differs from the already-running process for ${targetAgent.name}; relaunch the worker to apply a new tool or write-path scope.`,
-			);
-		}
+		// The live process keeps the immutable profile persisted at birth. A follow-up only advances
+		// instructions and its fenced sequence; it cannot widen or replace the process profile.
 		// Reserve before watcher/prompt side effects. Reconcile re-arms a reserved turn but never
 		// re-injects it, so crash recovery cannot duplicate a provider prompt.
 		const reserved = persistJobPatch(job.id, (current) => {
@@ -1859,9 +1719,9 @@ async function executeTool(
 			agent.currentTurn = turn;
 			agent.pendingTurn = turn;
 			agent.result = undefined;
-			applyManagedAuthorization(agent, managedAuthority, {
+			applyManagedTurn(agent, {
 				instructions: followupTask,
-				goalId: params.goalId,
+				goalId: params.goalId ?? agent.dispatchGoalId,
 				leaseTtlMs: job.deadlineSeconds * 1_000,
 			});
 			current.currentTurn = turn;
@@ -1914,6 +1774,15 @@ async function executeTool(
 				content: [{ type: "text", text: `tmux job ${job.id} was already dismissed.` }],
 				details: { action, jobId: job.id, alreadyDismissed: true },
 			};
+		if (tmuxSessionExists(job.sessionName)) {
+			for (const agent of job.agents) {
+				if (!agent.paneId || !tmuxPaneExists(job.sessionName, agent.paneId)) continue;
+				requireTmuxRun(
+					runTmux(["pipe-pane", "-t", agent.paneId]),
+					`tmux completion watcher detach for ${agent.paneId}`,
+				);
+			}
+		}
 		persistJobPatch(job.id, (current) => {
 			current.dismissedAt = new Date().toISOString();
 			return current;
@@ -2009,6 +1878,13 @@ function formatFireTaskHandoff(job: FireTaskPlan): string {
 	].join("\n");
 }
 
+function compactTmuxAgentStatus(status: string | undefined): "succeeded" | "partial" | "failed" | "canceled" {
+	if (status === "done" || status === "succeeded" || status === "completed") return "succeeded";
+	if (status === "blocked" || status === "partial") return "partial";
+	if (status === "canceled" || status === "cancelled" || status === "stopped") return "canceled";
+	return "failed";
+}
+
 /** Diff live tmux sessions against this session's job records. Mirrors the invariant behind
  * `LocalRuntimeController.reconcile` (local-runtime-controller.ts): reconcile only ever OBSERVES —
  * it never kills a session it did not provably start. A job whose tmux session is gone is marked
@@ -2067,13 +1943,6 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 	let handoffTail = Promise.resolve();
 	const jobWatchers = new Map<string, fs.FSWatcher>();
 	const bridge: HostBridge = pi;
-	// Non-interactive opt-in for grant_dispatch: optional-chained so a lightweight test double
-	// that doesn't implement registerFlag still loads the extension; a real host always has it.
-	bridge.registerFlag?.("allow-tmux-dispatch", {
-		type: "boolean",
-		description:
-			"Authorize tmux_agent_manager grant_dispatch to create a standing tmux dispatch grant without interactive approval (print/rpc/non-interactive mode only).",
-	});
 
 	const closeJobWatchers = () => {
 		for (const watcher of jobWatchers.values()) watcher.close();
@@ -2114,16 +1983,13 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			if (!bridge.reportManagedLane) {
 				pi.sendMessage(
 					{
-						customType: "tmux-background-completion",
+						customType: "background-worker-completion",
 						content: formatFireTaskHandoff(job),
 						display: true,
 						details: {
-							jobId: job.id,
-							sessionName: job.sessionName,
-							agents: job.agents.map((agent) => ({
-								id: agent.id,
-								name: agent.name,
-								status: agent.result?.status,
+							records: job.agents.map((agent) => ({
+								laneId: agentLaneId(job.id, agent.id),
+								status: compactTmuxAgentStatus(agent.result?.status),
 							})),
 						},
 					},
@@ -2140,7 +2006,6 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 				}
 				return current;
 			});
-			if (ctx.hasUI) ctx.ui.notify(`tmux background task ${job.id} completed.`, "info");
 		}
 
 		const activeIds = new Set(jobs.filter((job) => !isFireTaskTerminal(job)).map((job) => job.id));
@@ -2199,22 +2064,22 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 		name: "tmux_agent_manager",
 		label: "tmux Agent Manager",
 		description:
-			"Specialized tmux-backed interactive provider/workspace manager. Native delegate is the standard cross-platform subagent path. Use this tool only when the owner explicitly requests persistent interactive CLI panes and tmux is available.",
-		promptSnippet: "tmux interactive panes only by owner request after guard; ordinary agents use native delegate.",
+			"Tmux-backed persistent interactive provider/workspace manager. Native delegate remains the standard cross-platform route; use this when a task benefits from persistent CLI panes.",
+		promptSnippet:
+			"Persistent tmux workers with inherited, immutable launch profiles; ordinary agents use native delegate.",
 		promptGuidelines: [
-			"Ordinary agents: delegate. tmux only owner-requested panes after guard; never native Windows.",
-			"WSL tmux only if installed/requested. Never edit profiles during dispatch; native resolver owns them.",
-			"fire_task starts batch, returns after watcher armed; never wait/poll/peek.",
+			"Ordinary agents: delegate. Tmux availability detection is automatic; guard is diagnostic only. Never use native Windows tmux.",
+			"fire_task derives one immutable profile per agent; omitted fields inherit parent tools, thinking, and machine scope.",
+			"tools, thinkingLevel, resourceProfile, and worktreeLane are Pi-only; configure external CLIs in command.",
+			"Pi path narrows structured file tools; external path sets cwd only and is audited as a machine-wide host process.",
+			"fire_task arms capture before atomically starting each CLI with its task; never wait/poll/peek.",
 			"Teams: list/show_template, teamTemplate. Layout: workspace_plan, then launch_workspace.",
 			"send_followup prompts live pane/re-arms watcher; no relaunch. dismiss stops tracking, not session.",
 			"Cleanup: stop_job/stop_session dryRun, then confirm=yes-tmux-stop.",
 			"No secrets in task/command; all persist: ~/.pi/agent/work/background/tmux-agent-manager/state/jobs.",
 			"Display/status metadata only; verify result/log before completion claim.",
-			"Real fire_task/send_followup needs grant or one-shot UI approval. No grant/UI: refused; run grant_dispatch.",
-			"grant_dispatch: agent,maxLaunches; optional goalId,allowedTools,resourceProfile,writePaths,expiresInMinutes.",
-			"Grant needs UI confirmation, or --allow-tmux-dispatch without UI; revoke_grant ends it.",
-			"Pi child: restricted tools/resource profile or no extensions/skills, scoped hard-stop prompt; launch config holds grant.",
-			"Non-pi CLI grant applies at launch only; tool loop is CLI-owned.",
+			"Workers continue autonomously inside the assigned profile; no separate approval handshake exists.",
+			"Non-Pi process behavior is CLI-owned; never represent Pi-only profile controls as enforced for an external CLI.",
 		],
 		parameters: Type.Object({
 			action: Type.Optional(
@@ -2239,12 +2104,10 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 						Type.Literal("show_template"),
 						Type.Literal("stop_job"),
 						Type.Literal("stop_session"),
-						Type.Literal("grant_dispatch"),
-						Type.Literal("revoke_grant"),
 					],
 					{
 						description:
-							"status, setup_help, guard, notify, set_status, clear_status, workspace_plan, launch_workspace, fire_task, send_followup, dismiss, job_status, list_jobs, set_variable, list_variables, list_templates, show_template, stop_job, stop_session, grant_dispatch, or revoke_grant. Default status.",
+							"status, setup_help, guard, notify, set_status, clear_status, workspace_plan, launch_workspace, fire_task, send_followup, dismiss, job_status, list_jobs, set_variable, list_variables, list_templates, show_template, stop_job, or stop_session. Default status.",
 					},
 				),
 			),
@@ -2293,7 +2156,13 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			jobId: Type.Optional(
 				Type.String({
 					description:
-						"Job id for fire_task (optional), job_status/list_variables/set_variable/send_followup/dismiss (required).",
+						"Existing job id for job_status/list_variables/set_variable/send_followup/dismiss. Never creates a fresh fire_task job.",
+				}),
+			),
+			launchKey: Type.Optional(
+				Type.String({
+					description:
+						"Optional fresh fire_task identity. Use only for intentional stable naming; omitted creates a unique key. Never auto-retained from results.",
 				}),
 			),
 			agentId: Type.Optional(
@@ -2314,7 +2183,7 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			deadlineSeconds: Type.Optional(
 				Type.Number({
 					description:
-						"For fire_task: seconds before each event-driven pane watcher records a timeout. Default 1200.",
+						"For fire_task: seconds before each event-driven watcher records timeout and terminates its owned pane. Default 1200.",
 					minimum: 5,
 					maximum: MAX_DEADLINE_SECONDS,
 				}),
@@ -2327,10 +2196,41 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 						command: Type.Optional(
 							Type.String({
 								description:
-									"Interactive CLI start command for this pane, e.g. claude, agy, pi, or a custom wrapper CLI. The manager injects the prompt after launch and captures pane output.",
+									"Interactive CLI start command. Capture is armed first, then the initial prompt file is passed as the final CLI argument; Agy also gets --prompt-interactive.",
 							}),
 						),
-						cwd: Type.Optional(Type.String({ description: "Optional per-agent cwd." })),
+						cwd: Type.Optional(
+							Type.String({
+								description: "Legacy per-agent working directory; does not narrow filesystem scope.",
+							}),
+						),
+						path: Type.Optional(
+							Type.String({
+								description:
+									"Optional workspace cwd. For Pi it narrows structured file tools; external CLIs remain machine-wide host-trusted processes.",
+							}),
+						),
+						tools: Type.Optional(
+							Type.Array(Type.String(), {
+								description:
+									"Pi-only policy-owned tool override. Omitted inherits the parent's eligible worker tools; parent-only controls are removed.",
+								minItems: 1,
+							}),
+						),
+						resourceProfile: Type.Optional(
+							Type.String({
+								description:
+									"Pi-only resource-profile override. Omitted inherits the parent's effective resources.",
+							}),
+						),
+						thinkingLevel: Type.Optional(
+							orchestrationThinkingLevelSchema(
+								"Pi-only thinking override. Omitted inherits the orchestrator's current level.",
+							),
+						),
+						worktreeLane: Type.Optional(
+							Type.String({ description: "Pi-only worktree-sync lane binding for this worker." }),
+						),
 					}),
 					{ description: "Agents/providers to lay out in tmux. Default: pi, agy, codex." },
 				),
@@ -2344,7 +2244,7 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			force: Type.Optional(
 				Type.Boolean({
 					description:
-						"For fire_task only: archive an existing job directory with the same jobId before launch. Existing tmux sessions are still refused; stop them first.",
+						"For fire_task only: archive an existing job directory with the same launchKey before launch. Existing tmux sessions are still refused; stop them first.",
 				}),
 			),
 			confirm: Type.Optional(
@@ -2352,50 +2252,7 @@ export default function tmuxAgentManagerExtension(pi: ExtensionAPI) {
 			),
 			goalId: Type.Optional(
 				Type.String({
-					description:
-						"Goal this dispatch/grant is scoped to. For grant_dispatch: an unscoped grant (omitted) covers any goal; a scoped grant covers only launches naming the same goalId. For fire_task/send_followup: tags the request for grant-coverage matching.",
-				}),
-			),
-			agent: Type.Optional(providerSchema("grant_dispatch: the provider this standing grant authorizes.")),
-			allowedTools: Type.Optional(
-				Type.Array(Type.String(), {
-					description:
-						"grant_dispatch: tool allowlist pushed into the child pi's own --tools flag. Defaults to a read-biased safe set (read, grep, find, ls) when omitted.",
-				}),
-			),
-			resourceProfile: Type.Optional(
-				Type.String({
-					description:
-						"grant_dispatch: resource profile name pushed into the child pi's own --resource-profile flag. When omitted, the child launches with --no-extensions --no-skills instead.",
-				}),
-			),
-			writePaths: Type.Optional(
-				Type.Array(Type.String(), {
-					description: "grant_dispatch: write paths named in the child's scoped --append-system-prompt role text.",
-				}),
-			),
-			maxLaunches: Type.Optional(
-				Type.Number({
-					description: "grant_dispatch: number of real fire_task/send_followup dispatches this grant authorizes.",
-					minimum: 1,
-				}),
-			),
-			expiresInMinutes: Type.Optional(
-				Type.Number({
-					description:
-						"grant_dispatch: grant validity window from creation. Omit for a grant that never expires (until revoke_grant).",
-					minimum: 1,
-				}),
-			),
-			maxUsdAdvisory: Type.Optional(
-				Type.Number({
-					description:
-						"grant_dispatch: advisory USD ceiling. Never enforced across the process boundary (the child bills under its own auth) — a claim to review only.",
-				}),
-			),
-			grantId: Type.Optional(
-				Type.String({
-					description: "revoke_grant: grant id to revoke. Omit to revoke whichever grant is currently active.",
+					description: "Goal this fire_task/send_followup belongs to for durable lane ownership and recovery.",
 				}),
 			),
 		}),

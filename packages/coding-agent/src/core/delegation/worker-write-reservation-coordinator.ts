@@ -1,5 +1,7 @@
+import { canonicalPathScopeIdentity } from "../autonomy/path-scope.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
+import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 import { isLocalProcessAlive, localWorkerProcessOwnerLiveness } from "./worker-process-owner.ts";
 import {
 	type WorkerWriteReservationLease,
@@ -37,7 +39,7 @@ export class WorkerWriteReservationCoordinator {
 	private readonly leases = new Map<string, WorkerWriteReservationLease>();
 	private readonly blockedByLocalLaneIds = new Map<string, Set<string>>();
 	private readonly availabilityListeners = new Set<() => void>();
-	private watchDispose: (() => void) | undefined;
+	private readonly watchDisposes = new Map<string, () => void>();
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
@@ -47,7 +49,7 @@ export class WorkerWriteReservationCoordinator {
 	acquire(
 		laneId: string,
 		attempt: Pick<AttemptRuntimeState, "attemptId" | "lease">,
-		plan: Pick<WorkerExecutionPlan, "writeEnabled" | "writePaths">,
+		plan: Pick<WorkerExecutionPlan, "writeEnabled" | "writePaths"> & Partial<Pick<WorkerExecutionPlan, "cwd">>,
 	): WorkerWriteReservationAdmission {
 		if (!plan.writeEnabled || plan.writePaths.length === 0) {
 			this.blockedByLocalLaneIds.delete(laneId);
@@ -59,6 +61,19 @@ export class WorkerWriteReservationCoordinator {
 			this.blockedByLocalLaneIds.delete(laneId);
 			return { kind: "granted" };
 		}
+		const planCwd = plan.cwd ?? this.options.getCwd();
+		const machineRoots = workerMachinePathRoots(planCwd);
+		const requestedScopes = new Set(plan.writePaths.map(canonicalPathScopeIdentity));
+		const machineWide =
+			requestedScopes.size === machineRoots.length &&
+			machineRoots.every((root) => requestedScopes.has(canonicalPathScopeIdentity(root)));
+		// Machine authority is intentionally unreserved: reserving `/` (or every Windows volume)
+		// serializes the swarm globally. Explicit workspace profiles retain collision fencing.
+		if (machineWide) {
+			this.blockedByLocalLaneIds.delete(laneId);
+			return { kind: "granted" };
+		}
+		const workspace = this.workspace(planCwd);
 		return this.acquireLease(
 			laneId,
 			{
@@ -68,7 +83,7 @@ export class WorkerWriteReservationCoordinator {
 				attemptId: attempt.attemptId,
 				fencingToken,
 				access: "write",
-				workspace: this.workspace(),
+				workspace,
 				writeScopes: plan.writePaths,
 			},
 			"Worker write reservation denied",
@@ -88,7 +103,7 @@ export class WorkerWriteReservationCoordinator {
 	/** Event-driven wakeup when a write reservation is released; same signal that drains the queue. */
 	subscribeAvailability(listener: () => void): () => void {
 		this.availabilityListeners.add(listener);
-		this.ensureWatch();
+		for (const workspace of this.hostWorkspaces()) this.ensureWatch(workspace);
 		return () => {
 			this.availabilityListeners.delete(listener);
 		};
@@ -173,31 +188,33 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	recoverProvenStale(): void {
-		const discovered = this.store.recover({ workspace: this.workspace(), evidence: [] });
-		const evidence = discovered.outcomes.map((outcome) => ({
-			reservationId: outcome.reservationId,
-			state:
-				localWorkerProcessOwnerLiveness(
-					outcome.lease.ownerId,
-					this.options.isProcessAlive ?? isLocalProcessAlive,
-				) === "dead"
-					? ("not_live" as const)
-					: ("unknown" as const),
-		}));
-		for (const outcome of this.store.recover({ workspace: this.workspace(), evidence }).outcomes) {
-			if (outcome.kind !== "stale") continue;
-			const released = this.store.release(outcome.lease);
-			if (released.kind !== "released" && released.kind !== "not_found") {
-				this.options.warn(
-					`Stale worker write reservation ${outcome.reservationId} was not released (${released.kind}).`,
-				);
+		for (const workspace of this.hostWorkspaces()) {
+			const discovered = this.store.recover({ workspace, evidence: [] });
+			const evidence = discovered.outcomes.map((outcome) => ({
+				reservationId: outcome.reservationId,
+				state:
+					localWorkerProcessOwnerLiveness(
+						outcome.lease.ownerId,
+						this.options.isProcessAlive ?? isLocalProcessAlive,
+					) === "dead"
+						? ("not_live" as const)
+						: ("unknown" as const),
+			}));
+			for (const outcome of this.store.recover({ workspace, evidence }).outcomes) {
+				if (outcome.kind !== "stale") continue;
+				const released = this.store.release(outcome.lease);
+				if (released.kind !== "released" && released.kind !== "not_found") {
+					this.options.warn(
+						`Stale worker write reservation ${outcome.reservationId} was not released (${released.kind}).`,
+					);
+				}
 			}
 		}
 	}
 
 	dispose(): void {
-		this.watchDispose?.();
-		this.watchDispose = undefined;
+		for (const dispose of this.watchDisposes.values()) dispose();
+		this.watchDisposes.clear();
 		this.availabilityListeners.clear();
 		// Release every held lease through the same path release() uses (best-effort store release,
 		// warn on failure, forgetLease bookkeeping) — dispose() previously dropped this coordinator's
@@ -207,9 +224,17 @@ export class WorkerWriteReservationCoordinator {
 		this.blockedByLocalLaneIds.clear();
 	}
 
-	private workspace() {
-		const cwd = this.options.getCwd();
-		return { repositoryRoot: cwd, executionRoot: cwd };
+	private workspace(cwd = this.options.getCwd()) {
+		const resolved = resolveWorkerWorkspacePath(this.options.getCwd(), cwd);
+		return { repositoryRoot: resolved, executionRoot: resolved };
+	}
+
+	private hostWorkspaces() {
+		const candidates = [this.options.getCwd(), ...workerMachinePathRoots(this.options.getCwd())];
+		const unique = new Map(
+			candidates.map((candidate) => [canonicalPathScopeIdentity(candidate), this.workspace(candidate)]),
+		);
+		return [...unique.values()];
 	}
 
 	private acquireLease(
@@ -222,12 +247,12 @@ export class WorkerWriteReservationCoordinator {
 			const result = this.store.acquire(request);
 			if (result.kind === "blocked") {
 				this.recordLocalBlockers(laneId, result.conflictingReservationIds);
-				this.ensureWatch();
+				this.ensureWatch(request.workspace);
 				return { kind: "blocked" };
 			}
 			if (!result.lease) {
 				this.blockedByLocalLaneIds.delete(laneId);
-				this.ensureWatch();
+				this.ensureWatch(request.workspace);
 				return { kind: "blocked" };
 			}
 			this.blockedByLocalLaneIds.delete(laneId);
@@ -279,8 +304,12 @@ export class WorkerWriteReservationCoordinator {
 		}
 	}
 
-	private ensureWatch(): void {
-		if (this.watchDispose) return;
-		this.watchDispose = this.store.watchAvailability(this.workspace(), () => this.emitAvailability());
+	private ensureWatch(workspace = this.workspace()): void {
+		const key = `${workspace.repositoryRoot}\0${workspace.executionRoot}`;
+		if (this.watchDisposes.has(key)) return;
+		this.watchDisposes.set(
+			key,
+			this.store.watchAvailability(workspace, () => this.emitAvailability()),
+		);
 	}
 }

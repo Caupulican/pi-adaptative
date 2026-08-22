@@ -48,6 +48,7 @@ function createUnifiedDelegate() {
 			inspectTaskProfileOptions: () => ({
 				baseProfiles: [{ profileId: "base-1", role: "builder", description: "bounded builder" }],
 				models: [],
+				inheritedToolNames: ["read", "python"],
 			}),
 			createTaskProfile,
 		},
@@ -67,7 +68,7 @@ describe("unified delegate model surface", () => {
 			caller: { kind: "worker", agentId: "child-1" },
 			runWorkerDelegation: () => Promise.resolve({ started: false, skipReason: "unused" }),
 		});
-		expect(actionEnum(workerTool)).toEqual(["start"]);
+		expect(actionEnum(workerTool)).toEqual([]);
 		expect(actionEnum(workerTool)).not.toEqual(
 			expect.arrayContaining(["status", "review", "profile_inspect", "profile_create"]),
 		);
@@ -90,7 +91,8 @@ describe("unified delegate model surface", () => {
 			workerAgentControl,
 			resolveMessageReplayScope: () => ({ sessionId: "session-1", branchId: "branch-1" }),
 		});
-		expect(actionEnum(worker)).toEqual(expect.arrayContaining(["start", "wait", "reply"]));
+		expect(actionEnum(worker)).toEqual(expect.arrayContaining(["wait", "reply"]));
+		expect(actionEnum(worker)).not.toContain("start");
 		expect(actionEnum(worker)).not.toEqual(expect.arrayContaining(["inbox", "inbox_wait", "inbox_ack"]));
 	});
 
@@ -235,7 +237,7 @@ describe("unified delegate model surface", () => {
 		).toBe(false);
 	});
 
-	it("rejects a bypassed authority budget before admitting the unbounded baseline", async () => {
+	it("rejects a bypassed authority object before admitting the inherited baseline", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
@@ -268,7 +270,7 @@ describe("unified delegate model surface", () => {
 		expect(rejected.details).toMatchObject({
 			started: false,
 			action: "start",
-			skipReason: "authority_budget_forbidden",
+			skipReason: "action_field_forbidden",
 		});
 		expect(startWorkerDelegation).toHaveBeenCalledTimes(1);
 		expect(startWorkerDelegation).toHaveBeenCalledWith({

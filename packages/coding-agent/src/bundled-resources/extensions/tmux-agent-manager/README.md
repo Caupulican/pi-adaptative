@@ -19,13 +19,15 @@ Important actions:
 - `list_templates` / `show_template` — inspect reusable owner templates.
 - `workspace_plan` — dry-run a tmux session/pane layout.
 - `launch_workspace` — launch panes immediately; pass `dryRun:true` only when a preview is useful.
-- `fire_task` — open provider CLIs in tmux panes, inject prompts, stream pane output through event-driven DONE/BLOCKED watchers, write result files, and wake the parent with a bounded terminal handoff.
+- `fire_task` — create provider panes, arm event-driven DONE/BLOCKED capture, then atomically start each CLI with its initial task, write result files, and wake the parent with a bounded terminal handoff.
 - `send_followup` — re-inject a fresh prompt into an already-live job's pane (default: primary agent; `agentId` targets another) without relaunching. Re-arms the completion watcher for a new turn with a unique per-turn marker pair and reuses the same event-driven handoff.
-- `dismiss` — stop tracking a job (no more re-arming/handoffs) without killing its tmux session; the pane keeps running.
+- `dismiss` — detach completion capture and stop tracking a job without killing its tmux session; the pane keeps running and the old deadline no longer owns it.
 - `job_status`, `list_jobs`, `set_variable`, `list_variables` — inspect and steer managed jobs.
 - `stop_job`, `stop_session` — dry-run/confirmed tmux cleanup.
 - `notify`, `set_status`, `clear_status` — tmux UI/status metadata.
-- `grant_dispatch`, `revoke_grant` — create/end a standing approval grant that lets `fire_task`/`send_followup` dispatch unattended within its bounds (agent, budget, optional goal/tool/path scope). See Safety below.
+
+Tmux availability is detected automatically for each action. `guard` remains a diagnostic action, not a
+required launch handshake.
 
 At session start, live tmux sessions are reconciled against this session's own job records: a session
 that vanished while its job was not yet terminal is marked orphaned (informational only, nothing is
@@ -51,7 +53,8 @@ tmux_agent_manager({
 })
 ```
 
-Custom commands are CLI-start commands, not non-interactive `--print` runners:
+Custom commands are interactive CLI-start commands that accept the initial prompt as their final
+positional argument, not non-interactive `--print` runners:
 
 ```ts
 tmux_agent_manager({
@@ -67,15 +70,31 @@ tmux_agent_manager({
 
 ## Safety
 
-A real (non-`dryRun`) `fire_task`/`send_followup` launch is approval-gated: it requires either a
-standing grant (`grant_dispatch` — interactively confirmed, or authorized via the `--allow-tmux-dispatch`
-flag when no UI is attached) or a one-shot interactive approval. With neither available, the launch is
-refused, never silent. A grant-covered `pi` child launches with a restricted profile (`--tools`/
-`--resource-profile` or `--no-extensions --no-skills`, plus a scoped `--append-system-prompt` naming the
-grant and its hard stops) pushed into the child's own launch configuration — this is not an in-process
-sandbox, and non-`pi` agents are bounded only at the launch layer; their internal tool-loop behavior is
-that CLI's own responsibility. Grant budget (`maxLaunches`, expiry) is enforced; any advisory USD figure
-or self-reported worker usage is a claim to review, never a hard cross-process cap.
+Real `fire_task` and `send_followup` actions run autonomously without a CLI allow flag or UI confirmation.
+Before any pane, watcher, prompt, or job artifact is created, `fire_task` derives one
+immutable internal execution profile for every worker and durably reserves its managed lane. Omitted
+tool and thinking fields inherit the orchestrator's eligible worker surface. Omitted `path` uses the
+normal process cwd while inheriting the host-derived full-machine scope except private harness paths;
+an explicit `path` sets the worker cwd and enforces that workspace for Pi's structured filesystem tools.
+
+For a `pi` worker, `tools`, `resourceProfile`, `thinkingLevel`, and `worktreeLane` are rendered into Pi
+CLI flags. The shared worker ceiling removes memory and agent-launching/root-owned controls while
+keeping eligible execution tools such as Python, and a scoped system prompt requires autonomous work
+inside the assigned profile.
+When `resourceProfile` is omitted, a one-shot profile inherits the parent's effective resources; an
+explicit value overrides it. Pi's structured read/write/edit/search tools hard-deny private harness
+roots and honor an explicit workspace path. Bash/Python remain explicit host-trust boundaries with
+OS-visible filesystem access; the profile does not claim process sandboxing.
+Those four overrides are rejected for non-Pi providers because an external CLI owns its own tool,
+thinking, and workspace controls; use that provider's native options in `command`. A non-Pi `path`
+changes cwd only. Its durable profile truthfully records a machine-wide host-trusted process instead of
+projecting the parent's Pi tool list. Cooperative usage reports remain advisory claims, never hard
+cross-process billing limits.
+
+Capture is armed before the initial provider command starts. The prompt file is passed with that same
+command (`--prompt-interactive` for Agy), eliminating the startup keystroke race. A deadline first
+persists the terminal timeout and then terminates the owned tmux pane so a timed-out CLI cannot keep
+spending resources in the background.
 
 Use `dryRun:true` when the task or provider choice is still ambiguous. Stop actions are destructive to running pane work, so they remain previews by default and require `confirm:"yes-tmux-stop"` for real cleanup.
 

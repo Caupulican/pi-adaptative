@@ -25,6 +25,61 @@ describe("AgentSession cost guard", () => {
 		}
 	});
 
+	it("keeps a positive legacy threshold dormant until explicitly enabled", async () => {
+		const harness = await createHarness({
+			models: [
+				{
+					id: "frontier",
+					contextWindow: 1_050_000,
+					maxTokens: 128_000,
+					cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+				},
+			],
+			settings: { costGuard: { maxTurnUsd: 0.01, action: "downgrade" } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("ok")]);
+
+		await harness.session.prompt("this would exceed the dormant threshold");
+
+		expect(harness.settingsManager.getCostGuardSettings()).toEqual({
+			enabled: false,
+			maxTurnUsd: 0.01,
+			action: "downgrade",
+		});
+		expect(harness.session.getLastCostGuardDecision()).toBeUndefined();
+	});
+
+	it("clears the live decision and envelope immediately when disabled", async () => {
+		const harness = await createHarness({
+			models: [
+				{
+					id: "frontier",
+					contextWindow: 1_050_000,
+					maxTokens: 128_000,
+					cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+				},
+			],
+			settings: { costGuard: { enabled: true, maxTurnUsd: 0.01, action: "warn" } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("ok")]);
+
+		await harness.session.prompt("project this turn");
+		expect(harness.session.getLastCostGuardDecision()).toBeDefined();
+		expect(harness.session.getForegroundEnvelope()?.maxEstimatedUsd).toBe(0.01);
+
+		harness.session.setCostGuardSettings({ enabled: false, maxTurnUsd: 0.01, action: "warn" });
+
+		expect(harness.settingsManager.getCostGuardSettings()).toEqual({
+			enabled: false,
+			maxTurnUsd: 0.01,
+			action: "warn",
+		});
+		expect(harness.session.getLastCostGuardDecision()).toBeUndefined();
+		expect(harness.session.getForegroundEnvelope()?.maxEstimatedUsd).toBeUndefined();
+	});
+
 	it("projects against the session response reserve without imposing a hidden output cap", async () => {
 		let requestMaxTokens: number | undefined;
 		const harness = await createHarness({
@@ -38,7 +93,7 @@ describe("AgentSession cost guard", () => {
 			],
 			settings: {
 				compaction: { reserveTokens: 16_384 },
-				costGuard: { maxTurnUsd: 2.5, action: "warn" },
+				costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 			},
 		});
 		harnesses.push(harness);
@@ -72,7 +127,7 @@ describe("AgentSession cost guard", () => {
 			],
 			settings: {
 				compaction: { reserveTokens: 16_384 },
-				costGuard: { maxTurnUsd: 0.6, action: "warn" },
+				costGuard: { enabled: true, maxTurnUsd: 0.6, action: "warn" },
 			},
 		});
 		harnesses.push(harness);
@@ -113,7 +168,7 @@ describe("AgentSession cost guard", () => {
 			],
 			settings: {
 				compaction: { reserveTokens: 0 },
-				costGuard: { maxTurnUsd: 3.5, action: "warn" },
+				costGuard: { enabled: true, maxTurnUsd: 3.5, action: "warn" },
 			},
 		});
 		harnesses.push(harness);
@@ -156,7 +211,7 @@ describe("AgentSession cost guard", () => {
 					cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 				},
 			],
-			settings: { costGuard: { maxTurnUsd: 0.01, action: "warn" } },
+			settings: { costGuard: { enabled: true, maxTurnUsd: 0.01, action: "warn" } },
 		});
 		harnesses.push(harness);
 		const model = harness.session.model;
@@ -187,7 +242,7 @@ describe("AgentSession cost guard", () => {
 					cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 				},
 			],
-			settings: { costGuard: { maxTurnUsd: 0.01, action: "downgrade" } },
+			settings: { costGuard: { enabled: true, maxTurnUsd: 0.01, action: "downgrade" } },
 		});
 		harnesses.push(harness);
 		harness.session.setThinkingLevel("high");
@@ -224,7 +279,7 @@ describe("AgentSession cost guard", () => {
 					cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 				},
 			],
-			settings: { costGuard: { maxTurnUsd: 0.01, action: "downgrade" } },
+			settings: { costGuard: { enabled: true, maxTurnUsd: 0.01, action: "downgrade" } },
 		});
 		harnesses.push(harness);
 		harness.session.setThinkingLevel("low");
@@ -261,7 +316,7 @@ describe("AgentSession cost guard", () => {
 					cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 				},
 			],
-			settings: { costGuard: { maxTurnUsd: 0.01, action: "downgrade" } },
+			settings: { costGuard: { enabled: true, maxTurnUsd: 0.01, action: "downgrade" } },
 		});
 		harnesses.push(harness);
 		harness.session.setThinkingLevel("ultra");
@@ -318,7 +373,7 @@ describe("AgentSession cost guard", () => {
 				],
 				settings: {
 					compaction: { reserveTokens: 16_384 },
-					costGuard: { maxTurnUsd: 2.5, action: "warn" },
+					costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 				},
 				tools: [bgSpendTool],
 			});
@@ -357,7 +412,7 @@ describe("AgentSession cost guard", () => {
 				],
 				settings: {
 					compaction: { reserveTokens: 16_384 },
-					costGuard: { maxTurnUsd: 2.5, action: "warn" },
+					costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 				},
 				tools: [bgSpendTool],
 			});
@@ -396,7 +451,7 @@ describe("AgentSession cost guard", () => {
 				],
 				settings: {
 					compaction: { reserveTokens: 16_384 },
-					costGuard: { maxTurnUsd: 2.5, action: "warn" },
+					costGuard: { enabled: true, maxTurnUsd: 2.5, action: "warn" },
 				},
 				tools: [bgSpendTool],
 			});

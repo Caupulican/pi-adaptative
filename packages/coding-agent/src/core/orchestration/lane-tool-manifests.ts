@@ -13,6 +13,10 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"python",
 	"run_process",
 	"bash",
+	"artifact_retrieve",
+	"run_toolkit_script",
+	"skill",
+	"skill_audit",
 ] as const;
 export const ORCHESTRATION_PROFILE_TOOL_NAMES = [...CLASSIFIED_LANE_TOOL_NAMES, "delegate"] as const;
 

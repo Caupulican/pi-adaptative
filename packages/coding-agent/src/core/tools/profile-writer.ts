@@ -1,11 +1,5 @@
 import { Type } from "typebox";
-import {
-	MAX_ORCHESTRATION_COLLECTION_LENGTH,
-	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
-	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
-	ORCHESTRATION_THINKING_LEVELS,
-} from "../orchestration/contracts.ts";
+import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "../orchestration/contracts.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -22,8 +16,9 @@ export interface DelegateProfileInput {
 	task?: string;
 	baseProfileId?: string;
 	model?: TaskProfileCreateInput["model"];
+	thinkingLevel?: TaskProfileCreateInput["thinkingLevel"];
+	path?: string;
 	toolNames?: readonly string[];
-	resourceProfileNames?: readonly string[];
 }
 
 export interface DelegateProfileToolDetails extends TaskProfileCreateResult {
@@ -37,29 +32,6 @@ export function createDelegateProfileParameterSchemas() {
 	return {
 		task: Type.Optional(Type.String({ minLength: 1, maxLength: 3_500 })),
 		baseProfileId: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH })),
-		model: Type.Optional(
-			Type.Object(
-				{
-					provider: Type.String({
-						minLength: 1,
-						maxLength: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
-					}),
-					modelId: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_ID_LENGTH }),
-					thinkingLevel: Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level))),
-				},
-				{ additionalProperties: false },
-			),
-		),
-		toolNames: Type.Optional(
-			Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
-				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
-			}),
-		),
-		resourceProfileNames: Type.Optional(
-			Type.Array(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH }), {
-				maxItems: MAX_ORCHESTRATION_COLLECTION_LENGTH,
-			}),
-		),
 	};
 }
 
@@ -94,7 +66,8 @@ export function delegateProfilePanelModel(details: DelegateProfileToolDetails): 
 
 export function formatTaskProfileInspection(inspection: TaskProfileInspection): string {
 	const bases = inspection.baseProfiles.map((profile) => profile.profileId).join(", ") || "none";
-	return `Reusable owner-authored bases for profile_create: ${bases}. Native delegate start does not need a base; omit profileId and set authority.role to explorer or implementer. profile_create requires an owner-authored explorer or implementer base. Available configured models: ${inspection.models.length}.`;
+	const inheritedTools = inspection.inheritedToolNames.join(", ") || "none";
+	return `Optional owner-authored bases for profile_create: ${bases}. Omit baseProfileId to derive the foreground model, reasoning, compatible tools, and machine scope. Effective inherited native tools: ${inheritedTools}. Optional model, thinkingLevel, path, and toolNames fields narrow that inherited base. Available configured models: ${inspection.models.length}.`;
 }
 
 export function executeDelegateProfileAction(
@@ -131,8 +104,9 @@ export function executeDelegateProfileAction(
 		task: input.task,
 		...(input.baseProfileId !== undefined ? { baseProfileId: input.baseProfileId } : {}),
 		...(input.model !== undefined ? { model: input.model } : {}),
+		...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel } : {}),
+		...(input.path !== undefined ? { path: input.path } : {}),
 		...(input.toolNames !== undefined ? { toolNames: input.toolNames } : {}),
-		...(input.resourceProfileNames !== undefined ? { resourceProfileNames: input.resourceProfileNames } : {}),
 	};
 	const result = writer.createTaskProfile(request);
 	return {
@@ -140,7 +114,7 @@ export function executeDelegateProfileAction(
 			{
 				type: "text",
 				text: result.created
-					? `Created immutable session task profile ${result.profileId} from ${result.baseProfileId}.`
+					? `Created immutable session task profile ${result.profileId} from ${result.baseProfileId ?? "foreground inheritance"}.`
 					: `delegate profile_create rejected the request: ${result.reason}.`,
 			},
 		],

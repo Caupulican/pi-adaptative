@@ -21,24 +21,244 @@ function createController(
 ) {
 	const lease = {} as ForegroundSubmissionLease;
 	const foreground = {
-		acquireSubmission: vi.fn(async () => lease),
+		waitForIdle: vi.fn(async () => undefined),
+		tryAcquireSubmission: vi.fn(() => lease),
 		releaseSubmission: vi.fn(),
 	} as unknown as ForegroundRecoveryController;
 	const sendCustomMessage = vi.fn(async () => undefined);
 	const startCustomMessageTurn = vi.fn(async () => ({ completion: Promise.resolve() }));
+	const enqueueCustomMessageTurn = vi.fn(async () => undefined);
 	const controller = new ForegroundTerminalHandoffController({
 		foreground,
 		isDisposed: () => false,
 		getGoalStateSnapshot: () => goal,
 		...(getWorkerResult ? { getWorkerResult } : {}),
 		startCustomMessageTurn,
+		enqueueCustomMessageTurn,
 		sendCustomMessage,
 		warn: vi.fn(),
 	});
-	return { controller, foreground, lease, sendCustomMessage, startCustomMessageTurn };
+	return { controller, foreground, lease, enqueueCustomMessageTurn, sendCustomMessage, startCustomMessageTurn };
 }
 
 describe("ForegroundTerminalHandoffController", () => {
+	it("delivers an unread terminal at the next provider boundary without waiting for the foreground run to end", async () => {
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		const lease = {} as ForegroundSubmissionLease;
+		const foreground = {
+			isBusy: true,
+			waitForIdle: vi.fn(() => idle),
+			tryAcquireSubmission: vi.fn(() => lease),
+			acquireSubmission: vi.fn(() => idle.then(() => lease)),
+			releaseSubmission: vi.fn(),
+		} as unknown as ForegroundRecoveryController;
+		const enqueueCustomMessageTurn = vi.fn(async () => undefined);
+		const deps = {
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" as const }),
+			startCustomMessageTurn: vi.fn(async () => ({ completion: Promise.resolve() })),
+			sendCustomMessage: vi.fn(async () => undefined),
+			enqueueCustomMessageTurn,
+			warn: vi.fn(),
+		};
+		const controller = new ForegroundTerminalHandoffController(deps);
+
+		let settled = false;
+		const notification = controller
+			.notifyWorkers([{ laneId: "worker-fast", status: "succeeded", goalId: "goal-active" }])
+			.then(() => {
+				settled = true;
+			});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		controller.flushProviderBoundary();
+		controller.flushProviderBoundary();
+		await notification;
+
+		expect(enqueueCustomMessageTurn).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: "background-worker-completion" }),
+		);
+		expect(enqueueCustomMessageTurn).toHaveBeenCalledOnce();
+		expect(foreground.acquireSubmission).not.toHaveBeenCalled();
+		expect(foreground.tryAcquireSubmission).not.toHaveBeenCalled();
+		releaseIdle();
+	});
+
+	it("persists one worker handoff when the same terminal generation is notified repeatedly", async () => {
+		const { controller, startCustomMessageTurn } = createController();
+		const terminal = {
+			laneId: "worker-idempotent",
+			status: "failed" as const,
+			reasonCode: "managed_process_launch_failed",
+			completedAt: "2026-08-21T20:00:01.000Z",
+			goalId: "goal-active",
+		};
+
+		await controller.notifyWorkers([{ ...terminal }]);
+		await controller.notifyWorkers([{ ...terminal }]);
+		await controller.notifyWorkers([{ ...terminal }]);
+
+		expect(startCustomMessageTurn).toHaveBeenCalledOnce();
+	});
+
+	it("suppresses a boundary wake when the terminal was observed during the active turn", async () => {
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		const foreground = {
+			waitForIdle: vi.fn(() => idle),
+			tryAcquireSubmission: vi.fn(),
+			releaseSubmission: vi.fn(),
+		} as unknown as ForegroundRecoveryController;
+		const enqueueCustomMessageTurn = vi.fn(async () => undefined);
+		const controller = new ForegroundTerminalHandoffController({
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" }),
+			startCustomMessageTurn: vi.fn(async () => ({ completion: Promise.resolve() })),
+			enqueueCustomMessageTurn,
+			sendCustomMessage: vi.fn(async () => undefined),
+			warn: vi.fn(),
+		});
+		const record = {
+			laneId: "worker-observed-at-boundary",
+			status: "succeeded" as const,
+			goalId: "goal-active",
+		};
+
+		const notification = controller.notifyWorkers([record]);
+		Object.assign(record, { observedAt: "2026-08-21T20:00:01.000Z" });
+		controller.flushProviderBoundary();
+		await notification;
+
+		expect(enqueueCustomMessageTurn).not.toHaveBeenCalled();
+		expect(foreground.tryAcquireSubmission).not.toHaveBeenCalled();
+		releaseIdle();
+	});
+
+	it("never steers after disposal while a terminal is waiting for the next boundary", async () => {
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		let disposed = false;
+		const enqueueCustomMessageTurn = vi.fn(async () => undefined);
+		const controller = new ForegroundTerminalHandoffController({
+			foreground: {
+				waitForIdle: vi.fn(() => idle),
+				tryAcquireSubmission: vi.fn(),
+			} as unknown as ForegroundRecoveryController,
+			isDisposed: () => disposed,
+			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" }),
+			startCustomMessageTurn: vi.fn(async () => ({ completion: Promise.resolve() })),
+			enqueueCustomMessageTurn,
+			sendCustomMessage: vi.fn(async () => undefined),
+			warn: vi.fn(),
+		});
+
+		const notification = controller.notifyWorkers([
+			{ laneId: "worker-disposed", status: "succeeded", goalId: "goal-active" },
+		]);
+		disposed = true;
+		controller.flushProviderBoundary();
+
+		await expect(notification).rejects.toThrow(/Session disposed/);
+		expect(enqueueCustomMessageTurn).not.toHaveBeenCalled();
+		releaseIdle();
+	});
+
+	it("persists but does not wake a tool terminal after its owning goal becomes terminal", async () => {
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		let goalStatus: GoalState["status"] = "active";
+		const lease = {} as ForegroundSubmissionLease;
+		const foreground = {
+			waitForIdle: vi.fn(() => idle),
+			tryAcquireSubmission: vi.fn(() => lease),
+			releaseSubmission: vi.fn(),
+		} as unknown as ForegroundRecoveryController;
+		const enqueueCustomMessageTurn = vi.fn(async () => undefined);
+		const sendCustomMessage = vi.fn(async () => undefined);
+		const controller = new ForegroundTerminalHandoffController({
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => ({ goalId: "goal-tool", status: goalStatus }),
+			startCustomMessageTurn: vi.fn(async () => ({ completion: Promise.resolve() })),
+			enqueueCustomMessageTurn,
+			sendCustomMessage,
+			warn: vi.fn(),
+		});
+		const record = {
+			sessionId: "session-a",
+			taskId: "tool-task-1",
+			toolCallId: "call-1",
+			toolName: "delegate",
+			goalId: "goal-tool",
+			status: "completed" as const,
+			startedAt: "2026-08-21T20:00:00.000Z",
+			completedAt: "2026-08-21T20:00:01.000Z",
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "delegate completed",
+			output: "done",
+		};
+
+		const notification = controller.notifyTools([record], true);
+		goalStatus = "completed";
+		controller.flushProviderBoundary();
+		expect(enqueueCustomMessageTurn).not.toHaveBeenCalled();
+
+		releaseIdle();
+		await notification;
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: "background-tool-completion",
+				content: expect.stringContaining("Parent was not woken"),
+			}),
+			{ triggerTurn: false, deliverAs: "followUp" },
+			lease,
+		);
+		expect(foreground.releaseSubmission).toHaveBeenCalledWith(lease);
+	});
+
+	it("still wakes for a goal-independent tool terminal while the current goal is stopped", async () => {
+		const { controller, lease, startCustomMessageTurn } = createController({
+			goalId: "goal-stopped",
+			status: "completed",
+		});
+
+		await controller.notifyTools(
+			[
+				{
+					sessionId: "session-a",
+					taskId: "tool-task-1",
+					toolCallId: "call-1",
+					toolName: "delegate",
+					status: "completed",
+					startedAt: "2026-08-21T20:00:00.000Z",
+					completedAt: "2026-08-21T20:00:01.000Z",
+					elapsedBeforeHandoffMs: 15_000,
+					summary: "delegate completed",
+					output: "done",
+				},
+			],
+			true,
+		);
+
+		expect(startCustomMessageTurn).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: "background-tool-completion" }),
+			lease,
+			undefined,
+		);
+	});
+
 	it("rechecks goal eligibility after waiting for the foreground lease", async () => {
 		const lease = {} as ForegroundSubmissionLease;
 		let releaseLease!: () => void;
@@ -47,10 +267,10 @@ describe("ForegroundTerminalHandoffController", () => {
 		});
 		let goalStatus: GoalState["status"] = "active";
 		const foreground = {
-			acquireSubmission: vi.fn(async () => {
+			waitForIdle: vi.fn(async () => {
 				await leaseAvailable;
-				return lease;
 			}),
+			tryAcquireSubmission: vi.fn(() => lease),
 			releaseSubmission: vi.fn(),
 		} as unknown as ForegroundRecoveryController;
 		const sendCustomMessage = vi.fn(async () => undefined);
@@ -60,6 +280,7 @@ describe("ForegroundTerminalHandoffController", () => {
 			isDisposed: () => false,
 			getGoalStateSnapshot: () => ({ goalId: "goal-runaway", status: goalStatus }),
 			startCustomMessageTurn,
+			enqueueCustomMessageTurn: vi.fn(async () => undefined),
 			sendCustomMessage,
 			warn: vi.fn(),
 		});
@@ -76,6 +297,32 @@ describe("ForegroundTerminalHandoffController", () => {
 			{ triggerTurn: false, deliverAs: "followUp" },
 			lease,
 		);
+	});
+
+	it("rejects an idle delivery receipt when durable custom-message acceptance fails", async () => {
+		const lease = {} as ForegroundSubmissionLease;
+		const failure = new Error("session append failed");
+		const foreground = {
+			waitForIdle: vi.fn(async () => undefined),
+			tryAcquireSubmission: vi.fn(() => lease),
+			releaseSubmission: vi.fn(),
+		} as unknown as ForegroundRecoveryController;
+		const controller = new ForegroundTerminalHandoffController({
+			foreground,
+			isDisposed: () => false,
+			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" }),
+			startCustomMessageTurn: vi.fn(async () => {
+				throw failure;
+			}),
+			enqueueCustomMessageTurn: vi.fn(async () => undefined),
+			sendCustomMessage: vi.fn(async () => undefined),
+			warn: vi.fn(),
+		});
+
+		await expect(
+			controller.notifyWorkers([{ laneId: "worker-failed-append", status: "succeeded", goalId: "goal-active" }]),
+		).rejects.toThrow(failure);
+		expect(foreground.releaseSubmission).toHaveBeenCalledWith(lease);
 	});
 
 	it.each<GoalState["status"]>(["paused", "blocked", "usage_limited", "budget_limited", "completed", "cancelled"])(
@@ -245,10 +492,10 @@ describe("ForegroundTerminalHandoffController", () => {
 			releaseLease = resolve;
 		});
 		const foreground = {
-			acquireSubmission: vi.fn(async () => {
+			waitForIdle: vi.fn(async () => {
 				await leaseAvailable;
-				return lease;
 			}),
+			tryAcquireSubmission: vi.fn(() => lease),
 			releaseSubmission: vi.fn(),
 		} as unknown as ForegroundRecoveryController;
 		const sendCustomMessage = vi.fn(async () => undefined);
@@ -258,6 +505,7 @@ describe("ForegroundTerminalHandoffController", () => {
 			isDisposed: () => false,
 			getGoalStateSnapshot: () => ({ goalId: "goal-active", status: "active" }),
 			startCustomMessageTurn,
+			enqueueCustomMessageTurn: vi.fn(async () => undefined),
 			sendCustomMessage,
 			warn: vi.fn(),
 		});

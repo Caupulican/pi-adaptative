@@ -201,6 +201,9 @@ describe("agent session local prefix warmer", () => {
 
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.options?.maxTokens).not.toBe(1);
-		expect(calls[0]?.context.messages).toHaveLength(1);
+		expect(calls[0]?.context.messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "real prompt" }],
+		});
 	});
 });

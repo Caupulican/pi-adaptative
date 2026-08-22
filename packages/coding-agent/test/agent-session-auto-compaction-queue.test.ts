@@ -144,6 +144,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
+			agentDir: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
 		});

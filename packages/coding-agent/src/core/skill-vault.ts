@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { type Stats, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core/provider-request-planner";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
@@ -16,6 +16,8 @@ const MAX_SEARCH_DESCRIPTION_CHARS = 240;
 
 type SkillVaultRequester = "model" | "user";
 type SkillVaultUnloadReason = "explicit" | "idle_expired" | "resource_unavailable" | "budget_exceeded";
+type SkillBodyReadMode = "read" | "load";
+type SkillFileStat = Stats;
 
 interface LoadedSkill {
 	skill: Skill;
@@ -64,6 +66,17 @@ export type SkillLoadResult =
 			message: string;
 	  };
 
+export type SkillReadResult =
+	| { ok: true; name: string; description: string; body: string }
+	| {
+			ok: false;
+			reason: "not_found" | "body_too_large" | "invalid_body" | "read_failed";
+			message: string;
+	  };
+
+type SkillReadFailure = Exclude<SkillReadResult, { ok: true }>;
+type SkillBodyReadResult = { ok: true; body: string; bodyBytes: number; file: SkillFileStat } | SkillReadFailure;
+
 export interface SkillVaultControllerOptions {
 	getSkills(): readonly Skill[];
 	now?: () => number;
@@ -106,6 +119,10 @@ function aggregateBodyBytes(slots: ReadonlyMap<string, SkillSlotState>): number 
 	let total = 0;
 	for (const slot of slots.values()) total += slot.bodyBytes;
 	return total;
+}
+
+function skillReadFailure(): SkillReadFailure {
+	return { ok: false, reason: "read_failed", message: "Skill could not be read." };
 }
 
 /** Per-skill use is unobservable host-side (every loaded body rides every request), so eviction is honest FIFO by loadedAtMs: oldest unpinned first, oldest pinned only once no unpinned slot remains. */
@@ -168,6 +185,23 @@ export class SkillVaultController {
 		return { candidates };
 	}
 
+	/** Read one eligible skill body without loading, evicting, or otherwise mutating the vault. */
+	read(name: string, requester: SkillVaultRequester = "model"): SkillReadResult {
+		const skill = this.getSkills().find(
+			(candidate) => candidate.name === name && (requester === "user" || !candidate.disableModelInvocation),
+		);
+		if (!skill)
+			return { ok: false, reason: "not_found", message: `No eligible skill named ${JSON.stringify(name)}.` };
+		const bodyResult = this.readSkillBody(skill, this.resolveMaxBodyBytes(), "read");
+		if (!bodyResult.ok) return bodyResult;
+		return { ok: true, name: skill.name, description: skill.description, body: bodyResult.body };
+	}
+
+	/** Host-only metadata snapshot for read-only audit brokers; paths never cross the tool boundary. */
+	getSkillsSnapshot(): readonly Skill[] {
+		return this.getSkills().map((skill) => ({ ...skill, sourceInfo: { ...skill.sourceInfo } }));
+	}
+
 	load(name: string, requester: SkillVaultRequester, pin = false): SkillLoadResult {
 		const now = this.now();
 		this.reconcile(now);
@@ -191,52 +225,9 @@ export class SkillVaultController {
 			}
 		}
 		const maxBodyBytes = this.resolveMaxBodyBytes();
-		let before: ReturnType<typeof statSync>;
-		try {
-			before = statSync(skill.filePath);
-		} catch (error) {
-			return { ok: false, reason: "read_failed", message: error instanceof Error ? error.message : String(error) };
-		}
-		let raw: string;
-		try {
-			raw = readBoundedTextFileSync(
-				skill.filePath,
-				maxBodyBytes + MAX_SKILL_FRONTMATTER_BYTES,
-				`Skill ${JSON.stringify(skill.name)}`,
-			);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return message.includes("exceeds its byte limit")
-				? {
-						ok: false,
-						reason: "body_too_large",
-						message: `Skill body exceeds ${maxBodyBytes} bytes; not truncated.`,
-					}
-				: { ok: false, reason: "read_failed", message };
-		}
-		const parsed = parseFrontmatter<SkillFrontmatter>(raw);
-		const currentName = parsed.frontmatter.name ?? skill.name;
-		const body = stripResourceProfileBlocks(parsed.body).trim();
-		if (currentName !== skill.name || !parsed.frontmatter.description || !body) {
-			return { ok: false, reason: "invalid_body", message: "Skill metadata changed or its body is empty." };
-		}
-		const bodyBytes = Buffer.byteLength(body, "utf8");
-		if (bodyBytes > maxBodyBytes) {
-			return {
-				ok: false,
-				reason: "body_too_large",
-				message: `Skill body exceeds ${maxBodyBytes} bytes; not truncated.`,
-			};
-		}
-		let file: ReturnType<typeof statSync>;
-		try {
-			file = statSync(skill.filePath);
-		} catch (error) {
-			return { ok: false, reason: "read_failed", message: error instanceof Error ? error.message : String(error) };
-		}
-		if (!sameFileVersion(before, file)) {
-			return { ok: false, reason: "read_failed", message: "Skill changed while it was being loaded." };
-		}
+		const bodyResult = this.readSkillBody(skill, maxBodyBytes, "load");
+		if (!bodyResult.ok) return bodyResult;
+		const { body, bodyBytes, file } = bodyResult;
 		const next = new Map(this.slots);
 		next.set(skill.name, {
 			state: "loaded_pending",
@@ -357,6 +348,67 @@ export class SkillVaultController {
 			expiresInMs: Math.max(0, this.idleTimeoutMs - idleForMs),
 			useCount: slot.useCount,
 		};
+	}
+
+	private readSkillBody(skill: Skill, maxBodyBytes: number, mode: SkillBodyReadMode): SkillBodyReadResult {
+		let before: SkillFileStat;
+		try {
+			before = statSync(skill.filePath) as Stats;
+		} catch (error) {
+			return mode === "read"
+				? skillReadFailure()
+				: { ok: false, reason: "read_failed", message: error instanceof Error ? error.message : String(error) };
+		}
+		let raw: string;
+		try {
+			raw = readBoundedTextFileSync(
+				skill.filePath,
+				maxBodyBytes + MAX_SKILL_FRONTMATTER_BYTES,
+				`Skill ${JSON.stringify(skill.name)}`,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return message.includes("exceeds its byte limit")
+				? {
+						ok: false,
+						reason: "body_too_large",
+						message: `Skill body exceeds ${maxBodyBytes} bytes; not truncated.`,
+					}
+				: mode === "read"
+					? skillReadFailure()
+					: { ok: false, reason: "read_failed", message };
+		}
+		const parsed = parseFrontmatter<SkillFrontmatter>(raw);
+		const currentName = parsed.frontmatter.name ?? skill.name;
+		const body = stripResourceProfileBlocks(parsed.body).trim();
+		if (currentName !== skill.name || !parsed.frontmatter.description || !body) {
+			return { ok: false, reason: "invalid_body", message: "Skill metadata changed or its body is empty." };
+		}
+		const bodyBytes = Buffer.byteLength(body, "utf8");
+		if (bodyBytes > maxBodyBytes) {
+			return {
+				ok: false,
+				reason: "body_too_large",
+				message: `Skill body exceeds ${maxBodyBytes} bytes; not truncated.`,
+			};
+		}
+		let file: SkillFileStat;
+		try {
+			file = statSync(skill.filePath) as Stats;
+		} catch (error) {
+			return mode === "read"
+				? skillReadFailure()
+				: { ok: false, reason: "read_failed", message: error instanceof Error ? error.message : String(error) };
+		}
+		if (!sameFileVersion(before, file)) {
+			return {
+				ok: false,
+				reason: "read_failed",
+				message:
+					mode === "read" ? "Skill changed while it was being read." : "Skill changed while it was being loaded.",
+			};
+		}
+		return { ok: true, body, bodyBytes, file };
 	}
 
 	private reconcile(now: number): void {

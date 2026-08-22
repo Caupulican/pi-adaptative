@@ -2,116 +2,140 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	buildGrant,
-	buildLaunchProfileFlags,
-	countGrantUsages,
-	DEFAULT_READ_BIASED_TOOLS,
-	decodeTmuxWorkerUsageClaim,
-	GRANT_CUSTOM_TYPE,
-	grantCovers,
-	isGrantBudgetExhausted,
-	isTmuxDispatchGrant,
-	isTmuxDispatchGrantTombstone,
-	isTmuxDispatchGrantUsage,
-	ONE_SHOT_LAUNCH_PROFILE_SOURCE,
-} from "../src/bundled-resources/extensions/tmux-agent-manager/dispatch-grant.ts";
 import tmuxAgentManagerExtension, {
 	getTmuxAgentManagerDataRoot,
 } from "../src/bundled-resources/extensions/tmux-agent-manager/index.ts";
+import {
+	buildLaunchProfileFlags,
+	DEFAULT_MANAGED_WORKER_TOOLS,
+	decodeTmuxWorkerUsageClaim,
+	deriveWorkerLaunchProfile,
+} from "../src/bundled-resources/extensions/tmux-agent-manager/launch-profile.ts";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../src/core/process-identity.ts";
 
 // ---------------------------------------------------------------------------
-// Pure dispatch-grant.ts unit tests — no session/tmux access, direct function calls.
+// Pure launch-profile.ts unit tests — no session/tmux access, direct function calls.
 // ---------------------------------------------------------------------------
 
-describe("dispatch-grant pure logic", () => {
-	it("type guards distinguish a grant, a tombstone, and a usage entry", () => {
-		const grant = buildGrant({ agent: "pi", maxLaunches: 3 });
-		expect(isTmuxDispatchGrant(grant)).toBe(true);
-		expect(isTmuxDispatchGrantTombstone(grant)).toBe(false);
-
-		const tombstone = { tombstone: true as const, grantId: "g1", revokedAt: new Date().toISOString() };
-		expect(isTmuxDispatchGrantTombstone(tombstone)).toBe(true);
-		expect(isTmuxDispatchGrant(tombstone)).toBe(false);
-
-		expect(isTmuxDispatchGrantUsage({ grantId: "g1", jobId: "j1", at: new Date().toISOString() })).toBe(true);
-		expect(isTmuxDispatchGrant(null)).toBe(false);
-		expect(isTmuxDispatchGrant("not an object")).toBe(false);
-		expect(isTmuxDispatchGrant({ ...grant, budget: { maxLaunches: "three" } })).toBe(false);
-	});
-
-	it("grantCovers matches agent + goal scope and respects expiry", () => {
-		const unscoped = buildGrant({ agent: "pi", maxLaunches: 5 });
-		expect(grantCovers(unscoped, { agent: "pi" })).toBe(true);
-		expect(grantCovers(unscoped, { agent: "pi", goalId: "goal-1" })).toBe(true);
-		expect(grantCovers(unscoped, { agent: "agy" })).toBe(false);
-
-		const scoped = buildGrant({ agent: "pi", goalId: "goal-1", maxLaunches: 5 });
-		expect(grantCovers(scoped, { agent: "pi", goalId: "goal-1" })).toBe(true);
-		expect(grantCovers(scoped, { agent: "pi", goalId: "goal-2" })).toBe(false);
-		expect(grantCovers(scoped, { agent: "pi" })).toBe(false);
-
-		const expired: ReturnType<typeof buildGrant> = {
-			...buildGrant({ agent: "pi", maxLaunches: 5 }),
-			expiresAt: new Date(Date.now() - 60_000).toISOString(),
-		};
-		expect(grantCovers(expired, { agent: "pi" })).toBe(false);
-	});
-
-	it("counts usages per grantId and reports budget exhaustion", () => {
-		const grant = buildGrant({ agent: "pi", maxLaunches: 2 });
-		const usages = [
-			{ grantId: grant.grantId, jobId: "a", at: new Date().toISOString() },
-			{ grantId: grant.grantId, jobId: "b", at: new Date().toISOString() },
-			{ grantId: "other-grant", jobId: "c", at: new Date().toISOString() },
-		];
-		expect(countGrantUsages(grant.grantId, usages)).toBe(2);
-		expect(isGrantBudgetExhausted(grant, 1)).toBe(false);
-		expect(isGrantBudgetExhausted(grant, 2)).toBe(true);
-	});
-
-	it("buildGrant rejects maxLaunches < 1 and derives expiresAt from expiresInMinutes", () => {
-		expect(() => buildGrant({ agent: "pi", maxLaunches: 0 })).toThrow(/maxLaunches/);
-		const now = new Date("2026-01-01T00:00:00.000Z").toISOString();
-		const grant = buildGrant({ agent: "pi", maxLaunches: 1, expiresInMinutes: 10 }, now);
-		expect(grant.expiresAt).toBe(new Date(Date.parse(now) + 10 * 60_000).toISOString());
-		expect(buildGrant({ agent: "pi", maxLaunches: 1 }, now).expiresAt).toBeUndefined();
-	});
-
-	it("buildLaunchProfileFlags derives --tools/--resource-profile (or --no-extensions --no-skills) and a scoped --append-system-prompt", () => {
-		const withProfile = buildLaunchProfileFlags({
-			identity: "grant g1",
-			allowedTools: ["read", "grep"],
-			resourceProfile: "backend",
-			writePaths: ["/tmp/x"],
+describe("tmux launch-profile pure logic", () => {
+	it("inherits the policy-owned parent surface, strips spawn controls, and freezes the result", () => {
+		const profile = deriveWorkerLaunchProfile({
+			identity: "profile-1",
+			inheritedTools: [
+				"read",
+				"bash",
+				"write",
+				"pipeline",
+				"create_goal",
+				"get_goal",
+				"update_goal",
+				"ask_question",
+				"skill",
+				"run_toolkit_script",
+				"tool_task",
+				"worktree_sync",
+				"memory",
+				"python",
+				"delegate",
+				"tmux_agent_manager",
+				"unknown-extension",
+			],
 		});
+		expect(profile.allowedTools).toEqual(
+			expect.arrayContaining([
+				"read",
+				"write",
+				"python",
+				"bash",
+				"run_toolkit_script",
+				"skill",
+				"create_goal",
+				"get_goal",
+				"update_goal",
+				"pipeline",
+				"tool_task",
+				"worktree_sync",
+				"ask_question",
+			]),
+		);
+		expect(profile.allowedTools).not.toEqual(expect.arrayContaining(["memory", "delegate", "tmux_agent_manager"]));
+		expect(DEFAULT_MANAGED_WORKER_TOOLS).toContain("python");
+		expect(DEFAULT_MANAGED_WORKER_TOOLS).toContain("pipeline");
+		expect(DEFAULT_MANAGED_WORKER_TOOLS).not.toContain("memory");
+		expect(profile.writePaths).toEqual([]);
+		expect(Object.isFrozen(profile)).toBe(true);
+		expect(Object.isFrozen(profile.allowedTools)).toBe(true);
+		expect(Object.isFrozen(profile.writePaths)).toBe(true);
+	});
+
+	it("rejects an explicit profile when any requested tool cannot survive the worker ceiling", () => {
+		expect(() =>
+			deriveWorkerLaunchProfile({
+				identity: "invalid-tools",
+				allowedTools: ["read", "delegate", "unknown-extension"],
+			}),
+		).toThrow(
+			expect.objectContaining({
+				code: "worker_profile_tools_rejected",
+				rejectedTools: ["delegate", "unknown-extension"],
+			}),
+		);
+	});
+
+	it("rejects an explicit tool that is policy-owned but unavailable on the inherited parent surface", () => {
+		expect(() =>
+			deriveWorkerLaunchProfile({
+				identity: "unavailable-tools",
+				inheritedTools: ["read", "bash"],
+				allowedTools: ["read", "pipeline"],
+			}),
+		).toThrow(
+			expect.objectContaining({
+				code: "worker_profile_tools_rejected",
+				rejectedTools: ["pipeline"],
+			}),
+		);
+	});
+
+	it("buildLaunchProfileFlags derives Pi CLI controls without disabling inherited extensions or skills", () => {
+		const withProfile = buildLaunchProfileFlags(
+			deriveWorkerLaunchProfile({
+				identity: "profile p1",
+				allowedTools: ["read", "grep"],
+				resourceProfile: "backend",
+				writePaths: ["/tmp/x"],
+				thinkingLevel: "high",
+			}),
+		);
 		expect(withProfile[0]).toEqual({ flag: "--tools", value: "read,grep" });
 		expect(withProfile[1]).toEqual({ flag: "--resource-profile", value: "backend" });
-		expect(withProfile[2]?.flag).toBe("--append-system-prompt");
-		expect(withProfile[2]?.value).toContain("grant g1");
-		expect(withProfile[2]?.value).toContain("/tmp/x");
-		expect(withProfile[2]?.value).toContain("BLOCKED");
+		expect(withProfile[2]).toEqual({ flag: "--thinking", value: "high" });
+		expect(withProfile[3]?.flag).toBe("--append-system-prompt");
+		expect(withProfile[3]?.value).toContain("profile p1");
+		expect(withProfile[3]?.value).toContain("/tmp/x");
+		expect(withProfile[3]?.value).toContain("BLOCKED");
+		expect(withProfile[3]?.value).not.toContain("owner approval");
 
-		const withoutProfile = buildLaunchProfileFlags(ONE_SHOT_LAUNCH_PROFILE_SOURCE);
-		expect(withoutProfile[0]).toEqual({ flag: "--tools", value: DEFAULT_READ_BIASED_TOOLS.join(",") });
-		expect(withoutProfile).toContainEqual({ flag: "--no-extensions" });
-		expect(withoutProfile).toContainEqual({ flag: "--no-skills" });
+		const withoutOverrides = buildLaunchProfileFlags(deriveWorkerLaunchProfile({ identity: "inherited" }));
+		expect(withoutOverrides[0]).toEqual({ flag: "--tools", value: DEFAULT_MANAGED_WORKER_TOOLS.join(",") });
+		expect(withoutOverrides.some((flag) => flag.flag === "--no-extensions")).toBe(false);
+		expect(withoutOverrides.some((flag) => flag.flag === "--no-skills")).toBe(false);
 	});
 
 	it("buildLaunchProfileFlags appends process identity only when present on the source", () => {
-		const withParent = buildLaunchProfileFlags({
-			...ONE_SHOT_LAUNCH_PROFILE_SOURCE,
-			parentPid: 4242,
-			parentSession: "master-session-1",
-			taskRef: "goal-1",
-		});
+		const withParent = buildLaunchProfileFlags(
+			deriveWorkerLaunchProfile({
+				identity: "parent-profile",
+				parentPid: 4242,
+				parentSession: "master-session-1",
+				taskRef: "goal-1",
+			}),
+		);
 		expect(withParent).toContainEqual({ flag: "--parent-pid", value: "4242" });
 		expect(withParent).toContainEqual({ flag: "--parent-session", value: "master-session-1" });
 		expect(withParent).toContainEqual({ flag: "--task-ref", value: "goal-1" });
 
-		const withoutParent = buildLaunchProfileFlags(ONE_SHOT_LAUNCH_PROFILE_SOURCE);
+		const withoutParent = buildLaunchProfileFlags(deriveWorkerLaunchProfile({ identity: "no-parent" }));
 		expect(withoutParent.some((flag) => flag.flag === "--parent-pid")).toBe(false);
 		expect(withoutParent.some((flag) => flag.flag === "--parent-session")).toBe(false);
 		expect(withoutParent.some((flag) => flag.flag === "--task-ref")).toBe(false);
@@ -132,15 +156,14 @@ describe("dispatch-grant pure logic", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Integration tests — exercise the registered tool end to end against a fake tmux + a fake pi/ctx that
-// implements a minimal in-memory session custom-entry store (appendEntry/getLatestCustomEntryOnBranch/
-// getBranch), matching the real branch-walk semantics well enough to prove the grant lifecycle.
+// Integration tests — exercise the registered tool end to end against a fake tmux + a fake pi/ctx.
 // ---------------------------------------------------------------------------
 
 type RegisteredTool = {
 	description?: string;
 	promptSnippet?: string;
 	promptGuidelines?: readonly string[];
+	parameters?: unknown;
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
@@ -162,10 +185,9 @@ type LaneEvent = {
 		profileId: string;
 		provider: string;
 		authorizationId: string;
-		authorizationKind: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+		authorizationKind: "profile-derived" | "legacy-recovery";
 		allowedTools: readonly string[];
 		writePaths: readonly string[];
-		maxCostUsd?: number;
 		leaseTtlMs: number;
 	};
 };
@@ -339,6 +361,8 @@ function installExtension(
 		hasUI?: boolean;
 		confirmImpl?: (title: string, message: string) => Promise<boolean>;
 		flags?: Record<string, boolean | string>;
+		activeTools?: string[];
+		effectiveResourceProfile?: Record<string, { allow?: string[]; block?: string[] }>;
 		reportManagedLane?: (event: LaneEvent) => void;
 	},
 ) {
@@ -366,6 +390,12 @@ function installExtension(
 		},
 		registerCommand() {},
 		sendMessage() {},
+		getActiveTools() {
+			return opts?.activeTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"];
+		},
+		...(opts?.effectiveResourceProfile
+			? { getEffectiveResourceProfile: () => opts.effectiveResourceProfile ?? {} }
+			: {}),
 		appendEntry,
 		reportManagedLane(event: LaneEvent) {
 			laneEvents.push(event);
@@ -432,8 +462,9 @@ describe("tmux extension routing guidance", () => {
 				.filter((value): value is string => value !== undefined)
 				.join("\n");
 			expect(guidance).toContain("native delegate");
-			expect(guidance).toContain("owner request");
-			expect(guidance).toContain("Never edit profiles during dispatch");
+			expect(guidance).toContain("detection is automatic");
+			expect(guidance).toContain("immutable profile");
+			expect(guidance).toContain("Pi-only");
 			expect(guidance).not.toContain("Use tmux_agent_manager for Windows/Linux tmux-managed workers");
 			expect(registeredTool.promptSnippet?.length).toBeLessThanOrEqual(120);
 			expect(promptGuidelines.every((guideline) => guideline.length <= 140)).toBe(true);
@@ -442,16 +473,40 @@ describe("tmux extension routing guidance", () => {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("exposes one profile-derived launch contract and no grant or revocation actions", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tmux-profile-schema-"));
+		try {
+			const { registeredTool } = installExtension(tempDir);
+			const contract = JSON.stringify({
+				description: registeredTool.description,
+				promptSnippet: registeredTool.promptSnippet,
+				promptGuidelines: registeredTool.promptGuidelines,
+				parameters: registeredTool.parameters,
+			});
+			expect(contract).not.toContain("grant_dispatch");
+			expect(contract).not.toContain("revoke_grant");
+			expect(contract).not.toContain("allow-tmux-dispatch");
+			expect(contract).not.toContain("one-shot");
+			expect(contract).not.toContain("owner approval");
+			expect(contract).toContain("thinkingLevel");
+			expect(contract).toContain("path");
+			expect(contract).not.toContain("writePaths");
+			expect(contract).toContain("tools");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
 });
 
-describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-gated launch", () => {
+describe.skipIf(process.platform === "win32")("tmux autonomous profiled dispatch", () => {
 	let tempDir: string;
 	let stateDir: string;
 	let previousAgentDir: string | undefined;
 	let previousPath: string | undefined;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tmux-grant-"));
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tmux-profile-"));
 		stateDir = path.join(tempDir, "fake-tmux-state");
 		const binDir = path.join(tempDir, "bin");
 		writeFakeTmux(binDir, stateDir);
@@ -469,141 +524,320 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("fire_task refuses a real launch with NO grant and NO interactive approval (doctrine-regression)", async () => {
-		const { registeredTool, context } = installExtension(tempDir, { hasUI: false });
-		await expect(
-			registeredTool.execute(
-				"fire-call",
-				{
-					action: "fire_task",
-					task: "do the thing",
-					jobId: "no-grant-job",
-					agents: [{ provider: "pi" }],
-					dryRun: false,
-				},
-				new AbortController().signal,
-				() => {},
-				context,
-			),
-		).rejects.toThrow(/no standing grant for tmux dispatch; run grant_dispatch first/);
-	});
-
-	it("send_followup refuses a real dispatch with NO grant and NO interactive approval (doctrine-regression)", async () => {
-		const sessionName = "followup-session";
-		const paneId = "%1";
-		seedAliveSession(stateDir, sessionName, paneId);
-		const { registeredTool, context } = installExtension(tempDir, { hasUI: false });
-		writeJobFixture(tempDir, context.sessionManager.getSessionFile(), "followup-job", { paneId, sessionName });
-		await expect(
-			registeredTool.execute(
-				"followup-call",
-				{ action: "send_followup", jobId: "followup-job", task: "keep going" },
-				new AbortController().signal,
-				() => {},
-				context,
-			),
-		).rejects.toThrow(/no standing grant for tmux dispatch; run grant_dispatch first/);
-	});
-
-	it("grant_dispatch requires interactive confirm (hasUI) or the opt-in flag — never silent", async () => {
-		const declining = installExtension(tempDir, { hasUI: true, confirmImpl: async () => false });
-		await expect(
-			declining.registeredTool.execute(
-				"g1",
-				{ action: "grant_dispatch", agent: "pi", maxLaunches: 3 },
-				new AbortController().signal,
-				() => {},
-				declining.context,
-			),
-		).rejects.toThrow(/declined by the owner/);
-		expect(declining.entries).toHaveLength(0);
-
-		const approving = installExtension(tempDir, { hasUI: true, confirmImpl: async () => true });
-		const created = await approving.registeredTool.execute(
-			"g2",
-			{ action: "grant_dispatch", agent: "pi", maxLaunches: 3 },
-			new AbortController().signal,
-			() => {},
-			approving.context,
-		);
-		expect(created.content[0]?.text).toContain("Created tmux dispatch grant");
-		expect(approving.entries).toHaveLength(1);
-		expect(approving.confirmCalls).toHaveLength(1);
-
-		const noFlag = installExtension(tempDir, { hasUI: false });
-		await expect(
-			noFlag.registeredTool.execute(
-				"g3",
-				{ action: "grant_dispatch", agent: "pi", maxLaunches: 3 },
-				new AbortController().signal,
-				() => {},
-				noFlag.context,
-			),
-		).rejects.toThrow(/requires interactive approval/);
-		expect(noFlag.entries).toHaveLength(0);
-
-		const withFlag = installExtension(tempDir, { hasUI: false, flags: { "allow-tmux-dispatch": true } });
-		const createdNoUI = await withFlag.registeredTool.execute(
-			"g4",
-			{ action: "grant_dispatch", agent: "pi", maxLaunches: 3 },
-			new AbortController().signal,
-			() => {},
-			withFlag.context,
-		);
-		expect(createdNoUI.content[0]?.text).toContain("Created tmux dispatch grant");
-		expect(withFlag.confirmCalls).toHaveLength(0);
-		expect(withFlag.entries).toHaveLength(1);
-	});
-
-	it("revoke_grant tombstones the active grant so a later launch sees no grant", async () => {
-		const { registeredTool, context, entries } = installExtension(tempDir, {
-			hasUI: false,
-			flags: { "allow-tmux-dispatch": true },
+	it("launches and follows up autonomously without a UI confirmation handshake", async () => {
+		const confirmImpl = async () => {
+			throw new Error("autonomous tmux work must never request confirmation");
+		};
+		const installed = installExtension(tempDir, {
+			hasUI: true,
+			confirmImpl,
+			activeTools: ["read", "bash", "edit", "write", "grep", "find", "ls", "delegate", "tmux_agent_manager"],
 		});
-		await registeredTool.execute(
-			"grant",
-			{ action: "grant_dispatch", agent: "pi", maxLaunches: 5 },
+		const launched = await installed.registeredTool.execute(
+			"autonomous-fire",
+			{
+				action: "fire_task",
+				launchKey: "autonomous-job",
+				workspaceName: "autonomous-session",
+				task: "implement and verify the assigned change",
+				agents: [
+					{
+						provider: "pi",
+						name: "implementer",
+						tools: ["read", "bash", "edit", "write"],
+						resourceProfile: "backend",
+						path: tempDir,
+						thinkingLevel: "high",
+					},
+				],
+			},
 			new AbortController().signal,
 			() => {},
-			context,
+			installed.context,
 		);
-		expect(entries).toHaveLength(1);
-		const revoked = await registeredTool.execute(
-			"revoke",
-			{ action: "revoke_grant" },
+
+		expect(installed.confirmCalls).toHaveLength(0);
+		const details = launched.details as {
+			job: { id: string; agents: Array<{ id: string; command?: string }> };
+		};
+		expect(details.job.id).toBe("autonomous-job");
+		const command = details.job.agents[0]?.command ?? "";
+		expect(command).toContain("--tools 'read,write,edit,bash'");
+		const toolFlag = command.match(/--tools '([^']*)'/)?.[1]?.split(",") ?? [];
+		expect(toolFlag).not.toContain("delegate");
+		expect(toolFlag).not.toContain("tmux_agent_manager");
+		expect(command).toContain("--resource-profile 'backend'");
+		expect(command).not.toContain("--resource-profile-json");
+		expect(command).toContain("--thinking 'high'");
+		expect(command).toContain("PI_WORKER_ALLOWED_PATHS=");
+		expect(command).not.toContain("--no-extensions");
+		expect(command).not.toContain("--no-skills");
+		expect(command).not.toContain("owner approval");
+		expect(installed.laneEvents).toContainEqual(
+			expect.objectContaining({
+				laneId: `tmux:${details.job.id}:${details.job.agents[0]?.id}`,
+				phase: "dispatch",
+				dispatch: expect.objectContaining({
+					authorizationKind: "profile-derived",
+					allowedTools: ["read", "write", "edit", "bash"],
+					writePaths: [tempDir],
+				}),
+			}),
+		);
+
+		const followed = await installed.registeredTool.execute(
+			"autonomous-followup",
+			{ action: "send_followup", jobId: details.job.id, task: "review and finish" },
 			new AbortController().signal,
 			() => {},
-			context,
+			installed.context,
 		);
-		expect(revoked.content[0]?.text).toContain("Revoked");
-		expect(entries).toHaveLength(2);
+		expect(followed.content[0]?.text).toContain("Sent follow-up turn 2");
+		expect(installed.confirmCalls).toHaveLength(0);
+		expect(installed.laneEvents).toContainEqual(
+			expect.objectContaining({
+				laneId: `tmux:${details.job.id}:${details.job.agents[0]?.id}`,
+				phase: "dispatch",
+				dispatch: expect.objectContaining({
+					sequence: 2,
+					authorizationId: `tmux-profile:${details.job.id}:${details.job.agents[0]?.id}`,
+					allowedTools: ["read", "write", "edit", "bash"],
+					writePaths: [tempDir],
+				}),
+			}),
+		);
+	});
+
+	it("rejects an invalid explicit tool profile before durable reservation or process side effects", async () => {
+		const jobId = "invalid-explicit-tools";
+		const { registeredTool, context, laneEvents } = installExtension(tempDir, { hasUI: false });
+		const callsBefore = readFakeTmuxCalls(stateDir).length;
 
 		await expect(
 			registeredTool.execute(
-				"fire-after-revoke",
+				"fire-invalid-tools",
 				{
 					action: "fire_task",
-					task: "do the thing",
-					jobId: "after-revoke-job",
-					agents: [{ provider: "pi" }],
-					dryRun: false,
+					launchKey: jobId,
+					task: "must not launch",
+					agents: [{ provider: "pi", tools: ["read", "delegate", "unknown-extension"] }],
 				},
 				new AbortController().signal,
 				() => {},
 				context,
 			),
-		).rejects.toThrow(/no standing grant for tmux dispatch/);
+		).rejects.toMatchObject({
+			code: "worker_profile_tools_rejected",
+			rejectedTools: ["delegate", "unknown-extension"],
+		});
+
+		expect(laneEvents).toHaveLength(0);
+		const launchCalls = readFakeTmuxCalls(stateDir).slice(callsBefore);
+		expect(launchCalls.some((call) => /^(new-session|split-window|send-keys|pipe-pane)\b/.test(call))).toBe(false);
+		expect(fs.existsSync(path.join(getTmuxAgentManagerDataRoot(), "jobs", jobId))).toBe(false);
+	});
+
+	it("inherits every compatible policy-owned parent tool when no explicit tool profile is supplied", async () => {
+		const installed = installExtension(tempDir, {
+			hasUI: false,
+			activeTools: [
+				"read",
+				"bash",
+				"pipeline",
+				"create_goal",
+				"get_goal",
+				"update_goal",
+				"ask_question",
+				"skill",
+				"run_toolkit_script",
+				"tool_task",
+				"worktree_sync",
+				"memory",
+				"delegate",
+				"tmux_agent_manager",
+				"unknown-extension",
+			],
+		});
+		const launched = await installed.registeredTool.execute(
+			"fire-inherited-tools",
+			{
+				action: "fire_task",
+				launchKey: "inherited-tools",
+				task: "use the inherited worker surface",
+				agents: [{ provider: "pi" }],
+			},
+			new AbortController().signal,
+			() => {},
+			installed.context,
+		);
+
+		const details = launched.details as { job: { agents: Array<{ command?: string }> } };
+		const command = details.job.agents[0]?.command ?? "";
+		const toolFlag = command.match(/--tools '([^']*)'/)?.[1]?.split(",") ?? [];
+		expect(toolFlag).toEqual(
+			expect.arrayContaining([
+				"read",
+				"bash",
+				"pipeline",
+				"create_goal",
+				"get_goal",
+				"update_goal",
+				"ask_question",
+				"skill",
+				"run_toolkit_script",
+				"tool_task",
+				"worktree_sync",
+			]),
+		);
+		expect(toolFlag).not.toEqual(
+			expect.arrayContaining(["memory", "delegate", "tmux_agent_manager", "unknown-extension"]),
+		);
+	});
+
+	it("arms capture before atomically starting an Agy worker with its initial task", async () => {
+		const installed = installExtension(tempDir, { hasUI: false });
+		await installed.registeredTool.execute(
+			"fire-agy-ready",
+			{
+				action: "fire_task",
+				launchKey: "agy-ready",
+				task: "write the requested implementation and verify it",
+				agents: [{ provider: "agy", command: "agy --dangerously-skip-permissions" }],
+			},
+			new AbortController().signal,
+			() => {},
+			installed.context,
+		);
+
+		const calls = readFakeTmuxCalls(stateDir);
+		const captureIndex = calls.findIndex((call) => call.startsWith("pipe-pane -O"));
+		const literalInputCalls = calls.filter((call) => call.startsWith("send-keys") && call.includes(" -l "));
+		expect(captureIndex).toBeGreaterThanOrEqual(0);
+		expect(literalInputCalls).toHaveLength(1);
+		expect(calls.indexOf(literalInputCalls[0] as string)).toBeGreaterThan(captureIndex);
+		expect(literalInputCalls[0]).toContain("agy --dangerously-skip-permissions --prompt-interactive");
+		expect(literalInputCalls[0]).toContain("$(cat '");
+	});
+
+	it("audits an unrestricted external CLI as a host-trusted process instead of a Pi tool profile", async () => {
+		const installed = installExtension(tempDir, {
+			hasUI: false,
+			activeTools: ["read", "grep", "find", "ls"],
+		});
+		await installed.registeredTool.execute(
+			"fire-external-host-trust",
+			{
+				action: "fire_task",
+				launchKey: "external-host-trust",
+				task: "perform the requested edits",
+				agents: [{ provider: "agy", command: "agy --dangerously-skip-permissions", path: tempDir }],
+			},
+			new AbortController().signal,
+			() => {},
+			installed.context,
+		);
+
+		expect(installed.laneEvents).toContainEqual(
+			expect.objectContaining({
+				laneId: "tmux:external-host-trust:agy-1",
+				phase: "dispatch",
+				dispatch: expect.objectContaining({
+					provider: "agy",
+					allowedTools: ["bash"],
+					writePaths: [],
+				}),
+			}),
+		);
+	});
+
+	it("inherits the parent's effective resource profile when no agent override is supplied", async () => {
+		const installed = installExtension(tempDir, {
+			hasUI: false,
+			effectiveResourceProfile: {
+				extensions: { allow: ["parent-extension"], block: ["blocked-extension"] },
+				skills: { allow: ["parent-skill"] },
+				tools: { allow: ["read", "bash"] },
+			},
+		});
+		const launched = await installed.registeredTool.execute(
+			"inherited-resource-profile",
+			{
+				action: "fire_task",
+				launchKey: "inherited-resource-profile",
+				workspaceName: "inherited-resource-session",
+				task: "inherit the parent resource surface",
+				agents: [{ provider: "pi", name: "inheritor" }],
+			},
+			new AbortController().signal,
+			() => {},
+			installed.context,
+		);
+		const command = (launched.details as { job: { agents: Array<{ command?: string }> } }).job.agents[0]?.command;
+		expect(command).toContain("--resource-profile-json '");
+		expect(command).toContain('"parent-extension"');
+		expect(command).toContain('"blocked-extension"');
+		expect(command).toContain('"parent-skill"');
+		expect(command).toMatch(/--resource-profile 'tmux-inherited-[a-f0-9]{12}'/);
+	});
+
+	it("ignores an auto-retained stale jobId across concurrent fresh fire_task plans", async () => {
+		const installed = installExtension(tempDir, { hasUI: false });
+		const launch = async (workspaceName: string) =>
+			installed.registeredTool.execute(
+				`fire-${workspaceName}`,
+				{
+					action: "fire_task",
+					jobId: "stale-autofilled-job",
+					workspaceName,
+					task: `inspect ${workspaceName}`,
+					agents: [{ provider: "agy", name: workspaceName, command: "agy" }],
+					dryRun: true,
+				},
+				new AbortController().signal,
+				() => {},
+				installed.context,
+			);
+
+		const launches = await Promise.all(
+			["fresh-session-one", "fresh-session-two", "fresh-session-three", "fresh-session-four"].map(launch),
+		);
+		const jobIds = launches.map((result) => (result.details as { job: { id: string } }).job.id);
+		expect(jobIds).not.toContain("stale-autofilled-job");
+		expect(new Set(jobIds).size).toBe(jobIds.length);
+	});
+
+	it.each([
+		{ override: { tools: ["read"] }, field: "tools" },
+		{ override: { resourceProfile: "backend" }, field: "resourceProfile" },
+		{ override: { thinkingLevel: "high" }, field: "thinkingLevel" },
+		{ override: { worktreeLane: "lane-1" }, field: "worktreeLane" },
+	])("rejects non-Pi $field overrides instead of claiming the external CLI enforces them", async ({ override }) => {
+		const { registeredTool, context } = installExtension(tempDir, { hasUI: false });
+		await expect(
+			registeredTool.execute(
+				"non-pi-override",
+				{
+					action: "fire_task",
+					launchKey: "non-pi-override",
+					task: "inspect",
+					agents: [{ provider: "claude", ...override }],
+					dryRun: true,
+				},
+				new AbortController().signal,
+				() => {},
+				context,
+			),
+		).rejects.toThrow(/Pi-only/);
 	});
 
 	it("reserves the durable managed lane before creating a process or job artifact", async () => {
 		const jobId = "reservation-failure-job";
-		const { registeredTool, context, laneEvents, seedCustomEntry } = installExtension(tempDir, {
+		const { registeredTool, context, laneEvents } = installExtension(tempDir, {
 			hasUI: false,
 			reportManagedLane(event) {
 				if (event.phase === "dispatch") throw new Error("host reservation unavailable");
 			},
 		});
-		seedCustomEntry(GRANT_CUSTOM_TYPE, buildGrant({ agent: "pi", maxLaunches: 1 }));
 		const callsBefore = readFakeTmuxCalls(stateDir).length;
 
 		await expect(
@@ -612,7 +846,7 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 				{
 					action: "fire_task",
 					task: "must not launch",
-					jobId,
+					launchKey: jobId,
 					agents: [{ provider: "pi" }],
 					dryRun: false,
 				},
@@ -635,115 +869,15 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 		]);
 	});
 
-	it("a valid grant lets fire_task dispatch UNATTENDED (no confirm prompt), carries grant-derived launch-profile flags on the child pi command, reports the tmux-worker lane, and decrements the launch budget until exhausted", async () => {
-		const { registeredTool, context, laneEvents, confirmCalls, seedCustomEntry } = installExtension(tempDir, {
-			hasUI: true,
-			confirmImpl: async () => {
-				throw new Error("must not prompt for a one-shot when a standing grant already covers the launch");
-			},
-		});
-		const grant = buildGrant({
-			agent: "pi",
-			maxLaunches: 1,
-			allowedTools: ["read", "grep"],
-			resourceProfile: "backend",
-			writePaths: ["/tmp/scope"],
-		});
-		seedCustomEntry(GRANT_CUSTOM_TYPE, grant);
-
-		const launched = await registeredTool.execute(
-			"fire-1",
-			{
-				action: "fire_task",
-				task: "investigate",
-				goalId: "goal-1",
-				jobId: "grant-job-1",
-				agents: [{ provider: "pi" }],
-				dryRun: false,
-			},
-			new AbortController().signal,
-			() => {},
-			context,
-		);
-		expect(confirmCalls).toHaveLength(0);
-		const details = launched.details as { job: { agents: Array<{ command?: string }> } };
-		const command = details.job.agents[0]?.command ?? "";
-		expect(command).toContain("--tools 'read,grep'");
-		expect(command).toContain("--resource-profile 'backend'");
-		expect(command).toContain("--append-system-prompt");
-		expect(command).toContain(grant.grantId);
-		// Process-matrix parent identity is threaded onto every pi-provider child, independent of the
-		// grant envelope (fire_task always spreads its own pid/sessionId onto the launch profile).
-		expect(command).toContain(`--parent-pid '${process.pid}'`);
-		expect(command).toContain(`--parent-session '${context.sessionManager.getSessionFile()}'`);
-		expect(command).toContain("--task-ref 'goal-1'");
-		expect(command).toContain(`${PI_ORCHESTRATION_AGENT_ID_ENV}='tmux:grant-job-1:pi-1'`);
-		expect(command).not.toContain("--no-approve");
-		expect(laneEvents).toContainEqual(
-			expect.objectContaining({
-				phase: "dispatch",
-				dispatch: expect.objectContaining({
-					authorizationId: grant.grantId,
-					authorizationKind: "standing-grant",
-					profileId: "tmux:pi",
-					allowedTools: ["read", "grep"],
-					writePaths: ["/tmp/scope"],
-				}),
-			}),
-		);
-
-		// Budget was 1; it is now exhausted, so a SECOND real launch under the SAME (still hasUI-capable,
-		// but here forced non-interactive) session is refused rather than silently reusing the grant.
-		context.hasUI = false;
-		await expect(
-			registeredTool.execute(
-				"fire-2",
-				{
-					action: "fire_task",
-					task: "investigate again",
-					jobId: "grant-job-2",
-					agents: [{ provider: "pi" }],
-					dryRun: false,
-				},
-				new AbortController().signal,
-				() => {},
-				context,
-			),
-		).rejects.toThrow(/no standing grant for tmux dispatch/);
-	});
-
-	it("does not let a primary-agent grant authorize a mixed provider team", async () => {
-		const { registeredTool, context, seedCustomEntry } = installExtension(tempDir, { hasUI: false });
-		seedCustomEntry(GRANT_CUSTOM_TYPE, buildGrant({ agent: "pi", maxLaunches: 3 }));
-
-		await expect(
-			registeredTool.execute(
-				"mixed-team",
-				{
-					action: "fire_task",
-					task: "do not launch",
-					jobId: "mixed-team-job",
-					agents: [{ provider: "pi" }, { provider: "claude" }],
-					dryRun: false,
-				},
-				new AbortController().signal,
-				() => {},
-				context,
-			),
-		).rejects.toThrow(/no standing grant for tmux dispatch/);
-	});
-
 	it("a lane-first dispatch (agent carrying worktreeLane) appends --worktree-lane plus a lane-doctrine system-prompt clause, and reports the lane key on the managed-lane dispatch event", async () => {
-		const { registeredTool, context, laneEvents, seedCustomEntry } = installExtension(tempDir, { hasUI: false });
-		const grant = buildGrant({ agent: "pi", maxLaunches: 1 });
-		seedCustomEntry(GRANT_CUSTOM_TYPE, grant);
+		const { registeredTool, context, laneEvents } = installExtension(tempDir, { hasUI: false });
 
 		const launched = await registeredTool.execute(
 			"fire-lane",
 			{
 				action: "fire_task",
 				task: "work the lane",
-				jobId: "lane-job-1",
+				launchKey: "lane-job-1",
 				agents: [{ provider: "pi", cwd: tempDir, worktreeLane: "adhoc-1" }],
 				dryRun: false,
 			},
@@ -764,30 +898,14 @@ describe.skipIf(process.platform === "win32")("tmux dispatch grant — approval-
 			expect.objectContaining({
 				phase: "dispatch",
 				worktreeLaneKey: "adhoc-1",
-				dispatch: expect.objectContaining({ authorizationId: grant.grantId, sequence: 1 }),
+				dispatch: expect.objectContaining({
+					authorizationId: "tmux-profile:lane-job-1:pi-1",
+					authorizationKind: "profile-derived",
+					sequence: 1,
+					writePaths: [tempDir],
+				}),
 			}),
 		);
-	});
-
-	it("a one-shot interactively-approved launch (no grant) still applies the conservative default profile and never persists a grant", async () => {
-		const { registeredTool, context, confirmCalls, entries } = installExtension(tempDir, {
-			hasUI: true,
-			confirmImpl: async () => true,
-		});
-		const launched = await registeredTool.execute(
-			"fire-oneshot",
-			{ action: "fire_task", task: "one shot", jobId: "oneshot-job", agents: [{ provider: "pi" }], dryRun: false },
-			new AbortController().signal,
-			() => {},
-			context,
-		);
-		expect(confirmCalls).toHaveLength(1);
-		expect(entries).toHaveLength(0);
-		const details = launched.details as { job: { agents: Array<{ command?: string }> } };
-		const command = details.job.agents[0]?.command ?? "";
-		expect(command).toContain(`--tools '${DEFAULT_READ_BIASED_TOOLS.join(",")}'`);
-		expect(command).toContain("--no-extensions");
-		expect(command).toContain("--no-skills");
 	});
 
 	it("attributes a cooperative worker's self-reported usage claim via reportSpawnedUsage with a deterministic, idempotent reportId", async () => {

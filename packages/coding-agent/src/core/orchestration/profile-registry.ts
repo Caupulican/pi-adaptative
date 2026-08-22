@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describeToolCapabilityAuthority, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type {
@@ -151,6 +152,14 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 		profile.updatedAt.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH
 	) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' timestamps are invalid.`);
+	}
+	if (
+		profile.workspacePath !== undefined &&
+		(!profile.workspacePath.trim() ||
+			profile.workspacePath.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
+			(!path.isAbsolute(profile.workspacePath) && !path.win32.isAbsolute(profile.workspacePath)))
+	) {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' workspacePath must be an absolute path.`);
 	}
 	for (const [label, values] of [
 		["capabilityCeiling", profile.capabilityCeiling],
@@ -313,6 +322,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"modelPolicy",
 			"capabilityCeiling",
 			"toolNames",
+			"workspacePath",
 			"resourceProfileNames",
 			"dispatchProfileIds",
 			"executionPolicy",
@@ -412,6 +422,11 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 				HARNESS_CAPABILITIES.includes(capability as (typeof HARNESS_CAPABILITIES)[number]),
 		) ||
 		!isStringArray(value.toolNames) ||
+		(value.workspacePath !== undefined &&
+			(typeof value.workspacePath !== "string" ||
+				!value.workspacePath.trim() ||
+				value.workspacePath.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
+				(!path.isAbsolute(value.workspacePath) && !path.win32.isAbsolute(value.workspacePath)))) ||
 		!isStringArray(value.resourceProfileNames) ||
 		!isStringArray(value.dispatchProfileIds) ||
 		!Number.isSafeInteger(value.maxConcurrent) ||
@@ -438,6 +453,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		modelPolicy: { mode: modelPolicy.mode as OrchestrationProfile["modelPolicy"]["mode"], candidates },
 		capabilityCeiling: value.capabilityCeiling as OrchestrationProfile["capabilityCeiling"],
 		toolNames: value.toolNames,
+		...(typeof value.workspacePath === "string" ? { workspacePath: value.workspacePath } : {}),
 		resourceProfileNames: value.resourceProfileNames,
 		dispatchProfileIds: value.dispatchProfileIds,
 		...(executionPolicy

@@ -110,7 +110,12 @@ export function isPathWithinEnvelope(envelope: CapabilityEnvelope, rawPath: stri
 
 export interface EnvelopeScopedTool {
 	name: string;
-	execute: (...args: unknown[]) => unknown;
+	/**
+	 * The `never` parameter keeps this structural boundary compatible with both the synchronous
+	 * fixtures used by the path-policy tests and the strongly typed async `AgentTool.execute`
+	 * implementations. The wrapper itself preserves the concrete execute signature below.
+	 */
+	execute: (...args: never[]) => unknown;
 }
 
 /**
@@ -124,33 +129,35 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 	envelope: CapabilityEnvelope,
 	cwd: string,
 ): T {
-	return {
-		...tool,
-		execute: (...args: unknown[]) => {
-			const params = args[1];
-			const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
-			if (pathAccess !== "none") {
-				for (const rawPath of extractToolPathArguments(tool.name, params)) {
-					if (!isPathWithinEnvelope(envelope, rawPath, cwd)) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
-								},
-							],
-							details: {
-								outcome: "envelope_path_denied",
-								tool: tool.name,
-								path: rawPath,
-								envelopeId: envelope.id,
+	type Execute = T["execute"];
+	const execute = (...args: Parameters<Execute>): ReturnType<Execute> => {
+		const params = args[1];
+		const pathAccess = resolveToolCallPathAccess(envelope.capabilities, tool.name, params);
+		if (pathAccess !== "none") {
+			for (const rawPath of extractToolPathArguments(tool.name, params)) {
+				if (!isPathWithinEnvelope(envelope, rawPath, cwd)) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
 							},
-							isError: true,
-						};
-					}
+						],
+						details: {
+							outcome: "envelope_path_denied",
+							tool: tool.name,
+							path: rawPath,
+							envelopeId: envelope.id,
+						},
+						isError: true,
+					} as ReturnType<Execute>;
 				}
 			}
-			return tool.execute(...args);
-		},
+		}
+		return tool.execute(...args) as ReturnType<Execute>;
 	};
+	return {
+		...tool,
+		execute,
+	} as T;
 }

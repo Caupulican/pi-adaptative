@@ -9,6 +9,6 @@
     { "provider": "pi", "name": "coordinator" }
   ],
   "notes": [
-    "Use for owner-approved implementation/QA batches; never claim complete until result files and validation evidence are inspected."
+    "Use for implementation/QA batches; never claim complete until result files and validation evidence are inspected."
   ]
 }

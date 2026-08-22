@@ -1,10 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
 import {
 	DEFAULT_STREAM_IDLE,
 	type StreamIdleOptions,
@@ -23,18 +22,8 @@ import type {
 	ThinkingLevel,
 	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core/types";
-import type {
-	Api,
-	AssistantMessage,
-	Context,
-	ImageContent,
-	Message,
-	Model,
-	SimpleStreamOptions,
-	TextContent,
-	Usage,
-} from "@caupulican/pi-ai";
-import { getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai/models";
+import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
+import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import { getAgentDir } from "../config.ts";
@@ -83,7 +72,8 @@ import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
-import { type CostGuardDecision, downgradeReasoning, estimateTurnCostUsd, evaluateCostGuard } from "./cost-guard.ts";
+import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
+import { CostGuardController } from "./cost-guard-controller.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getLatestWorkerClaimSnapshot,
@@ -131,6 +121,7 @@ import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
+import { isWarmableLocalModel, LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import { MemoryController } from "./memory-controller.ts";
@@ -148,9 +139,7 @@ import { ModelSelectionController } from "./model-selection-controller.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
-import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
-import { isLoopbackModelEndpoint } from "./models/model-endpoint.ts";
 import {
 	DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 	estimateContextPromptTokens,
@@ -187,7 +176,7 @@ import { isWorkerSession } from "./session-role.ts";
 import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
-import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
+import type { ResourceProfileFilterSettings, SettingsManager, SettingsScope } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -286,6 +275,7 @@ export class AgentSession {
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
+	private _unsubscribeSettingsChanges?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _extensionsChangedListeners: Array<() => void> = [];
 
@@ -324,11 +314,8 @@ export class AgentSession {
 	private _agentDir: string;
 	private _collectWorkspaceSources: typeof collectWorkspaceSources;
 	private readonly _localRuntimeController: LocalRuntimeController;
+	private readonly _localPrefixWarm: LocalPrefixWarmController;
 	private readonly _toolProtocol: ToolProtocolController;
-	private _prefixWarmer:
-		| { modelKey: string; controller: AbortController; timer: NodeJS.Timeout | undefined }
-		| undefined;
-	private readonly _completedPrefixWarms = new Set<string>();
 	/** Assembles the session's base system prompt from live session state (see
 	 * system-prompt-builder.ts); owns the paired _baseSystemPromptOptions. */
 	private readonly _systemPromptBuilder: SystemPromptBuilder;
@@ -368,14 +355,7 @@ export class AgentSession {
 	 * owns the spawned-usage and daily-usage memo caches. */
 	private readonly _analytics: SessionAnalytics;
 	private readonly _treeNavigator: SessionTreeNavigator;
-	private _lastCostGuardDecision?: CostGuardDecision;
-	/**
-	 * `getSpawnedUsage().cost` snapshotted at the start of the CURRENT foreground prompt cycle (see
-	 * `_promptUnserialized`), so the cost guard can attribute only background/spawned spend since THIS
-	 * turn began, not the session's entire lifetime spend. Reset on every new user prompt; every
-	 * round-trip within the same turn (tool-call iterations) shares this one baseline.
-	 */
-	private _costGuardTurnBaselineUsd = 0;
+	private readonly _costGuard: CostGuardController;
 	/** Per-turn model-router subsystem (see model-router-controller.ts); owns the transient route/intent,
 	 * the cheap-turn session buffer, the escalation/retry flags, and the sticky last-decision/skip-reason
 	 * used by the status report. Its parallel routed drive path delegates every turn back to
@@ -393,8 +373,7 @@ export class AgentSession {
 	private _disposed = false;
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
-	/** Native reflection engine + learning-apply/rollback path (see reflection-controller.ts); owns no
-	 * session state, applies durable writes through the bundled memory tool and the session log. */
+	/** Root current-turn reflection cue + explicit learning-apply/rollback compatibility path. */
 	private readonly _reflection: ReflectionController;
 	/** Durable goal lifecycle, accounting, and raw continuation loop. */
 	private readonly _goals: GoalSessionController;
@@ -442,7 +421,7 @@ export class AgentSession {
 			const resolvedReasoning = previousResolveRequestReasoning
 				? previousResolveRequestReasoning(reasoning, request)
 				: reasoning;
-			return this._resolveCostGuardRequestReasoning(
+			return this._costGuard.resolveRequestReasoning(
 				request.model,
 				request.context,
 				resolvedReasoning,
@@ -474,7 +453,7 @@ export class AgentSession {
 					base: httpBounded.options,
 					profile,
 					promptTokens: estimateContextPromptTokens(context),
-					localClass: this._isWarmableLocalModel(model),
+					localClass: isWarmableLocalModel(model),
 					ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 				});
 				return { ...httpBounded.options, ...adaptive };
@@ -546,6 +525,15 @@ export class AgentSession {
 			resolveConfiguredTierModel: (tier) => this._modelRouter.resolveConfiguredTierModel(tier),
 			formatModel: (model) => formatModelRouterModel(model),
 		});
+		this._localPrefixWarm = new LocalPrefixWarmController({
+			getStreamFn: () => this.agent.streamFn,
+			getTools: () => this.agent.state.tools,
+			getSystemPrompt: () => this._baseSystemPrompt,
+			getRequestHooks: () => ({ onPayload: this.agent.onPayload, onResponse: this.agent.onResponse }),
+			isRawStreamSimple: (streamFn) => this._isRawStreamSimple(streamFn),
+			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
+			ensureManagedModelReady: (model) => this._localRuntimeController.ensureIsolatedModelReady(model),
+		});
 		this._systemPromptBuilder = new SystemPromptBuilder({
 			getCwd: () => this._cwd,
 			getSettingsManager: () => this.settingsManager,
@@ -557,6 +545,7 @@ export class AgentSession {
 			getModelAdaptationRules: () => this._toolProtocol.getAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
+			isChildSession: () => this._isChildSession,
 			// The evidence-gated tool-selection hint block — self-gated by kill switch/evidence
 			// thresholds inside getActiveHints() itself, so this is a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
@@ -574,6 +563,13 @@ export class AgentSession {
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
+		this._costGuard = new CostGuardController({
+			getSettings: () => this.settingsManager.getCostGuardSettings(),
+			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),
+			getSpawnedUsageCost: () => this.getSpawnedUsage().cost,
+			isUnmeteredSubscription: (model) =>
+				model.provider === "openai-codex" && this._modelRegistry.isUsingOAuth(model),
+		});
 		this._humanInput = new HumanInputController({
 			getSessionManager: () => this.sessionManager,
 			getUIContext: () => this._extensionUIContext,
@@ -608,6 +604,8 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getModel: () => this.model ?? undefined,
+			getForegroundThinkingLevel: () => this.thinkingLevel,
+			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
@@ -622,6 +620,15 @@ export class AgentSession {
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
+			getArtifactStore: () => this._getToolArtifactStore(),
+			getSkillReadBroker: () => ({
+				search: (query) => this._skillVault.search(query),
+				read: (name) => this._skillVault.read(name),
+			}),
+			getSkillAuditSource: () => ({
+				getSkills: () => this._skillVault.getSkillsSnapshot(),
+				redactPath: (path: string) => `skill:${createHash("sha256").update(path).digest("hex").slice(0, 12)}`,
+			}),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			// RAW loop, deliberately bypassing the public `continueGoalLoop` — that method now delegates
@@ -676,6 +683,7 @@ export class AgentSession {
 		});
 		this._backgroundToolTasks = new BackgroundToolTaskController({
 			getSessionId: () => this.sessionManager.getSessionId(),
+			getGoalId: () => this._goals.getExecutionGoalId(),
 			getSessionLineageIds: () => this.sessionManager.getSessionLineageIds(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(this.sessionManager),
@@ -746,6 +754,7 @@ export class AgentSession {
 			enqueueRelevanceCuration: (messages, report) => this._enqueueRelevanceCuration(messages, report),
 			maybeDrainBrainCuration: () => this._maybeDrainBrainCuration(),
 			appendMemoryEvidence: (messages, report) => this._maybeAppendMemoryEvidenceBlock(messages, report),
+			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
 		});
@@ -784,6 +793,7 @@ export class AgentSession {
 		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
 			foreground: this._foregroundRecovery,
 			goals: this._goals,
+			enqueueSteeringMessage: (message) => this.agent.steer(message),
 		});
 		this._terminalHandoffs = new ForegroundTerminalHandoffController({
 			foreground: this._foregroundRecovery,
@@ -794,6 +804,7 @@ export class AgentSession {
 			getWorkerResult: (laneId) => this._backgroundLanes.getWorkerResult(laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
+			enqueueCustomMessageTurn: (message) => this._durableCustomMessageTurns.enqueue(message),
 			sendCustomMessage: (message, options, lease) => this._sendCustomMessage(message, options, lease),
 			warn: (message) => this._emit({ type: "warning", message }),
 		});
@@ -838,6 +849,8 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			getAgentDir: () => this._agentDir,
+			getCwd: () => this._cwd,
+			getSkillsForAudit: () => this._resourceLoader.getActiveSkills(),
 			isChildSession: () => this._isChildSession,
 			isDisposed: () => this._disposed,
 			getReflectionSignal: () => this._reflectionAbort.signal,
@@ -1160,76 +1173,15 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		this._scheduleLocalPrefixWarm(this.agent.state.model, "session-start");
+		this._unsubscribeSettingsChanges = this.settingsManager.subscribeChanges(() => {
+			this._refreshBaseSystemPrompt();
+		});
+		this._localPrefixWarm.schedule(this.agent.state.model);
 	}
 
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
-	}
-
-	private _scheduleLocalPrefixWarm(model: Model<Api> | undefined, _reason: "session-start" | "selection"): void {
-		if (!model || !this._isWarmableLocalModel(model)) return;
-		const modelKey = formatModelRouterModel(model);
-		if (this._completedPrefixWarms.has(modelKey) || this._prefixWarmer?.modelKey === modelKey) return;
-		this._cancelPrefixWarm();
-		const controller = new AbortController();
-		const timer = setTimeout(() => {
-			const warmer = this._prefixWarmer;
-			if (!warmer || warmer.controller !== controller || controller.signal.aborted) return;
-			warmer.timer = undefined;
-			void this._runLocalPrefixWarm(model, modelKey, controller);
-		}, 0);
-		timer.unref?.();
-		this._prefixWarmer = { modelKey, controller, timer };
-	}
-
-	private _cancelPrefixWarm(): void {
-		const warmer = this._prefixWarmer;
-		if (!warmer) return;
-		if (warmer.timer) clearTimeout(warmer.timer);
-		warmer.controller.abort(new Error("prefix warmer preempted"));
-		this._prefixWarmer = undefined;
-	}
-
-	private async _runLocalPrefixWarm(model: Model<Api>, modelKey: string, controller: AbortController): Promise<void> {
-		try {
-			const options: SimpleStreamOptions = {
-				maxTokens: 1,
-				signal: controller.signal,
-				onPayload: this.agent.onPayload,
-				onResponse: this.agent.onResponse,
-			};
-			if (this._isRawStreamSimple(this.agent.streamFn)) {
-				const auth = await this._getRequiredRequestAuth(model);
-				options.apiKey = auth.apiKey;
-				options.headers = auth.headers;
-			}
-			if (controller.signal.aborted) return;
-			if (model.provider === OLLAMA_PROVIDER || model.provider === HF_TRANSFORMERS_PROVIDER) {
-				await this._localRuntimeController.ensureIsolatedModelReady(model);
-			}
-			if (controller.signal.aborted) return;
-			const stream = await this.agent.streamFn(
-				model,
-				{
-					systemPrompt: this._baseSystemPrompt,
-					tools: projectToolsForProvider(this.agent.state.tools),
-					messages: [],
-				},
-				options,
-			);
-			await stream.result();
-			if (!controller.signal.aborted) this._completedPrefixWarms.add(modelKey);
-		} catch {
-			// Best-effort cache warm only; a miss must never affect the real turn.
-		} finally {
-			if (this._prefixWarmer?.controller === controller) this._prefixWarmer = undefined;
-		}
-	}
-
-	private _isWarmableLocalModel(model: Model<Api>): boolean {
-		return model.api === "openai-completions" && isLoopbackModelEndpoint(model.baseUrl);
 	}
 
 	/**
@@ -1306,69 +1258,16 @@ export class AgentSession {
 		return this._compactionSupport.resolveThinkingLevel(this.thinkingLevel, compactionModel, sessionModel);
 	}
 
-	/**
-	 * Resolve the foreground request's cost policy after routing/context conversion, when the actual
-	 * model, full system prompt, converted messages, and tool schemas are known. The guard is a
-	 * projection threshold rather than a hard output cap: warning mode never reduces capability, while
-	 * opt-in downgrade changes only this request's reasoning effort. Best-effort: never throws.
-	 *
-	 * The ceiling is turn-cumulative: the next foreground call's projection is folded together with
-	 * background/research/worker/reflection spend recorded SINCE THIS TURN BEGAN — {@link getSpawnedUsage}'s
-	 * already-recorded rollup (the same read-side-deduped total the footer's SUBAGENTS line uses) minus the
-	 * baseline snapshotted before a new turn enters routing in `_promptUnserialized`
-	 * ({@link _costGuardTurnBaselineUsd}) — so a
-	 * turn that is cheap in the foreground but has spent heavily via background lanes THIS turn still trips
-	 * the warning, while a prior turn's background spend does not keep every later turn's guard stuck
-	 * "over". A background lane that finishes mid-turn is attributed to whichever turn it completes in.
-	 * Per-lane dollar caps (research/worker `maxUsd`) are separate and untouched by this guard.
-	 */
-	private _resolveCostGuardRequestReasoning(
-		model: Model<Api>,
-		context: Context,
-		reasoning: SimpleStreamOptions["reasoning"],
-		requestMaxTokens: number | undefined,
-	): SimpleStreamOptions["reasoning"] {
-		try {
-			const guard = this.settingsManager.getCostGuardSettings();
-			const isChatGptSubscription = model.provider === "openai-codex" && this._modelRegistry.isUsingOAuth(model);
-			if (guard.maxTurnUsd <= 0 || !model.cost || isChatGptSubscription) {
-				this._lastCostGuardDecision = undefined;
-				return reasoning;
-			}
-			const inputTokens = estimateContextPromptTokens(context);
-			// Use an explicit request cap when present; otherwise project against the session response
-			// reserve instead of a frontier model's theoretical 128K output maximum.
-			const maxOutputTokens = Math.min(
-				model.maxTokens ?? 4096,
-				requestMaxTokens ?? this.settingsManager.getCompactionReserveTokens(),
-			);
-			const estUsd = estimateTurnCostUsd({
-				inputTokens,
-				maxOutputTokens,
-				cost: model.cost,
-				longContextPricing: model.longContextPricing,
-			});
-			// Only spend recorded SINCE this turn's baseline counts -- never negative (a dedup/rollup
-			// correction could otherwise move the total backward transiently).
-			const cumulativeBackgroundUsd = Math.max(0, this.getSpawnedUsage().cost - this._costGuardTurnBaselineUsd);
-			const decision = evaluateCostGuard(
-				estUsd,
-				{ maxTurnUsd: guard.maxTurnUsd, action: guard.action },
-				cumulativeBackgroundUsd,
-			);
-			this._lastCostGuardDecision = decision;
-			if (!decision.over || guard.action !== "downgrade" || reasoning === undefined) return reasoning;
-			const next = downgradeReasoning(reasoning, getSupportedThinkingLevels(model), model.thinkingLevelMap);
-			return next as NonNullable<SimpleStreamOptions["reasoning"]>;
-		} catch {
-			// cost guard must never disrupt a turn
-			return reasoning;
-		}
-	}
-
 	/** Latest cost-guard decision (for the host footer/UI to surface a warning). Undefined if disabled. */
 	getLastCostGuardDecision(): CostGuardDecision | undefined {
-		return this._lastCostGuardDecision;
+		return this._costGuard.getLastDecision();
+	}
+
+	/** Apply an explicit guard choice and invalidate all prior decision/envelope projections immediately. */
+	setCostGuardSettings(settings: CostGuardSettings, scope: SettingsScope = "global"): void {
+		this.settingsManager.setCostGuardSettings(settings, scope);
+		this._costGuard.invalidateDecision();
+		if (this._currentForegroundEnvelope) this._refreshForegroundEnvelope();
 	}
 
 	private get _skillCurator(): SkillCurator {
@@ -1414,6 +1313,13 @@ export class AgentSession {
 
 	private _installAgentTurnRefresh(): void {
 		const previousPrepareNextTurn = this.agent.prepareNextTurn?.bind(this.agent);
+		const previousBeforeSteeringPoll = this.agent.beforeSteeringPoll?.bind(this.agent);
+		this.agent.beforeSteeringPoll = async (signal) => {
+			await previousBeforeSteeringPoll?.(signal);
+			// This is later than async turn preparation and the graceful-stop check, making it the
+			// authoritative last-moment inbox refresh before the queue is drained.
+			this._terminalHandoffs.flushProviderBoundary();
+		};
 		this.agent.prepareNextTurn = async (signal) => {
 			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
 			const snapshot = this._createAgentContextSnapshot();
@@ -1947,12 +1853,18 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "agent_end" && !this._willRetryAfterAgentEnd(event)) {
-			const contextHeadroomPct = Math.max(0, 100 - (this.getContextUsage()?.percent ?? 0));
-			const reflectionTurn = this._reflection.scheduleFromTurn(event.messages, contextHeadroomPct);
+			const reflectionTurn = this._reflection.analyzeCompletedTurn(event.messages);
 			// The shared projection excludes raw tool-result payloads and bounds both roles before any
-			// provider sees the turn. Synchronization is serialized in the background by MemoryController.
+			// deterministic memory sync. No reflection provider request is scheduled at this boundary.
 			this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
+			if (reflectionTurn.trigger !== "none") this._reflection.queueCurrentTurnCue(reflectionTurn.trigger);
 			this._goals.endQueuedOwnerChatGoalExecution();
+		}
+		// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
+		// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
+		// steering requires one continuation; turn_end is intentionally not a flush.
+		if (event.type === "agent_end") {
+			this._terminalHandoffs.flushProviderBoundary();
 		}
 	};
 
@@ -2153,18 +2065,21 @@ export class AgentSession {
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
 		safely(() => this._foregroundRecovery.shutdown());
+		safely(() => this._durableCustomMessageTurns.shutdown());
 		safely(() => this.abortRetry());
 		safely(() => this.abortCompaction());
 		safely(() => this.abortBranchSummary());
 		safely(() => this.abortBash());
 		safely(() => this._skillVault.unload());
+		safely(() => this._unsubscribeSettingsChanges?.());
+		this._unsubscribeSettingsChanges = undefined;
 		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
-		safely(() => this._cancelPrefixWarm());
+		safely(() => this._localPrefixWarm.cancel());
 		safely(() => this.agent.abort());
 		track(() => this._gatewayRegistry.stop());
 		track(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());
-		safely(() => this._reflection.cancelScheduled());
+		safely(() => this._reflection.dispose());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._backgroundLanes.abortInFlightLanes());
 		safely(() => this._providerRequestRuntime.dispose());
@@ -2177,12 +2092,7 @@ export class AgentSession {
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		safely(() => this._disconnectFromAgent());
 		this._eventListeners = [];
-		// Let an aborted in-flight reflection reach its terminal state, then flush session-owned write
-		// hooks before releasing provider locks/handles. This prevents a late write racing shutdown.
-		track(async () => {
-			await this._reflection.waitForActivePass();
-			await this._memory.shutdown();
-		});
+		track(() => this._memory.shutdown());
 		track(() => this._toolRecoveryLogger.shutdown());
 		safely(() => cleanupSessionResources(this.sessionId));
 		// Best-effort final sweep for any grep/find artifact already released (reference
@@ -2250,7 +2160,7 @@ export class AgentSession {
 			turnIndex: this._turnIndex,
 			activeToolNames: this.getActiveToolNames(),
 			cwd: this._cwd,
-			maxTurnUsd: this.settingsManager.getCostGuardSettings().maxTurnUsd,
+			maxTurnUsd: this._costGuard.getEnabledMaxTurnUsd(),
 		});
 	}
 
@@ -2556,7 +2466,7 @@ export class AgentSession {
 		submission: ForegroundPromptSubmission,
 	): Promise<void> {
 		this._toolProtocol.applyRepairLayerSettings();
-		this._cancelPrefixWarm();
+		this._localPrefixWarm.cancel();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const processSlashCommands = options?.processSlashCommands ?? expandPromptTemplates;
 		const preflightResult = options?.preflightResult;
@@ -2653,9 +2563,9 @@ export class AgentSession {
 				admittedGoalId = this._goals.startOwnerChatGoal(expandedText, this.agent.state.messages) ?? admittedGoalId;
 			}
 
-			// This submission is starting a new foreground turn. Queued steer/follow-up messages above
-			// remain part of the already-active turn and must not erase its spawned-cost baseline.
-			this._costGuardTurnBaselineUsd = this.getSpawnedUsage().cost;
+			// Queued steer/follow-up messages remain in the active turn; only a new submission resets the
+			// cost controller's spawned-usage baseline shared by every round trip in this turn.
+			this._costGuard.beginForegroundTurn();
 
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
@@ -2771,6 +2681,10 @@ export class AgentSession {
 					// recall must never break a turn
 				}
 			}
+
+			// Queue one durable logical cue. ProviderRequestContextController owns its transient preview
+			// and accepted-plan commit, so it never enters or needs cleanup from agent history.
+			if (!options?.internalContextType) this._reflection.queueCurrentTurnCue("root-turn");
 
 			// Add user message (built earlier, before the router judge, so it could be painted
 			// immediately — see the early message_start emit above).
@@ -3216,7 +3130,7 @@ export class AgentSession {
 
 	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
 		await this._modelSelection.setModel(model, options);
-		this._scheduleLocalPrefixWarm(this.agent.state.model, "selection");
+		this._localPrefixWarm.schedule(this.agent.state.model);
 	}
 
 	/** Re-resolve startup profile model/thinking after allowed extension providers are bound. */
@@ -3226,13 +3140,13 @@ export class AgentSession {
 		const activeToolNames = this._requestedActiveToolNames ?? this.getActiveToolNames();
 		this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
 		if (!modelsAreEqual(previousModel, this.model)) {
-			this._scheduleLocalPrefixWarm(this.model, "selection");
+			this._localPrefixWarm.schedule(this.model);
 		}
 	}
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
 		const result = await this._modelSelection.cycleModel(direction);
-		this._scheduleLocalPrefixWarm(result?.model, "selection");
+		this._localPrefixWarm.schedule(result?.model);
 		return result;
 	}
 
@@ -3439,6 +3353,7 @@ export class AgentSession {
 
 	async reload(): Promise<void> {
 		this._foregroundLifecycle.reload();
+		this._reflection.invalidateCurrentTurnCueStateCache();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		return this._runtimeBuilder.reload();
 	}
@@ -3554,7 +3469,9 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		return this._treeNavigator.navigateTree(targetId, options);
+		const result = await this._treeNavigator.navigateTree(targetId, options);
+		this._reflection.invalidateCurrentTurnCueStateCache();
+		return result;
 	}
 
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
@@ -3798,17 +3715,14 @@ export class AgentSession {
 		return this._backgroundLanes.continueGoalLoopExclusive(options);
 	}
 
-	/**
-	 * Run a one-shot LLM completion fully ISOLATED from the main session — the load-bearing primitive
-	 * for native reflection (see reflection-controller.ts for the isolation invariants).
-	 */
+	/** Run one explicit isolated completion for bounded host-owned consumers. */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
 		return this._reflection.runIsolatedCompletion(opts);
 	}
 
 	/**
-	 * Native end-of-loop reflection pass. Delegates to {@link ReflectionController}; returns null
-	 * when the demand gate skips or in a child session.
+	 * Explicit compatibility/application reflection pass. Automatic reflection never calls this
+	 * method; it returns null when the demand gate skips or in a child session.
 	 */
 	async runReflectionPass(input: {
 		signals: DemandSignals;

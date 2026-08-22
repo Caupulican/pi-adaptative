@@ -68,15 +68,15 @@ describe("estimateTurnCostUsd", () => {
 
 describe("evaluateCostGuard", () => {
 	it("exports the same warning-only default used by SettingsManager", () => {
-		expect(DEFAULT_COST_GUARD_SETTINGS).toEqual({ maxTurnUsd: 0, action: "warn" });
+		expect(DEFAULT_COST_GUARD_SETTINGS).toEqual({ enabled: false, maxTurnUsd: 0, action: "warn" });
 	});
 
-	it("is never over when disabled (maxTurnUsd <= 0)", () => {
-		expect(evaluateCostGuard(999, { maxTurnUsd: 0, action: "warn" }).over).toBe(false);
+	it("requires explicit opt-in even when a legacy threshold is positive", () => {
+		expect(evaluateCostGuard(999, { enabled: false, maxTurnUsd: 0.5, action: "warn" }).over).toBe(false);
 	});
 
 	it("trips only above the projection threshold", () => {
-		const s = { maxTurnUsd: 1.5, action: "downgrade" as const };
+		const s = { enabled: true, maxTurnUsd: 1.5, action: "downgrade" as const };
 		expect(evaluateCostGuard(1.49, s).over).toBe(false);
 		expect(evaluateCostGuard(1.51, s).over).toBe(true);
 		expect(evaluateCostGuard(1.51, s).action).toBe("downgrade");
@@ -88,7 +88,7 @@ describe("evaluateCostGuard", () => {
 	// `cumulativeBackgroundUsd` to the current turn (see agent-session-cost-guard.test.ts for that).
 	describe("cumulative background spend", () => {
 		it("defaults backgroundUsd to 0 and behaves exactly as before when omitted", () => {
-			const s = { maxTurnUsd: 1.5, action: "warn" as const };
+			const s = { enabled: true, maxTurnUsd: 1.5, action: "warn" as const };
 			const decision = evaluateCostGuard(1.0, s);
 			expect(decision.backgroundUsd).toBe(0);
 			expect(decision.totalUsd).toBe(1.0);
@@ -97,7 +97,7 @@ describe("evaluateCostGuard", () => {
 		});
 
 		it("trips the guard on cumulative background spend alone, even with a tiny foreground estimate", () => {
-			const s = { maxTurnUsd: 1.5, action: "warn" as const };
+			const s = { enabled: true, maxTurnUsd: 1.5, action: "warn" as const };
 			const decision = evaluateCostGuard(0.1, s, 2.0);
 			expect(decision.estUsd).toBe(0.1);
 			expect(decision.backgroundUsd).toBe(2.0);
@@ -108,18 +108,18 @@ describe("evaluateCostGuard", () => {
 		});
 
 		it("does not trip when the foreground estimate plus background spend stays under threshold", () => {
-			const s = { maxTurnUsd: 1.5, action: "warn" as const };
+			const s = { enabled: true, maxTurnUsd: 1.5, action: "warn" as const };
 			const decision = evaluateCostGuard(0.5, s, 0.9);
 			expect(decision.totalUsd).toBeCloseTo(1.4, 10);
 			expect(decision.over).toBe(false);
 		});
 
-		it("still respects the disabled guard (maxTurnUsd <= 0) regardless of background spend", () => {
-			expect(evaluateCostGuard(0, { maxTurnUsd: 0, action: "warn" }, 999).over).toBe(false);
+		it("still respects the disabled guard regardless of background spend", () => {
+			expect(evaluateCostGuard(0, { enabled: false, maxTurnUsd: 1.5, action: "warn" }, 999).over).toBe(false);
 		});
 
 		it("clamps a negative backgroundUsd to 0 instead of ever lowering the projected total", () => {
-			const s = { maxTurnUsd: 1.5, action: "warn" as const };
+			const s = { enabled: true, maxTurnUsd: 1.5, action: "warn" as const };
 			const decision = evaluateCostGuard(1.0, s, -5);
 			expect(decision.backgroundUsd).toBe(0);
 			expect(decision.totalUsd).toBe(1.0);

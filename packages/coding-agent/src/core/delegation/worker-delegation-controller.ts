@@ -16,7 +16,14 @@ import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
-import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import {
+	createWorkerToolAdapterRegistry,
+	WORKER_TOOL_ADAPTER_NAMES,
+	type WorkerToolAdapterRegistry,
+	type WorkerToolAdapterSources,
+} from "../autonomy/worker-tool-adapter-registry.ts";
+import type { ArtifactStore } from "../context/context-artifacts.ts";
+import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -27,6 +34,7 @@ import {
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	type OrchestrationProfile,
+	type OrchestrationThinkingLevel,
 	type ResourcePointer,
 	type WorkerExecutionContract,
 	type WorkerRole,
@@ -50,16 +58,23 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
-import { createDelegateToolDefinition } from "../tools/delegate.ts";
+import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposePersistentShellSession } from "../tools/shell-session.ts";
-import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+import type { ReadOnlySkillBroker } from "../tools/skill.ts";
+import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
 import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import type { WorkerAgentControlPort } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
-import { resolveWorkerAuthority } from "./worker-authority-resolver.ts";
+import {
+	bindCompiledToolSurface,
+	bindCompiledVerifierIdentity,
+	resolveWorkerAuthority,
+	type WorkerAuthorityResolution,
+	type WorkerAuthorityResolutionInput,
+} from "./worker-authority-resolver.ts";
 import { WorkerContextForkStore, WorkerContextForkStoreError } from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
@@ -159,6 +174,8 @@ export interface WorkerDelegationControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
 	getModel(): Model<Api> | undefined;
+	getForegroundThinkingLevel?(): OrchestrationThinkingLevel;
+	getForegroundToolNames?(): readonly string[];
 	isDelegateToolActive(): boolean;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	emit(event: AgentSessionEvent): void;
@@ -167,6 +184,13 @@ export interface WorkerDelegationControllerDeps {
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
 	readMemoryForLane(query: string): Promise<string>;
+	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
+	getArtifactStore?(): ArtifactStore;
+	/** Host-owned read-only skill broker; no SkillVaultController crosses this boundary. */
+	getSkillReadBroker?(): ReadOnlySkillBroker;
+	/** Host-owned skill metadata source for read-only audit; paths are redacted before projection. */
+	getSkillAuditSource?(): Pick<SkillAuditToolOptions, "getSkills"> &
+		Required<Pick<SkillAuditToolOptions, "redactPath">>;
 	addSpawnedUsage(
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
@@ -255,6 +279,7 @@ export class WorkerDelegationController {
 			getUsage: () => AttemptUsageSnapshot;
 			request: WorkerRequest;
 			handle: StartedDelegationAttempt;
+			cwd: string;
 		}
 	>();
 
@@ -495,7 +520,7 @@ export class WorkerDelegationController {
 					claim,
 					accepted: false,
 					costUsd: usage.costUsd,
-					cwd: this.deps.getCwd(),
+					cwd: ledger.cwd,
 					inputTokens: usage.inputTokens,
 					outputTokens: usage.outputTokens,
 					totalTokens: reportedUsage.totalTokens,
@@ -574,8 +599,40 @@ export class WorkerDelegationController {
 				return !model || this.deps.isModelExhausted(model);
 			},
 			getActiveOrchestrationProfile: () => this.deps.getActiveOrchestrationProfile?.(),
+			getInheritedBaseProfile: () => {
+				const foregroundModel = this.deps.getModel();
+				if (!foregroundModel) return undefined;
+				const inherited = this.resolveWorkerAuthority({ foregroundModel });
+				if (!inherited.ok) return undefined;
+				const plan = this.buildWorkerExecutionPlan(
+					inherited.shipment.profile,
+					this.deps.getSettingsManager().getWorkerDelegationSettings(),
+				);
+				return bindCompiledToolSurface(
+					inherited.shipment,
+					plan.toolManifests.map((manifest) => manifest.toolName),
+				).profile;
+			},
 		});
 		return this.taskProfileWriter;
+	}
+
+	private resolveWorkerAuthority(
+		input: Pick<WorkerAuthorityResolutionInput, "authority" | "base" | "modelPin"> & {
+			foregroundModel?: Model<Api>;
+		},
+	): WorkerAuthorityResolution {
+		const foregroundModel = input.foregroundModel ?? this.deps.getModel();
+		return resolveWorkerAuthority({
+			...input,
+			...(foregroundModel ? { foregroundModel } : {}),
+			foregroundThinkingLevel: this.deps.getForegroundThinkingLevel?.(),
+			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
+			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
+			cwd: this.deps.getCwd(),
+			modelRegistry: this.deps.getModelRegistry(),
+			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+		});
 	}
 
 	/** Read-only durable worker projection. Undefined means the delegate capability never loaded. */
@@ -668,6 +725,7 @@ export class WorkerDelegationController {
 		const admitted = resolveWorkerAuthority({
 			base: resolved.resolved,
 			...(modelPin ? { modelPin: modelPin.binding } : {}),
+			cwd: this.deps.getCwd(),
 			modelRegistry: this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
 		});
@@ -677,10 +735,10 @@ export class WorkerDelegationController {
 	}
 
 	/**
-	 * A descendant may select a different routing profile, but that preset cannot introduce context or
-	 * recursive authority its ancestor never admitted. Pointer ids alone are insufficient authority:
-	 * retain only pointers whose complete immutable metadata matches the ancestral contract, require
-	 * exact soul text, and intersect durable delegation limits.
+	 * A recovered legacy nested dispatch may retain a different routing profile, but it cannot widen
+	 * the immutable ancestor contract. Pointer ids alone are insufficient authority: retain only
+	 * pointers whose complete metadata matches, require exact soul text, and intersect the persisted
+	 * lineage limits. Fresh native workers never enter this compatibility path.
 	 */
 	private narrowWorkerShipmentContext(
 		shipment: ResolvedWorkerProfile,
@@ -716,7 +774,7 @@ export class WorkerDelegationController {
 		};
 	}
 
-	private hasExactRecursiveCycle(parentAgentId: string, instructions: string, profileId: string): boolean {
+	private hasExactRecoveredLineageCycle(parentAgentId: string, instructions: string, profileId: string): boolean {
 		const normalizedInstructions = instructions.trim();
 		const visited = new Set<string>();
 		let current = this.lifecycle.getAgent(parentAgentId);
@@ -817,7 +875,7 @@ export class WorkerDelegationController {
 			basePreset = configured.preset;
 		}
 		const effectiveRole: WorkerRole =
-			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? "orchestrator";
+			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? "implementer";
 		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole);
 		// The model itself is authority?.model, not `role` — role selects which pin applies, but a
 		// roles-only policy (no `default`) leaves an unlisted role with no pin at all, so a caller
@@ -837,13 +895,10 @@ export class WorkerDelegationController {
 		}
 		const adaptive = pinnedContract
 			? { ok: true as const, shipment: baseShipment! }
-			: resolveWorkerAuthority({
+			: this.resolveWorkerAuthority({
 					authority,
 					...(baseShipment ? { base: baseShipment } : {}),
 					...(modelPin ? { modelPin: modelPin.binding } : {}),
-					...(this.deps.getModel() ? { foregroundModel: this.deps.getModel() } : {}),
-					modelRegistry: this.deps.getModelRegistry(),
-					isModelExhausted: (model) => this.deps.isModelExhausted(model),
 				});
 		if (!adaptive.ok) {
 			return {
@@ -860,7 +915,10 @@ export class WorkerDelegationController {
 			if (!narrowed.ok) return narrowed;
 			shipment = narrowed.shipment;
 		}
-		if (parentAgent && this.hasExactRecursiveCycle(parentAgent.agentId, instructions, shipment.profile.profileId)) {
+		if (
+			parentAgent &&
+			this.hasExactRecoveredLineageCycle(parentAgent.agentId, instructions, shipment.profile.profileId)
+		) {
 			return { ok: false, skipReason: "recursive_delegation_cycle" };
 		}
 		if (request.verificationOfTaskId && shipment.profile.role !== "verifier") {
@@ -902,12 +960,37 @@ export class WorkerDelegationController {
 				: shipment.resourcePointers.map((pointer) => pointer.id),
 		);
 		if (!selectedResources.ok) return { ok: false, skipReason: selectedResources.reason };
-		const currentExecutionPlan = this.buildWorkerExecutionPlan(
-			shipment.profile,
-			settings,
-			adaptive.requestedReadPaths,
-			adaptive.requestedWritePaths,
-		);
+		const currentExecutionPlan = this.buildWorkerExecutionPlan(shipment.profile, settings);
+		const explicitlySelectedProfile =
+			!pinnedContract &&
+			(request.profileId !== undefined || (!parentContract && settings.orchestrationProfile !== undefined));
+		if (explicitlySelectedProfile) {
+			const activeAdapterNames = new Set(this.workerToolAdapterNames());
+			const unavailableAdapters = mapToolNamesForPlatform(shipment.profile.toolNames).filter(
+				(toolName) => WORKER_TOOL_ADAPTER_NAMES.has(toolName) && !activeAdapterNames.has(toolName),
+			);
+			if (unavailableAdapters.length > 0) {
+				return {
+					ok: false,
+					skipReason: `orchestration_tool_unavailable:${[...new Set(unavailableAdapters)].join(",")}`,
+				};
+			}
+		}
+		if (!pinnedContract && authority?.toolNames) {
+			const materializedTools = new Set(currentExecutionPlan.toolManifests.map((manifest) => manifest.toolName));
+			const missingTools = mapToolNamesForPlatform(authority.toolNames).filter(
+				(toolName) => !materializedTools.has(toolName),
+			);
+			if (missingTools.length > 0) {
+				return { ok: false, skipReason: `orchestration_tool_unavailable:${[...new Set(missingTools)].join(",")}` };
+			}
+		}
+		if (!pinnedContract) {
+			shipment = bindCompiledToolSurface(
+				shipment,
+				currentExecutionPlan.toolManifests.map((manifest) => manifest.toolName),
+			);
+		}
 		const inheritedAuthority = pinnedContract?.worker.authority ?? parentContract?.worker.authority;
 		const executionPlan = inheritedAuthority
 			? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
@@ -915,6 +998,15 @@ export class WorkerDelegationController {
 		const verifierExecutionPlan = verifierShipment
 			? this.buildWorkerExecutionPlan(verifierShipment.profile, settings)
 			: undefined;
+		if (!pinnedContract && verifierShipment && verifierExecutionPlan) {
+			verifierShipment = bindCompiledToolSurface(
+				verifierShipment,
+				verifierExecutionPlan.toolManifests.map((manifest) => manifest.toolName),
+			);
+		}
+		if (verifierShipment) {
+			shipment = bindCompiledVerifierIdentity(shipment, verifierShipment.profile.profileId);
+		}
 		const inheritedVerifierAuthority = parentContract?.verifier?.authority ?? parentContract?.worker.authority;
 		const boundedVerifierExecutionPlan =
 			verifierExecutionPlan && inheritedVerifierAuthority
@@ -1410,6 +1502,9 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
 	): WorkerAdmission {
+		if (request.parentAgentId && !pinnedContract) {
+			return { ok: false, skipReason: "worker_leaf_delegation_forbidden" };
+		}
 		const goalDependencySkipReason = this.workerGoalDependencySkipReason(request);
 		if (goalDependencySkipReason) return { ok: false, skipReason: goalDependencySkipReason };
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request);
@@ -1452,8 +1547,6 @@ export class WorkerDelegationController {
 	private buildWorkerExecutionPlan(
 		profile: OrchestrationProfile,
 		settings: ResolvedWorkerDelegationSettings,
-		requestedReadPaths?: readonly string[],
-		requestedWritePaths?: readonly string[],
 	): WorkerExecutionPlan {
 		return buildWorkerExecutionPlan({
 			profile,
@@ -1462,9 +1555,20 @@ export class WorkerDelegationController {
 			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 			foregroundMaxCostUsd: this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
 			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
-			...(requestedReadPaths ? { requestedReadPaths } : {}),
-			...(requestedWritePaths ? { requestedWritePaths } : {}),
+			workerToolAdapterNames: this.workerToolAdapterNames(),
 		});
+	}
+
+	private workerToolAdapterNames(): readonly string[] {
+		const active = new Set(
+			this.deps.getForegroundToolNames?.() ?? this.deps.getCapabilityEnvelope()?.allowedTools ?? [],
+		);
+		const names: string[] = [];
+		if (active.has("artifact_retrieve") && this.deps.getArtifactStore) names.push("artifact_retrieve");
+		if (active.has("skill") && this.deps.getSkillReadBroker) names.push("skill");
+		if (active.has("skill_audit") && this.deps.getSkillAuditSource) names.push("skill_audit");
+		if (active.has("run_toolkit_script")) names.push("run_toolkit_script");
+		return names;
 	}
 
 	/** One durable preparation path for queued, immediate, and recovered execution. */
@@ -1652,7 +1756,7 @@ export class WorkerDelegationController {
 			agentDir: this.deps.getAgentDir(),
 			parentSessionId: this.deps.getSessionId(),
 			logicalAgentId: agentId,
-			cwd: this.deps.getCwd(),
+			cwd: prepared.executionPlan.cwd,
 			orchestrationProfileId: immutableWorker.profile.profileId,
 			modelRef: `${immutableWorker.modelBinding.provider}/${immutableWorker.modelBinding.modelId}`,
 			resourceProfileNames: immutableWorker.profile.resourceProfileNames,
@@ -1905,21 +2009,6 @@ export class WorkerDelegationController {
 		onStarted?.(startedRecord);
 		const maxUsd = grant.budget.maxCostUsd;
 		const executionPolicy = orchestrationProfile.executionPolicy;
-		const recursiveDelegateTool = wrapToolDefinition(
-			createDelegateToolDefinition({
-				startWorkerDelegation: (childRequest) => this.start({ ...childRequest, parentAgentId: agentId }),
-				runWorkerDelegation: (childRequest) => this.runOnce({ ...childRequest, parentAgentId: agentId }),
-				orchestrationProfiles: this.getProfileCatalog(),
-				workerModelPinPolicy: this.deps.getSettingsManager().getWorkerModelPinPolicy(),
-				workerAgentControl: this.agentControl,
-				caller: { kind: "worker", agentId },
-				warn: (message) => this.safeWarn(message),
-				resolveMessageReplayScope: () => ({
-					sessionId: this.deps.getSessionId(),
-					branchId: durableHandle.attemptId,
-				}),
-			}),
-		);
 		const agentBinding = lifecycle.getAgent(agentId);
 		if (!agentBinding) {
 			this.cancelAndPublish(lifecycle, prepared.record.laneId, "orchestration_agent_missing");
@@ -1939,9 +2028,40 @@ export class WorkerDelegationController {
 		const shellOutputDirectory = shellGranted
 			? getProcessWorkRun(this.deps.getAgentDir(), "outputs", "tool-streams").path
 			: undefined;
+		const adapterSources: WorkerToolAdapterSources = {};
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "artifact_retrieve")) {
+			const artifactStore = this.deps.getArtifactStore?.();
+			if (artifactStore) adapterSources.artifactStore = artifactStore;
+		}
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "skill")) {
+			const broker = this.deps.getSkillReadBroker?.();
+			if (broker) adapterSources.skill = broker;
+		}
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "skill_audit")) {
+			const source = this.deps.getSkillAuditSource?.();
+			if (source) adapterSources.skillAudit = source;
+		}
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "run_toolkit_script")) {
+			adapterSources.runToolkitScript = {
+				getScripts: () => this.deps.getSettingsManager().getToolkitScripts(),
+				execute: (script, scriptArgs, signal) =>
+					executeToolkitScript({
+						script,
+						scriptArgs,
+						cwd: executionPlan.cwd,
+						...(grant.budget.maxWallClockMs && grant.budget.maxWallClockMs > 0
+							? { timeoutMs: grant.budget.maxWallClockMs }
+							: {}),
+						signal,
+					}),
+			};
+		}
+		const workerToolAdapters: WorkerToolAdapterRegistry | undefined =
+			Object.keys(adapterSources).length > 0 ? createWorkerToolAdapterRegistry(adapterSources) : undefined;
 		if (shellSessionKey) this.shellSessionKeys.add(shellSessionKey);
 		const toolSurface = createLaneToolSurface({
-			cwd: this.deps.getCwd(),
+			cwd: executionPlan.cwd,
+			deniedPaths: executionPlan.deniedPaths,
 			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,
 			writeEnabled: executionPlan.writeEnabled,
 			writePaths: executionPlan.writePaths,
@@ -1951,7 +2071,7 @@ export class WorkerDelegationController {
 			...(shellOutputDirectory ? { shellOutputDirectory } : {}),
 			grant,
 			toolManifests: executionPlan.toolManifests,
-			additionalTools: [recursiveDelegateTool],
+			...(workerToolAdapters ? { workerToolAdapters } : {}),
 			initialUsage,
 			sharedBudget,
 		});
@@ -2046,7 +2166,7 @@ export class WorkerDelegationController {
 			durableHandle,
 			parentSessionId: this.deps.getSessionId(),
 			agentDir: this.deps.getAgentDir(),
-			cwd: this.deps.getCwd(),
+			cwd: executionPlan.cwd,
 			model,
 			thinkingLevel: modelBinding.thinkingLevel,
 			laneCapability,
@@ -2068,7 +2188,7 @@ export class WorkerDelegationController {
 							actions,
 							gateway: toolSurface.gateway!,
 							toolManifests: executionPlan.toolManifests,
-							cwd: this.deps.getCwd(),
+							cwd: executionPlan.cwd,
 							...(actionJournal ? { actionJournal } : {}),
 						})
 				: undefined,
@@ -2081,6 +2201,7 @@ export class WorkerDelegationController {
 				getUsage: executor.ledger.getUsage,
 				request: workerRequest,
 				handle: durableHandle,
+				cwd: executionPlan.cwd,
 			});
 			leaseHeartbeat.start();
 			const executionResult = await executor.run();
@@ -2159,7 +2280,7 @@ export class WorkerDelegationController {
 				accepted: outcome.accepted,
 				costUsd: finalUsage.costUsd,
 				reasonCode: outcome.reasonCode,
-				cwd: this.deps.getCwd(),
+				cwd: executionPlan.cwd,
 				inputTokens: finalUsage.inputTokens,
 				outputTokens: finalUsage.outputTokens,
 				totalTokens: reportedUsage.totalTokens,
@@ -2255,7 +2376,7 @@ export class WorkerDelegationController {
 						claim: failureClaim,
 						accepted: false,
 						costUsd: failureUsage.costUsd,
-						cwd: this.deps.getCwd(),
+						cwd: executionPlan.cwd,
 						inputTokens: failureUsage.inputTokens,
 						outputTokens: failureUsage.outputTokens,
 						totalTokens: reportedUsage.totalTokens,

@@ -81,7 +81,7 @@ describe("worker controller dependency dispatch", () => {
 	it("revalidates dynamic verifier queue demand when a write reservation forces an immediate worker to queue", async () => {
 		const profiles = verifiedWriteWorkerProfiles();
 		const harness = await createHarness({
-			settings: { workerDelegation: { enabled: true, maxConcurrent: 3, writeEnabled: true, writePaths: ["src"] } },
+			settings: { workerDelegation: { enabled: true, maxConcurrent: 3, writeEnabled: true } },
 			workerOrchestrationProfile: profiles.implementation,
 			additionalOrchestrationProfiles: [profiles.verifier],
 		});
@@ -100,7 +100,11 @@ describe("worker controller dependency dispatch", () => {
 				},
 			]);
 			const controls = controlsFor(harness.session);
-			const first = controls.startWorkerDelegation({ instructions: "Hold the first scoped write reservation." });
+			const workspace = `${harness.tempDir}/src`;
+			const first = controls.startWorkerDelegation({
+				instructions: "Hold the first scoped write reservation.",
+				authority: { path: workspace },
+			});
 			if (!first.started) throw new Error(first.skipReason);
 			await vi.waitFor(() => expect(providerCalls).toBe(1));
 
@@ -113,7 +117,12 @@ describe("worker controller dependency dispatch", () => {
 
 			const enqueue = vi.spyOn(scheduler, "enqueue");
 			const rejectedLaneId = controls._getWorkerLifecycle().getNextAvailableLaneIdCandidate();
-			expect(controls.startWorkerDelegation({ instructions: "Contend for the same scoped write." })).toEqual({
+			expect(
+				controls.startWorkerDelegation({
+					instructions: "Contend for the same scoped write.",
+					authority: { path: workspace },
+				}),
+			).toEqual({
 				started: false,
 				skipReason: "worker_not_started",
 			});

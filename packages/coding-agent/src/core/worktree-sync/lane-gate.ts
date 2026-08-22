@@ -4,9 +4,10 @@
  * write / bash) with {@link WorktreeLaneGate.checkMutation}; a lane that the active policy marks
  * sync_required fails closed with the exact recovery step until it rebases main.
  *
- * Honesty boundary (unchanged from the tmux trust model): this is HARD for pi children -- the
- * wrapper lives under the tool layer, not in the prompt -- and cooperative-only for foreign
- * CLIs, whose backstop is the land CAS (G3): stale work simply cannot land.
+ * Honesty boundary: edit/write checks are structural for Pi children because the wrapper lives
+ * under the tool layer. Bash remains a deliberate host-trust boundary; this gate only rejects
+ * integration-sensitive Git forms and never claims to sandbox arbitrary process code. Foreign
+ * CLIs stay cooperative-only, with the land CAS (G3) as their backstop.
  *
  * Determinism: the gate re-derives from git only when the epoch file actually changed (mtime
  * fence) or while blocked; verdicts in between are cached. No polling, no timers.
@@ -186,11 +187,6 @@ export interface WorktreeLaneGateConfig {
 	laneKey: string;
 	engineDeps: () => WorktreeSyncEngineDeps;
 	policy: () => WorktreeSyncPolicy;
-	/** Worker launches use a hard shell envelope: only lane-safe Git/WIP commands and the owner-configured
-	 * exact gate command may pass through bash. Interactive lane sessions retain the legacy cooperative
-	 * command surface while the typed worktree_sync actions are used for hard worker mutations. */
-	hardShell?: boolean;
-	trustedGateCommand?: () => string | undefined;
 }
 
 export type LaneMutationCheck = { allowed: true } | { allowed: false; code: string; message: string };
@@ -213,21 +209,6 @@ async function changedPaths(
 			.map((path) => path.trim())
 			.filter(Boolean),
 	);
-}
-
-function hardShellCommandAllowed(command: string, mainBranch: string, trustedGateCommand?: string): boolean {
-	const trimmed = command.trim();
-	if (trustedGateCommand && trimmed === trustedGateCommand.trim()) return true;
-	if (!/^git(?:\s|$)/u.test(trimmed)) return false;
-	const verdict = classifyLaneBashCommand(trimmed, mainBranch);
-	if (verdict.verdict === "main_mutation_refused") return false;
-	const tokens = trimmed.split(/\s+/u);
-	const subcommand = tokens[1] ?? "";
-	if (!SYNC_SAFE_GIT_SUBCOMMANDS.has(subcommand) && subcommand !== "commit") return false;
-	// Git path operands must not escape the lane checkout. The typed worktree
-	// actions are the authoritative route for path-sensitive add/diff operations;
-	// this final check prevents the common absolute/parent escape in the shell floor.
-	return !tokens.slice(2).some((token) => token.startsWith("/") || token.startsWith("..") || token.includes("/../"));
 }
 
 /**
@@ -268,28 +249,10 @@ export class WorktreeLaneGate {
 	async checkMutation(toolName: string, bashCommand?: string, targetPath?: string): Promise<LaneMutationCheck> {
 		const ctx = await this.resolveContext();
 		// No repo context (deleted repo, engine failure): fail OPEN for plain tools -- the land
-		// CAS still holds -- but the G10 bash rules below never depend on repo state.
+		// CAS still holds -- but the integration-sensitive Git rules below never depend on repo state.
 		const mainBranch = ctx?.mainBranch ?? "main";
-		if (this.config.hardShell && !ctx) {
-			return {
-				allowed: false,
-				code: "lane_state_unavailable",
-				message: "worktree-sync: lane state is unavailable; hard worker mutations fail closed",
-			};
-		}
 
 		if (toolName === "bash" && bashCommand !== undefined) {
-			if (
-				this.config.hardShell &&
-				!hardShellCommandAllowed(bashCommand, mainBranch, this.config.trustedGateCommand?.())
-			) {
-				return {
-					allowed: false,
-					code: "main_mutation_refused",
-					message:
-						"worktree-sync: unrestricted bash is unavailable in a hard worker lane; use typed worktree_sync actions",
-				};
-			}
 			const verdict = classifyLaneBashCommand(bashCommand, mainBranch);
 			if (verdict.verdict === "main_mutation_refused") {
 				return { allowed: false, code: "main_mutation_refused", message: `worktree-sync: ${verdict.reason}` };
@@ -319,27 +282,12 @@ export class WorktreeLaneGate {
 		const deps = this.config.engineDeps();
 		const lane = await readLane(ctx.paths, this.config.laneKey);
 		if (!lane || lane.status !== "active") {
-			if (this.config.hardShell) {
-				return {
-					allowed: false,
-					code: "lane_state_unavailable",
-					message:
-						"worktree-sync: hard worker lane registration is missing or inactive; reconcile before mutating",
-				};
-			}
 			this._cachedAllowed = true;
 			return { allowed: true };
 		}
 		// Re-derive main tip: the cached ctx pins the sha from session start.
 		const fresh = await resolveRepoContext(deps);
 		if ("code" in fresh) {
-			if (this.config.hardShell) {
-				return {
-					allowed: false,
-					code: "lane_state_unavailable",
-					message: "worktree-sync: Git context is unavailable; hard worker mutation refused",
-				};
-			}
 			this._cachedAllowed = true;
 			return { allowed: true };
 		}

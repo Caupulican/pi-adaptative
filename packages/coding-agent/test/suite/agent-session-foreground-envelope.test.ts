@@ -50,10 +50,24 @@ describe("AgentSession foreground envelope (G7, observe-only)", () => {
 		expect(envelope.maxEstimatedUsd).toBeUndefined();
 	});
 
-	it("projects an explicitly configured per-turn cost ceiling", async () => {
+	it("does not project a legacy threshold without explicit opt-in", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "edit"],
 			settings: { costGuard: { maxTurnUsd: 1.25 } },
+		});
+		harnesses.push(harness);
+
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("do a thing");
+
+		expect(harness.settingsManager.getCostGuardSettings()).toMatchObject({ enabled: false, maxTurnUsd: 1.25 });
+		expect(harness.session.getForegroundEnvelope()?.maxEstimatedUsd).toBeUndefined();
+	});
+
+	it("projects an explicitly enabled per-turn cost ceiling", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["read", "edit"],
+			settings: { costGuard: { enabled: true, maxTurnUsd: 1.25 } },
 		});
 		harnesses.push(harness);
 

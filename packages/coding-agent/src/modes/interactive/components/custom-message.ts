@@ -230,6 +230,8 @@ function readSummaryContract(
 }
 
 function formatBackgroundActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
+	const supervisionSummary = formatSupervisionActivitySummary(message);
+	if (supervisionSummary) return supervisionSummary;
 	const kind =
 		message.customType === "background-worker-completion"
 			? "agent"
@@ -261,4 +263,19 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
 		status:
 			summary.failedCount > 0 ? "error" : summary.attentionCount + summary.canceledCount > 0 ? "warning" : "success",
 	};
+}
+
+/**
+ * Supervision is durable model input, but its raw lifecycle prose is not a second TUI renderer.
+ * Keep it in the session/custom-message stream for the model and transcript overlay while the
+ * foreground history uses the same one-line activity projection as background completions.
+ */
+function formatSupervisionActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
+	if (message.customType === "worktree-sync-notice") {
+		return { text: "Worktree sync activity", status: "warning" };
+	}
+	if (message.customType === "process-matrix-notice") {
+		return { text: "Process supervision activity", status: "warning" };
+	}
+	return undefined;
 }

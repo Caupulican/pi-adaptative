@@ -1,6 +1,12 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { SkillLoadResult, SkillSearchResult, SkillVaultController, SkillVaultStatus } from "../skill-vault.ts";
+import type {
+	SkillLoadResult,
+	SkillReadResult,
+	SkillSearchResult,
+	SkillVaultController,
+	SkillVaultStatus,
+} from "../skill-vault.ts";
 
 const skillSchema = Type.Object(
 	{
@@ -21,6 +27,72 @@ export type SkillToolDetails =
 	| { action: "load"; result: SkillLoadResult }
 	| { action: "unload"; result: { ok: true; unloaded: string[] } }
 	| { action: "status"; result: SkillVaultStatus };
+
+export interface ReadOnlySkillBroker {
+	search(query: string): SkillSearchResult;
+	read(name: string): SkillReadResult;
+}
+
+const readOnlySkillSchema = Type.Object(
+	{
+		action: Type.Union([Type.Literal("search"), Type.Literal("read")], { description: "search | read" }),
+		query: Type.Optional(Type.String({ description: "search query" })),
+		name: Type.Optional(Type.String({ description: "exact skill name" })),
+	},
+	{ additionalProperties: false },
+);
+
+function readText(result: Extract<SkillReadResult, { ok: true }>): string {
+	return `skill: ${result.name}\n${result.description}\n\n${result.body}`;
+}
+
+/** Worker-only read/search surface; it cannot load, unload, pin, or inspect vault slots. */
+export function createReadOnlySkillToolDefinition(
+	broker: ReadOnlySkillBroker,
+): ToolDefinition<typeof readOnlySkillSchema> {
+	return {
+		name: "skill",
+		label: "Skill (read-only)",
+		description:
+			"Search and read eligible skill guidance through a bounded host broker. This worker surface cannot mutate the skill vault.",
+		promptSnippet: "Search/read skill guidance.",
+		parameters: readOnlySkillSchema,
+		async execute(_toolCallId, input) {
+			if (input.action === "search") {
+				if (!input.query?.trim()) {
+					return {
+						content: [{ type: "text" as const, text: "skill search requires query" }],
+						details: { action: "search", result: { candidates: [] } },
+						isError: true,
+					};
+				}
+				const result = broker.search(input.query);
+				return {
+					content: [{ type: "text" as const, text: searchText(result) }],
+					details: { action: "search", result },
+				};
+			}
+			if (!input.name?.trim()) {
+				return {
+					content: [{ type: "text" as const, text: "skill read requires exact name" }],
+					details: {
+						action: "read",
+						result: { ok: false, reason: "not_found", message: "Skill name is required." },
+					},
+					isError: true,
+				};
+			}
+			const result = broker.read(input.name.trim());
+			return {
+				content: [
+					{ type: "text" as const, text: result.ok ? readText(result) : `skill read failed: ${result.message}` },
+				],
+				details: { action: "read", result },
+				...(result.ok ? {} : { isError: true }),
+			};
+		},
+	};
+}
 
 function searchText(result: SkillSearchResult): string {
 	if (result.candidates.length === 0) return "skill search: no match";

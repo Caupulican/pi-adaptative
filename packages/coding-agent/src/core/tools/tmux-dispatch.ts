@@ -35,7 +35,7 @@ export interface TmuxDispatchDeps {
 	 * a creation refusal aborts cleanly before any tmux/pane side effect ever runs -- never a
 	 * half-made lane, never a fabricated worktree. On success the dispatched agent's `cwd` is the new
 	 * lane worktree and it carries `worktreeLane` (threaded to the tmux extension's launch profile --
-	 * see `dispatch-grant.ts`'s `buildLaunchProfileFlags`). Absent dep -> existing byte-identical
+	 * see `launch-profile.ts`'s `buildLaunchProfileFlags`). Absent dep -> existing byte-identical
 	 * `params.agents` (no `cwd`/`worktreeLane`), exactly as before this field existed.
 	 */
 	createLaneWorktree?: (args: {
@@ -53,21 +53,6 @@ export interface TmuxDispatchDeps {
 	evaluateWorkerLaneRefusal?: () => LaneWorkerRefusal | undefined;
 }
 
-/**
- * Classify a `fire_task` launch failure into an honest, stable skip reason. For an UNATTENDED
- * caller (`ctx.hasUI === false`, always true from the goal/idle path) `authorizeLaunch`'s ONLY
- * refusal throw is the no-standing-grant error (`tmux-agent-manager/index.ts`'s `authorizeLaunch`,
- * message containing the stable phrase "no standing grant") -- matched here by substring since the
- * extension throws a plain `Error`, not a tagged error code (documented follow-up hardening, not
- * blocking). Every other thrown error (a bad jobId, a live session-name collision,
- * an environment failure) maps onto the generic `"tmux_dispatch_failed"` -- still surfaced through
- * the existing `dispatchSkipReason` contract, never a crash and never a silently-ignored failure.
- */
-export function classifyDispatchError(error: unknown): string {
-	const message = error instanceof Error ? error.message : String(error);
-	return message.includes("no standing grant") ? "no_standing_grant" : "tmux_dispatch_failed";
-}
-
 interface FireTaskResultDetails {
 	job?: {
 		id?: string;
@@ -83,10 +68,9 @@ interface TmuxGuardResultDetails {
  * Structurally dispatch ONE persistent tmux worker agent for a single goal requirement, by
  * invoking the SAME `tmux_agent_manager` `fire_task` tool call the model itself would make. Core
  * -- not model discretion -- decides WHEN this fires (the goal tool's `dispatchTarget:"tmux"`
- * routing gates the call); the launch itself always still goes through the extension's own
- * grant-gated `authorizeLaunch`, so an ungranted unattended call is honestly refused here (never a
- * silent launch, never a fabricated laneId) and the refusal is surfaced through the existing
- * `dispatchSkipReason` contract on the goal tool's response.
+ * routing gates the call). The extension derives an immutable child profile from the parent's
+ * admitted worker surface and reserves it durably before launch; no separate approval handshake is
+ * involved. Any launch failure is surfaced through the existing `dispatchSkipReason` contract.
  */
 export async function dispatchTmuxWorker(
 	deps: TmuxDispatchDeps,
@@ -154,8 +138,8 @@ export async function dispatchTmuxWorker(
 	let result: Awaited<ReturnType<ToolDefinition["execute"]>>;
 	try {
 		result = await toolDef.execute(toolCallId, params, ctx.signal, undefined, ctx);
-	} catch (error) {
-		return { skipReason: classifyDispatchError(error) };
+	} catch {
+		return { skipReason: "tmux_dispatch_failed" };
 	}
 
 	// Correlate: the extension reports its dispatch under its OWN caller-chosen laneId

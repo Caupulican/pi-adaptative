@@ -7,7 +7,7 @@ export function createTestManagedLaneDispatch(overrides: Partial<ManagedLaneDisp
 		profileId: "test-managed-worker",
 		provider: "test",
 		authorizationId: "test-managed-authorization",
-		authorizationKind: "standing-grant",
+		authorizationKind: "profile-derived",
 		allowedTools: ["read"],
 		writePaths: [],
 		leaseTtlMs: 60_000,

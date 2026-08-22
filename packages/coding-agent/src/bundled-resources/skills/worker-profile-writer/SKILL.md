@@ -9,7 +9,7 @@ description: "Use only when you need a reusable session-scoped worker preset (pr
 
 Use this skill only to create a session-scoped task preset. Do not load it to start workers.
 
-Native `delegate start` does not need an owner-authored base. Omit `profileId` and set `authority` (role `explorer` or `implementer`, model/reasoning, and tools). Empty `profile_inspect` bases are not a start block. Never add a budget: host settings and owner-authored profiles own ceilings.
+Native `delegate start` does not need an owner-authored base. Omit `profileId` to inherit the foreground model, live reasoning level, compatible tools, and machine scope. Use only the optional top-level `model`, `thinkingLevel`, `path`, and `toolNames` fields to narrow or focus that inheritance. Empty `profile_inspect` bases are not a start block. Never add an authority object or budget: the host compiles grants and owns ceilings.
 
 Freedom Dial: high freedom for describing and composing the bounded task; low freedom for authority, persistence, model availability, and budget checks. Pi's core engineering and evidence rules remain mandatory.
 
@@ -22,13 +22,13 @@ Create the smallest immutable profile that can complete one explicit task, then 
 ### 1. Establish the contract
 
 1. State the worker's single outcome, required evidence, intended files, and completion boundary.
-2. Call `delegate` with `action: "profile_inspect"` only when you are about to `profile_create` and the reusable bases or configured model/thinking combinations are unknown.
-3. If inspect lists no owner-authored explorer/implementer base, do not ask the user to authorize one just to start work. Start with `delegate start` and `authority`. Ask the user only if they explicitly want a durable reusable base for future `profile_create`.
-4. When creating a preset, choose an owner-authored base whose role and authority already cover the task. Never derive from another generated task profile.
+2. Call `delegate` with `action: "profile_inspect"` only when you are about to `profile_create` and reusable owner bases or configured model/thinking combinations are unknown. Inspection is optional.
+3. If no owner-authored base is selected, `profile_create` derives its base directly from the foreground inheritance. Do not ask the user to authorize a base just to start work or create a preset.
+4. When an owner-authored base is useful, choose one whose authority already covers the task. Never derive from another generated task profile.
 5. Prefer the fastest model with demonstrated ability to satisfy the task contract. Configuration and authentication prove availability, not fitness; use existing fitness evidence or `model_fitness` when the risk justifies its token cost.
-6. Request only the tools and resource profiles the task needs. Omitted fields inherit the base; supplied fields must be exact subsets. The generated profile inherits the base budget unchanged because `profile_create` has no budget field.
+6. Request only the model, thinking level, one workspace path, and exact tool subset the task needs. Omitted fields inherit the base. Resources and budget always remain host-owned and inherited.
 
-Human edge: if `profile_create` is required and the task needs an unlisted base, unavailable credentials, broader tools/resources, or a different budget, stop and ask the user to authorize a durable owner-profile change. Do not route around a rejection. Do not treat that as a ban on `delegate start`.
+Human edge: if an explicitly requested reusable preset needs unavailable credentials, tools outside its inherited surface, or a different budget, report the exact rejection and ask for an owner-profile change. Do not route around a rejection. Ordinary inherited `delegate start` remains available unless the host reports a real admission block.
 
 ### 2. Execute and verify
 
@@ -43,15 +43,15 @@ Human edge: if `profile_create` is required and the task needs an unlisted base,
 - Blocking `delegate start` because `profile_inspect` listed no bases.
 - Writing one-off profile JSON, settings, reports, or dependencies into the repository.
 - Selecting a model or thinking level that `inspect` did not report as available.
-- Giving a worker extra tools "just in case" or attempting to author a per-dispatch budget.
+- Giving a worker extra tools "just in case", authoring resource/capability arrays, or attempting a per-dispatch budget.
 - Inventing, guessing, editing, or reusing a generated profile ID across sessions or branches.
 - Treating a fast model as fit without task-shaped evidence.
 
 ## Examples
 
-Positive: inspect, derive from a read/write implementer, select an authenticated fast model at `low`, narrow tools to `read`, `grep`, and `edit`, inherit the base budget unchanged, then delegate with the returned `task-...` ID.
+Positive: omit inspect and base, derive from foreground inheritance, select an authenticated fast model at `low`, narrow tools to `read`, `grep`, and `edit`, inherit host resources and budget unchanged, then delegate with the returned `task-...` ID.
 
-Positive: inspect returns no bases; start two workers with `authority.role` `explorer` and `implementer` and no `profileId`.
+Positive: start two workers with self-contained instructions and no `profileId`; omit overrides when both should inherit the foreground model, reasoning, tools, and machine scope.
 
 Negative: a base exposes only `read` and `grep`, but the task requires `edit`. Do not request `edit` from `profile_create`; select an authorized write-capable base or ask the user for an owner-profile change. Starting without a profile remains allowed.
 
@@ -62,9 +62,9 @@ Negative: telling the user workers are blocked until they authorize explorer/imp
 - Ordinary start omitted `profileId` unless a returned `task-...` ID is in hand.
 - Empty inspect bases did not stop start.
 - The task has one bounded outcome and explicit acceptance evidence.
-- The base, if used, is owner-authored and authorized for this orchestrator.
+- The base is foreground inheritance or an owner-authored profile authorized for this orchestrator.
 - Model and thinking level were reported available or otherwise resolved by the harness.
-- Tools/resources are subsets and the owner-authored base budget is unchanged.
+- Tools are an exact subset; resources and budget remain inherited and host-owned.
 - The returned ID is passed unchanged; no project/user profile file was created.
 
 ## Known Gaps

@@ -653,6 +653,72 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 		).toHaveLength(1);
 	});
 
+	it("organizes one exact hot-memory item without touching neighboring facts", async () => {
+		const provider = new FileStoreProvider();
+		await provider.initialize("test-session", { agentDir, cwd: testDir, isChildSession: false });
+		const memoryTool = provider.getToolDefinitions()[0]!;
+		for (const content of ["Decision: use artifacts", "Unrelated fact"]) {
+			await memoryTool.execute(
+				`seed-${content}`,
+				{ action: "add", target: "memory", content },
+				undefined,
+				undefined,
+				{} as never,
+			);
+		}
+
+		const result = await provider.applyStructuredReflectionWrite({
+			kind: "okf_organize",
+			type: "Design Decision",
+			title: "Artifact output",
+			description: "Large output uses artifacts.",
+			text: "Store large output as artifacts.",
+			sourceText: "Decision: use artifacts",
+			evidenceRefs: ["transcript:exact-organization"],
+		});
+
+		expect(result).toEqual(expect.objectContaining({ applied: true, created: true, sourceRemoved: true }));
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("Unrelated fact\n");
+		expect(
+			readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+				String(entry).endsWith(".okf.md"),
+			),
+		).toHaveLength(1);
+	});
+
+	it("rejects OKF organization when sourceText is only a hot-memory substring", async () => {
+		const provider = new FileStoreProvider();
+		await provider.initialize("test-session", { agentDir, cwd: testDir, isChildSession: false });
+		const memoryTool = provider.getToolDefinitions()[0]!;
+		await memoryTool.execute(
+			"seed-hot-memory",
+			{ action: "add", target: "memory", content: "Decision: use artifacts" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		const result = await provider.applyStructuredReflectionWrite({
+			kind: "okf_organize",
+			type: "Design Decision",
+			title: "Artifact output",
+			description: "Large output uses artifacts.",
+			text: "Store large output as artifacts.",
+			sourceText: "Decision",
+			evidenceRefs: ["transcript:substring-guard"],
+		});
+
+		expect(result).toEqual(expect.objectContaining({ applied: false, created: false, sourceRemoved: false }));
+		expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("Decision: use artifacts\n");
+		expect(
+			existsSync(join(agentDir, "okf-memory"))
+				? readdirSync(join(agentDir, "okf-memory"), { recursive: true }).filter((entry) =>
+						String(entry).endsWith(".okf.md"),
+					)
+				: [],
+		).toHaveLength(0);
+	});
+
 	it("should detect out-of-band drift, back up the file, and refuse to overwrite", async () => {
 		const provider = new FileStoreProvider();
 		const ctx: MemoryLifecycleContext = {

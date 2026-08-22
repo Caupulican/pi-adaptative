@@ -6,6 +6,8 @@ import { ENV_AGENT_DIR } from "../src/config.ts";
 import { configBackupsDir, directoryProfilesDir, managedMemoryStateFile, stateFile } from "../src/core/agent-paths.ts";
 import { migrateAgentDirLayout, pruneEmptySessionNamespaces, runMigrations } from "../src/migrations.ts";
 
+const originalAgentDir = process.env[ENV_AGENT_DIR];
+
 describe("migrateAgentDirLayout", () => {
 	const tempDirs: string[] = [];
 
@@ -201,7 +203,8 @@ describe("runMigrations wires migrateAgentDirLayout in before any store read", (
 		for (const dir of tempDirs.splice(0)) {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
-		delete process.env[ENV_AGENT_DIR];
+		if (originalAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+		else process.env[ENV_AGENT_DIR] = originalAgentDir;
 	});
 
 	it("relocates trust.json as part of the normal startup migration pass", () => {

@@ -440,7 +440,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}): Promise<ResearchLaneRunOutcome> {
 		return this._research.runOnce(request);
 	}
-	/** Start a durable recursive agent with inherited, preset, or model-selected authority. */
+	/** Start a durable leaf worker with inherited, preset, or model-selected authority. */
 	startWorkerDelegation(
 		request: WorkerDelegationRequest,
 	): { started: false; skipReason: string } | { started: true; record: LaneRecord } {

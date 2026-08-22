@@ -149,7 +149,7 @@ describe("delegate logical-agent controls", () => {
 		);
 	});
 
-	it("forwards birth-context selection only for a fresh logical worker", async () => {
+	it("rejects every fresh-profile override on persistent worker reuse before dispatch", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "fresh", type: "worker" as const, status: "queued" as const },
@@ -174,19 +174,38 @@ describe("delegate logical-agent controls", () => {
 			undefined,
 			context,
 		);
-		const reuse = await tool.execute(
-			"reuse-context",
-			{ action: "start", agentId: "worker-1", instructions: "continue", forkTurns: "none" },
-			undefined,
-			undefined,
-			context,
-		);
-
 		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "inherit one", forkTurns: "1" });
-		expect(reuse.details).toMatchObject({
-			started: true,
-			agentId: "worker-1",
-		});
+		type DelegateStartOverride = Pick<
+			DelegateToolInput,
+			"model" | "path" | "toolNames" | "profileId" | "forkTurns"
+		> & {
+			thinkingLevel?: NonNullable<WorkerDelegationRequest["authority"]>["thinkingLevel"];
+		};
+		const overrides = [
+			{ model: { provider: "openai", modelId: "gpt-5.6-luna" } },
+			{ thinkingLevel: "high" },
+			{ path: "/tmp/worker-focus" },
+			{ toolNames: ["read"] },
+			{ profileId: "profile-luna" },
+			{ forkTurns: "none" },
+		] satisfies readonly DelegateStartOverride[];
+		for (const [index, override] of overrides.entries()) {
+			const reuse = await tool.execute(
+				`reuse-override-${index}`,
+				{ action: "start", agentId: "worker-1", instructions: "continue", ...override },
+				undefined,
+				undefined,
+				context,
+			);
+			expect(reuse.details).toMatchObject({
+				started: false,
+				action: "start",
+				agentId: "worker-1",
+				skipReason: "worker_reuse_overrides_forbidden",
+			});
+			expect(delegateText(reuse)).toContain("start a fresh worker without agentId");
+		}
+		expect(startWorkerAgentTask).not.toHaveBeenCalled();
 	});
 
 	it("lets Codex-valid fork turn spellings reach the context policy parser while zero still rejects", async () => {
@@ -452,7 +471,7 @@ describe("delegate logical-agent controls", () => {
 		expect(JSON.stringify(tool.parameters)).not.toContain("oneOf");
 	});
 
-	it("forwards a model-authored capability specification instead of requiring a profile cage", async () => {
+	it("forwards only lightweight worker overrides and leaves grant compilation to the host", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "lane-free", type: "worker" as const, status: "queued" as const },
@@ -462,18 +481,17 @@ describe("delegate logical-agent controls", () => {
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
-		const authority = {
-			role: "operator" as const,
-			model: { provider: "faux", modelId: "selected" },
-			thinkingLevel: "high" as const,
-			capabilities: ["filesystem.read" as const, "process.exec" as const, "workflow.delegate" as const],
-			toolNames: ["read", "bash", "delegate"],
-			readPaths: ["."],
-		};
+		const model = { provider: "faux", modelId: "selected" };
 
 		await tool.execute(
 			"call",
-			{ instructions: "Use the strongest useful local tools.", authority },
+			{
+				instructions: "Use the strongest useful local tools.",
+				model,
+				thinkingLevel: "high",
+				path: "../sibling-project",
+				toolNames: ["read", "bash"],
+			},
 			undefined,
 			undefined,
 			context,
@@ -481,7 +499,12 @@ describe("delegate logical-agent controls", () => {
 
 		expect(startWorkerDelegation).toHaveBeenCalledWith({
 			instructions: "Use the strongest useful local tools.",
-			authority,
+			authority: {
+				model,
+				thinkingLevel: "high",
+				path: "../sibling-project",
+				toolNames: ["read", "bash"],
+			},
 		});
 	});
 
@@ -499,7 +522,7 @@ describe("delegate logical-agent controls", () => {
 		const guidelines = tool.promptGuidelines ?? [];
 		expect(guidelines.every((guideline) => guideline.length <= 140)).toBe(true);
 		expect(guidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_200);
-		expect(guidelines.join("\n")).toContain("Owner profiles: 40");
+		expect(guidelines.join("\n")).toContain("Worker profiles: 40");
 		expect(guidelines.join("\n")).toContain("39 omitted");
 	});
 
@@ -1277,7 +1300,7 @@ describe("delegate wait and status", () => {
 		expect(details.lanes?.length).toBeLessThanOrEqual(20);
 	});
 
-	it("forwards bounded recursive action start for an admitted worker", async () => {
+	it("rejects a direct worker start even when a caller bypasses the leaf-only schema", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "nested-lane", type: "worker" as const, status: "queued" as const },
@@ -1295,9 +1318,12 @@ describe("delegate wait and status", () => {
 			undefined,
 			context,
 		);
-		expect(startWorkerDelegation).toHaveBeenCalledOnce();
-		expect(startWorkerDelegation).toHaveBeenCalledWith({ instructions: "Nested delegation" });
-		expect(result.details).toMatchObject({ started: true, agentId: "nested-lane", status: "queued" });
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
+		expect(result.details).toMatchObject({
+			started: false,
+			action: "start",
+			skipReason: "action_unavailable",
+		});
 	});
 });
 
@@ -1581,7 +1607,7 @@ describe("delegate persistent worker reuse", () => {
 		expect(unknownText).toContain("No worker started; nothing was dropped");
 		expect(unknownText).toContain("Retry once now without agentId");
 		expect(unknownText).toContain("keep instructions unchanged");
-		expect(unknownText).toContain("authority/profileId only on that fresh start");
+		expect(unknownText).toContain("overrides/profileId only on that fresh start");
 		expect(unknownText).toContain("use an exact returned agentId; never invent one");
 		expect(reuseCalls).toBe(2);
 		expect(startWorkerDelegation).not.toHaveBeenCalled();
@@ -1630,19 +1656,18 @@ describe("delegate persistent worker reuse", () => {
 		expect(startWorkerAgentTask).toHaveBeenCalledTimes(2);
 	});
 
-	it("auto-sanitizes redundant authority/profileId parameters on delegate start with agentId reuse", async () => {
+	it("rejects a bypassed authority object before persistent-agent reuse", async () => {
+		const startWorkerAgentTask = vi.fn(() => ({
+			started: true,
+			steering: false as const,
+			messageId: "msg",
+			record: { laneId: "lane", type: "worker" as const, status: "queued" as const },
+		}));
 		const tool = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
 			resolveMessageReplayScope: fixedReplayScope,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
-			workerAgentControl: workerAgentControl({
-				startWorkerAgentTask: () => ({
-					started: true,
-					steering: false,
-					messageId: "msg",
-					record: { laneId: "lane", type: "worker", status: "queued" },
-				}),
-			}),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
 		});
 		const result = await tool.execute(
 			"call",
@@ -1656,7 +1681,8 @@ describe("delegate persistent worker reuse", () => {
 			undefined,
 			context,
 		);
-		expect(result.details).toMatchObject({ started: true, agentId: "worker-1" });
+		expect(result.details).toMatchObject({ started: false, skipReason: "action_field_forbidden" });
+		expect(startWorkerAgentTask).not.toHaveBeenCalled();
 	});
 
 	it("rejects a bypassed model-authored budget before persistent-agent reuse", async () => {
@@ -1685,7 +1711,7 @@ describe("delegate persistent worker reuse", () => {
 			context,
 		);
 
-		expect(result.details).toMatchObject({ started: false, skipReason: "authority_budget_forbidden" });
+		expect(result.details).toMatchObject({ started: false, skipReason: "action_field_forbidden" });
 		expect(startWorkerAgentTask).not.toHaveBeenCalled();
 	});
 

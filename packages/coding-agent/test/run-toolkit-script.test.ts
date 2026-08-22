@@ -167,4 +167,22 @@ describe("executeToolkitScript (real spawn)", () => {
 		expect(failure.exitCode).toBe(3);
 		expect(failure.stderr).toContain("boom");
 	});
+
+	it("forwards cancellation through the bounded executor", async () => {
+		const controller = new AbortController();
+		let receivedSignal: AbortSignal | undefined;
+		const result = await executeToolkitScript({
+			script: { name: "cancel", description: "d", runner: "bash", path: "cancel.sh" },
+			scriptArgs: [],
+			cwd: tempDir,
+			signal: controller.signal,
+			executor: async (_command, _argv, _cwd, _timeoutMs, signal) => {
+				receivedSignal = signal;
+				return { exitCode: null, stdout: "", stderr: "aborted", durationMs: 1, timedOut: false };
+			},
+		});
+		expect(receivedSignal).toBe(controller.signal);
+		expect(result.exitCode).toBeNull();
+		expect(result.stderr).toBe("aborted");
+	});
 });

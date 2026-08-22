@@ -8,7 +8,7 @@ import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
-import { DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
+import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
 import {
 	DEFAULT_GOAL_AUTO_CONTINUE,
 	DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS,
@@ -21,11 +21,7 @@ import {
 	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 } from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
-import {
-	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	MAX_WORKER_AUTHORITY_PATH_LENGTH,
-	MAX_WORKER_AUTHORITY_PATHS,
-} from "./orchestration/contracts.ts";
+import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./orchestration/contracts.ts";
 import {
 	compileWorkerModelPinPolicy,
 	type WorkerModelPinPolicy,
@@ -184,18 +180,18 @@ export interface SelfModificationSettings {
 export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface AutoLearnSettings {
-	enabled?: boolean; // default: false - autonomously trigger background history scavenging for long sessions
+	enabled?: boolean; // effective default: true in every autonomy preset; explicit false is the kill switch
 	model?: string; // "active" or omitted uses the current session model; otherwise a pi --model pattern
 	thinkingLevel?: AutoLearnThinkingLevel; // default: low for background learner subprocesses
-	longSessionMessages?: number; // default: 64
-	longSessionContextPercent?: number; // default: 85
+	longSessionMessages?: number; // preset default: 32 in off, 64 otherwise
+	longSessionContextPercent?: number; // preset default: 70 in off, 85 otherwise
 	cooldownMinutes?: number; // default: 1440 per session tenant (manual /auto-learn run bypasses)
 	leaseMinutes?: number; // default: 90 for background learner state leases
-	maxConcurrentLearners?: number; // default: 2 per session tenant
+	maxConcurrentLearners?: number; // preset default: 1 per session tenant
 	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
-	reflectionReview?: boolean; // default: true when Auto Learn is enabled - post-turn review after corrective/complex turns
-	reflectionMinToolCalls?: number; // default: 12 tool calls in a turn before reflection review triggers
-	reflectionCooldownMinutes?: number; // default: 1440 per session tenant for reflection reviews
+	reflectionReview?: boolean; // default: true when Auto Learn is enabled - queue a root-session cue for the next ordinary turn after corrective/complex turns
+	reflectionMinToolCalls?: number; // default: 12 tool calls in a turn before a root-session reflection cue is queued
+	reflectionCooldownMinutes?: number; // default: 1440 per session tenant between root-session reflection cues
 	complexTaskToolCalls?: number; // default: 12 tool calls before bypassing reflection cooldown as a complex task
 }
 
@@ -225,7 +221,7 @@ export interface ModelRouterSettings {
 	cheapModel?: string; // model pattern for read-only/research turns
 	mediumModel?: string; // model pattern for normal scoped implementation, edits, and refactors
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
-	learningModel?: string; // model pattern for background reflection/learn/skill-creator work; "active" uses session model
+	learningModel?: string; // model pattern for explicit/background learning and skill-creator work; automatic reflection uses the current session turn
 	judgeEnabled?: boolean; // default: true — the routing judge runs automatically whenever the router is enabled and a judge model resolves
 	fitnessGate?: boolean; // default: false — opt-in; blocks tier models whose probed relevant lane failed (Class B, subtractive)
 	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
@@ -276,7 +272,6 @@ export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
 export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 20;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
-export const DEFAULT_WORKER_DELEGATION_WRITE_PATHS = ["."] as const;
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
@@ -284,11 +279,10 @@ export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
 export interface WorkerDelegationSettings {
 	enabled?: boolean; // default: true for capable models; explicit false is a hard off-switch
 	orchestrationProfile?: string; // optional execution preset; agents may replace its defaults within inherited authority
-	maxUsd?: number; // default: 0 (unbounded); a positive value caps shared spend for one recursive agent tree
-	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps cumulative active time across one tree
+	maxUsd?: number; // default: 0 (unbounded); a positive value caps spend for one worker task
+	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps one worker task's cumulative active time
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
-	writePaths?: string[]; // default: ["."]; explicit empty array revokes direct write/edit tools
-	maxConcurrent?: number; // default: 20; running-worker concurrency; fixed fleet safety ceilings separately bound depth, children, identities, and queued dispatches
+	maxConcurrent?: number; // default: 20; running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 }
 
@@ -353,19 +347,19 @@ export type LearningPolicyLayer =
 	| "source";
 
 export const DEFAULT_LEARNING_POLICY_ENABLED = true;
-export const DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED = false;
-export const DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD = 90;
-export const DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS = 2;
-export const DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS: readonly LearningPolicyLayer[] = ["memory"];
+export const DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED = true;
+export const DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD = 50;
+export const DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS = 1;
+export const DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS: readonly LearningPolicyLayer[] = ["memory", "skill"];
 export const DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE = 50;
 export const DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS = false;
 
 export interface LearningPolicySettings {
-	enabled?: boolean; // default: false — until enabled, reflection writes keep the legacy direct-apply path (now audited)
-	autoApplyEnabled?: boolean; // default: false — with the policy on, writes become proposals unless auto-apply is enabled
-	confidenceThreshold?: number; // default: 90 (0-100)
-	minObservations?: number; // default: 2 — single-session cues do not auto-apply
-	allowedAutoApplyLayers?: LearningPolicyLayer[]; // default: ["memory"] — every other layer stays proposal-first
+	enabled?: boolean; // default: true — main-session reflection routes durable writes through the audited policy
+	autoApplyEnabled?: boolean; // default: true — safe additive/organizational writes may apply without user babysitting
+	confidenceThreshold?: number; // default: 50 (0-100), matching the default reflection-source confidence
+	minObservations?: number; // default: 1 — a main-session reflection may apply a first safe observation
+	allowedAutoApplyLayers?: LearningPolicyLayer[]; // default: ["memory", "skill"] — every other layer stays proposal-first
 	requireRollbackPlan?: boolean; // default: true — durable writes need a rollback plan to auto-apply
 	reflectionSourceConfidence?: number; // default: 50 — trust assigned to single-session reflection cues (0-100)
 	autoApplySupersessions?: boolean; // default: false — a memory_replace/memory_remove (supersedes/deletes an existing fact) stays a proposal even when otherwise eligible, unless explicitly opted in
@@ -504,7 +498,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	scout?: ScoutSettings;
 	/** Proactive per-turn cost guard (#34). */
-	costGuard?: { maxTurnUsd?: number; action?: "warn" | "downgrade" };
+	costGuard?: Partial<CostGuardSettings>;
 	/** Skill curator (#32): auto-archive stale reflection-promoted skills at session start. */
 	curator?: { autoArchive?: boolean; staleDays?: number };
 	contextGc?: ContextGcSettings;
@@ -552,18 +546,18 @@ export interface Settings {
 	selfModification?: SelfModificationSettings; // Local guardrails for modifying the pi-adaptative source/harness
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
-	workerDelegation?: WorkerDelegationSettings; // Autonomous recursive agent-tree scheduling; enabled by default on capable models
+	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	worktreeSync?: WorktreeSyncSettings; // Opt-in hard-gated worktree-per-lane parallel-work workflow (core/worktree-sync)
 	processMatrix?: ProcessMatrixSettings; // Durable master/worker process-matrix supervision (core/process-matrix); on by default
 	windowsShell?: WindowsShellSettings; // Windows shell contract engine tier (core/tools/windows-shell-engine); on by default
-	learningPolicy?: LearningPolicySettings; // Opt-in learning apply policy: proposal-first durable writes with audit/rollback
+	learningPolicy?: LearningPolicySettings; // Default-on audited learning policy; destructive supersessions remain proposal-gated
 	modelCapability?: ModelCapabilitySettings; // Auto-detected small-model tool/lane surface (default: auto)
 	bedrock?: BedrockScopeSettings; // User-level verified profile/region/model scope for Amazon Bedrock
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
 	toolRepair?: ToolRepairSettings; // Tool-recovery logging plus teach and text-protocol switches
 	failover?: FailoverSettings; // Provider quota behavior; metered quota always halts for explicit user choice
-	autoLearn?: AutoLearnSettings; // Setting-gated autonomous background learning for long sessions
+	autoLearn?: AutoLearnSettings; // Root current-session reflection plus explicitly invoked Auto Learn compatibility settings
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in ms; 0 disables it. Nonzero values constrain every stream-watchdog phase below this timeout
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
@@ -770,44 +764,6 @@ function reportInvalidWorkerDelegationField(
 	reportDiagnostic?.(`workerDelegation.${field} must be ${expectation}; the configured value was ignored`);
 }
 
-function normalizeWorkerDelegationWritePaths(
-	value: unknown,
-	reportDiagnostic?: WorkerDelegationDiagnosticReporter,
-): string[] | undefined {
-	if (!Array.isArray(value)) {
-		reportInvalidWorkerDelegationField(reportDiagnostic, "writePaths", "an array of path strings");
-		return undefined;
-	}
-	const normalized: string[] = [];
-	const seen = new Set<string>();
-	let canonicalized = false;
-	for (let index = 0; index < value.length; index++) {
-		const entry = value[index];
-		if (typeof entry !== "string") {
-			canonicalized = true;
-			continue;
-		}
-		const trimmed = entry.trim();
-		if (!trimmed || trimmed.length > MAX_WORKER_AUTHORITY_PATH_LENGTH || seen.has(trimmed)) {
-			canonicalized = true;
-			continue;
-		}
-		if (trimmed !== entry) canonicalized = true;
-		seen.add(trimmed);
-		normalized.push(trimmed);
-		if (normalized.length === MAX_WORKER_AUTHORITY_PATHS && index < value.length - 1) {
-			canonicalized = true;
-			break;
-		}
-	}
-	if (canonicalized) {
-		reportDiagnostic?.(
-			`workerDelegation.writePaths was normalized to at most ${MAX_WORKER_AUTHORITY_PATHS} unique, nonempty paths of at most ${MAX_WORKER_AUTHORITY_PATH_LENGTH} characters`,
-		);
-	}
-	return normalized;
-}
-
 /** Normalize one precedence layer before merging so malformed overrides cannot widen lower-scope authority. */
 function normalizeWorkerDelegationLayer(
 	value: unknown,
@@ -878,10 +834,6 @@ function normalizeWorkerDelegationLayer(
 	if (Object.hasOwn(value, "writeEnabled")) {
 		if (typeof value.writeEnabled === "boolean") normalized.writeEnabled = value.writeEnabled;
 		else reportInvalidWorkerDelegationField(reportDiagnostic, "writeEnabled", "a boolean");
-	}
-	if (Object.hasOwn(value, "writePaths")) {
-		const writePaths = normalizeWorkerDelegationWritePaths(value.writePaths, reportDiagnostic);
-		if (writePaths !== undefined) normalized.writePaths = writePaths;
 	}
 	if (Object.hasOwn(value, "maxConcurrent")) {
 		if (
@@ -1213,6 +1165,7 @@ export class SettingsManager {
 	private profileRegistry!: ProfileRegistry;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
+	private readonly changeListeners = new Set<() => void>();
 
 	private constructor(
 		storage: SettingsStorage,
@@ -1356,6 +1309,23 @@ export class SettingsManager {
 	private recomputeSettings(): void {
 		this.settings = this.mergeEffectiveSettings();
 		this.refreshProfileRegistry();
+		this.notifyChanges();
+	}
+
+	/** Subscribe to synchronous effective-settings transitions. Listener failures never break persistence. */
+	subscribeChanges(listener: () => void): () => void {
+		this.changeListeners.add(listener);
+		return () => this.changeListeners.delete(listener);
+	}
+
+	private notifyChanges(): void {
+		for (const listener of this.changeListeners) {
+			try {
+				listener();
+			} catch {
+				// Settings persistence is authoritative; a runtime projection can recover on its next refresh.
+			}
+		}
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -1797,6 +1767,7 @@ export class SettingsManager {
 		this.directoryProfileInfo = snapshot.directoryProfileInfo ? { ...snapshot.directoryProfileInfo } : null;
 		this.errors = [...snapshot.errors];
 		this.refreshProfileRegistry();
+		this.notifyChanges();
 	}
 
 	/** Apply additional overrides on top of current settings */
@@ -1808,6 +1779,7 @@ export class SettingsManager {
 			else delete normalizedOverrides.workerDelegation;
 		}
 		this.settings = deepMergeSettings(this.settings, normalizedOverrides);
+		this.notifyChanges();
 	}
 
 	/** Select runtime-only resource profiles, e.g. from CLI/subagent launch options. */
@@ -2691,15 +2663,42 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Optional per-turn cost guard (#34). Disabled by default so productive work has no implicit spend
-	 * limiter. Set a positive `maxTurnUsd` to warn at that projected ceiling, or pair it with
-	 * `action: "downgrade"` to also auto-reduce reasoning effort.
+	 * Optional per-turn cost guard (#34). Explicit `enabled: true` is mandatory; this keeps positive
+	 * thresholds written by older releases dormant instead of silently restoring a spend guard.
 	 */
-	getCostGuardSettings(): { maxTurnUsd: number; action: "warn" | "downgrade" } {
+	getCostGuardSettings(): CostGuardSettings {
+		const configuredMaxTurnUsd = this.settings.costGuard?.maxTurnUsd;
 		return {
-			maxTurnUsd: this.settings.costGuard?.maxTurnUsd ?? DEFAULT_COST_GUARD_SETTINGS.maxTurnUsd,
-			action: this.settings.costGuard?.action ?? DEFAULT_COST_GUARD_SETTINGS.action,
+			enabled: this.settings.costGuard?.enabled === true,
+			maxTurnUsd:
+				typeof configuredMaxTurnUsd === "number" &&
+				Number.isFinite(configuredMaxTurnUsd) &&
+				configuredMaxTurnUsd >= 0
+					? configuredMaxTurnUsd
+					: DEFAULT_COST_GUARD_SETTINGS.maxTurnUsd,
+			action: this.settings.costGuard?.action === "downgrade" ? "downgrade" : DEFAULT_COST_GUARD_SETTINGS.action,
 		};
+	}
+
+	setCostGuardSettings(settings: CostGuardSettings, scope: SettingsScope = "global"): void {
+		const normalized: CostGuardSettings = {
+			enabled: settings.enabled === true,
+			maxTurnUsd:
+				Number.isFinite(settings.maxTurnUsd) && settings.maxTurnUsd >= 0
+					? settings.maxTurnUsd
+					: DEFAULT_COST_GUARD_SETTINGS.maxTurnUsd,
+			action: settings.action === "downgrade" ? "downgrade" : "warn",
+		};
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.costGuard = normalized;
+			this.markProjectModified("costGuard");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+		this.globalSettings.costGuard = normalized;
+		this.markModified("costGuard");
+		this.save();
 	}
 
 	getFailoverSettings(): Required<FailoverSettings> {
@@ -3678,7 +3677,6 @@ export class SettingsManager {
 				typeof configured.writeEnabled === "boolean"
 					? configured.writeEnabled
 					: DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
-			writePaths: configured.writePaths ? [...configured.writePaths] : [...DEFAULT_WORKER_DELEGATION_WRITE_PATHS],
 			maxConcurrent: sanitizeIntegerSetting(
 				configured.maxConcurrent,
 				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,

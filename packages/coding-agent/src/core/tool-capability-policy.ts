@@ -69,6 +69,19 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);
 
+const NON_CANONICAL_POLICY_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"edit-diff",
+	"powershell",
+	"shell",
+	"tmux_dispatch",
+]);
+
+/** Model-facing runtime tools whose authority is owned by this policy catalogue. Platform aliases
+ * and the internal managed-process adapter stay out of child CLI profiles. */
+export const POLICY_OWNED_RUNTIME_TOOL_NAMES: readonly string[] = Object.freeze(
+	[...TOOL_CAPABILITY_POLICIES.keys()].filter((toolName) => !NON_CANONICAL_POLICY_TOOL_NAMES.has(toolName)),
+);
+
 export function getToolCapabilityPolicy(toolName: string): ToolCapabilityPolicy | undefined {
 	return TOOL_CAPABILITY_POLICIES.get(toolName.toLowerCase());
 }

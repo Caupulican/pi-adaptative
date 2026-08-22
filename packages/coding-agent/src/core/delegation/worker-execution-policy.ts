@@ -1,4 +1,4 @@
-import path from "node:path";
+import { join } from "node:path";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type {
@@ -16,6 +16,7 @@ import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
 import { getToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
+import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
@@ -25,6 +26,8 @@ function delegatedToolCapabilities(toolName: string): readonly HarnessCapability
 }
 
 export interface WorkerExecutionPlan {
+	/** Actual process and relative-tool working directory fixed at admission. */
+	cwd: string;
 	toolManifests: readonly ToolCapabilityManifest[];
 	requiredCapabilities: readonly HarnessCapability[];
 	readPaths: readonly string[];
@@ -44,11 +47,12 @@ function intersectPathScopes(admittedPaths: readonly string[], currentPaths: rea
 			return [];
 		}),
 	);
-	return [...new Set(intersections.map((entry) => path.resolve(entry)))];
+	return [...new Set(intersections.map((entry) => resolveWorkerWorkspacePath(entry, entry)))];
 }
 
 export function workerExecutionAuthorityFromPlan(plan: WorkerExecutionPlan): WorkerExecutionAuthorityContract {
 	return {
+		cwd: plan.cwd,
 		capabilities: [...plan.requiredCapabilities],
 		toolNames: plan.toolManifests.map((manifest) => manifest.toolName),
 		readPaths: [...plan.readPaths],
@@ -77,14 +81,25 @@ export function narrowWorkerExecutionPlan(
 	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	return {
+		cwd: admitted.cwd ?? current.cwd,
 		toolManifests,
 		requiredCapabilities,
 		readPaths: readEnabled ? intersectPathScopes(admitted.readPaths, current.readPaths) : [],
 		writePaths: writeEnabled ? intersectPathScopes(admitted.writePaths, current.writePaths) : [],
-		deniedPaths: [...new Set([...admitted.deniedPaths, ...current.deniedPaths].map((entry) => path.resolve(entry)))],
+		deniedPaths: [
+			...new Set(
+				[...admitted.deniedPaths, ...current.deniedPaths].map((entry) =>
+					resolveWorkerWorkspacePath(current.cwd, entry),
+				),
+			),
+		],
 		readMemory: grantedTools.has("memory"),
 		writeEnabled,
-		processEnabled: grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME),
+		processEnabled:
+			grantedTools.has("python") ||
+			grantedTools.has("run_process") ||
+			grantedTools.has(STABLE_SHELL_TOOL_NAME) ||
+			grantedTools.has("run_toolkit_script"),
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
 	};
 }
@@ -96,35 +111,38 @@ export function buildWorkerExecutionPlan(args: {
 	deniedPaths: readonly string[];
 	foregroundMaxCostUsd?: number;
 	memoryEnabled: boolean;
-	requestedReadPaths?: readonly string[];
-	requestedWritePaths?: readonly string[];
+	workerToolAdapterNames?: readonly string[];
 }): WorkerExecutionPlan {
+	const parentCwd = resolveWorkerWorkspacePath(args.cwd, args.cwd);
+	const cwd = args.profile.workspacePath
+		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
+		: parentCwd;
+	const pathScopes = args.profile.workspacePath ? [cwd] : workerMachinePathRoots(cwd);
 	const profileToolNames = new Set(mapToolNamesForPlatform(args.profile.toolNames));
 	const grantsRead =
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
 		args.profile.capabilityCeiling.includes("worktree.read");
 	const writeEligible =
 		args.settings.writeEnabled &&
-		args.settings.writePaths.length > 0 &&
 		(args.profile.capabilityCeiling.includes("filesystem.write") ||
 			args.profile.capabilityCeiling.includes("worktree.mutate"));
-	const memoryEligible = args.memoryEnabled;
+	const memoryEligible = args.memoryEnabled && profileToolNames.has("memory");
 	const processEligible =
 		args.profile.capabilityCeiling.includes("process.exec") ||
 		args.profile.capabilityCeiling.includes("tests.execute");
 	const enabledProcessToolNames = processEligible
 		? [
+				...(profileToolNames.has("python") ? (["python"] as const) : []),
 				...(args.profile.executionPolicy && profileToolNames.has("run_process") ? (["run_process"] as const) : []),
 				...(profileToolNames.has(STABLE_SHELL_TOOL_NAME) ? [STABLE_SHELL_TOOL_NAME] : []),
 			]
 		: [];
+	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter((name) => profileToolNames.has(name));
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
 		...enabledProcessToolNames,
-		...(profileToolNames.has("delegate") && args.profile.capabilityCeiling.includes("workflow.delegate")
-			? (["delegate"] as const)
-			: []),
+		...enabledAdapterToolNames,
 	];
 	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
 	if (memoryEligible) {
@@ -142,7 +160,11 @@ export function buildWorkerExecutionPlan(args: {
 	);
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
 	const readMemory = grantedTools.has("memory");
-	const processEnabled = grantedTools.has("run_process") || grantedTools.has(STABLE_SHELL_TOOL_NAME);
+	const processEnabled =
+		grantedTools.has("python") ||
+		grantedTools.has("run_process") ||
+		grantedTools.has(STABLE_SHELL_TOOL_NAME) ||
+		grantedTools.has("run_toolkit_script");
 	const budget = intersectRiskBudgets(
 		args.profile.budget,
 		...(args.settings.maxUsd > 0 ? [{ maxCostUsd: args.settings.maxUsd }] : []),
@@ -150,27 +172,18 @@ export function buildWorkerExecutionPlan(args: {
 		...(args.settings.maxWallClockMs > 0 ? [{ maxWallClockMs: args.settings.maxWallClockMs }] : []),
 	);
 	return {
+		cwd,
 		toolManifests,
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
-		readPaths: readEnabled
-			? intersectPathScopes(
-					[path.resolve(args.cwd)],
-					(args.requestedReadPaths ?? [args.cwd]).map((entry) =>
-						path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
-					),
-				)
-			: [],
-		writePaths: writeEnabled
-			? intersectPathScopes(
-					args.settings.writePaths.map((entry) =>
-						path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
-					),
-					(args.requestedWritePaths ?? args.settings.writePaths).map((entry) =>
-						path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
-					),
-				)
-			: [],
-		deniedPaths: args.deniedPaths.map((entry) => path.resolve(entry)),
+		readPaths: readEnabled ? pathScopes : [],
+		writePaths: writeEnabled ? pathScopes : [],
+		deniedPaths: [
+			...new Set(
+				[...args.deniedPaths, join(cwd, ".pi", "settings.json")].map((entry) =>
+					resolveWorkerWorkspacePath(cwd, entry),
+				),
+			),
+		],
 		readMemory,
 		writeEnabled,
 		processEnabled,
@@ -245,6 +258,12 @@ export function compileManagedProcessExecutionGrant(args: {
 	const readEnabled = capabilities.some(
 		(capability) => capability === "filesystem.read" || capability === "worktree.read",
 	);
+	const writeEnabled = capabilities.some(
+		(capability) => capability === "filesystem.write" || capability === "worktree.mutate",
+	);
+	const cwd = resolveWorkerWorkspacePath(args.cwd, args.cwd);
+	const explicitScopes = args.writePaths.map((entry) => resolveWorkerWorkspacePath(cwd, entry));
+	const pathScopes = explicitScopes.length > 0 ? explicitScopes : workerMachinePathRoots(cwd);
 	const compiled = new ExecutionPolicyCompiler().compile({
 		...args.target,
 		subjectId: `managed:${args.laneId}:${args.authorizationId}`,
@@ -254,11 +273,9 @@ export function compileManagedProcessExecutionGrant(args: {
 		authorityCapabilities: capabilities,
 		requestedTools: manifests.map((manifest) => manifest.toolName),
 		toolManifests: manifests,
-		readPaths: readEnabled ? [path.resolve(args.cwd)] : [],
-		writePaths: args.writePaths.map((entry) =>
-			path.isAbsolute(entry) ? path.resolve(entry) : path.resolve(args.cwd, entry),
-		),
-		deniedPaths: args.deniedPaths.map((entry) => path.resolve(entry)),
+		readPaths: readEnabled ? pathScopes : [],
+		writePaths: writeEnabled ? pathScopes : [],
+		deniedPaths: args.deniedPaths.map((entry) => resolveWorkerWorkspacePath(cwd, entry)),
 		requestedBudget: args.budget,
 		authorityBudget: args.budget,
 		policyVersion: "managed-process-v1",

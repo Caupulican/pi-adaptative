@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import { resolvePath } from "../utils/paths.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { Extension } from "./extensions/types.ts";
+import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
@@ -57,6 +58,8 @@ export interface SystemPromptBuilderDeps {
 	getActiveExtensions(): ReadonlyArray<Extension>;
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
+	/** Child/worker sessions never receive root autonomy or reflection instructions. */
+	isChildSession(): boolean;
 }
 
 export function collectSelfModificationSourceCandidates(settings: {
@@ -192,21 +195,24 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
-		const autoLearn = this.deps.getSettingsManager().getAutoLearnSettings();
-		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
-		if (!profile.backgroundLanesEnabled || (!autoLearn.enabled && autonomy.mode !== "full")) {
+		if (this.deps.isChildSession()) return undefined;
+		const settingsManager = this.deps.getSettingsManager();
+		const autonomy = settingsManager.getAutonomySettings();
+		const autoLearn = resolveAutoLearnSettings(autonomy.mode, settingsManager.getAutoLearnSettings());
+		if (!autoLearn.enabled && autonomy.mode !== "full") {
 			return undefined;
 		}
 
-		const reflection = autoLearn.reflectionReview ?? autonomy.mode !== "off";
-		const model = autoLearn.model?.trim() || "active";
+		const reflectionContract = isCurrentSessionReflectionEnabled(autoLearn)
+			? "ROOT REFLECTION: decide and apply warranted durable learning in the current root provider turn only; never add a provider request or delegate reflection."
+			: "Root reflection is disabled.";
 		if (profile.class !== "full") {
-			return `PI AUTONOMY ${autonomy.mode}: background learning may use ${model}; active task primary. Observations are evidence; bound changes. Approval: publish/push/tag/release, credential/authentication changes outside active secret_store authority, destructive deletion, broader authority.`;
+			return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Active task primary. Observations are evidence; bound changes. Approval: publish/push/tag/release, credential/authentication changes outside active secret_store authority, destructive deletion, broader authority.`;
 		}
 		if (autonomy.mode === "full") {
-			return `PI AUTONOMY full (standing): learners may use ${model} after long/corrective/complex sessions. Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Hard stop for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
+			return `PI AUTONOMY full (standing): ${reflectionContract} Grant: high-confidence memory; user/project skills and small extensions/tools; autonomy/autoLearn tuning; authorized selfModification source edits; validation plus rollback evidence. Hard stop for publish/release/push/tag, credential disclosure/provider authentication/out-of-grant secret operations, destructive user-data deletion, exposed services, or more authority. Current-turn evidence is a cue, not proof; active task stays primary.`;
 		}
-		return `PI AUTONOMY ${autonomy.mode}: learners may use ${model} after long sessions${reflection ? " or corrective/complex turns" : ""}, query memory, run bounded tools. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
+		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
 	}
 
 	private _buildDelegationPrompt(delegateActive: boolean): string | undefined {

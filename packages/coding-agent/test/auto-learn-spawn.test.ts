@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import {
 	AUTO_LEARN_HISTORY_RETENTION_MS,
@@ -35,6 +35,8 @@ interface AutoLearnLaunchHarness {
 			bypassReflectionCooldown?: boolean;
 		},
 	) => string;
+	maybeStartAutoLearn: () => boolean;
+	maybeStartAutonomyReview: (messages: unknown[]) => boolean;
 }
 
 afterEach(async () => {
@@ -155,6 +157,8 @@ function createAutoLearnHarness(
 		model: { provider: "test", id: "model" },
 		sessionId: options.sessionId ?? "auto-learn-test-session",
 		getContextUsage: () => undefined,
+		getTaskStepsStateSnapshot: () => undefined,
+		sendCustomMessage: () => Promise.resolve(),
 	};
 	const harness = Object.create(AutoLearnController.prototype) as AutoLearnLaunchHarness;
 	harness.deps = {
@@ -270,53 +274,59 @@ describe("Auto Learn spawn args", () => {
 		expect(existsSync(sessionPath)).toBe(true);
 	});
 
-	it("launches with a null-byte reflection digest without putting prompt content in argv", async () => {
+	it("refuses every reflection-flavored background learner before resolving or spawning the CLI", () => {
 		const dataDir = createTempDir();
-		const fakeCliPath = join(dataDir, "fake-pi.mjs");
-		writeFileSync(
-			fakeCliPath,
-			`
-import { readFileSync } from "node:fs";
-
-const promptArg = process.argv.at(-1);
-if (!promptArg?.startsWith("@")) {
-	console.error("missing @ prompt file");
-	process.exit(2);
-}
-if (process.argv.some((arg) => arg.includes("\\0"))) {
-	console.error("argv contains null byte");
-	process.exit(3);
-}
-const prompt = readFileSync(promptArg.slice(1), "utf-8");
-if (!prompt.includes("\\0")) {
-	console.error("prompt file does not contain null byte");
-	process.exit(4);
-}
-console.log("received-null-byte-prompt-file");
-await new Promise((resolve) => setTimeout(resolve, 1000));
-`,
-			"utf-8",
-		);
-		const mode = createAutoLearnHarness(dataDir, { command: process.execPath, argsPrefix: [fakeCliPath] });
+		const mode = createAutoLearnHarness(dataDir, {
+			command: `${process.execPath}\0must-not-be-inspected`,
+			argsPrefix: [],
+		});
 
 		const result = mode.launchAutoLearn("reflection null-byte regression", true, {
 			cooldownKind: "reflection",
 			promptKind: "reflection",
 			turnDigest: "toolResult: before-null\0after-null",
+			bypassReflectionCooldown: true,
 		});
 
-		expect(result).toContain("Auto Learn started");
-		expect(result).not.toContain("with test/model");
-		const logPath = result.match(/Log: (.*)$/)?.[1];
-		expect(logPath).toBeDefined();
-		await waitForFileToContain(logPath!, "received-null-byte-prompt-file");
-		const state = JSON.parse(readFileSync(join(dataDir, "state.json"), "utf-8")) as {
-			runs: Record<string, { promptPath: string }>;
+		expect(result).toBe(
+			"Auto Learn not started: automatic reflection runs only in the current root session; background reflection learners are disabled.",
+		);
+		expect(readAutoLearnRunCount(dataDir)).toBe(0);
+	});
+
+	it("does not fall through the native-reflection kill switch into an automatic Auto Learn spawn", () => {
+		const dataDir = createTempDir();
+		const mode = createAutoLearnHarness(dataDir, { command: process.execPath, argsPrefix: ["unused.mjs"] });
+		const launchAutoLearn = vi.fn(() => "Auto Learn started");
+		const internals = mode as AutoLearnLaunchHarness & {
+			evaluateAutoLearn: () => { shouldRun: boolean; reason: string };
 		};
-		const promptPath = Object.values(state.runs)[0]?.promptPath;
-		expect(promptPath).toBeDefined();
-		expect(promptPath).toContain(join(dataDir, "tenants"));
-		expect(readFileSync(promptPath!, "utf-8")).toContain("before-null\0after-null");
+		internals.evaluateAutoLearn = () => ({ shouldRun: true, reason: "message trigger" });
+		mode.launchAutoLearn = launchAutoLearn;
+		const original = process.env.PI_NATIVE_REFLECTION;
+		process.env.PI_NATIVE_REFLECTION = "0";
+
+		try {
+			expect(mode.maybeStartAutoLearn()).toBe(false);
+			expect(launchAutoLearn).not.toHaveBeenCalled();
+		} finally {
+			if (original === undefined) delete process.env.PI_NATIVE_REFLECTION;
+			else process.env.PI_NATIVE_REFLECTION = original;
+		}
+	});
+
+	it("never launches a completed-turn autonomy review in a background process", () => {
+		const dataDir = createTempDir();
+		const mode = createAutoLearnHarness(dataDir, { command: process.execPath, argsPrefix: ["unused.mjs"] });
+		const launchAutoLearn = vi.fn(() => "Auto Learn started");
+		const internals = mode as AutoLearnLaunchHarness & {
+			evaluateAutonomyReview: () => { shouldRun: boolean; reason: string; digest: string };
+		};
+		internals.evaluateAutonomyReview = () => ({ shouldRun: true, reason: "correction", digest: "bounded" });
+		mode.launchAutoLearn = launchAutoLearn;
+
+		expect(mode.maybeStartAutonomyReview([{ role: "user", content: "No, remember this." }])).toBe(false);
+		expect(launchAutoLearn).not.toHaveBeenCalled();
 	});
 
 	it("marks a background learner as a worker session", async () => {
@@ -372,129 +382,7 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		expect(readAutoLearnRunCount(dataDir)).toBe(0);
 	});
 
-	it("serializes same-tenant reflection reservations so a second launch observes cooldown", () => {
-		const dataDir = createTempDir();
-		const fakeCliPath = writeFakeCli(dataDir, `console.log("reserved"); setTimeout(() => undefined, 1000);\n`);
-		const spawnTarget = { command: process.execPath, argsPrefix: [fakeCliPath] };
-		const first = createAutoLearnHarness(dataDir, spawnTarget, {
-			maxConcurrentLearners: 2,
-			reflectionCooldownMinutes: 10,
-		});
-		const second = createAutoLearnHarness(dataDir, spawnTarget, {
-			maxConcurrentLearners: 2,
-			reflectionCooldownMinutes: 10,
-		});
-
-		expect(
-			first.launchAutoLearn("same tenant first", true, { cooldownKind: "reflection", promptKind: "reflection" }),
-		).toContain("Auto Learn started");
-		expect(
-			second.launchAutoLearn("same tenant second", true, { cooldownKind: "reflection", promptKind: "reflection" }),
-		).toContain("Auto Learn not started: reflection cooldown");
-		expect(readAutoLearnRunCount(dataDir)).toBe(1);
-	});
-
-	it("lets explicit self-improvement reflection signals bypass reflection cooldown", () => {
-		const dataDir = createTempDir();
-		const fakeCliPath = writeFakeCli(dataDir, `console.log("reserved"); setTimeout(() => undefined, 1000);\n`);
-		const spawnTarget = { command: process.execPath, argsPrefix: [fakeCliPath] };
-		const first = createAutoLearnHarness(dataDir, spawnTarget, {
-			maxConcurrentLearners: 2,
-			reflectionCooldownMinutes: 10,
-		});
-		const second = createAutoLearnHarness(dataDir, spawnTarget, {
-			maxConcurrentLearners: 2,
-			reflectionCooldownMinutes: 10,
-		});
-
-		expect(
-			first.launchAutoLearn("same tenant first", true, { cooldownKind: "reflection", promptKind: "reflection" }),
-		).toContain("Auto Learn started");
-		expect(
-			second.launchAutoLearn("reflection behavioral self-improvement signal", true, {
-				cooldownKind: "reflection",
-				promptKind: "reflection",
-				bypassReflectionCooldown: true,
-			}),
-		).toContain("Auto Learn started");
-		expect(readAutoLearnRunCount(dataDir)).toBe(2);
-	});
-
-	it("detects code-baked behavioral self-improvement cues as automatic reflection triggers", () => {
-		const now = Date.now();
-		const mode = Object.create(AutoLearnController.prototype) as any;
-		mode.getEffectiveAutoLearnSettings = () => ({
-			enabled: true,
-			reflectionReview: true,
-			reflectionCooldownMinutes: 60,
-			reflectionMinToolCalls: 99,
-			maxConcurrentLearners: 1,
-		});
-		mode.deps = {
-			getSession: () => ({
-				settingsManager: { getAutonomySettings: () => ({ mode: "balanced" }) },
-				getContextUsage: () => ({ percent: 10 }),
-			}),
-		};
-		mode.withAutoLearnStateLock = (callback: (state: unknown) => { result: unknown }) =>
-			callback({ lastReflectionByTenant: { tenant: now }, runs: {} }).result;
-		mode.pruneAutoLearnHistoryFromState = (state: unknown) => state;
-		mode.getAutoLearnTenantKey = () => "tenant";
-		mode.getAutoLearnMessageCount = () => 3;
-
-		const decision = mode.evaluateAutonomyReview([
-			{
-				role: "user",
-				content:
-					"Pi needs code-baked harness self-improvement triggers that fire automatically, not Automata-only memory.",
-			},
-		]);
-
-		expect(decision.shouldRun).toBe(true);
-		expect(decision.reason).toBe("reflection behavioral self-improvement signal");
-		expect(decision.bypassCooldown).toBe(true);
-	});
-
-	it("detects Hermes-style complex tasks as automatic reflection triggers", () => {
-		const now = Date.now();
-		const mode = Object.create(AutoLearnController.prototype) as any;
-		mode.getEffectiveAutoLearnSettings = () => ({
-			enabled: true,
-			reflectionReview: true,
-			reflectionCooldownMinutes: 60,
-			reflectionMinToolCalls: 99,
-			maxConcurrentLearners: 1,
-			complexTaskToolCalls: 5,
-		});
-		mode.deps = {
-			getSession: () => ({
-				settingsManager: { getAutonomySettings: () => ({ mode: "balanced" }) },
-				getContextUsage: () => ({ percent: 10 }),
-			}),
-		};
-		mode.withAutoLearnStateLock = (callback: (state: unknown) => { result: unknown }) =>
-			callback({ lastReflectionByTenant: { tenant: now }, runs: {} }).result;
-		mode.pruneAutoLearnHistoryFromState = (state: unknown) => state;
-		mode.getAutoLearnTenantKey = () => "tenant";
-		mode.getAutoLearnMessageCount = () => 3;
-
-		const decision = mode.evaluateAutonomyReview([
-			{ role: "user", content: "Please solve this." },
-			...Array.from({ length: 5 }, (_, index) => ({
-				role: "toolResult",
-				toolCallId: `call-${index}`,
-				toolName: "read",
-				content: [{ type: "text", text: "raw output intentionally ignored" }],
-				isError: false,
-			})),
-		]);
-
-		expect(decision.shouldRun).toBe(true);
-		expect(decision.reason).toBe("reflection complex task learning signal (5/5 tool calls)");
-		expect(decision.bypassCooldown).toBe(true);
-	});
-
-	it("instructs Auto Learn to code-bake behavioral self-improvements instead of stopping at memory", () => {
+	it("instructs a manual Auto Learn run to code-bake behavioral improvements instead of stopping at memory", () => {
 		const mode = Object.create(AutoLearnController.prototype) as any;
 		mode.deps = {
 			getSession: () => ({
@@ -507,12 +395,12 @@ await new Promise((resolve) => setTimeout(resolve, 1000));
 		};
 
 		const prompt = mode.buildAutoLearnPrompt(
-			"reflection behavioral self-improvement signal",
+			"manual self-improvement run",
 			{
 				applyHighConfidence: true,
 				complexTaskToolCalls: 5,
 			} as any,
-			{ kind: "reflection", turnDigest: "latest user correction" },
+			{ kind: "auto" },
 		);
 
 		expect(prompt).toContain("Hermes-style learning cycle");

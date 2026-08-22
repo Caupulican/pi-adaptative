@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added a host hook immediately before steering-queue drains so durable terminal events can join an active agent loop without a redundant provider wake.
+
 ## [0.94.1] - 2026-08-21
 
 ## [0.94.0] - 2026-08-21

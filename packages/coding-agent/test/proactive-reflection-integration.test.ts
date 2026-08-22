@@ -1,80 +1,123 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { fauxAssistantMessage } from "@caupulican/pi-ai";
+import { type Context, fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, type Harness } from "./suite/harness.ts";
+import {
+	CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
+	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+} from "../src/core/reflection-controller.ts";
+import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
-describe("proactive reflection across session modes", () => {
+describe("current-session reflection", () => {
 	const harnesses: Harness[] = [];
+	const originalNativeReflection = process.env.PI_NATIVE_REFLECTION;
+	const originalAutoLearnChild = process.env.PI_AUTO_LEARN_CHILD;
+	const originalSessionRole = process.env.PI_SESSION_ROLE;
 
 	afterEach(async () => {
+		if (originalNativeReflection === undefined) delete process.env.PI_NATIVE_REFLECTION;
+		else process.env.PI_NATIVE_REFLECTION = originalNativeReflection;
+		if (originalAutoLearnChild === undefined) delete process.env.PI_AUTO_LEARN_CHILD;
+		else process.env.PI_AUTO_LEARN_CHILD = originalAutoLearnChild;
+		if (originalSessionRole === undefined) delete process.env.PI_SESSION_ROLE;
+		else process.env.PI_SESSION_ROLE = originalSessionRole;
 		while (harnesses.length > 0) {
 			const harness = harnesses.pop();
 			if (!harness) continue;
 			await harness.session.disposeAndWait();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
-	it("learns explicit durable guidance from a print-mode turn without an interactive controller", async () => {
+	it("places a durable hidden reflection cue in the root's current provider turn without another request", async () => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
 		const harness = await createHarness({
-			settings: {
-				autoLearn: { enabled: true, reflectionReview: true },
-			},
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
 		});
 		harnesses.push(harness);
 		await harness.session.bindExtensions({});
-		const reflectionUsage = {
-			input: 20,
-			output: 10,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 30,
-			cost: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.002 },
-		};
+		const contexts: Context[] = [];
 		harness.setResponses([
-			fauxAssistantMessage("Understood."),
-			{
-				...fauxAssistantMessage(
-					'```json\n{"rationale":"durable preference","writes":[{"kind":"memory_add","section":"USER","text":"User prefers bounded diagnostic output."}]}\n```',
+			(context) => {
+				contexts.push(context);
+				return fauxAssistantMessage("Handled in the current root turn.");
+			},
+			fauxAssistantMessage("This background reflection response must remain unused."),
+		]);
+
+		await harness.session.prompt("Summarize this ordinary request.");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(contexts).toHaveLength(1);
+		expect(
+			contexts[0]?.messages.some((message) => getMessageText(message).includes("Root reflection contract")),
+		).toBe(true);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 				),
-				usage: reflectionUsage,
+		).toHaveLength(2);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+				)
+				.at(-1),
+		).toMatchObject({ data: { status: "consumed", revision: 2, triggers: ["root-turn"] } });
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) => entry.type === "custom_message" && entry.customType === CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
+				),
+		).toBe(false);
+		expect(
+			harness.session.messages.some(
+				(message) => message.role === "custom" && message.customType === CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
+			),
+		).toBe(false);
+		expect(harness.session.getSpawnedUsage().reports).toBe(0);
+	});
+
+	it.each([
+		["the native-reflection kill switch", { PI_NATIVE_REFLECTION: "0" }],
+		["an Auto Learn child", { PI_AUTO_LEARN_CHILD: "1" }],
+		["a worker session", { PI_SESSION_ROLE: "worker" }],
+	] as const)("does not inject reflection into %s", async (_label, environment) => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
+		Object.assign(process.env, environment);
+		const harness = await createHarness({
+			settings: { autoLearn: { enabled: true, reflectionReview: true } },
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		let context: Context | undefined;
+		harness.setResponses([
+			(current) => {
+				context = current;
+				return fauxAssistantMessage("No reflection privilege.");
 			},
 		]);
 
-		const scheduler = (
-			harness.session as unknown as {
-				_reflection: {
-					scheduleFromTurn(messages: AgentMessage[], headroom: number): void;
-					waitForActivePass(): Promise<void>;
-				};
-			}
-		)._reflection;
+		await harness.session.prompt("Ordinary request.");
 
-		await harness.session.prompt("From now on, remember that I prefer bounded diagnostic output.");
-		await scheduler.waitForActivePass();
-		const userFile = join(harness.tempDir, "USER.md");
-		expect(existsSync(userFile)).toBe(true);
-		expect(readFileSync(userFile, "utf-8")).toContain("User prefers bounded diagnostic output.");
-		expect(harness.session.getLearningAuditRecords().at(-1)).toMatchObject({
-			action: "apply",
-			reasonCode: "explicit_user_memory_instruction",
-		});
-		expect(harness.session.getSpawnedUsage().reports).toBe(1);
-
-		scheduler.scheduleFromTurn(
-			[
-				{
-					role: "user",
-					content: [{ type: "text", text: "From now on, remember that I prefer bounded diagnostic output." }],
-					timestamp: 1,
-				},
-				fauxAssistantMessage("Understood."),
-			],
-			90,
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(context?.messages.some((message) => getMessageText(message).includes("Root reflection contract"))).toBe(
+			false,
 		);
-		await scheduler.waitForActivePass();
-		expect(harness.session.getSpawnedUsage().reports).toBe(1);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) => entry.type === "custom_message" && entry.customType === CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
+				),
+		).toBe(false);
 	});
 });

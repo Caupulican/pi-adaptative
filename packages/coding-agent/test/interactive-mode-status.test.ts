@@ -268,6 +268,9 @@ describe("InteractiveMode.handleUsageCommand", () => {
 			chatContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			session: {
+				settingsManager: {
+					getCostGuardSettings: () => ({ enabled: true, maxTurnUsd: 1, action: "warn" }),
+				},
 				getSessionStats: () => ({
 					tokens: { input: 1_000, output: 500, cacheRead: 250, cacheWrite: 125, total: 1_875 },
 					cost: 0.1234,

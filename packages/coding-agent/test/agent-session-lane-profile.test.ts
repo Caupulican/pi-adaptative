@@ -275,7 +275,7 @@ describe("profile-shipped lanes", () => {
 
 		expect(run.record?.status).toBe("succeeded");
 		expect(run.outcome?.claim.summary).toBe("profile repair read succeeded");
-		expect(seenTools).toEqual(["read", "memory"]);
+		expect(seenTools).toEqual(["read"]);
 	});
 
 	it("composes owner-authored worker soul with the immutable core and role prompt", async () => {
@@ -298,7 +298,7 @@ describe("profile-shipped lanes", () => {
 		expect(run.record?.status).toBe("succeeded");
 		expect(seenSystemPrompt?.startsWith(SUBAGENT_CORE_SYSTEM_PROMPT)).toBe(true);
 		expect(seenSystemPrompt).toContain("Answer with a single JSON summary field.");
-		expect(seenSystemPrompt).toContain("Autonomous orchestration-tree agent. Contract:");
+		expect(seenSystemPrompt).toContain("Autonomous leaf worker. Contract:");
 		expect(seenSystemPrompt).toContain("The workspace tools are read-only; do not claim file changes.");
 	});
 });

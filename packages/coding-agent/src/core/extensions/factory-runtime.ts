@@ -60,6 +60,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
 		getExternalResourceRoots: notInitialized,
+		getEffectiveResourceProfile: notInitialized,
 		registerMemoryProvider: notInitialized,
 		registerContextMemoryProvider: notInitialized,
 		reportSpawnedUsage: notInitialized,
@@ -252,6 +253,10 @@ export function createExtensionAPI(
 		getExternalResourceRoots() {
 			runtime.assertActive();
 			return runtime.getExternalResourceRoots();
+		},
+		getEffectiveResourceProfile() {
+			runtime.assertActive();
+			return runtime.getEffectiveResourceProfile();
 		},
 		registerMemoryProvider(provider): void {
 			runtime.assertActive();

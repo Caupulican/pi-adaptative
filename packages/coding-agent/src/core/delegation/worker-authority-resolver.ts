@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import {
@@ -8,12 +10,14 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
+	type OrchestrationThinkingLevel,
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
 import { envelopeHasToolCapability, getToolCapabilityPolicy } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
-import { LEAN_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
+import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
+import { resolveWorkerWorkspacePath } from "./worker-machine-scope.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
 /**
@@ -34,10 +38,13 @@ const DEFAULT_TOOL_NAMES = [
 	"write",
 	"edit",
 	"memory",
+	"python",
 	STABLE_SHELL_TOOL_NAME,
-	"delegate",
+	"artifact_retrieve",
+	"skill",
+	"skill_audit",
 ] as const;
-const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set([...CLASSIFIED_LANE_TOOL_NAMES, "delegate"]);
+const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set(CLASSIFIED_LANE_TOOL_NAMES);
 const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"filesystem.read",
 	"filesystem.write",
@@ -47,13 +54,17 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"network.http",
 	"service.mcp",
 	"memory.query",
+	"skill.read",
 ];
-
 export interface WorkerAuthorityResolutionInput {
 	authority?: WorkerDelegationAuthorityRequest;
 	base?: ResolvedWorkerProfile;
 	modelPin?: OrchestrationModelBinding;
 	foregroundModel?: Model<Api>;
+	foregroundThinkingLevel?: OrchestrationThinkingLevel;
+	foregroundToolNames?: readonly string[];
+	foregroundEnvelope?: CapabilityEnvelope;
+	cwd?: string;
 	modelRegistry: ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;
 }
@@ -62,16 +73,55 @@ export type WorkerAuthorityResolution =
 	| {
 			ok: true;
 			shipment: ResolvedWorkerProfile;
-			requestedReadPaths?: readonly string[];
-			requestedWritePaths?: readonly string[];
 	  }
 	| { ok: false; reason: string };
+
+/**
+ * Bind a compiled implementation profile to the compiled verifier identity it will persist.
+ * Verifier admission can legitimately derive a new immutable profile id (for example when the
+ * host forces a legacy delegation-capable preset to the leaf contract), so retaining the
+ * configured source id would make the execution contract internally inconsistent. Rebinding changes compiled
+ * content and therefore derives a fresh implementation identity as well.
+ */
+export function bindCompiledVerifierIdentity(
+	shipment: ResolvedWorkerProfile,
+	verifierProfileId: string,
+): ResolvedWorkerProfile {
+	if (shipment.profile.verificationProfileId === verifierProfileId) return shipment;
+	const profile: OrchestrationProfile = {
+		...shipment.profile,
+		verificationProfileId: verifierProfileId,
+		profileId: adaptiveProfileId({
+			baseProfileId: shipment.profile.profileId,
+			verificationProfileId: verifierProfileId,
+		}),
+	};
+	return { ...shipment, profile };
+}
+
+/** Bind the immutable profile snapshot to the exact native tools its host plan materialized. */
+export function bindCompiledToolSurface(
+	shipment: ResolvedWorkerProfile,
+	toolNames: readonly string[],
+): ResolvedWorkerProfile {
+	if (isDeepStrictEqual(shipment.profile.toolNames, toolNames)) return shipment;
+	const profile: OrchestrationProfile = {
+		...shipment.profile,
+		toolNames: [...toolNames],
+		profileId: adaptiveProfileId({
+			baseProfileId: shipment.profile.profileId,
+			toolNames,
+		}),
+	};
+	return { ...shipment, profile };
+}
 
 function selectModelBinding(
 	modelPin: OrchestrationModelBinding | undefined,
 	authority: WorkerDelegationAuthorityRequest | undefined,
 	base: ResolvedWorkerProfile | undefined,
 	foregroundModel: Model<Api> | undefined,
+	foregroundThinkingLevel: OrchestrationThinkingLevel | undefined,
 	modelRegistry: ModelRegistry,
 ): OrchestrationModelBinding | undefined {
 	if (modelPin) return { ...modelPin };
@@ -85,7 +135,7 @@ function selectModelBinding(
 		(sameAsBase
 			? base.modelBinding.thinkingLevel
 			: foregroundModel && provider === foregroundModel.provider && modelId === foregroundModel.id
-				? resolveModelThinkingLevel(foregroundModel, undefined)
+				? (foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined))
 				: selectedModel
 					? resolveModelThinkingLevel(selectedModel, undefined)
 					: "off");
@@ -104,63 +154,67 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
 
 /** Materialize free-form model choices as one immutable profile-shaped execution snapshot. */
 export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): WorkerAuthorityResolution {
-	if (!input.authority && input.base) {
-		const floorFailure = tokenBudgetFloorFailure(input.base.profile.budget.maxTokens);
-		if (floorFailure) return { ok: false, reason: floorFailure };
-		if (!input.modelPin) return { ok: true, shipment: input.base };
-		const resolvedModel = resolvePinnedOrchestrationModel(
-			input.modelPin,
-			input.modelRegistry,
-			input.isModelExhausted,
-		);
-		if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };
-		return {
-			ok: true,
-			shipment: {
-				...input.base,
-				model: resolvedModel.model,
-				modelBinding: resolvedModel.binding,
-				profile: {
-					...input.base.profile,
-					modelPolicy: { mode: "fixed", candidates: [resolvedModel.binding] },
-				},
-			},
-		};
-	}
 	const binding = selectModelBinding(
 		input.modelPin,
 		input.authority,
 		input.base,
 		input.foregroundModel,
+		input.foregroundThinkingLevel,
 		input.modelRegistry,
 	);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };
 	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
 	if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };
+	if (
+		input.modelPin &&
+		((input.authority?.model !== undefined &&
+			(input.authority.model.provider !== input.modelPin.provider ||
+				input.authority.model.modelId !== input.modelPin.modelId)) ||
+			(input.authority?.thinkingLevel !== undefined &&
+				input.authority.thinkingLevel !== input.modelPin.thinkingLevel))
+	) {
+		return {
+			ok: false,
+			reason: `worker_model_pin_conflict:${input.authority?.role ?? input.base?.profile.role ?? "implementer"}`,
+		};
+	}
 
+	const inheritedForegroundToolNames = mapToolNamesForPlatform(
+		input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES,
+	).filter((toolName) => AVAILABLE_TOOL_NAMES.has(toolName));
 	const configuredToolNames = mapToolNamesForPlatform(
-		input.authority?.toolNames ?? input.base?.profile.toolNames ?? DEFAULT_TOOL_NAMES,
+		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedForegroundToolNames,
 	);
-	const inheritsDelegation =
-		input.authority?.capabilities === undefined &&
-		(input.base === undefined ||
-			(input.base.profile.toolNames.includes("delegate") &&
-				input.base.profile.capabilityCeiling.includes("workflow.delegate")));
-	const requestedToolNames =
-		inheritsDelegation && !configuredToolNames.includes("delegate")
-			? [...configuredToolNames, "delegate"]
-			: configuredToolNames;
-	const uniqueToolNames = [...new Set(requestedToolNames)];
+	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
+	const uniqueToolNames = [
+		...new Set(
+			configuredToolNames.filter((toolName) => toolName !== "delegate" && !deniedForegroundTools.has(toolName)),
+		),
+	];
+	if (input.authority?.toolNames?.includes("delegate")) {
+		return { ok: false, reason: "orchestration_tool_unavailable:delegate" };
+	}
 	const unavailableTools = uniqueToolNames.filter((toolName) => !AVAILABLE_TOOL_NAMES.has(toolName));
 	if (unavailableTools.length > 0) {
 		return { ok: false, reason: `orchestration_tool_unavailable:${unavailableTools.join(",")}` };
 	}
-	const capabilities = new Set<HarnessCapability>(
-		input.authority?.capabilities ?? input.base?.profile.capabilityCeiling ?? DEFAULT_CAPABILITIES,
-	);
-	if (uniqueToolNames.includes("delegate") && inheritsDelegation) {
-		capabilities.add("workflow.delegate");
+	if (input.authority?.toolNames !== undefined) {
+		const inheritedSurface = new Set(
+			input.base ? mapToolNamesForPlatform(input.base.profile.toolNames) : inheritedForegroundToolNames,
+		);
+		const uninheritedTools = uniqueToolNames.filter((toolName) => !inheritedSurface.has(toolName));
+		if (uninheritedTools.length > 0) {
+			return { ok: false, reason: `orchestration_tool_unavailable:${uninheritedTools.join(",")}` };
+		}
 	}
+	const capabilities = new Set<HarnessCapability>(
+		input.authority?.capabilities ??
+			input.base?.profile.capabilityCeiling ??
+			input.foregroundEnvelope?.capabilities ??
+			DEFAULT_CAPABILITIES,
+	);
+	capabilities.delete("workflow.delegate");
+	capabilities.delete("memory.mutate");
 	const capabilityList = [...capabilities];
 	const toolNames: string[] = [];
 	for (const toolName of uniqueToolNames) {
@@ -177,45 +231,56 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const budget = structuredClone(input.authority?.budget ?? input.base?.profile.budget ?? {});
 	const floorFailure = tokenBudgetFloorFailure(budget.maxTokens);
 	if (floorFailure) return { ok: false, reason: floorFailure };
-	const role = input.authority?.role ?? input.base?.profile.role ?? "orchestrator";
-	const delegationLimits = input.base
-		? input.base.profile.delegationLimits
-		: structuredClone(LEAN_WORKER_DELEGATION_LIMITS);
+	const role = input.authority?.role ?? input.base?.profile.role ?? "implementer";
+	const delegationLimits = structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
+	const requestedWorkspacePath = input.authority?.path ?? input.base?.profile.workspacePath;
+	const workspacePath = requestedWorkspacePath
+		? resolveWorkerWorkspacePath(input.cwd ?? process.cwd(), requestedWorkspacePath)
+		: undefined;
 	const now = new Date().toISOString();
 	const descriptor = {
+		baseProfileId: input.base?.profile.profileId ?? null,
 		role,
 		binding: resolvedModel.binding,
 		capabilities: [...capabilities],
 		toolNames,
 		budget,
 		delegationLimits: delegationLimits ?? null,
+		workspacePath: workspacePath ?? null,
 		resourceProfileNames: input.base?.profile.resourceProfileNames ?? [],
+		dispatchProfileIds: input.base?.profile.dispatchProfileIds ?? [],
+		executionPolicy: input.base?.profile.executionPolicy ?? null,
+		requireIndependentVerification: input.base?.profile.requireIndependentVerification ?? false,
+		verificationProfileId: input.base?.profile.verificationProfileId ?? null,
 	};
 	const maxWallClockMs = budget.maxWallClockMs ?? 0;
 	const wallClockLeaseTtlMs =
 		maxWallClockMs > Number.MAX_SAFE_INTEGER - 30_000 ? Number.MAX_SAFE_INTEGER : maxWallClockMs + 30_000;
 	const profile: OrchestrationProfile = {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-		profileId: adaptiveProfileId(descriptor),
-		description: "Admission-time adaptive agent authority",
+		profileId: input.base?.profile.profileId ?? "",
+		description: input.base?.profile.description ?? "Admission-time adaptive agent authority",
 		role,
 		modelPolicy: { mode: "fixed", candidates: [resolvedModel.binding] },
 		capabilityCeiling: [...capabilities],
 		toolNames,
+		...(workspacePath ? { workspacePath } : {}),
 		resourceProfileNames: [...(input.base?.profile.resourceProfileNames ?? [])],
-		dispatchProfileIds: [],
+		dispatchProfileIds: [...(input.base?.profile.dispatchProfileIds ?? [])],
 		...(input.base?.profile.executionPolicy ? { executionPolicy: input.base.profile.executionPolicy } : {}),
-		...(delegationLimits ? { delegationLimits: structuredClone(delegationLimits) } : {}),
+		delegationLimits,
 		budget,
-		maxConcurrent: Number.MAX_SAFE_INTEGER,
+		maxConcurrent: input.base?.profile.maxConcurrent ?? Number.MAX_SAFE_INTEGER,
 		leaseTtlMs: Math.max(input.base?.profile.leaseTtlMs ?? 0, wallClockLeaseTtlMs, 90_000),
 		requireIndependentVerification: input.base?.profile.requireIndependentVerification ?? false,
 		...(input.base?.profile.verificationProfileId
 			? { verificationProfileId: input.base.profile.verificationProfileId }
 			: {}),
-		createdAt: now,
-		updatedAt: now,
+		createdAt: input.base?.profile.createdAt ?? now,
+		updatedAt: input.base?.profile.updatedAt ?? now,
 	};
+	const unchangedBase = input.base && isDeepStrictEqual(profile, input.base.profile);
+	profile.profileId = unchangedBase ? profile.profileId : adaptiveProfileId(descriptor);
 	return {
 		ok: true,
 		shipment: {
@@ -225,7 +290,5 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			resourcePointers: structuredClone(input.base?.resourcePointers ?? []),
 			...(input.base?.soul ? { soul: input.base.soul } : {}),
 		},
-		...(input.authority?.readPaths ? { requestedReadPaths: [...input.authority.readPaths] } : {}),
-		...(input.authority?.writePaths ? { requestedWritePaths: [...input.authority.writePaths] } : {}),
 	};
 }

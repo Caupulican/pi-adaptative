@@ -90,7 +90,7 @@ const goalSchema = Type.Object(
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 		dispatchTarget: Type.Optional(
 			Type.Union([Type.Literal("in_process"), Type.Literal("tmux")], {
-				description: "Legacy target. Native is default; use tmux only for an owner-requested persistent pane.",
+				description: "Legacy target. Native is default; use tmux when the task benefits from a persistent pane.",
 			}),
 		),
 	},
@@ -157,9 +157,9 @@ export interface GoalToolDependencies {
 	hasToolCallId?: (toolCallId: string) => boolean;
 	/**
 	 * Read the session's live worker lane records, for validating kind:"worker" evidence refs
-	 * (the `uri` is a laneId) at add_evidence time. Read-defensive: when not wired -- exactly like
-	 * `hasToolCallId` -- a "worker" ref cannot be proven and is recorded as `verified: false` rather
-	 * than assumed true. Live wiring is added separately.
+	 * (the `uri` is a laneId) at add_evidence time and refusing completion while goal-owned work is
+	 * queued or running. Read-defensive: when not wired -- exactly like `hasToolCallId` -- a "worker"
+	 * ref cannot be proven and is recorded as `verified: false` rather than assumed true.
 	 */
 	getLaneRecords?: () => readonly LaneRecord[];
 	/**
@@ -192,7 +192,6 @@ export interface GoalToolDependencies {
 	 * BOTH `input.dispatchTarget === "tmux"` AND this dependency is present; otherwise the EXISTING
 	 * {@link startWorkerDelegation} in-process path runs, byte-identical to before this field existed.
 	 * The honest skip-reason vocabulary this can return: `tmux_extension_not_loaded`,
-	 * `no_standing_grant` (the owner has not authorized unattended tmux dispatch),
 	 * `tmux_dispatch_failed`, `tmux_dispatch_incomplete`, `lane_correlation_failed`,
 	 * `worktree_create_failed` (worktree-sync is enabled but the lane-first `create_lane` call was
 	 * refused -- e.g. max lanes reached -- so no fire_task call was ever attempted),
@@ -414,6 +413,18 @@ function goalPanelModel(details: GoalToolDetails | undefined): OrchestrationPane
 	};
 }
 
+function goalExecutionError(
+	action: GoalToolDetails["action"],
+	message: string,
+	state: GoalState,
+): { content: Array<{ type: "text"; text: string }>; details: GoalToolDetails; isError: true } {
+	return {
+		content: [{ type: "text", text: `goal ${action} failed: ${message}` }],
+		details: { action, applied: false, error: message, state },
+		isError: true,
+	};
+}
+
 export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDefinition {
 	const now = deps.now ?? (() => new Date().toISOString());
 	return {
@@ -426,7 +437,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"Start when persistent continuation materially benefits current work or the user/system requests it. Skip routine one-turn tasks; get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
-			"complete needs current authoritative evidence, no remaining work, no linked open task_steps, no running tool_task, no active pipeline. block_goal needs same real impasse for 3 goal turns.",
+			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned running or cited non-completed tool_task, and no active pipeline. block_goal needs same real impasse for 3 goal turns.",
 		],
 		parameters: goalSchema,
 		renderShell: "self",
@@ -587,20 +598,35 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				nextState = current as GoalState;
 			} else {
 				let activePipeline: ReturnType<NonNullable<GoalToolDependencies["getActivePipeline"]>>;
+				let activeGoalLaneIds: string[] | undefined;
 				if (
 					current &&
 					isGoalExecutionActive(current.status) &&
 					(action.action === "complete" || action.action === "increment")
 				) {
 					try {
+						const boundLaneIds = new Set(
+							current.requirements.flatMap((requirement) =>
+								requirement.boundLaneId ? [requirement.boundLaneId] : [],
+							),
+						);
+						activeGoalLaneIds = deps
+							.getLaneRecords?.()
+							.filter(
+								(record) =>
+									(record.status === "queued" || record.status === "running") &&
+									(record.goalId === current.goalId || boundLaneIds.has(record.laneId)),
+							)
+							.map((record) => record.laneId);
+					} catch (error) {
+						const message = `Cannot verify active goal-owned lane state: ${error instanceof Error ? error.message : String(error)}`;
+						return goalExecutionError(input.action, message, current);
+					}
+					try {
 						activePipeline = deps.getActivePipeline?.();
 					} catch (error) {
 						const message = `Cannot verify active pipeline state: ${error instanceof Error ? error.message : String(error)}`;
-						return {
-							content: [{ type: "text" as const, text: `goal ${input.action} failed: ${message}` }],
-							details: { action: input.action, applied: false, error: message, state: current },
-							isError: true,
-						};
+						return goalExecutionError(input.action, message, current);
 					}
 				}
 				const result = applyGoalAction(current, action, now(), {
@@ -608,6 +634,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					openTaskSteps: deps.getOpenTaskSteps?.(),
 					backgroundToolTasks: deps.getBackgroundToolTasks?.(),
 					activePipeline,
+					activeGoalLaneIds,
 				});
 				if (!result.ok) {
 					return {

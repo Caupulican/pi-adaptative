@@ -166,7 +166,8 @@ describe("delegate status", () => {
 		expect(result.content[0]?.text).toContain(
 			"Never poll, interrupt, or cancel a healthy running worker to force the queue",
 		);
-		expect(result.content[0]?.text).toContain("authority.toolNames omits write and edit");
+		expect(result.content[0]?.text).toContain("Independent machine-scope workers may run in parallel");
+		expect(result.content[0]?.text).toContain("an explicit path preserves collision fencing");
 		expect(result.content[0]?.text).toContain(
 			"If you start a fresh narrower replacement, cancel this queued agent after the replacement starts",
 		);

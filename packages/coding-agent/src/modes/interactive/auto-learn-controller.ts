@@ -20,7 +20,11 @@ import lockfile from "proper-lockfile";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
-import { analyzeReflectionTurn } from "../../core/learning/reflection-turn-analysis.ts";
+import {
+	getAutoLearnPreset,
+	isCurrentSessionReflectionEnabled,
+	resolveAutoLearnSettings,
+} from "../../core/learning/auto-learn-settings.ts";
 import { isProcessAlive } from "../../core/process-liveness.ts";
 import {
 	describeInFlightWorkUnit,
@@ -36,68 +40,6 @@ import {
 } from "../../core/tasks/task-contract-monitor.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { theme } from "./theme/theme.ts";
-
-const AUTO_LEARN_DEFAULTS = {
-	enabled: false,
-	model: "active",
-	thinkingLevel: "low",
-	longSessionMessages: 32,
-	longSessionContextPercent: 70,
-	cooldownMinutes: 24 * 60,
-	leaseMinutes: 90,
-	maxConcurrentLearners: 1,
-	applyHighConfidence: false,
-	reflectionReview: true,
-	reflectionMinToolCalls: 12,
-	reflectionCooldownMinutes: 24 * 60,
-	complexTaskToolCalls: 12,
-} as const satisfies Required<AutoLearnSettings>;
-
-const AUTONOMY_AUTO_LEARN_PRESETS = {
-	off: { ...AUTO_LEARN_DEFAULTS, enabled: true, reflectionReview: true },
-	safe: {
-		...AUTO_LEARN_DEFAULTS,
-		enabled: true,
-		longSessionMessages: 64,
-		longSessionContextPercent: 85,
-		cooldownMinutes: 24 * 60,
-		leaseMinutes: 60,
-		maxConcurrentLearners: 1,
-		applyHighConfidence: false,
-		reflectionReview: true,
-		reflectionMinToolCalls: 12,
-		reflectionCooldownMinutes: 24 * 60,
-		complexTaskToolCalls: 12,
-	},
-	balanced: {
-		...AUTO_LEARN_DEFAULTS,
-		enabled: true,
-		longSessionMessages: 64,
-		longSessionContextPercent: 85,
-		cooldownMinutes: 24 * 60,
-		leaseMinutes: 90,
-		maxConcurrentLearners: 1,
-		applyHighConfidence: false,
-		reflectionReview: true,
-		reflectionMinToolCalls: 12,
-		reflectionCooldownMinutes: 24 * 60,
-		complexTaskToolCalls: 12,
-	},
-	full: {
-		...AUTO_LEARN_DEFAULTS,
-		enabled: true,
-		longSessionMessages: 64,
-		longSessionContextPercent: 85,
-		cooldownMinutes: 24 * 60,
-		leaseMinutes: 90,
-		maxConcurrentLearners: 1,
-		applyHighConfidence: true,
-		reflectionReview: true,
-		reflectionMinToolCalls: 12,
-		reflectionCooldownMinutes: 24 * 60,
-		complexTaskToolCalls: 12,
-	},
-} as const satisfies Record<AutonomyMode, Required<AutoLearnSettings>>;
 
 export const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
@@ -305,11 +247,6 @@ interface AutoLearnReservation {
 
 type AutoLearnReservationResult = { ok: true; reservation: AutoLearnReservation } | { ok: false; reason: string };
 
-interface AutonomyReviewDecision extends AutoLearnDecision {
-	toolCalls: number;
-	digest?: string;
-}
-
 export interface AutoLearnSpawnTarget {
 	command: string;
 	argsPrefix: string[];
@@ -366,9 +303,8 @@ export interface AutoLearnControllerDeps {
 export class AutoLearnController {
 	// Cheap turn-boundary task_steps contract nudge. Tracks the consecutive-violation streak
 	// across turns so `checkTaskStepsContractNudge` (invoked from the existing per-turn `agent_end`
-	// pass below) can fire exactly one advisory harness note per sustained-violation streak. No model
-	// calls; best-effort coupling to whichever per-turn branch runs (native reflection or the
-	// auto-learn/autonomy-review pair) — see `checkTaskStepsContractNudge` for the rationale.
+	// pass below) can fire exactly one advisory harness note per sustained-violation streak. It makes
+	// no model call and remains independent of current-session reflection cue planning.
 	private _taskContractStreak: TaskContractStreak = INITIAL_TASK_CONTRACT_STREAK;
 
 	private readonly deps: AutoLearnControllerDeps;
@@ -577,31 +513,12 @@ export class AutoLearnController {
 	}
 
 	getAutoLearnPresetForAutonomyMode(mode: AutonomyMode, current: AutoLearnSettings = {}): Required<AutoLearnSettings> {
-		const preset = AUTONOMY_AUTO_LEARN_PRESETS[mode] ?? AUTONOMY_AUTO_LEARN_PRESETS.off;
-		return { ...preset, model: current.model?.trim() || preset.model };
+		return getAutoLearnPreset(mode, current);
 	}
 
 	getEffectiveAutoLearnSettings(): Required<AutoLearnSettings> {
 		const settings = this.session.settingsManager.getAutoLearnSettings();
-		const preset = this.getAutoLearnPresetForAutonomyMode(
-			this.session.settingsManager.getAutonomySettings().mode,
-			settings,
-		);
-		return {
-			enabled: settings.enabled ?? preset.enabled,
-			model: settings.model?.trim() || preset.model,
-			longSessionMessages: settings.longSessionMessages ?? preset.longSessionMessages,
-			longSessionContextPercent: settings.longSessionContextPercent ?? preset.longSessionContextPercent,
-			cooldownMinutes: settings.cooldownMinutes ?? preset.cooldownMinutes,
-			leaseMinutes: settings.leaseMinutes ?? preset.leaseMinutes,
-			maxConcurrentLearners: settings.maxConcurrentLearners ?? preset.maxConcurrentLearners,
-			applyHighConfidence: settings.applyHighConfidence ?? preset.applyHighConfidence,
-			reflectionReview: settings.reflectionReview ?? preset.reflectionReview,
-			reflectionMinToolCalls: settings.reflectionMinToolCalls ?? preset.reflectionMinToolCalls,
-			reflectionCooldownMinutes: settings.reflectionCooldownMinutes ?? preset.reflectionCooldownMinutes,
-			complexTaskToolCalls: settings.complexTaskToolCalls ?? preset.complexTaskToolCalls,
-			thinkingLevel: settings.thinkingLevel ?? preset.thinkingLevel,
-		};
+		return resolveAutoLearnSettings(this.session.settingsManager.getAutonomySettings().mode, settings);
 	}
 
 	getCurrentAutoLearnSettings(): Required<AutoLearnSettings> {
@@ -707,6 +624,15 @@ export class AutoLearnController {
 		};
 	}
 
+	/** Read-only readiness projection for the manual Auto Learn command and status report. */
+	private evaluateAutoLearn(force = false): AutoLearnDecision {
+		const settings = this.getEffectiveAutoLearnSettings();
+		return this.withAutoLearnStateLock((current) => {
+			const state = this.pruneAutoLearnHistoryFromState(current);
+			return { result: this.buildAutoLearnDecisionFromState(state, settings, force), next: state };
+		});
+	}
+
 	private resolveAutoLearnModelPattern(settings: Required<AutoLearnSettings>): string | undefined {
 		if (settings.model === "active") {
 			return this.session.model ? `${this.session.model.provider}/${this.session.model.id}` : undefined;
@@ -745,14 +671,6 @@ export class AutoLearnController {
 		}
 		if (available.some((model) => model.id === modelValue)) return undefined;
 		return `Auto Learn model "${modelValue}" is not in configured subscription/API models; saved as manual/unverified.`;
-	}
-
-	private evaluateAutoLearn(force = false): AutoLearnDecision {
-		const settings = this.getEffectiveAutoLearnSettings();
-		return this.withAutoLearnStateLock((current) => {
-			const state = this.pruneAutoLearnHistoryFromState(current);
-			return { result: this.buildAutoLearnDecisionFromState(state, settings, force), next: state };
-		});
 	}
 
 	private buildAutonomyAuthorityPrompt(): string {
@@ -961,6 +879,9 @@ export class AutoLearnController {
 			bypassReflectionCooldown?: boolean;
 		} = {},
 	): string {
+		if (options.promptKind === "reflection" || options.cooldownKind === "reflection") {
+			return "Auto Learn not started: automatic reflection runs only in the current root session; background reflection learners are disabled.";
+		}
 		const settings = this.getEffectiveAutoLearnSettings();
 		const modelPattern = this.resolveAutoLearnModelPattern(settings);
 		if (!modelPattern) {
@@ -1087,95 +1008,12 @@ export class AutoLearnController {
 		return `Auto Learn started. Log: ${logPath}`;
 	}
 
-	private evaluateAutonomyReview(messages: AgentMessage[]): AutonomyReviewDecision {
-		const settings = this.getEffectiveAutoLearnSettings();
-		const complexTaskThreshold = Math.max(1, settings.complexTaskToolCalls ?? 12);
-		const turn = analyzeReflectionTurn(messages, complexTaskThreshold);
-		const digest = turn.recentTurnText || "[No textual turn digest available.]";
-		const state = this.withAutoLearnStateLock((current) => {
-			const pruned = this.pruneAutoLearnHistoryFromState(current);
-			return { result: pruned, next: pruned };
-		});
-		const now = Date.now();
-		const tenant = this.getAutoLearnTenantKey();
-		const runningCount = Object.values(state.runs ?? {}).filter((run) => run.tenant === tenant).length;
-		const lastReflection = state.lastReflectionByTenant?.[tenant] ?? 0;
-		const cooldownMs = settings.reflectionCooldownMinutes * 60 * 1000;
-		const cooldownRemainingMs = Math.max(0, lastReflection + cooldownMs - now);
-		const messageCount = this.getAutoLearnMessageCount();
-		const contextPercent = this.session.getContextUsage()?.percent ?? null;
-		const toolCalls = turn.toolCallCount;
-		const userText = turn.userText;
-		const correctionSignal = turn.hadCorrection;
-		const behavioralSelfImprovementSignal =
-			/\b(harness|pi|agent|autonomy|autonomous|self[- ]?improv(?:e|ement|ing)?|steer(?:ing)?|trigger(?:s)?|skill(?:s)?|code[- ]?bak(?:e|ed)|bake(?:d)? into code|not (?:automata|memory)|reference agent|hermes)\b/i.test(
-				userText,
-			) &&
-			/\b(improve|automatic(?:ally)?|autonomous|trigger|fire|skill|steer|self[- ]?improv(?:e|ement|ing)?|code[- ]?bak(?:e|ed)|bake(?:d)?|too much|less)\b/i.test(
-				userText,
-			);
-		const complexTaskSignal = toolCalls >= complexTaskThreshold;
-		const bypassCooldown = correctionSignal || behavioralSelfImprovementSignal || complexTaskSignal;
-		const base = { messageCount, contextPercent, cooldownRemainingMs, runningCount, toolCalls };
-		if (!settings.enabled) return { ...base, shouldRun: false, reason: "disabled" };
-		if (!settings.reflectionReview) return { ...base, shouldRun: false, reason: "reflection disabled" };
-		if (runningCount >= settings.maxConcurrentLearners) {
-			return {
-				...base,
-				shouldRun: false,
-				reason: `max tenant learners running (${runningCount}/${settings.maxConcurrentLearners})`,
-			};
-		}
-		if (cooldownRemainingMs > 0 && !bypassCooldown) {
-			return { ...base, shouldRun: false, reason: "reflection cooldown" };
-		}
-		if (behavioralSelfImprovementSignal) {
-			return {
-				...base,
-				shouldRun: true,
-				reason: "reflection behavioral self-improvement signal",
-				digest,
-				bypassCooldown: true,
-			};
-		}
-		if (correctionSignal) {
-			return {
-				...base,
-				shouldRun: true,
-				reason: "reflection correction signal",
-				digest,
-				bypassCooldown: true,
-			};
-		}
-		if (complexTaskSignal) {
-			return {
-				...base,
-				shouldRun: true,
-				reason: `reflection complex task learning signal (${toolCalls}/${complexTaskThreshold} tool calls)`,
-				digest,
-				bypassCooldown: true,
-			};
-		}
-		// Full autonomy expands allowed action scope for triggered reviews; it does not make every turn a review trigger.
-		if (toolCalls >= settings.reflectionMinToolCalls) {
-			return {
-				...base,
-				shouldRun: true,
-				reason: `reflection tool trigger (${toolCalls}/${settings.reflectionMinToolCalls})`,
-				digest,
-			};
-		}
-		return { ...base, shouldRun: false, reason: "reflection thresholds not met" };
-	}
-
 	/**
-	 * Native reflection is the in-process replacement for the buggy `continuous-learning`
-	 * subprocess. It runs when auto-learn is enabled and is not killed via `PI_NATIVE_REFLECTION=0`.
+	 * Current-session reflection is available only to the root orchestrator. It never launches a
+	 * learner process; the session provider planner owns its single-request transient cue.
 	 */
 	isNativeReflectionEnabled(): boolean {
-		if (process.env.PI_NATIVE_REFLECTION === "0") return false;
-		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
-		return this.getEffectiveAutoLearnSettings().enabled;
+		return isCurrentSessionReflectionEnabled(this.getEffectiveAutoLearnSettings());
 	}
 
 	/**
@@ -1187,9 +1025,8 @@ export class AutoLearnController {
 	 * `task_steps_context` pages through). Zero model calls; a delivery failure is swallowed so this
 	 * best-effort nudge can never disrupt the turn.
 	 *
-	 * Called from both `maybeRunNativeReflection` and `maybeStartAutoLearn` — the mutually exclusive
-	 * `agent_end` branches in interactive-mode.ts — so it runs on every turn regardless of whether
-	 * native reflection or legacy auto-learn is enabled, without adding a new turn-boundary hook.
+	 * Called from both interactive turn-boundary compatibility hooks so it runs regardless of the
+	 * current-session reflection setting without adding another provider turn.
 	 */
 	private checkTaskStepsContractNudge(): void {
 		const state = this.session.getTaskStepsStateSnapshot();
@@ -1215,32 +1052,17 @@ export class AutoLearnController {
 	}
 
 	maybeStartAutoLearn(): boolean {
-		// The other mutually exclusive `agent_end` branch (see `checkTaskStepsContractNudge`) — runs
-		// unconditionally here so the contract nudge fires every turn regardless of auto-learn settings.
+		// Preserve the deterministic task-contract monitor, but never buy an automatic learner turn.
 		this.checkTaskStepsContractNudge();
-		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
-		const decision = this.evaluateAutoLearn(false);
-		if (!decision.shouldRun) {
-			this.updateAutoLearnFooter();
-			return false;
-		}
-		const message = this.launchAutoLearn(decision.reason, false);
-		if (!message.startsWith("Auto Learn started")) this.deps.ui.showStatus(message);
-		return message.startsWith("Auto Learn started");
+		this.updateAutoLearnFooter();
+		return false;
 	}
 
 	maybeStartAutonomyReview(messages: AgentMessage[]): boolean {
-		if (process.env.PI_AUTO_LEARN_CHILD === "1") return false;
-		const decision = this.evaluateAutonomyReview(messages);
-		if (!decision.shouldRun) return false;
-		const message = this.launchAutoLearn(decision.reason, true, {
-			cooldownKind: "reflection",
-			promptKind: "reflection",
-			turnDigest: decision.digest,
-			bypassReflectionCooldown: decision.bypassCooldown,
-		});
-		if (!message.startsWith("Auto Learn started")) this.deps.ui.showStatus(message);
-		return message.startsWith("Auto Learn started");
+		// Compatibility hook for InteractiveEventHost. Completed-turn reflection is deterministic and
+		// session-owned; it never creates a background process or a second provider turn.
+		void messages;
+		return false;
 	}
 
 	updateAutoLearnFooter(): void {
@@ -1300,13 +1122,7 @@ export class AutoLearnController {
 		const inFlightWorkLines = inFlightWork.length
 			? inFlightWork.map((unit) => `- ${describeInFlightWorkUnit(unit)}`).join("\n")
 			: "- none";
-		const reflectionLast = state.lastReflectionByTenant?.[this.getAutoLearnTenantKey()] ?? 0;
-		const reflectionCooldownRemainingMs = Math.max(
-			0,
-			reflectionLast + settings.reflectionCooldownMinutes * 60 * 1000 - Date.now(),
-		);
-		const reflectionCooldownText =
-			reflectionCooldownRemainingMs > 0 ? `${Math.ceil(reflectionCooldownRemainingMs / 60000)}m remaining` : "ready";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nReflection review: ${settings.reflectionReview ? "enabled" : "disabled"} (tool trigger ${settings.reflectionMinToolCalls}, cooldown ${reflectionCooldownText})\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning tenant leases: ${runs.length}/${settings.maxConcurrentLearners}\nOther tenant leases: ${otherTenantRuns}\nTenant artifact dir: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nIn-process reload-gate work: ${inFlightWork.length ? `${inFlightWork.length} unit(s)` : "none"}\n${inFlightWorkLines}\nRuns:\n${runLines}`;
+		const reflectionStatus = this.isNativeReflectionEnabled() ? "enabled" : "disabled";
+		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nCurrent-session reflection: ${reflectionStatus} (complex trigger ${settings.complexTaskToolCalls} tool calls; automatic provider requests 0)\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning tenant leases: ${runs.length}/${settings.maxConcurrentLearners}\nOther tenant leases: ${otherTenantRuns}\nTenant artifact dir: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockers.pending ? reloadBlockers.reason : "none"}\n${reloadBlockerLines}\nIn-process reload-gate work: ${inFlightWork.length ? `${inFlightWork.length} unit(s)` : "none"}\n${inFlightWorkLines}\nRuns:\n${runLines}`;
 	}
 }

@@ -52,8 +52,9 @@ import type {
 } from "./agent-session-contracts.ts";
 import { deriveCompositeChildEnvelope, wrapToolWithCapabilityEnvelopeGate } from "./autonomy/composite-tool-gate.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
-import { isPathWithinEnvelope } from "./autonomy/envelope-enforcement.ts";
+import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
+import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
 import { isCompletedBackgroundToolEvidence } from "./background-tool-task-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
@@ -446,11 +447,15 @@ export class RuntimeBuilder {
 	private readonly _credentialBootstrapFiles: readonly string[];
 	private readonly _credentialDiscoveryRoots: readonly string[];
 	private readonly _fileMutationIntents: FileMutationIntentController;
+	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
 
 	private readonly deps: RuntimeBuilderDeps;
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
+		this._workerSessionPrivatePathEnvelope = isWorkerSession()
+			? buildWorkerSessionPrivatePathEnvelope(deps.getCwd(), deps.getAgentDir())
+			: undefined;
 		this._credentialBootstrapFiles = getMachineCredentialBootstrapFiles(deps.getAgentDir());
 		this._credentialDiscoveryRoots = getMachineCredentialDiscoveryRoots(deps.getAgentDir());
 		this._credentialManager = new CredentialManager({
@@ -471,7 +476,14 @@ export class RuntimeBuilder {
 			redactSensitiveText: (text) => this._credentialManager.redactSensitiveText(text),
 			// Data from the retired local vault remains protected even though it is no longer executable.
 			protectedFiles: [secretVaultFile(deps.getAgentDir()), ...this._credentialBootstrapFiles],
-			protectedDirectories: [managedSecretEnvDir(deps.getAgentDir())],
+			// Worker process tools remain host-wide for ordinary sibling-project work, but the
+			// recognizable private harness roots still pass through the same execution guard as
+			// direct filesystem tools. This is lexical/recognizable protection only; obfuscated
+			// runtime path construction requires OS-level isolation.
+			protectedDirectories: [
+				managedSecretEnvDir(deps.getAgentDir()),
+				...(this._workerSessionPrivatePathEnvelope?.deniedPaths ?? []),
+			],
 		};
 		this._fileMutationIntents = new FileMutationIntentController();
 	}
@@ -702,7 +714,10 @@ export class RuntimeBuilder {
 					this.deps.getCwd(),
 					this._credentialExposureBoundary,
 				);
-				return [guarded.name, guarded] as const;
+				const scoped = this._workerSessionPrivatePathEnvelope
+					? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
+					: guarded;
+				return [scoped.name, scoped] as const;
 			}),
 		);
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
@@ -711,7 +726,10 @@ export class RuntimeBuilder {
 				this.deps.getCwd(),
 				this._credentialExposureBoundary,
 			);
-			toolRegistry.set(guarded.name, guarded);
+			const scoped = this._workerSessionPrivatePathEnvelope
+				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
+				: guarded;
+			toolRegistry.set(scoped.name, scoped);
 		}
 		this._toolRegistry = toolRegistry;
 
@@ -1227,7 +1245,7 @@ export class RuntimeBuilder {
 
 			// Worktree-sync (opt-in): the closed-action lane workflow tool, plus -- for a session
 			// launched lane-bound (PI_WORKTREE_LANE) -- the G8/G10 lane gate wrapped UNDER the
-			// file-mutation tools (edit/write, plus cooperative bash only for interactive lanes), so a sync_required lane fails closed with the
+			// file-mutation tools (edit/write, plus integration-sensitive bash checks), so a sync_required lane fails closed with the
 			// exact recovery step rather than relying on prompt compliance. `worktreeSyncSettings` /
 			// `worktreeSyncEngineDeps` are hoisted above (declared before the goal-tool registration)
 			// so the goal->tmux lane-first dispatch dep and this tool share one settings/deps source.
@@ -1246,8 +1264,6 @@ export class RuntimeBuilder {
 						laneKey: boundLaneKey,
 						engineDeps: worktreeSyncEngineDeps,
 						policy: () => this.deps.getSettingsManager().getWorktreeSyncSettings().syncPolicy,
-						hardShell: isWorkerSession(),
-						trustedGateCommand: () => this.deps.getSettingsManager().getWorktreeSyncSettings().gateCommand,
 					});
 					for (const gatedToolName of ["edit", "write", "bash"]) {
 						const original = this._baseToolDefinitions.get(gatedToolName);
@@ -1312,22 +1328,15 @@ export class RuntimeBuilder {
 		this.deps.applyExtensionBindings(runner);
 
 		const boundLaneKey = getBoundWorktreeLaneKey();
-		const hardLaneWorker = boundLaneKey !== undefined && isWorkerSession();
-		const explicitlyRequestedTools =
-			options.activeToolNames ?? (baseToolsOverride ? Object.keys(baseToolsOverride) : undefined);
-		if (hardLaneWorker && explicitlyRequestedTools?.includes("bash")) {
-			throw new Error("hard lane workers cannot request unrestricted bash; use typed worktree_sync actions");
-		}
+		const laneWorker = boundLaneKey !== undefined && isWorkerSession();
 		const defaultActiveToolNames = mapToolNamesForPlatform(
 			baseToolsOverride
 				? Object.keys(baseToolsOverride)
 				: [...DEFAULT_ACTIVE_TOOL_NAMES, ...(settingsManager.getScoutSettings().enabled ? ["context_scout"] : [])],
 		);
-		const baseActiveToolNames = mapToolNamesForPlatform(options.activeToolNames ?? defaultActiveToolNames).filter(
-			(name) => !hardLaneWorker || name !== "bash",
-		);
+		const baseActiveToolNames = mapToolNamesForPlatform(options.activeToolNames ?? defaultActiveToolNames);
 		if (
-			hardLaneWorker &&
+			laneWorker &&
 			settingsManager.getWorktreeSyncSettings().enabled &&
 			!baseActiveToolNames.includes("worktree_sync")
 		) {

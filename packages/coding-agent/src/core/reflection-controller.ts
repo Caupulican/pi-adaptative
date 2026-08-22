@@ -1,16 +1,13 @@
 /**
- * Native reflection + learning-write controller.
+ * Root-session reflection cue + explicit learning-write controller.
  *
- * Extracted verbatim from agent-session.ts (god-file decomposition). Owns the end-of-loop reflection
- * pass (R2), the isolated-completion primitive it runs on, and the learning-apply/rollback path that
- * turns reflection writes into gated, audited durable memory/skill changes. It mutates NO session
- * fields — every durable effect goes through the bundled memory tool, the session log (via deps), or
- * the skills dir; the whole pass is best-effort and never throws into the turn loop. Reads live
- * session state (model/agent/registry/memory/settings) through narrow deps accessors rather than the
- * whole AgentSession.
+ * Automatic reflection is a hidden cue in the root orchestrator's ordinary provider turn. This
+ * controller never schedules an automatic provider request. The isolated completion and structured
+ * reflection pass remain explicit compatibility/application seams for owner-invoked callers. Every
+ * durable effect goes through the bundled memory tool, the session log (via deps), or the skills dir.
  */
 
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
@@ -36,6 +33,7 @@ import {
 import type { LearningDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { PI_OKF_TYPES, type PiOkfType } from "./context/okf-memory.ts";
+import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import {
 	APPLY_WRITE_REFUSED_REASON_CODE,
 	appendLearningAuditSnapshot,
@@ -54,12 +52,7 @@ import {
 	type ReflectionResult,
 	type ReflectionWrite,
 } from "./learning/reflection-engine.ts";
-import {
-	analyzeReflectionTurn,
-	boundReflectionSemanticText,
-	type ReflectionTurnAnalysis,
-	reflectionTriggerPriority,
-} from "./learning/reflection-turn-analysis.ts";
+import { analyzeReflectionTurn, type ReflectionTurnAnalysis } from "./learning/reflection-turn-analysis.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type {
 	StructuredReflectionApplyResult,
@@ -67,10 +60,10 @@ import type {
 	StructuredReflectionWrite,
 } from "./memory/providers/file-store.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { resolveCliModel } from "./model-resolver.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { runSkillAudit } from "./tools/skill-audit.ts";
+import type { Skill } from "./skills.ts";
+import { DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS, runSkillAudit } from "./tools/skill-audit.ts";
 
 export interface ReflectionControllerDeps {
 	/** Current session model (fallback for an isolated call that omits its own model). */
@@ -128,6 +121,8 @@ export interface ReflectionControllerDeps {
 	 * mirroring the existing profile-resolution fallback in settings-manager.ts).
 	 */
 	getCwd?(): string;
+	/** Already-loaded root skill universe; avoids a second unbounded filesystem discovery during reflection. */
+	getSkillsForAudit?(): readonly Skill[];
 }
 
 // reasonCode when an automatic skill promotion is blocked by an overlap with an existing skill
@@ -137,9 +132,71 @@ export const SKILL_OVERLAP_CONSOLIDATION_REASON_CODE = "skill_overlap_consolidat
 // rather than silently skipping the check.
 export const SKILL_AUDIT_UNAVAILABLE_REASON_CODE = "skill_audit_unavailable";
 
-const REFLECTION_MIN_INTERVAL_MS = 45_000;
-const REFLECTION_PENDING_MAX_CHARS = 12_000;
-const REFLECTION_DIGEST_HISTORY_SIZE = 64;
+export const CURRENT_TURN_REFLECTION_CUSTOM_TYPE = "reflection_cue";
+export const CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE = "reflection_cue_state";
+
+export type CurrentTurnReflectionTrigger = "root-turn" | Exclude<DemandSignals["trigger"], "none">;
+
+export interface CurrentTurnReflectionCueState {
+	version: 1;
+	revision: number;
+	cueId: string;
+	status: "pending" | "consumed" | "dismissed";
+	triggers: CurrentTurnReflectionTrigger[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface CurrentTurnReflectionCuePlan {
+	message: AgentMessage;
+	isCurrent(): boolean;
+	commit(): void;
+}
+
+const CURRENT_TURN_REFLECTION_CUE = [
+	"Root reflection contract for this current turn:",
+	"- Decide during this same turn whether the request or resulting evidence warrants durable learning.",
+	"- When warranted, confront existing memory first, then use this root session's memory or skill tools now.",
+	"- Do not defer reflection, request another model turn, call an isolated completion, or launch a background learner or worker for reflection.",
+	"- When nothing durable is warranted, continue normally and do not mention this cue.",
+].join("\n");
+
+const CURRENT_TURN_REFLECTION_TRIGGERS = new Set<CurrentTurnReflectionTrigger>([
+	"root-turn",
+	"complex",
+	"corrective",
+	"durable",
+	"session-end",
+]);
+
+function parseCurrentTurnReflectionCueState(value: unknown): CurrentTurnReflectionCueState | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const candidate = value as Partial<CurrentTurnReflectionCueState>;
+	if (
+		candidate.version !== 1 ||
+		typeof candidate.revision !== "number" ||
+		!Number.isSafeInteger(candidate.revision) ||
+		candidate.revision < 1 ||
+		typeof candidate.cueId !== "string" ||
+		(candidate.status !== "pending" && candidate.status !== "consumed" && candidate.status !== "dismissed") ||
+		!Array.isArray(candidate.triggers) ||
+		candidate.triggers.length === 0 ||
+		candidate.triggers.some((trigger) => !CURRENT_TURN_REFLECTION_TRIGGERS.has(trigger)) ||
+		typeof candidate.createdAt !== "string" ||
+		typeof candidate.updatedAt !== "string"
+	) {
+		return undefined;
+	}
+	return {
+		version: 1,
+		revision: candidate.revision,
+		cueId: candidate.cueId,
+		status: candidate.status,
+		triggers: [...new Set(candidate.triggers)],
+		createdAt: candidate.createdAt,
+		updatedAt: candidate.updatedAt,
+	};
+}
 
 interface ReflectionApplyResult {
 	applied: boolean;
@@ -157,125 +214,173 @@ function parseOkfRollbackTarget(target: string | undefined): { type: PiOkfType; 
 
 export class ReflectionController {
 	private readonly deps: ReflectionControllerDeps;
-	private readonly pendingTurns: Array<{ analysis: ReflectionTurnAnalysis; contextHeadroomPct: number }> = [];
-	private readonly scheduledDigests = new Set<string>();
-	private activeScheduledPass: Promise<void> | undefined;
-	private scheduledTimer: NodeJS.Timeout | undefined;
-	private lastScheduledPassAt = 0;
+	private readonly unsubscribeSettingsChanges: () => void;
+	private cueStateCacheInitialized = false;
+	private cueStateCache: CurrentTurnReflectionCueState | undefined;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
+		this.unsubscribeSettingsChanges = deps.getSettingsManager().subscribeChanges(() => {
+			this.synchronizeCurrentTurnCueWithSettings();
+		});
+		this.synchronizeCurrentTurnCueWithSettings();
 	}
 
-	/** Analyze once, schedule bounded background reflection when warranted, and return filtered turn text for sync hooks. */
-	scheduleFromTurn(messages: AgentMessage[], contextHeadroomPct: number): ReflectionTurnAnalysis {
-		const settings = this.deps.getSettingsManager().getAutoLearnSettings();
-		const analysis = analyzeReflectionTurn(messages, settings.complexTaskToolCalls ?? 12);
-		const enabled =
-			settings.enabled !== false &&
-			settings.reflectionReview !== false &&
-			process.env.PI_NATIVE_REFLECTION !== "0" &&
-			process.env.PI_AUTO_LEARN_CHILD !== "1" &&
-			!this.deps.isChildSession() &&
-			!this.deps.isDisposed();
-		if (!enabled || analysis.trigger === "none" || this.scheduledDigests.has(analysis.digest)) return analysis;
-
-		this.scheduledDigests.add(analysis.digest);
-		while (this.scheduledDigests.size > REFLECTION_DIGEST_HISTORY_SIZE) {
-			const oldest = this.scheduledDigests.values().next().value;
-			if (typeof oldest !== "string") break;
-			this.scheduledDigests.delete(oldest);
-		}
-		this.pendingTurns.push({ analysis, contextHeadroomPct });
-		let pendingChars = this.pendingTurns.reduce((total, turn) => total + turn.analysis.recentTurnText.length, 0);
-		while (this.pendingTurns.length > 1 && pendingChars > REFLECTION_PENDING_MAX_CHARS) {
-			pendingChars -= this.pendingTurns.shift()?.analysis.recentTurnText.length ?? 0;
-		}
-		this.schedulePendingPass();
-		return analysis;
+	dispose(): void {
+		this.unsubscribeSettingsChanges();
 	}
 
-	private schedulePendingPass(): void {
-		if (this.activeScheduledPass || this.scheduledTimer || this.pendingTurns.length === 0 || this.deps.isDisposed()) {
-			return;
-		}
-		const delay = Math.max(0, REFLECTION_MIN_INTERVAL_MS - (Date.now() - this.lastScheduledPassAt));
-		if (delay > 0) {
-			this.scheduledTimer = setTimeout(() => {
-				this.scheduledTimer = undefined;
-				this.startPendingPass();
-			}, delay);
-			this.scheduledTimer.unref?.();
-			return;
-		}
-		this.startPendingPass();
-	}
-
-	private startPendingPass(): void {
-		if (this.activeScheduledPass || this.pendingTurns.length === 0 || this.deps.isDisposed()) return;
-		const turns = this.pendingTurns.splice(0);
-		const trigger = turns.reduce<DemandSignals["trigger"]>(
-			(selected, turn) =>
-				reflectionTriggerPriority(turn.analysis.trigger) > reflectionTriggerPriority(selected)
-					? turn.analysis.trigger
-					: selected,
-			"none",
+	private isAutomaticReflectionEnabled(): boolean {
+		const settingsManager = this.deps.getSettingsManager();
+		const settings = resolveAutoLearnSettings(
+			settingsManager.getAutonomySettings().mode,
+			settingsManager.getAutoLearnSettings(),
 		);
-		const recentTurnText = boundReflectionSemanticText(
-			turns.map((turn) => turn.analysis.recentTurnText).join("\n---\n"),
-			REFLECTION_PENDING_MAX_CHARS,
-		);
-		const reportDigest = createHash("sha256")
-			.update(turns.map((turn) => turn.analysis.digest).join("\0"))
-			.digest("hex")
-			.slice(0, 24);
-		const settings = this.deps.getSettingsManager().getAutoLearnSettings();
-		let model: Model<Api> | undefined;
-		if (settings.model && settings.model !== "active") {
-			const resolved = resolveCliModel({ cliModel: settings.model, modelRegistry: this.deps.getModelRegistry() });
-			if (resolved.model && this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) model = resolved.model;
-		}
-		const toolCallCount = turns.reduce((total, turn) => total + turn.analysis.toolCallCount, 0);
-		const contextHeadroomPct = Math.min(...turns.map((turn) => turn.contextHeadroomPct));
-		this.lastScheduledPassAt = Date.now();
-		this.activeScheduledPass = (async () => {
-			try {
-				await this.runReflectionPass({
-					signals: {
-						trigger,
-						toolCallCount,
-						hadCorrection: turns.some((turn) => turn.analysis.hadCorrection),
-						contextHeadroomPct,
-						usefulLately: 0,
-					},
-					recentTurnText,
-					reportId: `reflection:${reportDigest}`,
-					model,
-					thinkingLevel: settings.thinkingLevel ?? "low",
-					explicitUserMemoryInstruction: turns.every((turn) => turn.analysis.explicitUserMemoryInstruction),
-				});
-			} catch {
-				// Best-effort background learning must never disrupt the foreground turn.
-			} finally {
-				this.activeScheduledPass = undefined;
-				this.schedulePendingPass();
+		return isCurrentSessionReflectionEnabled(settings) && !this.deps.isChildSession() && !this.deps.isDisposed();
+	}
+
+	/** Latest durable cue snapshot on the active session branch; custom state never enters model context. */
+	getCurrentTurnCueState(): CurrentTurnReflectionCueState | undefined {
+		if (this.cueStateCacheInitialized) return this.cueStateCache;
+		const sessionManager = this.deps.getSessionManager();
+		let fromId: string | undefined;
+		while (true) {
+			const entry = sessionManager.getLatestCustomEntryOnBranch(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE, fromId);
+			if (!entry) break;
+			const state = parseCurrentTurnReflectionCueState(entry.data);
+			if (state) {
+				this.cueStateCache = state;
+				break;
 			}
-		})();
+			if (!entry.parentId) break;
+			fromId = entry.parentId;
+		}
+		this.cueStateCacheInitialized = true;
+		return this.cueStateCache;
 	}
 
-	cancelScheduled(): void {
-		if (this.scheduledTimer) clearTimeout(this.scheduledTimer);
-		this.scheduledTimer = undefined;
-		this.pendingTurns.length = 0;
+	/** Branch/session navigation invalidates the lazy latest-state index; ordinary appends do not. */
+	invalidateCurrentTurnCueStateCache(): void {
+		this.cueStateCacheInitialized = false;
+		this.cueStateCache = undefined;
 	}
 
-	async waitForActivePass(): Promise<void> {
-		while (this.activeScheduledPass) await this.activeScheduledPass;
+	private persistCurrentTurnCueState(state: CurrentTurnReflectionCueState): void {
+		this.deps.getSessionManager().appendCustomEntry(CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE, state);
+		this.cueStateCache = state;
+		this.cueStateCacheInitialized = true;
+	}
+
+	private synchronizeCurrentTurnCueWithSettings(): void {
+		if (this.isAutomaticReflectionEnabled()) return;
+		const current = this.getCurrentTurnCueState();
+		if (current?.status !== "pending") return;
+		this.persistCurrentTurnCueState({
+			...current,
+			revision: current.revision + 1,
+			status: "dismissed",
+			updatedAt: new Date().toISOString(),
+		});
 	}
 
 	/**
-	 * Run an LLM completion fully ISOLATED from the main session — the load-bearing primitive for
-	 * reflection and bounded child lanes (adaptive-agent design §6c/§7).
+	 * Persist one logical pending cue. Repeated triggers merge into the existing pending snapshot;
+	 * they never append competing pending cues or retain raw transcript text.
+	 */
+	queueCurrentTurnCue(trigger: CurrentTurnReflectionTrigger): boolean {
+		if (!this.isAutomaticReflectionEnabled()) {
+			this.synchronizeCurrentTurnCueWithSettings();
+			return false;
+		}
+		const current = this.getCurrentTurnCueState();
+		const updatedAt = new Date().toISOString();
+		if (current?.status === "pending") {
+			if (current.triggers.includes(trigger)) return false;
+			const next = {
+				...current,
+				revision: current.revision + 1,
+				triggers: [...current.triggers, trigger],
+				updatedAt,
+			} satisfies CurrentTurnReflectionCueState;
+			this.persistCurrentTurnCueState(next);
+			return true;
+		}
+		const next = {
+			version: 1,
+			revision: 1,
+			cueId: randomUUID(),
+			status: "pending",
+			triggers: [trigger],
+			createdAt: updatedAt,
+			updatedAt,
+		} satisfies CurrentTurnReflectionCueState;
+		this.persistCurrentTurnCueState(next);
+		return true;
+	}
+
+	/**
+	 * Preview one transient provider-only cue. Discarded/replanned previews do nothing; the accepted
+	 * provider-plan commit closes exactly the captured cue id + revision.
+	 */
+	previewCurrentTurnCue(): CurrentTurnReflectionCuePlan | undefined {
+		const current = this.getCurrentTurnCueState();
+		if (current?.status !== "pending" || !this.isAutomaticReflectionEnabled()) return undefined;
+		const cueId = current.cueId;
+		const revision = current.revision;
+		const message: AgentMessage = {
+			role: "custom",
+			customType: CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
+			content: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.`,
+			display: false,
+			details: {
+				version: 1,
+				scope: "root-current-turn",
+				automaticProviderRequests: 0,
+				cueId: current.cueId,
+				triggers: current.triggers,
+			},
+			timestamp: Date.now(),
+		};
+		const isCurrent = (): boolean => {
+			const latest = this.getCurrentTurnCueState();
+			return (
+				this.isAutomaticReflectionEnabled() &&
+				latest?.status === "pending" &&
+				latest.cueId === cueId &&
+				latest.revision === revision
+			);
+		};
+		return {
+			message,
+			isCurrent,
+			commit: () => {
+				if (!isCurrent()) throw new Error("Reflection cue changed before provider-plan commit");
+				const latest = this.getCurrentTurnCueState();
+				if (!latest) throw new Error("Reflection cue disappeared before provider-plan commit");
+				const next = {
+					...latest,
+					revision: latest.revision + 1,
+					status: "consumed",
+					updatedAt: new Date().toISOString(),
+				} satisfies CurrentTurnReflectionCueState;
+				this.persistCurrentTurnCueState(next);
+			},
+		};
+	}
+
+	/** Pure completed-turn projection used only by deterministic memory synchronization. */
+	analyzeCompletedTurn(messages: AgentMessage[]): ReflectionTurnAnalysis {
+		const settingsManager = this.deps.getSettingsManager();
+		const settings = resolveAutoLearnSettings(
+			settingsManager.getAutonomySettings().mode,
+			settingsManager.getAutoLearnSettings(),
+		);
+		return analyzeReflectionTurn(messages, settings.complexTaskToolCalls);
+	}
+
+	/**
+	 * Run an explicit LLM completion fully ISOLATED from the main session for bounded host-owned
+	 * consumers. Automatic reflection never reaches this primitive.
 	 *
 	 * Isolation invariants (audited by codex): builds fresh context (no main history), defaults to no
 	 * tools, and passes **no real `sessionId`** — only a deterministic SYNTHETIC cache-affinity key
@@ -284,8 +389,8 @@ export class ReflectionController {
 	 * and applies a turn bound only when its owner explicitly supplies one. It cannot mutate `agent.state.messages`, append session entries, or touch the
 	 * foreground tool registry. Mirrors `generateSummary()`'s one-shot mechanics otherwise.
 	 *
-	 * Returns the result even on an error/aborted stop reason (callers — e.g. a background reflection
-	 * microtask — decide whether to act); it does not throw on a model-level error.
+	 * Returns the result even on an error/aborted stop reason; the explicit caller decides whether to
+	 * act, and a model-level error is returned rather than thrown.
 	 */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
 		if (opts.maxTurns !== undefined && (!Number.isSafeInteger(opts.maxTurns) || opts.maxTurns <= 0)) {
@@ -523,10 +628,10 @@ export class ReflectionController {
 	}
 
 	/**
-	 * Native end-of-loop reflection pass (R2). Demand-gates (zero-I/O), and when warranted runs the
-	 * {@link ReflectionEngine} via an isolated completion ({@link runIsolatedCompletion}), applies the
-	 * resulting memory writes through the bundled `memory` tool, and accounts the reflection's token
-	 * cost via the cost-aggregation surface so it stays visible and net-negative-auditable.
+	 * Explicit compatibility/application seam for an owner-invoked structured reflection pass. This
+	 * method can make an isolated provider request, so automatic current-turn reflection never calls
+	 * it. Demand-gates (zero-I/O), applies resulting writes through the bundled `memory` tool, and
+	 * accounts the explicitly requested pass through the spawned-usage surface.
 	 *
 	 * Returns `null` when the gate skips (or in a child session, which must not learn). The whole pass
 	 * is best-effort: a model/parse error yields no writes, never throws into the caller.
@@ -981,7 +1086,19 @@ export class ReflectionController {
 	}): { reasonCode: string; note: string } | undefined {
 		try {
 			const cwd = this.deps.getCwd?.() ?? process.cwd();
-			const audit = runSkillAudit(cwd, write);
+			const audit = runSkillAudit(
+				cwd,
+				write,
+				this.deps.getSkillsForAudit?.(),
+				undefined,
+				DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS,
+			);
+			if (audit.truncated) {
+				return {
+					reasonCode: SKILL_AUDIT_UNAVAILABLE_REASON_CODE,
+					note: "skill overlap audit exceeded its bounded universe; promotion held rather than written unaudited",
+				};
+			}
 			const overlap = audit.nearDuplicates.find((d) => d.a === "[draft]" || d.b === "[draft]");
 			if (!overlap) return undefined;
 			const otherPath = overlap.a === "[draft]" ? overlap.b : overlap.a;

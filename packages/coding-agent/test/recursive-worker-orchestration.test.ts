@@ -10,7 +10,6 @@ import type { WorkerDelegationRequest } from "../src/core/delegation/worker-dele
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { DEFAULT_LANE_MAX_OUTPUT_TOKENS } from "../src/core/model-capability.ts";
-import { budgetedTokens } from "../src/core/orchestration/capability-gateway.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 import { createHarness } from "./suite/harness.ts";
@@ -74,10 +73,10 @@ function seedAgent(lifecycle: WorkerLifecycle, args: { agentId: string; cwd: str
 	});
 }
 
-describe("recursive worker orchestration", () => {
-	it("allows an admitted worker to spawn a durable child through its delegate tool", async () => {
+describe("leaf worker orchestration", () => {
+	it("strips delegate from a worker even when a legacy profile requests it", async () => {
 		const profile = createTestWorkerOrchestrationProfile({
-			profileId: "recursive-wait",
+			profileId: "legacy-recursive-profile",
 			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
 			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
 			toolNames: ["read", "delegate"],
@@ -85,71 +84,58 @@ describe("recursive worker orchestration", () => {
 		const harness = await createHarness({ workerOrchestrationProfile: profile });
 		try {
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Produce child evidence." })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage([fauxToolCall("delegate", { action: "wait", agentId: "worker-2" })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage('{"summary":"child evidence","status":"completed"}'),
-				fauxAssistantMessage('{"summary":"parent delegated successfully","status":"completed"}'),
+				(context) => {
+					expect(context.tools?.map((tool) => tool.name)).toEqual(["read"]);
+					return fauxAssistantMessage('{"summary":"leaf completed","status":"completed"}');
+				},
 			]);
 
-			const parent = await harness.session.runWorkerDelegationOnce({
-				instructions: "Attempt nested delegation.",
+			const worker = await harness.session.runWorkerDelegationOnce({
+				instructions: "Work independently without spawning descendants.",
 			});
 
-			expect(parent.record?.status).toBe("succeeded");
-			const parentTranscript = treeControl(harness.session).readWorkerAgentTranscript("worker-1", {
-				maxMessages: 64,
+			expect(worker.record?.status).toBe("succeeded");
+			expect(treeControl(harness.session).listWorkerAgents()).toEqual([
+				expect.objectContaining({ agentId: "worker-1", rootAgentId: "worker-1", depth: 0 }),
+			]);
+			const attempt = Object.values(
+				new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				}).getTaskRuntimeSnapshot().attempts,
+			)[0];
+			expect(attempt?.grant?.allowedTools).not.toContain("delegate");
+			expect(attempt?.grant?.capabilities).not.toContain("workflow.delegate");
+			expect(attempt?.dispatch.executionContract?.worker.profile.delegationLimits).toEqual({
+				maxDepth: 0,
+				maxChildrenPerAgent: 0,
+				maxNestedAgentsPerSession: 0,
 			});
-			expect(JSON.stringify(parentTranscript.messages)).toContain("delegate started");
-			const agents = treeControl(harness.session).listWorkerAgents();
-			expect(agents).toHaveLength(2);
-			expect(agents).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({ agentId: "worker-1", rootAgentId: "worker-1", depth: 0 }),
-					expect.objectContaining({ parentAgentId: "worker-1", rootAgentId: "worker-1", depth: 1 }),
-				]),
-			);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("routes a nested child's terminal handoff durably to its owning parent", async () => {
-		const profile = createTestWorkerOrchestrationProfile({
-			profileId: "recursive-handoff",
-			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
-			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
-			toolNames: ["read", "delegate"],
-		});
-		const harness = await createHarness({
-			workerOrchestrationProfile: profile,
-			settings: { workerDelegation: { enabled: true, maxConcurrent: 1 } },
-		});
+	it("rejects a child before creating task or conversation state", async () => {
+		const harness = await createHarness();
 		try {
-			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Produce nested result" })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage([fauxToolCall("delegate", { action: "wait", agentId: "worker-2" })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage('{"summary":"nested result","status":"completed"}'),
-				fauxAssistantMessage('{"summary":"parent observed child completion","status":"completed"}'),
-			]);
+			harness.setResponses([fauxAssistantMessage('{"summary":"root ready","status":"completed"}')]);
+			const root = await harness.session.runWorkerDelegationOnce({ instructions: "Create one leaf worker." });
+			if (!root.record) throw new Error("Expected root worker record.");
+			const lifecycle = new WorkerLifecycle({ agentDir: harness.tempDir, sessionId: harness.session.sessionId });
+			const before = durableEntityCounts(lifecycle);
+			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
+			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute","status":"completed"}')]);
 
-			const parent = await harness.session.runWorkerDelegationOnce({
-				instructions: "Delegate worker.",
+			const rejected = await harness.session.runWorkerDelegationOnce({
+				instructions: "Attempt a forbidden descendant.",
+				parentAgentId: root.record.laneId,
 			});
-			expect(parent.record?.status).toBe("succeeded");
-			expect(harness.session.getLaneRecords().filter((record) => record.type === "worker")).toHaveLength(2);
-			const parentTranscript = treeControl(harness.session).readWorkerAgentTranscript("worker-1", {
-				maxMessages: 64,
-			});
-			expect(JSON.stringify(parentTranscript.messages)).toContain("Worker terminal handoff");
-			expect(JSON.stringify(parentTranscript.messages)).toContain("childAgentId=worker-2");
+
+			expect(rejected).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
+			expect(durableEntityCounts(lifecycle)).toEqual(before);
+			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
+			expect(harness.getPendingResponseCount()).toBe(1);
 		} finally {
 			await harness.cleanup();
 		}
@@ -193,19 +179,12 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
-	it("lets top-level workers discover peers without exposing private resume paths", async () => {
-		const profile = createTestWorkerOrchestrationProfile({
-			profileId: "peer-discovery",
-			model: { provider: "faux", id: "faux-1", maxTokens: 100_000 },
-			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
-			toolNames: ["read", "delegate"],
-		});
-		const harness = await createHarness({ workerOrchestrationProfile: profile });
+	it("lets the owning root list top-level workers without exposing private resume paths", async () => {
+		const harness = await createHarness();
 		try {
 			harness.setResponses([
 				fauxAssistantMessage('{"summary":"first peer ready","status":"completed"}'),
-				fauxAssistantMessage([fauxToolCall("delegate", { action: "list" })], { stopReason: "toolUse" }),
-				fauxAssistantMessage('{"summary":"peer list inspected","status":"completed"}'),
+				fauxAssistantMessage('{"summary":"second peer ready","status":"completed"}'),
 			]);
 			const first = await harness.session.runWorkerDelegationOnce({ instructions: "Become the first peer." });
 			if (!first.record) throw new Error("Expected first worker record.");
@@ -213,10 +192,7 @@ describe("recursive worker orchestration", () => {
 			const second = await harness.session.runWorkerDelegationOnce({ instructions: "Discover the first peer." });
 			if (!second.record) throw new Error("Expected second worker record.");
 
-			const transcript = treeControl(harness.session).readWorkerAgentTranscript(second.record.laneId, {
-				maxMessages: 64,
-			});
-			const serialized = JSON.stringify(transcript.messages);
+			const serialized = JSON.stringify(treeControl(harness.session).listWorkerAgents());
 			expect(serialized).toContain(first.record.laneId);
 			expect(serialized).toContain(second.record.laneId);
 			expect(serialized).not.toContain("resumeContext");
@@ -226,7 +202,7 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
-	it("rejects an exact ancestor task replay independently of the fleet depth bound", async () => {
+	it("rejects an exact ancestor task replay at the leaf depth gate", async () => {
 		const harness = await createHarness();
 		try {
 			harness.setResponses([fauxAssistantMessage('{"summary":"root complete","status":"completed"}')]);
@@ -239,7 +215,7 @@ describe("recursive worker orchestration", () => {
 				parentAgentId: root.record.laneId,
 			});
 
-			expect(replay).toEqual({ started: false, skipReason: "recursive_delegation_cycle" });
+			expect(replay).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			await harness.cleanup();
@@ -283,7 +259,7 @@ describe("recursive worker orchestration", () => {
 				parentAgentId,
 			});
 
-			expect(rejected).toEqual({ started: false, skipReason: "worker_agent_depth_limit_reached" });
+			expect(rejected).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			expect(durableEntityCounts(lifecycle)).toEqual(before);
 			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
 			expect(harness.getPendingResponseCount()).toBe(1);
@@ -292,36 +268,46 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
-	it("rejects a sixty-fifth direct child before creating any durable child state", async () => {
-		const harness = await createHarness();
+	it("keeps workers leaf-only even when a legacy profile authors recursive limits", async () => {
+		const profile = Object.assign(
+			createTestWorkerOrchestrationProfile({
+				profileId: "legacy-authored-recursion",
+				model: { provider: "faux", id: "faux-1" },
+				capabilityCeiling: ["filesystem.read", "workflow.delegate"],
+				toolNames: ["read", "delegate"],
+			}),
+			{ delegationLimits: { maxDepth: 8, maxChildrenPerAgent: 8, maxNestedAgentsPerSession: 8 } },
+		);
+		const harness = await createHarness({ workerOrchestrationProfile: profile });
 		try {
-			harness.setResponses([fauxAssistantMessage('{"summary":"fanout root ready","status":"completed"}')]);
-			const root = await harness.session.runWorkerDelegationOnce({ instructions: "Create the fanout-bound root." });
+			harness.setResponses([fauxAssistantMessage('{"summary":"legacy root ready","status":"completed"}')]);
+			const root = await harness.session.runWorkerDelegationOnce({
+				instructions: "Create the authored-limit root.",
+			});
 			if (!root.record) throw new Error("Expected root worker record.");
 			const lifecycle = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			});
-			for (let index = 0; index < DEFAULT_WORKER_FLEET_LIMITS.maxChildrenPerAgent; index += 1) {
-				seedAgent(lifecycle, {
-					agentId: `seed-direct-child-${index}`,
-					parentAgentId: root.record.laneId,
-					cwd: harness.tempDir,
-				});
-			}
 			const before = durableEntityCounts(lifecycle);
 			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
 			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute","status":"completed"}')]);
 
 			const rejected = await harness.session.runWorkerDelegationOnce({
-				instructions: "Attempt the sixty-fifth direct child.",
+				instructions: "Attempt a descendant despite authored recursive limits.",
 				parentAgentId: root.record.laneId,
 			});
 
-			expect(rejected).toEqual({ started: false, skipReason: "worker_agent_child_limit_reached" });
+			expect(rejected).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			expect(durableEntityCounts(lifecycle)).toEqual(before);
 			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
 			expect(harness.getPendingResponseCount()).toBe(1);
+			const attempt = lifecycle.getLatestAgentAttempt(root.record.laneId);
+			expect(attempt?.dispatch.executionContract?.worker.profile.delegationLimits).toEqual({
+				maxDepth: 0,
+				maxChildrenPerAgent: 0,
+				maxNestedAgentsPerSession: 0,
+			});
 		} finally {
 			await harness.cleanup();
 		}
@@ -578,7 +564,7 @@ describe("recursive worker orchestration", () => {
 		90_000,
 	);
 
-	it("rejects a descendant preset that would introduce unadmitted resources or soul", async () => {
+	it("rejects a descendant preset before it can introduce resources or soul", async () => {
 		let privilegedSkill = "";
 		const parentProfile = createTestWorkerOrchestrationProfile({
 			profileId: "bounded-parent-context",
@@ -639,7 +625,7 @@ describe("recursive worker orchestration", () => {
 				profileId: privilegedProfile.profileId,
 			});
 
-			expect(rejected).toEqual({ started: false, skipReason: "orchestration_context_authority_exceeded" });
+			expect(rejected).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			expect(childSystemPrompt).toBe("");
 			expect(harness.getPendingResponseCount()).toBe(1);
 			expect(durableEntityCounts(lifecycle)).toEqual(before);
@@ -653,7 +639,7 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
-	it("rejects a descendant whose required verifier would introduce unadmitted context", async () => {
+	it("rejects a descendant before its required verifier can introduce context", async () => {
 		let privilegedVerifierSkill = "";
 		const parentProfile = createTestWorkerOrchestrationProfile({
 			profileId: "bounded-verifier-parent",
@@ -715,7 +701,7 @@ describe("recursive worker orchestration", () => {
 				profileId: childProfile.profileId,
 			});
 
-			expect(rejected).toEqual({ started: false, skipReason: "orchestration_context_authority_exceeded" });
+			expect(rejected).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			expect(harness.getPendingResponseCount()).toBe(1);
 			expect(durableEntityCounts(lifecycle)).toEqual(before);
 			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
@@ -767,13 +753,14 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(run.started).toBe(true);
-			expect(run.record?.profileId).toBe(alternate.profileId);
+			expect(run.record?.profileId).toMatch(/^adaptive-/);
+			expect(run.record?.profileId).not.toBe(alternate.profileId);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("admits a profile-free model, reasoning, tool, capability, and path specification as a durable grant", async () => {
+	it("compiles lightweight model, thinking, tool, and path overrides into a durable host grant", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "foreground", contextWindow: 200_000 },
@@ -799,15 +786,12 @@ describe("recursive worker orchestration", () => {
 			if (!provider) throw new Error("Expected selected faux model.");
 
 			const run = await harness.session.runWorkerDelegationOnce({
-				instructions: "Exercise the profile-free authority contract.",
+				instructions: "Exercise the lightweight worker override contract.",
 				authority: {
-					role: "operator",
 					model: { provider, modelId: "selected" },
 					thinkingLevel: "low",
-					capabilities: ["filesystem.read", "process.exec", "workflow.delegate"],
-					toolNames: ["read", STABLE_SHELL_TOOL_NAME, "delegate"],
-					readPaths: ["."],
-					budget: { maxTokens: 8_192, maxToolCalls: 64 },
+					toolNames: ["read", STABLE_SHELL_TOOL_NAME],
+					path: harness.tempDir,
 				},
 			});
 
@@ -815,7 +799,7 @@ describe("recursive worker orchestration", () => {
 			expect(run.record?.status).toBe("succeeded");
 			expect(seenModel).toBe("selected");
 			expect(seenReasoning).toBe("low");
-			expect(seenTools).toEqual(["read", "memory", STABLE_SHELL_TOOL_NAME, "delegate"]);
+			expect(seenTools).toEqual(["read", STABLE_SHELL_TOOL_NAME]);
 			expect(harness.settingsManager.getWorkerDelegationSettings().maxConcurrent).toBe(128);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
@@ -825,8 +809,11 @@ describe("recursive worker orchestration", () => {
 			expect(attempt?.dispatch.executionContract?.worker).toMatchObject({
 				modelBinding: { provider, modelId: "selected", thinkingLevel: "low" },
 				authority: {
-					capabilities: ["filesystem.read", "process.exec", "workflow.delegate", "memory.query"],
-					toolNames: ["read", "bash", "delegate", "memory"],
+					capabilities: ["filesystem.read", "process.exec"],
+					toolNames: ["read", "bash"],
+					cwd: harness.tempDir,
+					readPaths: [harness.tempDir],
+					writePaths: [],
 				},
 			});
 		} finally {
@@ -851,7 +838,6 @@ describe("recursive worker orchestration", () => {
 				instructions: "Select the non-reasoning model without redundant reasoning configuration.",
 				authority: {
 					model: { provider, modelId: "selected-no-reasoning" },
-					budget: { maxWallClockMs: Number.MAX_SAFE_INTEGER },
 				},
 			});
 
@@ -866,9 +852,6 @@ describe("recursive worker orchestration", () => {
 				modelId: "selected-no-reasoning",
 				thinkingLevel: "off",
 			});
-			expect(Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.profile.leaseTtlMs).toBe(
-				Number.MAX_SAFE_INTEGER,
-			);
 		} finally {
 			await harness.cleanup();
 		}
@@ -884,7 +867,6 @@ describe("recursive worker orchestration", () => {
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Try to request the other platform's shell.",
 				authority: {
-					capabilities: ["process.exec"],
 					toolNames: [UNAVAILABLE_SHELL_TOOL_NAME],
 				},
 			});
@@ -915,27 +897,25 @@ describe("recursive worker orchestration", () => {
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Use the stored legacy shell name.",
 				authority: {
-					capabilities: ["process.exec"],
 					toolNames: ["powershell"],
 				},
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual(["memory", STABLE_SHELL_TOOL_NAME]);
+			expect(tools).toEqual([STABLE_SHELL_TOOL_NAME]);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
 			expect(Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.authority.toolNames).toEqual([
 				"bash",
-				"memory",
 			]);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("uses the maximum host-permitted local surface when neither a profile nor authority override is supplied", async () => {
+	it("inherits the compatible active foreground surface when neither a profile nor authority override is supplied", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
@@ -953,89 +933,58 @@ describe("recursive worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual([
-				"read",
-				"grep",
-				"find",
-				"ls",
-				"memory",
-				"write",
-				"edit",
-				STABLE_SHELL_TOOL_NAME,
-				"delegate",
-			]);
+			expect(tools).toEqual(["read", "write", "edit", "python", STABLE_SHELL_TOOL_NAME]);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("lets a profile-free inherited worker delegate without an authority override", async () => {
+	it("keeps an inherited profile-free worker leaf-only", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		try {
-			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("delegate", { instructions: "Inspect one independent seam." })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage('{"summary":"nested evidence","status":"completed"}'),
-				fauxAssistantMessage([fauxToolCall("delegate", { action: "wait", agentId: "worker-2" })], {
-					stopReason: "toolUse",
-				}),
-				fauxAssistantMessage('{"summary":"baseline recursion complete","status":"completed"}'),
-			]);
+			harness.setResponses([fauxAssistantMessage('{"summary":"leaf complete","status":"completed"}')]);
 
-			const parent = await harness.session.runWorkerDelegationOnce({
-				instructions: "Exercise inherited recursive orchestration.",
+			const root = await harness.session.runWorkerDelegationOnce({
+				instructions: "Exercise inherited leaf orchestration.",
 			});
-
-			expect(parent.record?.status).toBe("succeeded");
-			const beforeRejectedStarts = new WorkerLifecycle({
+			if (!root.record) throw new Error("Expected root worker record.");
+			expect(root.record.status).toBe("succeeded");
+			const lifecycle = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			});
-			const beforeCounts = durableEntityCounts(beforeRejectedStarts);
+			const beforeCounts = durableEntityCounts(lifecycle);
 			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
-			const cosmeticSibling = await harness.session.runWorkerDelegationOnce({
-				instructions: "Inspect another independent seam with different wording.",
-				parentAgentId: "worker-1",
-			});
-			const grandchild = await harness.session.runWorkerDelegationOnce({
-				instructions: "Delegate the same investigation one level deeper.",
-				parentAgentId: "worker-2",
+			const child = await harness.session.runWorkerDelegationOnce({
+				instructions: "Attempt one inherited descendant.",
+				parentAgentId: root.record.laneId,
 			});
 
-			expect(cosmeticSibling).toEqual({ started: false, skipReason: "worker_agent_child_limit_reached" });
-			expect(grandchild).toEqual({ started: false, skipReason: "worker_agent_depth_limit_reached" });
-			expect(durableEntityCounts(beforeRejectedStarts)).toEqual(beforeCounts);
+			expect(child).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
+			expect(durableEntityCounts(lifecycle)).toEqual(beforeCounts);
 			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
 			expect(treeControl(harness.session).listWorkerAgents()).toEqual([
 				expect.objectContaining({ agentId: "worker-1", depth: 0 }),
-				expect.objectContaining({ agentId: "worker-2", parentAgentId: "worker-1", depth: 1 }),
 			]);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("rejects a second profile-free nested tree before creating durable state", async () => {
+	it("admits independent top-level leaves while rejecting descendants under each", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		try {
 			harness.setResponses([
 				fauxAssistantMessage('{"summary":"first root ready","status":"completed"}'),
-				fauxAssistantMessage('{"summary":"first nested worker ready","status":"completed"}'),
 				fauxAssistantMessage('{"summary":"second root ready","status":"completed"}'),
 				fauxAssistantMessage('{"summary":"must not execute","status":"completed"}'),
 			]);
 			const firstRoot = await harness.session.runWorkerDelegationOnce({ instructions: "Create first root." });
 			if (!firstRoot.record) throw new Error("Expected first root worker.");
-			const firstChild = await harness.session.runWorkerDelegationOnce({
-				instructions: "Create the one lean nested worker.",
-				parentAgentId: firstRoot.record.laneId,
-			});
-			if (!firstChild.record) throw new Error("Expected first nested worker.");
 			const secondRoot = await harness.session.runWorkerDelegationOnce({ instructions: "Create second root." });
 			if (!secondRoot.record) throw new Error("Expected second root worker.");
 			const lifecycle = new WorkerLifecycle({
@@ -1046,23 +995,26 @@ describe("recursive worker orchestration", () => {
 			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
 
 			const rejected = await harness.session.runWorkerDelegationOnce({
-				instructions: "Attempt an extra nested worker under the second root.",
+				instructions: "Attempt a descendant under the second root.",
 				parentAgentId: secondRoot.record.laneId,
 			});
 
 			expect(rejected).toEqual({
 				started: false,
-				skipReason: "worker_agent_nested_session_limit_reached",
+				skipReason: "worker_leaf_delegation_forbidden",
 			});
 			expect(durableEntityCounts(lifecycle)).toEqual(before);
 			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
-			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(treeControl(harness.session).listWorkerAgents()).toEqual([
+				expect.objectContaining({ agentId: firstRoot.record.laneId, depth: 0 }),
+				expect.objectContaining({ agentId: secondRoot.record.laneId, depth: 0 }),
+			]);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("preserves explicitly authored recursive depth and fan-out", async () => {
+	it("overrides explicitly authored recursive depth and fan-out with a hard leaf contract", async () => {
 		const profile = Object.assign(
 			createTestWorkerOrchestrationProfile({
 				profileId: "explicit-recursion",
@@ -1077,46 +1029,28 @@ describe("recursive worker orchestration", () => {
 			settings: { workerDelegation: { maxConcurrent: 4 } },
 		});
 		try {
-			harness.setResponses(
-				Array.from({ length: 4 }, (_, index) =>
-					fauxAssistantMessage(`{"summary":"explicit worker ${index + 1}","status":"completed"}`),
-				),
-			);
+			harness.setResponses([
+				fauxAssistantMessage('{"summary":"explicit root complete","status":"completed"}'),
+				fauxAssistantMessage('{"summary":"must not execute","status":"completed"}'),
+			]);
 			const control = treeControl(harness.session);
 			const root = control.startWorkerDelegation({ instructions: "Create the explicit root." });
 			if (!root.started) throw new Error(`Explicit root rejected: ${root.skipReason}`);
-			const firstChild = control.startWorkerDelegation({
-				instructions: "Create the first explicit child.",
+			const child = control.startWorkerDelegation({
+				instructions: "Attempt an explicitly configured child.",
 				parentAgentId: root.record.laneId,
 				forkTurns: "none",
 			});
-			if (!firstChild.started) throw new Error(`First explicit child rejected: ${firstChild.skipReason}`);
-			const secondChild = control.startWorkerDelegation({
-				instructions: "Create the second explicit child.",
-				parentAgentId: root.record.laneId,
-				forkTurns: "none",
-			});
-			if (!secondChild.started) throw new Error(`Second explicit child rejected: ${secondChild.skipReason}`);
-			const grandchild = control.startWorkerDelegation({
-				instructions: "Create the explicit grandchild.",
-				parentAgentId: firstChild.record.laneId,
-				forkTurns: "none",
-			});
-			if (!grandchild.started) throw new Error(`Explicit grandchild rejected: ${grandchild.skipReason}`);
-
-			expect(control.listWorkerAgents()).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({ agentId: root.record.laneId, depth: 0 }),
-					expect.objectContaining({ agentId: firstChild.record.laneId, depth: 1 }),
-					expect.objectContaining({ agentId: grandchild.record.laneId, depth: 2 }),
-				]),
-			);
+			expect(child).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
+			expect(control.listWorkerAgents()).toEqual([
+				expect.objectContaining({ agentId: root.record.laneId, depth: 0 }),
+			]);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("prevents a lean descendant from selecting a broader profile to escape its ancestor", async () => {
+	it("prevents a leaf from selecting a broader profile to gain descendants", async () => {
 		const broadProfile = Object.assign(
 			createTestWorkerOrchestrationProfile({
 				profileId: "broad-descendant",
@@ -1133,41 +1067,33 @@ describe("recursive worker orchestration", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage('{"summary":"lean root ready","status":"completed"}'),
-				fauxAssistantMessage('{"summary":"narrowed child ready","status":"completed"}'),
+				fauxAssistantMessage('{"summary":"must not execute","status":"completed"}'),
 			]);
 			const root = await harness.session.runWorkerDelegationOnce({ instructions: "Create the lean root." });
 			if (!root.record) throw new Error("Expected lean root worker record.");
-			const child = await harness.session.runWorkerDelegationOnce({
+			const rejected = await harness.session.runWorkerDelegationOnce({
 				instructions: "Select the broad routing preset.",
 				parentAgentId: root.record.laneId,
 				profileId: broadProfile.profileId,
 			});
-			if (!child.record) throw new Error("Expected narrowed child worker record.");
 
-			const escaped = await harness.session.runWorkerDelegationOnce({
-				instructions: "Attempt to escape through the broader preset.",
-				parentAgentId: child.record.laneId,
-				profileId: broadProfile.profileId,
-			});
-
-			expect(escaped).toEqual({ started: false, skipReason: "worker_agent_depth_limit_reached" });
+			expect(rejected).toEqual({ started: false, skipReason: "worker_leaf_delegation_forbidden" });
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
-			const childAttempt = Object.values(snapshot.attempts).find(
-				(attempt) => attempt.dispatch.parentAgentId === root.record?.laneId,
-			);
-			expect(childAttempt?.dispatch.executionContract?.worker.profile).toMatchObject({
-				delegationLimits: { maxDepth: 1, maxChildrenPerAgent: 1, maxNestedAgentsPerSession: 1 },
+			const rootAttempt = Object.values(snapshot.attempts)[0];
+			expect(rootAttempt?.dispatch.executionContract?.worker.profile).toMatchObject({
+				delegationLimits: { maxDepth: 0, maxChildrenPerAgent: 0, maxNestedAgentsPerSession: 0 },
 			});
-			expect(treeControl(harness.session).listWorkerAgents()).toHaveLength(2);
+			expect(treeControl(harness.session).listWorkerAgents()).toHaveLength(1);
+			expect(harness.getPendingResponseCount()).toBe(1);
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("honors an explicit non-delegating leaf authority", async () => {
+	it("honors an explicitly narrowed leaf tool surface", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
@@ -1182,63 +1108,57 @@ describe("recursive worker orchestration", () => {
 
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Run as a non-delegating leaf.",
-				authority: { capabilities: [] },
+				authority: { toolNames: ["read"] },
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual(["memory"]);
+			expect(tools).toEqual(["read"]);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
-			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual(["memory"]);
-			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual(["memory.query"]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual(["read"]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual(["filesystem.read"]);
+			expect(
+				Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.profile.delegationLimits,
+			).toEqual({
+				maxDepth: 0,
+				maxChildrenPerAgent: 0,
+				maxNestedAgentsPerSession: 0,
+			});
 		} finally {
 			await harness.cleanup();
 		}
 	});
 
-	it("debits descendant provider capacity from one cumulative root token budget", async () => {
-		const treeTokenBudget = 8_000;
+	it("gives independent top-level leaves the configured provider token ceiling", async () => {
+		const workerTokenBudget = 8_000;
 		const profile = createTestWorkerOrchestrationProfile({
-			profileId: "global-budget",
-			model: { provider: "faux", id: "faux-1", maxTokens: treeTokenBudget },
-			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
-			toolNames: ["read", "delegate"],
+			profileId: "independent-leaf-budget",
+			model: { provider: "faux", id: "faux-1", maxTokens: workerTokenBudget },
+			capabilityCeiling: ["filesystem.read"],
+			toolNames: ["read"],
 		});
-		profile.budget = { ...profile.budget, maxTokens: treeTokenBudget };
+		profile.budget = { ...profile.budget, maxTokens: workerTokenBudget };
 		const harness = await createHarness({ workerOrchestrationProfile: profile });
 		try {
-			harness.setResponses([fauxAssistantMessage('{"summary":"root spent tokens","status":"completed"}')]);
-			const root = await harness.session.runWorkerDelegationOnce({ instructions: "Spend part of the tree budget." });
-			if (!root.record) throw new Error("Expected root worker record.");
-			const rootSnapshot = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
-			}).getTaskRuntimeSnapshot();
-			const rootAttempt = Object.values(rootSnapshot.attempts)[0];
-			const rootUsage = [...(rootAttempt?.checkpointIds ?? [])]
-				.reverse()
-				.map((checkpointId) => rootSnapshot.checkpoints[checkpointId]?.usage)
-				.find((usage) => usage !== undefined);
-			if (!rootUsage) throw new Error("Expected durable root usage.");
-
-			let childMaxTokens: number | undefined;
+			const requestCaps: Array<number | undefined> = [];
 			harness.setResponses([
 				(_context, options) => {
-					childMaxTokens = options?.maxTokens;
-					return fauxAssistantMessage('{"summary":"child respected remaining budget","status":"completed"}');
+					requestCaps.push(options?.maxTokens);
+					return fauxAssistantMessage('{"summary":"first leaf complete","status":"completed"}');
+				},
+				(_context, options) => {
+					requestCaps.push(options?.maxTokens);
+					return fauxAssistantMessage('{"summary":"second leaf complete","status":"completed"}');
 				},
 			]);
-			const child = await harness.session.runWorkerDelegationOnce({
-				instructions: "Use only the remaining root budget.",
-				parentAgentId: root.record.laneId,
-			});
+			const first = await harness.session.runWorkerDelegationOnce({ instructions: "Run the first leaf." });
+			const second = await harness.session.runWorkerDelegationOnce({ instructions: "Run the second leaf." });
 
-			expect(child.record?.status).toBe("succeeded");
-			const remainingTreeTokens = treeTokenBudget - budgetedTokens(rootUsage);
-			expect(remainingTreeTokens).toBeGreaterThan(DEFAULT_LANE_MAX_OUTPUT_TOKENS);
-			expect(childMaxTokens).toBe(Math.min(DEFAULT_LANE_MAX_OUTPUT_TOKENS, remainingTreeTokens));
+			expect(first.record?.status).toBe("succeeded");
+			expect(second.record?.status).toBe("succeeded");
+			expect(requestCaps).toEqual([DEFAULT_LANE_MAX_OUTPUT_TOKENS, DEFAULT_LANE_MAX_OUTPUT_TOKENS]);
 		} finally {
 			await harness.cleanup();
 		}
@@ -1275,8 +1195,7 @@ describe("recursive worker orchestration", () => {
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Prove the local shell capability.",
 				authority: {
-					capabilities: ["process.exec", "workflow.delegate"],
-					toolNames: [STABLE_SHELL_TOOL_NAME, "delegate"],
+					toolNames: [STABLE_SHELL_TOOL_NAME],
 				},
 			});
 			if (!run.record) throw new Error("Expected shell worker record.");
@@ -1300,62 +1219,27 @@ describe("recursive worker orchestration", () => {
 		}
 	});
 
-	it("lets descendants choose freely while immutable parent grants prevent escalation", async () => {
+	it("rejects an explicit delegate tool override instead of silently ignoring it", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		try {
-			harness.setResponses([fauxAssistantMessage('{"summary":"root read grant","status":"completed"}')]);
-			const root = await harness.session.runWorkerDelegationOnce({
-				instructions: "Establish a read-only root grant.",
+			harness.setResponses([fauxAssistantMessage('{"summary":"must not execute","status":"completed"}')]);
+			const lifecycle = new WorkerLifecycle({ agentDir: harness.tempDir, sessionId: harness.session.sessionId });
+			const before = durableEntityCounts(lifecycle);
+			const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
+
+			const rejected = await harness.session.runWorkerDelegationOnce({
+				instructions: "Try to retain descendant spawning.",
 				authority: {
-					capabilities: ["filesystem.read", "workflow.delegate"],
 					toolNames: ["read", "delegate"],
 				},
 			});
-			if (!root.record) throw new Error("Expected root worker record.");
 
-			let childTools: string[] = [];
-			harness.setResponses([
-				(context) => {
-					childTools = context.tools?.map((tool) => tool.name) ?? [];
-					return fauxAssistantMessage('{"summary":"child stayed inherited","status":"completed"}');
-				},
-			]);
-			const child = await harness.session.runWorkerDelegationOnce({
-				instructions: "Request a shell but remain inside inherited authority.",
-				parentAgentId: root.record.laneId,
-				authority: {
-					capabilities: ["process.exec", "workflow.delegate"],
-					toolNames: [STABLE_SHELL_TOOL_NAME, "delegate"],
-				},
-			});
-
-			expect(child.record?.status).toBe("succeeded");
-			expect(childTools).toEqual(["memory", "delegate"]);
-			const grandchild = await harness.session.runWorkerDelegationOnce({
-				instructions: "Try to widen recursion through another free-form authority request.",
-				parentAgentId: child.record?.laneId,
-				authority: {
-					capabilities: ["filesystem.read", "workflow.delegate"],
-					toolNames: ["read", "delegate"],
-				},
-			});
-			expect(grandchild).toEqual({ started: false, skipReason: "worker_agent_depth_limit_reached" });
-			const snapshot = new WorkerLifecycle({
-				agentDir: harness.tempDir,
-				sessionId: harness.session.sessionId,
-			}).getTaskRuntimeSnapshot();
-			const childAttempt = Object.values(snapshot.attempts).find(
-				(attempt) => attempt.dispatch.parentAgentId === root.record?.laneId,
-			);
-			expect(childAttempt?.grant?.capabilities).toEqual(["workflow.delegate", "memory.query"]);
-			expect(childAttempt?.grant?.allowedTools).toEqual(["delegate", "memory"]);
-			expect(childAttempt?.dispatch.executionContract?.worker.profile.delegationLimits).toEqual({
-				maxDepth: 1,
-				maxChildrenPerAgent: 1,
-				maxNestedAgentsPerSession: 1,
-			});
+			expect(rejected).toEqual({ started: false, skipReason: "orchestration_tool_unavailable:delegate" });
+			expect(durableEntityCounts(lifecycle)).toEqual(before);
+			expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
+			expect(harness.getPendingResponseCount()).toBe(1);
 		} finally {
 			await harness.cleanup();
 		}

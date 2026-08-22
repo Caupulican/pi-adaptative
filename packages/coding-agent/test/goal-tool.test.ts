@@ -216,6 +216,42 @@ describe("goal tool", () => {
 		expect(state?.status).toBe("active");
 	});
 
+	it("refuses completion while a goal-owned worker lane is still active", async () => {
+		let state: GoalState | undefined;
+		let goalLaneStatus: "running" | "succeeded" = "running";
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			getLaneRecords: () => [
+				{ laneId: "worker-running", type: "tmux-worker", status: goalLaneStatus, goalId: "g1" },
+				{ laneId: "other-goal-worker", type: "worker", status: "queued", goalId: "g2" },
+			],
+			now: () => "T0",
+		});
+		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+
+		const result = await tool.execute("call-complete", { action: "complete" }, undefined, undefined, ctx);
+
+		expect(result).toMatchObject({
+			isError: true,
+			details: { applied: false, error: expect.stringContaining("worker-running") },
+		});
+		expect(state?.status).toBe("active");
+
+		goalLaneStatus = "succeeded";
+		const completed = await tool.execute(
+			"call-complete-after-terminal",
+			{ action: "complete" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(completed.isError).not.toBe(true);
+		expect(state?.status).toBe("completed");
+	});
+
 	it("reads a blocked ledger without exposing owner resume authority", async () => {
 		const { run, getState } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship" });

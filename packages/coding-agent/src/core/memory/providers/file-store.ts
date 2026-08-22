@@ -175,6 +175,18 @@ function contentDigest(content: string): string {
 	return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+function removeExactHotMemoryItem(existing: string, sourceText: string): string | undefined {
+	if (sourceText.length === 0) return undefined;
+	const memoryLines = existing.split("\n");
+	const sourceLines = sourceText.split("\n");
+	const start = memoryLines.findIndex((_, index) =>
+		sourceLines.every((line, offset) => memoryLines[index + offset] === line),
+	);
+	if (start === -1) return undefined;
+	memoryLines.splice(start, sourceLines.length);
+	return memoryLines.join("\n");
+}
+
 function parseManagedMemoryState(raw: string): ManagedMemoryState | undefined {
 	let parsed: unknown;
 	try {
@@ -418,11 +430,61 @@ export class FileStoreProvider implements MemoryProvider {
 		};
 	}
 
+	private async hasExactHotMemoryItem(sourceText: string): Promise<boolean> {
+		return withFileLock(this.memoryFilePath, async () => {
+			const current = await fs.readFile(this.memoryFilePath, "utf8");
+			return removeExactHotMemoryItem(current, sourceText) !== undefined;
+		});
+	}
+
+	private async removeExactHotMemoryItem(sourceText: string): Promise<{ success: boolean; error?: string }> {
+		try {
+			return await withFileLock(this.memoryFilePath, async () => {
+				const currentOnDisk = await fs.readFile(this.memoryFilePath, "utf8");
+				const currentDigest = contentDigest(currentOnDisk);
+				const stateRead = await readManagedMemoryState(this.memoryStatePath);
+				let managedState: ManagedMemoryState | undefined;
+				if (stateRead.status === "valid") {
+					const reconciled = reconcileManagedMemoryState(currentDigest, stateRead.state);
+					if (reconciled.recognized) {
+						managedState = reconciled.state;
+						if (reconciled.changed) await writeManagedMemoryState(this.memoryStatePath, reconciled.state);
+					}
+				}
+				if (!managedState) return { success: false, error: "Drift detected" };
+
+				const newContent = removeExactHotMemoryItem(currentOnDisk, sourceText);
+				if (newContent === undefined) return { success: false, error: "Exact hot-memory item was not found" };
+				const newDigest = contentDigest(newContent);
+				await writeManagedMemoryState(this.memoryStatePath, {
+					version: 1,
+					committedDigest: managedState.committedDigest,
+					pendingDigest: newDigest,
+				});
+				await writeFileAtomic(this.memoryFilePath, newContent, { mode: 0o600 });
+				await writeManagedMemoryState(this.memoryStatePath, { version: 1, committedDigest: newDigest });
+				this.lastWrittenMemory = newContent;
+				this.options.onDurableMemoryChanged?.();
+				return { success: true };
+			});
+		} catch (error) {
+			return { success: false, error: String(error) };
+		}
+	}
+
 	/** Reflection-owned structured write. Organization is OKF-first, then exact hot-memory removal. */
 	public async applyStructuredReflectionWrite(
 		write: StructuredReflectionWrite,
 		signal?: AbortSignal,
 	): Promise<StructuredReflectionApplyResult> {
+		if (write.kind === "okf_organize" && !(await this.hasExactHotMemoryItem(write.sourceText))) {
+			return {
+				applied: false,
+				created: false,
+				sourceRemoved: false,
+				error: "Exact hot-memory item was not found",
+			};
+		}
 		const added = await this.executeMemoryCommand(
 			{
 				action: "add",
@@ -450,13 +512,9 @@ export class FileStoreProvider implements MemoryProvider {
 				...(!created ? { error: "Exact OKF record already exists" } : {}),
 			};
 		}
-
 		await this.options.beforeOrganizeHotRemoval?.();
-		const removed = await this.executeMemoryCommand(
-			{ action: "remove", target: "memory", oldContent: write.sourceText },
-			signal,
-		);
-		const sourceRemoved = removed.details?.success === true;
+		const removed = await this.removeExactHotMemoryItem(write.sourceText);
+		const sourceRemoved = removed.success;
 		return {
 			// A newly-created OKF record is a real durable change even if exact hot cleanup was
 			// interrupted. This records a reversible partial apply instead of hiding landed data.
@@ -464,7 +522,7 @@ export class FileStoreProvider implements MemoryProvider {
 			created,
 			...(storedDigest ? { digest: storedDigest } : {}),
 			sourceRemoved,
-			...(!sourceRemoved ? { error: removed.details?.error ?? "Hot-memory removal failed" } : {}),
+			...(!sourceRemoved ? { error: removed.error ?? "Hot-memory removal failed" } : {}),
 		};
 	}
 

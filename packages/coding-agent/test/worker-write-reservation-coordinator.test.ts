@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerWriteReservationStore } from "../src/core/delegation/worker-write-reservation.ts";
 import { WorkerWriteReservationCoordinator } from "../src/core/delegation/worker-write-reservation-coordinator.ts";
@@ -74,6 +74,27 @@ describe("WorkerWriteReservationCoordinator", () => {
 				writeScopes: [state.source],
 			}),
 		).toMatchObject({ kind: "granted" });
+		state.coordinator.dispose();
+	});
+
+	it("does not serialize machine-wide workers but still fences an explicit workspace", () => {
+		const state = fixture();
+		const machineRoot = parse(resolve(state.workspace)).root;
+		const machinePlan = { cwd: state.workspace, writeEnabled: true, writePaths: [machineRoot] };
+		expect(state.coordinator.acquire("machine-1", { attemptId: "machine-attempt-1" }, machinePlan)).toEqual({
+			kind: "granted",
+		});
+		expect(state.coordinator.acquire("machine-2", { attemptId: "machine-attempt-2" }, machinePlan)).toEqual({
+			kind: "granted",
+		});
+
+		const focusedPlan = { cwd: state.workspace, writeEnabled: true, writePaths: [state.source] };
+		expect(state.coordinator.acquire("focused-1", { attemptId: "focused-attempt-1" }, focusedPlan)).toEqual({
+			kind: "granted",
+		});
+		expect(state.coordinator.acquire("focused-2", { attemptId: "focused-attempt-2" }, focusedPlan)).toEqual({
+			kind: "blocked",
+		});
 		state.coordinator.dispose();
 	});
 

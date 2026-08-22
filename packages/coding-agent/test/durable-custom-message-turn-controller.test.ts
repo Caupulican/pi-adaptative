@@ -9,6 +9,47 @@ import type { GoalExecutionLease } from "../src/core/goals/goal-session-controll
 const submissionLease = {} as ForegroundSubmissionLease;
 
 describe("DurableCustomMessageTurnController", () => {
+	it("acknowledges a boundary-queued message only after its exact custom message is persisted", async () => {
+		const enqueueSteeringMessage = vi.fn();
+		const controller = new DurableCustomMessageTurnController({
+			foreground: {} as ForegroundRecoveryController,
+			goals: { beginExecution: vi.fn(), endExecution: vi.fn() },
+			enqueueSteeringMessage,
+		});
+
+		let accepted = false;
+		const delivery = controller
+			.enqueue({ customType: "background-worker-completion", content: "done", display: true })
+			.then(() => {
+				accepted = true;
+			});
+		await Promise.resolve();
+		expect(accepted).toBe(false);
+		const queued = enqueueSteeringMessage.mock.calls[0]?.[0];
+		expect(queued).toMatchObject({ role: "custom", customType: "background-worker-completion" });
+
+		controller.notePersisted(queued as never);
+		await delivery;
+		expect(accepted).toBe(true);
+	});
+
+	it("rejects a queued persistence receipt on shutdown instead of hanging notification drain", async () => {
+		const controller = new DurableCustomMessageTurnController({
+			foreground: {} as ForegroundRecoveryController,
+			goals: { beginExecution: vi.fn(), endExecution: vi.fn() },
+			enqueueSteeringMessage: vi.fn(),
+		});
+
+		const delivery = controller.enqueue({
+			customType: "background-tool-completion",
+			content: "done",
+			display: true,
+		});
+		controller.shutdown();
+
+		await expect(delivery).rejects.toThrow(/Session disposed/);
+	});
+
 	it("releases the goal execution lease once the run completes normally", async () => {
 		const lease = { goalId: "goal-1" } as GoalExecutionLease;
 		const beginExecution = vi.fn(() => lease);
@@ -17,6 +58,7 @@ describe("DurableCustomMessageTurnController", () => {
 		const controller = new DurableCustomMessageTurnController({
 			foreground,
 			goals: { beginExecution, endExecution },
+			enqueueSteeringMessage: vi.fn(),
 		});
 
 		// start()'s synchronous prefix (through `this.pending.set(...)`) runs before its first
@@ -48,6 +90,7 @@ describe("DurableCustomMessageTurnController", () => {
 		const controller = new DurableCustomMessageTurnController({
 			foreground,
 			goals: { beginExecution, endExecution },
+			enqueueSteeringMessage: vi.fn(),
 		});
 
 		// Nothing calls notePersisted before runAgentPrompt's rejection propagates, so start()
@@ -74,6 +117,7 @@ describe("DurableCustomMessageTurnController", () => {
 		const controller = new DurableCustomMessageTurnController({
 			foreground,
 			goals: { beginExecution, endExecution },
+			enqueueSteeringMessage: vi.fn(),
 		});
 
 		await expect(
@@ -93,6 +137,7 @@ describe("DurableCustomMessageTurnController", () => {
 		const controller = new DurableCustomMessageTurnController({
 			foreground,
 			goals: { beginExecution, endExecution },
+			enqueueSteeringMessage: vi.fn(),
 		});
 
 		await expect(

@@ -24,6 +24,7 @@ const RECORD_KEYS = [
 	"taskId",
 	"toolCallId",
 	"toolName",
+	"goalId",
 	"status",
 	"startedAt",
 	"completedAt",
@@ -39,7 +40,7 @@ const RECORD_KEYS = [
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
 export type BackgroundToolTerminalDelivery = "pending" | "delivered";
 
-export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "status">;
+export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "goalId" | "status">;
 
 /** Match a goal/task_steps evidence uri to a session background tool task by task id or toolCallId. */
 export function findBackgroundToolTask<T extends BackgroundToolTaskRef>(
@@ -78,6 +79,8 @@ export interface BackgroundToolTaskRecord {
 	taskId: string;
 	toolCallId: string;
 	toolName: string;
+	/** Goal execution that owned the foreground tool call when it was handed off. */
+	goalId?: string;
 	status: BackgroundToolTaskStatus;
 	startedAt: string;
 	completedAt?: string;
@@ -116,6 +119,8 @@ export interface BackgroundToolTerminalMessage {
 
 export interface BackgroundToolTaskControllerDeps {
 	getSessionId(): string;
+	/** Authoritative goal execution attribution at the tool handoff boundary. */
+	getGoalId?(): string | undefined;
 	/** Current session followed by the authoritative fork ancestry whose branch records remain visible. */
 	getSessionLineageIds?(): readonly string[];
 	getArtifactStore(): ArtifactStore | undefined;
@@ -158,17 +163,21 @@ export function loadBackgroundToolTaskRecordsNewestFirst(
 
 export function createBackgroundToolTerminalMessage(
 	records: readonly BackgroundToolTaskRecord[],
+	options?: { wakeParent?: boolean },
 ): BackgroundToolTerminalMessage {
 	if (records.length === 0) throw new TypeError("Background tool terminal handoff requires at least one record");
 	const included = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS);
 	const omitted = records.length - included.length;
+	const wakeParent = options?.wakeParent ?? true;
 	return {
 		customType: "background-tool-completion",
 		content: [
 			"Background tool terminal handoff:",
 			...included.map((record) => `- ${record.taskId}: ${record.status} tool=${record.toolName}`),
 			...(omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted.`] : []),
-			"Parent woke. Need result: tool_task action=wait once; never poll.",
+			...(wakeParent
+				? ["Parent woke. Need result: tool_task action=wait once; never poll."]
+				: ["Parent was not woken because the owning goal is no longer active. Wait for explicit user input."]),
 		].join("\n"),
 		display: true,
 		details: {
@@ -260,6 +269,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		(value.completedAt !== undefined &&
 			(typeof value.completedAt !== "string" || !Number.isFinite(Date.parse(value.completedAt)))) ||
 		(value.status !== "running" && value.completedAt === undefined) ||
+		(value.goalId !== undefined && (typeof value.goalId !== "string" || value.goalId.length === 0)) ||
 		typeof value.elapsedBeforeHandoffMs !== "number" ||
 		!Number.isFinite(value.elapsedBeforeHandoffMs) ||
 		value.elapsedBeforeHandoffMs < 0 ||
@@ -281,6 +291,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		taskId: value.taskId,
 		toolCallId: value.toolCallId,
 		toolName: value.toolName,
+		...(value.goalId ? { goalId: value.goalId } : {}),
 		status: value.status,
 		startedAt: value.startedAt,
 		...(value.completedAt ? { completedAt: value.completedAt } : {}),
@@ -327,11 +338,13 @@ export class BackgroundToolTaskController {
 		const sessionId = this.deps.getSessionId();
 		const taskId = `tool-task-${this.nextTaskId++}`;
 		const startedAt = this.now().toISOString();
+		const goalId = this.deps.getGoalId?.();
 		const record: BackgroundToolTaskRecord = {
 			sessionId,
 			taskId,
 			toolCallId: context.toolCall.id,
 			toolName: context.toolCall.name,
+			...(goalId ? { goalId } : {}),
 			status: "running",
 			startedAt,
 			elapsedBeforeHandoffMs: context.elapsedMs,

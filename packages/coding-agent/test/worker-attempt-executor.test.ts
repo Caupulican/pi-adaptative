@@ -153,6 +153,7 @@ function createExecutorHarness(
 		},
 		grant,
 		executionPlan: {
+			cwd: process.cwd(),
 			processEnabled: false,
 			writeEnabled: false,
 			readMemory: false,

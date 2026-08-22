@@ -3,13 +3,16 @@ import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { validateSkillName } from "../skills.ts";
+import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
+import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH, validateSkillName } from "../skills.ts";
 import { runSkillAudit, type SkillAuditReport } from "./skill-audit.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const skillifySchema = Type.Object({
-	name: Type.String({ description: "Skill name (lowercase, a-z 0-9 hyphens only, max 64 chars)" }),
-	description: Type.String({ description: "Skill description (max 1024 chars)" }),
+	name: Type.String({
+		description: `Skill name (lowercase, a-z 0-9 hyphens only, max ${MAX_SKILL_NAME_LENGTH} chars)`,
+	}),
+	description: Type.String({ description: `Skill description (max ${MAX_SKILL_DESCRIPTION_LENGTH} chars)` }),
 	body: Type.String({ description: "Skill body/implementation code" }),
 });
 
@@ -69,12 +72,20 @@ export function createSkillifyToolDefinition(
 			// Validate description
 			if (!description || description.trim() === "") {
 				errors.push("description is required");
-			} else if (description.length > 1024) {
-				errors.push(`description exceeds 1024 characters (${description.length})`);
+			} else if (description.length > MAX_SKILL_DESCRIPTION_LENGTH) {
+				errors.push(`description exceeds ${MAX_SKILL_DESCRIPTION_LENGTH} characters (${description.length})`);
 			}
 
-			// Run audit on the draft
-			const audit = runSkillAudit(cwd, { name, description, body });
+			const bodyBytes = Buffer.byteLength(body, "utf8");
+			if (bodyBytes > MAX_ACTIVE_SKILL_BODY_BYTES) {
+				errors.push(`body exceeds ${MAX_ACTIVE_SKILL_BODY_BYTES} bytes (${bodyBytes})`);
+			}
+
+			// Do not tokenize an oversized draft; retain the existing-skill report for the proposal.
+			const audit =
+				bodyBytes > MAX_ACTIVE_SKILL_BODY_BYTES
+					? runSkillAudit(cwd)
+					: runSkillAudit(cwd, { name, description, body });
 
 			const valid = errors.length === 0;
 			const proposedPath = join(homedir(), ".pi", "agent", "skills", name, "SKILL.md");

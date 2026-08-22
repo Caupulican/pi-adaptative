@@ -316,6 +316,6 @@ pi --exclude-tools ask_question
 
 ## Design Principles
 
-Pi keeps the core focused and pushes project-specific workflows into extensions, skills, prompt templates, and packages. Core includes the cross-project lifecycle primitives it depends on itself: native goals, task steps, durable recursive agent orchestration, and a platform-selected shell. Broader integrations such as MCP and external-provider teams remain extension/package territory.
+Pi keeps the core focused and pushes project-specific workflows into extensions, skills, prompt templates, and packages. Core includes the cross-project lifecycle primitives it depends on itself: native goals, task steps, durable root-managed leaf-worker orchestration, and a platform-selected shell. Broader integrations such as MCP and external-provider teams remain extension/package territory.
 
 For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).

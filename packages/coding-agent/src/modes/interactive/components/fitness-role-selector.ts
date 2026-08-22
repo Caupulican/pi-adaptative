@@ -59,8 +59,9 @@ const FITNESS_ROLE_ITEMS: readonly SelectItem[] = [
 	},
 	{
 		value: "learning",
-		label: "Learning / reflection",
-		description: "Background reflection and learning passes",
+		label: "Learning",
+		description:
+			"Explicit/background learning passes; automatic reflection uses the orchestrator's current session turn",
 	},
 	{
 		value: "none",

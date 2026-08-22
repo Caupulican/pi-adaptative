@@ -99,11 +99,13 @@ Cross-process, like `PI_WORKTREE_LANE`/`--worktree-lane`:
 | `PI_PARENT_SESSION` | `--parent-session <id>` | The parent's sessionId, recorded alongside the pid for diagnostics/adoption. |
 | `PI_ORCHESTRATION_AGENT_ID` | launch-only | Pins the logical agent identity across the initial process and exact-session resumes. |
 | `PI_TASK_REF` | `--task-ref <id>` | Pins the goal/task identity used to fence automatic recovery across process generations. |
+| `PI_WORKER_ALLOWED_PATHS` | launch-only | JSON array of absolute paths compiled once into a worker session's structural filesystem envelope. `[]` preserves full-machine scope; malformed or relative entries fail startup. Process tools remain an explicit host-trust boundary. |
 
 `tmux_agent_manager`'s `fire_task` sets the parent pid/session and logical agent ID automatically on
-every `pi`-provider child it launches. Goal-bound launches also set `PI_TASK_REF` from `goalId`, the
-same way lane-first dispatch threads `--worktree-lane` -- see `dispatch-grant.ts`'s
-`LaunchProfileSource`.
+every `pi`-provider child it launches and always sets the worker path channel from the immutable
+launch profile. Goal-bound launches also set `PI_TASK_REF` from `goalId`, the
+same way lane-first dispatch threads `--worktree-lane` -- see `launch-profile.ts`'s
+`WorkerLaunchProfile`.
 
 ## Settings
 
@@ -134,9 +136,9 @@ entry.
 
 Only a `pi`-provider child self-registers and watches -- a non-`pi` agent launched via
 `tmux_agent_manager` (a foreign CLI) has no way to be handed `--parent-pid`/`PI_PARENT_PID` and
-act on it. Its lifecycle stays bounded only at the launch layer (agent/budget/count), the same
-documented limitation `worktree-sync` already has for foreign CLIs -- not a hidden gap, a
-cooperative boundary this system cannot structurally enforce across an arbitrary external process.
+act on it. Its managed lane and event watcher still provide durable lifecycle/audit records, but its
+internal tool and thinking controls remain owned by that external CLI. Pi-only profile overrides are
+rejected rather than represented as enforced across a boundary the host cannot structurally control.
 
 ## What this does not do
 

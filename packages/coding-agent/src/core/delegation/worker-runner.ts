@@ -43,7 +43,7 @@ export {
  * Pure execution for one bounded specialist delegation: bounded isolated completion ->
  * parse -> untrusted `WorkerClaim` -> parent validation via {@link validateWorkerClaim}.
  *
- * The injected completion may be a bounded child tool loop. Its tool surface is built and gated by
+ * The injected completion may be a bounded worker tool loop. Its tool surface is built and gated by
  * the host; this module keeps the structured-output contract and treats every claim as untrusted
  * until parent validation succeeds.
  */
@@ -52,9 +52,9 @@ export interface WorkerCompletion {
 	text: string;
 	costUsd: number;
 	stopReason: string;
-	/** Files successfully changed by the child tool loop before it produced the final JSON. */
+	/** Files successfully changed by the worker tool loop before it produced the final JSON. */
 	changedFiles?: readonly string[];
-	/** Capability refusals or execution failures observed inside the child tool loop. */
+	/** Capability refusals or execution failures observed inside the worker tool loop. */
 	blockers?: readonly string[];
 }
 
@@ -70,7 +70,7 @@ export interface WorkerRunnerOptions {
 	 */
 	usageReportId: string;
 	complete: (args: { systemPrompt: string; userPrompt: string; signal: AbortSignal }) => Promise<WorkerCompletion>;
-	/** Live successful child-tool mutations, including writes completed before timeout/cancellation. */
+	/** Live successful worker-tool mutations, including writes completed before timeout/cancellation. */
 	getChangedFiles?: () => readonly string[];
 	signal?: AbortSignal;
 	now?: () => string;
@@ -80,12 +80,10 @@ export interface WorkerRunnerOptions {
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
 	/** Enables the constrained direct-argv operator role prompt. */
 	processCapable?: boolean;
-	/** Enables recursive delegation and orchestration-tree coordination guidance. */
-	delegationCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
-	/** Turns the child into a read-only semantic verifier for this exact durable task. */
+	/** Turns the worker into a read-only semantic verifier for this exact durable task. */
 	verificationSubjectTaskId?: string;
 }
 
@@ -327,13 +325,10 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		execute: (signal) =>
 			options.complete({
 				systemPrompt: options.verificationSubjectTaskId
-					? buildVerifierSystemPrompt(options.verificationSubjectTaskId, {
-							delegate: options.delegationCapable === true,
-						})
+					? buildVerifierSystemPrompt(options.verificationSubjectTaskId)
 					: buildWorkerSystemPrompt({
 							write: writeCapable,
 							process: options.processCapable === true,
-							delegate: options.delegationCapable === true,
 						}),
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,

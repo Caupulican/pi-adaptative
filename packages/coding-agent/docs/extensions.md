@@ -1625,6 +1625,14 @@ Typical `sourceInfo.source` values:
 - `sdk` for tools passed via `createAgentSession({ customTools })`
 - extension source metadata for tools registered by extensions
 
+### pi.getEffectiveResourceProfile()
+
+Return a self-contained snapshot of the session's effective extension, skill, prompt, theme, agent,
+and tool filters. Extensions that launch a Pi child can pass this snapshot through
+`--resource-profile-json` plus `--resource-profile` so an omitted child override inherits the exact
+parent resource authority. Unrestricted kinds are represented explicitly as `allow: ["*"]`; activating
+the snapshot therefore does not turn an unrestricted kind into strict-profile deny-all.
+
 ### pi.setModel(model)
 
 Set the current model. Returns `false` if no API key is available for the model. See [models.md](models.md) for configuring custom models.

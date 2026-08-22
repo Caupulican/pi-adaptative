@@ -6,7 +6,7 @@ import type { ExtensionContext, ToolDefinition } from "../src/core/extensions/ty
 import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
-import { classifyDispatchError, dispatchTmuxWorker, type TmuxDispatchDeps } from "../src/core/tools/tmux-dispatch.ts";
+import { dispatchTmuxWorker, type TmuxDispatchDeps } from "../src/core/tools/tmux-dispatch.ts";
 import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
 
 /**
@@ -14,7 +14,7 @@ import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
  * FAUX `tmux_agent_manager` tool (no real tmux) driving a REAL `BackgroundLaneController` -- the
  * adapter's correlation (`resolveManagedLaneId`), the goal reducer's binding, and the existing
  * "waiting"/resume continuation machinery are all exercised for real, only the extension's tmux
- * side effects (panes, sessions, grants) are faked.
+ * side effects (panes and sessions) are faked.
  */
 
 function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps> = {}): BackgroundLaneControllerDeps {
@@ -59,7 +59,7 @@ function fauxTmuxTool(
 }
 
 describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneController)", () => {
-	it("granted dispatch: single pi agent, boundLaneId is the caller-stable durable id; goal waits then resumes on terminal", async () => {
+	it("autonomous profiled dispatch: single pi agent, boundLaneId is the caller-stable durable id; goal waits then resumes on terminal", async () => {
 		const sessionManager = InMemorySessionManager.inMemory();
 		const blc = new BackgroundLaneController(buildLaneControllerDeps({ getSessionManager: () => sessionManager }));
 
@@ -129,25 +129,6 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 			laneRecords: blc.getLaneRecords(),
 		});
 		expect(afterTerminal.continuation.action).not.toBe("waiting");
-	});
-
-	it("ungranted refusal: a no-standing-grant throw surfaces as an honest skip, never a crash and never a fake laneId", async () => {
-		const toolDef = fauxTmuxTool(async () => {
-			throw new Error(
-				"no standing grant for tmux dispatch; run grant_dispatch first: fire_task launch of job job1 (primary agent goal-worker). Refusing to launch without a grant or interactive approval.",
-			);
-		});
-		const deps: TmuxDispatchDeps = {
-			platform: fauxTmuxPlatform,
-			getToolDefinition: () => toolDef,
-			createExtensionContext: () => fauxCtx,
-			resolveManagedLaneId: () => undefined,
-			getGoalId: () => "g1",
-		};
-
-		const outcome = await dispatchTmuxWorker(deps, { requirementId: "req-1", instructions: "do it" });
-		expect(outcome.laneId).toBeUndefined();
-		expect(outcome.skipReason).toBe("no_standing_grant");
 	});
 
 	it("extension-not-loaded: getToolDefinition undefined -> honest skip, no crash", async () => {
@@ -223,7 +204,7 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		expect(worktreeCreated).toBe(false);
 	});
 
-	it("a non-grant launch failure classifies as tmux_dispatch_failed -- still an honest surfaced skip, never a crash", async () => {
+	it("a launch failure classifies as tmux_dispatch_failed -- still an honest surfaced skip, never a crash", async () => {
 		const toolDef = fauxTmuxTool(async () => {
 			throw new Error("tmux session already exists: pi-agents-x. Use stop_job/stop_session first.");
 		});
@@ -418,13 +399,5 @@ describe("dispatchTmuxWorker (faux tmux tool end-to-end, real BackgroundLaneCont
 		expect(outcome.laneId).toBe("tmux:job1:goal-worker-1");
 		const params = capturedParams as { agents: Array<Record<string, unknown>> };
 		expect(params.agents[0]).toEqual({ provider: "pi", name: "goal-worker" });
-	});
-
-	it("classifyDispatchError maps the stable no-standing-grant substring; every other failure is tmux_dispatch_failed", () => {
-		expect(classifyDispatchError(new Error("no standing grant for tmux dispatch; run grant_dispatch first"))).toBe(
-			"no_standing_grant",
-		);
-		expect(classifyDispatchError(new Error("some other failure"))).toBe("tmux_dispatch_failed");
-		expect(classifyDispatchError("a non-Error throw")).toBe("tmux_dispatch_failed");
 	});
 });

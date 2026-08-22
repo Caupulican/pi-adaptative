@@ -339,6 +339,8 @@ export interface HarnessOptions {
 	resourceLoader?: ResourceLoader;
 	/** Inline extensions to load into the session resource loader. */
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
+	/** Existing agent-core next-turn hook installed before AgentSession composes its boundary refresh. */
+	prepareNextTurn?: Agent["prepareNextTurn"];
 }
 
 export interface Harness {
@@ -382,6 +384,7 @@ function createHarnessWithResourceLoader(
 			tools: options.tools ?? [],
 		},
 		streamFn,
+		...(options.prepareNextTurn ? { prepareNextTurn: options.prepareNextTurn } : {}),
 	});
 
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();

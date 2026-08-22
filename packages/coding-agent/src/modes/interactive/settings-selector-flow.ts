@@ -71,6 +71,8 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 		const selector = new SettingsSelectorComponent(
 			{
 				autoCompact: host.session.autoCompactionEnabled,
+				costGuard: host.settingsManager.getCostGuardSettings(),
+				costGuardScope: projectSettings.costGuard ? "project" : "global",
 				showImages: host.settingsManager.getShowImages(),
 				imageWidthCells: host.settingsManager.getImageWidthCells(),
 				autoResizeImages: host.settingsManager.getImageAutoResize(),
@@ -143,6 +145,16 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				onAutoCompactChange: (enabled) => {
 					host.session.setAutoCompactionEnabled(enabled);
 					host.footer.setAutoCompactEnabled(enabled);
+				},
+				onCostGuardChange: (settings, scope) => {
+					host.session.setCostGuardSettings(settings, scope);
+					host.footer.invalidate();
+					host.ui.requestRender();
+					host.showStatus(
+						settings.enabled
+							? `Foreground cost guard enabled at $${settings.maxTurnUsd.toFixed(2)}/turn (${settings.action}).`
+							: "Foreground cost guard disabled.",
+					);
 				},
 				onShowImagesChange: (enabled) => {
 					host.settingsManager.setShowImages(enabled);

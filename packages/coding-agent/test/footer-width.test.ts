@@ -34,6 +34,7 @@ function createSession(options: {
 	subagentCost?: number;
 	subagentReports?: number;
 	costGuardDecision?: CostGuardDecision;
+	costGuardEnabled?: boolean;
 	subscription?: boolean;
 }): AgentSession {
 	const usage = options.usage;
@@ -93,6 +94,11 @@ function createSession(options: {
 		},
 		settingsManager: {
 			getFastModeEnabled: () => options.fastMode,
+			getCostGuardSettings: () => ({
+				enabled: options.costGuardEnabled ?? false,
+				maxTurnUsd: options.costGuardDecision?.thresholdUsd ?? 0,
+				action: options.costGuardDecision?.action ?? "warn",
+			}),
 		},
 	};
 
@@ -330,6 +336,7 @@ describe("FooterComponent width handling", () => {
 				cost: { total: 2.1 },
 			},
 			dailyCost: 2.1,
+			costGuardEnabled: true,
 			costGuardDecision: {
 				over: true,
 				estUsd: 3.25,
@@ -345,6 +352,24 @@ describe("FooterComponent width handling", () => {
 		expect(rendered.match(/GUARD:/g)).toHaveLength(1);
 		expect(rendered.match(/CURRENT:/g)).toHaveLength(1);
 		expect(rendered.match(/TODAY:/g)).toHaveLength(1);
+	});
+
+	it("does not render a stale guard decision without explicit opt-in", () => {
+		const session = createSession({
+			sessionName: "",
+			costGuardEnabled: false,
+			costGuardDecision: {
+				over: true,
+				estUsd: 0.54,
+				backgroundUsd: 0,
+				totalUsd: 0.54,
+				thresholdUsd: 0.5,
+				action: "warn",
+			},
+		});
+
+		const rendered = stripAnsi(new FooterComponent(session, createFooterData(1)).render(200).join("\n"));
+		expect(rendered).not.toContain("GUARD:");
 	});
 
 	it("marks subscription-equivalent current cost without duplicating the cost bar", () => {

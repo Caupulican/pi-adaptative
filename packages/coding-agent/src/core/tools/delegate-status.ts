@@ -8,7 +8,7 @@ import type { OrchestrationPanelModel, OrchestrationPanelRow } from "./orchestra
 const MAX_WORKER_CONTROL_ID_CHARS = 512;
 
 export const WORKER_QUEUED_CAVEMAN_GUIDANCE =
-	"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or safety reservations clear. Never poll, interrupt, or cancel a healthy running worker to force the queue. For genuine parallel read-only work, start a fresh worker whose authority.toolNames omits write and edit; write-capable workers may serialize. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
+	"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
 
 export const DELEGATE_STATUS_ACTIONS = ["status", "review"] as const;
 

@@ -48,19 +48,25 @@ export function estimateTurnCostUsd(args: {
 export type CostGuardAction = "warn" | "downgrade";
 
 export interface CostGuardSettings {
-	/** Per-turn projected USD threshold. `0` disables the guard entirely. */
+	/** Explicit opt-in. A stored threshold without this flag is dormant legacy configuration. */
+	enabled: boolean;
+	/** Per-turn projected USD threshold. Must also be explicitly enabled to activate the guard. */
 	maxTurnUsd: number;
 	/** Over the ceiling: `warn` (surface a notice) or `downgrade` (also reduce reasoning effort). */
 	action: CostGuardAction;
 }
 
 export const DEFAULT_COST_GUARD_SETTINGS: CostGuardSettings = {
+	enabled: false,
 	maxTurnUsd: 0,
 	action: "warn",
 };
 
+/** Threshold offered when the user enables an unconfigured guard from `/settings`. */
+export const DEFAULT_ENABLED_COST_GUARD_MAX_TURN_USD = 0.5;
+
 export interface CostGuardDecision {
-	/** True when the guard is enabled AND the projected TOTAL (estUsd + backgroundUsd) exceeds the ceiling. */
+	/** True only after explicit opt-in and when projected TOTAL (estUsd + backgroundUsd) exceeds the ceiling. */
 	over: boolean;
 	/** Projected USD cost of the next foreground call alone (unchanged meaning — what the footer's "/turn" label shows). */
 	estUsd: number;
@@ -73,7 +79,8 @@ export interface CostGuardDecision {
 }
 
 /**
- * Decide whether the projected turn cost trips the guard. Disabled (`maxTurnUsd<=0`) is never `over`.
+ * Decide whether the projected turn cost trips the guard. `enabled: true` is mandatory; a positive
+ * legacy threshold by itself stays dormant.
  *
  * `cumulativeBackgroundUsd` (default 0) is spawned/background-lane spend (research, worker delegation,
  * reflection, model-fitness probes — see {@link SpawnedUsageTotals}) folded into the same ceiling as the
@@ -82,14 +89,14 @@ export interface CostGuardDecision {
  * baseline snapshotted at the top of the turn, subtracted from the live cumulative total), not the
  * session's entire lifetime, so a turn that is cheap in the foreground but has quietly spent a lot in
  * background lanes THIS turn still trips the guard, without a prior turn's spend keeping it stuck over
- * forever (still warn-only by default).
+ * forever (still warn-only by default). `cost-guard-controller.ts` owns that bracketing convention.
  */
 export function evaluateCostGuard(
 	estUsd: number,
 	settings: CostGuardSettings,
 	cumulativeBackgroundUsd = 0,
 ): CostGuardDecision {
-	const enabled = settings.maxTurnUsd > 0;
+	const enabled = settings.enabled && settings.maxTurnUsd > 0;
 	const backgroundUsd = Math.max(0, cumulativeBackgroundUsd);
 	const totalUsd = estUsd + backgroundUsd;
 	return {

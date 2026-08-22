@@ -98,22 +98,28 @@ history. This is not single-session summarization.
 5. Pick the smallest useful layer: Automata memory, skill, prompt template,
    role agent, extension/tool, then core source only when lower layers cannot
    solve it.
-6. When `autoLearn.enabled` is true, long sessions may autonomously launch a
-   background learner with the selected active/in-use model. Learners must share
-   the Auto Learn state file, use per-session tenant leases, renew/complete
-   their lease, and avoid colliding with learners from other sessions.
-7. Auto Learn learners must look for memory. If Automata/user memory is enabled
+6. Automatic reflection is root-only: at most one durable cue is pending for
+   the orchestrator and projected transiently into its next ordinary provider
+   request. Accepting that request consumes the cue. Disabling reflection
+   dismisses it; re-enabling cannot resurrect its evidence. Reflection never
+   launches a second, background, or isolated model request. Workers do not
+   reflect or mutate durable memory; they return evidence to the orchestrator.
+7. An explicit `/auto-learn run` may launch one bounded background learner with
+   the selected active/in-use model. Learners must share the Auto Learn state
+   file, use per-session tenant leases, renew/complete their lease, and avoid
+   colliding with learners from other sessions.
+8. Auto Learn learners must look for memory. If Automata/user memory is enabled
    and contains rules, preferences, corrections, or project facts, query it
    before judging candidates and use it to polish proposals, avoid duplicates,
    and improve behavioral/tooling accuracy.
-8. Apply policy gates: memory may be auto-applied only after overlap checks;
+9. Apply policy gates: memory may be auto-applied only after overlap checks;
    safe low-risk user-level skill/prompt changes may be applied when the current
    request or standing grant authorizes self-improvement. A direct request to
    fix or improve the harness is authorization for scoped source changes; do
    not ask for duplicate approval at each layer transition. Settings,
    credentials, destructive actions, executable authority expansion,
    publishing, pushing, tagging, and releases still require specific approval.
-9. Leave an audit artifact with evidence sources, recurrence count, chosen
+10. Leave an audit artifact with evidence sources, recurrence count, chosen
    layer, action/approval need, expected benefit, risk, and validation.
 
 ## After-action learning workflow

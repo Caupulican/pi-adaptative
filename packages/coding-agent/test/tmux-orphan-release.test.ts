@@ -28,9 +28,7 @@ type ManagedLaneEventCapture = {
 	usage?: unknown;
 };
 
-/** Minimal in-memory session custom-entry store — the tmux extension unconditionally calls
- * `registerFlag` at load time and reads/writes entries when a grant action needs them; neither
- * scenario here dispatches a real launch, so this only needs to exist, not be exercised. */
+/** Minimal in-memory custom-entry support for the extension host contract. */
 function makeCustomEntryStore() {
 	const entries: StoredEntry[] = [];
 	return {

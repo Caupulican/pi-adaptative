@@ -144,6 +144,38 @@ describe("BackgroundToolTaskController", () => {
 		await second.controller.shutdown();
 	});
 
+	it("persists the authoritative goal execution identity on every handed-off tool edge", async () => {
+		const persisted: BackgroundToolTaskRecord[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getGoalId: () => "goal-owning-tool",
+			getArtifactStore: () => undefined,
+			persist: (record) => persisted.push(record),
+			notifyTerminal: vi.fn(),
+		});
+		const call = controlledContext();
+
+		controller.handoff(call.context);
+		expect(persisted[0]).toMatchObject({
+			taskId: "tool-task-1",
+			status: "running",
+			goalId: "goal-owning-tool",
+		});
+
+		call.resolveCompletion({
+			toolCall: call.context.toolCall,
+			result: { content: [{ type: "text", text: "done" }], details: {} },
+			isError: false,
+		});
+		await controller.waitForNotifications();
+		expect(persisted.at(-1)).toMatchObject({
+			taskId: "tool-task-1",
+			status: "completed",
+			goalId: "goal-owning-tool",
+		});
+		await controller.shutdown();
+	});
+
 	it("delivers manual handoff requests as an event without polling", () => {
 		const { controller } = createHarness("session-a");
 		const first = vi.fn();
@@ -403,6 +435,7 @@ describe("BackgroundToolTaskController", () => {
 			taskId: "tool-task-7",
 			toolCallId: "call-pending",
 			toolName: "slow",
+			goalId: "goal-restored",
 			status: "completed",
 			startedAt: "2026-08-01T12:00:00.000Z",
 			completedAt: "2026-08-01T12:00:02.000Z",
@@ -425,7 +458,13 @@ describe("BackgroundToolTaskController", () => {
 
 		await controller.waitForNotifications();
 
-		expect(delivered).toEqual([expect.objectContaining({ taskId: "tool-task-7", terminalDelivery: "pending" })]);
+		expect(delivered).toEqual([
+			expect.objectContaining({
+				taskId: "tool-task-7",
+				goalId: "goal-restored",
+				terminalDelivery: "pending",
+			}),
+		]);
 		expect(persisted).toEqual([expect.objectContaining({ taskId: "tool-task-7", terminalDelivery: "delivered" })]);
 		await controller.shutdown();
 	});

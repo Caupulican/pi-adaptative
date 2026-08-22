@@ -206,10 +206,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		const sent: SentMessage[] = [];
 		const laneEvents: LaneEvent[] = [];
 		let registeredTool: RegisteredTool | undefined;
-		// A minimal in-memory session custom-entry store — just enough to back the STANDING GRANT
-		// (appendEntry/getLatestCustomEntryOnBranch/getBranch), added because a real (non-dryRun)
-		// send_followup dispatch is now approval-gated (see tmux-dispatch-grant.test.ts for the dedicated
-		// grant-lifecycle coverage). Not used by the dismiss/reconcile tests below.
+		// Minimal in-memory custom-entry support for the extension host contract.
 		const entries: StoredEntry[] = [];
 		let leafId: string | null = null;
 		let entrySeq = 0;
@@ -259,7 +256,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		};
 		tmuxAgentManagerExtension(pi as never);
 		if (!registeredTool) throw new Error("tmux_agent_manager tool was not registered");
-		return { registeredTool, handlers, sent, laneEvents, context, seedCustomEntry: appendEntry };
+		return { registeredTool, handlers, sent, laneEvents, context };
 	}
 
 	it("send_followup dispatches a fresh durable turn and reports its terminal exactly once through the host lane bridge", async () => {
@@ -269,19 +266,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		setSessions(stateDir, [sessionName]);
 		setPanes(stateDir, sessionName, [paneId]);
 		const { jobDir, jobPath } = writeJob(jobId, { paneId, sessionName });
-		const { registeredTool, sent, laneEvents, context, seedCustomEntry } = installExtension();
-		// A real (non-dryRun) send_followup is approval-gated (standing-grant doctrine); seed one
-		// covering this job's agent so this test still exercises the follow-up MECHANICS unattended. The
-		// grant lifecycle itself (creation approval, budget, refusal without one) is covered in
-		// tmux-dispatch-grant.test.ts.
-		seedCustomEntry("tmux-dispatch-grant", {
-			grantId: "test-grant",
-			createdAt: new Date().toISOString(),
-			agent: "pi",
-			scope: {},
-			envelope: {},
-			budget: { maxLaunches: 10 },
-		});
+		const { registeredTool, sent, laneEvents, context } = installExtension();
 		const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(() => {
 			throw new Error("completion polling is forbidden");
 		});
@@ -353,18 +338,10 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 		setSessions(stateDir, [sessionName]);
 		setPanes(stateDir, sessionName, [paneId]);
 		const { jobDir, jobPath } = writeJob(jobId, { paneId, sessionName });
-		const { registeredTool, laneEvents, context, seedCustomEntry } = installExtension({
+		const { registeredTool, laneEvents, context } = installExtension({
 			reportManagedLane(event) {
 				if (event.phase === "dispatch") throw new Error("host reservation unavailable");
 			},
-		});
-		seedCustomEntry("tmux-dispatch-grant", {
-			grantId: "reservation-test-grant",
-			createdAt: new Date().toISOString(),
-			agent: "pi",
-			scope: {},
-			envelope: {},
-			budget: { maxLaunches: 1 },
 		});
 		const callsBefore = readCalls(stateDir).length;
 
@@ -455,6 +432,7 @@ describe.skipIf(process.platform === "win32")("tmux follow-up + dismiss + sessio
 
 		const calls = readCalls(stateDir);
 		expect(calls.some((line) => line.startsWith("kill-session"))).toBe(false);
+		expect(calls).toContain(`pipe-pane -t ${paneId}`);
 	});
 
 	it("session_start reconcile marks an orphaned job informational (session gone) without ever killing anything", async () => {

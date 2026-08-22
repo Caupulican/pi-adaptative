@@ -1,5 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
+import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -210,15 +210,15 @@ describe("worker model pin policy", () => {
 			workerModelPinPolicy: compileWorkerModelPinPolicy({ global: { roles: { implementer: luna } } }),
 		});
 
-		expect(baseline.promptGuidelines?.join("\n")).not.toContain("pins win fresh model/thinking");
+		expect(baseline.promptGuidelines?.join("\n")).not.toContain("conflicting model/thinking overrides fail closed");
 		expect(absent.promptGuidelines).toEqual(baseline.promptGuidelines);
 		expect(active.promptGuidelines?.join("\n")).toContain("CAVEMAN MODE - MANDATORY");
-		expect(active.promptGuidelines?.join("\n")).toContain("pins win fresh model/thinking");
+		expect(active.promptGuidelines?.join("\n")).toContain("conflicting model/thinking overrides fail closed");
 	});
 });
 
 describe("worker model pin admission", () => {
-	it("overrides an agent-selected model and thinking level without changing its role or tools", () => {
+	it("rejects an explicit model or thinking level that conflicts with an owner pin", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: {
 				role: "implementer",
@@ -232,11 +232,7 @@ describe("worker model pin admission", () => {
 			isModelExhausted: () => false,
 		});
 
-		expect(resolution.ok).toBe(true);
-		if (!resolution.ok) return;
-		expect(resolution.shipment.modelBinding).toEqual(luna);
-		expect(resolution.shipment.profile.role).toBe("implementer");
-		expect(resolution.shipment.profile.toolNames).toEqual(["read", "bash", "delegate"]);
+		expect(resolution).toEqual({ ok: false, reason: "worker_model_pin_conflict:implementer" });
 	});
 
 	it("keeps explicit authority selection unchanged when no pin applies", () => {
@@ -277,6 +273,34 @@ describe("worker model pin admission", () => {
 });
 
 describe("worker model pin lifecycle", () => {
+	it("does not start a different model when an explicit selection conflicts with an owner pin", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "foreground", contextWindow: 128_000 },
+				{ id: "requested", contextWindow: 128_000, reasoning: true },
+				{ id: "pinned", contextWindow: 128_000, reasoning: true },
+			],
+			settings: { workerDelegation: { modelPins: { roles: { implementer: luna } } } },
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage('{"summary":"must not run"}')]);
+
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Use the explicitly selected model or fail closed.",
+				authority: {
+					role: "implementer",
+					model: { provider: "faux", modelId: "requested" },
+				},
+			});
+
+			expect(run).toEqual({ started: false, skipReason: "worker_model_pin_conflict:implementer" });
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.session.getLaneRecords()).toEqual([]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("binds a valid pin before an unavailable profile candidate and reports the durable effective model", async () => {
 		const harness = await createHarness({
 			models: [
@@ -298,11 +322,7 @@ describe("worker model pin lifecycle", () => {
 
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Use the exact owner model pin.",
-				authority: {
-					role: "implementer",
-					model: { provider: "faux", modelId: "requested" },
-					thinkingLevel: "low",
-				},
+				authority: { role: "implementer" },
 			});
 
 			expect(run.started).toBe(true);
@@ -340,7 +360,7 @@ describe("worker model pin lifecycle", () => {
 				_state: unknown,
 				model: Model<Api>,
 			) => {
-				if (!context.systemPrompt?.includes("Autonomous orchestration-tree agent")) {
+				if (!context.systemPrompt?.includes("Autonomous leaf worker")) {
 					return fauxAssistantMessage("Terminal handoff observed.");
 				}
 				observedModelIds.push(model.id);
@@ -392,7 +412,7 @@ describe("worker model pin lifecycle", () => {
 				_state: unknown,
 				model: Model<Api>,
 			) => {
-				if (!context.systemPrompt?.includes("Autonomous orchestration-tree agent")) {
+				if (!context.systemPrompt?.includes("Autonomous leaf worker")) {
 					return fauxAssistantMessage("Terminal handoff observed.");
 				}
 				observedModelIds.push(model.id);
@@ -618,8 +638,8 @@ describe("worker model pin lifecycle", () => {
 		}
 	});
 
-	it("applies the child role pin to fresh nested delegation", async () => {
-		const recursiveProfile = workerProfile("unavailable-profile-model", {
+	it("keeps a pinned worker leaf-only when an owner profile requests delegation", async () => {
+		const delegationProfile = workerProfile("delegation-requesting-profile", {
 			capabilityCeiling: ["filesystem.read", "workflow.delegate"],
 			toolNames: ["read", "delegate"],
 		});
@@ -634,34 +654,20 @@ describe("worker model pin lifecycle", () => {
 					modelPins: { roles: { implementer: luna, explorer: terra } },
 				},
 			},
-			workerOrchestrationProfile: recursiveProfile,
+			workerOrchestrationProfile: delegationProfile,
 		});
 		const observedModelIds: string[] = [];
+		let observedTools: string[] = [];
 		try {
 			harness.setResponses([
-				(_context, _options, _state, model) => {
+				(context, _options, _state, model) => {
 					observedModelIds.push(model.id);
-					return fauxAssistantMessage(
-						[
-							fauxToolCall("delegate", {
-								instructions: "Inspect the nested evidence.",
-								authority: { role: "explorer" },
-							}),
-						],
-						{ stopReason: "toolUse" },
-					);
-				},
-				(_context, _options, _state, model) => {
-					observedModelIds.push(model.id);
-					return fauxAssistantMessage('{"summary":"nested evidence inspected","status":"completed"}');
-				},
-				(_context, _options, _state, model) => {
-					observedModelIds.push(model.id);
-					return fauxAssistantMessage('{"summary":"parent complete","status":"completed"}');
+					observedTools = context.tools?.map((tool) => tool.name) ?? [];
+					return fauxAssistantMessage('{"summary":"leaf work complete","status":"completed"}');
 				},
 			]);
 
-			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Delegate one nested inspection." });
+			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Inspect one repository." });
 			if (!run.started || !run.record) {
 				throw new Error(`Expected root worker to start: ${run.skipReason ?? "unknown"}`);
 			}
@@ -676,22 +682,12 @@ describe("worker model pin lifecycle", () => {
 			});
 			const snapshot = lifecycle.getTaskRuntimeSnapshot();
 			const childAgents = Object.values(snapshot.agents).filter((agent) => agent.parentAgentId === parentLaneId);
-			if (childAgents.length !== 1) {
-				throw new Error(
-					`Expected exactly one child agent with parentAgentId '${parentLaneId}', got ${childAgents.length}.`,
-				);
-			}
-			const childWait = await control.waitForWorkerAgent(childAgents[0].agentId);
-			expect(childWait.timedOut).toBe(false);
-			expect(harness.session.getWorkerClaimSnapshots().length).toBeGreaterThanOrEqual(2);
-			expect(observedModelIds).toHaveLength(3);
-			expect(observedModelIds.filter((modelId) => modelId === "pinned")).toHaveLength(2);
-			expect(observedModelIds.filter((modelId) => modelId === "requested")).toHaveLength(1);
+			expect(childAgents).toHaveLength(0);
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
+			expect(observedModelIds).toEqual(["pinned"]);
+			expect(observedTools).toEqual(["read"]);
 			expect(harness.session.getLaneRecords()).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({ modelRef: "faux/pinned", thinkingLevel: "high" }),
-					expect.objectContaining({ modelRef: "faux/requested", thinkingLevel: "medium" }),
-				]),
+				expect.arrayContaining([expect.objectContaining({ modelRef: "faux/pinned", thinkingLevel: "high" })]),
 			);
 		} finally {
 			await harness.cleanup();

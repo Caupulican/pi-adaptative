@@ -88,6 +88,9 @@ interface ForegroundTerminalHandoffControllerDeps {
 		lease: ForegroundSubmissionLease,
 		goalId?: string,
 	): Promise<{ completion: Promise<void> }>;
+	enqueueCustomMessageTurn(
+		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
+	): Promise<void>;
 	sendCustomMessage(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
 		options: { triggerTurn: false; deliverAs: "followUp" },
@@ -95,6 +98,22 @@ interface ForegroundTerminalHandoffControllerDeps {
 	): Promise<void>;
 	warn(message: string): void;
 }
+
+type TerminalCustomMessage = Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">;
+
+interface TerminalDeliveryPlan {
+	message: TerminalCustomMessage;
+	wakeParent: boolean;
+	goalId?: string;
+}
+
+interface PendingTerminalDelivery {
+	prepare(): TerminalDeliveryPlan | undefined;
+	resolve(): void;
+	reject(error: unknown): void;
+}
+
+const MAX_DELIVERED_TERMINAL_IDENTITIES = 512;
 
 export function buildForegroundWorkerTerminalHandoffContent(
 	records: readonly {
@@ -167,6 +186,9 @@ export function buildForegroundWorkerTerminalHandoffContent(
 /** Serializes durable background terminal delivery through the foreground submission owner. */
 export class ForegroundTerminalHandoffController {
 	private readonly deps: ForegroundTerminalHandoffControllerDeps;
+	private readonly pending = new Set<PendingTerminalDelivery>();
+	private readonly terminalDeliveries = new Map<string, Promise<void>>();
+	private readonly deliveredTerminalIdentities = new Set<string>();
 
 	constructor(deps: ForegroundTerminalHandoffControllerDeps) {
 		this.deps = deps;
@@ -175,48 +197,184 @@ export class ForegroundTerminalHandoffController {
 	async notifyWorkers(records: readonly WorkerTerminalHandoffRecord[]): Promise<void> {
 		if (records.every((record) => record.observedAt !== undefined)) return;
 		this.assertLive("worker terminal handoff was persisted");
-		const lease = await this.deps.foreground.acquireSubmission();
+		await this.scheduleUnique(
+			records,
+			(record) =>
+				["worker", record.laneId, record.completedAt ?? "", record.status, record.reasonCode ?? ""].join("\0"),
+			(uniqueRecords) => this.prepareWorkerDelivery(uniqueRecords),
+		);
+	}
+
+	async notifyTools(records: readonly BackgroundToolTaskRecord[], wakeParent: boolean): Promise<void> {
+		if (!wakeParent || records.every((record) => record.observedAt !== undefined)) return;
+		this.assertLive("background tool terminal handoff was delivered");
+		await this.scheduleUnique(
+			records,
+			(record) => ["tool", record.sessionId, record.taskId, record.completedAt ?? "", record.status].join("\0"),
+			(uniqueRecords) => this.prepareToolDelivery(uniqueRecords),
+		);
+	}
+
+	/** Deliver queued terminals immediately before the agent loop polls its steering inbox. */
+	flushProviderBoundary(): void {
+		for (const pending of [...this.pending]) {
+			try {
+				this.assertLive("terminal handoff reached a provider boundary");
+				const plan = pending.prepare();
+				if (!plan) {
+					this.pending.delete(pending);
+					pending.resolve();
+					continue;
+				}
+				if (!plan.wakeParent) continue;
+				this.pending.delete(pending);
+				void this.deps.enqueueCustomMessageTurn(plan.message).then(pending.resolve, pending.reject);
+			} catch (error) {
+				this.pending.delete(pending);
+				pending.reject(error);
+			}
+		}
+	}
+
+	private schedule(prepare: () => TerminalDeliveryPlan | undefined): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			const pending: PendingTerminalDelivery = { prepare, resolve, reject };
+			this.pending.add(pending);
+			void this.deliverWhenIdle(pending);
+		});
+	}
+
+	private async scheduleUnique<T>(
+		records: readonly T[],
+		identity: (record: T) => string,
+		prepare: (records: readonly T[]) => TerminalDeliveryPlan | undefined,
+	): Promise<void> {
+		const receipts = new Set<Promise<void>>();
+		const uniqueRecords: T[] = [];
+		const uniqueIdentities: string[] = [];
+		for (const record of records) {
+			const key = identity(record);
+			if (this.deliveredTerminalIdentities.has(key)) continue;
+			const inFlight = this.terminalDeliveries.get(key);
+			if (inFlight) {
+				receipts.add(inFlight);
+				continue;
+			}
+			uniqueRecords.push(record);
+			uniqueIdentities.push(key);
+		}
+		if (uniqueRecords.length > 0) {
+			const delivery = this.schedule(() => prepare(uniqueRecords));
+			for (const key of uniqueIdentities) this.terminalDeliveries.set(key, delivery);
+			receipts.add(delivery);
+			void delivery.then(
+				() => {
+					for (const key of uniqueIdentities) {
+						if (this.terminalDeliveries.get(key) === delivery) this.terminalDeliveries.delete(key);
+						this.rememberDeliveredTerminal(key);
+					}
+				},
+				() => {
+					for (const key of uniqueIdentities) {
+						if (this.terminalDeliveries.get(key) === delivery) this.terminalDeliveries.delete(key);
+					}
+				},
+			);
+		}
+		await Promise.all(receipts);
+	}
+
+	private rememberDeliveredTerminal(identity: string): void {
+		this.deliveredTerminalIdentities.delete(identity);
+		this.deliveredTerminalIdentities.add(identity);
+		while (this.deliveredTerminalIdentities.size > MAX_DELIVERED_TERMINAL_IDENTITIES) {
+			const oldest = this.deliveredTerminalIdentities.values().next().value;
+			if (oldest === undefined) break;
+			this.deliveredTerminalIdentities.delete(oldest);
+		}
+	}
+
+	private async deliverWhenIdle(pending: PendingTerminalDelivery): Promise<void> {
+		try {
+			while (this.pending.has(pending)) {
+				await this.deps.foreground.waitForIdle();
+				if (!this.pending.has(pending)) return;
+				this.assertLive("terminal handoff was waiting for foreground idle");
+				const lease = this.deps.foreground.tryAcquireSubmission();
+				if (!lease) continue;
+				if (!this.pending.delete(pending)) {
+					this.deps.foreground.releaseSubmission(lease);
+					return;
+				}
+				try {
+					await this.deliverWithLease(pending.prepare(), lease);
+					pending.resolve();
+				} catch (error) {
+					pending.reject(error);
+				}
+				return;
+			}
+		} catch (error) {
+			if (this.pending.delete(pending)) pending.reject(error);
+		}
+	}
+
+	private async deliverWithLease(
+		plan: TerminalDeliveryPlan | undefined,
+		lease: ForegroundSubmissionLease,
+	): Promise<void> {
 		let releaseLease = true;
 		try {
-			this.assertLive("worker terminal handoff was persisted");
-			const unread = records.filter((record) => record.observedAt === undefined);
-			if (unread.length === 0) return;
-			const prepared = unread.map((record, index) => {
-				const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId);
-				const claim = snapshot?.claim;
-				const outputArtifact =
-					index < 8 ? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId)) : undefined;
-				return {
-					summaryItem: {
-						id: record.laneId,
-						status: workerSummaryStatus(record, claim?.parentReviewRequired === true),
-					},
-					laneId: record.laneId,
-					status: record.status,
-					...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
-					...(outputArtifact ? { outputArtifact } : {}),
-					...(claim
-						? {
-								claim: {
-									status: claim.status,
-									summary: claim.summary.slice(0, 1000),
-									changedFiles: claim.changedFiles,
-									...(claim.blockers ? { blockers: claim.blockers } : {}),
-									...(claim.parentReviewRequired ? { parentReviewRequired: true } : {}),
-								},
-							}
-						: {}),
-				};
-			});
-			const included = prepared.slice(0, 8).map(({ summaryItem: _summaryItem, ...record }) => record);
-			const goal = this.deps.getGoalStateSnapshot();
-			const wakeParent = unread.some(
-				(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
-			);
-			const message = {
+			if (!plan) return;
+			if (plan.wakeParent) {
+				const started = await this.deps.startCustomMessageTurn(plan.message, lease, plan.goalId);
+				this.releaseAfterTurn(started.completion, lease, "background terminal handoff turn");
+				releaseLease = false;
+				return;
+			}
+			await this.deps.sendCustomMessage(plan.message, { triggerTurn: false, deliverAs: "followUp" }, lease);
+		} finally {
+			if (releaseLease) this.deps.foreground.releaseSubmission(lease);
+		}
+	}
+
+	private prepareWorkerDelivery(records: readonly WorkerTerminalHandoffRecord[]): TerminalDeliveryPlan | undefined {
+		const unread = records.filter((record) => record.observedAt === undefined);
+		if (unread.length === 0) return undefined;
+		const prepared = unread.map((record, index) => {
+			const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId);
+			const claim = snapshot?.claim;
+			const outputArtifact =
+				index < 8 ? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId)) : undefined;
+			return {
+				summaryItem: {
+					id: record.laneId,
+					status: workerSummaryStatus(record, claim?.parentReviewRequired === true),
+				},
+				laneId: record.laneId,
+				status: record.status,
+				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
+				...(outputArtifact ? { outputArtifact } : {}),
+				...(claim
+					? {
+							claim: {
+								status: claim.status,
+								summary: claim.summary.slice(0, 1000),
+								changedFiles: claim.changedFiles,
+								...(claim.blockers ? { blockers: claim.blockers } : {}),
+								...(claim.parentReviewRequired ? { parentReviewRequired: true } : {}),
+							},
+						}
+					: {}),
+			};
+		});
+		const included = prepared.slice(0, 8).map(({ summaryItem: _summaryItem, ...record }) => record);
+		const wake = this.resolveWake(unread);
+		return {
+			message: {
 				customType: "background-worker-completion",
 				content: buildForegroundWorkerTerminalHandoffContent(included, {
-					wakeParent,
+					wakeParent: wake.wakeParent,
 					totalCount: unread.length,
 				}),
 				display: true,
@@ -227,31 +385,18 @@ export class ForegroundTerminalHandoffController {
 						prepared.map((entry) => entry.summaryItem),
 					),
 				},
-			};
-			if (wakeParent) {
-				const goalId = unread.find((record) => record.goalId === goal?.goalId)?.goalId;
-				const started = await this.deps.startCustomMessageTurn(message, lease, goalId);
-				this.releaseAfterTurn(started.completion, lease, "worker terminal handoff turn");
-				releaseLease = false;
-			} else {
-				await this.deps.sendCustomMessage(message, { triggerTurn: false, deliverAs: "followUp" }, lease);
-			}
-		} finally {
-			if (releaseLease) this.deps.foreground.releaseSubmission(lease);
-		}
+			},
+			...wake,
+		};
 	}
 
-	async notifyTools(records: readonly BackgroundToolTaskRecord[], wakeParent: boolean): Promise<void> {
-		if (!wakeParent || records.every((record) => record.observedAt !== undefined)) return;
-		this.assertLive("background tool terminal handoff was delivered");
-		const lease = await this.deps.foreground.acquireSubmission();
-		let releaseLease = true;
-		try {
-			this.assertLive("background tool terminal handoff was delivered");
-			const unread = records.filter((record) => record.observedAt === undefined);
-			if (unread.length === 0) return;
-			const toolMessage = createBackgroundToolTerminalMessage(unread);
-			const message = {
+	private prepareToolDelivery(records: readonly BackgroundToolTaskRecord[]): TerminalDeliveryPlan | undefined {
+		const unread = records.filter((record) => record.observedAt === undefined);
+		if (unread.length === 0) return undefined;
+		const wake = this.resolveWake(unread);
+		const toolMessage = createBackgroundToolTerminalMessage(unread, { wakeParent: wake.wakeParent });
+		return {
+			message: {
 				...toolMessage,
 				details: {
 					...toolMessage.details,
@@ -268,13 +413,20 @@ export class ForegroundTerminalHandoffController {
 						})),
 					),
 				},
-			};
-			const started = await this.deps.startCustomMessageTurn(message, lease);
-			this.releaseAfterTurn(started.completion, lease, "background tool terminal handoff turn");
-			releaseLease = false;
-		} finally {
-			if (releaseLease) this.deps.foreground.releaseSubmission(lease);
-		}
+			},
+			...wake,
+		};
+	}
+
+	private resolveWake(records: readonly { goalId?: string }[]): Pick<TerminalDeliveryPlan, "wakeParent" | "goalId"> {
+		const goal = this.deps.getGoalStateSnapshot();
+		const wakeParent = records.some(
+			(record) => !record.goalId || (goal?.goalId === record.goalId && isGoalExecutionActive(goal.status)),
+		);
+		return {
+			wakeParent,
+			...(wakeParent ? { goalId: records.find((record) => record.goalId === goal?.goalId)?.goalId } : {}),
+		};
 	}
 
 	private releaseAfterTurn(completion: Promise<void>, lease: ForegroundSubmissionLease, label: string): void {

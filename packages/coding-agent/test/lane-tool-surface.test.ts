@@ -1,9 +1,8 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { AgentContext, AgentTool } from "@caupulican/pi-agent-core";
+import type { AgentContext } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
 import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
@@ -53,14 +52,7 @@ describe("classified lane tool surface", () => {
 		expect(first.allowedTools).not.toContain("bash");
 	});
 
-	it("materializes an owner-injected recursive delegation tool through the compiled grant", async () => {
-		const delegateTool: AgentTool = {
-			name: "delegate",
-			label: "delegate",
-			description: "Spawn or communicate with agents in this orchestration tree.",
-			parameters: Type.Object({}, { additionalProperties: false }),
-			execute: async () => ({ content: [{ type: "text" as const, text: "started" }], details: undefined }),
-		};
+	it("rejects a compiled grant for a tool the isolated lane cannot materialize", () => {
 		const manifest: ToolCapabilityManifest = {
 			toolName: "delegate",
 			moduleSpecifier: "runtime:delegate",
@@ -70,7 +62,7 @@ describe("classified lane tool surface", () => {
 		};
 		const grant: ExecutionGrant = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-			grantId: "recursive-grant",
+			grantId: "unmaterializable-grant",
 			objectiveId: "objective-1",
 			taskId: "task-1",
 			attemptId: "attempt-1",
@@ -83,21 +75,14 @@ describe("classified lane tool surface", () => {
 			writePaths: [],
 			deniedPaths: [],
 			budget: { maxToolCalls: 2 },
-			policyVersion: "recursive-v1",
+			policyVersion: "leaf-v1",
 			decisionTrace: [],
 			issuedAt: "2026-08-04T00:00:00.000Z",
 		};
 
-		const surface = createLaneToolSurface({
-			cwd,
-			grant,
-			toolManifests: [manifest],
-			additionalTools: [delegateTool],
-		});
-
-		expect(surface.allowedTools).toEqual(["delegate"]);
-		expect(surface.tools).toEqual([delegateTool]);
-		expect(await gate(surface, "delegate", {})).toBeUndefined();
+		expect(() => createLaneToolSurface({ cwd, grant, toolManifests: [manifest] })).toThrow(
+			"Compiled lane grant references unmaterializable tool 'delegate'.",
+		);
 	});
 
 	it("disposes the persistent shell session owned by a lane", async () => {

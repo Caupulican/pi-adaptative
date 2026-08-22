@@ -12,8 +12,10 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
+import { type CostGuardSettings, DEFAULT_ENABLED_COST_GUARD_MAX_TURN_USD } from "../../../core/cost-guard.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../../../core/delegation/worker-fleet-limits.ts";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
+import { DEFAULT_AUTO_LEARN_SETTINGS, resolveAutoLearnSettings } from "../../../core/learning/auto-learn-settings.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -36,6 +38,11 @@ import {
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
 	DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+	DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED,
+	DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS,
+	DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD,
+	DEFAULT_LEARNING_POLICY_ENABLED,
+	DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS,
 	DEFAULT_RESEARCH_LANE_ENABLED,
 	DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS,
 	DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
@@ -88,19 +95,6 @@ const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
 	allowExternalEgress: false,
 } as const;
 
-const AUTO_LEARN_DEFAULTS = {
-	model: "active",
-	longSessionMessages: 32,
-	longSessionContextPercent: 70,
-	cooldownMinutes: 120,
-	leaseMinutes: 90,
-	maxConcurrentLearners: 2,
-	applyHighConfidence: false,
-	reflectionReview: true,
-	reflectionMinToolCalls: 5,
-	reflectionCooldownMinutes: 60,
-} as const;
-
 function booleanSettingValue(value: boolean | undefined, defaultValue = false): string {
 	return (value ?? defaultValue) ? "true" : "false";
 }
@@ -128,7 +122,7 @@ function numberSettingValue(value: number | undefined, defaultValue: number): st
 }
 
 function autoLearnModelValue(settings: AutoLearnSettings): string {
-	return optionalStringValue(settings.model, AUTO_LEARN_DEFAULTS.model);
+	return optionalStringValue(settings.model, DEFAULT_AUTO_LEARN_SETTINGS.model);
 }
 
 function selfModificationSummary(settings: SelfModificationSettings): string {
@@ -137,6 +131,11 @@ function selfModificationSummary(settings: SelfModificationSettings): string {
 		Boolean(settings.sourcePath?.trim()) ||
 		(Array.isArray(settings.sourcePaths) && settings.sourcePaths.some((candidate) => Boolean(candidate?.trim())));
 	return hasPath ? "enabled" : "enabled (missing path)";
+}
+
+function costGuardSummary(settings: CostGuardSettings): string {
+	if (!settings.enabled) return "disabled";
+	return `${settings.action} at $${settings.maxTurnUsd.toFixed(2)}/turn`;
 }
 
 function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
@@ -185,8 +184,10 @@ function contextCurationSummary(settings: ContextCurationSettings): string {
 }
 
 function learningPolicySummary(settings: LearningPolicySettings): string {
-	if (!settings.enabled) return "disabled (legacy direct-apply)";
-	return `on · auto-apply ${settings.autoApplyEnabled ? "on" : "off"} · conf>=${settings.confidenceThreshold ?? 60}`;
+	if (!(settings.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED)) return "disabled (legacy direct-apply)";
+	const autoApply = settings.autoApplyEnabled ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED;
+	const confidence = settings.confidenceThreshold ?? DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD;
+	return `on · auto-apply ${autoApply ? "on" : "off"} · conf>=${confidence}`;
 }
 
 function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
@@ -197,11 +198,12 @@ function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
 	if (!(settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED)) return "disabled";
 	const maxUsd = settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD;
-	return maxUsd > 0 ? `enabled ($${maxUsd}/tree)` : "enabled (unbounded)";
+	return maxUsd > 0 ? `enabled ($${maxUsd}/worker)` : "enabled (unbounded)";
 }
 
-function autoLearnSummary(settings: AutoLearnSettings): string {
-	return settings.enabled ? `enabled (${autoLearnModelValue(settings)})` : "disabled";
+function autoLearnSummary(settings: AutoLearnSettings, autonomyMode: AutonomyMode): string {
+	const effective = resolveAutoLearnSettings(autonomyMode, settings);
+	return effective.enabled ? `enabled (${effective.model})` : "disabled";
 }
 
 function contextPolicyEnforcementSummary(settings: ContextPromptEnforcementSettings): string {
@@ -235,7 +237,7 @@ function buildAutoLearnModelOptions(
 	const currentValue = autoLearnModelValue(settings);
 	const options: SelectItem[] = [
 		{
-			value: AUTO_LEARN_DEFAULTS.model,
+			value: DEFAULT_AUTO_LEARN_SETTINGS.model,
 			label: "active",
 			description: currentModelPattern
 				? `Use the current session model (${currentModelPattern})`
@@ -250,7 +252,7 @@ function buildAutoLearnModelOptions(
 		seen.add(option.value);
 	}
 
-	if (currentValue !== AUTO_LEARN_DEFAULTS.model && !seen.has(currentValue)) {
+	if (currentValue !== DEFAULT_AUTO_LEARN_SETTINGS.model && !seen.has(currentValue)) {
 		options.push({
 			value: currentValue,
 			label: currentValue,
@@ -280,13 +282,13 @@ function buildModelRouterRoleModelOptions(options: {
 
 	if (options.includeActive) {
 		modelOptions.push({
-			value: AUTO_LEARN_DEFAULTS.model,
+			value: DEFAULT_AUTO_LEARN_SETTINGS.model,
 			label: "active",
 			description: options.currentModelPattern
 				? `Use the current session model (${options.currentModelPattern})`
 				: "Use the current session model",
 		});
-		seen.add(AUTO_LEARN_DEFAULTS.model);
+		seen.add(DEFAULT_AUTO_LEARN_SETTINGS.model);
 	} else {
 		modelOptions.push({
 			value: MODEL_ROUTER_UNSET_MODEL_VALUE,
@@ -341,6 +343,8 @@ function buildModelRouterThinkingOptions(
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	costGuard: CostGuardSettings;
+	costGuardScope?: SettingsScope;
 	showImages: boolean;
 	imageWidthCells: number;
 	autoResizeImages: boolean;
@@ -406,6 +410,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onCostGuardChange: (settings: CostGuardSettings, scope: SettingsScope) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onImageWidthCellsChange: (width: number) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
@@ -501,7 +506,7 @@ class ModelSelectionSubmenu extends Container {
 			customTitle: "Custom Auto Learn Model",
 			customDescription: 'Enter "active" or a provider/model pattern like "openai/gpt-5.4".',
 			customEmptyHint: 'empty uses "active"',
-			customEmptyValue: AUTO_LEARN_DEFAULTS.model,
+			customEmptyValue: DEFAULT_AUTO_LEARN_SETTINGS.model,
 		},
 	) {
 		super();
@@ -600,6 +605,96 @@ class SettingsListSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.settingsList.handleInput(data);
+	}
+}
+
+class CostGuardSettingsSubmenu extends SettingsListSubmenu {
+	private state: CostGuardSettings;
+	private scope: SettingsScope;
+
+	constructor(
+		settings: CostGuardSettings,
+		onChange: (settings: CostGuardSettings, scope: SettingsScope) => void,
+		onCancel: () => void,
+		scope: SettingsScope = "global",
+	) {
+		super();
+		this.state = { ...settings };
+		this.scope = scope;
+		this.mountSettingsList(
+			[
+				{
+					id: "cost-guard-scope",
+					label: "Save scope",
+					description: "Save this foreground cost guard globally or in the current project's .pi/settings.json",
+					currentValue: this.scope,
+					values: ["global", "project"],
+				},
+				{
+					id: "cost-guard-enabled",
+					label: "Enabled",
+					description:
+						"Explicit opt-in. A saved threshold alone remains dormant and never limits or labels a turn.",
+					currentValue: String(this.state.enabled),
+					values: ["false", "true"],
+				},
+				{
+					id: "cost-guard-max-turn-usd",
+					label: "Maximum USD per turn",
+					description: "Projected foreground plus current-turn background spend; zero keeps the guard inactive",
+					currentValue: String(this.state.maxTurnUsd),
+					submenu: (_currentValue, done) =>
+						new TextInputSubmenu(
+							"Foreground Cost Guard Threshold",
+							"Enter a nonnegative finite USD projection threshold. The Enabled switch is still mandatory.",
+							String(this.state.maxTurnUsd),
+							(value) => {
+								const maxTurnUsd = Number(value.trim());
+								if (!Number.isFinite(maxTurnUsd) || maxTurnUsd < 0) {
+									done();
+									return;
+								}
+								this.state = { ...this.state, maxTurnUsd };
+								onChange({ ...this.state }, this.scope);
+								done(String(maxTurnUsd));
+							},
+							() => done(),
+							"nonnegative finite number; invalid input keeps the current value",
+						),
+				},
+				{
+					id: "cost-guard-action",
+					label: "Action",
+					description: "warn only, or reduce reasoning one supported level for the imminent request",
+					currentValue: this.state.action,
+					values: ["warn", "downgrade"],
+				},
+			],
+			(id, newValue) => {
+				switch (id) {
+					case "cost-guard-scope":
+						this.scope = newValue as SettingsScope;
+						break;
+					case "cost-guard-enabled":
+						this.state = {
+							...this.state,
+							enabled: newValue === "true",
+							maxTurnUsd:
+								newValue === "true" && this.state.maxTurnUsd <= 0
+									? DEFAULT_ENABLED_COST_GUARD_MAX_TURN_USD
+									: this.state.maxTurnUsd,
+						};
+						break;
+					case "cost-guard-action":
+						this.state = { ...this.state, action: newValue === "downgrade" ? "downgrade" : "warn" };
+						break;
+					default:
+						return;
+				}
+				onChange({ ...this.state }, this.scope);
+			},
+			onCancel,
+		);
 	}
 }
 
@@ -775,7 +870,8 @@ class AutonomySettingsSubmenu extends SettingsListSubmenu {
 			{
 				id: "autonomy-mode",
 				label: "Mode",
-				description: "One preset for background learning: off, safe, balanced, or standing autonomy",
+				description:
+					"One preset for learning and root-session reflection cues: off, safe, balanced, or standing autonomy",
 				currentValue: autonomyModeValue(this.state),
 				values: AUTONOMY_MODES,
 			},
@@ -975,15 +1071,15 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 				id: "learning-policy-enabled",
 				label: "Enabled",
 				description:
-					"Gate reflection writes through the learning policy (proposals, audits, rollback). Disabled keeps legacy direct-apply with audit records.",
-				currentValue: String(this.state.enabled ?? false),
+					"Gate root-session reflection writes through the learning policy (proposals, audits, rollback). Disabled keeps legacy direct-apply with audit records.",
+				currentValue: String(this.state.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED),
 				values: ["true", "false"],
 			},
 			{
 				id: "learning-policy-auto-apply",
 				label: "Auto-apply",
 				description: "Allow eligible writes to auto-apply; otherwise everything becomes a proposal",
-				currentValue: String(this.state.autoApplyEnabled ?? false),
+				currentValue: String(this.state.autoApplyEnabled ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED),
 				values: ["true", "false"],
 			},
 			{
@@ -991,21 +1087,21 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 				label: "Auto-apply supersessions",
 				description:
 					"Allow a memory_replace/memory_remove (overwrites or deletes an existing fact) to auto-apply once otherwise eligible; off keeps every supersession a proposal",
-				currentValue: String(this.state.autoApplySupersessions ?? false),
+				currentValue: String(this.state.autoApplySupersessions ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS),
 				values: ["true", "false"],
 			},
 			{
 				id: "learning-policy-confidence",
 				label: "Confidence threshold",
 				description: "Minimum confidence (0-100) before a write may auto-apply; below it, proposal or no-op",
-				currentValue: String(this.state.confidenceThreshold ?? 60),
+				currentValue: String(this.state.confidenceThreshold ?? DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD),
 				values: ["25", "50", "60", "75", "90"],
 			},
 			{
 				id: "learning-policy-min-observations",
 				label: "Min observations",
 				description: "Observations required before auto-apply (allowedAutoApplyLayers stays JSON-only)",
-				currentValue: String(this.state.minObservations ?? 2),
+				currentValue: String(this.state.minObservations ?? DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS),
 				values: ["1", "2", "3", "5"],
 			},
 		];
@@ -1202,18 +1298,18 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 				id: "worker-delegation-enabled",
 				label: "Enabled",
 				description:
-					"Allow capable models to create autonomous recursive agent trees; enabled by default, and explicit false is a hard off-switch",
+					"Allow capable models to dispatch autonomous persistent leaf workers; enabled by default, and explicit false is a hard off-switch",
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
 			},
 			{
 				id: "worker-delegation-max-usd",
-				label: "Budget per agent tree",
-				description: "Cumulative USD budget shared by a root agent and every descendant; 0 disables this ceiling",
+				label: "Budget per worker task",
+				description: "Cumulative USD budget for one worker task; 0 disables this ceiling",
 				currentValue: String(this.state.maxUsd),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
-						"Agent Tree USD Budget",
+						"Worker Task USD Budget",
 						`Enter a nonnegative finite number no greater than ${MAX_WORKER_DELEGATION_MAX_USD}. Zero disables the settings-level cost ceiling.`,
 						String(this.state.maxUsd),
 						(value) => {
@@ -1231,13 +1327,13 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "worker-delegation-max-wall-clock-ms",
-				label: "Tree active milliseconds",
-				description: "Cumulative active wall-clock budget across the agent tree; 0 disables the time budget",
+				label: "Worker task milliseconds",
+				description: "Active wall-clock budget for one worker task; 0 disables the time budget",
 				currentValue: String(this.state.maxWallClockMs),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
-						"Agent Tree Active Time",
-						"Enter cumulative active milliseconds as a nonnegative safe integer. Zero disables the time ceiling.",
+						"Worker Task Active Time",
+						"Enter active milliseconds per worker task as a nonnegative safe integer. Zero disables the time ceiling.",
 						String(this.state.maxWallClockMs),
 						(value) => {
 							const maxWallClockMs = Number(value.trim());
@@ -1256,19 +1352,19 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 				id: "worker-delegation-write-enabled",
 				label: "Allow file writes",
 				description:
-					"Let agents change files through direct write/edit tools; default scope is the current workspace and explicit false revokes it",
+					"Let workers change files through direct write/edit tools; default authority is machine-wide and explicit false revokes it",
 				currentValue: String(this.state.writeEnabled ?? DEFAULT_WORKER_DELEGATION_WRITE_ENABLED),
 				values: ["true", "false"],
 			},
 			{
 				id: "worker-delegation-max-concurrent",
 				label: "Max concurrent workers",
-				description: `Global scheduler concurrency; fixed fleet caps are depth ${DEFAULT_WORKER_FLEET_LIMITS.maxDepth}, ${DEFAULT_WORKER_FLEET_LIMITS.maxChildrenPerAgent} children/agent, and ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} session agents`,
+				description: `Global scheduler concurrency for leaf workers; the fleet retains at most ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} logical agents per session`,
 				currentValue: String(this.state.maxConcurrent),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
 						"Global Worker Concurrency",
-						`Enter any positive safe integer. This limits running agents; fixed safety ceilings separately bound depth ${DEFAULT_WORKER_FLEET_LIMITS.maxDepth}, ${DEFAULT_WORKER_FLEET_LIMITS.maxChildrenPerAgent} direct children, ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} session agents, and ${DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches} queued dispatches.`,
+						`Enter any positive safe integer. This limits running leaf workers; fixed safety ceilings separately bound ${DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession} session agents and ${DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches} queued dispatches.`,
 						String(this.state.maxConcurrent),
 						(value) => {
 							const maxConcurrent = Number(value.trim());
@@ -1323,6 +1419,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 
 	constructor(
 		settings: AutoLearnSettings,
+		autonomyMode: AutonomyMode,
 		currentModelPattern: string | undefined,
 		modelOptions: SelectItem[] | undefined,
 		onChange: (settings: AutoLearnSettings, scope: SettingsScope) => void,
@@ -1333,9 +1430,10 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 
 		this.state = { ...settings };
 		this.scope = scope;
+		const defaults = resolveAutoLearnSettings(autonomyMode, settings);
 		const modelDescription = currentModelPattern
-			? `Model for background learning. "active" uses ${currentModelPattern}; configured subscription/API models are listed first.`
-			: 'Model for background learning. Use "active" for the current session model, or choose a configured subscription/API model.';
+			? `Model for explicit/background learning. "active" uses ${currentModelPattern}; configured subscription/API models are listed first. Automatic reflection uses the orchestrator's current session turn.`
+			: 'Model for explicit/background learning. Use "active" for the current session model, or choose a configured subscription/API model. Automatic reflection uses the orchestrator\'s current session turn.';
 		const selectableModelOptions = buildAutoLearnModelOptions(this.state, modelOptions, currentModelPattern);
 
 		const items: SettingItem[] = [
@@ -1350,7 +1448,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 				id: "auto-learn-enabled",
 				label: "Enabled",
 				description: "Autonomously trigger background history scavenging for long sessions",
-				currentValue: booleanSettingValue(this.state.enabled),
+				currentValue: booleanSettingValue(this.state.enabled, defaults.enabled),
 				values: ["true", "false"],
 			},
 			{
@@ -1374,41 +1472,35 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 				id: "auto-learn-long-session-messages",
 				label: "Message trigger",
 				description: "Trigger after this many message entries in the active branch",
-				currentValue: numberSettingValue(this.state.longSessionMessages, AUTO_LEARN_DEFAULTS.longSessionMessages),
+				currentValue: numberSettingValue(this.state.longSessionMessages, defaults.longSessionMessages),
 				values: ["16", "32", "64", "128", "256"],
 			},
 			{
 				id: "auto-learn-context-percent",
 				label: "Context trigger %",
 				description: "Trigger when current context usage reaches this percentage",
-				currentValue: numberSettingValue(
-					this.state.longSessionContextPercent,
-					AUTO_LEARN_DEFAULTS.longSessionContextPercent,
-				),
-				values: ["50", "60", "70", "80", "90"],
+				currentValue: numberSettingValue(this.state.longSessionContextPercent, defaults.longSessionContextPercent),
+				values: ["50", "60", "70", "80", "85", "90"],
 			},
 			{
 				id: "auto-learn-cooldown-minutes",
 				label: "Cooldown minutes",
 				description: "Per-session-tenant cooldown between learner launches",
-				currentValue: numberSettingValue(this.state.cooldownMinutes, AUTO_LEARN_DEFAULTS.cooldownMinutes),
-				values: ["15", "30", "60", "120", "240"],
+				currentValue: numberSettingValue(this.state.cooldownMinutes, defaults.cooldownMinutes),
+				values: ["15", "30", "60", "120", "240", "1440"],
 			},
 			{
 				id: "auto-learn-lease-minutes",
 				label: "Lease minutes",
 				description: "Shared-state lease duration for a running background learner",
-				currentValue: numberSettingValue(this.state.leaseMinutes, AUTO_LEARN_DEFAULTS.leaseMinutes),
+				currentValue: numberSettingValue(this.state.leaseMinutes, defaults.leaseMinutes),
 				values: ["30", "60", "90", "180"],
 			},
 			{
 				id: "auto-learn-max-concurrent",
 				label: "Max learners",
 				description: "Maximum running Auto Learn background learners per session tenant",
-				currentValue: numberSettingValue(
-					this.state.maxConcurrentLearners,
-					AUTO_LEARN_DEFAULTS.maxConcurrentLearners,
-				),
+				currentValue: numberSettingValue(this.state.maxConcurrentLearners, defaults.maxConcurrentLearners),
 				values: ["1", "2", "3", "4"],
 			},
 			{
@@ -1416,35 +1508,30 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 				label: "Apply high confidence",
 				description:
 					"Allow high-confidence memory candidates to be applied automatically; broader write authority follows autonomy.mode",
-				currentValue: booleanSettingValue(this.state.applyHighConfidence, AUTO_LEARN_DEFAULTS.applyHighConfidence),
+				currentValue: booleanSettingValue(this.state.applyHighConfidence, defaults.applyHighConfidence),
 				values: ["false", "true"],
 			},
 			{
 				id: "auto-learn-reflection-review",
 				label: "Reflection review",
-				description: "After corrective or complex turns, launch a bounded background learning review",
-				currentValue: booleanSettingValue(this.state.reflectionReview, AUTO_LEARN_DEFAULTS.reflectionReview),
+				description:
+					"After corrective or complex turns, queue a durable root-session reflection cue for the next ordinary turn",
+				currentValue: booleanSettingValue(this.state.reflectionReview, defaults.reflectionReview),
 				values: ["true", "false"],
 			},
 			{
 				id: "auto-learn-reflection-tool-calls",
 				label: "Reflection tool trigger",
-				description: "Trigger reflection review after this many tool calls in one completed turn",
-				currentValue: numberSettingValue(
-					this.state.reflectionMinToolCalls,
-					AUTO_LEARN_DEFAULTS.reflectionMinToolCalls,
-				),
+				description: "Queue a root-session reflection cue after this many tool calls in one completed turn",
+				currentValue: numberSettingValue(this.state.reflectionMinToolCalls, defaults.reflectionMinToolCalls),
 				values: ["3", "5", "8", "12"],
 			},
 			{
 				id: "auto-learn-reflection-cooldown",
 				label: "Reflection cooldown",
-				description: "Per-session-tenant cooldown between reflection-review launches",
-				currentValue: numberSettingValue(
-					this.state.reflectionCooldownMinutes,
-					AUTO_LEARN_DEFAULTS.reflectionCooldownMinutes,
-				),
-				values: ["15", "30", "60", "120"],
+				description: "Per-session-tenant cooldown between automatic root-session reflection cues",
+				currentValue: numberSettingValue(this.state.reflectionCooldownMinutes, defaults.reflectionCooldownMinutes),
+				values: ["15", "30", "60", "120", "1440"],
 			},
 		];
 
@@ -1928,14 +2015,14 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "model-router-learning",
-				label: "Learning/reflection model",
+				label: "Learning model",
 				description:
-					"Pick the model for background reflection, learn, and skill-creator work; active uses the session model",
+					"Pick the model for explicit/background learning and skill-creator work; automatic reflection uses the orchestrator's current session turn",
 				currentValue: optionalStringValue(this.state.learningModel, "active"),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
 						learningModelOptions,
-						this.state.learningModel ?? AUTO_LEARN_DEFAULTS.model,
+						this.state.learningModel ?? DEFAULT_AUTO_LEARN_SETTINGS.model,
 						(value) => {
 							this.state = { ...this.state, learningModel: value };
 							onChange({ ...this.state }, this.scope);
@@ -1943,13 +2030,14 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Learning / Reflection Model",
+							title: "Learning Model",
 							description:
-								"Choose active or a model from configured subscription/API accounts. Type to filter; manual is fallback.",
-							customTitle: "Custom Learning / Reflection Model",
-							customDescription: 'Enter "active" or a provider/model pattern from pi --list-models.',
+								"Choose active or a model from configured subscription/API accounts for explicit/background learning. Automatic reflection uses the orchestrator's current session turn. Type to filter; manual is fallback.",
+							customTitle: "Custom Learning Model",
+							customDescription:
+								'Enter "active" or a provider/model pattern for explicit/background learning from pi --list-models.',
 							customEmptyHint: 'empty uses "active"',
-							customEmptyValue: AUTO_LEARN_DEFAULTS.model,
+							customEmptyValue: DEFAULT_AUTO_LEARN_SETTINGS.model,
 						},
 					),
 			},
@@ -2215,6 +2303,7 @@ export class SettingsSelectorComponent extends Container {
 
 		const supportsImages = getCapabilities().images;
 		const followUpKey = keyDisplayText("app.message.followUp");
+		let currentCostGuard: CostGuardSettings = { ...config.costGuard };
 		let currentWarnings = { ...config.warnings };
 		let currentSelfModification: SelfModificationSettings = { ...config.selfModification };
 		let currentAutonomy: AutonomySettings = { ...config.autonomy };
@@ -2234,6 +2323,22 @@ export class SettingsSelectorComponent extends Container {
 				description: "Automatically compact context when it gets too large",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "cost-guard",
+				label: "Foreground cost guard",
+				description: "Optional per-turn USD projection warning or reasoning downgrade; disabled by default",
+				currentValue: costGuardSummary(currentCostGuard),
+				submenu: (_currentValue, done) =>
+					new CostGuardSettingsSubmenu(
+						currentCostGuard,
+						(settings, scope) => {
+							currentCostGuard = { ...settings };
+							callbacks.onCostGuardChange(settings, scope);
+						},
+						() => done(costGuardSummary(currentCostGuard)),
+						config.costGuardScope ?? "global",
+					),
 			},
 			{
 				id: "steering-mode",
@@ -2378,7 +2483,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "worker-delegation",
 				label: "Worker Delegation",
 				description:
-					"Default-on provider-neutral agent trees: recursive delegation, inherited authority, and optional owner-authored execution presets",
+					"Default-on provider-neutral leaf workers with inherited authority and optional owner-authored execution presets",
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
 				submenu: (_currentValue, done) =>
 					new WorkerDelegationSettingsSubmenu(
@@ -2447,7 +2552,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "model-router",
 				label: "Model Router",
 				description:
-					"Configure models for cheap research, expensive modify/escalation, and background learning/reflection",
+					"Configure models for cheap research, expensive modify/escalation, and explicit/background learning; automatic reflection uses the orchestrator's current session turn",
 				currentValue: modelRouterSummary(currentModelRouter),
 				submenu: (_currentValue, done) =>
 					new ModelRouterSettingsSubmenu(
@@ -2467,17 +2572,18 @@ export class SettingsSelectorComponent extends Container {
 				id: "auto-learn",
 				label: "Auto Learn Advanced",
 				description: "Advanced overrides for autonomous background learning/scavenging",
-				currentValue: autoLearnSummary(currentAutoLearn),
+				currentValue: autoLearnSummary(currentAutoLearn, autonomyModeValue(currentAutonomy)),
 				submenu: (_currentValue, done) =>
 					new AutoLearnSettingsSubmenu(
 						currentAutoLearn,
+						autonomyModeValue(currentAutonomy),
 						config.currentModelPattern,
 						config.autoLearnModelOptions,
 						(settings, scope) => {
 							currentAutoLearn = { ...settings };
 							callbacks.onAutoLearnChange(settings, scope);
 						},
-						() => done(autoLearnSummary(currentAutoLearn)),
+						() => done(autoLearnSummary(currentAutoLearn, autonomyModeValue(currentAutonomy))),
 						config.autoLearnScope ?? "global",
 					),
 			},

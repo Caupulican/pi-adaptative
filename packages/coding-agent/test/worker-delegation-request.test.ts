@@ -13,8 +13,7 @@ describe("parseWorkerDelegationAuthorityRequest", () => {
 				thinkingLevel: "ultra",
 				capabilities: ["filesystem.read", "process.exec", "workflow.delegate"],
 				toolNames: ["read", "bash", "delegate"],
-				readPaths: ["."],
-				writePaths: ["src"],
+				path: "../sibling-project",
 				budget: { maxTokens: 100_000, maxCostUsd: 5, maxAttempts: 20, maxToolCalls: 500 },
 			}),
 		).toEqual({
@@ -23,14 +22,15 @@ describe("parseWorkerDelegationAuthorityRequest", () => {
 			thinkingLevel: "ultra",
 			capabilities: ["filesystem.read", "process.exec", "workflow.delegate"],
 			toolNames: ["read", "bash", "delegate"],
-			readPaths: ["."],
-			writePaths: ["src"],
+			path: "../sibling-project",
 			budget: { maxTokens: 100_000, maxCostUsd: 5, maxAttempts: 20, maxToolCalls: 500 },
 		});
 	});
 
 	it.each([
 		[{ hiddenAuthority: true }, "unsupported field"],
+		[{ readPaths: ["."] }, "unsupported field"],
+		[{ writePaths: ["src"] }, "unsupported field"],
 		[{ toolNames: ["read", "read"] }, "unique"],
 		[{ capabilities: ["host.root"] }, "unknown capability"],
 		[{ model: { provider: "faux" } }, "model is invalid"],

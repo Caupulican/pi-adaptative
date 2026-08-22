@@ -390,7 +390,7 @@ describe("delegate session-root reply routing", () => {
 			action: "reply",
 			messageId: "reply-1",
 		});
-		expect(rootRejected.details).toMatchObject({ started: false, skipReason: "worker_only_action" });
+		expect(rootRejected.details).toMatchObject({ started: false, skipReason: "action_unavailable" });
 		expect(ambiguous.details).toMatchObject({ started: false, skipReason: "reply_target_forbidden" });
 		expect(threaded.details).toMatchObject({ started: false, skipReason: "reply_target_forbidden" });
 		expect(replyExpected.details).toMatchObject({ started: false, skipReason: "reply_target_forbidden" });
@@ -423,7 +423,9 @@ describe("delegate session-root reply routing", () => {
 		});
 		const fieldSamples = {
 			profileId: "profile-1",
-			authority: {},
+			model: { provider: "faux", modelId: "worker-model" },
+			path: "/tmp/worker-project",
+			toolNames: ["read"],
 			instructions: "instructions",
 			agentId: "worker-2",
 			message: "message",
@@ -647,7 +649,7 @@ describe("delegate session-root reply routing", () => {
 
 		expect(acknowledgeSessionRootReply).toHaveBeenCalledWith("reply-1", "00000000-0000-4000-8000-000000000001");
 		expect(acknowledged.details).toMatchObject({ action: "inbox_ack", accepted: true, messageId: "reply-1" });
-		expect(workerRejected.details).toMatchObject({ started: false, skipReason: "root_only_action" });
+		expect(workerRejected.details).toMatchObject({ started: false, skipReason: "action_unavailable" });
 		expect(acknowledgeSessionRootReply).toHaveBeenCalledTimes(1);
 	});
 });

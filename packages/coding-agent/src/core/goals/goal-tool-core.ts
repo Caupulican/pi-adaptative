@@ -90,14 +90,15 @@ export interface ApplyGoalActionOptions {
 	 */
 	requireVerifiedEvidenceForCompletion?: boolean;
 	/**
-	 * Open (non-terminal) task_steps on this branch. Agent-facing complete refuses while any of
-	 * these still reference a requirement of the goal being closed.
+	 * Open (non-terminal) task_steps on this branch. Agent-facing complete refuses while any remain.
 	 */
 	openTaskSteps?: readonly OpenTaskStepRef[];
-	/** Live background tool_task records used to re-check kind:"tool" evidence at complete time. */
+	/** Live background tool_task records used to gate goal-owned work and re-check tool evidence. */
 	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
-	/** Active ICM pipeline run; agent complete refuses while a joined or any active run remains. */
+	/** Active ICM pipeline run; agent complete refuses while any active run remains. */
 	activePipeline?: { runId: string; pipelineName: string; goalId?: string; status: string };
+	/** Queued/running worker lanes owned by this goal or bound to one of its requirements. */
+	activeGoalLaneIds?: readonly string[];
 }
 
 function requirementExists(state: GoalState, requirementId: string): boolean {
@@ -331,30 +332,34 @@ function toGoalEvent(
 						.join(", ")}).`,
 				};
 			}
-			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
-			const linkedOpenSteps = findLinkedOpenTaskSteps(state, options?.openTaskSteps);
-			if (linkedOpenSteps.length > 0) {
+			const activeGoalLaneIds = [...new Set(options?.activeGoalLaneIds ?? [])];
+			if (activeGoalLaneIds.length > 0) {
 				return {
 					ok: false,
-					error: `Cannot complete goal: open task_steps still reference this goal (${linkedOpenSteps.join(", ")}). Update them via task_steps first.`,
+					error: `Cannot complete goal: goal-owned worker lane(s) are still active (${activeGoalLaneIds.join(", ")}). Wait for their terminal handoffs or explicitly cancel them first.`,
 				};
 			}
-			const pendingToolTasks = findNonterminalCitedToolTasks(state, options?.backgroundToolTasks);
+			const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
+			const openStepIds = findOpenTaskStepIds(options?.openTaskSteps);
+			if (openStepIds.length > 0) {
+				return {
+					ok: false,
+					error: `Cannot complete goal: open task_steps work remains (${openStepIds.join(", ")}). Complete or explicitly cancel those steps first.`,
+				};
+			}
+			const pendingToolTasks = findBlockingToolTasks(state, options?.backgroundToolTasks);
 			if (pendingToolTasks.length > 0) {
 				return {
 					ok: false,
-					error: `Cannot complete goal: cited tool_task(s) are not complete (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
+					error: `Cannot complete goal: goal-owned or cited tool_task(s) are not complete (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
 				};
 			}
 			const activePipeline = options?.activePipeline;
 			if (activePipeline && activePipeline.status === "active") {
-				const joined = Boolean(activePipeline.goalId && activePipeline.goalId === state.goalId);
-				if (joined) {
-					return {
-						ok: false,
-						error: `Cannot complete goal: pipeline '${activePipeline.pipelineName}' run '${activePipeline.runId}' is still active. Increment or abandon it first.`,
-					};
-				}
+				return {
+					ok: false,
+					error: `Cannot complete goal: pipeline '${activePipeline.pipelineName}' run '${activePipeline.runId}' is still active. Increment or abandon it first.`,
+				};
 			}
 			const unprovenRequirementIds = getUnprovenGoalRequirementIds(state);
 			if (requireVerifiedEvidence && unprovenRequirementIds.length > 0) {
@@ -442,19 +447,19 @@ export interface OpenTaskStepRef {
 	pipelineStageId?: string;
 }
 
-function findLinkedOpenTaskSteps(state: GoalState, openTaskSteps: readonly OpenTaskStepRef[] | undefined): string[] {
-	if (!openTaskSteps || openTaskSteps.length === 0) return [];
-	return openTaskSteps
-		.filter((step) => state.requirements.some((requirement) => taskStepReferencesRequirement(step, requirement)))
-		.map((step) => step.id);
+function findOpenTaskStepIds(openTaskSteps: readonly OpenTaskStepRef[] | undefined): string[] {
+	return openTaskSteps?.map((step) => step.id) ?? [];
 }
 
-function findNonterminalCitedToolTasks(
+function findBlockingToolTasks(
 	state: GoalState,
 	backgroundToolTasks: readonly BackgroundToolTaskRef[] | undefined,
 ): string[] {
 	if (!backgroundToolTasks || backgroundToolTasks.length === 0) return [];
 	const pending = new Set<string>();
+	for (const task of backgroundToolTasks) {
+		if (task.goalId === state.goalId && task.status === "running") pending.add(task.taskId);
+	}
 	for (const evidence of state.evidence) {
 		if (evidence.kind !== "tool" || !evidence.uri) continue;
 		const task = findBackgroundToolTask(backgroundToolTasks, evidence.uri);

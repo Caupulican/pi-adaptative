@@ -68,7 +68,14 @@ describe("self-adaptation defaults on", () => {
 	});
 
 	it("a fresh SettingsManager resolves learningPolicy.enabled to true", () => {
-		expect(SettingsManager.inMemory().getLearningPolicySettings().enabled).toBe(true);
+		expect(SettingsManager.inMemory().getLearningPolicySettings()).toMatchObject({
+			enabled: true,
+			autoApplyEnabled: true,
+			confidenceThreshold: 50,
+			minObservations: 1,
+			allowedAutoApplyLayers: ["memory", "skill"],
+			autoApplySupersessions: false,
+		});
 	});
 
 	it("a fresh session's native reflection gate is on by default, with autonomy.mode left at 'off'", async () => {
@@ -76,6 +83,10 @@ describe("self-adaptation defaults on", () => {
 		expect(settingsManager.getAutonomySettings().mode).toBe("off");
 		expect(controller.getEffectiveAutoLearnSettings().enabled).toBe(true);
 		expect(controller.isNativeReflectionEnabled()).toBe(true);
+		expect(session.systemPrompt).toContain(
+			"ROOT REFLECTION: decide and apply warranted durable learning in the current root provider turn only; never add a provider request or delegate reflection.",
+		);
+		expect(session.systemPrompt).not.toContain("learners may use");
 		session.dispose();
 	});
 
@@ -115,6 +126,19 @@ describe("self-adaptation defaults on", () => {
 		settingsManager.setAutoLearnSettings({ enabled: false });
 		expect(controller.getEffectiveAutoLearnSettings().enabled).toBe(false);
 		expect(controller.isNativeReflectionEnabled()).toBe(false);
+		session.dispose();
+	});
+
+	it("refreshes the materialized root reflection contract at the settings transition", async () => {
+		const { settingsManager, session } = await newController();
+		const reflectionContract = "ROOT REFLECTION: decide and apply warranted durable learning";
+
+		expect(session.systemPrompt).toContain(reflectionContract);
+		settingsManager.setAutoLearnSettings({ enabled: false, reflectionReview: true });
+		expect(session.systemPrompt).not.toContain(reflectionContract);
+
+		settingsManager.setAutoLearnSettings({ enabled: true, reflectionReview: true });
+		expect(session.systemPrompt).toContain(reflectionContract);
 		session.dispose();
 	});
 

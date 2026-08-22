@@ -20,6 +20,7 @@ export type ScriptExecutor = (
 	argv: string[],
 	cwd: string,
 	timeoutMs: number,
+	signal?: AbortSignal,
 ) => Promise<ScriptExecution>;
 
 export function buildScriptArgv(script: ToolkitScript, args: readonly string[]): { command: string; argv: string[] } {
@@ -40,9 +41,13 @@ const MAX_OUTPUT_BYTES = 512 * 1024;
 const SCRIPT_KILL_GRACE_MS = 2_000;
 
 /** Default executor: real process spawn, no shell interpolation, bounded output and time. */
-export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, timeoutMs) => {
+export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, timeoutMs, signal) => {
 	const started = Date.now();
+	if (signal?.aborted) {
+		return { exitCode: null, stdout: "", stderr: "aborted", durationMs: 0, timedOut: false };
+	}
 	const terminationController = new AbortController();
+	const abort = () => terminationController.abort();
 	const stdoutChunks: Buffer[] = [];
 	const stderrChunks: Buffer[] = [];
 	let stdoutBytes = 0;
@@ -60,6 +65,7 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 	};
 
 	try {
+		signal?.addEventListener("abort", abort, { once: true });
 		const child = spawnProcess(command, argv, {
 			cwd,
 			detached: process.platform !== "win32",
@@ -96,6 +102,8 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 			durationMs: Date.now() - started,
 			timedOut: false,
 		};
+	} finally {
+		signal?.removeEventListener("abort", abort);
 	}
 };
 
@@ -104,9 +112,10 @@ export async function executeToolkitScript(args: {
 	scriptArgs: readonly string[];
 	cwd: string;
 	timeoutMs?: number;
+	signal?: AbortSignal;
 	executor?: ScriptExecutor;
 }): Promise<ScriptExecution> {
 	const { command, argv } = buildScriptArgv(args.script, args.scriptArgs);
 	const executor = args.executor ?? spawnScriptExecutor;
-	return executor(command, argv, args.cwd, args.timeoutMs ?? 120_000);
+	return executor(command, argv, args.cwd, args.timeoutMs ?? 120_000, args.signal);
 }

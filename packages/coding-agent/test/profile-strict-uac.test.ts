@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { compileEffectiveResourceProfileSnapshot } from "../src/core/extension-binding-controller.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 /**
@@ -87,5 +88,19 @@ describe("strict profile UAC", () => {
 			expect(settingsManager.getResourceProfileFilter(kind)).toEqual({ allow: [], block: [] });
 			expect(settingsManager.isResourceAllowedByProfile(kind, "/anywhere/thing.ts")).toBe(true);
 		}
+	});
+
+	it("compiles a self-contained child snapshot without turning unrestricted kinds into deny-all", () => {
+		const unrestricted = compileEffectiveResourceProfileSnapshot(SettingsManager.inMemory());
+		expect(unrestricted.extensions).toEqual({ allow: ["*"], block: [] });
+		expect(unrestricted.tools).toEqual({ allow: ["*"], block: [] });
+
+		const restrictedManager = SettingsManager.inMemory({
+			resourceProfiles: { scout: { tools: { allow: ["read"], block: ["bash"] } } },
+			activeResourceProfiles: ["scout"],
+		});
+		const restricted = compileEffectiveResourceProfileSnapshot(restrictedManager);
+		expect(restricted.tools).toEqual({ allow: ["read"], block: ["bash"] });
+		expect(restricted.skills).toEqual({ allow: ["*"], block: ["*"] });
 	});
 });

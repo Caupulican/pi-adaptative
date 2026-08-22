@@ -64,6 +64,7 @@ import type { HumanInputPresentationRequest, HumanInputPresentationResult } from
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { MemoryProvider } from "../memory/memory-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { ResourceProfileSettings } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -1181,15 +1182,15 @@ export interface ManagedLaneDispatch {
 	profileId: string;
 	/** Provider/launcher identity used by the external process. */
 	provider: string;
-	/** Authorization record that covered this launch or follow-up. */
+	/** Immutable host-derived profile identity covering this launch or follow-up. */
 	authorizationId: string;
-	/** How the owner authority was established. */
-	authorizationKind: "standing-grant" | "one-shot-owner-approval" | "legacy-recovery";
+	/** How the worker authority was materialized. */
+	authorizationKind: "profile-derived" | "legacy-recovery";
 	/** Exact child tool surface requested at launch. */
 	allowedTools: readonly string[];
 	/** Exact write path claims requested at launch. */
 	writePaths: readonly string[];
-	/** Advisory cross-process cost ceiling when supplied by the owner grant. */
+	/** Advisory cross-process cost ceiling when supplied by the immutable profile. */
 	maxCostUsd?: number;
 	/** Lease duration for this externally supervised turn. */
 	leaseTtlMs: number;
@@ -1377,6 +1378,9 @@ export interface ExtensionAPI {
 
 	/** Get the canonicalized paths of effective trusted external resource roots configured in settings. */
 	getExternalResourceRoots(): string[];
+
+	/** Snapshot the parent session's effective extension/skill/prompt/theme/agent/tool filters. */
+	getEffectiveResourceProfile(): ResourceProfileSettings;
 
 	/** Register a memory provider with the session's MemoryManager (applied on next memory (re)init). */
 	registerMemoryProvider(provider: MemoryProvider): void;
@@ -1695,6 +1699,7 @@ export interface ExtensionActions {
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
 	getExternalResourceRoots: () => string[];
+	getEffectiveResourceProfile: () => ResourceProfileSettings;
 	registerMemoryProvider: (provider: MemoryProvider) => void;
 	registerContextMemoryProvider: (provider: ContextMemoryProvider) => void;
 	reportSpawnedUsage: (usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }) => void;
