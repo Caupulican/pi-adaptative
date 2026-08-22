@@ -6,6 +6,7 @@ import {
 	narrowWorkerExecutionPlan,
 	workerExecutionAuthorityFromPlan,
 } from "../src/core/delegation/worker-execution-policy.ts";
+import { workerMachinePathRoots } from "../src/core/delegation/worker-machine-scope.ts";
 import type { ResolvedWorkerDelegationSettings } from "../src/core/settings-manager.ts";
 import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 
@@ -319,7 +320,7 @@ describe("buildWorkerExecutionPlan", () => {
 		});
 
 		expect(machineWide.cwd).toBe(resolve("/repo"));
-		expect(machineWide.readPaths).toEqual([resolve("/")]);
+		expect(machineWide.readPaths).toEqual(workerMachinePathRoots("/repo"));
 		expect(focused.cwd).toBe(resolve("/other/project"));
 		expect(focused.readPaths).toEqual([resolve("/other/project")]);
 	});

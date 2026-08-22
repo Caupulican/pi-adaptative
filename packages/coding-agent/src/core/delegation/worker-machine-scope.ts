@@ -21,14 +21,21 @@ export function workerMachinePathRoots(
 	platform: NodeJS.Platform = process.platform,
 	pathExists: PathExists = existsSync,
 ): string[] {
-	if (platform !== "win32") return [path.parse(path.resolve(cwd)).root];
+	if (platform !== "win32") return [path.posix.parse(path.posix.resolve(cwd)).root];
 
-	const roots = new Set<string>();
+	const roots = new Map<string, string>();
+	const addRoot = (candidate: string): void => {
+		const normalized = path.win32.normalize(candidate);
+		const canonical = /^[a-z]:\\$/i.test(normalized)
+			? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`
+			: normalized;
+		roots.set(canonical.toLowerCase(), canonical);
+	};
 	const currentRoot = path.win32.parse(path.win32.resolve(cwd)).root;
-	if (currentRoot) roots.add(currentRoot);
+	if (currentRoot) addRoot(currentRoot);
 	for (let code = "A".charCodeAt(0); code <= "Z".charCodeAt(0); code += 1) {
 		const root = `${String.fromCharCode(code)}:\\`;
-		if (pathExists(root)) roots.add(root);
+		if (pathExists(root)) addRoot(root);
 	}
-	return [...roots].sort((left, right) => left.localeCompare(right));
+	return [...roots.values()].sort((left, right) => left.localeCompare(right));
 }

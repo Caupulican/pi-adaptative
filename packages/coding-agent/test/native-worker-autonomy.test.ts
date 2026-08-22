@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join, parse, resolve } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
+import { isPathWithinScope } from "../src/core/autonomy/path-scope.ts";
 import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { workerMachinePathRoots } from "../src/core/delegation/worker-machine-scope.ts";
@@ -265,6 +266,7 @@ describe("native worker autonomy", () => {
 		expect(
 			workerMachinePathRoots("C:\\repo", "win32", (candidate) => candidate === "C:\\" || candidate === "D:\\"),
 		).toEqual(["C:\\", "D:\\"]);
+		expect(workerMachinePathRoots("c:\\repo", "win32", (candidate) => candidate === "C:\\")).toEqual(["C:\\"]);
 		expect(workerMachinePathRoots("\\\\server\\share\\repo", "win32", () => false)).toEqual(["\\\\server\\share\\"]);
 	});
 
@@ -391,9 +393,7 @@ describe("native worker autonomy", () => {
 			expect(toolResults).toContain("path_outside_scope");
 			const deniedPaths = firstExecutionContract(harness)?.authority.deniedPaths ?? [];
 			for (const [privatePath] of privateFiles) {
-				expect(deniedPaths.some((scope) => privatePath === scope || privatePath.startsWith(`${scope}/`))).toBe(
-					true,
-				);
+				expect(deniedPaths.some((scope) => isPathWithinScope(privatePath, scope))).toBe(true);
 			}
 		} finally {
 			rmSync(outside, { force: true, recursive: true });
