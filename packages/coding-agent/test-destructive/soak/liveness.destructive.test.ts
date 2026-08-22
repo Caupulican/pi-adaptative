@@ -1,8 +1,8 @@
 /**
  * H4 — soak / liveness under fake timers (blueprint §4).
  *
- * (a) A 6-virtual-hour goal continuation with periodic stalls: stall window, worker-wait
- *     timeout, and budget stop must fire at their documented bounds.
+ * (a) A 6-virtual-hour goal continuation with periodic stalls: stall and worker-wait recovery,
+ *     then the budget stop, must fire at their documented bounds.
  * (b) A stuck notify() for 2 virtual hours: the observe-only handoff watchdog warns once,
  *     the batch stays recoverable, restart replays it (INV-W4, INV-W6).
  * (c) Lease heartbeat across suspend/resume: the captured fence rejects; live expiry remains
@@ -69,7 +69,7 @@ function iso(ms: number): string {
 }
 
 describe("destructive/soak: H4a goal loop 6 virtual hours (INV-L1/W6)", () => {
-	it("stall, worker-wait, and budget stops fire at their documented bounds", () => {
+	it("stall and worker-wait recovery, then the budget stop, fire at their documented bounds", () => {
 		const fired = new Set<string>();
 		const t0 = Date.parse(T0);
 		let nowMs = t0;
@@ -113,7 +113,7 @@ describe("destructive/soak: H4a goal loop 6 virtual hours (INV-L1/W6)", () => {
 			maxWorkerWaitMs: DEFAULT_GOAL_WORKER_WAIT_MS,
 		});
 		expect(atWait.reasonCode).toBe("worker_wait_timeout");
-		expect(atWait.action).toBe("ask-user");
+		expect(atWait.action).toBe("continue");
 		fired.add("worker_wait_timeout");
 
 		// Worker gone; stall the parent loop up to the documented window.
@@ -127,9 +127,10 @@ describe("destructive/soak: H4a goal loop 6 virtual hours (INV-L1/W6)", () => {
 			now: iso(nowMs),
 		});
 		expect(atStall.reasonCode).toBe("stall_limit_reached");
+		expect(atStall.action).toBe("continue");
 		expect(
 			shouldContinueGoalLoop({ state, maxStallTurns: DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS, now: iso(nowMs) }),
-		).toBe(false);
+		).toBe(true);
 		fired.add("stall_limit_reached");
 
 		nowMs += 60_000;
