@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevented internal custom steering messages from re-admitting unchanged failed tool operations while keeping each queued owner turn aligned with restored recovery state.
+
 ## [0.96.0] - 2026-08-22
 
 ## [0.95.0] - 2026-08-22
