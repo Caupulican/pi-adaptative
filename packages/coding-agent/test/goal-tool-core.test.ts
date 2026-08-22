@@ -103,7 +103,9 @@ describe("applyGoalAction (goal producer core)", () => {
 		const premature = applyGoalAction(state, { action: "block_goal", reason: "stuck" }, "T3");
 		expect(premature.ok).toBe(false);
 		if (premature.ok) return;
-		expect(premature.error).toContain("three consecutive goal turns");
+		expect(premature.error).toContain("three consecutive no-progress goal turns");
+		expect(premature.error).toContain("verified owner/approval boundary");
+		expect(premature.error).toContain("distinct recovery approaches");
 
 		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T4"));
 		state = expectOk(applyGoalAction(state, { action: "no_progress" }, "T5"));

@@ -84,7 +84,7 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	// xAI
 	{ provider: "xai", model: "grok-4.6", label: "xai-grok-4.6" },
 	// Cerebras
-	{ provider: "cerebras", model: "zai-glm-4.7", label: "cerebras-zai-glm-4.7" },
+	{ provider: "cerebras", model: "gpt-oss-120b", label: "cerebras-gpt-oss-120b" },
 	// Cloudflare Workers AI
 	{ provider: "cloudflare-workers-ai", model: "@cf/moonshotai/kimi-k2.6", label: "cloudflare-kimi-k2.6" },
 	// Cloudflare AI Gateway
