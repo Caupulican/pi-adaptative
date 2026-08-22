@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, parse, resolve } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
@@ -11,7 +11,7 @@ import type { DelegateProfileToolDetails } from "../src/core/tools/profile-write
 import { createHarness } from "./suite/harness.ts";
 
 function externalWorkspace(parent: string, suffix: string): string {
-	const workspace = join(tmpdir(), `${basename(parent)}-${suffix}`);
+	const workspace = join(realpathSync.native(tmpdir()), `${basename(parent)}-${suffix}`);
 	rmSync(workspace, { force: true, recursive: true });
 	mkdirSync(workspace, { recursive: true });
 	return workspace;
