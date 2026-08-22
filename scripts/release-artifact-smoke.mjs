@@ -14,6 +14,10 @@ export const RELEASE_SMOKE_MODEL_NAME = "Deterministic Release Smoke";
 export const RELEASE_SMOKE_REPLY = "PI_RELEASE_SMOKE_REPLY_7F3C";
 
 const RELEASE_SMOKE_API_KEY = "release-smoke-loopback-key";
+const RELEASE_SMOKE_RESOURCE_PROFILE = "release-smoke-bundled-extension";
+const RELEASE_SMOKE_RESOURCE_PROFILE_JSON = JSON.stringify({
+	[RELEASE_SMOKE_RESOURCE_PROFILE]: { extensions: { allow: ["tmux-agent-manager"] } },
+});
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_CAPTURE_CHARS = 1_048_576;
 const MAX_REQUEST_BYTES = 1_048_576;
@@ -385,6 +389,12 @@ function assertSuccessful(result, label) {
 	}
 }
 
+function assertBundledExtensionLoaded(result, label) {
+	if (/Warning: Failed to load extension/u.test(result.output)) {
+		throw new Error(`${label} could not load the bundled extension\n${result.output}`);
+	}
+}
+
 function requestForPrompt(requests, startIndex, prompt) {
 	return requests.slice(startIndex).find((request) => request.prompt.includes(prompt));
 }
@@ -460,7 +470,10 @@ export async function runReleaseArtifactSmoke(options) {
 				"--model",
 				RELEASE_SMOKE_MODEL,
 				"--no-session",
-				"--no-extensions",
+				"--resource-profile-json",
+				RELEASE_SMOKE_RESOURCE_PROFILE_JSON,
+				"--resource-profile",
+				RELEASE_SMOKE_RESOURCE_PROFILE,
 				"--no-skills",
 				"--no-prompt-templates",
 				"--no-themes",
@@ -477,6 +490,7 @@ export async function runReleaseArtifactSmoke(options) {
 				label: `${artifact.label} print conversation`,
 			});
 			assertSuccessful(print, `${artifact.label} print conversation`);
+			assertBundledExtensionLoaded(print, `${artifact.label} print conversation`);
 			if (!requestForPrompt(provider.requests, printRequestStart, printPrompt)) {
 				throw new Error(`${artifact.label} did not send the print prompt to the loopback provider`);
 			}
@@ -492,6 +506,7 @@ export async function runReleaseArtifactSmoke(options) {
 				label: `${artifact.label} interactive conversation`,
 			});
 			assertSuccessful(interactive, `${artifact.label} interactive conversation`);
+			assertBundledExtensionLoaded(interactive, `${artifact.label} interactive conversation`);
 			if (!requestForPrompt(provider.requests, interactiveRequestStart, interactivePrompt)) {
 				throw new Error(`${artifact.label} did not send the interactive prompt to the loopback provider`);
 			}

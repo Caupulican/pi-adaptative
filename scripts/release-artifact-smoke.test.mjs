@@ -21,12 +21,17 @@ function writeFixture(directory, name, source) {
 	return fixturePath;
 }
 
-function responsiveCliSource(version) {
+function responsiveCliSource(version, options = {}) {
 	return `#!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
+${
+	options.extensionLoadFailure
+		? 'if (args.includes("--resource-profile")) console.error("Warning: Failed to load extension bundled-fixture: missing dependency");'
+		: ""
+}
 if (args.includes("--help")) {
 	console.log("Usage: pi [options]");
 	process.exit(0);
@@ -155,6 +160,32 @@ test(
 					expectedVersion: version,
 				}),
 				/did not send the print prompt to the loopback provider/u,
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	},
+);
+
+test(
+	"negative control rejects a release artifact that cannot load its bundled extension",
+	{ skip: !hasScriptPty && "Linux util-linux script(1) is required" },
+	async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-release-artifact-extension-negative-"));
+		try {
+			const version = "9.8.7";
+			const brokenCli = writeFixture(
+				directory,
+				"broken-extension-pi.mjs",
+				responsiveCliSource(version, { extensionLoadFailure: true }),
+			);
+			await assert.rejects(
+				runReleaseArtifactSmoke({
+					artifacts: [{ label: "broken extension CLI", executable: brokenCli }],
+					commandTimeoutMs: 10_000,
+					expectedVersion: version,
+				}),
+				/could not load the bundled extension/u,
 			);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });

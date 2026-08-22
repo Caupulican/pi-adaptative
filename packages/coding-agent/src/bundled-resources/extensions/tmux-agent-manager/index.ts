@@ -7,17 +7,15 @@ import { fileURLToPath } from "node:url";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
+	encodeWorkerSessionAllowedPaths,
 	getProcessWorkRun,
+	orchestrationThinkingLevelSchema,
 	PI_ORCHESTRATION_AGENT_ID_ENV,
+	PI_WORKER_ALLOWED_PATHS_ENV,
 } from "@caupulican/pi-adaptative";
 import type { AgentToolResult, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
-import {
-	encodeWorkerSessionAllowedPaths,
-	PI_WORKER_ALLOWED_PATHS_ENV,
-} from "../../../core/autonomy/worker-session-private-scope.ts";
-import { orchestrationThinkingLevelSchema } from "../../../core/orchestration/thinking-level-schema.ts";
 import {
 	buildLaunchProfileFlags,
 	DEFAULT_MANAGED_WORKER_TOOLS,

@@ -1,8 +1,10 @@
+import {
+	mapToolNamesForPlatform,
+	POLICY_OWNED_RUNTIME_TOOL_NAMES,
+	WORKER_FORBIDDEN_TOOLS,
+} from "@caupulican/pi-adaptative";
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
-import { mapToolNamesForPlatform } from "../../../core/default-tool-surface.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../../../core/session-role.ts";
-import { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "../../../core/tool-capability-policy.ts";
 
 export type Provider = "pi" | "codex" | "agy" | "claude" | "opencode" | "custom";
 

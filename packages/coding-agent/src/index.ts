@@ -70,6 +70,13 @@ export {
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
 } from "./core/auth-storage.ts";
+// Copied bundled extensions resolve runtime dependencies through this public module. Bun embeds
+// this surface; relative imports back into dist/core do not exist beside a compiled executable.
+export {
+	encodeWorkerSessionAllowedPaths,
+	PI_WORKER_ALLOWED_PATHS_ENV,
+} from "./core/autonomy/worker-session-private-scope.ts";
+export { mapToolNamesForPlatform } from "./core/default-tool-surface.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {
@@ -240,6 +247,7 @@ export * from "./core/orchestration/policy-compiler.ts";
 export * from "./core/orchestration/profile-registry.ts";
 export * from "./core/orchestration/profile-store.ts";
 export * from "./core/orchestration/task-runtime.ts";
+export { orchestrationThinkingLevelSchema } from "./core/orchestration/thinking-level-schema.ts";
 export type {
 	PackageManager,
 	PathMetadata,
@@ -349,6 +357,7 @@ export {
 	resolveCredentialMigrationSources,
 } from "./core/secrets/credential-migration-source.ts";
 export { createPortableGitProjectKey, resolveCredentialProject } from "./core/secrets/credential-project.ts";
+export { WORKER_FORBIDDEN_TOOLS } from "./core/session-role.ts";
 export {
 	type CompactionSettings,
 	type DirectoryResourceProfileInfo,
@@ -389,6 +398,7 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "./core/tool-capability-policy.ts";
 export {
 	type AskQuestion,
 	type AskQuestionAnswer,

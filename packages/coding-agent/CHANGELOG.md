@@ -35,6 +35,7 @@
 - Bounded reflection response scanning, accepted writes, memory and skill fields, automatic overlap audits, and `skillify` draft bodies; truncated automatic promotion audits now fail closed.
 - Omitted raw root memory tools and prompt snapshots from child sessions; managed workers receive memory only through the bounded, source-labeled query broker.
 - Corrected platform-aware machine-root resolution and case-insensitive drive deduplication so Windows multi-drive workers retain machine-wide authority without global reservation serialization.
+- Routed bundled tmux extension dependencies through the embedded package runtime so compiled Bun releases load the manager without missing `dist/core` modules.
 
 ## [0.94.1] - 2026-08-21
 
