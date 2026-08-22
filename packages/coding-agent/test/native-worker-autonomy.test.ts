@@ -107,12 +107,13 @@ describe("native worker autonomy", () => {
 			expect(run.record?.status).toBe("partial");
 			expect(readFileSync(output, "utf-8")).toBe("machine-wide");
 			const worker = firstExecutionContract(harness);
-			const machineRoot = parse(resolve(harness.tempDir)).root;
+			const machineRoots = workerMachinePathRoots(harness.tempDir);
+			expect(machineRoots).toContain(parse(resolve(harness.tempDir)).root);
 			expect(worker?.modelBinding).toMatchObject({ modelId: "foreground", thinkingLevel: "high" });
 			expect(worker?.authority).toMatchObject({
 				cwd: resolve(harness.tempDir),
-				readPaths: [machineRoot],
-				writePaths: [machineRoot],
+				readPaths: machineRoots,
+				writePaths: machineRoots,
 			});
 			expect(worker?.authority.toolNames).not.toContain("delegate");
 			expect(worker?.authority.capabilities).not.toContain("workflow.delegate");
