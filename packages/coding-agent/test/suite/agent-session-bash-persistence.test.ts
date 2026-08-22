@@ -3,6 +3,7 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../src/core/reflection-controller.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -161,7 +162,9 @@ describe("AgentSession bash and persistence characterization", () => {
 		const entries = harness.sessionManager.getEntries();
 		expect(entries.map((entry) => entry.type)).toEqual([
 			"custom_message",
+			"custom",
 			"message",
+			"custom",
 			"request_snapshot",
 			"message",
 			"foreground_tool_start",
@@ -170,6 +173,11 @@ describe("AgentSession bash and persistence characterization", () => {
 			"request_snapshot",
 			"message",
 		]);
+		expect(
+			entries.filter(
+				(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+			),
+		).toMatchObject([{ data: { status: "pending" } }, { data: { status: "consumed" } }]);
 		expect(entries.some((entry) => entry.type === "custom" && entry.customType === "tool_argument_validation")).toBe(
 			false,
 		);
