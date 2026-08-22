@@ -49,13 +49,34 @@ describe("assessOperationRisk", () => {
 		expect(result2.risk).toBe("approval-required");
 	});
 
-	it("returns approval-required for destructive commands", () => {
-		const result1 = assessOperationRisk({ operation: "Run command", command: "git reset --hard" });
-		expect(result1.risk).toBe("approval-required");
-		expect(result1.requiresApproval).toBe(true);
+	it("allows a local commit as a reversible scoped write", () => {
+		for (const command of ['git commit -m "verified change"', 'git commit -m "prepare release"']) {
+			const result = assessOperationRisk({ operation: "Run command", command });
+			expect(result).toMatchObject({
+				risk: "scoped-write",
+				reasonCode: "local_git_commit",
+				requiresApproval: false,
+			});
+		}
+	});
 
-		const result2 = assessOperationRisk({ operation: "Delete the generated files and reset the repo" });
-		expect(result2.risk).toBe("approval-required");
+	it("keeps destructive or externally mutating git commands approval-gated", () => {
+		for (const command of [
+			"git reset --hard",
+			"git push origin main",
+			'git commit -m "ready" && git push',
+			"git commit --amend --no-edit",
+			'git commit -m "$(touch /tmp/untrusted)"',
+			'git commit -m "`whoami`"',
+			'git commit -m "ready" & git push',
+		]) {
+			const result = assessOperationRisk({ operation: "Run command", command });
+			expect(result.risk).toBe("approval-required");
+			expect(result.requiresApproval).toBe(true);
+		}
+
+		const result = assessOperationRisk({ operation: "Delete the generated files and reset the repo" });
+		expect(result.risk).toBe("approval-required");
 	});
 
 	it("returns approval-required for publish commands", () => {

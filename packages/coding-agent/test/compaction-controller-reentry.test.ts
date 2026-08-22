@@ -765,6 +765,31 @@ describe("CompactionController auto-compaction re-entry", () => {
 		expect(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	});
 
+	it("preserves branch ancestry when lifecycle markers precede the retained tail", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const timestamp = Date.now() - 10_000;
+		const firstEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "original request" }],
+			timestamp,
+		});
+		sessionManager.appendMessage(assistantWithUsage(20_000, timestamp + 1));
+		sessionManager.appendCompactionStart("failed-prior", firstEntryId, 20_000);
+		sessionManager.appendCompactionEnd("failed-prior", "failure", { error: "summarizer unavailable" });
+		const fixture = createFixture({
+			sessionManager,
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+		});
+
+		await fixture.controller.compact();
+
+		const current = [...sessionManager.getSessionLifecycleIndex().compactionsById.values()].find(
+			(record) => record.start?.compactionId !== "failed-prior",
+		);
+		expect(current?.start?.tokensBefore).toBeGreaterThan(20_000);
+	});
+
 	it("fails closed before summarization when the lifecycle start cannot be persisted", async () => {
 		const fixture = createFixture({
 			measureLiveContextTokens: () => 3_000,

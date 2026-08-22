@@ -24,7 +24,11 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
-import { DELEGATION_DECISION_RULE } from "./provider-prompt-contracts.ts";
+import {
+	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
+	DELEGATION_DECISION_RULE,
+	WORK_LIFECYCLE_SYSTEM_RULE,
+} from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
@@ -254,6 +258,24 @@ export class SystemPromptBuilder {
 		return `PI AUTONOMY ${autonomy.mode}: ${reflectionContract} Query memory and use bounded tools already available in this session. Auto-apply configured high-confidence memory and clean additive skill promotions; code/prompt/extension/settings changes need approval. Evidence is cue, never proof; active task primary.`;
 	}
 
+	private _buildWorkLifecyclePrompt(toolNames: readonly string[]): string | undefined {
+		if (this.deps.isChildSession()) return undefined;
+		if (this.deps.getModelCapabilityProfile().class === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
+		const hasWorkPlanningTool = toolNames.some(
+			(name) =>
+				name === "goal" ||
+				name === "create_goal" ||
+				name === "get_goal" ||
+				name === "update_goal" ||
+				name === "task_steps",
+		);
+		const ownerRule = hasWorkPlanningTool
+			? "\n- One owner per invariant: goal owns outcome/contract, task_steps owns plan, delegate owns workers, evidence owns acceptance. Never create parallel workflow state."
+			: "";
+		return `PI WORK LIFECYCLE
+- ${WORK_LIFECYCLE_SYSTEM_RULE}${ownerRule}`;
+	}
+
 	private _buildDelegationPrompt(delegateActive: boolean): string | undefined {
 		if (!delegateActive || !this.deps.getSettingsManager().getWorkerDelegationSettings().enabled) {
 			return undefined;
@@ -298,6 +320,7 @@ export class SystemPromptBuilder {
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),
+			this._buildWorkLifecyclePrompt(validToolNames),
 			this._buildDelegationPrompt(validToolNames.includes("delegate")),
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(),

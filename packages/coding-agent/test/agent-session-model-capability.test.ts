@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
+import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE, DELEGATION_DECISION_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 const MINIMAL_ACTIVE_TOOL_NAMES = [
@@ -104,6 +105,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
 			expect(harness.session.getActiveToolNames()).toEqual(["create_goal", "get_goal", "update_goal"]);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
+			expect(harness.session.systemPrompt).toContain(CHAT_WORK_LIFECYCLE_SYSTEM_RULE);
 		} finally {
 			harness.cleanup();
 		}
@@ -192,8 +194,7 @@ describe("model capability auto-detection", () => {
 		try {
 			const fullSet = harness.session.getActiveToolNames();
 			expect(fullSet).toContain("goal");
-			const delegateSnippet =
-				"Delegate useful independent research, implementation, tests, or specialist review early";
+			const delegateSnippet = DELEGATION_DECISION_RULE;
 			expect(harness.session.systemPrompt).toContain(delegateSnippet);
 			expect(harness.session.systemPrompt).toContain("Parent owns integration, verification");
 

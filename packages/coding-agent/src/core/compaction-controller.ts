@@ -277,9 +277,21 @@ export class CompactionController {
 	/**
 	 * Lifecycle records are durable bookkeeping and must not become compaction input or alter the
 	 * loop's trailing-compaction guard. They remain in the real branch so recovery can inspect them.
+	 *
+	 * A plain filter breaks ancestry because retained children still point at removed lifecycle
+	 * parents. Reconnect the already-linear active branch while preserving every real entry id.
 	 */
 	private getCompactionBranch(): ReturnType<SessionManager["getBranch"]> {
-		return this.deps.sessionManager.getBranch().filter((entry) => !isSessionLifecycleEntry(entry));
+		const compactableBranch: ReturnType<SessionManager["getBranch"]> = [];
+		let retainedParentId: string | null = null;
+		for (const entry of this.deps.sessionManager.getBranch()) {
+			if (isSessionLifecycleEntry(entry)) continue;
+			compactableBranch.push(
+				entry.parentId === retainedParentId ? entry : ({ ...entry, parentId: retainedParentId } as typeof entry),
+			);
+			retainedParentId = entry.id;
+		}
+		return compactableBranch;
 	}
 
 	/**

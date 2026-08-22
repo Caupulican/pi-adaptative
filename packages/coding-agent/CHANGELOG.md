@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- Added one canonical five-phase work lifecycle—Survey, Contract, Plan/Route, Execute, Prove/Deliver—wired through the existing goal, task, delegation, evidence, and approval owners, with project-relative POC/MVP versus complete-feature delivery contracts.
+
+### Changed
+
+- Made solo/team routing, independent review, and verification depth adaptive to delivery risk and evidence instead of treating long work as an automatic team trigger.
+- Classified one plain local `git commit` as a reversible scoped checkpoint after green verification while keeping composed commands, history rewrites, push/tag/release/publish, and destructive operations approval-gated.
+
+### Fixed
+
+- Preserved active-branch ancestry when excluding lifecycle-ledger records from compaction input, preventing context accounting from collapsing to only the newest tool result.
+
 ## [0.95.0] - 2026-08-22
 
 ### Breaking Changes

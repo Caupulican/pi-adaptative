@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
 	CAPACITY_PROBE_SYSTEM_PROMPT,
+	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
 	CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT,
 	CURATION_DIGEST_SYSTEM_PROMPT,
 	CURATION_RELEVANCE_SYSTEM_PROMPT,
@@ -15,6 +16,7 @@ import {
 	SUBAGENT_CORE_SYSTEM_PROMPT,
 	TOOL_CALL_PROBE_SYSTEM_PROMPT,
 	UNTRUSTED_BOUNDARY_SYSTEM_RULE,
+	WORK_LIFECYCLE_SYSTEM_RULE,
 	WORKER_LANE_SYSTEM_PROMPT,
 } from "../src/core/provider-prompt-contracts.ts";
 import {
@@ -37,10 +39,12 @@ const PROMPT_LIMITS = [
 	["search probe", SEARCH_PROBE_SYSTEM_PROMPT, 300],
 	["tool-call probe", TOOL_CALL_PROBE_SYSTEM_PROMPT, 300],
 	["capacity probe", CAPACITY_PROBE_SYSTEM_PROMPT, 220],
+	["chat work lifecycle", CHAT_WORK_LIFECYCLE_SYSTEM_RULE, 65],
 	["reflection", REFLECTION_SYSTEM_PROMPT, 1_300],
 	["untrusted boundary", UNTRUSTED_BOUNDARY_SYSTEM_RULE, 350],
 	["skill vault", SKILL_VAULT_SYSTEM_RULE, 200],
 	["worker", WORKER_LANE_SYSTEM_PROMPT, 800],
+	["work lifecycle", WORK_LIFECYCLE_SYSTEM_RULE, 650],
 ] as const;
 
 describe("recurring provider prompt budgets", () => {

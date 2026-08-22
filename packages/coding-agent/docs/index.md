@@ -48,6 +48,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [FastContext scout](scout.md) - read-only repository scout setup and 10 GB local profile.
 - [Tool repair](tool-repair.md) - repaired tool-call arguments, health diagnostics, kill switches, and replay workflow.
 - [Task steps](task-steps.md) - native session checklist, slash commands, persistence, and delegation migration.
+- [Work lifecycle](work-lifecycle.md) - canonical five-phase Survey-to-delivery contract, adaptive solo/team routing, verification, and checkpoint boundaries.
 - [Native Python](python.md) - uv-managed bounded Python execution, provisioning, output limits, and cross-platform file guidance.
 - [Managed data tools](managed-data-tools.md) - pinned rg, jq, and Rust jscpd provisioning without project files.
 

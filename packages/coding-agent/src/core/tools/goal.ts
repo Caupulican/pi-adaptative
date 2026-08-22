@@ -435,6 +435,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 		promptSnippet: "Read or update the durable goal.",
 		promptGuidelines: [
 			"Start when persistent continuation materially benefits current work or the user/system requests it. Skip routine one-turn tasks; get if uncertain; never replace unfinished goal; tokenBudget only if requested.",
+			"After bounded read-only survey, make the project-relative delivery contract explicit in the goal requirements: POC/MVP proves the requested capability; complete means full integration across affected project surfaces.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned running or cited non-completed tool_task, and no active pipeline. block_goal needs same real impasse for 3 goal turns.",

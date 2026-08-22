@@ -8,6 +8,8 @@ Task steps complement the native goal and delegation systems:
 - `goal` records durable outcome requirements and evidence.
 - `delegate` starts worker lanes, retrieves status, reviews claims, and coordinates them.
 
+For the canonical Survey → Contract → Plan/Route → Execute → Prove/Deliver flow and the ownership boundary between these systems, see [Five-step work lifecycle](work-lifecycle.md).
+
 ## Statuses
 
 Each step has one of these statuses:

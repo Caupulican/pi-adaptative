@@ -21,7 +21,10 @@ const TEST_VALIDATION_RE = /\b(test|testing|validation|lint|vitest|jest|run)\b/i
 const IMPLEMENT_RE = /\b(implement|fix|apply|change|update|create|write|generate|modify|edit|patch|add)\b/i;
 const DESTRUCTIVE_CMD_RE =
 	/\b(rm(\s+-r|\s+-f|\s+-rf|\s+-fr)?|mv|cp|chmod|chown|install)\b|>\s*\/dev\/(sda|hda|vda)|\b(dd\s+if=)/i;
-const GIT_MUTATE_CMD_RE = /\bgit\s+(commit|push|reset|clean|stash|rebase)\b/i;
+const GIT_APPROVAL_CMD_RE = /\bgit\s+(push|reset|clean|stash|rebase)\b/i;
+const GIT_LOCAL_COMMIT_CMD_RE = /^\s*git(?:\s+-C\s+\S+)?\s+commit(?:\s|$)/i;
+const GIT_COMMIT_HISTORY_RE = /(?:^|\s)--amend(?:\s|$)/i;
+const SHELL_CONTROL_RE = /(?:&&|\|\||[;&|<>`\r\n]|\$\()/;
 const PKG_MUTATE_CMD_RE = /\b(npm|pnpm|yarn|bun)\s+(install|i|update|up|publish|run|remove|rm|uninstall)\b/i;
 const RELEASE_DEPLOY_CMD_RE = /\b(release|deploy)\b/i;
 const PYTHON_HIGH_IMPACT_RE =
@@ -214,6 +217,21 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 			requiresApproval: false,
 		};
 	}
+	const isCommitCommand = command.length > 0 && GIT_LOCAL_COMMIT_CMD_RE.test(cleanCommand);
+	const isHistoryRewritingCommit = isCommitCommand && GIT_COMMIT_HISTORY_RE.test(cleanCommand);
+	const isShellComposedCommit = isCommitCommand && SHELL_CONTROL_RE.test(cleanCommand);
+	const isLocalCommitOnly = isCommitCommand && !isHistoryRewritingCommit && !isShellComposedCommit;
+	// A commit message may legitimately contain words such as "release". Classify the operation text
+	// separately, then admit only one plain local commit command; shell composition and history rewrite
+	// stay on the approval path below.
+	if (isLocalCommitOnly && !highRiskSignal(operation)) {
+		return {
+			risk: "scoped-write",
+			reasonCode: "local_git_commit",
+			reasons: ["A local commit is a reversible repository checkpoint and does not publish changes"],
+			requiresApproval: false,
+		};
+	}
 	const highRisk = highRiskSignal(cleanFullText);
 	if (highRisk) {
 		const reasonCode: Record<RiskSignal["kind"], string> = {
@@ -233,7 +251,9 @@ export function assessOperationRisk(input: RiskAssessmentInput): RiskAssessment 
 	if (
 		command &&
 		(DESTRUCTIVE_CMD_RE.test(cleanCommand) ||
-			GIT_MUTATE_CMD_RE.test(cleanCommand) ||
+			GIT_APPROVAL_CMD_RE.test(cleanCommand) ||
+			isHistoryRewritingCommit ||
+			isShellComposedCommit ||
 			PKG_MUTATE_CMD_RE.test(cleanCommand) ||
 			RELEASE_DEPLOY_CMD_RE.test(cleanCommand) ||
 			PYTHON_HIGH_IMPACT_RE.test(cleanCommand) ||

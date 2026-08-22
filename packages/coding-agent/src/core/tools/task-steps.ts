@@ -323,6 +323,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		promptSnippet: "Track multi-step session work.",
 		promptGuidelines: [
 			"Use for multi-step work; keep one in_progress step.",
+			"For project changes, establish Plan/Route before first mutation and link steps to the goal contract; task_steps owns execution detail, never a second outcome state.",
 			"Batch transitions; work the first open step; record evidence/blockers; skip unchanged narration.",
 			"intake keeps every item; link goal requirementIds.",
 			"advance completes current, then starts next pending.",

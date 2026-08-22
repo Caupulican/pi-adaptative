@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import type { Extension } from "../src/core/extensions/types.ts";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
+import { WORK_LIFECYCLE_PHASES, WORK_LIFECYCLE_SYSTEM_RULE } from "../src/core/provider-prompt-contracts.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
@@ -105,6 +106,43 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 
 		expect(prompt).not.toContain("PI AUTONOMY");
 		expect(prompt).not.toContain("ROOT REFLECTION");
+	});
+
+	it("renders the five-step root lifecycle and gates tool-specific ownership", () => {
+		expect(WORK_LIFECYCLE_PHASES).toEqual(["Survey", "Contract", "Plan/Route", "Execute", "Prove/Deliver"]);
+		expect(WORK_LIFECYCLE_PHASES).toHaveLength(5);
+		expect(WORK_LIFECYCLE_SYSTEM_RULE).toContain(WORK_LIFECYCLE_PHASES.join(" → "));
+
+		const root = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt(["goal", "task_steps", "delegate"]);
+		expect(root).toContain("PI WORK LIFECYCLE");
+		expect(root).toContain("Survey → Contract → Plan/Route → Execute → Prove/Deliver");
+		expect(root).toContain("POC/MVP proves requested capability");
+		expect(root).toContain("complete means full project integration");
+		expect(root).toContain(
+			"affected interfaces, callers, configuration, tests, documentation, compatibility/migration, and cleanup",
+		);
+		expect(root).toContain(
+			"risk, uncertainty, urgency, reversibility, invariant sensitivity, test strength/cost, and cognitive load",
+		);
+		expect(root).toContain("Local commit follows green checks");
+		expect(root).toContain("push/tag/release/publish stays owner-gated");
+		expect(root).toContain("goal owns outcome/contract, task_steps owns plan, delegate owns workers");
+
+		const splitGoalSurface = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt([
+			"create_goal",
+			"get_goal",
+			"update_goal",
+		]);
+		expect(splitGoalSurface).toContain("PI WORK LIFECYCLE");
+		const routine = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt(["read"]);
+		expect(routine).toContain("PI WORK LIFECYCLE");
+		expect(routine).toContain("Survey → Contract → Plan/Route → Execute → Prove/Deliver");
+		expect(routine).not.toContain("goal owns outcome/contract");
+		const child = new SystemPromptBuilder(makeDeps({ isChildSession: () => true })).rebuildSystemPrompt([
+			"goal",
+			"task_steps",
+		]);
+		expect(child).not.toContain("PI WORK LIFECYCLE");
 	});
 
 	it("makes optional connector availability subordinate to current-task relevance", () => {
