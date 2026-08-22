@@ -933,7 +933,17 @@ describe("leaf worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual(["read", "write", "edit", "python", STABLE_SHELL_TOOL_NAME]);
+			expect(tools).toEqual([
+				"read",
+				"write",
+				"edit",
+				"python",
+				STABLE_SHELL_TOOL_NAME,
+				"artifact_retrieve",
+				"run_toolkit_script",
+				"skill",
+				"skill_audit",
+			]);
 		} finally {
 			await harness.cleanup();
 		}
@@ -1093,7 +1103,7 @@ describe("leaf worker orchestration", () => {
 		}
 	});
 
-	it("honors an explicitly narrowed leaf tool surface", async () => {
+	it("honors an explicitly narrowed leaf tool surface even when inherited adapters are active", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
