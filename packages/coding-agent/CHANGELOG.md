@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Changed
+
+- Kept durable goals active across bounded runaway guards, stalled turns, repeated requirement blockers, and timed-out workers; each condition now injects recovery guidance and requires a different autonomous approach instead of silently waiting for manual continuation.
+- Automatically reopened goals blocked by bounded runaway/provider-turn guards when restoring a session while preserving explicit owner pauses, cancellations, terminal failures, budgets, and approval boundaries.
+
+### Fixed
+
+- Prevented internal goal-continuation and recovery notices from impersonating new owner turns and repeatedly re-admitting an unchanged failed tool operation; real successful operations and new user turns still advance recovery.
+- Honored the resource selector's exact negative extension filter when deciding whether to load default-on TPS.
+- Made background completion summaries report succeeded, verification-needed, failed, and canceled counts as disjoint outcomes instead of describing failed work as both finished and failed.
+- Kept every provider default resolvable after catalog refreshes and moved the retired Cerebras default to `gpt-oss-120b`.
+
 ## [0.96.0] - 2026-08-22
 
 ### Added

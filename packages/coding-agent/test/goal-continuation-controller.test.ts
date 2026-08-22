@@ -40,8 +40,8 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.reasonCode).toBe("goal_blocked");
 	});
 
-	describe("Semantic Circuit Breaker", () => {
-		it("stops the goal when a requirement is blocked 3 times", () => {
+	describe("repeated blocker recovery", () => {
+		it("forces a different recovery approach when a requirement is blocked 3 times", () => {
 			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 			state = applyGoalEvent(state, {
@@ -68,12 +68,12 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 				settings: { maxStallTurns: 3 },
 			});
 
-			expect(decision.action).toBe("stop");
+			expect(decision.action).toBe("continue");
 			expect(decision.reasonCode).toBe("stall_limit_reached");
-			expect(decision.message).toMatch(/Circuit Breaker/);
+			expect(decision.message).toContain("distinct recovery approach");
 		});
 
-		it("does not stop the goal if blocked less than 3 times", () => {
+		it("keeps recovering when a requirement is blocked less than 3 times", () => {
 			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 			state = applyGoalEvent(state, {
@@ -94,8 +94,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 				settings: { maxStallTurns: 3 },
 			});
 
-			// Only asks user, doesn't force stop
-			expect(decision.action).toBe("ask-user");
+			expect(decision.action).toBe("continue");
 			expect(decision.reasonCode).toBe("blocked_requirements_present");
 		});
 	});
@@ -130,14 +129,14 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.openRequirementIds).toEqual(["req-2"]);
 	});
 
-	it("asks the owner when every remaining legacy requirement is blocked", () => {
+	it("keeps autonomous verification active when every remaining legacy requirement is blocked", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 		state = applyGoalEvent(state, { type: "block_requirement", id: "req-1", blockedReason: "hard", now: "T1" });
 
 		const decision = evaluateGoalContinuation({ state, settings: { maxStallTurns: 3 } });
 
-		expect(decision.action).toBe("ask-user");
+		expect(decision.action).toBe("continue");
 		expect(decision.reasonCode).toBe("blocked_requirements_present");
 		expect(decision.blockedRequirementIds).toEqual(["req-1"]);
 	});
@@ -178,7 +177,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 		expect(decision.message).toContain("req-1");
 	});
 
-	it("active goal at stall limit asks user", () => {
+	it("active goal at the stall threshold enforces a different recovery approach", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 		state = applyGoalEvent(state, { type: "no_progress", now: "T1" });
@@ -190,8 +189,9 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			settings: { maxStallTurns: 3 },
 		});
 
-		expect(decision.action).toBe("ask-user");
+		expect(decision.action).toBe("continue");
 		expect(decision.reasonCode).toBe("stall_limit_reached");
+		expect(decision.message).toContain("different approach");
 	});
 
 	it("maxStallTurns 0 is unlimited", () => {
@@ -268,7 +268,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			expect(decision.reasonCode).toBe("worker_in_flight");
 		});
 
-		it("boundAt past maxWorkerWaitMs escalates to action:'ask-user'/reasonCode:'worker_wait_timeout'", () => {
+		it("boundAt past maxWorkerWaitMs continues into autonomous worker recovery", () => {
 			const state = seedBoundInFlight({ boundAt: "2026-01-01T00:00:00.000Z" });
 
 			const decision = evaluateGoalContinuation({
@@ -279,11 +279,12 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 				maxWorkerWaitMs: 60 * 60_000,
 			});
 
-			expect(decision.action).toBe("ask-user");
+			expect(decision.action).toBe("continue");
 			expect(decision.reasonCode).toBe("worker_wait_timeout");
+			expect(decision.message).toContain("recover");
 		});
 
-		it("boundAt exactly at the deadline (boundAt + maxWorkerWaitMs === now) escalates", () => {
+		it("boundAt exactly at the deadline (boundAt + maxWorkerWaitMs === now) triggers recovery", () => {
 			const state = seedBoundInFlight({ boundAt: "2026-01-01T00:00:00.000Z" });
 
 			const decision = evaluateGoalContinuation({
@@ -294,11 +295,11 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 				maxWorkerWaitMs: 60 * 60_000,
 			});
 
-			expect(decision.action).toBe("ask-user");
+			expect(decision.action).toBe("continue");
 			expect(decision.reasonCode).toBe("worker_wait_timeout");
 		});
 
-		it("a mix of one fresh and one stale binding stays 'waiting' (escalates only once EVERY bound requirement has timed out)", () => {
+		it("a mix of one fresh and one stale binding stays 'waiting' (recovers only once EVERY bound requirement has timed out)", () => {
 			let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
 			state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
 			state = applyGoalEvent(state, { type: "add_requirement", id: "req-2", text: "Req 2", now: "T0" });

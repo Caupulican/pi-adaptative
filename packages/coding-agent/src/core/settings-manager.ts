@@ -205,7 +205,7 @@ export const DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS = DEFAULT_GOAL_AUTO_CO
 
 export interface AutonomySettings {
 	mode?: AutonomyMode; // default: off; presets drive Auto Learn/reflection without many knobs
-	maxStallTurns?: number; // default: 20; maximum no-progress rounds before goal continuation asks the user
+	maxStallTurns?: number; // default: 20; unchanged-turn threshold that forces a different autonomous recovery approach
 	goalContinueTurns?: number; // default: 0 (unbounded); a positive value is an explicit per-loop limit
 	goalContinueMaxWallClockMinutes?: number; // default: 0; 0 disables wall-clock budget
 	goalAutoContinue?: boolean; // default: true; auto-inject continuation prompts when an active goal is idle
@@ -632,8 +632,7 @@ export function getDirectoryResourceProfileInfo(
 	};
 }
 
-export function matchesResourceProfilePattern(resourcePath: string, patterns: string[], baseDir = ""): boolean {
-	if (patterns.length === 0) return false;
+function getResourceProfileMatchCandidates(resourcePath: string, baseDir: string): readonly string[] {
 	const resolvedBase = baseDir ? resolvePath(baseDir) : "";
 	const rel = resolvedBase ? toPosixPath(relative(resolvedBase, resourcePath)) : toPosixPath(resourcePath);
 	const name = basename(resourcePath);
@@ -642,18 +641,40 @@ export function matchesResourceProfilePattern(resourcePath: string, patterns: st
 	const parentRel = resolvedBase ? toPosixPath(relative(resolvedBase, parentDir)) : toPosixPath(parentDir);
 	const parentName = basename(parentDir);
 	const parentDirPosix = toPosixPath(parentDir);
+	return [rel, name, filePathPosix, parentRel, parentName, parentDirPosix];
+}
 
+export function matchesResourceProfilePattern(resourcePath: string, patterns: string[], baseDir = ""): boolean {
+	if (patterns.length === 0) return false;
+	const candidates = getResourceProfileMatchCandidates(resourcePath, baseDir);
 	return patterns.some((pattern) => {
 		const normalizedPattern = toPosixPath(pattern);
-		return (
-			matchesCompiledPattern(rel, normalizedPattern) ||
-			matchesCompiledPattern(name, normalizedPattern) ||
-			matchesCompiledPattern(filePathPosix, normalizedPattern) ||
-			matchesCompiledPattern(parentRel, normalizedPattern) ||
-			matchesCompiledPattern(parentName, normalizedPattern) ||
-			matchesCompiledPattern(parentDirPosix, normalizedPattern)
-		);
+		return candidates.some((candidate) => matchesCompiledPattern(candidate, normalizedPattern));
 	});
+}
+
+function matchesExactResourceProfilePattern(resourcePath: string, patterns: string[], baseDir: string): boolean {
+	if (patterns.length === 0) return false;
+	const candidates = getResourceProfileMatchCandidates(resourcePath, baseDir);
+	return patterns.some((pattern) => {
+		const withoutRelativePrefix = pattern.startsWith("./") || pattern.startsWith(".\\") ? pattern.slice(2) : pattern;
+		return candidates.includes(toPosixPath(withoutRelativePrefix));
+	});
+}
+
+/** Canonical `!`/`+`/`-` precedence for top-level resource selector overrides. */
+export function isResourceEnabledByTopLevelOverrides(resourcePath: string, entries: string[], baseDir = ""): boolean {
+	const overrides = entries.filter(
+		(pattern) => pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"),
+	);
+	const excludes = overrides.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
+	const forceIncludes = overrides.filter((pattern) => pattern.startsWith("+")).map((pattern) => pattern.slice(1));
+	const forceExcludes = overrides.filter((pattern) => pattern.startsWith("-")).map((pattern) => pattern.slice(1));
+
+	let enabled = !matchesResourceProfilePattern(resourcePath, excludes, baseDir);
+	if (matchesExactResourceProfilePattern(resourcePath, forceIncludes, baseDir)) enabled = true;
+	if (matchesExactResourceProfilePattern(resourcePath, forceExcludes, baseDir)) enabled = false;
+	return enabled;
 }
 
 function normalizeResourceProfileNames(value: unknown): string[] {
@@ -714,6 +735,18 @@ function collectLegacyDisabledFilterFromSettings(
 ): ResourceProfileFilterSettings {
 	const legacyDisabled = settings.disabledResources?.[kind];
 	return Array.isArray(legacyDisabled) ? { block: legacyDisabled } : {};
+}
+
+function isResourceDisabledByTopLevelOverrides(
+	settings: Settings,
+	kind: ResourceProfileKind,
+	resourcePath: string,
+	baseDir: string,
+): boolean {
+	if (kind === "agents" || kind === "tools") return false;
+	const entries = settings[kind];
+	if (!Array.isArray(entries)) return false;
+	return !isResourceEnabledByTopLevelOverrides(resourcePath, entries, baseDir);
 }
 
 function mergeResourceProfileFilters(...filters: ResourceProfileFilterSettings[]): ResourceProfileFilterSettings {
@@ -1587,9 +1620,9 @@ export class SettingsManager {
 
 	/**
 	 * Explicit off-switch for passive default-on resources. Unlike the strict profile grant,
-	 * an omitted allow entry is not a disable: only disabledResources or an authored profile
-	 * block wins. This keeps default-on cosmetic resources available without weakening the
-	 * import boundary for ordinary authority-bearing extensions.
+	 * an omitted allow entry is not a disable: only disabledResources, the resource selector's
+	 * negative filters, or an authored profile block wins. This keeps default-on cosmetic resources
+	 * available without weakening the import boundary for ordinary authority-bearing extensions.
 	 */
 	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir = ""): boolean {
 		const userDisabled = mergeResourceProfileFilters(
@@ -1598,6 +1631,9 @@ export class SettingsManager {
 			collectLegacyDisabledFilterFromSettings(this.directoryProfileSettings, kind),
 		).block;
 		if (matchesResourceProfilePattern(resourcePath, userDisabled ?? [], baseDir)) return true;
+		if (isResourceDisabledByTopLevelOverrides(this.settings, kind, resourcePath, baseDir)) {
+			return true;
+		}
 
 		const registry = this.getProfileRegistry();
 		const seen = new Set<string>();

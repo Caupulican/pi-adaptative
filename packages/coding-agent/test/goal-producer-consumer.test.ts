@@ -63,7 +63,7 @@ describe("goal producer feeds the continuation consumer", () => {
 		expect(snapshot.continuation.reasonCode).toBe("goal_completed");
 	});
 
-	it("stall accumulation reaches the stall limit and asks the user", async () => {
+	it("stall accumulation reaches the recovery threshold without stopping autonomous work", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const run = createProducer(sessionManager);
 
@@ -76,7 +76,7 @@ describe("goal producer feeds the continuation consumer", () => {
 			sessionManager,
 			settings: { maxStallTurns: 2 },
 		});
-		expect(snapshot.continuation.action).toBe("ask-user");
+		expect(snapshot.continuation.action).toBe("continue");
 		expect(snapshot.continuation.reasonCode).toBe("stall_limit_reached");
 	});
 

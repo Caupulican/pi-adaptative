@@ -12,6 +12,16 @@ describe("generated model routing", () => {
 		expect(getModel("github-copilot", "claude-sonnet-5").api).toBe("anthropic-messages");
 	});
 
+	it("keeps Cloudflare Anthropic passthrough IDs in their native hyphenated form", () => {
+		const ids = getModels("cloudflare-ai-gateway")
+			.filter((model) => model.api === "anthropic-messages")
+			.map((model) => model.id);
+		expect(ids).toContain("claude-sonnet-4-5");
+		expect(ids).not.toEqual(
+			expect.arrayContaining([expect.stringMatching(/^claude-(?:haiku|opus|sonnet)-\d+\.\d+/)]),
+		);
+	});
+
 	it("omits the unsupported session_id header for OpenCode Responses models", () => {
 		expect(getModel("opencode", "gpt-5.4").compat?.sessionAffinityFormat).toBe("openai-nosession");
 	});

@@ -250,7 +250,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			expect(snapshot.continuation.reasonCode).toBe("worker_in_flight");
 		});
 
-		it("an injected 'now' past boundAt + maxWorkerWaitMs escalates to action:'ask-user'/reasonCode:'worker_wait_timeout'", () => {
+		it("an injected 'now' past boundAt + maxWorkerWaitMs starts autonomous worker recovery", () => {
 			const sessionManager = SessionManager.inMemory();
 			const laneRecords = seedBoundInFlight(sessionManager, "2026-01-01T00:00:00.000Z");
 
@@ -262,7 +262,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 				maxWorkerWaitMs: 60 * 60_000,
 			});
 
-			expect(snapshot.continuation.action).toBe("ask-user");
+			expect(snapshot.continuation.action).toBe("continue");
 			expect(snapshot.continuation.reasonCode).toBe("worker_wait_timeout");
 		});
 
@@ -281,7 +281,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 			expect(DEFAULT_GOAL_WORKER_WAIT_MS).toBeGreaterThan(0);
 		});
 
-		it("with now/maxWorkerWaitMs omitted, a worker bound well past the real default has already escalated", () => {
+		it("with now/maxWorkerWaitMs omitted, a worker bound well past the real default enters recovery", () => {
 			const sessionManager = SessionManager.inMemory();
 			const staleBoundAt = new Date(Date.now() - DEFAULT_GOAL_WORKER_WAIT_MS - 60_000).toISOString();
 			const laneRecords = seedBoundInFlight(sessionManager, staleBoundAt);
@@ -292,7 +292,7 @@ describe("Phase 10B: Goal Runtime Snapshot", () => {
 				laneRecords,
 			});
 
-			expect(snapshot.continuation.action).toBe("ask-user");
+			expect(snapshot.continuation.action).toBe("continue");
 			expect(snapshot.continuation.reasonCode).toBe("worker_wait_timeout");
 		});
 	});

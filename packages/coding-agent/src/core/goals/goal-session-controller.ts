@@ -17,7 +17,13 @@ import { GoalLoopController } from "../goal-loop-controller.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { GoalBudgetExhaustedError } from "./goal-execution-errors.ts";
-import { type GoalStateRevision, getGoalStateRevision, stopGoalFromSystem } from "./goal-lifecycle.ts";
+import {
+	type GoalStateRevision,
+	getGoalStateRevision,
+	isSystemBlockedGoal,
+	resumeGoal,
+	stopGoalFromSystem,
+} from "./goal-lifecycle.ts";
 import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
@@ -171,6 +177,20 @@ export class GoalSessionController {
 
 	getState(): GoalState | undefined {
 		return getLatestGoalStateSnapshot(this.deps.getSessionManager());
+	}
+
+	/**
+	 * A bounded runaway/provider-turn guard stops one autonomous run, not the owner's durable intent.
+	 * Resume that narrow class immediately or during restoration while preserving deliberate blocks,
+	 * terminal tool failures, pauses, and quota/budget stops.
+	 */
+	resumeSystemBlockedGoal(now = new Date().toISOString()): string | undefined {
+		const current = this.getState();
+		if (!current || !isSystemBlockedGoal(current)) return undefined;
+		const resumed = resumeGoal(current, now);
+		if (!resumed.ok) return undefined;
+		this.saveState(resumed.state, getGoalStateRevision(current));
+		return resumed.state.goalId;
 	}
 
 	/**
@@ -511,12 +531,13 @@ export class GoalSessionController {
 		);
 	}
 
-	markHarnessGuardBlocked(info: AgentRunawayStopInfo): boolean {
+	recoverFromHarnessGuard(info: AgentRunawayStopInfo): boolean {
 		const reason =
 			info.reason === "provider_turn_limit"
 				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
 				: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
-		return this.stopActiveGoal("blocked", reason);
+		if (!this.stopActiveGoal("blocked", reason)) return false;
+		return this.resumeSystemBlockedGoal() !== undefined;
 	}
 
 	markTerminalToolFailureBlocked(toolName: string): boolean {
@@ -544,8 +565,10 @@ export class GoalSessionController {
 		return this.loop.continueGoalLoop(options);
 	}
 
-	restoreAfterResume(): void {
+	restoreAfterResume(): boolean {
+		const resumedGoalId = this.resumeSystemBlockedGoal();
 		this.deps.scheduleGoalAutoContinueFromIdle();
+		return resumedGoalId !== undefined;
 	}
 
 	private recordContinuationFailure(error: unknown): void {

@@ -555,6 +555,37 @@ Content`,
 			).toBe(false);
 		});
 
+		it("honors the resource selector's exact negative filter for default-on TPS", async () => {
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfiles: [],
+				extensions: ["-tps"],
+			});
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			expect(
+				loader.getExtensions().extensions.some((candidate) => candidate.path.includes(join("extensions", "tps"))),
+			).toBe(false);
+		});
+
+		it.each([
+			{ extensions: ["!tps", "+tps"], expectedLoaded: true },
+			{ extensions: ["+tps", "-tps"], expectedLoaded: false },
+			{ extensions: ["!tps", "+t*"], expectedLoaded: false },
+			{ extensions: ["!tps", "+tps", "-t*"], expectedLoaded: true },
+		])("preserves top-level extension override precedence for default-on TPS: $extensions", async (fixture) => {
+			const settingsManager = SettingsManager.inMemory({
+				activeResourceProfiles: [],
+				extensions: fixture.extensions,
+			});
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+			await loader.reload();
+
+			expect(
+				loader.getExtensions().extensions.some((candidate) => candidate.path.includes(join("extensions", "tps"))),
+			).toBe(fixture.expectedLoaded);
+		});
+
 		it("keeps an active profile TPS block authoritative without requiring an allow entry", async () => {
 			const settingsManager = SettingsManager.inMemory({
 				activeResourceProfile: "no-meter",

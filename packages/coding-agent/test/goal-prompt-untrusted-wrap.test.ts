@@ -36,6 +36,18 @@ describe("compact active-goal context", () => {
 		expect(messages).toHaveLength(4);
 	});
 
+	it("injects mandatory recovery guidance after unchanged continuation turns", () => {
+		let state = createGoalState({ goalId: "g-recovery", userGoal: "Ship it", now: "T0" });
+		state = applyGoalEvent(state, { type: "no_progress", now: "T1" });
+		state = applyGoalEvent(state, { type: "no_progress", now: "T2" });
+
+		const text = formatCompactGoalContext(state, true);
+
+		expect(text).toContain("2 consecutive turns made no authoritative progress");
+		expect(text).toContain("use a different approach");
+		expect(text).toContain("Do not ask the owner unless a true approval boundary is proven");
+	});
+
 	it("escapes objective markup and keeps detailed ledgers out of the projection", () => {
 		let state = createGoalState({
 			goalId: "g1",
@@ -52,10 +64,13 @@ describe("compact active-goal context", () => {
 		expect(text).not.toContain("secret-req");
 		expect(text).not.toContain("ledger detail");
 		expect(text).toContain("task_steps for decomposition");
+		expect(text).toContain("stale or timed-out work must be recovered or reassigned");
+		expect(text).toContain("Blocked requirements are not terminal by themselves");
 		expect(text).toContain("current user message steers this turn");
 		expect(text).toContain("get_goal");
 		expect(text).toContain("requirement-by-requirement audit");
-		expect(text).toContain("same blocking condition");
+		expect(text).toContain("verified owner/approval boundary");
+		expect(text).toContain("3 consecutive no-progress goal turns despite distinct recovery approaches");
 		expect(text).toContain('update_goal with status "complete"');
 	});
 

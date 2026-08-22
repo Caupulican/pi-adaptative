@@ -91,7 +91,7 @@ describe("goal continuation interruption containment", () => {
 		seedOpenGoal(harness);
 		harness.settingsManager.setAutonomySettings({
 			goalAutoContinue: true,
-			goalAutoContinueDelayMs: 0,
+			goalAutoContinueDelayMs: 100,
 			goalContinueTurns: 1,
 			goalContinueMaxWallClockMinutes: 0,
 			maxStallTurns: 1,
@@ -102,7 +102,7 @@ describe("goal continuation interruption containment", () => {
 		]);
 
 		await harness.session.prompt("foreground work");
-		await vi.runAllTimersAsync();
+		await vi.advanceTimersToNextTimerAsync();
 
 		expect(harness.faux.state.callCount).toBe(2);
 	});

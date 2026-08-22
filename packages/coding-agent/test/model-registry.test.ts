@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { listModels } from "../src/cli/list-models.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
+import { defaultModelPerProvider } from "../src/core/model-resolver.ts";
 import { clearDeprecationWarningsForTests } from "../src/utils/deprecation.ts";
 import {
 	createCounterConfigCommand,
@@ -114,6 +115,32 @@ describe("ModelRegistry", () => {
 			expect(registry.getAvailable().map((model) => model.provider)).toEqual(
 				expect.arrayContaining(["anthropic", "openai-codex"]),
 			);
+		});
+	});
+
+	describe("built-in provider catalogs", () => {
+		test("keeps every provider default resolvable in the generated catalog", () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
+				expect(registry.find(provider, modelId), `${provider}/${modelId}`).toBeDefined();
+			}
+		});
+
+		test("includes OpenRouter Ox Alpha with its free tool-capable metadata", () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("openrouter", "stealth/ox-alpha");
+
+			expect(model).toMatchObject({
+				name: "Ox Alpha",
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_048_576,
+				maxTokens: 131_072,
+			});
 		});
 	});
 

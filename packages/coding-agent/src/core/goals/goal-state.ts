@@ -617,13 +617,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 }
 
 export function shouldContinueGoalLoop(args: { state: GoalState; maxStallTurns: number; now: string }): boolean {
-	if (!isGoalExecutionActive(args.state.status)) {
-		return false;
-	}
-	if (args.state.stallTurns >= args.maxStallTurns) {
-		return false;
-	}
-	return true;
+	return isGoalExecutionActive(args.state.status);
 }
 
 export function serializeGoalState(state: GoalState): string {

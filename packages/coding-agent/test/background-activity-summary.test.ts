@@ -26,11 +26,29 @@ describe("background activity summary", () => {
 		const text = stripAnsi(new CustomMessageComponent(message).render(160).join("\n"));
 
 		expect(text.split("\n").filter((line) => line.trim())).toHaveLength(1);
-		expect(text).toContain("3 agents finished");
+		expect(text).toContain("1 agent succeeded [worker-1]");
 		expect(text).toContain("1 agent needs verification [worker-2]");
 		expect(text).toContain("1 agent failed [worker-3]");
+		expect(text).not.toContain("agents finished");
 		expect(text).not.toContain("background-worker-completion");
 		expect(text).not.toContain("verbose internal handoff");
+	});
+
+	it("never reports an all-failed batch as finished or succeeded", () => {
+		const message: CustomMessage<unknown> = {
+			role: "custom",
+			customType: "background-worker-completion",
+			content: "failed handoff",
+			display: true,
+			details: { records: [{ laneId: "worker-1", status: "failed" }] },
+			timestamp: Date.now(),
+		};
+
+		const text = stripAnsi(new CustomMessageComponent(message).render(160).join("\n"));
+
+		expect(text).toContain("1 agent failed [worker-1]");
+		expect(text).not.toContain("finished");
+		expect(text).not.toContain("succeeded");
 	});
 
 	it("renders background tool batches through the same one-line contract", () => {
@@ -51,8 +69,9 @@ describe("background activity summary", () => {
 		const text = stripAnsi(new CustomMessageComponent(message).render(160).join("\n"));
 
 		expect(text.split("\n").filter((line) => line.trim())).toHaveLength(1);
-		expect(text).toContain("2 background tasks finished");
+		expect(text).toContain("1 background task succeeded [tool-task-1]");
 		expect(text).toContain("1 background task failed [tool-task-2]");
+		expect(text).not.toContain("background tasks finished");
 		expect(text).not.toContain("background-tool-completion");
 		expect(text).not.toContain("verbose internal tool handoff");
 	});
@@ -78,8 +97,35 @@ describe("background activity summary", () => {
 
 		const text = stripAnsi(new CustomMessageComponent(message).render(160).join("\n"));
 
-		expect(text).toContain("10 agents finished");
+		expect(text).toContain("8 agents succeeded [worker-1, worker-2, worker-3, worker-4, +4]");
 		expect(text).toContain("2 agents failed");
+		expect(text).not.toContain("agents finished");
+	});
+
+	it("rejects aggregate counts that classify included successes as failures", () => {
+		const message: CustomMessage<unknown> = {
+			role: "custom",
+			customType: "background-worker-completion",
+			content: "inconsistent bounded handoff",
+			display: true,
+			details: {
+				records: Array.from({ length: 8 }, (_, index) => ({ laneId: `worker-${index + 1}`, status: "succeeded" })),
+				summary: {
+					kind: "agent",
+					totalCount: 10,
+					attentionCount: 0,
+					failedCount: 5,
+					canceledCount: 0,
+				},
+			},
+			timestamp: Date.now(),
+		};
+
+		const text = stripAnsi(new CustomMessageComponent(message).render(160).join("\n"));
+
+		expect(text).toContain("activity unavailable");
+		expect(text).not.toContain("succeeded");
+		expect(text).not.toContain("failed");
 	});
 
 	it.each(["background-worker-completion", "background-tool-completion"] as const)(

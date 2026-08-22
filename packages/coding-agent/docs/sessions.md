@@ -71,7 +71,7 @@ to …`, or `I want to refactor/rewrite/rebuild/redesign …` create the same du
 Handover wording (`by the way`, `i'm handing over`, sub-agent or role assignment) is classification
 only; the previous user task is the objective. Pi deliberately does not infer persistence from an
 ordinary multi-step request, and it will not replace an unfinished goal implicitly. Active
-chat-created goals use the normal bounded, hidden continuation trigger and survive compaction
+chat-created goals use the normal automatic hidden continuation trigger and survive compaction
 through one compact active-goal projection.
 
 Reading a session `.jsonl` with `read` returns a labeled transcript (user/assistant/compaction or

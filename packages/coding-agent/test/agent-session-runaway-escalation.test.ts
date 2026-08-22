@@ -72,7 +72,7 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
-	it("blocks an active goal when the runaway backstop trips so auto-continuation cannot restart it", async () => {
+	it("records a repeated-tool guard and keeps the active goal eligible for enforced recovery", async () => {
 		const harness = await createHarness();
 		try {
 			const state = applyGoalEvent(
@@ -88,18 +88,181 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				repeats: 12,
 			});
 
-			const blocked = harness.session.getGoalStateSnapshot();
-			expect(blocked).toMatchObject({
+			const recovered = harness.session.getGoalStateSnapshot();
+			expect(recovered).toMatchObject({
 				goalId: "goal-runaway",
-				status: "blocked",
+				status: "active",
+				blockedReason: undefined,
 			});
-			expect(blocked?.blockedReason).toContain("runaway_tool_loop");
-			expect(blocked?.blockedReason).toContain("tool_task:{wait}");
+			const guard = recovered?.events.findLast((event) => event.type === "system_stop_goal");
+			expect(guard).toMatchObject({
+				type: "system_stop_goal",
+				reason: expect.stringContaining("runaway_tool_loop"),
+			});
+			expect(guard).toMatchObject({ reason: expect.stringContaining("tool_task:{wait}") });
+			expect(recovered?.events.at(-1)?.type).toBe("resume_goal");
 
 			const result = await harness.session.continueGoalOnce({ maxStallTurns: 20 });
-			expect(result.submitted).toBe(false);
-			expect(result.snapshot.continuation.action).toBe("ask-user");
-			expect(prompt).not.toHaveBeenCalled();
+			expect(result.submitted).toBe(true);
+			expect(result.snapshot.continuation.action).toBe("continue");
+			expect(prompt).toHaveBeenCalledOnce();
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps enforcing recovery across consecutive bounded guards instead of terminalizing the goal", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-repeated-recovery", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+
+			for (let attempt = 0; attempt < 2; attempt++) {
+				harness.session.agent.onRunawayStop?.({
+					reason: "repeated_tool_call",
+					signature: "bash:{same-failed-probe}",
+					repeats: 12,
+				});
+				expect(harness.session.getGoalStateSnapshot()?.status).toBe("active");
+			}
+
+			const eventTypes = harness.session.getGoalStateSnapshot()?.events.map((event) => event.type) ?? [];
+			expect(eventTypes.filter((type) => type === "system_stop_goal")).toHaveLength(2);
+			expect(eventTypes.filter((type) => type === "resume_goal")).toHaveLength(2);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not require an owner chat turn after automatic runaway recovery", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-runaway-resume", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			harness.session.agent.onRunawayStop?.({
+				reason: "repeated_tool_call",
+				signature: "tool_task:{wait}",
+				repeats: 12,
+			});
+			expect(harness.session.getGoalStateSnapshot()?.status).toBe("active");
+
+			harness.setResponses([fauxAssistantMessage("audit resumed")]);
+			await harness.session.prompt("continue the audit", { autoContinueGoal: false });
+
+			const resumed = harness.session.getGoalStateSnapshot();
+			expect(resumed).toMatchObject({ goalId: "goal-runaway-resume", status: "active" });
+			const eventTypes = resumed?.events.map((event) => event.type) ?? [];
+			expect(eventTypes.lastIndexOf("system_stop_goal")).toBeLessThan(eventTypes.lastIndexOf("resume_goal"));
+			expect(eventTypes.filter((type) => type === "resume_goal")).toHaveLength(1);
+			expect(JSON.stringify(harness.session.messages)).toContain("runaway-recovery");
+			expect(JSON.stringify(harness.session.messages)).toContain(
+				"Do not repeat the same failed operation unchanged",
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("automatically resumes and schedules a runaway-guard-blocked goal when its session runtime is restored", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		try {
+			harness.settingsManager.setAutonomySettings({
+				goalAutoContinue: true,
+				goalAutoContinueDelayMs: 100,
+				goalContinueTurns: 1,
+				goalContinueMaxWallClockMinutes: 0,
+				maxStallTurns: 1,
+			});
+			harness.setResponses([fauxAssistantMessage("automatic continuation resumed")]);
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-runaway-restore", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(
+				applyGoalEvent(state, {
+					type: "system_stop_goal",
+					status: "blocked",
+					reason: "runaway_tool_loop: interrupted before process exit",
+					now: "T1",
+				}),
+			);
+			expect(harness.session.getGoalStateSnapshot()?.status).toBe("blocked");
+
+			expect(harness.session.restoreGoalRuntimeAfterResume()).toBe(true);
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-runaway-restore",
+				status: "active",
+			});
+			await vi.advanceTimersToNextTimerAsync();
+			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not override an explicit goal blocker when ordinary owner chat continues", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				applyGoalEvent(
+					createGoalState({ goalId: "goal-owner-blocked", userGoal: "Wait for approval", now: "T0" }),
+					{ type: "add_requirement", id: "approval", text: "Obtain approval", now: "T0" },
+				),
+				{ type: "block_goal", reason: "Waiting for explicit publication approval", now: "T1" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			harness.setResponses([fauxAssistantMessage("still waiting")]);
+
+			await harness.session.prompt("status update", { autoContinueGoal: false });
+
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-owner-blocked",
+				status: "blocked",
+				blockedReason: "Waiting for explicit publication approval",
+			});
+			expect(harness.session.restoreGoalRuntimeAfterResume()).toBe(false);
+			expect(harness.session.getGoalStateSnapshot()?.status).toBe("blocked");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("warns instead of swallowing a new explicit owner goal while recovering a system-blocked goal", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-system-blocked", userGoal: "Finish the prior audit", now: "T0" }),
+				{
+					type: "system_stop_goal",
+					status: "blocked",
+					reason: "runaway_tool_loop: interrupted before recovery",
+					now: "T1",
+				},
+			);
+			harness.session.saveGoalStateSnapshot(state);
+			harness.setResponses([fauxAssistantMessage("prior audit resumed")]);
+
+			await harness.session.prompt("Set a persistent goal: ship a different objective.", {
+				autoContinueGoal: false,
+			});
+
+			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+				goalId: "goal-system-blocked",
+				status: "active",
+			});
+			expect(
+				harness
+					.eventsOfType("warning")
+					.some((event) => event.message.includes("unfinished goal 'goal-system-blocked'")),
+			).toBe(true);
 		} finally {
 			harness.cleanup();
 		}
@@ -135,17 +298,21 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				signature: "provider_turn_limit",
 				repeats: 20,
 			});
-			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			const recovered = harness.session.getGoalStateSnapshot();
+			expect(recovered).toMatchObject({
 				goalId: "goal-provider-fuse",
-				status: "blocked",
-				blockedReason: expect.stringContaining("provider_turn_limit"),
+				status: "active",
+				blockedReason: undefined,
+			});
+			expect(recovered?.events.findLast((event) => event.type === "system_stop_goal")).toMatchObject({
+				reason: expect.stringContaining("provider_turn_limit"),
 			});
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("persists a late worker terminal without waking a goal blocked by runaway detection", async () => {
+	it("lets a late worker terminal wake work after automatic runaway recovery", async () => {
 		const harness = await createHarness();
 		let resolveForeground: (message: AssistantMessage) => void = () => {};
 		let foregroundResolved = false;
@@ -221,22 +388,22 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 			});
 			expect(harness.session.getGoalStateSnapshot()).toMatchObject({
 				goalId: "goal-runaway-worker",
-				status: "blocked",
+				status: "active",
 			});
 
 			resolveForeground(fauxAssistantMessage("Foreground released after runaway stop."));
 			await foregroundRun;
 			await handoff;
 
-			expect(harness.getPendingResponseCount()).toBe(1);
-			expect(JSON.stringify(harness.session.messages)).not.toContain("LATE HANDOFF RESURRECTED");
+			await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(0));
+			expect(JSON.stringify(harness.session.messages)).toContain("LATE HANDOFF RESURRECTED");
 			const completion = harness.sessionManager
 				.getEntries()
 				.find((entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion");
-			expect(completion).toMatchObject({
-				type: "custom_message",
-				content: expect.stringContaining("do not continue or replan automatically"),
-			});
+			expect(completion).toMatchObject({ type: "custom_message" });
+			expect(completion && "content" in completion ? String(completion.content) : "").not.toContain(
+				"do not continue or replan automatically",
+			);
 		} finally {
 			unsubscribe();
 			if (!foregroundResolved) resolveForeground(fauxAssistantMessage("Test cleanup."));
@@ -331,6 +498,8 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 				status: "blocked",
 				blockedReason: expect.stringContaining("terminal_tool_failure: terminal_tool"),
 			});
+			expect(harness.session.restoreGoalRuntimeAfterResume()).toBe(false);
+			expect(harness.session.getGoalStateSnapshot()?.status).toBe("blocked");
 		} finally {
 			harness.cleanup();
 		}

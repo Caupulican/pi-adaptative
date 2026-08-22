@@ -1636,9 +1636,9 @@ export class AgentSession {
 		this.agent.onToolValidationEscalation = (event) => this._handleToolValidationEscalation(event);
 	}
 
-	/** Persist and surface the exact semantic cause when either host runaway/cost guard stops a run. */
+	/** Persist the guard evidence, retain active work, and force the next pass onto a recovery path. */
 	private _handleRunawayStop(info: AgentRunawayStopInfo): void {
-		const goalBlocked = this._goals.markHarnessGuardBlocked(info);
+		const goalRecovered = this._goals.recoverFromHarnessGuard(info);
 		const record: RunawayStopRecord = {
 			reason: info.reason,
 			signature: info.signature,
@@ -1648,13 +1648,25 @@ export class AgentSession {
 			at: new Date().toISOString(),
 		};
 		this.sessionManager.appendCustomEntry(RUNAWAY_STOP_CUSTOM_TYPE, record);
+		if (goalRecovered) {
+			void this.sendCustomMessage(
+				{
+					customType: "runaway-recovery",
+					content:
+						"A bounded harness guard ended the previous agent loop, but the durable goal remains active and must continue automatically. Do not repeat the same failed operation unchanged. Inspect the recorded failure, change tool or approach, and keep working unless evidence proves a true owner/approval boundary.",
+					display: false,
+					details: info,
+				},
+				{ deliverAs: "nextTurn" },
+			);
+		}
 		const cause =
 			info.reason === "provider_turn_limit"
 				? `the configured provider-turn limit of ${info.repeats} requests was reached`
 				: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
 		this._emit({
 			type: "warning",
-			message: `Stopped: ${cause}.${goalBlocked ? " The active goal was blocked to prevent automatic restart." : ""} Review the run and steer or retry with a different approach.`,
+			message: `Bounded guard ended this run: ${cause}.${goalRecovered ? " The active goal remains scheduled; the next pass must use a different approach." : ""}`,
 		});
 	}
 
@@ -2560,7 +2572,9 @@ export class AgentSession {
 			this._foregroundPromptLease = submission.lease;
 
 			if (!options?.internalContextType) {
-				admittedGoalId = this._goals.startOwnerChatGoal(expandedText, this.agent.state.messages) ?? admittedGoalId;
+				const recoveredGoalId = this._goals.resumeSystemBlockedGoal();
+				const startedGoalId = this._goals.startOwnerChatGoal(expandedText, this.agent.state.messages);
+				admittedGoalId = startedGoalId ?? recoveredGoalId ?? admittedGoalId;
 			}
 
 			// Queued steer/follow-up messages remain in the active turn; only a new submission resets the
@@ -3539,9 +3553,9 @@ export class AgentSession {
 		this._goals.recordContinuationTelemetry(pass);
 	}
 
-	/** Restore runtime intent without mutating persisted goal lifecycle state. */
-	restoreGoalRuntimeAfterResume(): void {
-		this._goals.restoreAfterResume();
+	/** Restore runtime intent, automatically reopening only goals stopped by bounded system guards. */
+	restoreGoalRuntimeAfterResume(): boolean {
+		return this._goals.restoreAfterResume();
 	}
 
 	/** Save native task-step state to the active session log. */

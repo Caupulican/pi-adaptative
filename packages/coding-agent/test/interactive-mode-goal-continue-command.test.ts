@@ -268,6 +268,99 @@ describe("InteractiveMode /goal-continue command", () => {
 		expect(resumed.getRuntimeRestoreCalls()).toBe(1);
 	});
 
+	it("automatically resumes a selected session goal stopped by a bounded system guard", async () => {
+		let state = applyGoalEvent(createGoalState({ goalId: "g-system", userGoal: "Ship", now: "T0" }), {
+			type: "system_stop_goal",
+			status: "blocked",
+			reason: "runaway_tool_loop: repeated call",
+			now: "T1",
+		});
+		let selectorCalls = 0;
+		let refreshCount = 0;
+		const statuses: string[] = [];
+		const session = {
+			getGoalStateSnapshot: () => state,
+			saveGoalStateSnapshot: (next: GoalState) => {
+				state = next;
+				return "entry";
+			},
+			restoreGoalRuntimeAfterResume: () => {
+				state = applyGoalEvent(state, { type: "resume_goal", now: "T2" });
+				return true;
+			},
+		} as unknown as AgentSession;
+		const host = {
+			session,
+			loadingAnimation: undefined,
+			statusContainer: { clear() {} },
+			runtimeHost: { switchSession: async () => ({ cancelled: false }) },
+			renderCurrentSessionState() {},
+			showStatus: (message: string) => statuses.push(message),
+			showError: (message: string) => {
+				throw new Error(message);
+			},
+			refreshAutonomyFooterStatus: () => {
+				refreshCount++;
+			},
+			extensionUiHost: {
+				showExtensionSelector: async () => {
+					selectorCalls++;
+					return "Leave stopped";
+				},
+			},
+		} as unknown as SessionFlowHost;
+
+		await handleResumeSession(host, "/tmp/system-stopped-session.jsonl");
+
+		expect(state.status).toBe("active");
+		expect(selectorCalls).toBe(0);
+		expect(refreshCount).toBe(1);
+		expect(statuses).toEqual(["Resumed session and goal"]);
+	});
+
+	it("falls back to the owner resume choice when automatic system-block recovery loses a revision race", async () => {
+		const state = applyGoalEvent(createGoalState({ goalId: "g-system-race", userGoal: "Ship", now: "T0" }), {
+			type: "system_stop_goal",
+			status: "blocked",
+			reason: "provider_turn_limit: interrupted before recovery",
+			now: "T1",
+		});
+		let selectorCalls = 0;
+		let fatalCalls = 0;
+		const statuses: string[] = [];
+		const session = {
+			getGoalStateSnapshot: () => state,
+			restoreGoalRuntimeAfterResume: () => false,
+		} as unknown as AgentSession;
+		const host = {
+			session,
+			loadingAnimation: undefined,
+			statusContainer: { clear() {} },
+			runtimeHost: { switchSession: async () => ({ cancelled: false }) },
+			renderCurrentSessionState() {},
+			showStatus: (message: string) => statuses.push(message),
+			refreshAutonomyFooterStatus() {},
+			extensionUiHost: {
+				showExtensionSelector: async () => {
+					selectorCalls++;
+					return "Leave stopped";
+				},
+			},
+			handleFatalRuntimeError: async () => {
+				fatalCalls++;
+				return { cancelled: true };
+			},
+		} as unknown as SessionFlowHost;
+
+		const result = await handleResumeSession(host, "/tmp/system-stopped-race-session.jsonl");
+
+		expect(result).toEqual({ cancelled: false });
+		expect(state.status).toBe("blocked");
+		expect(selectorCalls).toBe(1);
+		expect(fatalCalls).toBe(0);
+		expect(statuses).toEqual(["Resumed session; goal state preserved"]);
+	});
+
 	it("offers an explicit owner choice before resuming a selected session's stopped goal", async () => {
 		let previousState = createGoalState({ goalId: "old", userGoal: "Old", now: "T0" });
 		previousState = applyGoalEvent(previousState, { type: "block_goal", reason: "old", now: "T1" });

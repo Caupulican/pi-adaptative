@@ -213,11 +213,14 @@ function readSummaryContract(
 		const summary = message.details.summary;
 		if (summary.kind !== kind || !items || summary.totalCount < items.length) return undefined;
 		const includedCounts = {
+			success: items.filter((item) => item.status === "success").length,
 			attention: items.filter((item) => item.status === "attention").length,
 			failed: items.filter((item) => item.status === "failed").length,
 			canceled: items.filter((item) => item.status === "canceled").length,
 		};
+		const successCount = summary.totalCount - summary.attentionCount - summary.failedCount - summary.canceledCount;
 		if (
+			successCount < includedCounts.success ||
 			summary.attentionCount < includedCounts.attention ||
 			summary.failedCount < includedCounts.failed ||
 			summary.canceledCount < includedCounts.canceled
@@ -247,11 +250,13 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
 	const summary = readSummaryContract(message, kind, items);
 	if (!summary || !items) return fallbackBackgroundActivitySummary(kind);
 	const nounName = kind === "agent" ? "agent" : "background task";
+	const successIds = items.filter((item) => item.status === "success").map((item) => item.id);
 	const attentionIds = items.filter((item) => item.status === "attention").map((item) => item.id);
 	const failedIds = items.filter((item) => item.status === "failed").map((item) => item.id);
 	const canceledIds = items.filter((item) => item.status === "canceled").map((item) => item.id);
+	const successCount = summary.totalCount - summary.attentionCount - summary.failedCount - summary.canceledCount;
 	const text = [
-		`${summary.totalCount} ${noun(summary.totalCount, nounName)} finished`,
+		formatCountedStatus(successCount, nounName, "succeeded", "succeeded", successIds),
 		formatCountedStatus(summary.attentionCount, nounName, "needs verification", "need verification", attentionIds),
 		formatCountedStatus(summary.failedCount, nounName, "failed", "failed", failedIds),
 		formatCountedStatus(summary.canceledCount, nounName, "canceled", "canceled", canceledIds),

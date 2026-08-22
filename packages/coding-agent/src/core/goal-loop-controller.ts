@@ -9,8 +9,8 @@
  * per-invocation turn cap, an optional per-invocation wall-clock cap, and an optional durable token
  * budget on the goal. Each submitted pass still reports turn/wall-clock telemetry; provider usage
  * and spend are attributed at the response boundary. The host compares each pass's authoritative
- * progress revision and records unchanged passes as stalls, so a model cannot bypass the stall
- * limit by omitting a voluntary `no_progress` call.
+ * progress revision and records unchanged passes as stalls, so the continuation prompt can force
+ * a different recovery approach even when a model omits a voluntary `no_progress` call.
  */
 
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";

@@ -17,6 +17,33 @@ export function getGoalStateRevision(state: GoalState): GoalStateRevision {
 	return { goalId: state.goalId, revision: state.revision ?? 0 };
 }
 
+const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = ["runaway_tool_loop:", "provider_turn_limit:"] as const;
+
+/** True only when a bounded runaway/provider-turn guard caused the block, not owner/model/terminal intent. */
+export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
+	if (state?.status !== "blocked") return false;
+	for (let index = state.events.length - 1; index >= 0; index--) {
+		const event = state.events[index];
+		if (event?.type === "system_stop_goal") {
+			return (
+				event.status === "blocked" &&
+				AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES.some((prefix) => event.reason.startsWith(prefix))
+			);
+		}
+		if (
+			event?.type === "block_goal" ||
+			event?.type === "pause_goal" ||
+			event?.type === "resume_goal" ||
+			event?.type === "complete_goal" ||
+			event?.type === "complete_goal_manually" ||
+			event?.type === "cancel_goal"
+		) {
+			return false;
+		}
+	}
+	return false;
+}
+
 /** Minimal durable seam shared by CLI, tools, and in-process session restoration. */
 export interface PersistedGoalStateHost {
 	getGoalStateSnapshot(): GoalState | undefined;

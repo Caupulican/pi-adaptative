@@ -93,7 +93,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		expect(promptCalls.length).toBe(0);
 	});
 
-	it("counts unchanged continuation passes as stalls without relying on the model to report no_progress", async () => {
+	it("counts unchanged passes as stalls but keeps the bounded recovery loop working", async () => {
 		const { session, sessionManager, promptCalls } = createTestSession();
 
 		let state = createGoalState({ goalId: "g1", userGoal: "User Goal Here", now: "T0" });
@@ -101,11 +101,14 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 		appendGoalStateSnapshot(sessionManager, state);
 
 		const result = await session.continueGoalLoop({ maxStallTurns: 3, maxTurns: 5 });
-		expect(result.turnsSubmitted).toBe(3);
-		expect(result.stopReason).toBe("continuation_not_allowed");
-		expect(result.finalSnapshot.goalState?.stallTurns).toBe(3);
-		expect(result.finalSnapshot.continuation.reasonCode).toBe("stall_limit_reached");
-		expect(promptCalls.length).toBe(3);
+		expect(result.turnsSubmitted).toBe(5);
+		expect(result.stopReason).toBe("max_turns_reached");
+		expect(result.finalSnapshot.goalState?.stallTurns).toBe(5);
+		expect(result.finalSnapshot.continuation).toMatchObject({
+			action: "continue",
+			reasonCode: "stall_limit_reached",
+		});
+		expect(promptCalls.length).toBe(5);
 	});
 
 	it("prompt that appends a completed goal snapshot submits once, then stops with continuation_not_allowed", async () => {

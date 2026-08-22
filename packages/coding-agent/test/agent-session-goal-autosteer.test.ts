@@ -103,7 +103,7 @@ describe("GoalAutoContinueController idle autosteer", () => {
 		]);
 	});
 
-	it("does not schedule after the authoritative continuation decision reaches the stall limit", async () => {
+	it("schedules recovery after the authoritative continuation decision reaches the stall threshold", async () => {
 		let goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
 		goalState = applyGoalEvent(goalState, {
 			type: "add_requirement",
@@ -123,13 +123,28 @@ describe("GoalAutoContinueController idle autosteer", () => {
 				settings: { maxStallTurns: AUTONOMY_SETTINGS.maxStallTurns },
 			}),
 		};
-		const { controller, continuationOptions } = createController(snapshot);
+		let reads = 0;
+		const { controller, continuationOptions } = createController(() => {
+			reads++;
+			return reads <= 2
+				? snapshot
+				: {
+						...snapshot,
+						continuation: { ...snapshot.continuation, action: "stop", reasonCode: "goal_completed" },
+					};
+		});
 
 		controller.scheduleFromIdle();
 		await vi.runAllTimersAsync();
 
-		expect(snapshot.continuation).toMatchObject({ action: "ask-user", reasonCode: "stall_limit_reached" });
-		expect(continuationOptions).toEqual([]);
+		expect(snapshot.continuation).toMatchObject({ action: "continue", reasonCode: "stall_limit_reached" });
+		expect(continuationOptions).toEqual([
+			{
+				maxTurns: 5,
+				maxStallTurns: 3,
+				maxWallClockMinutes: 2,
+			},
+		]);
 	});
 
 	it("does not inject a continuation when the foreground prompt opts out", async () => {

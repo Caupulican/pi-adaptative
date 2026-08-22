@@ -58,9 +58,9 @@ export function evaluateGoalContinuation(args: {
 	now?: string;
 	/**
 	 * Maximum milliseconds a bound in-flight requirement (`Requirement.boundAt`) may wait before
-	 * this escalates to `action:"ask-user"`/`reasonCode:"worker_wait_timeout"` instead of
-	 * `"waiting"` -- a worker that is alive-but-hung past its deadline must not wait forever. Only
-	 * takes effect when BOTH `now` and this are supplied; escalation fires only once EVERY
+	 * this returns `action:"continue"`/`reasonCode:"worker_wait_timeout"` for autonomous recovery
+	 * instead of `"waiting"` -- a worker that is alive-but-hung past its deadline must not wait
+	 * forever. Only takes effect when BOTH `now` and this are supplied; recovery fires only once EVERY
 	 * bound-in-flight open requirement has individually passed `boundAt + maxWorkerWaitMs`, so a
 	 * goal with a mix of fresh and stale bindings keeps waiting on the fresh one.
 	 */
@@ -151,9 +151,8 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
-	// Semantic Circuit Breaker: check if any requirement has been repeatedly blocked.
-	// If a requirement has failed verification / been blocked 3 or more times, the
-	// subagent loop is stuck. Forcefully retire the goal to prevent infinite orchestrator looping.
+	// Repeated blockers are recovery evidence, not permission to abandon the goal. Force another
+	// approach while leaving genuine owner/approval boundaries available through explicit goal state.
 	const MAX_REQUIREMENT_BLOCKS = 3;
 	for (const reqId of blockedRequirementIds) {
 		const blockCount = state.events.filter((e) => e.type === "block_requirement" && e.id === reqId).length;
@@ -161,9 +160,9 @@ export function evaluateGoalContinuation(args: {
 		if (blockCount >= MAX_REQUIREMENT_BLOCKS) {
 			return {
 				...baseDecision,
-				action: "stop",
+				action: "continue",
 				reasonCode: "stall_limit_reached",
-				message: `Circuit Breaker: Requirement '${reqId}' has been blocked ${blockCount} times (e.g. repeated verification failures). The task is stuck in a loop and requires human intervention.`,
+				message: `Requirement '${reqId}' has been blocked ${blockCount} times. Inspect the blocker evidence and use a distinct recovery approach; ask the owner only when the blocker is a verified owner/approval boundary.`,
 			};
 		}
 	}
@@ -199,9 +198,10 @@ export function evaluateGoalContinuation(args: {
 		if (blockedRequirementIds.length > 0) {
 			return {
 				...baseDecision,
-				action: "ask-user",
+				action: "continue",
 				reasonCode: "blocked_requirements_present",
-				message: "All remaining legacy goal requirements are blocked.",
+				message:
+					"All remaining legacy goal requirements are blocked. Verify each blocker, reopen recoverable work, and ask the owner only for a proven owner/approval boundary.",
 			};
 		}
 		if (state.requirements.length === 0) {
@@ -296,10 +296,10 @@ export function evaluateGoalContinuation(args: {
 		: [];
 
 	if (boundInFlightRequirements.length > 0) {
-		// Never-hang backstop: a worker alive-but-hung past its deadline must escalate to the owner
-		// instead of waiting forever. Only evaluated when the caller supplies BOTH a clock reading and
-		// a deadline; escalates only once EVERY bound-in-flight requirement has individually timed out,
-		// so one fresh binding keeps the goal legitimately waiting.
+		// Never-hang backstop: a worker alive-but-hung past its deadline must return control to the
+		// autonomous parent for inspection and recovery instead of waiting forever. Only evaluated when
+		// the caller supplies BOTH a clock reading and a deadline; recovers only once EVERY bound-in-flight
+		// requirement has individually timed out, so one fresh binding keeps the goal legitimately waiting.
 		if (args.now !== undefined && args.maxWorkerWaitMs !== undefined) {
 			const nowMs = Date.parse(args.now);
 			const maxWorkerWaitMs = args.maxWorkerWaitMs;
@@ -313,9 +313,9 @@ export function evaluateGoalContinuation(args: {
 			if (allTimedOut) {
 				return {
 					...baseDecision,
-					action: "ask-user",
+					action: "continue",
 					reasonCode: "worker_wait_timeout",
-					message: `A dispatched worker has not completed within the maximum wait of ${maxWorkerWaitMs}ms; escalating to the owner instead of waiting indefinitely.`,
+					message: `A dispatched worker has not completed within the maximum wait of ${maxWorkerWaitMs}ms. Inspect its authoritative status and evidence, then recover it, reassign the requirement, or use another approach without waiting indefinitely.`,
 				};
 			}
 		}
@@ -340,9 +340,9 @@ export function evaluateGoalContinuation(args: {
 	if (args.settings.maxStallTurns > 0 && state.stallTurns >= args.settings.maxStallTurns) {
 		return {
 			...baseDecision,
-			action: "ask-user",
+			action: "continue",
 			reasonCode: "stall_limit_reached",
-			message: `The goal has reached the maximum stall limit of ${args.settings.maxStallTurns} turns.`,
+			message: `The goal has reached the recovery threshold of ${args.settings.maxStallTurns} unchanged turns. Do not repeat the same operation: inspect failure evidence, use a different approach, tool, or route, and keep working unless a true owner/approval boundary is proven.`,
 		};
 	}
 

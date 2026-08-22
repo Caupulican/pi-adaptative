@@ -428,7 +428,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"After bounded read-only survey, make the project-relative delivery contract explicit in the goal requirements: POC/MVP proves the requested capability; complete means full integration across affected project surfaces.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
-			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned running or cited non-completed tool_task, and no active pipeline. block_goal needs same real impasse for 3 goal turns.",
+			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned running or cited non-completed tool_task, and no active pipeline. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
 		parameters: goalSchema,
 		renderShell: "self",
@@ -701,7 +701,7 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		name: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
-			"Update the existing goal. Set active only after concrete, verifiable progress in the current turn. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only after the same blocking condition has recurred for at least three consecutive goal turns and no meaningful progress is possible without user input or external change; include that condition in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+			"Update the existing goal. Set active only after concrete, verifiable progress in the current turn. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only when the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; include the evidence and attempted approaches in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
 		promptSnippet: "Update goal; complete/block only with evidence.",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {

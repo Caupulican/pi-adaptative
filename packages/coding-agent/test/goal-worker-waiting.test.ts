@@ -215,7 +215,7 @@ describe("the never-hang wait-timeout escalates a hung worker instead of waiting
 		expect(snapshot.continuation.reasonCode).toBe("worker_in_flight");
 	});
 
-	it("a bound-in-flight requirement past maxWorkerWaitMs escalates to action:'ask-user'/reasonCode:'worker_wait_timeout' instead of waiting forever", () => {
+	it("a bound-in-flight requirement past maxWorkerWaitMs continues into worker recovery instead of waiting forever", () => {
 		const sessionManager = InMemorySessionManager.inMemory();
 		const controller = new BackgroundLaneController(
 			buildLaneControllerDeps({ getSessionManager: () => sessionManager }),
@@ -242,7 +242,7 @@ describe("the never-hang wait-timeout escalates a hung worker instead of waiting
 			maxWorkerWaitMs: 60 * 60_000,
 		});
 
-		expect(snapshot.continuation.action).toBe("ask-user");
+		expect(snapshot.continuation.action).toBe("continue");
 		expect(snapshot.continuation.reasonCode).toBe("worker_wait_timeout");
 	});
 });

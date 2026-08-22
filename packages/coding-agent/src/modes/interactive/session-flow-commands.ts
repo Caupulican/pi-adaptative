@@ -30,6 +30,7 @@ import {
 	editPersistedGoal,
 	type GoalStateRevision,
 	getGoalStateRevision,
+	isSystemBlockedGoal,
 	pausePersistedGoal,
 	replaceGoal,
 	resumeGoal,
@@ -484,6 +485,13 @@ async function switchSession(
 
 async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> {
 	const state = host.session.getGoalStateSnapshot();
+	if (state && isSystemBlockedGoal(state)) {
+		const resumed = host.session.restoreGoalRuntimeAfterResume();
+		if (resumed) {
+			host.refreshAutonomyFooterStatus();
+			return true;
+		}
+	}
 	if (!state || (state.status !== "paused" && state.status !== "blocked" && state.status !== "usage_limited")) {
 		host.session.restoreGoalRuntimeAfterResume();
 		return false;
@@ -921,7 +929,7 @@ export async function handleGoalContinueCommand(host: GoalContinueCommandHost, t
 	}
 
 	host.showStatus(
-		`Goal continuation started: ${parsed.maxTurns === 0 ? "unbounded turns" : `up to ${parsed.maxTurns} turn(s)`}, stall limit ${parsed.maxStallTurns}, wall-clock limit ${parsed.maxWallClockMinutes || "disabled"} minute(s).`,
+		`Goal continuation started: ${parsed.maxTurns === 0 ? "unbounded turns" : `up to ${parsed.maxTurns} turn(s)`}, recovery threshold ${parsed.maxStallTurns}, wall-clock limit ${parsed.maxWallClockMinutes || "disabled"} minute(s).`,
 	);
 	try {
 		const result = await host.session.continueGoalLoop({

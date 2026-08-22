@@ -319,6 +319,58 @@ describe("tool-failure recovery restore", () => {
 		}
 	});
 
+	it("re-admits multiple failed Bash operations after one real world advance", () => {
+		const bashSchema = Type.Object({ command: Type.String() });
+		const bash: AgentTool<typeof bashSchema> = {
+			name: "bash",
+			label: "bash",
+			description: "bash",
+			parameters: bashSchema,
+			async execute() {
+				throw new Error("must not execute during recovery-state testing");
+			},
+		};
+		const read: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "read",
+			parameters: Type.Object({ path: Type.String() }),
+			async execute() {
+				return { content: [{ type: "text", text: "current source" }], details: {} };
+			},
+		};
+		const commands = [{ command: "first failing probe" }, { command: "second failing probe" }];
+		const gate = new ToolFailureRecoveryGate();
+		const tracker = new Map();
+
+		for (const args of commands) {
+			gate.apply({
+				kind: "unproductive",
+				tool: bash,
+				args,
+				record: rememberToolFailure(
+					tracker,
+					"bash",
+					args,
+					"failed",
+					"exit_1",
+					"Inspect the failure evidence before retrying.",
+				),
+			});
+			expect(gate.admit(bash, args, undefined, [])).toMatchObject({ kind: "blocked" });
+		}
+
+		expect(gate.admit(read, { path: "subject.ts" }, undefined, [])).toEqual({ kind: "allowed" });
+		gate.apply({ kind: "success", tool: read, args: { path: "subject.ts" } });
+
+		for (const args of commands) {
+			expect(gate.admit(bash, args, undefined, [])).toEqual({ kind: "allowed" });
+		}
+		expect(gate.admit(bash, { command: "materially different recovery" }, undefined, [])).toEqual({
+			kind: "allowed",
+		});
+	});
+
 	it("restores a refused operation from the transcript and re-admits it after a later success", () => {
 		const args = { command: "run focused tests" };
 		const tracker = new Map();

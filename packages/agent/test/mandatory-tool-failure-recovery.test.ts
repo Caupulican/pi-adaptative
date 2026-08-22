@@ -490,6 +490,165 @@ describe("mandatory tool failure recovery protocol", () => {
 		).toBe(false);
 	});
 
+	it("does not treat internal custom steering as a new owner turn", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		let executions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a shell command",
+			parameters: schema,
+			async execute() {
+				executions++;
+				throw new Error("search rejected\nCommand exited with code 2");
+			},
+		};
+		let providerTurns = 0;
+		let steeringPolls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				stream.push({
+					type: "done",
+					reason: providerTurns <= 2 ? "toolUse" : "stop",
+					message:
+						providerTurns <= 2
+							? assistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: `bash-${providerTurns}`,
+											name: "bash",
+											arguments: { command: "find /workspace -name '*.ts'" },
+										},
+									],
+									"toolUse",
+								)
+							: assistantMessage([{ type: "text", text: "reported" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "find the source file", timestamp: 1 }],
+				{ systemPrompt: "base", messages: [], tools: [tool] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 0,
+					getSteeringMessages: async () => {
+						steeringPolls++;
+						if (steeringPolls !== 2) return [];
+						return [
+							{
+								role: "custom",
+								customType: "internal_recovery_notice",
+								content: "internal notice",
+								display: false,
+								timestamp: 2,
+							},
+						];
+					},
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(providerTurns).toBe(3);
+		expect(executions).toBe(1);
+		const bashResults = events.filter((event) => event.type === "message_end" && event.message.role === "toolResult");
+		expect(bashResults).toHaveLength(2);
+		expect(
+			bashResults.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "toolResult" &&
+					event.message.content.some(
+						(block) => block.type === "text" && block.text.includes('"failure_code":"repeated_failed_operation"'),
+					),
+			),
+		).toBe(true);
+	});
+
+	it("counts every queued owner message so live and restored recovery cursors stay aligned", async () => {
+		const schema = Type.Object({ command: Type.String() });
+		const executions = new Map<string, number>();
+		const tool: AgentTool<typeof schema> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a shell command",
+			parameters: schema,
+			async execute(_toolCallId, args) {
+				executions.set(args.command, (executions.get(args.command) ?? 0) + 1);
+				throw new Error("probe failed\nCommand exited with code 2");
+			},
+		};
+		let providerTurns = 0;
+		let steeringPolls = 0;
+		const originalCommand = "original failing probe";
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				const content =
+					providerTurns === 3
+						? Array.from({ length: 64 }, (_, index) => ({
+								type: "toolCall" as const,
+								id: `evict-${index}`,
+								name: "bash",
+								arguments: { command: `distinct failing probe ${index}` },
+							}))
+						: providerTurns <= 4
+							? [
+									{
+										type: "toolCall" as const,
+										id: `original-${providerTurns}`,
+										name: "bash",
+										arguments: { command: originalCommand },
+									},
+								]
+							: [{ type: "text" as const, text: "reported" }];
+				stream.push({
+					type: "done",
+					reason: providerTurns <= 4 ? "toolUse" : "stop",
+					message: assistantMessage(content, providerTurns <= 4 ? "toolUse" : "stop"),
+				});
+			});
+			return stream;
+		};
+
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "investigate", timestamp: 1 }],
+				{ systemPrompt: "base", messages: [], tools: [tool] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 0,
+					getSteeringMessages: async () => {
+						steeringPolls++;
+						if (steeringPolls === 2) {
+							return [
+								{ role: "user", content: "first owner correction", timestamp: 2 },
+								{ role: "user", content: "second owner correction", timestamp: 3 },
+							];
+						}
+						return steeringPolls === 4 ? [{ role: "user", content: "third owner correction", timestamp: 4 }] : [];
+					},
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(providerTurns).toBe(5);
+		expect(executions.get(originalCommand)).toBe(3);
+	});
+
 	it("leads with catalogued policy guidance before the gate's loaded actions", async () => {
 		const schema = Type.Object({ path: Type.String() });
 		const targetKind = "test.file.exists";

@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Added OpenRouter's `stealth/ox-alpha` model to the generated catalog.
+
+### Changed
+
+- Refreshed generated provider catalogs from their live upstream sources.
+
+### Fixed
+
+- Normalized Cloudflare AI Gateway Anthropic passthrough entries to native hyphenated model IDs when upstream catalogs expose dotted aliases.
+
 ## [0.96.0] - 2026-08-22
 
 ## [0.95.0] - 2026-08-22

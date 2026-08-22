@@ -107,7 +107,7 @@ describe("Goal State (Phase 4)", () => {
 		expect(state.lastProgressAt).toBe("T2");
 	});
 
-	it("no-progress loop stops at max stall turns", () => {
+	it("no-progress signals do not terminalize an active goal", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
 		expect(shouldContinueGoalLoop({ state, maxStallTurns: 2, now: "T0" })).toBe(true);
 
@@ -115,7 +115,7 @@ describe("Goal State (Phase 4)", () => {
 		expect(shouldContinueGoalLoop({ state, maxStallTurns: 2, now: "T1" })).toBe(true);
 
 		state = applyGoalEvent(state, { type: "no_progress", now: "T2" });
-		expect(shouldContinueGoalLoop({ state, maxStallTurns: 2, now: "T2" })).toBe(false); // stallTurns = 2
+		expect(shouldContinueGoalLoop({ state, maxStallTurns: 2, now: "T2" })).toBe(true); // recovery threshold
 	});
 
 	it("completed/blocked/cancelled goals do not continue", () => {

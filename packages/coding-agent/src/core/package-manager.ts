@@ -37,7 +37,13 @@ import { isStdoutTakenOver } from "./output-guard.ts";
 import { createResourceIgnoreMatcher, toPosixResourcePath } from "./resource-ignore.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { collectResourceFilesRecursively, readResourceDirectory } from "./resource-traversal.ts";
-import type { PackageSource, ResourceProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
+import {
+	isResourceEnabledByTopLevelOverrides,
+	type PackageSource,
+	type ResourceProfileSettings,
+	type Settings,
+	type SettingsManager,
+} from "./settings-manager.ts";
 import { discoverSkillFiles, type SkillDiscoveryMode } from "./skill-discovery.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
 
@@ -435,10 +441,6 @@ function matchesAnyExactPattern(filePath: string, patterns: string[], baseDir: s
 	});
 }
 
-function getOverridePatterns(entries: string[]): string[] {
-	return entries.filter((pattern) => pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"));
-}
-
 function toDisabledOverride(pattern: string): string | null {
 	const trimmed = pattern.trim();
 	if (!trimmed) return null;
@@ -454,25 +456,6 @@ function mergeResourceOverrides(settings: Settings, resourceType: ResourceType):
 		? disabledResources[resourceType]!.map(toDisabledOverride).filter((value): value is string => Boolean(value))
 		: [];
 	return [...base, ...disabled];
-}
-
-function isEnabledByOverrides(filePath: string, patterns: string[], baseDir: string): boolean {
-	const overrides = getOverridePatterns(patterns);
-	const excludes = overrides.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
-	const forceIncludes = overrides.filter((pattern) => pattern.startsWith("+")).map((pattern) => pattern.slice(1));
-	const forceExcludes = overrides.filter((pattern) => pattern.startsWith("-")).map((pattern) => pattern.slice(1));
-
-	let enabled = true;
-	if (excludes.length > 0 && matchesAnyPattern(filePath, excludes, baseDir)) {
-		enabled = false;
-	}
-	if (forceIncludes.length > 0 && matchesAnyExactPattern(filePath, forceIncludes, baseDir)) {
-		enabled = true;
-	}
-	if (forceExcludes.length > 0 && matchesAnyExactPattern(filePath, forceExcludes, baseDir)) {
-		enabled = false;
-	}
-	return enabled;
 }
 
 /**
@@ -2031,7 +2014,7 @@ export class DefaultPackageManager implements PackageManager {
 		) => {
 			const target = this.getTargetMap(accumulator, resourceType);
 			for (const path of paths) {
-				const enabled = isEnabledByOverrides(path, overrides, baseDir);
+				const enabled = isResourceEnabledByTopLevelOverrides(path, overrides, baseDir);
 				this.addResource(target, path, metadata, enabled);
 			}
 		};

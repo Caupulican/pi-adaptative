@@ -215,6 +215,12 @@ const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 ]);
 const BEDROCK_INFERENCE_PROFILE_ONLY_MODEL_IDS = new Set(["anthropic.claude-opus-5"]);
 
+function normalizeCloudflareAnthropicModelId(modelId: string): string {
+	// Cloudflare's Anthropic passthrough accepts Anthropic's native hyphenated
+	// IDs, while models.dev currently publishes dotted display aliases.
+	return modelId.replace(/^(claude-(?:haiku|opus|sonnet)-\d+)\.(\d+)(?=-|$)/, "$1-$2");
+}
+
 const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	minimal: null,
 	low: null,
@@ -822,7 +828,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				} else if (upstream === "anthropic") {
 					api = "anthropic-messages";
 					baseUrl = CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL;
-					id = nativeId;
+					id = normalizeCloudflareAnthropicModelId(nativeId);
 				} else if (upstream === "workers-ai") {
 					api = "openai-completions";
 					baseUrl = CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL;

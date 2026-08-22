@@ -335,10 +335,11 @@ async function runLoop(
 	const processPendingMessages = async (): Promise<void> => {
 		if (pendingMessages.length === 0) return;
 		lastSuccessfulTextProtocolBatch = undefined;
-		// A new user turn can change authority, intent, or the workspace itself, so every
-		// operation that was blocked as an unproductive replay becomes worth attempting again.
-		toolFailureRecoveryGate.noteWorldAdvance();
+		// Only an owner/user turn can change authority or intent. Internal custom steering and
+		// follow-up messages must not re-admit a known-bad unchanged operation. Count every owner
+		// message so live admission stays byte-for-byte aligned with transcript restoration.
 		for (const message of pendingMessages) {
+			if (message.role === "user") toolFailureRecoveryGate.noteWorldAdvance();
 			await emit({ type: "message_start", message });
 			await emit({ type: "message_end", message });
 			currentContext.messages.push(message);

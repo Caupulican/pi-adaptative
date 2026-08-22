@@ -891,8 +891,9 @@ class AutonomySettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "autonomy-max-stall-turns",
-				label: "Goal stall limit",
-				description: "Maximum no-progress rounds before Pi stops continuing and asks the user",
+				label: "Goal recovery threshold",
+				description:
+					"Unchanged rounds before Pi must inspect failure evidence and switch approach without stopping",
 				currentValue: autonomyMaxStallTurnsValue(this.state),
 				values: AUTONOMY_MAX_STALL_TURN_VALUES,
 			},

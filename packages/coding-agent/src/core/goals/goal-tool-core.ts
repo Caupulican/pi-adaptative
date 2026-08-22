@@ -379,7 +379,7 @@ function toGoalEvent(
 			if (state.stallTurns < MIN_AGENT_BLOCK_STALL_TURNS) {
 				return {
 					ok: false,
-					error: `Cannot block goal: the host has recorded ${state.stallTurns}/${MIN_AGENT_BLOCK_STALL_TURNS} consecutive no-progress goal turns. Keep the goal active until the same blocker has persisted for at least three consecutive goal turns.`,
+					error: `Cannot block goal: the host has recorded ${state.stallTurns}/${MIN_AGENT_BLOCK_STALL_TURNS} consecutive no-progress goal turns. Keep the goal active until the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change.`,
 				};
 			}
 			return { ok: true, event: { type: "block_goal", reason, now } };
