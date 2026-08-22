@@ -316,7 +316,7 @@ describe("delegate status/review surfaces unreviewed mutations", () => {
 			getWorkerClaimSnapshots: () => [{ ...baseClaim, blockers: ["x"], parentReviewRequired: true }],
 		});
 		const result = await tool.execute("call", { laneId: "req-1", action: "review" }, undefined, undefined, context);
-		expect(textOf(result)).toContain("not available");
+		expect(textOf(result)).toContain("delegate action is unavailable to this caller: review");
 	});
 
 	it("unreviewed mutations stay visible even when pushed out of the recent-10 window by newer lanes", async () => {
