@@ -8,6 +8,7 @@ const TEXT_MODELS = [
 	"deepseek-v4-flash",
 	"deepseek-v4-flash-0731",
 	"deepseek-v4-pro",
+	"deepseek-v4-pro-0813",
 	"glm-5",
 	"glm-5.1",
 	"glm-5.2",
