@@ -49,6 +49,7 @@ export interface AdaptiveStreamIdleInput {
 	promptTokens: number;
 	ceilingMs?: number;
 	localClass?: boolean;
+	provider?: string;
 }
 
 export interface ModelPerfProfileStreamRecorder {
@@ -148,8 +149,16 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 	const localConnectDefaultMs = input.localClass
 		? Math.max(input.base.connectMs, input.base.quietIdleMs)
 		: input.base.connectMs;
+	// Grok CLI keeps the accepted stream alive while the model is silent before its first generated
+	// block. xAI therefore uses the same allowance before and after first thinking progress instead
+	// of Pi's generic short first-token bound. The HTTP constraint has already bounded quietIdleMs.
+	const firstProgressDefaultMs =
+		input.provider === "xai"
+			? Math.max(input.base.firstProgressMs, input.base.quietIdleMs)
+			: input.base.firstProgressMs;
+	if (firstProgressDefaultMs > input.base.firstProgressMs) result.firstProgressMs = firstProgressDefaultMs;
 	const firstProgressCeilingMs = Math.max(
-		input.base.firstProgressMs,
+		firstProgressDefaultMs,
 		input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 	);
 	const quietCeilingMs = Math.max(input.base.quietIdleMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
@@ -157,8 +166,9 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 
 	const expectedPrefillMs = expectedPrefillFromProfile(profile, input.promptTokens);
 	if (expectedPrefillMs !== undefined) {
-		const firstProgressMs = adaptiveBound(input.base.firstProgressMs, firstProgressCeilingMs, expectedPrefillMs);
-		if (firstProgressMs > input.base.firstProgressMs) result.firstProgressMs = firstProgressMs;
+		const firstProgressMs = adaptiveBound(firstProgressDefaultMs, firstProgressCeilingMs, expectedPrefillMs);
+		const currentFirstProgressMs = result.firstProgressMs ?? input.base.firstProgressMs;
+		if (firstProgressMs > currentFirstProgressMs) result.firstProgressMs = firstProgressMs;
 		const quietIdleMs = adaptiveBound(input.base.quietIdleMs, quietCeilingMs, expectedPrefillMs);
 		if (quietIdleMs > input.base.quietIdleMs) result.quietIdleMs = quietIdleMs;
 	}

@@ -72,4 +72,26 @@ describe("AssistantMessageComponent", () => {
 		expect(rendered).not.toContain("Thinking...");
 		expect(rendered).toContain("answer");
 	});
+
+	test("keeps signed commentary and orchestration payloads out of the transcript", () => {
+		initTheme("dark");
+		const commentarySignature = JSON.stringify({ v: 1, id: "commentary", phase: "commentary" });
+		const finalSignature = JSON.stringify({ v: 1, id: "final", phase: "final_answer" });
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([
+				{
+					type: "text",
+					text: '{"action":"advance","id":"step-3","evidence":["internal"]}',
+					textSignature: commentarySignature,
+				},
+				{ type: "text", text: "Continuing verification", textSignature: commentarySignature },
+				{ type: "text", text: "Verified result", textSignature: finalSignature },
+			]),
+		);
+		const rendered = component.render(100).join("\n");
+
+		expect(rendered).toContain("Verified result");
+		expect(rendered).not.toContain('"action"');
+		expect(rendered).not.toContain("Continuing verification");
+	});
 });

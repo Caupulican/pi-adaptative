@@ -139,13 +139,22 @@ describe("RetryController", () => {
 		expect(await controller.prepareRetry(failure)).toBe(false);
 	});
 
+	it("does not retry when the provider explicitly vetoes a transient retry", async () => {
+		const failure = errorMessage("429 rate limited\nProvider retry directive: do not retry.");
+		const { agent, controller, startInfos } = setup({ messages: [failure] });
+
+		expect(await controller.prepareRetry(failure)).toBe(false);
+		expect(startInfos).toEqual([]);
+		expect(agent.state.messages).toEqual([failure]);
+	});
+
 	it("does not retry context-overflow failures (routed to compaction, not retry)", async () => {
 		const failure = errorMessage("prompt is too long: 213462 tokens > 200000 maximum");
 		const { controller } = setup({ messages: [failure] });
 		expect(await controller.prepareRetry(failure)).toBe(false);
 	});
 
-	it("honors provider retry-after hints and caps them at maxDelayMs", async () => {
+	it("honors provider retry-after hints and rejects waits above maxDelayMs", async () => {
 		const hinted = errorMessage("rate limit exceeded; retry in 20s");
 		const first = setup({ messages: [hinted], policy: { baseDelayMs: 4, maxDelayMs: 30_000 } });
 		const firstPending = first.controller.prepareRetry(hinted);
@@ -153,10 +162,25 @@ describe("RetryController", () => {
 		first.controller.abort();
 		await firstPending;
 
-		const capped = errorMessage("rate limit exceeded; retry in 999s");
-		const second = setup({ messages: [capped], policy: { baseDelayMs: 4, maxDelayMs: 30_000 } });
-		const secondPending = second.controller.prepareRetry(capped);
-		expect(second.startInfos[0].delayMs).toBe(30_000);
+		const overBound = errorMessage("rate limit exceeded; retry in 999s");
+		const second = setup({ messages: [overBound], policy: { baseDelayMs: 4, maxDelayMs: 30_000 } });
+		expect(await second.controller.prepareRetry(overBound)).toBe(false);
+		expect(second.startInfos).toEqual([]);
+		expect(second.agent.state.messages).toEqual([overBound]);
+	});
+
+	it("waits for a mixed-unit provider boundary while preserving no-hint fallback backoff", async () => {
+		const bounded = errorMessage("429 rate limit exceeded; Please try again in 1m19.542s.");
+		const first = setup({ messages: [bounded], policy: { baseDelayMs: 4 } });
+		const firstPending = first.controller.prepareRetry(bounded);
+		expect(first.startInfos[0].delayMs).toBe(79_542);
+		first.controller.abort();
+		await firstPending;
+
+		const noHint = errorMessage("429 rate limit exceeded");
+		const second = setup({ messages: [noHint], policy: { baseDelayMs: 4 } });
+		const secondPending = second.controller.prepareRetry(noHint);
+		expect(second.startInfos[0].delayMs).toBe(4);
 		second.controller.abort();
 		await secondPending;
 	});

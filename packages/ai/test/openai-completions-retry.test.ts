@@ -5,6 +5,7 @@ import type { Context, Model } from "../src/types.ts";
 const mockState = vi.hoisted(() => ({
 	requestOptions: [] as unknown[],
 	failuresRemaining: 0,
+	failureHeaders: { "retry-after-ms": "0" } as Record<string, string>,
 }));
 
 vi.mock("openai", () => {
@@ -36,7 +37,7 @@ vi.mock("openai", () => {
 							mockState.failuresRemaining--;
 							throw Object.assign(new Error("retry"), {
 								status: 429,
-								headers: new Headers({ "retry-after-ms": "0" }),
+								headers: new Headers(mockState.failureHeaders),
 							});
 						}
 						return {
@@ -83,6 +84,7 @@ describe("openai-completions provider retries", () => {
 	beforeEach(() => {
 		mockState.requestOptions = [];
 		mockState.failuresRemaining = 0;
+		mockState.failureHeaders = { "retry-after-ms": "0" };
 	});
 
 	it("disables SDK retries by default", async () => {
@@ -98,5 +100,42 @@ describe("openai-completions provider retries", () => {
 			expect.objectContaining({ maxRetries: 0 }),
 			expect.objectContaining({ maxRetries: 0 }),
 		]);
+	});
+
+	it("preserves final Retry-After guidance for every downstream retry owner", async () => {
+		mockState.failuresRemaining = 1;
+		mockState.failureHeaders = { "retry-after": "19.542" };
+
+		const result = await consume();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Provider retry directive: retry after 19.542s.");
+	});
+
+	it("fails closed instead of shortening a Retry-After above the configured bound", async () => {
+		mockState.failuresRemaining = 1;
+		mockState.failureHeaders = { "retry-after": "79.542" };
+
+		const result = await consume();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Server requested 79.542s retry delay (max: 60s).");
+		expect(result.errorMessage).toContain("Provider retry directive: do not retry.");
+	});
+
+	it("preserves an explicit provider no-retry directive", async () => {
+		mockState.failuresRemaining = 1;
+		mockState.failureHeaders = { "x-should-retry": "false" };
+
+		const result = await consume();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Provider retry directive: do not retry.");
+	});
+
+	it("does not invent retry guidance when the provider sends none", async () => {
+		mockState.failuresRemaining = 1;
+		mockState.failureHeaders = {};
+
+		const result = await consume();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).not.toContain("Provider retry directive:");
 	});
 });

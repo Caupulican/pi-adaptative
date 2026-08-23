@@ -2,8 +2,10 @@ import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import {
 	type ClassifiedError,
 	classifyFailure,
+	computeRetryDelayMs,
 	DEFAULT_RETRY_POLICY,
 	RetryController,
+	RetryDelayExceededError,
 } from "@caupulican/pi-agent-core/reliability";
 import type { AgentEvent, AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
@@ -56,16 +58,7 @@ export class ForegroundRecoveryController {
 		this.deps = deps;
 		this.retry = new RetryController(
 			deps.agent,
-			() => {
-				const retry = deps.settingsManager.getRetrySettings();
-				return {
-					enabled: retry.enabled,
-					maxAttempts: retry.maxRetries,
-					baseDelayMs: retry.baseDelayMs,
-					maxDelayMs: DEFAULT_RETRY_POLICY.maxDelayMs,
-					jitterRatio: 0,
-				};
-			},
+			() => this.getRetryPolicy(),
 			{
 				onRetryStart: (info) => deps.emit({ type: "auto_retry_start", ...info }),
 				onRetryEnd: (info) => deps.emit({ type: "auto_retry_end", ...info }),
@@ -80,6 +73,19 @@ export class ForegroundRecoveryController {
 			emit: (event) => deps.emit(event),
 			recordFailure: (record) => deps.failureCorpus.record(record),
 		});
+	}
+
+	private getRetryPolicy() {
+		const retry = this.deps.settingsManager.getRetrySettings();
+		const providerRetry = this.deps.settingsManager.getProviderRetrySettings();
+		return {
+			enabled: retry.enabled,
+			maxAttempts: retry.maxRetries,
+			baseDelayMs: retry.baseDelayMs,
+			maxDelayMs: DEFAULT_RETRY_POLICY.maxDelayMs,
+			maxRetryAfterMs: providerRetry.maxRetryDelayMs,
+			jitterRatio: 0,
+		};
 	}
 
 	get attempt(): number {
@@ -253,7 +259,18 @@ export class ForegroundRecoveryController {
 		if (!settings.enabled || this.retry.attempt >= settings.maxRetries) return false;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			const message = event.messages[index];
-			if (message.role === "assistant") return this.classifyAssistantError(message)?.retryable ?? false;
+			if (message.role !== "assistant") continue;
+			const classified = this.classifyAssistantError(message);
+			if (!classified?.retryable) return false;
+			try {
+				computeRetryDelayMs(this.getRetryPolicy(), this.retry.attempt + 1, {
+					retryAfterMs: classified.retryAfterMs,
+				});
+				return true;
+			} catch (error) {
+				if (error instanceof RetryDelayExceededError) return false;
+				throw error;
+			}
 		}
 		return false;
 	}

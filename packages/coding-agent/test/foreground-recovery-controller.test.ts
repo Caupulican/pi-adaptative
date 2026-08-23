@@ -28,6 +28,7 @@ function createFixture() {
 		agent,
 		settingsManager: {
 			getRetrySettings: () => ({ enabled: true, maxRetries: 3, baseDelayMs: 0 }),
+			getProviderRetrySettings: () => ({ maxRetryDelayMs: 60_000 }),
 			getFailoverSettings: () => ({ subscriptionHop: false }),
 		} as unknown as SettingsManager,
 		modelRegistry: {} as ModelRegistry,
@@ -83,5 +84,15 @@ describe("ForegroundRecoveryController", () => {
 
 		expect(fixture.retryStarts).toEqual([1, 2, 3]);
 		expect(fixture.checkCompaction).not.toHaveBeenCalled();
+	});
+
+	it("fails closed instead of shortening a provider wait above retry.provider.maxRetryDelayMs", async () => {
+		const fixture = createFixture();
+		fixture.checkCompaction.mockResolvedValue(false);
+		const failure = errorAssistant("openrouter", "429 rate limit exceeded. Please try again in 1m19.542s.");
+
+		const continued = await handleFailure(fixture, failure);
+		expect(fixture.retryStarts).toEqual([]);
+		expect(continued).toBe(false);
 	});
 });

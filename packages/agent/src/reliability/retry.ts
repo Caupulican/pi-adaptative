@@ -2,7 +2,10 @@
 export interface RetryPolicy {
 	maxAttempts: number;
 	baseDelayMs: number;
+	/** Cap for locally computed exponential backoff. */
 	maxDelayMs: number;
+	/** Longest provider-requested wait accepted; 0 disables this bound. Defaults to maxDelayMs. */
+	maxRetryAfterMs?: number;
 	/** Fraction of the computed delay added as uniform random jitter (0..1). */
 	jitterRatio: number;
 }
@@ -15,15 +18,35 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 };
 
 export interface ComputeRetryDelayOptions {
-	/** Provider-suggested delay (e.g. from Retry-After); wins over backoff but is capped. */
+	/** Provider-suggested minimum delay (e.g. from Retry-After); wins over local backoff. */
 	retryAfterMs?: number;
 	/** Injectable RNG for deterministic tests. Defaults to Math.random. */
 	random?: () => number;
 }
 
+export class RetryDelayExceededError extends Error {
+	readonly retryAfterMs: number;
+	readonly maxRetryAfterMs: number;
+
+	constructor(retryAfterMs: number, maxRetryAfterMs: number) {
+		super(
+			`Provider requested ${Math.ceil(retryAfterMs / 1000)}s retry delay (max: ${Math.ceil(maxRetryAfterMs / 1000)}s).\nProvider retry directive: do not retry.`,
+		);
+		this.name = "RetryDelayExceededError";
+		this.retryAfterMs = retryAfterMs;
+		this.maxRetryAfterMs = maxRetryAfterMs;
+	}
+}
+
 export function computeRetryDelayMs(policy: RetryPolicy, attempt: number, opts?: ComputeRetryDelayOptions): number {
 	if (opts?.retryAfterMs !== undefined) {
-		return Math.min(opts.retryAfterMs, policy.maxDelayMs);
+		const retryAfterMs = Math.max(0, opts.retryAfterMs);
+		if (!Number.isFinite(retryAfterMs)) throw new TypeError("Provider retry delay must be finite");
+		const maxRetryAfterMs = policy.maxRetryAfterMs ?? policy.maxDelayMs;
+		if (maxRetryAfterMs > 0 && retryAfterMs > maxRetryAfterMs) {
+			throw new RetryDelayExceededError(retryAfterMs, maxRetryAfterMs);
+		}
+		return retryAfterMs;
 	}
 	const exponential = Math.min(policy.baseDelayMs * 2 ** (Math.max(1, attempt) - 1), policy.maxDelayMs);
 	if (policy.jitterRatio <= 0) return exponential;

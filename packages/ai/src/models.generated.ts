@@ -16221,6 +16221,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: { max: "max" },
 			input: ["text", "image"],
 			cost: {
 				input: 0,

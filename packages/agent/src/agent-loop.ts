@@ -242,12 +242,29 @@ async function emitProviderTurnLimitStop(
 }
 
 /**
- * How many `stallLimit`-length periods the runaway-loop window spans. A window of `stallLimit * P`
- * turns lets the count-based detector catch oscillating cycles of period up to `P` (each signature in a
- * period-k cycle recurs ~window/k times), not just back-to-back repeats. Beyond this the cycle is loose
- * enough that it's indistinguishable from legitimate varied work, so we don't chase it.
+ * Maximum exact cycle width inspected by the runaway-loop backstop. Detection requires the complete
+ * suffix pattern to repeat `stallLimit` times; recurring housekeeping calls among distinct productive
+ * operations therefore never look like a loop merely because one signature is frequent.
  */
 const STALL_WINDOW_PERIODS = 4;
+
+function repeatsToolCallPattern(stallWindow: readonly string[], stallLimit: number): boolean {
+	if (stallLimit <= 0) return false;
+	const maxPeriod = Math.min(STALL_WINDOW_PERIODS, Math.floor(stallWindow.length / stallLimit));
+	for (let period = 1; period <= maxPeriod; period++) {
+		const requiredTurns = period * stallLimit;
+		const start = stallWindow.length - requiredTurns;
+		let matches = true;
+		for (let offset = period; offset < requiredTurns; offset++) {
+			if (stallWindow[start + offset] !== stallWindow[start + (offset % period)]) {
+				matches = false;
+				break;
+			}
+		}
+		if (matches) return true;
+	}
+	return false;
+}
 
 function textProtocolOperationArguments(toolCall: AgentToolCall): unknown {
 	const args: unknown = toolCall.arguments;
@@ -431,14 +448,15 @@ async function runLoop(
 
 			await emit({ type: "turn_end", message, toolResults });
 
-			// Runaway-loop backstop (cost guard): detect a model stuck repeating one action.
+			// Runaway-loop backstop (cost guard): detect only a repeated suffix cycle. Counting
+			// signatures anywhere in the window falsely stopped progressing workflows whose status
+			// checks recurred among distinct edits, reads, and verification operations.
 			if (stallLimit > 0 && toolCalls.length > 0) {
 				const signature = normalizeToolSignature(toolCalls.map((c) => [c.name, c.arguments ?? null]));
 				stallWindow.push(signature);
 				if (stallWindow.length > stallLimit * STALL_WINDOW_PERIODS) stallWindow.shift();
-				const repeats = stallWindow.reduce((n, s) => (s === signature ? n + 1 : n), 0);
-				if (repeats >= stallLimit) {
-					config.onRunawayStop?.({ reason: "repeated_tool_call", signature, repeats });
+				if (repeatsToolCallPattern(stallWindow, stallLimit)) {
+					config.onRunawayStop?.({ reason: "repeated_tool_call", signature, repeats: stallLimit });
 					await streamToollessClosingTurn(
 						currentContext,
 						newMessages,

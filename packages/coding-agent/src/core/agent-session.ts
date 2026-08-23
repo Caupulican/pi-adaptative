@@ -454,6 +454,7 @@ export class AgentSession {
 					profile,
 					promptTokens: estimateContextPromptTokens(context),
 					localClass: isWarmableLocalModel(model),
+					provider: model.provider,
 					ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 				});
 				return { ...httpBounded.options, ...adaptive };

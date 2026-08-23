@@ -5,6 +5,8 @@ import { PROVIDER_FAILURE_SIGNATURES } from "../../src/reliability/provider-sign
 const XAI_CAPACITY_ERROR =
 	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
 const XAI_GENERATION_ERROR = "Error Code null: Internal error during token generation";
+const OPENROUTER_RATE_LIMIT_ERROR =
+	"OpenRouter rate limit exceeded for model `openrouter/z-ai/glm-4.7` in organization `test` on tokens per min (TPM): Limit 10000, Used 0, Requested 23257. Please try again in 1m19.542s.";
 
 describe("classifyFailure", () => {
 	it("classifies rate limits as retryable + rotate + fallback", () => {
@@ -199,6 +201,44 @@ describe("classifyFailure", () => {
 		expect(classifyFailure({ message: 'overloaded {"retryDelay":"7s"}' }).retryAfterMs).toBe(7_000);
 		expect(classifyFailure({ message: "please retry in 2500 ms" }).retryAfterMs).toBe(2_500);
 		expect(classifyFailure({ message: "500 internal error" }).retryAfterMs).toBeUndefined();
+	});
+
+	it("extracts the exact mixed-unit OpenRouter retry boundary without guessing vague waits", () => {
+		expect(classifyFailure({ provider: "openrouter", message: OPENROUTER_RATE_LIMIT_ERROR })).toMatchObject({
+			reason: "rate_limit",
+			retryable: true,
+			retryAfterMs: 79_542,
+		});
+		expect(
+			classifyFailure({ message: "429 rate limited\nProvider retry directive: retry after 79.542s." }).retryAfterMs,
+		).toBe(79_542);
+		expect(classifyFailure({ message: "rate limited; try again in a few minutes" }).retryAfterMs).toBeUndefined();
+	});
+
+	it("never shortens a provider boundary when body and canonical guidance disagree", () => {
+		expect(
+			classifyFailure({
+				message: "429 rate limited; retry after 2s\nProvider retry directive: retry after 79.542s.",
+			}).retryAfterMs,
+		).toBe(79_542);
+	});
+
+	it("promotes an explicit provider retry directive even when the status is normally terminal", () => {
+		expect(
+			classifyFailure({ message: "404 model unavailable\nProvider retry directive: retry after 1.25s." }),
+		).toMatchObject({
+			reason: "server_error",
+			retryable: true,
+			retryAfterMs: 1_250,
+		});
+	});
+
+	it("lets an explicit provider no-retry directive veto generic transient classification", () => {
+		expect(classifyFailure({ message: "429 rate limited\nProvider retry directive: do not retry." })).toMatchObject({
+			reason: "rate_limit",
+			retryable: false,
+			shouldFallback: true,
+		});
 	});
 
 	it("matches numeric status codes only as standalone codes", () => {

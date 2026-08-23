@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made foreground and delegated-worker retries honor provider wait boundaries and fail closed when a requested wait exceeds the configured maximum.
+- Kept signed commentary and orchestration payloads out of the visible assistant transcript while retaining normal assistant text.
+- Let accepted xAI streams use the HTTP-bounded quiet-stream allowance before first generated progress instead of the generic short first-token timeout.
+
 ## [0.96.1] - 2026-08-22
 
 ### Changed

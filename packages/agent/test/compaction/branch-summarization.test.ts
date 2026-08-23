@@ -4,7 +4,7 @@ import {
 	fauxAssistantMessage,
 	type Model,
 } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateBranchSummary, prepareBranchEntries } from "../../src/compaction/branch-summarization.ts";
 import type { SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 import type { StreamFn } from "../../src/types.ts";
@@ -39,6 +39,10 @@ function streamWith(event: AssistantMessageEvent): ReturnType<StreamFn> {
 	queueMicrotask(() => stream.push(event));
 	return stream;
 }
+
+afterEach(() => {
+	vi.useRealTimers();
+});
 
 describe("generateBranchSummary reliability", () => {
 	it("ignores malformed persisted file-operation values", () => {
@@ -81,6 +85,7 @@ describe("generateBranchSummary reliability", () => {
 	});
 
 	it("classifies and retries stalled stream errors instead of hanging", async () => {
+		vi.useFakeTimers();
 		let calls = 0;
 		const streamFn: StreamFn = () => {
 			calls++;
@@ -94,14 +99,55 @@ describe("generateBranchSummary reliability", () => {
 			});
 		};
 
-		const result = await generateBranchSummary([entry("summarize me")], {
+		const resultPromise = generateBranchSummary([entry("summarize me")], {
 			model: createModel(),
 			apiKey: "key",
 			signal: new AbortController().signal,
 			streamFn,
 		});
+		await vi.runAllTimersAsync();
+		const result = await resultPromise;
 
 		expect(calls).toBe(3);
 		expect(result.error).toContain("stream stalled");
+	});
+
+	it("does not reissue a branch-summary request before the provider boundary", async () => {
+		vi.useFakeTimers();
+		let calls = 0;
+		const streamFn: StreamFn = () => {
+			calls++;
+			return streamWith(
+				calls === 1
+					? {
+							type: "error",
+							reason: "error",
+							error: fauxAssistantMessage("", {
+								stopReason: "error",
+								errorMessage: "429 rate limited. Please try again in 1.5s.",
+							}),
+						}
+					: {
+							type: "done",
+							reason: "stop",
+							message: fauxAssistantMessage("## Goal\nretry succeeded"),
+						},
+			);
+		};
+
+		const resultPromise = generateBranchSummary([entry("summarize me")], {
+			model: createModel(),
+			apiKey: "key",
+			signal: new AbortController().signal,
+			streamFn,
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(calls).toBe(1);
+		await vi.advanceTimersByTimeAsync(1499);
+		expect(calls).toBe(1);
+		await vi.advanceTimersByTimeAsync(1);
+
+		await expect(resultPromise).resolves.toMatchObject({ summary: expect.stringContaining("retry succeeded") });
+		expect(calls).toBe(2);
 	});
 });

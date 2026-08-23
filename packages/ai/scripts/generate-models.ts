@@ -453,6 +453,11 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openai-codex" && isOpenAiGpt56(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null });
 	}
+	if (model.provider === "openrouter" && model.id === "stealth/ox-alpha") {
+		// Ox Alpha accepts OpenRouter's maximum reasoning effort. Keep this explicit so the
+		// catalog capability gate exposes --thinking max instead of silently clamping to high.
+		mergeThinkingLevelMap(model, { max: "max" });
+	}
 	if (model.provider === "openrouter" && model.id.startsWith("inception/mercury-2")) {
 		// Mercury 2 in instant mode (reasoning_effort: "none") disables tool calling.
 		// Mark "off" unsupported so the openai-completions provider omits the reasoning param

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Parsed mixed-unit provider retry windows, rejected over-bound waits instead of shortening them, and added abortable backoff to branch-summary retries.
+- Limited runaway stops to exact repeated no-progress call cycles, allowing recurring goal/task status calls interleaved with distinct successful work to continue.
+
 ## [0.96.1] - 2026-08-22
 
 ### Fixed

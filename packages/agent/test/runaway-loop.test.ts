@@ -673,6 +673,86 @@ describe("runaway-loop backstop", () => {
 		expect(events.filter((e) => e.type === "agent_end")).toHaveLength(1);
 	});
 
+	it("does not stop progressing work when housekeeping calls recur among distinct operations", async () => {
+		const sequence = [
+			"goal-status",
+			"task-status",
+			"edit-1",
+			"goal-status",
+			"task-status",
+			"read-1",
+			"goal-status",
+			"task-status",
+			"test-1",
+			"goal-status",
+		];
+		let providerTurns = 0;
+		let executions = 0;
+		let toolFreeTurns = 0;
+		const stalls: Array<{ signature: string; repeats: number }> = [];
+		const streamFn: StreamFn = (_model, providerContext) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				providerTurns++;
+				if (providerContext.tools?.length === 0) {
+					toolFreeTurns++;
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "premature guard close" }], "stop"),
+					});
+					return;
+				}
+				const value = sequence[providerTurns - 1];
+				if (value) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: assistantMessage(
+							[{ type: "toolCall", id: `work-${providerTurns}`, name: "echo", arguments: { value } }],
+							"toolUse",
+						),
+					});
+					return;
+				}
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage([{ type: "text", text: "all work complete" }], "stop"),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "complete the workflow", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [createEchoTool(() => executions++)] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 4,
+					onRunawayStop: (info) => stalls.push(info),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(stalls).toEqual([]);
+		expect(toolFreeTurns).toBe(0);
+		expect(executions).toBe(sequence.length);
+		expect(providerTurns).toBe(sequence.length + 1);
+		expect(
+			events.some(
+				(event) =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.content.some((block) => block.type === "text" && block.text === "all work complete"),
+			),
+		).toBe(true);
+	});
+
 	it("trips when only a volatile arg (timestamp) changes each call (bug #28)", async () => {
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [echoTool] };
 		const stalls: Array<{ signature: string; repeats: number }> = [];
@@ -1889,11 +1969,11 @@ describe("runaway-loop backstop", () => {
 
 		// Each successful repair genuinely moves the world, so each replay is genuinely admitted. That
 		// is correct per call and still unproductive in aggregate, which is exactly what the cost guard
-		// is for — the recovery gate itself never ends a run.
-		expect(turns).toBe(7);
+		// is for — after four complete two-operation cycles, not merely four sightings of one member.
+		expect(turns).toBe(8);
 		expect(deliveryTurns).toBe(1);
 		expect(targetExecutions).toBe(4);
-		expect(recoveryExecutions).toBe(3);
+		expect(recoveryExecutions).toBe(4);
 		expect(stalls).toMatchObject([{ reason: "repeated_tool_call" }]);
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 	});

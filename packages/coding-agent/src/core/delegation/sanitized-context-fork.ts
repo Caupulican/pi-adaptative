@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, TextContent, UserMessage } from "@caupulican/pi-ai";
+import { isAssistantCommentary } from "../message-phase.ts";
 import {
 	MAX_WORKER_CONTEXT_FORK_BYTES,
 	MAX_WORKER_CONTEXT_FORK_MESSAGES,
@@ -38,18 +39,6 @@ export function parseSanitizedContextForkMode(value: string): SanitizedContextFo
 	return { kind: "last_user_turns", count };
 }
 
-function hasCommentaryPhase(textSignature: string | undefined): boolean {
-	if (!textSignature?.startsWith("{")) return false;
-	try {
-		const parsed: unknown = JSON.parse(textSignature);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-		const phase = Object.getOwnPropertyDescriptor(parsed, "phase");
-		return phase !== undefined && "value" in phase && phase.value === "commentary";
-	} catch {
-		return false;
-	}
-}
-
 function sanitizedTextBlocks(
 	content: readonly ContextTextCandidate[],
 	dropCommentary: boolean,
@@ -59,7 +48,7 @@ function sanitizedTextBlocks(
 	let textBytes = 0;
 	for (const block of content) {
 		if (block.type !== "text" || !block.text.trim()) continue;
-		if (dropCommentary && hasCommentaryPhase(block.textSignature)) continue;
+		if (dropCommentary && isAssistantCommentary(block)) continue;
 		textBytes += Buffer.byteLength(block.text, "utf-8");
 		if (textBytes > MAX_WORKER_CONTEXT_FORK_BYTES) return { kind: "oversized" };
 		blocks.push({ type: "text", text: block.text });

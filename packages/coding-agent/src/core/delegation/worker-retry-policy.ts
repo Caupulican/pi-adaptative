@@ -1,4 +1,9 @@
-import { classifyFailure, computeRetryDelayMs, type RetryPolicy } from "@caupulican/pi-agent-core/reliability";
+import {
+	classifyFailure,
+	computeRetryDelayMs,
+	RetryDelayExceededError,
+	type RetryPolicy,
+} from "@caupulican/pi-agent-core/reliability";
 
 /**
  * Restart-durable, host-owned attempt ladder policy for delegated workers.
@@ -42,8 +47,14 @@ export function evaluateWorkerRetry(args: {
 	if (args.retriesUsed + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
 	const classified = classifyFailure({ message: args.reasonDetail, provider: args.provider });
 	if (!classified.retryable) return { retry: false, reason: `not_retryable_${classified.reason}` };
-	const delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, args.retriesUsed + 1, {
-		...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
-	});
+	let delayMs: number;
+	try {
+		delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, args.retriesUsed + 1, {
+			...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
+		});
+	} catch (error) {
+		if (error instanceof RetryDelayExceededError) return { retry: false, reason: "retry_delay_exceeds_max" };
+		throw error;
+	}
 	return { retry: true, reason: classified.reason, delayMs };
 }

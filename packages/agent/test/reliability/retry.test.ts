@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../../src/reliability/retry.ts";
+import {
+	computeRetryDelayMs,
+	DEFAULT_RETRY_POLICY,
+	RetryDelayExceededError,
+	sleepAbortable,
+} from "../../src/reliability/retry.ts";
 
 describe("computeRetryDelayMs", () => {
 	it("matches current AgentSession backoff exactly with zero jitter", () => {
@@ -19,9 +24,11 @@ describe("computeRetryDelayMs", () => {
 		expect(computeRetryDelayMs(policy, 1, { random: () => 1 })).toBe(3000); // 2000 + 0.5*2000*1
 	});
 
-	it("prefers a provider retry-after hint, still capped", () => {
+	it("prefers a provider retry-after hint but never shortens one above the wait bound", () => {
 		expect(computeRetryDelayMs(DEFAULT_RETRY_POLICY, 1, { retryAfterMs: 15_000 })).toBe(15_000);
-		expect(computeRetryDelayMs(DEFAULT_RETRY_POLICY, 1, { retryAfterMs: 500_000 })).toBe(120_000);
+		expect(() => computeRetryDelayMs(DEFAULT_RETRY_POLICY, 1, { retryAfterMs: 500_000 })).toThrow(
+			RetryDelayExceededError,
+		);
 	});
 });
 

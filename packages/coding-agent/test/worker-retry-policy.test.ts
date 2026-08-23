@@ -68,4 +68,10 @@ describe("worker retry policy", () => {
 		if (!decision.retry) return;
 		expect(decision.delayMs).toBe(2_000);
 	});
+
+	it("fails closed instead of shortening a provider delay above the worker wait bound", () => {
+		expect(
+			evaluateWorkerRetry({ ...base, reasonDetail: "429 rate limited; Please try again in 1m19.542s." }),
+		).toEqual({ retry: false, reason: "retry_delay_exceeds_max" });
+	});
 });

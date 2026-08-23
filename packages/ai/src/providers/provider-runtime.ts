@@ -14,7 +14,7 @@ import type {
 import { createEmptyUsage } from "../usage.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import type { ProviderRetryOptions } from "../utils/provider-retry.ts";
+import { appendProviderRetryDirective, type ProviderRetryOptions } from "../utils/provider-retry.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 type ProviderRequestOptions = Pick<StreamOptions | ImagesOptions, "signal" | "timeoutMs">;
@@ -155,7 +155,8 @@ export function terminateAssistantStreamWithError(
 		return;
 	}
 	output.stopReason = signal?.aborted ? "aborted" : "error";
-	output.errorMessage = options.formatError(error);
+	const formattedError = options.formatError(error);
+	output.errorMessage = signal?.aborted ? formattedError : appendProviderRetryDirective(formattedError, error);
 	stream.push({ type: "error", reason: output.stopReason, error: output });
 	stream.end();
 }

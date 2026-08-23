@@ -13,7 +13,13 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import { classifyFailure } from "../reliability/classifier.ts";
+import {
+	classifyFailure,
+	computeRetryDelayMs,
+	DEFAULT_RETRY_POLICY,
+	RetryDelayExceededError,
+	sleepAbortable,
+} from "../reliability/index.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session/session-manager.ts";
 import type { AgentMessage, StreamFn } from "../types.ts";
 import { addUsage, createEmptyUsage } from "../usage.ts";
@@ -340,7 +346,7 @@ export async function generateBranchSummary(
 	// use the same reliability doctrine as compaction instead of bypassing the host stream wrapper.
 	let response: AssistantMessage | undefined;
 	const usage = createEmptyUsage();
-	for (let attempt = 0; attempt < 3; attempt++) {
+	for (let attempt = 1; attempt <= DEFAULT_RETRY_POLICY.maxAttempts; attempt++) {
 		response = await completeBranchSummary(
 			model,
 			{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
@@ -350,7 +356,20 @@ export async function generateBranchSummary(
 		addUsage(usage, response.usage);
 		if (response.stopReason !== "error") break;
 		const classified = classifyFailure({ message: response.errorMessage ?? "", provider: response.provider });
-		if (!classified.retryable || signal.aborted) break;
+		if (!classified.retryable || signal.aborted || attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
+		try {
+			const delayMs = computeRetryDelayMs(DEFAULT_RETRY_POLICY, attempt, {
+				retryAfterMs: classified.retryAfterMs,
+			});
+			await sleepAbortable(delayMs, signal);
+		} catch (error) {
+			if (signal.aborted) return { aborted: true };
+			if (error instanceof RetryDelayExceededError) {
+				response.errorMessage = `${response.errorMessage || "Summarization failed"}\n${error.message}`;
+				break;
+			}
+			throw error;
+		}
 	}
 	if (!response) return { error: "Summarization failed" };
 

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved provider `Retry-After`, `x-should-retry`, and structured OpenRouter `availability.retryable` / `availability.retry_after` guidance across final assistant errors, and enforced `retry.provider.maxRetryDelayMs` before handing failures to agent-level recovery.
+- Exposed `max` reasoning for OpenRouter's `stealth/ox-alpha` catalog entry instead of silently clamping `--thinking max` to `high`.
+
 ## [0.96.1] - 2026-08-22
 
 ### Added

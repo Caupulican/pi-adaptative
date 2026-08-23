@@ -17,7 +17,7 @@ import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import type { AgentMessage } from "../types.ts";
 import { classifyFailure } from "./classifier.ts";
-import { computeRetryDelayMs, type RetryPolicy, sleepAbortable } from "./retry.ts";
+import { computeRetryDelayMs, RetryDelayExceededError, type RetryPolicy, sleepAbortable } from "./retry.ts";
 
 /** The slice of an Agent the retry driver reads and mutates: just the live transcript. */
 export interface RetryAgent {
@@ -134,14 +134,17 @@ export class RetryController {
 		}
 
 		const maxAttempts = effectiveMaxAttempts(message, classified.reason, policy.maxAttempts);
-		this._attempt++;
-		if (this._attempt > maxAttempts) {
-			// Preserve the completed attempt count so the host can emit the final failure.
-			this._attempt--;
-			return false;
-		}
+		const nextAttempt = this._attempt + 1;
+		if (nextAttempt > maxAttempts) return false;
 
-		const delayMs = computeRetryDelayMs(policy, this._attempt, { retryAfterMs: classified.retryAfterMs });
+		let delayMs: number;
+		try {
+			delayMs = computeRetryDelayMs(policy, nextAttempt, { retryAfterMs: classified.retryAfterMs });
+		} catch (error) {
+			if (error instanceof RetryDelayExceededError) return false;
+			throw error;
+		}
+		this._attempt = nextAttempt;
 
 		// The retry window counts as active work from the instant listeners hear about it:
 		// isRetrying must already be true inside onRetryStart handlers so prompts arriving there

@@ -55,24 +55,53 @@ const OVERLOADED = /overloaded/i;
 const STREAM_STALL =
 	/stream stalled|ended without|stream ended before message_stop|stream ended before a terminal response event|reset before headers/i;
 const SERVER_ERROR =
-	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|ResourceExhausted|retry delay|you can retry your request|try your request again|please retry your request/i;
+	/(?<![A-Za-z0-9])(?:500|502|503|504)(?![A-Za-z0-9])|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|upstream.?connect|http2 request did not get a response|ResourceExhausted|retry delay|provider retry directive:\s*retry|you can retry your request|try your request again|please retry your request/i;
 const NETWORK =
 	/network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|socket hang up|socket connection was closed|timed? out|timeout|terminated/i;
+const PROVIDER_NO_RETRY = /Provider retry directive:\s*do not retry\./i;
 
-const RETRY_AFTER_S = /retry.?(?:after|in)\s+(\d+(?:\.\d+)?)\s*s\b|"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i;
-const RETRY_AFTER_MS = /retry.?(?:after|in)\s+(\d+)\s*ms\b/i;
+const RETRY_DELAY_TEXT =
+	/(?:retry(?:\s+your\s+request)?|try(?:\s+your\s+request)?\s+again)\s+(?:after|in)\s+((?:\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\s*)+)/gi;
+const RETRY_DELAY_JSON = /"retryDelay"\s*:\s*"([^"]+)"/gi;
+const RETRY_DURATION_COMPONENT =
+	/(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)(?![A-Za-z])/gi;
+
+function parseRetryDurationMs(value: string): number | undefined {
+	let totalMs = 0;
+	let components = 0;
+	for (const match of value.matchAll(RETRY_DURATION_COMPONENT)) {
+		const amount = Number(match[1]);
+		if (!Number.isFinite(amount)) return undefined;
+		const unit = match[2].toLowerCase();
+		const multiplier =
+			unit === "ms" || unit.startsWith("millisecond")
+				? 1
+				: unit === "s" || unit.startsWith("sec")
+					? 1000
+					: unit === "m" || unit.startsWith("min")
+						? 60_000
+						: 3_600_000;
+		totalMs += amount * multiplier;
+		components++;
+	}
+	return components > 0 && Number.isFinite(totalMs) ? Math.round(totalMs) : undefined;
+}
 
 function parseRetryAfterMs(message: string): number | undefined {
-	const ms = RETRY_AFTER_MS.exec(message);
-	if (ms) return Number(ms[1]);
-	const s = RETRY_AFTER_S.exec(message);
-	if (s) return Math.round(Number(s[1] ?? s[2]) * 1000);
-	return undefined;
+	let longestDelayMs: number | undefined;
+	for (const pattern of [RETRY_DELAY_TEXT, RETRY_DELAY_JSON]) {
+		for (const match of message.matchAll(pattern)) {
+			const delayMs = parseRetryDurationMs(match[1]);
+			if (delayMs !== undefined) longestDelayMs = Math.max(longestDelayMs ?? 0, delayMs);
+		}
+	}
+	return longestDelayMs;
 }
 
 export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 	const message = input.message;
 	const retryAfterMs = parseRetryAfterMs(message);
+	const providerForbidsRetry = PROVIDER_NO_RETRY.test(message);
 
 	const base = {
 		retryable: false,
@@ -82,8 +111,10 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 		message,
 	};
 
-	const withRetry = <T extends { reason: FailureReason }>(obj: T): T | (T & { retryAfterMs: number }) =>
-		retryAfterMs !== undefined ? { ...obj, retryAfterMs } : obj;
+	const withRetry = (result: ClassifiedError): ClassifiedError => {
+		const withDelay = retryAfterMs !== undefined ? { ...result, retryAfterMs } : result;
+		return providerForbidsRetry && withDelay.retryable ? { ...withDelay, retryable: false } : withDelay;
+	};
 
 	if (input.aborted) return withRetry({ ...base, reason: "aborted" });
 	if (input.contextOverflow) return withRetry({ ...base, reason: "context_overflow", shouldCompact: true });

@@ -13,6 +13,7 @@ import {
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
+import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import type { ActiveToolCallRegistry } from "./components/active-tool-call-registry.ts";
 import {
@@ -96,6 +97,11 @@ function clearRetryControls(host: InteractiveEventHost): void {
 		host.retryCountdown.dispose();
 		host.retryCountdown = undefined;
 	}
+}
+
+function updateCommentaryActivity(host: InteractiveEventHost, message: AssistantMessage): void {
+	const label = latestAssistantCommentaryLabel(message);
+	if (label) host.activityLane?.update("runtime:turn", label);
 }
 
 /** Single owner for AgentSessionEvent -> terminal UI state transitions. */
@@ -202,6 +208,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				);
 				host.streamingMessage = event.message;
 				host.chatContainer.addChild(host.streamingComponent);
+				updateCommentaryActivity(host, host.streamingMessage);
 				host.applyStreamingMessageUpdate(host.streamingMessage, { force: true });
 				host.trimLiveTuiHistory();
 			}
@@ -209,6 +216,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 
 		case "message_update":
 			if (host.streamingComponent && event.message.role === "assistant") {
+				updateCommentaryActivity(host, event.message);
 				host.applyStreamingMessageUpdate(event.message);
 			}
 			break;
@@ -217,6 +225,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			if (event.message.role === "user") break;
 			if (host.streamingComponent && event.message.role === "assistant") {
 				host.streamingMessage = event.message;
+				updateCommentaryActivity(host, host.streamingMessage);
 				let errorMessage: string | undefined;
 				if (host.streamingMessage.stopReason === "aborted") {
 					const retryAttempt = host.session.retryAttempt;

@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@caupulican/pi-tui";
+import { isAssistantCommentary } from "../../../core/message-phase.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -73,7 +74,7 @@ export class AssistantMessageComponent extends Container {
 
 		const hasVisibleContent = message.content.some(
 			(c) =>
-				(c.type === "text" && c.text.trim()) ||
+				(c.type === "text" && !isAssistantCommentary(c) && c.text.trim()) ||
 				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
 		);
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
@@ -87,7 +88,7 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" && content.text.trim()) {
+			if (content.type === "text" && !isAssistantCommentary(content) && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, this.markdownTheme));
@@ -107,7 +108,11 @@ export class AssistantMessageComponent extends Container {
 				if (!this.hideThinkingBlock) {
 					const hasVisibleContentAfter = message.content
 						.slice(i + 1)
-						.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+						.some(
+							(c) =>
+								(c.type === "text" && !isAssistantCommentary(c) && c.text.trim()) ||
+								(c.type === "thinking" && c.thinking.trim()),
+						);
 					// Adjacent thinking blocks form one section instead of repeated visual chrome.
 					this.contentContainer.addChild(
 						new Markdown(thinkingBlocks.join("\n\n"), 1, 0, this.markdownTheme, {

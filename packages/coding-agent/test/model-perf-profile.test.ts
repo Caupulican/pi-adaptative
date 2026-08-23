@@ -147,6 +147,22 @@ describe("model perf profile", () => {
 		).toEqual({ firstProgressMs: 6_000, quietIdleMs: 6_000 });
 	});
 
+	it("uses the quiet-stream allowance for xAI first progress without changing other providers", () => {
+		const xaiInput = {
+			base: BASE_IDLE,
+			promptTokens: 2_000,
+			provider: "xai",
+		} as Parameters<typeof resolveAdaptiveStreamIdleOptions>[0] & { provider: string };
+		const openAiInput = {
+			base: BASE_IDLE,
+			promptTokens: 2_000,
+			provider: "openai",
+		} as Parameters<typeof resolveAdaptiveStreamIdleOptions>[0] & { provider: string };
+
+		expect(resolveAdaptiveStreamIdleOptions(xaiInput)).toEqual({ firstProgressMs: BASE_IDLE.quietIdleMs });
+		expect(resolveAdaptiveStreamIdleOptions(openAiInput)).toEqual({});
+	});
+
 	it("expands first-progress time from measured prefill instead of a fixed remote cap", () => {
 		const base = { ...BASE_IDLE, firstProgressMs: 500 };
 		const profile = {
