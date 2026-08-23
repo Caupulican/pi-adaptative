@@ -192,7 +192,7 @@ export const RUNAWAY_STOP_CUSTOM_TYPE = "runaway_stop";
 export const TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE = "tool_validation_escalation";
 
 export interface RunawayStopRecord {
-	reason: "repeated_tool_call" | "provider_turn_limit";
+	reason: "stagnant_tool_cycle" | "repeated_tool_call" | "provider_turn_limit";
 	signature: string;
 	repeats: number;
 	model?: string;

@@ -193,7 +193,7 @@ export interface AgentLoopTurnUpdate {
 	thinkingLevel?: ThinkingLevel;
 }
 
-export type AgentRunawayStopReason = "repeated_tool_call" | "provider_turn_limit";
+export type AgentRunawayStopReason = "stagnant_tool_cycle" | "repeated_tool_call" | "provider_turn_limit";
 
 /** Semantic cause and evidence for a host-enforced runaway/cost stop. */
 export interface AgentRunawayStopInfo {

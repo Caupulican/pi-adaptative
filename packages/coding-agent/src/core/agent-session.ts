@@ -1654,7 +1654,9 @@ export class AgentSession {
 				{
 					customType: "runaway-recovery",
 					content:
-						"A bounded harness guard ended the previous agent loop, but the durable goal remains active and must continue automatically. Do not repeat the same failed operation unchanged. Inspect the recorded failure, change tool or approach, and keep working unless evidence proves a true owner/approval boundary.",
+						info.reason === "stagnant_tool_cycle"
+							? "A bounded harness guard ended an unchanged tool-result cycle, but the durable goal remains active and must continue automatically. Reuse the latest returned state; do not call the same status/read cycle again. Execute an available state-changing or finalization action, wait once on the true dependency, or record a concrete blocker."
+							: "A bounded harness guard ended the previous agent loop, but the durable goal remains active and must continue automatically. Do not repeat the same failed operation unchanged. Inspect the recorded failure, change tool or approach, and keep working unless evidence proves a true owner/approval boundary.",
 					display: false,
 					details: info,
 				},
@@ -1664,7 +1666,9 @@ export class AgentSession {
 		const cause =
 			info.reason === "provider_turn_limit"
 				? `the configured provider-turn limit of ${info.repeats} requests was reached`
-				: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
+				: info.reason === "stagnant_tool_cycle"
+					? `the same tool-call cycle returned identical results ${info.repeats} times`
+					: `the model repeated the same tool call ${info.repeats} times in a row without making progress`;
 		this._emit({
 			type: "warning",
 			message: `Bounded guard ended this run: ${cause}.${goalRecovered ? " The active goal remains scheduled; the next pass must use a different approach." : ""}`,

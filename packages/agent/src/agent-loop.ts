@@ -32,6 +32,7 @@ import {
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	describeOperationOutcome,
+	getToolExecutionKey,
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	rememberToolFailure,
@@ -72,11 +73,18 @@ const TOOL_EXECUTION_WAVE_SIZE = 4;
 export interface AgentLoopContinuationState {
 	providerTurns: number;
 	stallWindow: string[];
+	/** Optional for compatibility with continuation snapshots created before result-aware cycle detection. */
+	stagnantResultWindow?: string[];
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
 }
 
 export function createAgentLoopContinuationState(): AgentLoopContinuationState {
-	return { providerTurns: 0, stallWindow: [], toolFailureRecoveryGate: new ToolFailureRecoveryGate() };
+	return {
+		providerTurns: 0,
+		stallWindow: [],
+		stagnantResultWindow: [],
+		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
+	};
 }
 
 /**
@@ -248,6 +256,9 @@ async function emitProviderTurnLimitStop(
  */
 const STALL_WINDOW_PERIODS = 4;
 
+/** Identical observable results make a repeated cycle conclusive well before the coarse call-only fuse. */
+const STAGNANT_RESULT_REPEAT_LIMIT = 3;
+
 function repeatsToolCallPattern(stallWindow: readonly string[], stallLimit: number): boolean {
 	if (stallLimit <= 0) return false;
 	const maxPeriod = Math.min(STALL_WINDOW_PERIODS, Math.floor(stallWindow.length / stallLimit));
@@ -279,6 +290,18 @@ function textProtocolOperationArguments(toolCall: AgentToolCall): unknown {
 function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string {
 	return normalizeToolSignature(
 		toolCalls.map((toolCall) => [toolCall.name, textProtocolOperationArguments(toolCall)]),
+	);
+}
+
+/** Hash only provider-visible result state; per-execution IDs/timestamps cannot hide a stagnant cycle. */
+function toolResultBatchSignature(toolResults: readonly ToolResultMessage[]): string {
+	return getToolExecutionKey(
+		"tool_result_batch",
+		toolResults.map((result) => ({
+			toolName: result.toolName,
+			content: result.content,
+			isError: result.isError,
+		})),
 	);
 }
 
@@ -341,6 +364,11 @@ async function runLoop(
 	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
 	const providerTurnLimit = config.maxProviderTurns ?? DEFAULT_MAX_PROVIDER_TURNS;
 	const stallWindow = continuationState.stallWindow;
+	let stagnantResultWindow = continuationState.stagnantResultWindow;
+	if (stagnantResultWindow === undefined) {
+		stagnantResultWindow = [];
+		continuationState.stagnantResultWindow = stagnantResultWindow;
+	}
 	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
@@ -453,6 +481,31 @@ async function runLoop(
 			// checks recurred among distinct edits, reads, and verification operations.
 			if (stallLimit > 0 && toolCalls.length > 0) {
 				const signature = normalizeToolSignature(toolCalls.map((c) => [c.name, c.arguments ?? null]));
+				const stagnantSignature = `${signature}:${toolResultBatchSignature(toolResults)}`;
+				stagnantResultWindow.push(stagnantSignature);
+				if (stagnantResultWindow.length > STAGNANT_RESULT_REPEAT_LIMIT * STALL_WINDOW_PERIODS) {
+					stagnantResultWindow.shift();
+				}
+				if (repeatsToolCallPattern(stagnantResultWindow, STAGNANT_RESULT_REPEAT_LIMIT)) {
+					config.onRunawayStop?.({
+						reason: "stagnant_tool_cycle",
+						signature,
+						repeats: STAGNANT_RESULT_REPEAT_LIMIT,
+					});
+					await streamToollessClosingTurn(
+						currentContext,
+						newMessages,
+						config,
+						continuationState,
+						providerTurnLimit,
+						signal,
+						emit,
+						streamFn,
+					);
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+
 				stallWindow.push(signature);
 				if (stallWindow.length > stallLimit * STALL_WINDOW_PERIODS) stallWindow.shift();
 				if (repeatsToolCallPattern(stallWindow, stallLimit)) {

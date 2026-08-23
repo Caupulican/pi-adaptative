@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stopped repeated tool-call cycles after three identical observable-result periods without preempting changing results before the existing configurable coarse fuse, and gave active goals state-changing recovery guidance instead of re-polling unchanged status.
+
 ## [0.96.4] - 2026-08-23
 
 ### Fixed

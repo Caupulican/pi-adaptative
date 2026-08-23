@@ -535,7 +535,9 @@ export class GoalSessionController {
 		const reason =
 			info.reason === "provider_turn_limit"
 				? `provider_turn_limit: reached the explicit ${info.repeats}-request provider-turn limit`
-				: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
+				: info.reason === "stagnant_tool_cycle"
+					? `stagnant_tool_cycle: repeated tool-call signature ${info.signature} ${info.repeats} times with identical results`
+					: `runaway_tool_loop: repeated tool-call signature ${info.signature} ${info.repeats} times without progress`;
 		if (!this.stopActiveGoal("blocked", reason)) return false;
 		return this.resumeSystemBlockedGoal() !== undefined;
 	}

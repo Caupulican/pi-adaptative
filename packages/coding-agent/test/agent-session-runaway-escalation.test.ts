@@ -111,6 +111,49 @@ describe("AgentSession runaway-stop and tool-validation-escalation handlers", ()
 		}
 	});
 
+	it("keeps a stagnant-result goal active and cues a state-changing recovery", async () => {
+		const harness = await createHarness();
+		try {
+			const state = applyGoalEvent(
+				createGoalState({ goalId: "goal-stagnant-cycle", userGoal: "Finish the audit", now: "T0" }),
+				{ type: "add_requirement", id: "audit", text: "Audit the target", now: "T0" },
+			);
+			harness.session.saveGoalStateSnapshot(state);
+
+			harness.session.agent.onRunawayStop?.({
+				reason: "stagnant_tool_cycle",
+				signature: "task_steps:{list}",
+				repeats: 3,
+			});
+
+			const recovered = harness.session.getGoalStateSnapshot();
+			expect(recovered).toMatchObject({ goalId: "goal-stagnant-cycle", status: "active" });
+			expect(recovered?.events.findLast((event) => event.type === "system_stop_goal")).toMatchObject({
+				type: "system_stop_goal",
+				reason: expect.stringContaining("stagnant_tool_cycle"),
+			});
+			expect(
+				harness.eventsOfType("warning").some((event) => event.message.includes("returned identical results")),
+			).toBe(true);
+
+			harness.setResponses([fauxAssistantMessage("audit finalized")]);
+			await harness.session.prompt("continue the audit", { autoContinueGoal: false });
+			const serializedMessages = JSON.stringify(harness.session.messages);
+			expect(serializedMessages).toContain("unchanged tool-result cycle");
+			expect(serializedMessages).toContain("do not call the same status/read cycle again");
+
+			const runawayEntry = harness.sessionManager
+				.getEntries()
+				.find(
+					(entry): entry is CustomEntry<RunawayStopRecord> =>
+						entry.type === "custom" && entry.customType === RUNAWAY_STOP_CUSTOM_TYPE,
+				);
+			expect(runawayEntry?.data?.reason).toBe("stagnant_tool_cycle");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("keeps enforcing recovery across consecutive bounded guards instead of terminalizing the goal", async () => {
 		const harness = await createHarness();
 		try {

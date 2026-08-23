@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stopped repeated tool-call cycles after three identical observable-result periods while preserving the configurable coarse runaway fuse for changing or volatile results.
+
 ## [0.96.4] - 2026-08-23
 
 ## [0.96.3] - 2026-08-23

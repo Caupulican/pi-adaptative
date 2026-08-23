@@ -185,14 +185,15 @@ describe("runaway-loop backstop", () => {
 		).toBe(true);
 	});
 
-	it("retains the runaway window across a host continuation after compaction", async () => {
-		const stalls: Array<{ signature: string; repeats: number }> = [];
+	it("retains the unchanged-result window across a host continuation after compaction", async () => {
+		const stalls: Array<{ reason: string; signature: string; repeats: number }> = [];
 		let providerCalls = 0;
-		const streamFn = () => {
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				providerCalls++;
-				if (providerCalls === 3 || providerCalls === 6) {
+				if (completeMandatoryDelivery(stream, providerContext)) return;
+				if (providerCalls === 3) {
 					stream.push({
 						type: "done",
 						reason: "stop",
@@ -232,9 +233,9 @@ describe("runaway-loop backstop", () => {
 		});
 		await agent.continue();
 
-		expect(stalls).toEqual([expect.objectContaining({ repeats: 4 })]);
-		// Four looping turns plus the one tool-free request that lets the model close.
-		expect(providerCalls).toBe(6);
+		expect(stalls).toEqual([expect.objectContaining({ reason: "stagnant_tool_cycle", repeats: 3 })]);
+		// Three unchanged tool-result turns plus the compaction boundary and one tool-free closing request.
+		expect(providerCalls).toBe(5);
 	});
 
 	it("retains an explicit provider-turn fuse across a host continuation", async () => {
@@ -370,7 +371,7 @@ describe("runaway-loop backstop", () => {
 			tools: [createEchoTool(() => executions++)],
 		};
 		let toolCalls = 0;
-		const stalls: Array<{ signature: string; repeats: number }> = [];
+		const stalls: Array<{ reason: string; signature: string; repeats: number }> = [];
 
 		// Always returns the SAME tool call (same args) and never stops — without the backstop this is
 		// an infinite token sink.
@@ -409,9 +410,8 @@ describe("runaway-loop backstop", () => {
 			agentLoop([{ role: "user", content: "go", timestamp: 1 }], context, config, undefined, streamFn),
 		);
 
-		// Backstop tripped exactly at the limit and ended the run.
-		expect(stalls).toHaveLength(1);
-		expect(stalls[0].repeats).toBe(4);
+		// After the initial success, three identical repeated-success results trip the stronger stagnant guard.
+		expect(stalls).toMatchObject([{ reason: "stagnant_tool_cycle", repeats: 3 }]);
 		expect(toolCalls).toBe(5); // four looping turns, then one tool-free closing request
 		expect(executions).toBe(1); // repeated phone calls teach without replaying the successful operation
 		const rejectedRepeats = events.filter((event) => event.type === "tool_execution_end" && event.isError);
@@ -989,8 +989,8 @@ describe("runaway-loop backstop", () => {
 			),
 		);
 
-		expect(stalls).toEqual([expect.objectContaining({ reason: "repeated_tool_call" })]);
-		// Three looping requests carried tools; exactly one closing request carried none.
+		expect(stalls).toEqual([expect.objectContaining({ reason: "stagnant_tool_cycle" })]);
+		// Three unchanged-result requests carried tools; exactly one closing request carried none.
 		expect(toolCounts).toEqual([1, 1, 1, 0]);
 		expect(systemPrompts[3]).toContain("RUNAWAY STOP CLOSING TURN");
 		expect(systemPrompts[3]).toContain("Do not emit a tool call or tool-call markup");
@@ -1131,7 +1131,7 @@ describe("runaway-loop backstop", () => {
 		);
 
 		// The hard provider limit wins: three requests, none of them tool-free, and no fabricated close.
-		expect(stalls).toEqual([expect.objectContaining({ reason: "repeated_tool_call" })]);
+		expect(stalls).toEqual([expect.objectContaining({ reason: "stagnant_tool_cycle" })]);
 		expect(toolCounts).toEqual([1, 1, 1]);
 		const assistantTexts = events.flatMap((event) =>
 			event.type === "message_end" && event.message.role === "assistant"
@@ -2743,6 +2743,205 @@ describe("runaway-loop backstop", () => {
 		);
 
 		expect(executions).toBe(2);
+	});
+
+	it("stops a repeated two-tool cycle after three unchanged result periods", async () => {
+		const emptySchema = Type.Object({});
+		let executions = 0;
+		const goalStatusTool: AgentTool<typeof emptySchema> = {
+			name: "goal_status",
+			label: "Goal status",
+			description: "Read goal status",
+			parameters: emptySchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "goal unchanged" }], details: {} };
+			},
+		};
+		const taskStatusTool: AgentTool<typeof emptySchema> = {
+			name: "task_status",
+			label: "Task status",
+			description: "Read task status",
+			parameters: emptySchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "tasks unchanged" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [goalStatusTool, taskStatusTool] };
+		const stops: Array<{ reason: string; signature: string; repeats: number }> = [];
+		let providerTurns = 0;
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
+				providerTurns++;
+				const toolName = providerTurns % 2 === 1 ? "goal_status" : "task_status";
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `status-${providerTurns}`, name: toolName, arguments: {} }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "finish the goal", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 12,
+					onRunawayStop: (info) => stops.push(info),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(6);
+		expect(providerTurns).toBe(6);
+		expect(deliveryTurns).toBe(1);
+		expect(stops).toMatchObject([{ reason: "stagnant_tool_cycle", repeats: 3 }]);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("allows a repeated tool-call cycle whose results change before the coarse fuse", async () => {
+		const emptySchema = Type.Object({});
+		let executions = 0;
+		const changingTool = (name: string): AgentTool<typeof emptySchema> => ({
+			name,
+			label: name,
+			description: "Read changing status",
+			parameters: emptySchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: `status version ${executions}` }], details: {} };
+			},
+		});
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [changingTool("goal_status"), changingTool("task_status")],
+		};
+		const stops: Array<{ reason: string; signature: string; repeats: number }> = [];
+		let providerTurns = 0;
+		let deliveryTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) {
+					deliveryTurns++;
+					return;
+				}
+				providerTurns++;
+				if (providerTurns > 8) {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage([{ type: "text", text: "status advanced" }], "stop"),
+					});
+					return;
+				}
+				const toolName = providerTurns % 2 === 1 ? "goal_status" : "task_status";
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[{ type: "toolCall", id: `changing-${providerTurns}`, name: toolName, arguments: {} }],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "watch progress", timestamp: 1 }],
+				context,
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 12,
+					onRunawayStop: (info) => stops.push(info),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(8);
+		expect(deliveryTurns).toBe(0);
+		expect(stops).toEqual([]);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("retains the configured coarse fuse for an indefinitely changing result", async () => {
+		const emptySchema = Type.Object({});
+		let executions = 0;
+		const changingTool: AgentTool<typeof emptySchema> = {
+			name: "changing_status",
+			label: "Changing status",
+			description: "Return a new visible status every time",
+			parameters: emptySchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: `status version ${executions}` }], details: {} };
+			},
+		};
+		const stops: Array<{ reason: string; signature: string; repeats: number }> = [];
+		let providerTurns = 0;
+		const streamFn = (_model: unknown, providerContext: { tools?: readonly unknown[] }) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (completeMandatoryDelivery(stream, providerContext)) return;
+				providerTurns++;
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistantMessage(
+						[
+							{
+								type: "toolCall",
+								id: `changing-status-${providerTurns}`,
+								name: "changing_status",
+								arguments: {},
+							},
+						],
+						"toolUse",
+					),
+				});
+			});
+			return stream;
+		};
+
+		await drain(
+			agentLoop(
+				[{ role: "user", content: "watch forever", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [changingTool] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					maxStallTurns: 4,
+					onRunawayStop: (info) => stops.push(info),
+				},
+				undefined,
+				streamFn,
+			),
+		);
+
+		expect(executions).toBe(4);
+		expect(stops).toMatchObject([{ reason: "repeated_tool_call", repeats: 4 }]);
 	});
 
 	it("trips on a period-3 oscillation A→B→C→A→… (bug #28)", async () => {

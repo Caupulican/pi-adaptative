@@ -17,7 +17,11 @@ export function getGoalStateRevision(state: GoalState): GoalStateRevision {
 	return { goalId: state.goalId, revision: state.revision ?? 0 };
 }
 
-const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = ["runaway_tool_loop:", "provider_turn_limit:"] as const;
+const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = [
+	"stagnant_tool_cycle:",
+	"runaway_tool_loop:",
+	"provider_turn_limit:",
+] as const;
 
 /** True only when a bounded runaway/provider-turn guard caused the block, not owner/model/terminal intent. */
 export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
