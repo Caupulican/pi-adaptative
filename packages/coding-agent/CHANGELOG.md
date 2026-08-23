@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Restored OpenRouter Ox Alpha tool use by defaulting it to Pi's text tool protocol and omitting the unsupported `reasoning.effort: none` default.
+
 ## [0.96.3] - 2026-08-23
 
 ## [0.96.2] - 2026-08-23
