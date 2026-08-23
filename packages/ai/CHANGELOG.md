@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Defaulted OpenRouter `stealth/ox-alpha` to the text tool-call protocol because native tools return empty `network_error` completions.
+- Marked Ox Alpha thinking `off` unsupported so Pi does not send `reasoning.effort: none`, which OpenRouter 400s as mandatory reasoning.
+
 ## [0.96.3] - 2026-08-23
 
 ### Fixed

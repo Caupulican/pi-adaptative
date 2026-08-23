@@ -16221,7 +16221,8 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: { max: "max" },
+			thinkingLevelMap: {"off":null,"max":"max"},
+			textToolCallProtocol: true,
 			input: ["text", "image"],
 			cost: {
 				input: 0,

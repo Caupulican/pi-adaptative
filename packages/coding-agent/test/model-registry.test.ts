@@ -136,6 +136,8 @@ describe("ModelRegistry", () => {
 				provider: "openrouter",
 				baseUrl: "https://openrouter.ai/api/v1",
 				reasoning: true,
+				textToolCallProtocol: true,
+				thinkingLevelMap: { off: null, max: "max" },
 				input: ["text", "image"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: 1_048_576,

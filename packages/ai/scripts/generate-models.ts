@@ -456,7 +456,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openrouter" && model.id === "stealth/ox-alpha") {
 		// Ox Alpha accepts OpenRouter's maximum reasoning effort. Keep this explicit so the
 		// catalog capability gate exposes --thinking max instead of silently clamping to high.
-		mergeThinkingLevelMap(model, { max: "max" });
+		// Reasoning is mandatory: {effort:"none"} 400s. Mark off unsupported so the provider
+		// omits the reasoning param instead of defaulting to none.
+		// Native OpenAI tools return empty completions with native_finish_reason network_error;
+		// default to the text tool-call protocol so tools are primed in-prompt instead of on the wire.
+		mergeThinkingLevelMap(model, { off: null, max: "max" });
+		model.textToolCallProtocol = true;
 	}
 	if (model.provider === "openrouter" && model.id.startsWith("inception/mercury-2")) {
 		// Mercury 2 in instant mode (reasoning_effort: "none") disables tool calling.
@@ -2341,6 +2346,9 @@ export const MODELS = {
 			}
 			if (model.thinkingLevelMap) {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
+			}
+			if (model.textToolCallProtocol) {
+				output += `\t\t\ttextToolCallProtocol: true,\n`;
 			}
 			if (model.openaiResponsesLite) {
 				output += `\t\t\topenaiResponsesLite: true,\n`;
