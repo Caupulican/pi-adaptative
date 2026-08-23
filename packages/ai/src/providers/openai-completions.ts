@@ -200,6 +200,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				partialArgsComplete?: boolean;
 				streamIndex?: number;
 			}
+			interface OpenAICompatibleChoice extends ChatCompletionChunk.Choice {
+				native_finish_reason?: string | null;
+			}
 			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
 			type StreamingToolCallDelta = NonNullable<ChatCompletionChunk.Choice.Delta["tool_calls"]>[number];
 
@@ -346,7 +349,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.usage = parseChunkUsage(chunk.usage, model);
 				}
 
-				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				const choice = (Array.isArray(chunk.choices) ? chunk.choices[0] : undefined) as
+					| OpenAICompatibleChoice
+					| undefined;
 				if (!choice) continue;
 
 				// Fallback: some providers (e.g., Moonshot) return usage
@@ -355,8 +360,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.usage = parseChunkUsage((choice as any).usage, model);
 				}
 
-				if (choice.finish_reason) {
-					const finishReasonResult = mapStopReason(choice.finish_reason);
+				// OpenRouter can normalize an upstream network_error to stop while retaining the
+				// authoritative failure in native_finish_reason. Other provider-native terminal
+				// dialects remain normalized through finish_reason.
+				const finishReason =
+					choice.native_finish_reason === "network_error" ? choice.native_finish_reason : choice.finish_reason;
+				if (finishReason) {
+					const finishReasonResult = mapStopReason(finishReason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
 						output.errorMessage = finishReasonResult.errorMessage;

@@ -10,7 +10,12 @@ const mockState = vi.hoisted(() => ({
 	chunks: undefined as
 		| Array<null | {
 				id?: string;
-				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
+				choices?: Array<{
+					delta: Record<string, unknown>;
+					finish_reason: string | null;
+					native_finish_reason?: string | null;
+					usage?: unknown;
+				}>;
 				usage?: {
 					prompt_tokens: number;
 					completion_tokens: number;
@@ -408,6 +413,62 @@ describe("openai-completions tool_choice", () => {
 
 		expect(response.stopReason).toBe("error");
 		expect(response.errorMessage).toBe("Provider finish_reason: network_error");
+	});
+
+	it("treats a native network_error as failure when OpenRouter normalizes finish_reason to stop", async () => {
+		mockState.chunks = [
+			{
+				id: "gen-openrouter-network-error",
+				choices: [
+					{
+						delta: { content: "", role: "assistant" },
+						finish_reason: "stop",
+						native_finish_reason: "network_error",
+					},
+				],
+			},
+		];
+
+		const model = getModel("openrouter", "stealth/ox-alpha")!;
+		const response = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Use the available tool.", timestamp: Date.now() }],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		expect(response.stopReason).toBe("error");
+		expect(response.errorMessage).toBe("Provider finish_reason: network_error");
+		expect(response.content).toEqual([]);
+	});
+
+	it("keeps the normalized stop for non-error native finish reasons", async () => {
+		mockState.chunks = [
+			{
+				id: "gen-openrouter-end-turn",
+				choices: [
+					{
+						delta: { content: "OK", role: "assistant" },
+						finish_reason: "stop",
+						native_finish_reason: "end_turn",
+					},
+				],
+			},
+		];
+
+		const model = getModel("openrouter", "stealth/ox-alpha")!;
+		const response = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Reply with OK.", timestamp: Date.now() }],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		expect(response.stopReason).toBe("stop");
+		expect(response.errorMessage).toBeUndefined();
+		expect(response.content).toEqual([{ type: "text", text: "OK" }]);
 	});
 
 	it("ignores null stream chunks from openai-compatible providers", async () => {

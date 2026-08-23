@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Treated OpenRouter native network failures as errors instead of persisting empty successful assistant responses.
+
 ## [0.96.2] - 2026-08-23
 
 ### Fixed
