@@ -146,21 +146,25 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"write",
 				].sort(),
 			);
-			// Ceilings are bloat guards, recalibrated (not loosened for slack) after
+			// Ceilings are bloat guards. The aggregate ceiling is intentionally recalibrated to 4,500
+			// after the action-discriminated task_steps schema raised the measured surface to 4,134;
+			// this preserves roughly 8.9% growth headroom without accepting the proposed 8,000-token slack.
+			// Earlier ceilings were recalibrated after
 			// provider-tool-projection.ts stopped deleting `type` from enum-bearing schema
 			// properties (providers whose function-declaration schema requires `type` per property,
 			// e.g. Google's OpenAPI subset, reject the whole tool list with a 400 otherwise — see
 			// compactRedundantEnumConstraints). Default surface now also includes skillify,
 			// skill_audit, improvement_loop, and the three lifecycle goal tools. Delegate's
-			// enum-heavy surface measures 844 tokens. task_steps measures 499 after adding
-			// authoritative pipeline linkage to both batch and single-step forms. skill grew to 74
+			// enum-heavy surface measures 844 tokens. task_steps now measures 1,120 after adding
+			// authoritative pipeline linkage and action-discriminated admission; its 1,200-token
+			// ceiling preserves roughly 7.1% headroom. skill grew to 74
 			// with the pin parameter (a bare boolean in the projected schema; annotations are
 			// stripped at the provider boundary, so there is no prose to trim).
-			expect(report.toolSchemaTokens).toBeLessThanOrEqual(3_950);
+			expect(report.toolSchemaTokens).toBeLessThanOrEqual(4_500);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(74);
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875);
-			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(510);
+			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(280);
 			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);
