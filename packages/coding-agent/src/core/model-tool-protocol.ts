@@ -12,6 +12,7 @@ export type ModelToolProtocolReasonCode =
 	| "probe_calibration_missing"
 	| "probe_calibration_failed"
 	| "probe_calibration_invalid"
+	| "probe_no_working_path"
 	| "probe_native"
 	| "native_default";
 
@@ -43,6 +44,12 @@ export function resolveModelToolProtocol(args: {
 	}
 	if (args.settingsOverride === true) {
 		return { protocol: true, reasonCode: "settings_enabled" };
+	}
+	// A model declaration is only a startup hint. Once graded probing or the live protocol breaker
+	// recorded that neither transport is working, do not silently restore the same text dialect on
+	// the next non-routed turn. An explicit settings override remains the operator escape hatch.
+	if (args.adaptation.toolProbe?.status === "none") {
+		return { protocol: undefined, reasonCode: "probe_no_working_path" };
 	}
 	if (args.model.textToolCallProtocol === true) {
 		return { protocol: true, reasonCode: "model_enabled" };

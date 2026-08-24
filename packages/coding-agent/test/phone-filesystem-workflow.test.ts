@@ -225,6 +225,75 @@ describe("non-native phone filesystem workflow", () => {
 		}
 	});
 
+	it("keeps a mixed text-protocol read/edit/bash batch ordered when one edit sibling is malformed", async () => {
+		const cwd = join(root, "project");
+		const agentDir = join(root, "agent");
+		const sourcePath = join(cwd, "source.txt");
+		const targetPath = join(cwd, "target.txt");
+		const needlePath = join(cwd, "needle.txt");
+		await writeFile(sourcePath, "source-before", "utf8");
+		await writeFile(targetPath, "target-before", "utf8");
+		await writeFile(needlePath, "needle", "utf8");
+
+		const responses = [
+			[
+				phoneCall("read", { path: sourcePath }),
+				phoneCall("edit", {
+					path: targetPath,
+					edits: [{ oldText: "target-before", newText: "target-after" }],
+				}),
+				// Negative control: this malformed sibling must be bounced without suppressing the
+				// independent read, edit, and shell operations in the same provider batch.
+				phoneCall("edit", { path: targetPath, edits: "not-an-edit-array" }),
+				phoneCall("bash", { command: "rg 'needle' needle.txt | rg 'needle'" }),
+				phoneCall("bash", { command: "ls -la" }),
+				phoneCall("bash", { command: "ls -R" }),
+			].join("\n"),
+			"mixed batch reconciled",
+		];
+		const created = await createPhoneWorkflowSession(cwd, agentDir, responses);
+
+		try {
+			await created.session.prompt("Run the mixed filesystem batch.");
+
+			expect(await readFile(targetPath, "utf8")).toBe("target-after");
+			expect(created.responseIndex).toBe(2);
+			const toolResults = created.session.messages.filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(toolResults.map((message) => [message.toolName, message.isError ?? false])).toEqual([
+				["read", false],
+				["edit", false],
+				["edit", true],
+				["bash", false],
+				["bash", false],
+				["bash", false],
+			]);
+			expect(toolResults[2]?.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")).toContain(
+				'"failure_code":"invalid_arguments"',
+			);
+			const calls = created.session.messages
+				.filter((message) => message.role === "assistant")
+				.flatMap((message) => message.content)
+				.filter((content): content is ToolCall => content.type === "toolCall");
+			expect(calls.map((call) => [call.name, call.source])).toEqual([
+				["read", "text-protocol"],
+				["edit", "text-protocol"],
+				["edit", "text-protocol"],
+				["bash", "text-protocol"],
+				["bash", "text-protocol"],
+				["bash", "text-protocol"],
+			]);
+			expect(calls.slice(3).map((call) => call.arguments)).toEqual([
+				{ command: "rg 'needle' needle.txt | rg 'needle'" },
+				{ command: "ls -la" },
+				{ command: "ls -R" },
+			]);
+		} finally {
+			await created.dispose();
+		}
+	});
+
 	it("retargets a collided write from bounded repair guidance without regenerating content", async () => {
 		const cwd = join(root, "project");
 		const agentDir = join(root, "agent");

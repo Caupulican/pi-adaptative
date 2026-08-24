@@ -31,9 +31,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function createSupervision(): SessionSupervisionRuntime {
 	return new SessionSupervisionRuntime({
 		agentDir: "/agent",
-		hasUI: false,
 		isProcessAlive: () => true,
-		promptConfirm: async () => false,
 		resumeWorker: async () => ({ status: "started" }) as unknown as ResumeWorkerLaunchOutcome,
 		onDiagnostic: () => {},
 		requestExit: async () => {},

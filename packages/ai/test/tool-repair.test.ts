@@ -6,6 +6,7 @@ import { Compile } from "typebox/compile";
 import { describe, expect, it, vi } from "vitest";
 import type { Tool, ToolCall } from "../src/types.ts";
 import {
+	getToolExecutionErrorPolicy,
 	TOOL_REPAIR_MODE_NAMES,
 	TOOL_REPAIR_REGISTRY,
 	type ToolRepairModeName,
@@ -358,6 +359,62 @@ describe("tool argument repair", () => {
 		expect(validateToolArguments(tool, makeCall("powershell", { command: { command: "Get-Location" } }))).toEqual({
 			command: "Get-Location",
 		});
+	});
+
+	it("keeps every schema-valid compound shell command byte-for-byte unchanged across a model batch", () => {
+		const commands = [
+			"rg --files | rg 'tool-repair'",
+			"ls -la",
+			"lr -r",
+			"printf '%s\\n' one && printf '%s\\n' two",
+			"printf '%s\\n' one; printf '%s\\n' two",
+		] as const;
+		const calls: ToolCall[] = commands.map((command, index) => ({
+			type: "toolCall" as const,
+			id: `batch-${index}`,
+			name: "bash",
+			arguments: { command },
+		}));
+		const events: unknown[] = [];
+
+		for (const [index, call] of calls.entries()) {
+			const validated = validateToolArguments(bashTool, call, { telemetry: (event) => events.push(event) });
+			expect(validated, commands[index]).toBe(call.arguments);
+			expect(validated.command, commands[index]).toBe(commands[index]);
+			expect(call.repairNotes, commands[index]).toBeUndefined();
+		}
+
+		// A valid command string is opaque to validation: parsing or executing it belongs to the shell.
+		expect(events).toEqual([]);
+	});
+
+	it("does not reinterpret JSON-like command strings, and bounces malformed non-string wrappers", () => {
+		const jsonLikeCommand = '["rg", "TODO"';
+		const stringCall = makeCall("bash", { command: jsonLikeCommand });
+		expect(validateToolArguments(bashTool, stringCall)).toBe(stringCall.arguments);
+		expect(stringCall.arguments.command).toBe(jsonLikeCommand);
+		expect(stringCall.repairNotes).toBeUndefined();
+
+		const malformedWrappers: ToolCall[] = [
+			makeCall("bash", { command: ["rg", 42] }),
+			makeCall("bash", { command: { cmd: ["rg", false] } }),
+			{
+				type: "toolCall",
+				id: "malformed-root-json",
+				name: "bash",
+				arguments: '{"command":["rg","TODO"] trailing}' as unknown as ToolCall["arguments"],
+			},
+		];
+
+		for (const call of malformedWrappers) {
+			expect(() => validateToolArguments(bashTool, call), call.id).toThrow("Validation failed");
+		}
+	});
+
+	it("leaves command-not-found and shell syntax outcomes to execution classification", () => {
+		const commandNotFound = getToolExecutionErrorPolicy("lr: command not found");
+		expect(commandNotFound).toMatchObject({ name: "commandNotFound", phase: "provisioning" });
+		expect(getToolExecutionErrorPolicy("bash: syntax error near unexpected token `|'")).toBeUndefined();
 	});
 
 	it("keeps the registry as the named repair source of truth", () => {

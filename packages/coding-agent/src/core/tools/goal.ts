@@ -228,6 +228,12 @@ export interface GoalToolDependencies {
 	/** Model-facing budget normalization for the current foreground turn. Omitted by direct owner/test callers. */
 	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | number | null | undefined;
 	/**
+	 * Trusted verification obligations reconstructed from the active session context. A model-facing
+	 * transition to completed is refused while any remain; ordinary goal and tool actions do not
+	 * consult this gate.
+	 */
+	getActiveVerificationIds?: () => readonly string[];
+	/**
 	 * Live tool-evidence check. When wired, kind:"tool" uses this instead of {@link hasToolCallId}
 	 * so a still-running background handoff cannot verify as done.
 	 */
@@ -406,7 +412,7 @@ function goalPanelModel(details: GoalToolDetails | undefined): OrchestrationPane
 function goalExecutionError(
 	action: GoalToolDetails["action"],
 	message: string,
-	state: GoalState,
+	state: GoalState | undefined,
 ): { content: Array<{ type: "text"; text: string }>; details: GoalToolDetails; isError: true } {
 	return {
 		content: [{ type: "text", text: `goal ${action} failed: ${message}` }],
@@ -633,6 +639,22 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						details: { action: input.action, applied: false, error: result.error, state: current },
 						isError: true,
 					};
+				}
+				if (result.state.status === "completed") {
+					let activeVerificationIds: readonly string[];
+					try {
+						activeVerificationIds = deps.getActiveVerificationIds?.() ?? [];
+					} catch (error) {
+						const message = `Cannot verify active verification obligations: ${error instanceof Error ? error.message : String(error)}`;
+						return goalExecutionError(input.action, message, current);
+					}
+					if (activeVerificationIds.length > 0) {
+						return goalExecutionError(
+							input.action,
+							`Cannot transition goal to ${result.state.status}: active verification obligation(s) remain (${activeVerificationIds.join(", ")}). The same verification id must report status passed first.`,
+							current,
+						);
+					}
 				}
 				deps.saveGoalState(result.state, current ? getGoalStateRevision(current) : undefined);
 				nextState = result.state;

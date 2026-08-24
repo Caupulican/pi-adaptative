@@ -7,7 +7,7 @@ import {
 	type CredentialProfileSummary,
 	CredentialStorageError,
 } from "../../core/secrets/credential-manager.ts";
-import { connectCredentialSessionWithMaskedPrompt } from "../../core/secrets/credential-session-connection.ts";
+import { isCredentialSessionKeyRequired } from "../../core/secrets/credential-session-connection.ts";
 import {
 	formatDotenvVariables,
 	MAX_DOTENV_VALUE_BYTES,
@@ -27,6 +27,8 @@ const CLOSE_ACTION = "Close";
 const USER_PASSWORD_KIND = "Username and password";
 const KEY_KIND = "API token or private key";
 const DOTENV_KIND = "Environment variables (.env format)";
+const MACHINE_SETUP_NOTICE =
+	"Bitwarden is not connected. Set BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for it.";
 
 export interface SecretMenuControllerOptions {
 	manager: CredentialManager;
@@ -100,11 +102,12 @@ export class SecretMenuController {
 			try {
 				profiles = await this.manager.listForProject(this.cwd);
 			} catch {
-				// A stale BW_SESSION falls through to the one-field owner reconnect flow.
+				// A stale BW_SESSION surfaces the environment-setup notice below.
 			}
 		}
 		if (!this.manager.status.connected) {
-			if (!(await this.connect(ui))) return;
+			ui.notify(MACHINE_SETUP_NOTICE, "error");
+			return;
 		}
 		while (true) {
 			try {
@@ -133,9 +136,19 @@ export class SecretMenuController {
 						continue;
 					case RECONNECT_ACTION:
 						this.manager.lock();
-						if (!(await this.connect(ui))) return;
-						profiles = undefined;
-						continue;
+						try {
+							await this.manager.ensureAvailable();
+							profiles = await this.manager.listForProject(this.cwd);
+							ui.notify("Bitwarden reconnected from machine-owned credentials.", "info");
+							continue;
+						} catch (error) {
+							this.manager.lock();
+							ui.notify(
+								isCredentialSessionKeyRequired(error) ? MACHINE_SETUP_NOTICE : safeErrorMessage(error),
+								"error",
+							);
+							return;
+						}
 					case LOCK_ACTION:
 						this.manager.lock();
 						ui.notify("Pi credential access is locked for this session.", "info");
@@ -149,10 +162,6 @@ export class SecretMenuController {
 				return;
 			}
 		}
-	}
-
-	private async connect(ui: ExtensionUIContext): Promise<boolean> {
-		return (await connectCredentialSessionWithMaskedPrompt(this.manager, ui)) === "connected";
 	}
 
 	private async addOrUpdate(ui: ExtensionUIContext, profiles: CredentialProfileSummary[]): Promise<void> {

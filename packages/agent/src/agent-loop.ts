@@ -11,6 +11,7 @@ import {
 } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
+	formatToolValidationEnrichment,
 	type ToolArgumentExecutionOutcome,
 	ToolArgumentValidationError,
 	type ToolArgumentValidationTelemetryEvent,
@@ -57,6 +58,8 @@ import type {
 } from "./types.ts";
 import { AgentToolExecutionError, DEFAULT_MAX_PROVIDER_TURNS, DEFAULT_MAX_STALL_TURNS } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
+import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
+import { retainedVerificationDetails, VerificationObligationTracker } from "./verification-obligations.ts";
 
 export {
 	composeRequestSystemPrompt,
@@ -369,12 +372,14 @@ async function runLoop(
 		stagnantResultWindow = [];
 		continuationState.stagnantResultWindow = stagnantResultWindow;
 	}
-	const validationFailureTracker: ToolValidationFailureTracker = { repeats: 0 };
+	const validationFailureTracker: ToolValidationFailureTracker = new Map();
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	let toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+	const verificationObligations = new VerificationObligationTracker(currentContext.messages);
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
 	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages);
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
+	let previousAssistantForDegenerateCollapse: AssistantMessage | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 	const processPendingMessages = async (): Promise<void> => {
@@ -389,7 +394,9 @@ async function runLoop(
 			await emit({ type: "message_end", message });
 			currentContext.messages.push(message);
 			newMessages.push(message);
+			verificationObligations.record([message]);
 		}
+		previousAssistantForDegenerateCollapse = undefined;
 		pendingMessages = [];
 	};
 
@@ -415,8 +422,25 @@ async function runLoop(
 			// Process pending messages (inject before next assistant response).
 			await processPendingMessages();
 			continuationState.providerTurns++;
-			const response = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const requestContext: AgentContext = {
+				...currentContext,
+				systemPrompt: verificationObligations.appendSystemPrompt(currentContext.systemPrompt),
+			};
+			const response = await streamAssistantResponse(
+				requestContext,
+				config,
+				signal,
+				emit,
+				streamFn,
+				{
+					verificationObligations,
+					invalidVerificationTerminalStopReason:
+						providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit ? "error" : "stop",
+				},
+				previousAssistantForDegenerateCollapse,
+			);
 			const message = response.message;
+			previousAssistantForDegenerateCollapse = response.comparisonMessage;
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -429,6 +453,7 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
+			let terminatingToolBatch = false;
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
@@ -452,12 +477,14 @@ async function runLoop(
 					emit,
 				);
 				toolResults.push(...executedToolBatch.messages);
+				terminatingToolBatch = executedToolBatch.terminate;
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
 					newMessages.push(result);
 				}
+				verificationObligations.record(toolResults);
 				if (!previousSuccessfulTextProtocolResults) {
 					lastSuccessfulTextProtocolBatch =
 						textProtocolBatch &&
@@ -473,6 +500,10 @@ async function runLoop(
 			} else {
 				lastSuccessfulTextProtocolBatch = undefined;
 			}
+			const verificationBlocksCompletion =
+				!verificationObligations.permitsTerminalMessage(message) ||
+				(terminatingToolBatch && verificationObligations.getActiveIds().length > 0);
+			if (verificationBlocksCompletion) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
 
@@ -501,6 +532,8 @@ async function runLoop(
 						signal,
 						emit,
 						streamFn,
+						previousAssistantForDegenerateCollapse,
+						verificationObligations,
 					);
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
@@ -519,6 +552,8 @@ async function runLoop(
 						signal,
 						emit,
 						streamFn,
+						previousAssistantForDegenerateCollapse,
+						verificationObligations,
 					);
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
@@ -536,6 +571,7 @@ async function runLoop(
 				currentContext = nextTurnSnapshot.context ?? currentContext;
 				if (nextTurnSnapshot.context) {
 					toolFailureMemory = createToolFailureMemoryTracker(currentContext.messages);
+					verificationObligations.restore(currentContext.messages);
 				}
 				config = {
 					...config,
@@ -545,12 +581,13 @@ async function runLoop(
 			}
 
 			if (
-				await config.shouldStopAfterTurn?.({
+				!verificationBlocksCompletion &&
+				(await config.shouldStopAfterTurn?.({
 					message,
 					toolResults,
 					context: currentContext,
 					newMessages,
-				})
+				}))
 			) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -599,6 +636,8 @@ async function streamToollessClosingTurn(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
+	previousAssistant?: AssistantMessage,
+	verificationObligations?: VerificationObligationTracker,
 ): Promise<void> {
 	if (signal?.aborted) return;
 	if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) return;
@@ -606,14 +645,35 @@ async function streamToollessClosingTurn(
 	await emit({ type: "turn_start" });
 	const closingContext: AgentContext = {
 		...currentContext,
-		systemPrompt: currentContext.systemPrompt
-			? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
-			: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+		systemPrompt: verificationObligations
+			? verificationObligations.appendSystemPrompt(
+					currentContext.systemPrompt
+						? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
+						: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+				)
+			: currentContext.systemPrompt
+				? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
+				: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
 		tools: [],
 	};
-	const response = await streamAssistantResponse(closingContext, config, signal, emit, streamFn, {
-		rejectToolCalls: true,
-	});
+	const response = await streamAssistantResponse(
+		closingContext,
+		config,
+		signal,
+		emit,
+		streamFn,
+		{
+			rejectToolCalls: true,
+			...(verificationObligations
+				? {
+						verificationObligations,
+						invalidVerificationTerminalStopReason: "error" as const,
+					}
+				: {}),
+		},
+		previousAssistant,
+		{ allowToolFreeComparison: true },
+	);
 	const message = response.message;
 	newMessages.push(message);
 	await emit({ type: "turn_end", message, toolResults: [] });
@@ -637,7 +697,15 @@ export async function startAgentProviderRequest(
 
 type StartedAssistantResponse = {
 	message: AssistantMessage;
+	/** Provider output before degeneration collapse, retained for the next turn comparison. */
+	comparisonMessage: AssistantMessage;
 	requestId: AgentRequestId;
+};
+
+type AssistantResponsePolicy = {
+	rejectToolCalls?: boolean;
+	verificationObligations?: VerificationObligationTracker;
+	invalidVerificationTerminalStopReason?: "stop" | "error";
 };
 
 /**
@@ -650,7 +718,9 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
-	policy?: { rejectToolCalls: boolean },
+	policy?: AssistantResponsePolicy,
+	previousAssistant?: AssistantMessage,
+	collapseOptions?: { allowToolFreeComparison?: boolean },
 ): Promise<StartedAssistantResponse> {
 	const degenerationAbort = new AbortController();
 	const onOuterAbort = (): void => degenerationAbort.abort();
@@ -715,7 +785,14 @@ async function streamAssistantResponse(
 		finalMessage = { ...finalMessage, stopReason: "stop" };
 		delete finalMessage.errorMessage;
 	}
-	finalMessage = collapseDegenerateAssistantMessage(finalMessage);
+	if (policy?.verificationObligations) {
+		finalMessage = policy.verificationObligations.enforceTerminalMessage(
+			finalMessage,
+			policy.invalidVerificationTerminalStopReason ?? "error",
+		);
+	}
+	const comparisonMessage = finalMessage;
+	finalMessage = collapseDegenerateAssistantMessage(finalMessage, previousAssistant, collapseOptions);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {
@@ -723,7 +800,7 @@ async function streamAssistantResponse(
 		await emit({ type: "message_start", message: { ...finalMessage } });
 	}
 	await emit({ type: "message_end", message: finalMessage });
-	return { message: finalMessage, requestId: response.requestId };
+	return { message: finalMessage, comparisonMessage, requestId: response.requestId };
 }
 
 interface ToolExecutionContext {
@@ -735,6 +812,8 @@ interface ToolExecutionContext {
 	repairTeachTracker: ToolRepairTeachTracker;
 	toolFailureMemory: ToolFailureMemoryTracker;
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
+	/** Set while preparing a batch; only an entirely clean tool turn closes validation episodes. */
+	validationBounced: boolean;
 	previousSuccessfulResults?: readonly ToolResultMessage[];
 	signal?: AbortSignal;
 	emit: AgentEventSink;
@@ -769,14 +848,17 @@ async function executeToolCalls(
 		repairTeachTracker,
 		toolFailureMemory,
 		toolFailureRecoveryGate,
+		validationBounced: false,
 		previousSuccessfulResults: previousSuccessfulTextProtocolResults,
 		signal,
 		emit,
 	};
-	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
-		return executeToolCallsSequential(execCtx, toolCalls);
-	}
-	return executeToolCallsParallel(execCtx, toolCalls);
+	const batch =
+		config.toolExecution === "sequential" || hasSequentialToolCall
+			? await executeToolCallsSequential(execCtx, toolCalls)
+			: await executeToolCallsParallel(execCtx, toolCalls);
+	if (!execCtx.validationBounced) resetValidationFailureTracker(validationFailureTracker);
+	return batch;
 }
 
 type ExecutedToolCallBatch = {
@@ -813,6 +895,7 @@ async function prepareAndStartToolCall(
 				execCtx.requestId,
 			);
 	if (preparation.kind === "immediate") {
+		if (preparation.validationEvent?.outcome === "bounced") execCtx.validationBounced = true;
 		await emitToolExecutionStart(toolCall, execCtx.emit);
 		emitToolArgumentValidationTelemetry(execCtx.config, preparation.validationEvent, "not_run", "none");
 		return {
@@ -891,6 +974,10 @@ async function executeToolCallsSequential(
 		await emitToolResultMessage(toolResultMessage, execCtx.emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
+		// A handoff may publish a foreground placeholder, but a sequential batch still owns the
+		// execution ordering contract. Do not begin the next body until the detached execution has
+		// reached its normal policy-finalized terminal state.
+		if (finalized.backgroundCompletion) await finalized.backgroundCompletion.catch(() => undefined);
 
 		if (execCtx.signal?.aborted) {
 			break;
@@ -969,6 +1056,8 @@ type ImmediateToolCallOutcome = {
 	failureCode: string;
 	correction: string;
 	diagnostic?: string;
+	/** Bounded current-turn instruction that supplements, but never replaces, the durable failure ledger. */
+	providerFeedback?: string;
 	repeatedSuccessfulCall?: { previousToolCallId: string };
 	repeatedToolFailure?: boolean;
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
@@ -989,14 +1078,23 @@ type FinalizedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
 	executionGateEffect?: ToolFailureRecoveryGateEffect;
+	/** Present only for an accepted handoff; sequential batches await it before their next body. */
+	backgroundCompletion?: Promise<FinalizedToolCallOutcome>;
 };
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
-type ToolValidationFailureTracker = {
-	signature?: string;
+type ToolValidationFailureEpisode = {
 	repeats: number;
-	escalatedSignature?: string;
+	escalated: boolean;
+};
+
+/** Bounded LRU episodes keyed by tool + deterministic validator/provider failure signature. */
+type ToolValidationFailureTracker = Map<string, ToolValidationFailureEpisode>;
+
+type ValidationFailureHandling = {
+	message: string;
+	providerFeedback?: string;
 };
 
 type ToolRepairTeachTracker = Map<string, number>;
@@ -1004,6 +1102,8 @@ type ToolRepairTeachTracker = Map<string, number>;
 const DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD = 3;
 const TOOL_REPAIR_TEACH_EVERY = 5;
 const REPEATED_SUCCESS_RESULT_MAX_CHARS = 2_048;
+const MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS = 480;
+const MAX_TRACKED_VALIDATION_FAILURE_EPISODES = 8;
 
 function createRepeatedSuccessfulToolCallOutcome(
 	previousResult: ToolResultMessage | undefined,
@@ -1100,8 +1200,7 @@ function validationFailureCorrection(
 }
 
 function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
-	tracker.signature = undefined;
-	tracker.repeats = 0;
+	tracker.clear();
 }
 
 function emitToolArgumentValidationTelemetry(
@@ -1136,33 +1235,89 @@ function isToolArgumentValidationError(error: unknown): error is ToolArgumentVal
 	);
 }
 
+function recordValidationBounce(
+	signature: string,
+	toolName: string,
+	enrichment: string,
+	config: AgentLoopConfig,
+	tracker: ToolValidationFailureTracker,
+): ValidationFailureHandling {
+	const episodeKey = `${toolName}\0${signature}`;
+	const previous = tracker.get(episodeKey);
+	const episode: ToolValidationFailureEpisode = {
+		repeats: (previous?.repeats ?? 0) + 1,
+		escalated: previous?.escalated ?? false,
+	};
+	tracker.delete(episodeKey);
+	tracker.set(episodeKey, episode);
+	while (tracker.size > MAX_TRACKED_VALIDATION_FAILURE_EPISODES) {
+		const oldest = tracker.keys().next().value;
+		if (oldest === undefined) break;
+		tracker.delete(oldest);
+	}
+
+	const threshold = toolValidationEscalationThreshold(config);
+	if (threshold <= 0 || episode.repeats < threshold || episode.escalated) {
+		return { message: "" };
+	}
+
+	episode.escalated = true;
+	config.onToolValidationEscalation?.({
+		tool: toolName,
+		signature,
+		repeats: episode.repeats,
+		model: config.model.id,
+		provider: config.model.provider,
+	});
+	return {
+		message: `Repeated validation failure (${episode.repeats} identical attempts).`,
+		providerFeedback: enrichment,
+	};
+}
+
 function handleValidationFailure(
 	error: ToolArgumentValidationError,
 	config: AgentLoopConfig,
 	tracker: ToolValidationFailureTracker,
-): string {
-	if (tracker.signature === error.signature) {
-		tracker.repeats++;
-	} else {
-		tracker.signature = error.signature;
-		tracker.repeats = 1;
-		tracker.escalatedSignature = undefined;
-	}
+	parserDiagnostic?: string,
+): ValidationFailureHandling {
+	const enrichment = parserDiagnostic ? `${parserDiagnostic}\n\n${error.enrichment}` : error.enrichment;
+	const handling = recordValidationBounce(error.signature, error.toolName, enrichment, config, tracker);
+	return {
+		message: handling.providerFeedback
+			? `${error.message}\n\n${handling.message} Use this full schema and example before retrying:\n${handling.providerFeedback}`
+			: error.message,
+		...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
+	};
+}
 
-	const threshold = toolValidationEscalationThreshold(config);
-	if (threshold <= 0 || tracker.repeats < threshold || tracker.escalatedSignature === error.signature) {
-		return error.message;
-	}
+function truncateProviderValidationFeedback(value: string, maxChars: number): string {
+	const sanitized = sanitizeBinaryOutput(value).trim();
+	if (sanitized.length <= maxChars) return sanitized;
+	let end = maxChars - 1;
+	const code = sanitized.charCodeAt(end - 1);
+	if (code >= 0xd800 && code <= 0xdbff) end--;
+	return `${sanitized.slice(0, end)}…`;
+}
 
-	tracker.escalatedSignature = error.signature;
-	config.onToolValidationEscalation?.({
-		tool: error.toolName,
-		signature: error.signature,
-		repeats: tracker.repeats,
-		model: config.model.id,
-		provider: config.model.provider,
-	});
-	return `${error.message}\n\nRepeated validation failure (${tracker.repeats} identical attempts). Use this full schema and example before retrying:\n${error.enrichment}`;
+function parserDiagnosticFromRawArguments(toolCall: AgentToolCall): string | undefined {
+	const rawArguments = toolCall.rawArguments;
+	if (!rawArguments || typeof rawArguments !== "object" || Array.isArray(rawArguments)) return undefined;
+	const candidate = rawArguments.parseDiagnostic;
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+	const detail = candidate as Record<string, unknown>;
+	const kind = typeof detail.kind === "string" ? detail.kind : "malformed call";
+	const offset =
+		typeof detail.offset === "number" && Number.isFinite(detail.offset) ? ` at offset ${detail.offset}` : "";
+	const context = typeof detail.context === "string" ? `: ${detail.context}` : "";
+	return truncateProviderValidationFeedback(
+		`Provider parse diagnostic (${kind}${offset})${context}`,
+		MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS,
+	);
+}
+
+function providerMalformedCallEnrichment(tool: AgentTool, parserDetail: string): string {
+	return `${parserDetail}\n\n${formatToolValidationEnrichment(tool)}`;
 }
 
 async function prepareToolCall(
@@ -1190,13 +1345,26 @@ async function prepareToolCall(
 	}
 
 	if (toolCall.errorMessage) {
+		const parserDetail = truncateProviderValidationFeedback(
+			toolCall.errorMessage,
+			MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS,
+		);
+		const handling = recordValidationBounce(
+			`malformed_call:${tool.name}:${parserDetail}`,
+			tool.name,
+			providerMalformedCallEnrichment(tool, parserDetail),
+			config,
+			validationFailureTracker,
+		);
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(toolCall.errorMessage),
+			result: createErrorToolResult(parserDetail),
 			isError: true,
 			phase: "validation",
 			failureCode: "malformed_call",
 			correction: "Resend one complete JSON argument object matching the current tool schema.",
+			diagnostic: parserDetail,
+			...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
 			validationEvent: createValidationBounceTelemetry(config, toolCall, "malformed_call"),
 		};
 	}
@@ -1212,7 +1380,6 @@ async function prepareToolCall(
 				validationEvent = event;
 			},
 		});
-		resetValidationFailureTracker(validationFailureTracker);
 		if (preparedToolCall.repairNotes) {
 			toolCall.repairNotes = preparedToolCall.repairNotes;
 		}
@@ -1277,11 +1444,11 @@ async function prepareToolCall(
 			validationEvent,
 		};
 	} catch (error) {
-		const message = isToolArgumentValidationError(error)
-			? handleValidationFailure(error, config, validationFailureTracker)
-			: error instanceof Error
-				? error.message
-				: String(error);
+		const parserDiagnostic = parserDiagnosticFromRawArguments(toolCall);
+		const validationFailure = isToolArgumentValidationError(error)
+			? handleValidationFailure(error, config, validationFailureTracker, parserDiagnostic)
+			: undefined;
+		const message = validationFailure?.message ?? (error instanceof Error ? error.message : String(error));
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(message),
@@ -1289,9 +1456,12 @@ async function prepareToolCall(
 			phase: isToolArgumentValidationError(error) ? "validation" : "preflight",
 			failureCode: isToolArgumentValidationError(error) ? "invalid_arguments" : "preflight_error",
 			correction: isToolArgumentValidationError(error)
-				? validationFailureCorrection(validationEvent, toolCall.name)
+				? [validationFailureCorrection(validationEvent, toolCall.name), parserDiagnostic]
+						.filter((part): part is string => part !== undefined)
+						.join(" ")
 				: toolFailureCorrection(message, "rejected", "preflight"),
 			diagnostic: isToolArgumentValidationError(error) ? undefined : message,
+			...(validationFailure?.providerFeedback ? { providerFeedback: validationFailure.providerFeedback } : {}),
 			validationEvent,
 		};
 	}
@@ -1328,17 +1498,23 @@ function finalizeRejectedToolCall(
 		},
 	);
 	const failureResult = createToolFailureResult(record, outcome.result.terminate);
+	const result = outcome.providerFeedback
+		? {
+				...failureResult,
+				content: [...failureResult.content, { type: "text" as const, text: outcome.providerFeedback }],
+			}
+		: failureResult;
 	return {
 		toolCall,
 		result: outcome.repeatedSuccessfulCall
 			? {
-					...failureResult,
+					...result,
 					details: {
-						...failureResult.details,
+						...result.details,
 						piRepeatedSuccessfulCall: outcome.repeatedSuccessfulCall,
 					},
 				}
-			: failureResult,
+			: result,
 		isError: true,
 		executionGateEffect: {
 			kind: "unproductive",
@@ -1502,6 +1678,7 @@ async function executeAndFinalizePreparedToolCall(
 		toolCall: prepared.toolCall,
 		result: handoff.result,
 		isError: handoff.isError ?? handoff.result.isError === true,
+		backgroundCompletion: handedOffCompletion,
 	};
 }
 
@@ -1643,6 +1820,7 @@ async function finalizeExecutedToolCall(
 		}
 	}
 
+	const verificationDetails = retainedVerificationDetails(result.details);
 	if (isError) {
 		const usage = result.usage;
 		const failureOutput =
@@ -1715,9 +1893,11 @@ async function finalizeExecutedToolCall(
 		}
 	}
 
-	const repaired = isError
-		? { result, taught: false }
-		: appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	const resultWithVerification = {
+		...repaired.result,
+		details: verificationDetails ? { ...repaired.result.details, ...verificationDetails } : repaired.result.details,
+	};
 	emitToolArgumentValidationTelemetry(
 		config,
 		prepared.validationEvent,
@@ -1727,7 +1907,7 @@ async function finalizeExecutedToolCall(
 
 	return {
 		toolCall: prepared.toolCall,
-		result: repaired.result,
+		result: resultWithVerification,
 		isError,
 		executionGateEffect,
 	};

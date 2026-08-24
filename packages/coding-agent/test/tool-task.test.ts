@@ -31,6 +31,18 @@ const failed: BackgroundToolTaskRecord = {
 	output: '[harness] {"failure_key":"bash:timeout","occ":1}',
 };
 
+const verificationFailed: BackgroundToolTaskRecord = {
+	...failed,
+	terminalDelivery: "pending",
+	piVerification: { version: 1, id: "verify-background", status: "failed", originTaskId: "tool-task-1" },
+};
+
+const verificationPassed: BackgroundToolTaskRecord = {
+	...terminal,
+	terminalDelivery: "pending",
+	piVerification: { version: 1, id: "verify-background", status: "passed", originTaskId: "tool-task-1" },
+};
+
 const canceled: BackgroundToolTaskRecord = {
 	...running,
 	status: "canceled",
@@ -145,6 +157,109 @@ describe("tool_task", () => {
 		expect(result.details).toMatchObject({ kind: "wait", taskId: record.taskId, status: record.status });
 		expect(result.isError).toBe(true);
 		expect(result.errorKind).toBe("operation_outcome");
+	});
+
+	it("preserves a failed pending background verification through its single wait result", async () => {
+		const tool = createToolTaskToolDefinition({
+			list: () => [verificationFailed],
+			observe: () => [verificationFailed],
+			wait: async () => verificationFailed,
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call",
+			{ action: "wait", taskId: verificationFailed.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(result.details).toMatchObject({
+			kind: "wait",
+			piVerification: { version: 1, id: "verify-background", status: "failed", originTaskId: "tool-task-1" },
+		});
+	});
+
+	it("preserves a pending pass only after a rejected wait is retried", async () => {
+		const wait = vi
+			.fn<() => Promise<BackgroundToolTaskRecord>>()
+			.mockRejectedValueOnce(new Error("transient wait interruption"))
+			.mockResolvedValueOnce(verificationPassed);
+		const tool = createToolTaskToolDefinition({
+			list: () => [verificationPassed],
+			observe: () => [verificationPassed],
+			wait,
+			cancel: vi.fn(),
+		});
+
+		const first = await tool.execute(
+			"call-first",
+			{ action: "wait", taskId: verificationPassed.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+		const retry = await tool.execute(
+			"call-retry",
+			{ action: "wait", taskId: verificationPassed.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(first.details).toMatchObject({ kind: "error", reason: "transient wait interruption" });
+		expect(first.details).not.toHaveProperty("piVerification");
+		expect(retry.details).toMatchObject({ piVerification: { status: "passed" } });
+	});
+
+	it("does not replay verification from a delivered terminal or a running watchdog snapshot", async () => {
+		const delivered = { ...verificationPassed, terminalDelivery: "delivered" as const };
+		const watchdogRecord = { ...running, taskId: "tool-task-2", toolCallId: "call-2" };
+		const tool = createToolTaskToolDefinition({
+			list: () => [delivered, watchdogRecord],
+			observe: () => [delivered, watchdogRecord],
+			wait: async (taskId) => (taskId === delivered.taskId ? delivered : watchdogRecord),
+			cancel: vi.fn(),
+		});
+
+		const stale = await tool.execute(
+			"call-stale",
+			{ action: "wait", taskId: delivered.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+		const watchdog = await tool.execute(
+			"call-watchdog",
+			{ action: "wait", taskId: watchdogRecord.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(stale.details).not.toHaveProperty("piVerification");
+		expect(watchdog.details).not.toHaveProperty("piVerification");
+	});
+
+	it("does not invent verification metadata for an ordinary pending terminal", async () => {
+		const ordinary = { ...terminal, terminalDelivery: "pending" as const };
+		const tool = createToolTaskToolDefinition({
+			list: () => [ordinary],
+			observe: () => [ordinary],
+			wait: async () => ordinary,
+			cancel: vi.fn(),
+		});
+
+		const result = await tool.execute(
+			"call-ordinary",
+			{ action: "wait", taskId: ordinary.taskId },
+			undefined,
+			undefined,
+			extensionContext,
+		);
+
+		expect(result.details).not.toHaveProperty("piVerification");
 	});
 
 	it("projects an invalid or rejected wait as a failed tool call", async () => {

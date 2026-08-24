@@ -27,3 +27,5 @@ export * from "./usage.ts";
 // Shell output utilities
 export * from "./utils/shell-output.ts";
 export { uuidv7 } from "./uuid.ts";
+// Trusted verification obligations carried by tool-result details.
+export * from "./verification-obligations.ts";

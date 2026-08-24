@@ -48,6 +48,87 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 		await harness.cleanup();
 	});
 
+	it("keeps capability authorization scoped to each call in a mixed read/edit/bash/grep batch", async () => {
+		const editParameters = Type.Object({ path: Type.String(), oldText: Type.String(), newText: Type.String() });
+		const grepParameters = Type.Object({
+			pattern: Type.String(),
+			path: Type.String(),
+			glob: Type.Optional(Type.String()),
+		});
+		const executed: string[] = [];
+		const tool = <
+			T extends typeof readParameters | typeof bashParameters | typeof editParameters | typeof grepParameters,
+		>(
+			name: "read" | "edit" | "bash" | "grep",
+			parameters: T,
+		): AgentTool<T> => ({
+			name,
+			label: name,
+			description: `${name} test tool`,
+			parameters,
+			execute: async (toolCallId) => {
+				executed.push(`${name}:${toolCallId}`);
+				return { content: [{ type: "text", text: `${name} completed` }], details: {} };
+			},
+		});
+		const harness = await createHarness({
+			settings: { modelCapability: { mode: "off" } },
+			tools: [
+				tool("read", readParameters),
+				tool("edit", editParameters),
+				tool("bash", bashParameters),
+				tool("grep", grepParameters),
+			],
+		});
+		harness.session.capabilityEnvelope = {
+			id: "mixed-per-call",
+			capabilities: ["filesystem.read", "process.exec"],
+		};
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall("read", { path: "src/allowed.ts" }, { id: "read-call" }),
+					fauxToolCall(
+						"edit",
+						{ path: "src/allowed.ts", oldText: "before", newText: "after" },
+						{ id: "edit-call" },
+					),
+					fauxToolCall("bash", { command: "echo allowed" }, { id: "bash-call" }),
+					fauxToolCall("grep", { pattern: "needle", path: "src", glob: "*.ts" }, { id: "grep-call" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("batch complete"),
+		]);
+
+		try {
+			await harness.session.prompt("exercise the mixed capability batch");
+
+			const results = new Map(
+				harness.session.agent.state.messages
+					.filter((message) => message.role === "toolResult")
+					.map((message) => [
+						message.toolCallId,
+						{
+							isError: message.isError,
+							text: message.content
+								.filter((block): block is { type: "text"; text: string } => block.type === "text")
+								.map((block) => block.text)
+								.join("\n"),
+						},
+					]),
+			);
+			expect(executed.sort()).toEqual(["bash:bash-call", "grep:grep-call", "read:read-call"]);
+			expect(results.get("read-call")).toMatchObject({ isError: false, text: "read completed" });
+			expect(results.get("bash-call")).toMatchObject({ isError: false, text: "bash completed" });
+			expect(results.get("grep-call")).toMatchObject({ isError: false, text: "grep completed" });
+			expect(results.get("edit-call")).toMatchObject({ isError: true });
+			expect(results.get("edit-call")?.text).toContain("missing_capability");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("blocks tool execution when explicitly denied by envelope", async () => {
 		let executed = false;
 		const customBashTool = {

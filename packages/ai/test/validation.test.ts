@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Tool, ToolCall } from "../src/types.ts";
-import { validateToolArguments } from "../src/utils/validation.ts";
+import { getValidator, ToolArgumentValidationError, validateToolArguments } from "../src/utils/validation.ts";
 
 function createToolCallWithPlainSchema(
 	schema: Tool["parameters"],
@@ -198,6 +198,120 @@ describe("validateToolArguments", () => {
 		expect(() => validateToolArguments(tool, toolCall)).toThrow(
 			/Validation failed for tool "search":\n[\s\S]*query\.limit:[\s\S]*Expected schema: \{"type":"number","minimum":1\}[\s\S]*Example: 1[\s\S]*Received: "many"[\s\S]*query\.mode:[\s\S]*Expected schema: \{"enum":\["fast","deep"\]\}[\s\S]*Example: "fast"[\s\S]*Received: "slow"/,
 		);
+	});
+
+	it("guides union-of-object roots and literal failures with the concrete allowed values", () => {
+		const tool: Tool = {
+			name: "scoped",
+			description: "Scoped tool",
+			parameters: Type.Union([
+				Type.Object({ scope: Type.Literal("project") }),
+				Type.Object({ scope: Type.Literal("user") }),
+			]),
+		};
+
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "union-root",
+				name: "scoped",
+				arguments: "not-an-object" as unknown as Record<string, unknown>,
+			}),
+		).toThrow(/root: expected object/i);
+
+		let thrown: unknown;
+		const events: unknown[] = [];
+		try {
+			validateToolArguments(
+				tool,
+				{
+					type: "toolCall",
+					id: "literal",
+					name: "scoped",
+					arguments: { scope: "workspace" },
+				},
+				{ telemetry: (event) => events.push(event) },
+			);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(ToolArgumentValidationError);
+		const message = (thrown as ToolArgumentValidationError).message;
+		expect(message).toContain('scope: must equal "project"; Allowed values: "project"');
+		expect(message).not.toContain("scope: expected string, received string");
+		expect(events).toMatchObject([
+			{
+				failureShape: expect.arrayContaining([
+					{ path: "scope", expectedType: 'literal "project"', receivedType: "string", keyword: "const" },
+				]),
+			},
+		]);
+		// Negative control: the first discriminated branch remains a usable valid example.
+		expect((thrown as ToolArgumentValidationError).enrichment).toContain('Valid example:\n{"scope":"project"}');
+	});
+
+	it("builds a validator-passing minimal example for a union-shaped edit schema", () => {
+		const tool: Tool = {
+			name: "edit",
+			description: "Edit a file",
+			parameters: Type.Union([
+				Type.Object({
+					path: Type.String({ minLength: 1 }),
+					edits: Type.Array(Type.Object({ oldText: Type.String({ minLength: 1 }), newText: Type.String() }), {
+						minItems: 1,
+					}),
+				}),
+				Type.Object({ path: Type.String({ minLength: 1 }), payloadRef: Type.String({ minLength: 1 }) }),
+			]),
+		};
+
+		let thrown: unknown;
+		try {
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "edit-union",
+				name: "edit",
+				arguments: {} as Record<string, unknown>,
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(ToolArgumentValidationError);
+		const enrichment = (thrown as ToolArgumentValidationError).enrichment;
+		const exampleText = enrichment.match(/Valid example:\n(.*)$/)?.[1];
+		expect(exampleText).toBeDefined();
+		const example = JSON.parse(exampleText ?? "{}");
+		expect(getValidator(tool.parameters).Check(example)).toBe(true);
+	});
+
+	it("omits an example rather than allocating from pathological minimum metadata", () => {
+		const tool: Tool = {
+			name: "oversized",
+			description: "Oversized schema",
+			parameters: Type.Object({
+				values: Type.Array(Type.String(), { minItems: 10_000 }),
+				label: Type.String({ minLength: 10_000 }),
+			}),
+		};
+
+		let thrown: unknown;
+		try {
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "oversized-example",
+				name: "oversized",
+				arguments: {},
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(ToolArgumentValidationError);
+		const enrichment = (thrown as ToolArgumentValidationError).enrichment;
+		expect(enrichment).not.toContain("Valid example:");
+		expect(enrichment.length).toBeLessThan(5_000);
 	});
 
 	it("identifies the exact forbidden nested property in validation diagnostics", () => {

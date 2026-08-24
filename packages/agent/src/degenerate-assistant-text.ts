@@ -118,8 +118,11 @@ export function shouldAbortDegenerateStream(text: string): boolean {
 
 const collapsedDegenerateMessages = new WeakSet<AssistantMessage>();
 
-export function collapseDegenerateAssistantMessage(message: AssistantMessage): AssistantMessage {
-	let changed = false;
+export function collapseDegenerateAssistantMessage(
+	message: AssistantMessage,
+	previousAssistant?: AssistantMessage,
+	options?: { allowToolFreeComparison?: boolean },
+): AssistantMessage {
 	const seenText = new Set<string>();
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
@@ -129,29 +132,57 @@ export function collapseDegenerateAssistantMessage(message: AssistantMessage): A
 		}
 		const isThinking = block.type === "thinking";
 		const source = isThinking ? block.thinking : block.text;
-		const canRewriteThinking =
-			!isThinking ||
-			(!block.redacted &&
-				(!block.thinkingSignature ||
-					message.api === "openai-completions" ||
-					message.api === "openai-responses" ||
-					message.api === "azure-openai-responses" ||
-					message.api === "openai-codex-responses"));
+		const canRewriteThinking = !isThinking || canRewriteThinkingBlock(message, block);
 		if (!canRewriteThinking) {
 			content.push(block);
 			continue;
 		}
 		const collapsed = collapseRepeatedLines(source);
-		if (collapsed !== source) changed = true;
-		if (!isThinking && collapsed.trim() !== "" && seenText.has(collapsed)) {
-			changed = true;
-			continue;
-		}
+		if (!isThinking && collapsed.trim() !== "" && seenText.has(collapsed)) continue;
 		if (!isThinking && collapsed.trim() !== "") seenText.add(collapsed);
 		content.push(
 			collapsed === source ? block : isThinking ? { ...block, thinking: collapsed } : { ...block, text: collapsed },
 		);
 	}
+	const messageHasToolCall = message.content.some((block) => block.type === "toolCall");
+	const previousHasToolCall = previousAssistant?.content.some((block) => block.type === "toolCall") ?? false;
+	const compareToolFreeClosingTurn = options?.allowToolFreeComparison && !messageHasToolCall;
+	if (previousAssistant && (messageHasToolCall || compareToolFreeClosingTurn) && previousHasToolCall) {
+		const previousThinking = previousAssistant.content.filter(
+			(block): block is Extract<AssistantMessage["content"][number], { type: "thinking" }> =>
+				block.type === "thinking" && canRewriteThinkingBlock(previousAssistant, block),
+		);
+		const repeatedThinking = new Set(
+			previousThinking.map((block) => `${block.thinkingSignature ?? ""}\u0000${block.thinking}`),
+		);
+		const crossTurnContent = content.filter((block) => {
+			if (block.type !== "thinking" || !canRewriteThinkingBlock(message, block)) return true;
+			const key = `${block.thinkingSignature ?? ""}\u0000${block.thinking}`;
+			if (!repeatedThinking.has(key)) return true;
+			return false;
+		});
+		if (crossTurnContent.length !== content.length) return markCollapsedMessage(message, crossTurnContent);
+	}
+	return markCollapsedMessage(message, content);
+}
+
+function canRewriteThinkingBlock(
+	message: AssistantMessage,
+	block: Extract<AssistantMessage["content"][number], { type: "thinking" }>,
+): boolean {
+	return (
+		!block.redacted &&
+		(!block.thinkingSignature ||
+			message.api === "openai-completions" ||
+			message.api === "openai-responses" ||
+			message.api === "azure-openai-responses" ||
+			message.api === "openai-codex-responses")
+	);
+}
+
+function markCollapsedMessage(message: AssistantMessage, content: AssistantMessage["content"]): AssistantMessage {
+	const changed =
+		content.length !== message.content.length || content.some((block, index) => block !== message.content[index]);
 	if (!changed) return message;
 	const next = { ...message, content };
 	collapsedDegenerateMessages.add(next);

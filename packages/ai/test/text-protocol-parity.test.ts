@@ -209,6 +209,32 @@ describe("text-protocol parity matrix", () => {
 		expect(parsed.calls).toMatchObject([{ name: "read", source: "text-protocol" }]);
 	});
 
+	it("retains bounded malformed-JSON diagnostics while valid quoted argument containers use shared repair", () => {
+		const tool = makeTool("echo");
+		const malformed = parseTextToolCalls('<tool_call>{"name":"echo","arguments":{"value": }}</tool_call>', [tool]);
+		const malformedCall = malformed.calls[0];
+		expect(malformedCall).toMatchObject({ name: "echo", source: "text-protocol", errorMessage: undefined });
+		expect(malformedCall?.rawArguments).toMatchObject({
+			parseDiagnostic: {
+				kind: "malformed-json",
+				offset: expect.any(Number),
+				context: expect.stringContaining('"value"'),
+			},
+		});
+		expect(
+			(malformedCall?.rawArguments?.parseDiagnostic as { context?: string } | undefined)?.context?.length,
+		).toBeLessThanOrEqual(160);
+		// The parser does not short-circuit the call: it reaches the shared validation/recovery choke point.
+		expect(() => validateToolArguments(tool, malformedCall!)).toThrow("Validation failed");
+
+		const quotedContainer = parseTextToolCalls(
+			'<tool_call>{"name":"echo","arguments":"{\\"value\\":\\"ok\\"}"}</tool_call>',
+			[tool],
+		).calls[0];
+		expect(quotedContainer?.rawArguments).not.toHaveProperty("parseDiagnostic");
+		expect(validateToolArguments(tool, quotedContainer!)).toEqual({ value: "ok" });
+	});
+
 	it("dialect parity: each of the four recognized dialects round-trips a call", () => {
 		const tool: Tool = {
 			name: "read",

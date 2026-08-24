@@ -1,13 +1,17 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, UserMessage } from "@caupulican/pi-ai";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	buildSessionContext as buildUncachedSessionContext,
 	CURRENT_SESSION_VERSION,
 	SessionManager,
 } from "../../src/session/session-manager.ts";
+import {
+	createVerificationObligationSnapshotDetails,
+	VerificationObligationTracker,
+} from "../../src/verification-obligations.ts";
 
 function assistantMessage(text: string, provider = "anthropic", model = "test-model"): AssistantMessage {
 	return {
@@ -47,6 +51,18 @@ function userText(message: ReturnType<SessionManager["buildSessionContext"]>["me
 		throw new TypeError("Expected a textual user message.");
 	}
 	return message.content;
+}
+
+function verificationResult(id: string, status: "failed" | "passed"): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: `verification-${id}-${status}`,
+		toolName: "verify",
+		content: [{ type: "text", text: `${id}: ${status}` }],
+		details: { piVerification: { version: 1, id, status } },
+		isError: status === "failed",
+		timestamp: 1,
+	};
 }
 
 describe("SessionManager context cache", () => {
@@ -211,6 +227,49 @@ describe("SessionManager context cache", () => {
 		expect(session.buildSessionContext().messages.find((message) => message.role === "branchSummary")).toMatchObject({
 			summary: "canonical branch summary",
 		});
+	});
+
+	it("persists bounded verification snapshots through iterative compaction and clears them after a kept pass", () => {
+		const session = SessionManager.inMemory("/repo");
+		const rootId = session.appendMessage({ role: "user", content: "verify work", timestamp: 1 });
+		session.appendMessage(verificationResult("unit-suite", "failed"));
+
+		const firstDetails = createVerificationObligationSnapshotDetails(
+			new VerificationObligationTracker(session.buildSessionContext().messages).getActiveIds(),
+		);
+		expect(firstDetails).toEqual({
+			piVerificationObligations: { version: 1, activeIds: ["unit-suite"] },
+		});
+		session.appendCompaction("first checkpoint", rootId, 100, firstDetails);
+
+		const firstContext = session.buildSessionContext().messages;
+		const firstSummary = firstContext.find((message) => message.role === "compactionSummary");
+		expect(firstSummary).toMatchObject({ details: firstDetails });
+		expect(new VerificationObligationTracker(firstContext).getActiveIds()).toEqual(["unit-suite"]);
+
+		const secondDetails = createVerificationObligationSnapshotDetails(
+			new VerificationObligationTracker(firstContext).getActiveIds(),
+		);
+		session.appendCompaction("second checkpoint", rootId, 80, secondDetails);
+		expect(new VerificationObligationTracker(session.buildSessionContext().messages).getActiveIds()).toEqual([
+			"unit-suite",
+		]);
+
+		const passId = session.appendMessage(verificationResult("unit-suite", "passed"));
+		const afterPass = session.buildSessionContext().messages;
+		expect(new VerificationObligationTracker(afterPass).getActiveIds()).toEqual([]);
+		const clearedDetails = createVerificationObligationSnapshotDetails(
+			new VerificationObligationTracker(afterPass).getActiveIds(),
+		);
+		session.appendCompaction("cleared checkpoint", passId, 60, clearedDetails);
+
+		const clearedSummary = session
+			.buildSessionContext()
+			.messages.find((message) => message.role === "compactionSummary");
+		expect(clearedSummary).toMatchObject({
+			details: { piVerificationObligations: { version: 1, activeIds: [] } },
+		});
+		expect(new VerificationObligationTracker(session.buildSessionContext().messages).getActiveIds()).toEqual([]);
 	});
 
 	it("matches an uncached projection after every appendable entry variant", () => {

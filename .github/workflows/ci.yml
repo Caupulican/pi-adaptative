@@ -86,6 +86,13 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Verification-harness coverage gate
+        if: >
+          runner.os == 'Linux' &&
+          inputs.skip_tests != true &&
+          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        run: npm run coverage:verification-harness
+
       - name: Test non-coding-agent workspaces
         if: >
           inputs.skip_tests != true &&

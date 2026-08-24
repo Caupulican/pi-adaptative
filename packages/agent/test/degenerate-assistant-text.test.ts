@@ -92,6 +92,86 @@ describe("degenerate assistant text", () => {
 		expect(collapseDegenerateAssistantMessage(original)).toBe(original);
 	});
 
+	it("collapses repeated thinking across tool turns while retaining the tool call", () => {
+		const line = "The operation was rejected. I will inspect the result and correct the request.";
+		const previous = assistant("");
+		previous.content = [
+			{ type: "thinking", thinking: line, thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/file.ts" } },
+		];
+		const current = assistant("");
+		current.content = [
+			{ type: "thinking", thinking: line, thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-2", name: "read", arguments: { path: "src/file.ts" } },
+		];
+
+		expect(collapseDegenerateAssistantMessage(current, previous).content).toEqual([current.content[1]]);
+	});
+
+	it("collapses repeated thinking when the tool operation changes or parallel calls differ", () => {
+		const line = "The operation was rejected. I will inspect the result and correct the request.";
+		const previous = assistant("");
+		previous.content = [
+			{ type: "thinking", thinking: line, thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/file.ts" } },
+			{ type: "toolCall", id: "call-2", name: "read", arguments: { path: "src/other.ts" } },
+		];
+		const current = assistant("");
+		current.content = [
+			{ type: "thinking", thinking: line, thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-3", name: "read", arguments: { path: "src/file.ts" } },
+			{ type: "toolCall", id: "call-4", name: "read", arguments: { path: "src/new.ts" } },
+		];
+
+		expect(collapseDegenerateAssistantMessage(current, previous).content).toEqual(current.content.slice(1));
+	});
+
+	it("keeps non-identical reasoning across changed tool turns", () => {
+		const previous = assistant("");
+		previous.content = [
+			{ type: "thinking", thinking: "I will inspect the first result.", thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/file.ts" } },
+		];
+		const current = assistant("");
+		current.content = [
+			{ type: "thinking", thinking: "I will inspect the second result.", thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-2", name: "read", arguments: { path: "src/other.ts" } },
+		];
+
+		expect(collapseDegenerateAssistantMessage(current, previous)).toBe(current);
+	});
+
+	it("preserves repeated assistant text across tool turns", () => {
+		const previous = assistant("");
+		previous.content = [
+			{ type: "text", text: "The same visible answer is valid on both turns." },
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/file.ts" } },
+		];
+		const current = assistant("");
+		current.content = [
+			{ type: "text", text: "The same visible answer is valid on both turns." },
+			{ type: "toolCall", id: "call-2", name: "read", arguments: { path: "src/file.ts" } },
+		];
+
+		expect(collapseDegenerateAssistantMessage(current, previous)).toBe(current);
+	});
+
+	it("does not collapse a tool-free repeated turn without the closing-turn policy", () => {
+		const line = "The unresolved operation remains blocked.";
+		const previous = assistant("");
+		previous.content = [
+			{ type: "thinking", thinking: line, thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/file.ts" } },
+		];
+		const current = assistant("");
+		current.content = [{ type: "thinking", thinking: line, thinkingSignature: "reasoning" }];
+
+		expect(collapseDegenerateAssistantMessage(current, previous)).toBe(current);
+		expect(collapseDegenerateAssistantMessage(current, previous, { allowToolFreeComparison: true }).content).toEqual(
+			[],
+		);
+	});
+
 	it("collapses a single-line sentence generation loop", () => {
 		const sentence = "Checking leftover copy, then finishing docs, sitemap, tests, and the message house.";
 		const looping = Array.from({ length: 12 }, () => sentence).join(" ");

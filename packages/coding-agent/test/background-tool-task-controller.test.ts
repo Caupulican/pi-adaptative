@@ -317,7 +317,7 @@ describe("BackgroundToolTaskController", () => {
 		await controller.shutdown();
 	});
 
-	it("never publishes a successful completion when its terminal record was not durable", async () => {
+	it("never publishes a successful completion or passing verification when its terminal record was not durable", async () => {
 		const notifications: BackgroundToolTaskRecord[] = [];
 		let writes = 0;
 		const controller = new BackgroundToolTaskController({
@@ -336,7 +336,10 @@ describe("BackgroundToolTaskController", () => {
 		controller.handoff(call.context);
 		call.resolveCompletion({
 			toolCall: call.context.toolCall,
-			result: { content: [{ type: "text", text: "successful process output" }], details: {} },
+			result: {
+				content: [{ type: "text", text: "successful process output" }],
+				details: { piVerification: { version: 1, id: "verify-undurable", status: "passed" } },
+			},
 			isError: false,
 		});
 		await controller.waitForNotifications();
@@ -348,7 +351,102 @@ describe("BackgroundToolTaskController", () => {
 			}),
 		]);
 		expect(notifications).toEqual([expect.objectContaining({ status: "failed" })]);
+		expect(controller.list()[0]?.piVerification).toBeUndefined();
+		expect(notifications[0]?.piVerification).toBeUndefined();
 		await controller.shutdown();
+	});
+
+	it("drops contradictory passing verification from failed, canceled, and restored background terminals", async () => {
+		const notifications: BackgroundToolTaskRecord[] = [];
+		const controller = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			persist: () => {},
+			notifyTerminal: (records) => {
+				notifications.push(...records);
+			},
+		});
+		const failed = controlledContext("call-failed-pass");
+		const canceled = controlledContext("call-canceled-pass");
+		controller.handoff(failed.context);
+		controller.handoff(canceled.context);
+		controller.cancel("tool-task-2");
+		failed.resolveCompletion({
+			toolCall: failed.context.toolCall,
+			result: {
+				content: [{ type: "text", text: "failed process" }],
+				details: { piVerification: { version: 1, id: "verify-contradictory", status: "passed" } },
+			},
+			isError: true,
+		});
+		canceled.resolveCompletion({
+			toolCall: canceled.context.toolCall,
+			result: {
+				content: [{ type: "text", text: "canceled process" }],
+				details: { piVerification: { version: 1, id: "verify-canceled", status: "passed" } },
+			},
+			isError: false,
+		});
+		await controller.waitForNotifications();
+
+		expect(controller.list().map((record) => [record.status, record.piVerification])).toEqual([
+			["failed", undefined],
+			["canceled", undefined],
+		]);
+		expect(notifications.map((record) => [record.status, record.piVerification])).toEqual([
+			["failed", undefined],
+			["canceled", undefined],
+		]);
+		await controller.shutdown();
+
+		const restoredNotifications: BackgroundToolTaskRecord[] = [];
+		const restored = new BackgroundToolTaskController({
+			getSessionId: () => "session-a",
+			getArtifactStore: () => undefined,
+			loadPersistedRecordsNewestFirst: () => [
+				{
+					sessionId: "session-a",
+					taskId: "tool-task-7",
+					toolCallId: "call-restored",
+					toolName: "slow",
+					status: "failed",
+					startedAt: "2026-08-21T20:00:00.000Z",
+					completedAt: "2026-08-21T20:00:01.000Z",
+					elapsedBeforeHandoffMs: 15_000,
+					summary: "slow failed",
+					output: "failed",
+					terminalDelivery: "pending",
+					piVerification: {
+						version: 1,
+						id: "verify-restored-contradictory",
+						status: "passed",
+						originTaskId: "tool-task-7",
+					},
+				},
+				{
+					sessionId: "session-a",
+					taskId: "tool-task-8",
+					toolCallId: "call-restored-legacy",
+					toolName: "slow",
+					status: "completed",
+					startedAt: "2026-08-21T20:00:00.000Z",
+					completedAt: "2026-08-21T20:00:01.000Z",
+					elapsedBeforeHandoffMs: 15_000,
+					summary: "slow completed",
+					output: "passed",
+					terminalDelivery: "pending",
+					piVerification: { version: 1, id: "verify-restored-legacy", status: "passed" },
+				},
+			],
+			persist: () => {},
+			notifyTerminal: (records) => {
+				restoredNotifications.push(...records);
+			},
+		});
+		await restored.waitForNotifications();
+		expect(restored.list().map((record) => record.piVerification)).toEqual([undefined, undefined]);
+		expect(restoredNotifications.map((record) => record.piVerification)).toEqual([undefined, undefined]);
+		await restored.shutdown();
 	});
 
 	it("still wakes the owner when a dependency wait aborts immediately before completion", async () => {
@@ -444,12 +542,18 @@ describe("BackgroundToolTaskController", () => {
 			output: "retained output",
 			terminalDelivery: "pending",
 		};
+		const foreignPending: BackgroundToolTaskRecord = {
+			...pending,
+			sessionId: "session-b",
+			taskId: "tool-task-8",
+			toolCallId: "call-foreign-pending",
+		};
 		const delivered: BackgroundToolTaskRecord[] = [];
 		const persisted: BackgroundToolTaskRecord[] = [];
 		const controller = new BackgroundToolTaskController({
 			getSessionId: () => "session-a",
 			getArtifactStore: () => undefined,
-			loadPersistedRecordsNewestFirst: () => [pending],
+			loadPersistedRecordsNewestFirst: () => [foreignPending, pending],
 			persist: (record) => persisted.push(record),
 			notifyTerminal: (records) => {
 				delivered.push(...records);
@@ -466,6 +570,9 @@ describe("BackgroundToolTaskController", () => {
 			}),
 		]);
 		expect(persisted).toEqual([expect.objectContaining({ taskId: "tool-task-7", terminalDelivery: "delivered" })]);
+		expect(delivered).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ taskId: "tool-task-8", sessionId: "session-b" })]),
+		);
 		await controller.shutdown();
 	});
 

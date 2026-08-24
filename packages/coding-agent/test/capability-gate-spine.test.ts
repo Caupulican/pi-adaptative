@@ -71,6 +71,22 @@ function isCalibration(context: Context): boolean {
 	return (context.systemPrompt ?? "").includes("Text tool protocol calibration trial");
 }
 
+function isTaskScaleCalibration(context: Context): boolean {
+	return (context.systemPrompt ?? "").includes("task-scale nested edit");
+}
+
+function taskScaleEditCalibrationEnvelope(): string {
+	return `<pi:call name="edit">${JSON.stringify({
+		path: "src/calibration fixture.ts",
+		edits: [
+			{
+				oldText: 'const value = "before";\n',
+				newText: 'const value = "after";\nconsole.log("escaped \\"quote\\"");\n',
+			},
+		],
+	})}</pi:call>`;
+}
+
 function messageText(context: Context): string {
 	return JSON.stringify(context.messages ?? []);
 }
@@ -127,6 +143,7 @@ function respondNativeCapable(_streamModel: Model<Api>, context: Context): strin
  * canonical tool-tag envelope — grades "text-protocol"/"tool-tag". */
 function respondTextProtocolOnly(_streamModel: Model<Api>, context: Context): string | AssistantMessage["content"] {
 	if (isCalibration(context)) {
+		if (isTaskScaleCalibration(context)) return taskScaleEditCalibrationEnvelope();
 		return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
 	}
 	return "no tools here";

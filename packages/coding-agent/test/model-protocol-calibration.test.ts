@@ -59,6 +59,29 @@ function isCalibration(context: Context): boolean {
 	return (context.systemPrompt ?? "").includes("Text tool protocol calibration trial");
 }
 
+function isTaskScaleCalibration(context: Context): boolean {
+	return (context.systemPrompt ?? "").includes("task-scale nested edit");
+}
+
+function taskScaleEditArgumentsJson(): string {
+	return JSON.stringify({
+		path: "src/calibration fixture.ts",
+		edits: [
+			{
+				oldText: 'const value = "before";\n',
+				newText: 'const value = "after";\nconsole.log("escaped \\"quote\\"");\n',
+			},
+		],
+	});
+}
+
+function taskScaleCalibrationEnvelope(context: Context): string {
+	const args = taskScaleEditArgumentsJson();
+	return (context.systemPrompt ?? "").includes("<tool_call>")
+		? `<tool_call>{"name":"edit","arguments":${args}}</tool_call>`
+		: `<pi:call name="edit">${args}</pi:call>`;
+}
+
 function isNativeReadTaskProbe(context: Context): boolean {
 	return (context.systemPrompt ?? "").includes("task-scale read");
 }
@@ -154,7 +177,11 @@ describe("text tool protocol calibration", () => {
 		const created = await createSession(model, requests, (context) => {
 			if (isNativeReadTaskProbe(context)) return "no tools";
 			if (isNativeEchoProbe(context)) return "no tools";
-			if (isCalibration(context)) return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+			if (isCalibration(context)) {
+				return isTaskScaleCalibration(context)
+					? taskScaleCalibrationEnvelope(context)
+					: `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+			}
 			return "done";
 		});
 		try {
@@ -192,6 +219,28 @@ describe("text tool protocol calibration", () => {
 		}
 	});
 
+	it("does not certify an echo-only dialect until its nested multiline edit calibration also round-trips", async () => {
+		const model = createModel("echo-only-text-protocol", { textProtocol: false });
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, (context) => {
+			if (isNativeReadTaskProbe(context) || isNativeEchoProbe(context)) return "no tools";
+			if (!isCalibration(context)) return "done";
+			// Negative control: this replies with a syntactically valid echo envelope even when the
+			// task probe demands the nested edit payload, so echo success alone cannot certify it.
+			return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+		});
+		try {
+			const report = await created.session.probeToolCalling(`${model.provider}/${model.id}`);
+			expect(report.results).toMatchObject([{ verdict: "none", nativeGrade: "absent" }]);
+			const taskRequest = requests.find((request) => isTaskScaleCalibration(request.context));
+			expect(taskRequest?.context.systemPrompt).toContain('oldText":"const value = \\"before\\";\\n');
+			expect(taskRequest?.context.systemPrompt).toContain('escaped \\\\\\"quote\\\\\\"');
+		} finally {
+			await created.session.disposeAndWait();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
 	it("probeToolCalling records the simplified variant that first round-trips and real prompts use it", async () => {
 		const model = createModel("simplified-model", { textProtocol: false });
 		const requests: CapturedRequest[] = [];
@@ -200,6 +249,7 @@ describe("text tool protocol calibration", () => {
 			if (isNativeEchoProbe(context)) return "no tools";
 			if (!isCalibration(context)) return "done";
 			if ((context.systemPrompt ?? "").includes("<tool_call>")) {
+				if (isTaskScaleCalibration(context)) return taskScaleCalibrationEnvelope(context);
 				return `<tool_call>{"name":"echo","arguments":{"data":"${calibrationToken(context)}"}}</tool_call>`;
 			}
 			return "I will call echo with prose instead.";
@@ -231,7 +281,9 @@ describe("text tool protocol calibration", () => {
 			return [
 				{
 					type: "thinking",
-					thinking: `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`,
+					thinking: isTaskScaleCalibration(context)
+						? taskScaleCalibrationEnvelope(context)
+						: `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`,
 				},
 			];
 		});
@@ -404,7 +456,9 @@ describe("text tool protocol calibration", () => {
 				];
 			}
 			if (isCalibration(context) && streamModel.id === "text-model") {
-				return `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
+				return isTaskScaleCalibration(context)
+					? taskScaleCalibrationEnvelope(context)
+					: `<pi:call name="echo">{"data":"${calibrationToken(context)}"}</pi:call>`;
 			}
 			return "no tools";
 		};

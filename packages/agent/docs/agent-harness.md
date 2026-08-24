@@ -237,7 +237,7 @@ Preferred future structure:
 
 Use the `pi-ai` faux provider (`registerFauxProvider`, `fauxAssistantMessage`) for deterministic harness/provider tests. Faux response factories can inspect `StreamOptions`, invoke `options.onPayload`, and return scripted assistant messages without real provider APIs or network access.
 
-Harness coverage is configured separately from the default package test run:
+Historical `AgentHarness` coverage remains separate from the default package test run:
 
 ```bash
 npm run test:harness
@@ -245,6 +245,8 @@ npm run coverage:harness
 ```
 
 `coverage:harness` runs `test/harness/**/*.test.ts` and reports coverage for `src/harness/**/*.ts` plus the non-harness runtime files it directly exercises (`src/agent.ts` and `src/agent-loop.ts`) into `coverage/harness`. Type-only dependencies such as `src/types.ts` are not included because they have no meaningful runtime coverage.
+
+The live verification harness is measured and hard-gated separately with `npm run coverage:verification-harness` at the repository root. It runs only the bounded verification, compaction, session, shell, background-task, and goal integration tests; V8 enforces per-file statement, branch, function, and line floors in Linux CI. Its source set and floors live in `packages/agent/vitest.verification-harness.config.ts` and `packages/coding-agent/vitest.verification-harness.config.ts`.
 
 ## Implementation todo
 

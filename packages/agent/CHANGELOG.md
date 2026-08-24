@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Exported the trusted verification-obligation boundary and added a bounded per-file V8 coverage command for the live verification, compaction, session, shell, background-task, and goal harness.
+
+### Fixed
+
+- Prevented identical rewritable thinking from being persisted across consecutive tool turns and runaway closing turns while preserving visible text, opaque signed reasoning, and all tool calls and results.
+- Kept repeated validation schema guidance visible to the provider and retained bounded repair teaching when a repaired tool execution itself fails.
+- Preserved forced-sequential tool ordering across detached handoffs without allowing a detached terminal failure to suppress later batch calls.
+- Made failed verification results durable across provider turns, compaction, and restart; stale or errored passes and unsupported completion claims can no longer clear the exact rerun obligation.
+
 ## [0.96.5] - 2026-08-24
 
 ### Fixed

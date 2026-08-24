@@ -7,7 +7,7 @@ import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Usage } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
-import { hasOnlyKeys, isPlainRecord } from "./util/value-guards.ts";
+import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
 
 export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 15_000;
 export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 30_000;
@@ -18,7 +18,9 @@ const MAX_INLINE_OUTPUT_BYTES = 32 * 1024;
 const MAX_INLINE_OUTPUT_LINES = 400;
 const MAX_SUMMARY_CHARS = 200;
 const MAX_TERMINAL_HANDOFF_RECORDS = 8;
+const MAX_VERIFICATION_ID_LENGTH = 128;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
+const VERIFICATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RECORD_KEYS = [
 	"sessionId",
 	"taskId",
@@ -35,10 +37,22 @@ const RECORD_KEYS = [
 	"usage",
 	"cancellationRequested",
 	"terminalDelivery",
+	"piVerification",
 ] as const;
 
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
 export type BackgroundToolTerminalDelivery = "pending" | "delivered";
+
+type ToolVerification = {
+	version: 1;
+	id: string;
+	status: "failed" | "passed";
+};
+
+type BackgroundToolVerification = ToolVerification & {
+	/** Host-bound origin used to order delayed background observations in the foreground transcript. */
+	originTaskId: string;
+};
 
 export type BackgroundToolTaskRef = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "goalId" | "status">;
 
@@ -92,6 +106,8 @@ export interface BackgroundToolTaskRecord {
 	cancellationRequested?: boolean;
 	/** Durable terminal handoff state. Undefined on legacy records, which are treated as delivered. */
 	terminalDelivery?: BackgroundToolTerminalDelivery;
+	/** Canonical tool-owned verification state, retained only after validation. */
+	piVerification?: BackgroundToolVerification;
 	/** Runtime-only receipt; never serialized into the durable task record. */
 	observedAt?: string;
 }
@@ -113,7 +129,9 @@ export interface BackgroundToolTerminalMessage {
 			status: BackgroundToolTaskStatus;
 			toolName: string;
 			artifactId?: string;
+			piVerification?: BackgroundToolVerification;
 		}>;
+		piVerificationEvents: BackgroundToolVerification[];
 	};
 }
 
@@ -186,7 +204,19 @@ export function createBackgroundToolTerminalMessage(
 				status: record.status,
 				toolName: record.toolName,
 				...(record.artifactId ? { artifactId: record.artifactId } : {}),
+				...(record.piVerification &&
+				record.piVerification.originTaskId === record.taskId &&
+				(record.piVerification.status !== "passed" || record.status === "completed")
+					? { piVerification: { ...record.piVerification } }
+					: {}),
 			})),
+			piVerificationEvents: included.flatMap((record) =>
+				record.piVerification &&
+				record.piVerification.originTaskId === record.taskId &&
+				(record.piVerification.status !== "passed" || record.status === "completed")
+					? [{ ...record.piVerification }]
+					: [],
+			),
 		},
 	};
 }
@@ -248,6 +278,39 @@ function cloneUsage(value: unknown): Usage | undefined {
 	};
 }
 
+function ownDataValue(record: object, key: string): unknown {
+	const descriptor = Object.getOwnPropertyDescriptor(record, key);
+	return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/** Normalize the cross-package verification wire contract before durable persistence. */
+function retainedToolVerification(details: unknown): ToolVerification | undefined {
+	if (!isRecordObject(details)) return undefined;
+	const candidate = ownDataValue(details, "piVerification");
+	if (!isRecordObject(candidate)) return undefined;
+	const version = ownDataValue(candidate, "version");
+	const id = ownDataValue(candidate, "id");
+	const status = ownDataValue(candidate, "status");
+	if (
+		version !== 1 ||
+		typeof id !== "string" ||
+		id.length > MAX_VERIFICATION_ID_LENGTH ||
+		!VERIFICATION_ID_PATTERN.test(id) ||
+		(status !== "failed" && status !== "passed")
+	) {
+		return undefined;
+	}
+	return { version, id, status };
+}
+
+function retainedBackgroundToolVerification(details: unknown, taskId: string): BackgroundToolVerification | undefined {
+	const verification = retainedToolVerification(details);
+	if (!verification || !isRecordObject(details)) return undefined;
+	const candidate = ownDataValue(details, "piVerification");
+	if (!isRecordObject(candidate) || ownDataValue(candidate, "originTaskId") !== taskId) return undefined;
+	return { ...verification, originTaskId: taskId };
+}
+
 function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): BackgroundToolTaskRecord | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECORD_KEYS)) return undefined;
 	if (
@@ -286,6 +349,14 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 	}
 	const usage = value.usage === undefined ? undefined : cloneUsage(value.usage);
 	if (value.usage !== undefined && !usage) return undefined;
+	const rawVerification = retainedToolVerification(value);
+	if (value.piVerification !== undefined && !rawVerification) return undefined;
+	const verification = rawVerification
+		? rawVerification.status === "passed" &&
+			(!retainedBackgroundToolVerification(value, value.taskId) || value.status !== "completed")
+			? undefined
+			: { ...rawVerification, originTaskId: value.taskId }
+		: undefined;
 	return {
 		sessionId: value.sessionId,
 		taskId: value.taskId,
@@ -302,6 +373,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		...(usage ? { usage } : {}),
 		...(value.cancellationRequested !== undefined ? { cancellationRequested: value.cancellationRequested } : {}),
 		...(value.terminalDelivery !== undefined ? { terminalDelivery: value.terminalDelivery } : {}),
+		...(verification ? { piVerification: verification } : {}),
 	};
 }
 
@@ -514,7 +586,14 @@ export class BackgroundToolTaskController {
 		if (state.record.status !== "running") return;
 		const status = state.cancellationRequested ? "canceled" : completion.isError ? "failed" : "completed";
 		const output = renderCompletionOutput(completion);
-		this.finishState(state, status, output, completion.result.usage, true);
+		this.finishState(
+			state,
+			status,
+			output,
+			completion.result.usage,
+			true,
+			retainedToolVerification(completion.result.details),
+		);
 	}
 
 	private settleRejected(state: BackgroundToolTaskState, error: unknown): void {
@@ -601,6 +680,7 @@ export class BackgroundToolTaskController {
 		rawOutput: string,
 		usage: Usage | undefined,
 		notify: boolean,
+		verification?: ToolVerification,
 	): void {
 		const packed = packToolOutput(
 			{
@@ -627,16 +707,22 @@ export class BackgroundToolTaskController {
 			...(usage ? { usage } : {}),
 			...(state.cancellationRequested ? { cancellationRequested: true } : {}),
 			terminalDelivery: notify ? "pending" : "delivered",
+			...(verification && (verification.status !== "passed" || status === "completed")
+				? { piVerification: { ...verification, originTaskId: state.record.taskId } }
+				: {}),
 		};
 		const persisted = this.persist(record);
 		const terminalRecord = persisted
 			? record
-			: {
-					...record,
-					status: "failed" as const,
-					summary: `${record.toolName} failed: terminal result could not be persisted`,
-					output: "Background tool result could not be persisted; treat it as unavailable.",
-				};
+			: (() => {
+					const { piVerification: _verification, ...unavailableRecord } = record;
+					return {
+						...unavailableRecord,
+						status: "failed" as const,
+						summary: `${record.toolName} failed: terminal result could not be persisted`,
+						output: "Background tool result could not be persisted; treat it as unavailable.",
+					};
+				})();
 		state.record = terminalRecord;
 		if (usage) this.deps.recordUsage?.(record.taskId, usage);
 		state.resolveTerminal(terminalRecord);
@@ -718,7 +804,7 @@ export class BackgroundToolTaskController {
 		await Promise.resolve();
 		while (this.queuedNotifications.length > 0) {
 			await Promise.resolve();
-			const batch = this.queuedNotifications.splice(0);
+			const batch = this.queuedNotifications.splice(0, MAX_TERMINAL_HANDOFF_RECORDS);
 			const records = batch.map((notification) => notification.record);
 			try {
 				await this.deps.notifyTerminal(records, {

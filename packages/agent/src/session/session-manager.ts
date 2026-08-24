@@ -534,7 +534,12 @@ export function buildSessionContext(
 		if (originalUserEntry) appendMessage(originalUserEntry);
 		messages.push(
 			retainSynthesizedSessionContextMessage(
-				createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp),
+				createCompactionSummaryMessage(
+					compaction.summary,
+					compaction.tokensBefore,
+					compaction.timestamp,
+					compaction.details,
+				),
 			),
 		);
 

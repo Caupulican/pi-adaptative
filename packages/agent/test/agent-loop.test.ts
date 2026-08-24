@@ -70,6 +70,14 @@ function createAssistantMessage(
 	};
 }
 
+function pushDone(response: MockAssistantStream, message: AssistantMessage): void {
+	const { stopReason } = message;
+	if (stopReason !== "stop" && stopReason !== "length" && stopReason !== "toolUse") {
+		throw new Error(`Invalid provider done reason: ${stopReason}`);
+	}
+	response.push({ type: "done", reason: stopReason, message });
+}
+
 function createUserMessage(text: string): UserMessage {
 	return {
 		role: "user",
@@ -85,7 +93,11 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 
 describe("agentLoop with AgentMessage", () => {
 	it("emits agent_end when the async loop fails before producing a model response", async () => {
-		const context: AgentContext = { systemPrompt: "You are helpful.", messages: [], tools: [] };
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [],
+			tools: [],
+		};
 		const stream = agentLoop([createUserMessage("hello")], context, {
 			model: createModel(),
 			convertToLlm: () => {
@@ -104,12 +116,20 @@ describe("agentLoop with AgentMessage", () => {
 		expect(result).not.toBe("timeout");
 		const messages = result as AgentMessage[];
 		expect(messages).toHaveLength(1);
-		expect(messages[0]).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: "converter exploded" });
+		expect(messages[0]).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "converter exploded",
+		});
 		expect(events.at(-1)).toMatchObject({ type: "agent_end", messages });
 	});
 
 	it("settles when a fast provider stream ends without a terminal event", async () => {
-		const context: AgentContext = { systemPrompt: "You are helpful.", messages: [], tools: [] };
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [],
+			tools: [],
+		};
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
 			const partial = createAssistantMessage([{ type: "text", text: "partial" }]);
@@ -303,7 +323,11 @@ describe("agentLoop with AgentMessage", () => {
 	it("runs request preflight after context transformation and narrows the request output cap", async () => {
 		const order: string[] = [];
 		let transportedMaxTokens: number | undefined;
-		const context: AgentContext = { systemPrompt: "preflight", messages: [], tools: [] };
+		const context: AgentContext = {
+			systemPrompt: "preflight",
+			messages: [],
+			tools: [],
+		};
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			maxTokens: 128,
@@ -350,7 +374,11 @@ describe("agentLoop with AgentMessage", () => {
 
 	it("fails before transport when request preflight rejects and never widens the owner cap", async () => {
 		let transportCalls = 0;
-		const context: AgentContext = { systemPrompt: "preflight", messages: [], tools: [] };
+		const context: AgentContext = {
+			systemPrompt: "preflight",
+			messages: [],
+			tools: [],
+		};
 		const widened = agentLoop(
 			[createUserMessage("do not widen")],
 			context,
@@ -401,7 +429,10 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(transportCalls).toBe(1);
 		expect(authCalls).toBe(0);
-		expect(messages.at(-1)).toMatchObject({ stopReason: "error", errorMessage: "request budget exhausted" });
+		expect(messages.at(-1)).toMatchObject({
+			stopReason: "error",
+			errorMessage: "request budget exhausted",
+		});
 
 		const invalid = agentLoop(
 			[createUserMessage("invalid allowance")],
@@ -490,7 +521,14 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					// First call: return tool call
 					const message = createAssistantMessage(
-						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						[
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "hello" },
+							},
+						],
 						"toolUse",
 					);
 					stream.push({ type: "done", reason: "toolUse", message });
@@ -524,38 +562,50 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("enriches the third identical validation bounce and emits escalation", async () => {
-		const toolSchema = Type.Object({ count: Type.Number() });
-		let executed = 0;
-		const tool: AgentTool<typeof toolSchema, { count: number }> = {
-			name: "count",
-			label: "Count",
-			description: "Count tool",
+	it("does not persist repeated thinking across changed tool turns", async () => {
+		const toolSchema = Type.Object({ path: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { path: string }> = {
+			name: "read",
+			label: "Read",
+			description: "Read a file",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
-				executed++;
-				return { content: [{ type: "text", text: String(params.count) }], details: { count: params.count } };
+				return {
+					content: [{ type: "text", text: `read ${params.path}` }],
+					details: { path: params.path },
+				};
 			},
 		};
-		const escalations: Array<{ tool: string; repeats: number }> = [];
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
-		const userPrompt: AgentMessage = createUserMessage("count");
-		const config: AgentLoopConfig = {
-			model: createModel(),
-			convertToLlm: identityConverter,
-			onToolValidationEscalation: (event) => escalations.push({ tool: event.tool, repeats: event.repeats }),
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
 		};
-
+		const repeatedThinking = "The operation was rejected. I will inspect the result and correct the request.";
 		let callIndex = 0;
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
-				if (callIndex < 3) {
+				if (callIndex < 2) {
 					stream.push({
 						type: "done",
 						reason: "toolUse",
 						message: createAssistantMessage(
-							[{ type: "toolCall", id: `tool-${callIndex}`, name: "count", arguments: { count: "nope" } }],
+							[
+								{
+									type: "thinking",
+									thinking: repeatedThinking,
+									thinkingSignature: "reasoning",
+								},
+								{
+									type: "toolCall",
+									id: `read-${callIndex}`,
+									name: "read",
+									arguments: {
+										path: callIndex === 0 ? "src/file.ts" : "src/other.ts",
+									},
+								},
+							],
 							"toolUse",
 						),
 					});
@@ -571,6 +621,214 @@ describe("agentLoop with AgentMessage", () => {
 			return stream;
 		};
 
+		const assistantEnds: AssistantMessage[] = [];
+		const loop = agentLoop(
+			[{ role: "user", content: "read", timestamp: 1 }],
+			context,
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				maxStallTurns: 0,
+			},
+			undefined,
+			streamFn,
+		);
+		for await (const event of loop) {
+			if (event.type === "message_end" && event.message.role === "assistant") assistantEnds.push(event.message);
+		}
+
+		expect(assistantEnds).toHaveLength(3);
+		expect(assistantEnds[0]?.content[0]).toMatchObject({
+			type: "thinking",
+			thinking: repeatedThinking,
+		});
+		expect(assistantEnds[1]?.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "read",
+				arguments: { path: "src/other.ts" },
+			}),
+		]);
+	});
+
+	it("preserves repeated thinking after a queued steering message boundary", async () => {
+		const toolSchema = Type.Object({ path: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { path: string }> = {
+			name: "read",
+			label: "Read",
+			description: "Read a file",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: `read ${params.path}` }],
+					details: { path: params.path },
+				};
+			},
+		};
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const repeatedThinking = "The operation was rejected. I will inspect the result and correct the request.";
+		let callIndex = 0;
+		let steeringPolls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex < 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "thinking",
+									thinking: repeatedThinking,
+									thinkingSignature: "reasoning",
+								},
+								{
+									type: "toolCall",
+									id: `read-steering-${callIndex}`,
+									name: "read",
+									arguments: { path: `src/steering-${callIndex}.ts` },
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const assistantEnds: AssistantMessage[] = [];
+		const loop = agentLoop(
+			[{ role: "user", content: "read", timestamp: 1 }],
+			context,
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				maxStallTurns: 0,
+				getSteeringMessages: async () => {
+					steeringPolls++;
+					return steeringPolls === 2 ? [createUserMessage("inspect this new result")] : [];
+				},
+			},
+			undefined,
+			streamFn,
+		);
+		for await (const event of loop) {
+			if (event.type === "message_end" && event.message.role === "assistant") assistantEnds.push(event.message);
+		}
+
+		expect(assistantEnds).toHaveLength(3);
+		expect(assistantEnds[0]?.content[0]).toMatchObject({
+			type: "thinking",
+			thinking: repeatedThinking,
+		});
+		expect(assistantEnds[1]?.content[0]).toMatchObject({
+			type: "thinking",
+			thinking: repeatedThinking,
+		});
+	});
+
+	it("enriches the third identical validation bounce and emits escalation", async () => {
+		const toolSchema = Type.Object({ count: Type.Number() });
+		const executed: number[] = [];
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "count",
+			label: "Count",
+			description: "Count tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.count);
+				return {
+					content: [{ type: "text", text: String(params.count) }],
+					details: { count: params.count },
+				};
+			},
+		};
+		const escalations: Array<{ tool: string; repeats: number }> = [];
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const userPrompt: AgentMessage = createUserMessage("count");
+		let providerSawEscalation = false;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: (messages) => {
+				providerSawEscalation = messages.some(
+					(message) =>
+						message.role === "toolResult" &&
+						message.content.some((block) => block.type === "text" && block.text.includes("Full tool schema:")),
+				);
+				return identityConverter(messages);
+			},
+			onToolValidationEscalation: (event) => escalations.push({ tool: event.tool, repeats: event.repeats }),
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (!providerSawEscalation) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `tool-${callIndex}`,
+									name: "count",
+									arguments: { count: "nope" },
+									rawArguments: {
+										parseDiagnostic: {
+											kind: "malformed-json",
+											offset: 14,
+											context: "expected closing number token",
+										},
+									},
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: callIndex === 3 ? "toolUse" : "stop",
+						message:
+							callIndex === 3
+								? createAssistantMessage(
+										[
+											{
+												type: "toolCall",
+												id: "tool-corrected",
+												name: "count",
+												arguments: { count: 7 },
+											},
+										],
+										"toolUse",
+									)
+								: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
 		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
 		for await (const _ of stream) {
 			// consume
@@ -578,14 +836,219 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		const toolResults = messages.filter((message) => message.role === "toolResult");
-		expect(executed).toBe(0);
+		expect(executed).toEqual([7]);
 		expect(escalations).toEqual([{ tool: "count", repeats: 3 }]);
-		const thirdResultText = toolResults[2]?.content[0]?.type === "text" ? toolResults[2].content[0].text : undefined;
+		const resultTexts = toolResults.map((result) =>
+			result.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n"),
+		);
+		const thirdResultText = resultTexts[2];
+		expect(resultTexts[0]).not.toContain("Full tool schema:");
+		expect(resultTexts[1]).not.toContain("Full tool schema:");
 		expect(thirdResultText).toContain('"occ":3');
 		expect(thirdResultText).toContain('"state":"rejected"');
 		expect(thirdResultText).toContain('"failure_code":"invalid_arguments"');
 		expect(thirdResultText).toContain("expected number, received string");
-		expect(thirdResultText).not.toContain("Full tool schema:");
+		expect(thirdResultText).toContain("Full tool schema:");
+		expect(thirdResultText).toContain("Valid example:");
+		expect(thirdResultText).toContain("Provider parse diagnostic (malformed-json at offset 14)");
+		expect(thirdResultText).toContain("expected closing number token");
+	});
+
+	it("keeps a validation episode across valid sibling calls until the live schema converges the provider", async () => {
+		const editSchema = Type.Object({ count: Type.Number() });
+		const bashSchema = Type.Object({ command: Type.String() });
+		const edits: number[] = [];
+		const bashCommands: string[] = [];
+		const edit: AgentTool<typeof editSchema, { count: number }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit a count",
+			parameters: editSchema,
+			async execute(_toolCallId, params) {
+				edits.push(params.count);
+				return {
+					content: [{ type: "text", text: String(params.count) }],
+					details: { count: params.count },
+				};
+			},
+		};
+		const bash: AgentTool<typeof bashSchema, { command: string }> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: bashSchema,
+			async execute(_toolCallId, params) {
+				bashCommands.push(params.command);
+				return {
+					content: [{ type: "text", text: params.command }],
+					details: { command: params.command },
+				};
+			},
+		};
+		let providerSawSchema = false;
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const invalid = !providerSawSchema;
+				stream.push({
+					type: "done",
+					reason: invalid || callIndex === 3 ? "toolUse" : "stop",
+					message: invalid
+						? createAssistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: `edit-${callIndex}`,
+										name: "edit",
+										arguments: { count: "nope" },
+									},
+									{
+										type: "toolCall",
+										id: `bash-${callIndex}`,
+										name: "bash",
+										arguments: { command: `echo ${callIndex}` },
+									},
+								],
+								"toolUse",
+							)
+						: callIndex === 3
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "edit-corrected",
+											name: "edit",
+											arguments: { count: 9 },
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("edit")],
+			{ systemPrompt: "", messages: [], tools: [edit, bash] },
+			{
+				model: createModel(),
+				maxProviderTurns: 5,
+				convertToLlm: (messages) => {
+					providerSawSchema = messages.some(
+						(message) =>
+							message.role === "toolResult" &&
+							message.content.some((block) => block.type === "text" && block.text.includes("Full tool schema:")),
+					);
+					return identityConverter(messages);
+				},
+			},
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const editResultTexts = (await stream.result())
+			.filter(
+				(message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === "edit",
+			)
+			.map((message) =>
+				message.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n"),
+			);
+		expect(editResultTexts[0]).not.toContain("Full tool schema:");
+		expect(editResultTexts[1]).not.toContain("Full tool schema:");
+		expect(editResultTexts[2]).toContain("Full tool schema:");
+		expect(edits).toEqual([9]);
+		expect(bashCommands).toEqual(["echo 0", "echo 1", "echo 2"]);
+	});
+
+	it("resets validation episodes after a clean tool turn", async () => {
+		const editSchema = Type.Object({ count: Type.Number() });
+		const bashSchema = Type.Object({ command: Type.String() });
+		let bashExecutions = 0;
+		const edit: AgentTool<typeof editSchema, { count: number }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit a count",
+			parameters: editSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: "should not run" }],
+					details: { count: params.count },
+				};
+			},
+		};
+		const bash: AgentTool<typeof bashSchema, { command: string }> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: bashSchema,
+			async execute(_toolCallId, params) {
+				bashExecutions++;
+				return {
+					content: [{ type: "text", text: "clean" }],
+					details: { command: params.command },
+				};
+			},
+		};
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const toolCall =
+					callIndex === 2
+						? {
+								type: "toolCall" as const,
+								id: "clean-bash",
+								name: "bash",
+								arguments: { command: "echo clean" },
+							}
+						: {
+								type: "toolCall" as const,
+								id: `invalid-${callIndex}`,
+								name: "edit",
+								arguments: { count: "nope" },
+							};
+				stream.push({
+					type: "done",
+					reason: callIndex < 4 ? "toolUse" : "stop",
+					message:
+						callIndex < 4
+							? createAssistantMessage([toolCall], "toolUse")
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("edit")],
+			{ systemPrompt: "", messages: [], tools: [edit, bash] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const invalidResults = (await stream.result()).filter(
+			(message) => message.role === "toolResult" && message.toolName === "edit",
+		);
+		expect(bashExecutions).toBe(1);
+		expect(JSON.stringify(invalidResults)).not.toContain("Full tool schema:");
 	});
 
 	it("does not accumulate distinct validation failures", async () => {
@@ -596,11 +1059,18 @@ describe("agentLoop with AgentMessage", () => {
 			description: "Count tool",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
-				return { content: [{ type: "text", text: String(params.count) }], details: { count: params.count } };
+				return {
+					content: [{ type: "text", text: String(params.count) }],
+					details: { count: params.count },
+				};
 			},
 		};
 		const escalations: unknown[] = [];
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		const userPrompt: AgentMessage = createUserMessage("count");
 		const config: AgentLoopConfig = {
 			model: createModel(),
@@ -659,8 +1129,16 @@ describe("agentLoop with AgentMessage", () => {
 				throw new TypeError("backend exploded");
 			},
 		};
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
-		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter, maxStallTurns: 12 };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxStallTurns: 12,
+		};
 		let callIndex = 0;
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
@@ -728,7 +1206,13 @@ describe("agentLoop with AgentMessage", () => {
 			failureRecovery: {
 				getFailureTargets: (params, failure) =>
 					failure.failureCode === "invalid_option"
-						? [{ authority: recoveryAuthority, kind: targetKind, scope: params.command }]
+						? [
+								{
+									authority: recoveryAuthority,
+									kind: targetKind,
+									scope: params.command,
+								},
+							]
 						: [],
 				actions: [
 					{
@@ -759,8 +1243,15 @@ describe("agentLoop with AgentMessage", () => {
 				};
 			},
 		};
-		const context: AgentContext = { systemPrompt: "base prompt", messages: [], tools: [tool] };
-		const providerContexts: Array<{ systemPrompt: string; messages: Message[] }> = [];
+		const context: AgentContext = {
+			systemPrompt: "base prompt",
+			messages: [],
+			tools: [tool],
+		};
+		const providerContexts: Array<{
+			systemPrompt: string;
+			messages: Message[];
+		}> = [];
 		let callIndex = 0;
 		const stream = agentLoop(
 			[createUserMessage("run it")],
@@ -784,7 +1275,9 @@ describe("agentLoop with AgentMessage", () => {
 										type: "toolCall",
 										id: `tool-${callIndex}`,
 										name: "shell",
-										arguments: { command: callIndex === 2 ? recoveryCommand : command },
+										arguments: {
+											command: callIndex === 2 ? recoveryCommand : command,
+										},
 									},
 								],
 								"toolUse",
@@ -860,7 +1353,11 @@ describe("agentLoop with AgentMessage", () => {
 		const usage = { ...createUsage(), output: 7, totalTokens: 7 };
 		let attempts = 0;
 		let repaired = false;
-		const observedAfterCall: Array<{ isError: boolean; text: string; usage: unknown }> = [];
+		const observedAfterCall: Array<{
+			isError: boolean;
+			text: string;
+			usage: unknown;
+		}> = [];
 		const tool: AgentTool<typeof toolSchema, { exitCode: number }> = {
 			name: "direct_argv",
 			label: "Direct argv",
@@ -869,7 +1366,13 @@ describe("agentLoop with AgentMessage", () => {
 			failureRecovery: {
 				getFailureTargets: (params, failure) =>
 					failure.failureCode === "exit_3"
-						? [{ authority: recoveryAuthority, kind: targetKind, scope: params.command }]
+						? [
+								{
+									authority: recoveryAuthority,
+									kind: targetKind,
+									scope: params.command,
+								},
+							]
 						: [],
 				actions: [
 					{
@@ -884,7 +1387,11 @@ describe("agentLoop with AgentMessage", () => {
 				attempts++;
 				if (params.command === "repair check") {
 					repaired = true;
-					return { content: [{ type: "text", text: "repair complete" }], details: { exitCode: 0 }, usage };
+					return {
+						content: [{ type: "text", text: "repair complete" }],
+						details: { exitCode: 0 },
+						usage,
+					};
 				}
 				if (!repaired) {
 					return {
@@ -904,10 +1411,17 @@ describe("agentLoop with AgentMessage", () => {
 						isError: true,
 					};
 				}
-				return { content: [{ type: "text", text: "completed" }], details: { exitCode: 0 }, usage };
+				return {
+					content: [{ type: "text", text: "completed" }],
+					details: { exitCode: 0 },
+					usage,
+				};
 			},
 		};
-		const providerContexts: Array<{ systemPrompt: string; messages: Message[] }> = [];
+		const providerContexts: Array<{
+			systemPrompt: string;
+			messages: Message[];
+		}> = [];
 		let callIndex = 0;
 		const stream = agentLoop(
 			[createUserMessage("run")],
@@ -942,7 +1456,9 @@ describe("agentLoop with AgentMessage", () => {
 										type: "toolCall",
 										id: `tool-${callIndex}`,
 										name: "direct_argv",
-										arguments: { command: callIndex === 1 ? "repair check" : "check" },
+										arguments: {
+											command: callIndex === 1 ? "repair check" : "check",
+										},
 									},
 								],
 								"toolUse",
@@ -996,7 +1512,12 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			async execute() {
 				return {
-					content: [{ type: "text", text: "outcome: failed\nexitCode: 1\nstderr:\nno permission" }],
+					content: [
+						{
+							type: "text",
+							text: "outcome: failed\nexitCode: 1\nstderr:\nno permission",
+						},
+					],
 					details: { outcome: "failed" },
 					isError: true,
 					terminate: true,
@@ -1017,7 +1538,14 @@ describe("agentLoop with AgentMessage", () => {
 						type: "done",
 						reason: "toolUse",
 						message: createAssistantMessage(
-							[{ type: "toolCall", id: "tool-1", name: "bounded_failure", arguments: { value: "x" } }],
+							[
+								{
+									type: "toolCall",
+									id: "tool-1",
+									name: "bounded_failure",
+									arguments: { value: "x" },
+								},
+							],
 							"toolUse",
 						),
 					});
@@ -1036,6 +1564,608 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResult?.role === "toolResult" ? toolResult.details : undefined).toMatchObject({
 			piToolFailureMemory: expect.any(Object),
 		});
+	});
+
+	it("keeps a failed verification active through unrelated work until the same id passes", async () => {
+		const verificationSchema = Type.Object({ status: Type.Union([Type.Literal("failed"), Type.Literal("passed")]) });
+		const readSchema = Type.Object({ path: Type.String() });
+		const verificationId = "focused-suite";
+		const verificationCalls: string[] = [];
+		const readCalls: string[] = [];
+		const verify: AgentTool<
+			typeof verificationSchema,
+			{ piVerification: { version: 1; id: string; status: "failed" | "passed" } }
+		> = {
+			name: "verify",
+			label: "Verify",
+			description: "Run focused verification",
+			parameters: verificationSchema,
+			async execute(_toolCallId, params) {
+				verificationCalls.push(params.status);
+				return {
+					content: [{ type: "text", text: `focused suite ${params.status}` }],
+					details: { piVerification: { version: 1, id: verificationId, status: params.status } },
+					isError: params.status === "failed",
+				};
+			},
+		};
+		const read: AgentTool<typeof readSchema, { path: string }> = {
+			name: "read",
+			label: "Read",
+			description: "Inspect the changed source",
+			parameters: readSchema,
+			async execute(_toolCallId, params) {
+				readCalls.push(params.path);
+				return { content: [{ type: "text", text: "source inspected" }], details: { path: params.path } };
+			},
+		};
+
+		const providerPrompts: string[] = [];
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("fix the regression and verify it")],
+			{ systemPrompt: "base", messages: [], tools: [verify, read] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			(_model, providerContext) => {
+				providerPrompts.push(providerContext.systemPrompt ?? "");
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn === 0
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "verify-failed",
+											name: "verify",
+											arguments: { status: "failed" },
+										},
+									],
+									"toolUse",
+								)
+							: turn === 1 || turn === 3
+								? createAssistantMessage([{ type: "text", text: "done" }])
+								: turn === 2
+									? createAssistantMessage(
+											[
+												{
+													type: "toolCall",
+													id: "read-source",
+													name: "read",
+													arguments: { path: "src/changed.ts" },
+												},
+											],
+											"toolUse",
+										)
+									: turn === 4
+										? createAssistantMessage(
+												[
+													{
+														type: "toolCall",
+														id: "verify-passed",
+														name: "verify",
+														arguments: { status: "passed" },
+													},
+												],
+												"toolUse",
+											)
+										: createAssistantMessage([{ type: "text", text: "done" }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const toolResults = (await stream.result()).filter(
+			(message): message is ToolResultMessage => message.role === "toolResult",
+		);
+		expect({
+			providerCalls,
+			verificationCalls,
+			readCalls,
+			verificationPromptStates: providerPrompts.map((prompt) => ({
+				active: prompt.includes("ACTIVE VERIFICATION FAILURES"),
+				id: prompt.includes(verificationId),
+			})),
+			toolResultIds: toolResults.map((result) => result.toolCallId),
+		}).toEqual({
+			providerCalls: 6,
+			verificationCalls: ["failed", "passed"],
+			readCalls: ["src/changed.ts"],
+			verificationPromptStates: [
+				{ active: false, id: false },
+				{ active: true, id: true },
+				{ active: true, id: true },
+				{ active: true, id: true },
+				{ active: true, id: true },
+				{ active: false, id: false },
+			],
+			toolResultIds: ["verify-failed", "read-source", "verify-passed"],
+		});
+	});
+
+	it("does not let a terminating tool batch bypass an active verification obligation", async () => {
+		const schema = Type.Object({});
+		const verificationId = "terminating-batch-check";
+		let terminatingCalls = 0;
+		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
+			name: "verify",
+			label: "Verify",
+			description: "Run verification",
+			parameters: schema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "verification failed" }],
+					details: { piVerification: { version: 1, id: verificationId, status: "failed" } },
+					isError: true,
+				};
+			},
+		};
+		const terminate: AgentTool<typeof schema, { terminal: true }> = {
+			name: "terminate",
+			label: "Terminate",
+			description: "Return a terminal result",
+			parameters: schema,
+			async execute() {
+				terminatingCalls++;
+				return {
+					content: [{ type: "text", text: "terminal tool completed" }],
+					details: { terminal: true },
+					terminate: true,
+				};
+			},
+		};
+
+		const handoff = `VERIFICATION_UNRESOLVED ${verificationId}: the suite remains red`;
+		const providerPrompts: string[] = [];
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("verify before stopping")],
+			{ systemPrompt: "base", messages: [], tools: [verify, terminate] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			(_model, providerContext) => {
+				providerPrompts.push(providerContext.systemPrompt ?? "");
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn === 0
+							? createAssistantMessage(
+									[{ type: "toolCall", id: "verify-failed", name: "verify", arguments: {} }],
+									"toolUse",
+								)
+							: turn === 1
+								? createAssistantMessage(
+										[{ type: "toolCall", id: "terminate-now", name: "terminate", arguments: {} }],
+										"toolUse",
+									)
+								: createAssistantMessage([{ type: "text", text: handoff }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const assistantTexts = (await stream.result())
+			.filter((message): message is AssistantMessage => message.role === "assistant")
+			.flatMap((message) => message.content)
+			.filter(
+				(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text",
+			)
+			.map((block) => block.text);
+		expect(providerCalls).toBe(3);
+		expect(terminatingCalls).toBe(1);
+		expect(providerPrompts[2]).toContain("ACTIVE VERIFICATION FAILURES");
+		expect(assistantTexts).toContain(handoff);
+	});
+
+	it("permits terminal output only for an exact unresolved verification handoff", async () => {
+		const schema = Type.Object({});
+		const verificationId = "focused-suite";
+		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
+			name: "verify",
+			label: "Verify",
+			description: "Run focused verification",
+			parameters: schema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "focused suite failed" }],
+					details: { piVerification: { version: 1, id: verificationId, status: "failed" } },
+					isError: true,
+				};
+			},
+		};
+
+		const providerPrompts: string[] = [];
+		let providerCalls = 0;
+		const handoff = `VERIFICATION_UNRESOLVED ${verificationId}: owner approval is required to repair the fixture.`;
+		const stream = agentLoop(
+			[createUserMessage("verify")],
+			{ systemPrompt: "base", messages: [], tools: [verify] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			(_model, providerContext) => {
+				providerPrompts.push(providerContext.systemPrompt ?? "");
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn === 0
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "verify-failed",
+											name: "verify",
+											arguments: {},
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: handoff }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const assistantText = (await stream.result())
+			.filter((message): message is AssistantMessage => message.role === "assistant")
+			.flatMap((message) => message.content)
+			.filter(
+				(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text",
+			)
+			.map((block) => block.text);
+		expect({
+			providerCalls,
+			secondPrompt: providerPrompts[1],
+			assistantText,
+		}).toEqual({
+			providerCalls: 2,
+			secondPrompt: expect.stringContaining(`ACTIVE VERIFICATION FAILURES`),
+			assistantText: [handoff],
+		});
+	});
+
+	it("requires an unresolved handoff for every active verification id", async () => {
+		const schema = Type.Object({ id: Type.String() });
+		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
+			name: "verify",
+			label: "Verify",
+			description: "Run focused verification",
+			parameters: schema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: `${params.id} failed` }],
+					details: { piVerification: { version: 1, id: params.id, status: "failed" } },
+					isError: true,
+				};
+			},
+		};
+		const handoff = "VERIFICATION_UNRESOLVED alpha: first blocker\nVERIFICATION_UNRESOLVED beta: second blocker";
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("verify both")],
+			{ systemPrompt: "base", messages: [], tools: [verify] },
+			{ model: createModel(), convertToLlm: identityConverter, maxProviderTurns: 3 },
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn === 0
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "verify-alpha",
+											name: "verify",
+											arguments: { id: "alpha" },
+										},
+										{
+											type: "toolCall",
+											id: "verify-beta",
+											name: "verify",
+											arguments: { id: "beta" },
+										},
+									],
+									"toolUse",
+								)
+							: turn === 1
+								? createAssistantMessage([{ type: "text", text: handoff }])
+								: createAssistantMessage([
+										{ type: "text", text: "VERIFICATION_UNRESOLVED alpha: fallback blocker" },
+									]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(providerCalls).toBe(2);
+	});
+
+	it("restores active verification obligations from a compaction snapshot", async () => {
+		const verificationId = "compacted-check";
+		const providerPrompts: string[] = [];
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("continue")],
+			{
+				systemPrompt: "base",
+				messages: [
+					{
+						role: "compactionSummary",
+						summary: "Compacted history",
+						tokensBefore: 100,
+						details: { piVerificationObligations: { version: 1, activeIds: [verificationId] } },
+						timestamp: 1,
+					} as AgentMessage,
+				],
+				tools: [],
+			},
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			(_model, providerContext) => {
+				providerPrompts.push(providerContext.systemPrompt ?? "");
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const text =
+						turn === 0 ? "done" : `VERIFICATION_UNRESOLVED ${verificationId}: external owner must repair it`;
+					const message = createAssistantMessage([{ type: "text", text }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(providerCalls).toBe(2);
+		expect(providerPrompts[0]).toContain(`ACTIVE VERIFICATION FAILURES`);
+		expect(providerPrompts[0]).toContain(verificationId);
+	});
+
+	it("applies pending custom verification events before requesting the provider", async () => {
+		const verificationId = "background-check";
+		const providerPrompts: string[] = [];
+		let providerCalls = 0;
+		let steeringReads = 0;
+		const stream = agentLoop(
+			[createUserMessage("continue")],
+			{ systemPrompt: "base", messages: [], tools: [] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				getSteeringMessages: async () => {
+					if (steeringReads++ !== 0) return [];
+					return [
+						{
+							role: "custom",
+							customType: "background-terminal",
+							content: "Background verification failed",
+							display: false,
+							details: {
+								piVerificationEvents: [{ version: 1, id: verificationId, status: "failed" }],
+							},
+							timestamp: 1,
+						},
+					];
+				},
+			},
+			undefined,
+			(_model, providerContext) => {
+				providerPrompts.push(providerContext.systemPrompt ?? "");
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const text =
+						turn === 0 ? "done" : `VERIFICATION_UNRESOLVED ${verificationId}: background owner is unavailable`;
+					const message = createAssistantMessage([{ type: "text", text }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(providerCalls).toBe(2);
+		expect(providerPrompts[0]).toContain(`ACTIVE VERIFICATION FAILURES`);
+		expect(providerPrompts[0]).toContain(verificationId);
+	});
+
+	it("rejects a tool-free completion at the provider limit while verification remains active", async () => {
+		const schema = Type.Object({});
+		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
+			name: "verify",
+			label: "Verify",
+			description: "Run verification",
+			parameters: schema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "verification failed" }],
+					details: { piVerification: { version: 1, id: "limit-check", status: "failed" } },
+					isError: true,
+				};
+			},
+		};
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("verify")],
+			{ systemPrompt: "base", messages: [], tools: [verify] },
+			{ model: createModel(), convertToLlm: identityConverter, maxProviderTurns: 2 },
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn === 0
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "verify-limit",
+											name: "verify",
+											arguments: {},
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const assistants = (await stream.result()).filter(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(providerCalls).toBe(2);
+		expect(assistants.at(-1)).toMatchObject({
+			content: [],
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		});
+	});
+
+	it("requires a valid unresolved handoff from the runaway closing turn", async () => {
+		const schema = Type.Object({});
+		const providerPrompts: string[] = [];
+		const verify: AgentTool<typeof schema, { piVerification: { version: 1; id: string; status: "failed" } }> = {
+			name: "verify",
+			label: "Verify",
+			description: "Run verification",
+			parameters: schema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "verification failed" }],
+					details: { piVerification: { version: 1, id: "runaway-check", status: "failed" } },
+					isError: true,
+				};
+			},
+		};
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("verify")],
+			{ systemPrompt: "base", messages: [], tools: [verify] },
+			{ model: createModel(), convertToLlm: identityConverter, maxStallTurns: 2 },
+			undefined,
+			(_model, providerContext) => {
+				providerPrompts.push(providerContext.systemPrompt ?? "");
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn < 2
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: `verify-runaway-${turn}`,
+											name: "verify",
+											arguments: {},
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const assistants = (await stream.result()).filter(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(providerCalls).toBe(3);
+		expect(providerPrompts.at(-1)).toContain("ACTIVE VERIFICATION FAILURES");
+		expect(assistants.at(-1)).toMatchObject({
+			content: [],
+			stopReason: "error",
+			errorMessage: "verification_handoff_required",
+		});
+	});
+
+	it("does not treat an untagged operation outcome as an unresolved verification", async () => {
+		const schema = Type.Object({});
+		const tool: AgentTool<typeof schema, { exitCode: number }> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: schema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "test command failed" }],
+					details: { exitCode: 1 },
+					isError: true,
+					errorKind: "operation_outcome",
+				};
+			},
+		};
+
+		let providerCalls = 0;
+		const stream = agentLoop(
+			[createUserMessage("run the test")],
+			{ systemPrompt: "base", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				const turn = providerCalls++;
+				queueMicrotask(() => {
+					const message =
+						turn === 0
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: "bash-failed",
+											name: "bash",
+											arguments: {},
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]);
+					pushDone(response, message);
+				});
+				return response;
+			},
+		);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(providerCalls).toBe(2);
 	});
 
 	it("sanitizes legacy failed tool turns before provider conversion", async () => {
@@ -1118,8 +2248,15 @@ describe("agentLoop with AgentMessage", () => {
 				throw new Error("ENOENT: no such file or directory, open 'missing.txt'");
 			},
 		};
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
-		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
 		let callIndex = 0;
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
@@ -1160,7 +2297,10 @@ describe("agentLoop with AgentMessage", () => {
 		const messages = await stream.result();
 		const toolResult = messages.find((message) => message.role === "toolResult");
 		expect(toolResult?.content).toEqual([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"file_not_found"') }),
+			expect.objectContaining({
+				type: "text",
+				text: expect.stringContaining('"failure_code":"file_not_found"'),
+			}),
 		]);
 		expect(JSON.stringify(toolResult)).toContain(
 			"Path not found. List parent directory or re-read path before retry. The operation is readmitted after another tool succeeds or a new user turn",
@@ -1169,7 +2309,9 @@ describe("agentLoop with AgentMessage", () => {
 	});
 
 	it("routes phone argument repairs through shared teaching and execution telemetry without argument values", async () => {
-		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
+		const toolSchema = Type.Object({
+			items: Type.Array(Type.Object({ value: Type.String() })),
+		});
 		const tool: AgentTool<typeof toolSchema, { items: Array<{ value: string }> }> = {
 			name: "collect",
 			label: "Collect",
@@ -1182,7 +2324,11 @@ describe("agentLoop with AgentMessage", () => {
 		const telemetry: NonNullable<AgentLoopConfig["onToolArgumentValidation"]>[] = [];
 		const events: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
 		telemetry.push((event) => events.push(event));
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
@@ -1202,7 +2348,9 @@ describe("agentLoop with AgentMessage", () => {
 									type: "toolCall",
 									id: "tool-1",
 									name: "collect",
-									arguments: { items: JSON.stringify([{ value: "secret-value" }]) },
+									arguments: {
+										items: JSON.stringify([{ value: "secret-value" }]),
+									},
 									source: "text-protocol",
 								},
 							],
@@ -1240,7 +2388,9 @@ describe("agentLoop with AgentMessage", () => {
 	});
 
 	it("adds throttled teach-back notes to repaired tool results", async () => {
-		const toolSchema = Type.Object({ items: Type.Array(Type.Object({ value: Type.String() })) });
+		const toolSchema = Type.Object({
+			items: Type.Array(Type.Object({ value: Type.String() })),
+		});
 		const executed: string[] = [];
 		const tool: AgentTool<typeof toolSchema, { items: Array<{ value: string }> }> = {
 			name: "collect",
@@ -1255,8 +2405,15 @@ describe("agentLoop with AgentMessage", () => {
 				};
 			},
 		};
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
-		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
 		let callIndex = 0;
 		const streamFn = () => {
 			const stream = new MockAssistantStream();
@@ -1271,7 +2428,9 @@ describe("agentLoop with AgentMessage", () => {
 									type: "toolCall",
 									id: `tool-${callIndex}`,
 									name: "collect",
-									arguments: { items: JSON.stringify([{ value: String(callIndex + 1) }]) },
+									arguments: {
+										items: JSON.stringify([{ value: String(callIndex + 1) }]),
+									},
 								},
 							],
 							"toolUse",
@@ -1313,6 +2472,93 @@ describe("agentLoop with AgentMessage", () => {
 		expect(resultTexts[0]).toContain("send raw array/object");
 	});
 
+	it("retains repair teaching and telemetry when repaired execution fails", async () => {
+		const toolSchema = Type.Object({
+			items: Type.Array(Type.Object({ value: Type.String() })),
+		});
+		const validationEvents: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
+		const tool: AgentTool<typeof toolSchema, { items: Array<{ value: string }> }> = {
+			name: "collect",
+			label: "Collect",
+			description: "Collect items",
+			parameters: toolSchema,
+			async execute() {
+				throw new Error("storage refused the request");
+			},
+		};
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex < 2) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{
+									type: "toolCall",
+									id: `failing-${callIndex}`,
+									name: "collect",
+									arguments:
+										callIndex === 0
+											? { items: JSON.stringify([{ value: "repaired" }]) }
+											: { items: [{ value: "already-valid" }] },
+								},
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("collect")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				onToolArgumentValidation: (event) => validationEvents.push(event),
+			},
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const failureTexts = (await stream.result())
+			.filter((message) => message.role === "toolResult")
+			.map((message) =>
+				message.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n"),
+			);
+		expect(failureTexts[0]).toContain('"state":"failed"');
+		expect(failureTexts[0]).toContain("storage refused the request");
+		expect(failureTexts[0]).toContain("[harness] jsonStringParse:");
+		expect(failureTexts[1]).toContain('"state":"failed"');
+		expect(failureTexts[1]).not.toContain("[harness] jsonStringParse:");
+		expect(validationEvents).toEqual([
+			expect.objectContaining({
+				outcome: "repaired",
+				repairsApplied: ["jsonStringParse"],
+				executionOutcome: "failed",
+				taught: "note",
+			}),
+		]);
+	});
+
 	it("stores repaired tool args on the assistant message while preserving raw args", async () => {
 		const toolSchema = Type.Object({ count: Type.Number() });
 		const executed: number[] = [];
@@ -1323,13 +2569,23 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				executed.push(params.count);
-				return { content: [{ type: "text", text: String(params.count) }], details: { count: params.count } };
+				return {
+					content: [{ type: "text", text: String(params.count) }],
+					details: { count: params.count },
+				};
 			},
 		};
 
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		const userPrompt: AgentMessage = createUserMessage("count");
-		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
 
 		let callIndex = 0;
 		const streamFn = () => {
@@ -1337,7 +2593,14 @@ describe("agentLoop with AgentMessage", () => {
 			queueMicrotask(() => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
-						[{ type: "toolCall", id: "tool-1", name: "count", arguments: { count: "42" as unknown as number } }],
+						[
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "count",
+								arguments: { count: "42" as unknown as number },
+							},
+						],
 						"toolUse",
 					);
 					stream.push({ type: "done", reason: "toolUse", message });
@@ -1381,11 +2644,18 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				executed.push(params);
-				return { content: [{ type: "text", text: "should not run" }], details: {} };
+				return {
+					content: [{ type: "text", text: "should not run" }],
+					details: {},
+				};
 			},
 		};
 
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		const userPrompt: AgentMessage = createUserMessage("echo something");
 		const validationEvents: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
 		const config: AgentLoopConfig = {
@@ -1436,13 +2706,88 @@ describe("agentLoop with AgentMessage", () => {
 			toolName: "echo",
 		});
 		expect(toolResult?.content).toEqual([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('"failure_code":"malformed_call"') }),
+			expect.objectContaining({
+				type: "text",
+				text: expect.stringContaining('"failure_code":"malformed_call"'),
+			}),
 		]);
 		expect(JSON.stringify(toolResult)).toContain('"phase":"validation"');
 		expect(validationEvents).toHaveLength(1);
 		expect(validationEvents[0]?.errorKeywords).toEqual(["malformed_call"]);
 		expect(JSON.stringify(toolResult)).toContain("complete JSON argument object");
-		expect(JSON.stringify(toolResult)).not.toContain("truncated before complete JSON");
+		expect(JSON.stringify(toolResult)).toContain("truncated before complete JSON");
+	});
+
+	it("teaches the live schema for repeated provider-marked malformed calls without losing parser detail", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let executed = 0;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed++;
+				return {
+					content: [{ type: "text", text: "should not run" }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const parserDetail = "Provider parser rejected the JSON token sequence before the value closed.";
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: callIndex < 3 ? "toolUse" : "stop",
+					message:
+						callIndex < 3
+							? createAssistantMessage(
+									[
+										{
+											type: "toolCall",
+											id: `malformed-${callIndex}`,
+											name: "echo",
+											arguments: { value: "partial" },
+											errorMessage: parserDetail,
+										},
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("echo")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		const resultTexts = (await stream.result())
+			.filter((message) => message.role === "toolResult")
+			.map((message) =>
+				message.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n"),
+			);
+		expect(executed).toBe(0);
+		expect(resultTexts[0]).not.toContain("Full tool schema:");
+		expect(resultTexts[1]).not.toContain("Full tool schema:");
+		expect(resultTexts[2]).toContain("Full tool schema:");
+		expect(resultTexts[2]).toContain("Valid example:");
+		expect(resultTexts[2]).toContain(parserDetail);
 	});
 
 	it("classifies an unknown phone tool by tool identity before its parser error", async () => {
@@ -1455,7 +2800,10 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			async execute() {
 				executed = true;
-				return { content: [{ type: "text", text: "should not run" }], details: {} };
+				return {
+					content: [{ type: "text", text: "should not run" }],
+					details: {},
+				};
 			},
 		};
 		const validationEvents: Parameters<NonNullable<AgentLoopConfig["onToolArgumentValidation"]>>[0][] = [];
@@ -1528,10 +2876,17 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			async execute() {
 				executed = true;
-				return { content: [{ type: "text", text: "should not run" }], details: {} };
+				return {
+					content: [{ type: "text", text: "should not run" }],
+					details: {},
+				};
 			},
 		};
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
@@ -1549,7 +2904,14 @@ describe("agentLoop with AgentMessage", () => {
 					message:
 						callIndex === 1
 							? createAssistantMessage(
-									[{ type: "toolCall", id: "tool-preflight", name: "echo", arguments: { value: "ok" } }],
+									[
+										{
+											type: "toolCall",
+											id: "tool-preflight",
+											name: "echo",
+											arguments: { value: "ok" },
+										},
+									],
 									"toolUse",
 								)
 							: createAssistantMessage([{ type: "text", text: "done" }]),
@@ -1614,7 +2976,14 @@ describe("agentLoop with AgentMessage", () => {
 			queueMicrotask(() => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
-						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						[
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "hello" },
+							},
+						],
 						"toolUse",
 					);
 					stream.push({ type: "done", reason: "toolUse", message });
@@ -1636,7 +3005,10 @@ describe("agentLoop with AgentMessage", () => {
 	});
 
 	it("should prepare tool arguments for validation", async () => {
-		const replaceSchema = Type.Object({ oldText: Type.String(), newText: Type.String() });
+		const replaceSchema = Type.Object({
+			oldText: Type.String(),
+			newText: Type.String(),
+		});
 		const toolSchema = Type.Object({ edits: Type.Array(replaceSchema) });
 		const executed: Array<Array<{ oldText: string; newText: string }>> = [];
 		const tool: AgentTool<typeof toolSchema, { count: number }> = {
@@ -1764,8 +3136,18 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "first" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "echo",
+								arguments: { value: "second" },
+							},
 						],
 						"toolUse",
 					);
@@ -1810,6 +3192,266 @@ describe("agentLoop with AgentMessage", () => {
 		expect(turnToolResultIds).toEqual(["tool-1", "tool-2"]);
 	});
 
+	it("keeps mixed read, edit, and bash batch results paired, ordered, and recoverable after sibling failures", async () => {
+		const readSchema = Type.Object({ path: Type.String() });
+		const editSchema = Type.Object({
+			path: Type.String(),
+			replacement: Type.String(),
+		});
+		const bashSchema = Type.Object({ command: Type.String() });
+		let releaseFirstRead: (() => void) | undefined;
+		const firstReadReleased = new Promise<void>((resolve) => {
+			releaseFirstRead = resolve;
+		});
+		const executed: string[] = [];
+		const read: AgentTool<typeof readSchema, { path: string }> = {
+			name: "read",
+			label: "Read",
+			description: "Read a file",
+			parameters: readSchema,
+			async execute(_toolCallId, params) {
+				executed.push(`read:${params.path}`);
+				if (params.path === "/one") await firstReadReleased;
+				if (params.path === "/two") releaseFirstRead?.();
+				return {
+					content: [{ type: "text", text: `read:${params.path}` }],
+					details: { path: params.path },
+				};
+			},
+		};
+		const edit: AgentTool<typeof editSchema, { path: string; replacement: string }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit a file",
+			parameters: editSchema,
+			async execute(_toolCallId, params) {
+				executed.push(`edit:${params.path}:${params.replacement}`);
+				return {
+					content: [{ type: "text", text: `edit:${params.path}:${params.replacement}` }],
+					details: { path: params.path, replacement: params.replacement },
+				};
+			},
+		};
+		const bash: AgentTool<typeof bashSchema, { command: string }> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: bashSchema,
+			async execute(_toolCallId, params) {
+				executed.push(`bash:${params.command}`);
+				throw new Error("bash fixture failed");
+			},
+		};
+
+		let providerCall = 0;
+		const events: AgentEvent[] = [];
+		const stream = agentLoop(
+			[createUserMessage("apply batch")],
+			{ systemPrompt: "", messages: [], tools: [read, edit, bash] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				maxStallTurns: 0,
+			},
+			undefined,
+			(_model, context) => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (providerCall === 0) {
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: "read-1",
+										name: "read",
+										arguments: { path: "/one" },
+									},
+									{
+										type: "toolCall",
+										id: "edit-1",
+										name: "edit",
+										arguments: { path: "/one", replacement: "A" },
+									},
+									{
+										type: "toolCall",
+										id: "bash-fail",
+										name: "bash",
+										arguments: { command: "false" },
+									},
+									{
+										type: "toolCall",
+										id: "read-2",
+										name: "read",
+										arguments: { path: "/two" },
+									},
+									{
+										type: "toolCall",
+										id: "edit-invalid",
+										name: "edit",
+										arguments: { path: "/bad", replacement: 1 },
+									},
+									{
+										type: "toolCall",
+										id: "edit-2",
+										name: "edit",
+										arguments: { path: "/two", replacement: "B" },
+									},
+								],
+								"toolUse",
+							),
+						});
+					} else if (providerCall === 1) {
+						const priorResultIds = context.messages.flatMap((message) =>
+							message.role === "toolResult" ? [message.toolCallId] : [],
+						);
+						expect(priorResultIds).toEqual(["read-1", "edit-1", "bash-fail", "read-2", "edit-invalid", "edit-2"]);
+						response.push({
+							type: "done",
+							reason: "toolUse",
+							message: createAssistantMessage(
+								[
+									{
+										type: "toolCall",
+										id: "edit-corrected",
+										name: "edit",
+										arguments: { path: "/bad", replacement: "C" },
+									},
+								],
+								"toolUse",
+							),
+						});
+					} else {
+						response.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					providerCall++;
+				});
+				return response;
+			},
+		);
+		for await (const event of stream) events.push(event);
+
+		const results = (await stream.result()).filter(
+			(message): message is ToolResultMessage => message.role === "toolResult",
+		);
+		expect(results.map((result) => result.toolCallId)).toEqual([
+			"read-1",
+			"edit-1",
+			"bash-fail",
+			"read-2",
+			"edit-invalid",
+			"edit-2",
+			"edit-corrected",
+		]);
+		expect(new Set(results.map((result) => result.toolCallId)).size).toBe(results.length);
+		expect(results.find((result) => result.toolCallId === "bash-fail")?.isError).toBe(true);
+		expect(results.find((result) => result.toolCallId === "edit-invalid")?.isError).toBe(true);
+		expect(executed).toEqual(
+			expect.arrayContaining(["read:/one", "read:/two", "edit:/one:A", "edit:/two:B", "bash:false", "edit:/bad:C"]),
+		);
+		expect(executed).not.toContain("edit:/bad:1");
+		const completedIds = events.flatMap((event) => (event.type === "tool_execution_end" ? [event.toolCallId] : []));
+		expect(completedIds.indexOf("edit-1")).toBeLessThan(completedIds.indexOf("read-1"));
+	});
+
+	it("executes sequential edit batches in source order despite an invalid sibling", async () => {
+		const schema = Type.Object({
+			path: Type.String(),
+			replacement: Type.String(),
+		});
+		const started: string[] = [];
+		const completed: string[] = [];
+		let inFlight = false;
+		let overlapped = false;
+		const edit: AgentTool<typeof schema, { path: string; replacement: string }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Sequential edit",
+			parameters: schema,
+			executionMode: "sequential",
+			async execute(toolCallId, params) {
+				if (inFlight) overlapped = true;
+				inFlight = true;
+				started.push(toolCallId);
+				await Promise.resolve();
+				inFlight = false;
+				completed.push(toolCallId);
+				return {
+					content: [{ type: "text", text: `${params.path}:${params.replacement}` }],
+					details: { path: params.path, replacement: params.replacement },
+				};
+			},
+		};
+		let providerCall = 0;
+		const events: AgentEvent[] = [];
+		const stream = agentLoop(
+			[createUserMessage("edit batch")],
+			{ systemPrompt: "", messages: [], tools: [edit] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push(
+						providerCall++ === 0
+							? {
+									type: "done",
+									reason: "toolUse",
+									message: createAssistantMessage(
+										[
+											{
+												type: "toolCall",
+												id: "edit-1",
+												name: "edit",
+												arguments: { path: "/one", replacement: "A" },
+											},
+											{
+												type: "toolCall",
+												id: "edit-invalid",
+												name: "edit",
+												arguments: { path: "/invalid", replacement: 1 },
+											},
+											{
+												type: "toolCall",
+												id: "edit-2",
+												name: "edit",
+												arguments: { path: "/two", replacement: "B" },
+											},
+										],
+										"toolUse",
+									),
+								}
+							: {
+									type: "done",
+									reason: "stop",
+									message: createAssistantMessage([{ type: "text", text: "done" }]),
+								},
+					);
+				});
+				return response;
+			},
+		);
+		for await (const event of stream) events.push(event);
+
+		const results = (await stream.result()).filter(
+			(message): message is ToolResultMessage => message.role === "toolResult",
+		);
+		expect(overlapped).toBe(false);
+		expect(started).toEqual(["edit-1", "edit-2"]);
+		expect(completed).toEqual(["edit-1", "edit-2"]);
+		expect(results.map((result) => result.toolCallId)).toEqual(["edit-1", "edit-invalid", "edit-2"]);
+		expect(new Set(results.map((result) => result.toolCallId)).size).toBe(3);
+		expect(results.find((result) => result.toolCallId === "edit-invalid")?.isError).toBe(true);
+		const endIds = events.flatMap((event) => (event.type === "tool_execution_end" ? [event.toolCallId] : []));
+		expect(endIds).toEqual(["edit-1", "edit-invalid", "edit-2"]);
+	});
+
 	it("reserves a prepared parallel wave once before any tool body starts", async () => {
 		const schema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
@@ -1822,7 +3464,10 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: schema,
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
-				return { content: [{ type: "text", text: params.value }], details: params };
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: params,
+				};
 			},
 		};
 		const config: AgentLoopConfig = {
@@ -1833,7 +3478,11 @@ describe("agentLoop with AgentMessage", () => {
 				throw new Error("tool reservation failed");
 			},
 		};
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		let transportCalls = 0;
 		const stream = agentLoop([createUserMessage("run both")], context, config, undefined, () => {
 			transportCalls++;
@@ -1844,8 +3493,18 @@ describe("agentLoop with AgentMessage", () => {
 					reason: "toolUse",
 					message: createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "one" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "two" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "one" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "echo",
+								arguments: { value: "two" },
+							},
 						],
 						"toolUse",
 					),
@@ -1879,7 +3538,10 @@ describe("agentLoop with AgentMessage", () => {
 			executionMode: "sequential",
 			async execute(_toolCallId, params) {
 				order.push(`execute:${params.value}`);
-				return { content: [{ type: "text", text: params.value }], details: params };
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: params,
+				};
 			},
 		};
 		const config: AgentLoopConfig = {
@@ -1892,7 +3554,11 @@ describe("agentLoop with AgentMessage", () => {
 				order.push(`reserve:${calls[0]?.toolCall.id}`);
 			},
 		};
-		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
 		let callIndex = 0;
 		const stream = agentLoop([createUserMessage("run both")], context, config, undefined, () => {
 			const response = new MockAssistantStream();
@@ -1904,8 +3570,18 @@ describe("agentLoop with AgentMessage", () => {
 						callIndex === 1
 							? createAssistantMessage(
 									[
-										{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "one" } },
-										{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "two" } },
+										{
+											type: "toolCall",
+											id: "tool-1",
+											name: "echo",
+											arguments: { value: "one" },
+										},
+										{
+											type: "toolCall",
+											id: "tool-2",
+											name: "echo",
+											arguments: { value: "two" },
+										},
 									],
 									"toolUse",
 								)
@@ -1936,7 +3612,10 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: schema,
 			async execute() {
 				executions++;
-				return { content: [{ type: "text", text: "ok" }], details: { value: "ok" } };
+				return {
+					content: [{ type: "text", text: "ok" }],
+					details: { value: "ok" },
+				};
 			},
 		};
 		const config: AgentLoopConfig = {
@@ -1965,8 +3644,18 @@ describe("agentLoop with AgentMessage", () => {
 							reason: "toolUse",
 							message: createAssistantMessage(
 								[
-									{ type: "toolCall", id: "invalid", name: "echo", arguments: { value: 1 } },
-									{ type: "toolCall", id: "blocked", name: "echo", arguments: { value: "blocked" } },
+									{
+										type: "toolCall",
+										id: "invalid",
+										name: "echo",
+										arguments: { value: 1 },
+									},
+									{
+										type: "toolCall",
+										id: "blocked",
+										name: "echo",
+										arguments: { value: "blocked" },
+									},
 								],
 								"toolUse",
 							),
@@ -2010,7 +3699,11 @@ describe("agentLoop with AgentMessage", () => {
 					};
 					response.push(
 						replayCallIndex++ < 2
-							? { type: "done", reason: "toolUse", message: createAssistantMessage([toolCall], "toolUse") }
+							? {
+									type: "done",
+									reason: "toolUse",
+									message: createAssistantMessage([toolCall], "toolUse"),
+								}
 							: {
 									type: "done",
 									reason: "stop",
@@ -2087,8 +3780,18 @@ describe("agentLoop with AgentMessage", () => {
 					// First call: return two tool calls
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "first" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "echo",
+								arguments: { value: "second" },
+							},
 						],
 						"toolUse",
 					);
@@ -2184,8 +3887,18 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "slow", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "slow", arguments: { value: "second" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "slow",
+								arguments: { value: "first" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "slow",
+								arguments: { value: "second" },
+							},
 						],
 						"toolUse",
 					);
@@ -2278,8 +3991,18 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "slow", arguments: { value: "a" } },
-							{ type: "toolCall", id: "tool-2", name: "fast", arguments: { value: "b" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "slow",
+								arguments: { value: "a" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "fast",
+								arguments: { value: "b" },
+							},
 						],
 						"toolUse",
 					);
@@ -2353,8 +4076,18 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "first" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "echo",
+								arguments: { value: "second" },
+							},
 						],
 						"toolUse",
 					);
@@ -2428,7 +4161,14 @@ describe("agentLoop with AgentMessage", () => {
 						type: "done",
 						reason: "toolUse",
 						message: createAssistantMessage(
-							[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+							[
+								{
+									type: "toolCall",
+									id: "tool-1",
+									name: "echo",
+									arguments: { value: "hello" },
+								},
+							],
 							"toolUse",
 						),
 					});
@@ -2504,7 +4244,14 @@ describe("agentLoop with AgentMessage", () => {
 			queueMicrotask(() => {
 				if (llmCalls === 1) {
 					const message = createAssistantMessage(
-						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						[
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "hello" },
+							},
+						],
 						"toolUse",
 					);
 					mockStream.push({ type: "done", reason: "toolUse", message });
@@ -2581,7 +4328,14 @@ describe("agentLoop with AgentMessage", () => {
 			const mockStream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage(
-					[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+					[
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: { value: "hello" },
+						},
+					],
 					"toolUse",
 				);
 				mockStream.push({ type: "done", reason: "toolUse", message });
@@ -2635,8 +4389,18 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "echo",
+								arguments: { value: "first" },
+							},
+							{
+								type: "toolCall",
+								id: "tool-2",
+								name: "echo",
+								arguments: { value: "second" },
+							},
 						],
 						"toolUse",
 					);
@@ -2698,7 +4462,14 @@ describe("agentLoop with AgentMessage", () => {
 			const mockStream = new MockAssistantStream();
 			queueMicrotask(() => {
 				const message = createAssistantMessage(
-					[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+					[
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: { value: "hello" },
+						},
+					],
 					"toolUse",
 				);
 				mockStream.push({ type: "done", reason: "toolUse", message });

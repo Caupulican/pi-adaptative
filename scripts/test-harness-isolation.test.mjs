@@ -12,10 +12,108 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const harnessPath = join(repositoryRoot, "test.sh");
 const releasePath = join(repositoryRoot, "scripts", "release.mjs");
+const agentVerificationCoverageConfigPath = join(repositoryRoot, "packages", "agent", "vitest.verification-harness.config.ts");
+const codingAgentVerificationCoverageConfigPath = join(
+	repositoryRoot,
+	"packages",
+	"coding-agent",
+	"vitest.verification-harness.config.ts",
+);
+const agentPackageJsonPath = join(repositoryRoot, "packages", "agent", "package.json");
+const codingAgentPackageJsonPath = join(repositoryRoot, "packages", "coding-agent", "package.json");
+const ciWorkflowPath = join(repositoryRoot, ".github", "workflows", "ci.yml");
+const agentVerificationCoverage = {
+	include: [
+		"src/verification-obligations.ts",
+		"src/agent-loop.ts",
+		"src/messages.ts",
+		"src/compaction/compaction.ts",
+		"src/compaction/branch-summarization.ts",
+		"src/session/session-manager.ts",
+	],
+	thresholds: {
+		perFile: true,
+		"src/verification-obligations.ts": { statements: 95, branches: 92, functions: 100, lines: 100 },
+		"src/agent-loop.ts": { statements: 75, branches: 66, functions: 80, lines: 77 },
+		"src/messages.ts": { statements: 35, branches: 12, functions: 85, lines: 35 },
+		"src/compaction/compaction.ts": { statements: 71, branches: 64, functions: 71, lines: 71 },
+		"src/compaction/branch-summarization.ts": { statements: 60, branches: 46, functions: 75, lines: 63 },
+		"src/session/session-manager.ts": { statements: 50, branches: 39, functions: 49, lines: 51 },
+	},
+};
+const codingAgentVerificationCoverage = {
+	include: [
+		"src/core/tools/shell-test-command.ts",
+		"src/core/tools/shell-output-projection.ts",
+		"src/core/tools/bash.ts",
+		"src/core/tools/tool-task.ts",
+		"src/core/background-tool-task-controller.ts",
+		"src/core/foreground-terminal-handoff-controller.ts",
+		"src/core/tools/goal.ts",
+		"src/core/compaction-controller.ts",
+		"src/core/agent-session.ts",
+		"src/core/runtime-builder.ts",
+	],
+	thresholds: {
+		perFile: true,
+		"src/core/tools/shell-test-command.ts": { statements: 96, branches: 91, functions: 100, lines: 99 },
+		"src/core/tools/shell-output-projection.ts": { statements: 89, branches: 77, functions: 100, lines: 91 },
+		"src/core/tools/bash.ts": { statements: 61, branches: 55, functions: 61, lines: 62 },
+		"src/core/tools/tool-task.ts": { statements: 97, branches: 84, functions: 100, lines: 100 },
+		"src/core/background-tool-task-controller.ts": { statements: 83, branches: 77, functions: 86, lines: 88 },
+		"src/core/foreground-terminal-handoff-controller.ts": { statements: 80, branches: 59, functions: 89, lines: 83 },
+		"src/core/tools/goal.ts": { statements: 78, branches: 64, functions: 72, lines: 78 },
+		"src/core/compaction-controller.ts": { statements: 82, branches: 70, functions: 96, lines: 85 },
+		"src/core/agent-session.ts": { statements: 48, branches: 43, functions: 37, lines: 48 },
+		"src/core/runtime-builder.ts": { statements: 54, branches: 47, functions: 37, lines: 54 },
+	},
+};
+const agentVerificationCoverageTests = [
+	"test/verification-obligations.test.ts",
+	"test/agent-loop.test.ts",
+	"test/compaction/compaction.test.ts",
+	"test/compaction/verification.test.ts",
+	"test/compaction/session-replacement-compaction.test.ts",
+	"test/compaction/branch-summarization.test.ts",
+	"test/session/branched-session-manager.test.ts",
+	"test/session/build-context.test.ts",
+	"test/session/compacted-payload-release.test.ts",
+	"test/session/latest-custom-entry-on-branch.test.ts",
+	"test/session/session-context-cache.test.ts",
+];
+const codingAgentVerificationCoverageTests = [
+	"test/shell-verification-classifier.test.ts",
+	"test/shell-output-projection.test.ts",
+	"test/bash-output-projection.test.ts",
+	"test/bash-verification-boundary.test.ts",
+	"test/tools.test.ts",
+	"test/tool-failure-recovery-contract.test.ts",
+	"test/bash-search-guard.test.ts",
+	"test/bash-silence-watchdog.test.ts",
+	"test/bash-executor-git-filter-spill.test.ts",
+	"test/background-tool-task-controller.test.ts",
+	"test/background-tool-verification-propagation.test.ts",
+	"test/background-tool-task-wait.test.ts",
+	"test/tool-task.test.ts",
+	"test/foreground-terminal-handoff-controller.test.ts",
+	"test/verification-obligation-gate.test.ts",
+	"test/agent-session-background-tool-task.test.ts",
+	"test/goal-tool.test.ts",
+	"test/goal-evidence-verification.test.ts",
+	"test/goal-worker-evidence.test.ts",
+	"test/goal-producer-consumer.test.ts",
+	"test/goal-task-compaction-survival.test.ts",
+	"test/agent-session-compaction.test.ts",
+	"test/compaction-controller-reentry.test.ts",
+	"test/runtime-builder-worker-ceiling.test.ts",
+	"test/runtime-builder-delegate-diagnostics.test.ts",
+	"test/runtime-builder-reload-reconcile.test.ts",
+];
 const clearedVariables = [
 	"ANTHROPIC_API_KEY",
 	"ANTHROPIC_OAUTH_TOKEN",
@@ -233,6 +331,53 @@ function assertActiveLine(source, needle, label = needle) {
 	assert.match(source, pattern, `${label} must be an active (uncommented) line, not commented out`);
 }
 
+function findActiveWorkflowStep(workflow, name) {
+	const lines = workflow.split("\n");
+	const stepStarts = lines
+		.map((line, index) => ({ line, index }))
+		.filter(({ line }) => line === `      - name: ${name}`)
+		.map(({ index }) => index);
+	assert.equal(stepStarts.length, 1, `CI must have exactly one active ${name} step`);
+
+	const start = stepStarts[0];
+	const end = lines.findIndex((line, index) => index > start && line.startsWith("      - "));
+	return lines.slice(start, end === -1 ? undefined : end);
+}
+
+function assertCoverageStepSemantics(workflow) {
+	const step = findActiveWorkflowStep(workflow, "Verification-harness coverage gate");
+	const conditionStart = step.findIndex((line) => line === "        if: >");
+	assert.notEqual(conditionStart, -1, "coverage step must have an active multiline condition");
+	const condition = step
+		.slice(conditionStart + 1)
+		.filter((line) => line.startsWith("          "))
+		.map((line) => line.trim())
+		.join(" ");
+	assert.match(condition, /runner\.os == 'Linux'/u);
+	assert.match(condition, /inputs\.skip_tests != true/u);
+	assert.match(condition, /github\.event_name != 'push'/u);
+	assert.match(condition, /!startsWith\(github\.event\.head_commit\.message, 'Release v'\)/u);
+	assert.ok(
+		step.some((line) => line === "        run: npm run coverage:verification-harness"),
+		"coverage step must actively invoke the root coverage command",
+	);
+}
+
+async function importVerificationCoverageConfig(configPath) {
+	return (await import(pathToFileURL(configPath).href)).default;
+}
+
+function assertVerificationCoverageConfig(config, expected, label) {
+	const coverage = config.test?.coverage;
+	assert.ok(coverage, `${label} must export an active coverage configuration`);
+	assert.equal(coverage.provider, "v8");
+	assert.equal(coverage.all, true);
+	assert.deepEqual(coverage.include, expected.include);
+	assert.deepEqual(coverage.reporter, ["text", "json-summary"]);
+	assert.equal(coverage.reportsDirectory, "coverage/verification-harness");
+	assert.deepEqual(coverage.thresholds, expected.thresholds);
+}
+
 test("the mandatory root check owns the isolated release-test harness contract", () => {
 	const source = readFileSync(harnessPath, "utf8");
 	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
@@ -265,6 +410,54 @@ test("the mandatory root check owns the isolated release-test harness contract",
 	);
 	assert.match(packageJson.scripts.check, /npm run check:test-harness-isolation/);
 	assert.equal(packageJson.scripts.test, "node scripts/run-workspace-tests.mjs");
+});
+
+test("the live verification harness has a bounded per-file V8 coverage gate in Linux CI", async () => {
+	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
+	const agentPackageJson = JSON.parse(readFileSync(agentPackageJsonPath, "utf8"));
+	const codingAgentPackageJson = JSON.parse(readFileSync(codingAgentPackageJsonPath, "utf8"));
+	const workflow = readFileSync(ciWorkflowPath, "utf8");
+	const agentConfig = await importVerificationCoverageConfig(agentVerificationCoverageConfigPath);
+	const codingAgentConfig = await importVerificationCoverageConfig(codingAgentVerificationCoverageConfigPath);
+
+	assert.equal(
+		packageJson.scripts["coverage:verification-harness"],
+		"npm run coverage:verification-harness --workspace=packages/agent && npm run coverage:verification-harness --workspace=packages/coding-agent",
+	);
+	assert.equal(packageJson.devDependencies["@vitest/coverage-v8"], "4.1.10");
+	assert.match(packageJson.scripts["check:test-harness-isolation"], /scripts\/test-harness-isolation\.test\.mjs/u);
+	assert.equal(
+		agentPackageJson.scripts["coverage:verification-harness"],
+		"vitest --run --config vitest.verification-harness.config.ts --coverage",
+	);
+	assert.deepEqual(agentConfig.test?.include, agentVerificationCoverageTests);
+	assertVerificationCoverageConfig(agentConfig, agentVerificationCoverage, "agent verification coverage");
+	assert.equal(
+		codingAgentPackageJson.scripts["coverage:verification-harness"],
+		`vitest --run --config vitest.verification-harness.config.ts --coverage ${codingAgentVerificationCoverageTests.join(" ")}`,
+	);
+	assertVerificationCoverageConfig(codingAgentConfig, codingAgentVerificationCoverage, "coding-agent verification coverage");
+	assertCoverageStepSemantics(workflow);
+});
+
+test("the verification coverage CI assertion rejects commented and detached steps", () => {
+	const workflow = readFileSync(ciWorkflowPath, "utf8");
+	assert.throws(() =>
+		assertCoverageStepSemantics(
+			workflow.replace(
+				"      - name: Verification-harness coverage gate",
+				"      # - name: Verification-harness coverage gate",
+			),
+		),
+	);
+	assert.throws(() =>
+		assertCoverageStepSemantics(
+			workflow.replace(
+				"        run: npm run coverage:verification-harness",
+				"      - name: Detached coverage command\n        run: npm run coverage:verification-harness",
+			),
+		),
+	);
 });
 
 test("the release command requires exact-HEAD GitHub CI before version mutation without a local full suite", () => {

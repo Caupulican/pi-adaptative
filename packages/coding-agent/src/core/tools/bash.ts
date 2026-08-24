@@ -50,6 +50,7 @@ import {
 	type ShellOutputProjectionDetails,
 } from "./shell-output-projection.ts";
 import { acquirePersistentShellSession } from "./shell-session.ts";
+import { classifyShellVerificationCommand } from "./shell-test-command.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWindowsShellEngineOperations, type WindowsShellEngineOptions } from "./windows-shell-engine.ts";
 import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } from "./windows-shell-state.ts";
@@ -109,6 +110,11 @@ export interface BashToolDetails {
 		skippedLines: number;
 	};
 	outputProjection?: ShellOutputProjectionDetails;
+	piVerification?: {
+		version: 1;
+		id: string;
+		status: "failed" | "passed";
+	};
 }
 
 /**
@@ -826,6 +832,17 @@ function createShellToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
+			const withVerification = (
+				details: BashToolDetails | undefined,
+				status: "failed" | "passed",
+				effectiveCwd: string,
+			) => {
+				const verification =
+					!commandPrefix && !spawnHook ? classifyShellVerificationCommand(command, effectiveCwd) : undefined;
+				return verification
+					? { ...(details ?? {}), piVerification: { version: 1 as const, id: verification.id, status } }
+					: details;
+			};
 			// The shell ran the command to completion and is reporting the process's own status. That is
 			// the observation the caller asked for — a red test run, a search that matched nothing, a
 			// false predicate — so it is an operation outcome, never a failure of this tool.
@@ -954,6 +971,27 @@ function createShellToolDefinition(
 					expectedNoMatch ? "(no matches)" : "(no output)",
 					projection,
 				);
+				// The true directory the command ran in: the session-reported $PWD on POSIX,
+				// the state-tracked effective cwd on the Windows contract (the runner protocol
+				// does not report one), or the host-requested cwd for per-command backends.
+				const reportedCwd = routesWindowsContract
+					? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
+					: (sessionCwd ?? spawnContext.cwd);
+				const verification =
+					!commandPrefix && !spawnHook ? classifyShellVerificationCommand(command, reportedCwd) : undefined;
+				if (exitCode === null) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: appendStatus(outputText, `Command terminated without an exit code\ncwd: ${reportedCwd}`),
+							},
+						],
+						details: withVerification(details, "failed", reportedCwd),
+						isError: true,
+						errorKind: "tool_failure",
+					};
+				}
 				if (exitCode !== 0 && exitCode !== null) {
 					if (expectedNoMatch) {
 						return {
@@ -966,15 +1004,25 @@ function createShellToolDefinition(
 							details,
 						};
 					}
-					// The true directory the command ran in: the session-reported $PWD on POSIX,
-					// the state-tracked effective cwd on the Windows contract (the runner protocol
-					// does not report one), or the host-requested cwd for per-command backends.
-					const reportedCwd = routesWindowsContract
-						? resolveEffectiveCwd(getOrCreateWindowsShellState(sessionKey), cwd)
-						: (sessionCwd ?? spawnContext.cwd);
+					if (verification) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: appendStatus(outputText, `Command exited with code ${exitCode}\ncwd: ${reportedCwd}`),
+								},
+							],
+							details: withVerification(details, "failed", reportedCwd),
+							isError: true,
+							errorKind: "operation_outcome",
+						};
+					}
 					throw createExitError(outputText, exitCode, reportedCwd);
 				}
-				return { content: [{ type: "text", text: outputText }], details };
+				return {
+					content: [{ type: "text", text: outputText }],
+					details: withVerification(details, "passed", reportedCwd),
+				};
 			} finally {
 				clearUpdateTimer();
 				await output.closeTempFile();

@@ -81,6 +81,33 @@ describe("task_steps tool", () => {
 		]);
 	});
 
+	it("uses an action-discriminated schema with no runtime contract drift", async () => {
+		const harness = createHarness();
+		const parameters = harness.tool.parameters;
+
+		expect(Value.Check(parameters, { action: "add" })).toBe(false);
+		expect(Value.Check(parameters, { action: "add", content: "Add a step", steps: [] })).toBe(false);
+		expect(Value.Check(parameters, { action: "add", content: "Add a step" })).toBe(true);
+
+		expect(Value.Check(parameters, { action: "set" })).toBe(false);
+		expect(Value.Check(parameters, { action: "set", steps: [], content: "not applicable" })).toBe(false);
+		expect(Value.Check(parameters, { action: "set", steps: [{ content: "Replace list" }] })).toBe(true);
+		expect(Value.Check(parameters, { action: "intake" })).toBe(false);
+		expect(Value.Check(parameters, { action: "intake", steps: [{ content: "Incoming" }] })).toBe(true);
+
+		expect(Value.Check(parameters, { action: "update", content: "Missing selector" })).toBe(false);
+		expect(Value.Check(parameters, { action: "update", id: "step-1", steps: [] })).toBe(false);
+		expect(Value.Check(parameters, { action: "update", id: "step-1", content: "Updated" })).toBe(true);
+		// Negative controls: all of the non-mutating and lifecycle actions retain their existing legal shape.
+		expect(Value.Check(parameters, { action: "list", showCompleted: true, maxItems: 1 })).toBe(true);
+		expect(Value.Check(parameters, { action: "clear" })).toBe(true);
+		expect(Value.Check(parameters, { action: "compact" })).toBe(true);
+		expect(Value.Check(parameters, { action: "advance" })).toBe(true);
+
+		const result = await execute(harness.tool, { action: "add", content: "Add a step" });
+		expect(result.details).toMatchObject({ action: "add", applied: true, stepCount: 1 });
+	});
+
 	it("returns bounded validation errors without persisting a mutation", async () => {
 		const harness = createHarness();
 		const result = await execute(harness.tool, { action: "update", id: "missing", status: "completed" });

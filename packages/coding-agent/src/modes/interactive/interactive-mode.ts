@@ -1688,7 +1688,7 @@ export class InteractiveMode {
 		this.streamingUiUpdateTimer = undefined;
 	}
 
-	private getSessionEntryCount(): number {
+	private getSessionRecordCount(): number {
 		const manager = this.sessionManager as typeof this.sessionManager & { getEntryCount?: () => number };
 		return manager.getEntryCount?.() ?? manager.getEntries().length;
 	}
@@ -1698,13 +1698,13 @@ export class InteractiveMode {
 		this.resetLiveTuiHistoryTrim();
 		this.clearActiveToolCallState();
 
-		const entryCount = this.getSessionEntryCount();
-		if (entryCount > 0) {
+		const recordCount = this.getSessionRecordCount();
+		if (recordCount > 0) {
 			this.chatContainer.addChild(
 				new Text(
 					theme.fg(
 						"dim",
-						`History hidden for typing performance (${entryCount} entries). Press ${keyText("app.history.load")} to load session history.`,
+						`History hidden for typing performance. Press ${keyText("app.history.load")} to load session history.`,
 					),
 					1,
 					0,
@@ -1716,7 +1716,7 @@ export class InteractiveMode {
 	}
 
 	private loadTuiHistoryOnDemand(): void {
-		if (this.tuiHistoryLoadInProgress || this.tuiHistoryLoaded || this.getSessionEntryCount() === 0) return;
+		if (this.tuiHistoryLoadInProgress || this.tuiHistoryLoaded || this.getSessionRecordCount() === 0) return;
 
 		this.tuiHistoryLoadInProgress = true;
 		void (async () => {

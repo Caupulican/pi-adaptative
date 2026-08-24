@@ -51,7 +51,7 @@ describe("bash test-output projection", () => {
 		expect(readFileSync(result.details?.fullOutputPath ?? "", "utf-8")).toBe(rawOutput);
 	});
 
-	it("preserves failure diagnostics and the original exit code", async () => {
+	it("preserves a verification failure's diagnostics, original exit code, and metadata", async () => {
 		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-projection-"));
 		cleanupDirectories.push(outputDirectory);
 		const rawOutput = noisyTestOutput(true);
@@ -60,15 +60,11 @@ describe("bash test-output projection", () => {
 			outputDirectory,
 		});
 
-		let error: unknown;
-		try {
-			await tool.execute("test-projection-failure", { command: String.raw`.\BuildVersion.Tests.ps1` });
-		} catch (caught) {
-			error = caught;
-		}
+		const result = await tool.execute("test-projection-failure", { command: String.raw`.\BuildVersion.Tests.ps1` });
+		const message = getTextOutput(result, false);
 
-		expect(error).toBeInstanceOf(Error);
-		const message = (error as Error).message;
+		expect(result).toMatchObject({ isError: true, errorKind: "operation_outcome" });
+		expect(result.details?.piVerification).toMatchObject({ version: 1, status: "failed", id: expect.any(String) });
 		expect(message).toContain("[FAIL] focused case");
 		expect(message).toContain("AssertionError: expected true but received false");
 		expect(message).not.toContain("unrelated case 42");

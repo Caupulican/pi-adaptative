@@ -145,7 +145,8 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.activeToolCalls = { activeEntries: () => [] };
 		ctx.editor = { setHistory: vi.fn() };
 		const sessionManager = {
-			getEntryCount: () => 42,
+			// Compaction adds journal records without implying thousands of user-visible actions.
+			getEntryCount: () => 4_287,
 			getRecentUserInputHistory: vi.fn(() => ["first prompt", "second prompt"]),
 			getEntries: vi.fn(() => {
 				throw new Error("history should not be loaded at startup");
@@ -163,6 +164,11 @@ describe("InteractiveMode TUI reload history cap", () => {
 		expect(sessionManager.getEntries).not.toHaveBeenCalled();
 		expect(sessionManager.buildSessionContext).not.toHaveBeenCalled();
 		expect(ctx.chatContainer.render(120).join("\n")).toContain("Press");
+		const placeholder = ctx.chatContainer.render(120).join("\n");
+		expect(placeholder).not.toContain("4,287");
+		expect(placeholder).not.toContain("4287");
+		expect(placeholder).not.toContain("entries");
+		expect(placeholder).not.toContain("journal records");
 		expect(ctx.chatContainer.render(120).join("\n")).toContain("load session history");
 		expect(ctx.chatContainer.render(120).join("\n")).not.toMatch(/Press .* to expand tools and load history/i);
 		expect(ctx.ui.requestRender).toHaveBeenCalledTimes(1);

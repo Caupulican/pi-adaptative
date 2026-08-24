@@ -13,6 +13,8 @@ import { formatValidationPath } from "./validation-path.ts";
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const EXPECTED_FRAGMENT_MAX_LENGTH = 320;
 const RECEIVED_VALUE_MAX_LENGTH = 200;
+const MINIMAL_EXAMPLE_MAX_STRING_LENGTH = 64;
+const MINIMAL_EXAMPLE_MAX_ARRAY_ITEMS = 8;
 const MISSING_VALUE = Symbol("missing");
 
 export type ToolArgumentValidationOutcome = "clean" | "repaired" | "bounced";
@@ -158,6 +160,27 @@ function schemaAtPath(schema: unknown, pathSegments: readonly string[]): unknown
 	return current;
 }
 
+function schemaAtValidationError(schema: unknown, error: TLocalizedValidationError): unknown {
+	const pointer = error.schemaPath;
+	if (!pointer.startsWith("#/")) return schemaAtPath(schema, validationPathSegments(error));
+	let current: unknown = schema;
+	for (const encodedSegment of pointer.slice(2).split("/")) {
+		const segment = encodedSegment.replace(/~1/g, "/").replace(/~0/g, "~");
+		if (Array.isArray(current)) {
+			const index = Number(segment);
+			if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+				return schemaAtPath(schema, validationPathSegments(error));
+			}
+			current = current[index];
+			continue;
+		}
+		const record = asRecord(current);
+		if (!record || !(segment in record)) return schemaAtPath(schema, validationPathSegments(error));
+		current = record[segment];
+	}
+	return current;
+}
+
 function receivedValueAtPath(args: unknown, pathSegments: readonly string[]): unknown {
 	let current: unknown = args;
 	for (const segment of pathSegments) {
@@ -194,11 +217,20 @@ function receivedTypeOf(value: unknown): string {
 function expectedTypeOf(schema: unknown): string {
 	const record = asRecord(schema);
 	if (!record) return "unknown";
+	const values = literalValues(record);
+	if (values?.length) {
+		const allowed = values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
+		return values.length === 1 ? `literal ${allowed}` : `one of ${allowed}`;
+	}
 	if (Array.isArray(record.type)) return record.type.filter((type) => typeof type === "string").join("|") || "unknown";
 	if (typeof record.type === "string") return record.type;
-	if (literalValues(record)) return "enum";
 	if (record.properties !== undefined) return "object";
 	if (record.items !== undefined) return "array";
+	const alternatives = schemaAlternatives(record);
+	if (alternatives.length > 0) {
+		const types = [...new Set(alternatives.map(expectedTypeOf).filter((type) => type !== "unknown"))];
+		if (types.length === 1) return types[0];
+	}
 	return "unknown";
 }
 
@@ -212,11 +244,12 @@ function formatFailureShape(
 	for (const error of errors) {
 		const path = formatValidationPath(error);
 		const pathSegments = path === "root" ? [] : path.split(".");
-		const expectedSchema = schemaAtPath(schema, pathSegments);
+		const expectedSchema = schemaAtValidationError(schema, error);
 		const value = receivedValueAtPath(args, pathSegments);
 		const entry = {
 			path,
-			expectedType: error.keyword === "additionalProperties" ? "forbidden" : expectedTypeOf(expectedSchema),
+			expectedType:
+				error.keyword === "additionalProperties" ? "forbidden" : expectedFailureType(error, expectedSchema),
 			receivedType: receivedTypeOf(value),
 			keyword: error.keyword,
 		};
@@ -258,6 +291,15 @@ function literalValues(schema: unknown): unknown[] | undefined {
 	return undefined;
 }
 
+function schemaAlternatives(schema: Record<string, unknown>): unknown[] {
+	const alternatives = Array.isArray(schema.anyOf)
+		? schema.anyOf
+		: Array.isArray(schema.oneOf)
+			? schema.oneOf
+			: undefined;
+	return alternatives ?? [];
+}
+
 function compactSchemaFragment(schema: unknown): Record<string, unknown> {
 	const record = asRecord(schema);
 	if (!record) {
@@ -269,6 +311,12 @@ function compactSchemaFragment(schema: unknown): Record<string, unknown> {
 	if (values) {
 		fragment.enum = values;
 		return fragment;
+	}
+	const alternatives = schemaAlternatives(record);
+	if (alternatives.length > 0) {
+		// A union's first branch is both deterministic and the branch used for our minimal valid
+		// example. Presenting it is more useful than an opaque anyOf/oneOf shell.
+		return compactSchemaFragment(alternatives[0]);
 	}
 
 	for (const key of ["type", "required", "minimum", "maximum", "minLength", "maxLength", "format"] as const) {
@@ -299,25 +347,42 @@ function minimalExample(schema: unknown): unknown {
 	if (values?.length) {
 		return values[0];
 	}
+	const alternatives = schemaAlternatives(record);
+	if (alternatives.length > 0) {
+		return minimalExample(alternatives[0]);
+	}
 
 	const type = Array.isArray(record.type) ? record.type[0] : record.type;
 	switch (type) {
-		case "string":
-			return "";
+		case "string": {
+			const minimumLength = typeof record.minLength === "number" && record.minLength > 0 ? record.minLength : 0;
+			return minimumLength <= MINIMAL_EXAMPLE_MAX_STRING_LENGTH ? "x".repeat(minimumLength) : undefined;
+		}
 		case "number":
 			return typeof record.minimum === "number" ? record.minimum : 0;
 		case "integer":
 			return typeof record.minimum === "number" ? Math.ceil(record.minimum) : 0;
 		case "boolean":
 			return true;
-		case "array":
-			return [];
+		case "array": {
+			const minimumItems = typeof record.minItems === "number" && record.minItems > 0 ? record.minItems : 0;
+			if (minimumItems > MINIMAL_EXAMPLE_MAX_ARRAY_ITEMS) return undefined;
+			if (minimumItems === 0) return [];
+			const item = minimalExample(record.items);
+			return item === undefined ? undefined : Array.from({ length: minimumItems }, () => item);
+		}
 		case "object": {
 			const properties = asRecord(record.properties) ?? {};
 			const required = Array.isArray(record.required)
 				? record.required.filter((key) => typeof key === "string")
 				: [];
-			return Object.fromEntries(required.map((key) => [key, minimalExample(properties[key]) ?? null]));
+			const example: Record<string, unknown> = {};
+			for (const key of required) {
+				const value = minimalExample(properties[key]);
+				if (value === undefined) return undefined;
+				example[key] = value;
+			}
+			return example;
 		}
 		case "null":
 			return null;
@@ -326,13 +391,45 @@ function minimalExample(schema: unknown): unknown {
 	}
 }
 
+function valuesFromValidationError(error: TLocalizedValidationError, schema: unknown): unknown[] | undefined {
+	const params = asRecord(error.params);
+	if (params?.allowedValue !== undefined) return [params.allowedValue];
+	if (Array.isArray(params?.allowedValues)) return params.allowedValues;
+	return literalValues(schema);
+}
+
+function expectedFailureType(error: TLocalizedValidationError, schema: unknown): string {
+	const values = valuesFromValidationError(error, schema);
+	if (values?.length) {
+		const allowed = values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
+		return values.length === 1 ? `literal ${allowed}` : `one of ${allowed}`;
+	}
+	return expectedTypeOf(schema);
+}
+
+function validationGuidance(error: TLocalizedValidationError, schema: unknown): string {
+	const values = valuesFromValidationError(error, schema);
+	if (values?.length) {
+		const allowed = values.map((value) => formatCompactJson(value, RECEIVED_VALUE_MAX_LENGTH)).join(", ");
+		return `${values.length === 1 ? `must equal ${allowed}` : `must be one of ${allowed}`}; Allowed values: ${allowed}`;
+	}
+	const expectedType = expectedTypeOf(schema);
+	if (
+		expectedType !== "unknown" &&
+		(error.keyword === "type" || error.keyword === "anyOf" || error.keyword === "oneOf")
+	) {
+		return `expected ${expectedType}`;
+	}
+	return error.message;
+}
+
 function formatValidationErrors(errors: readonly TLocalizedValidationError[], args: unknown, schema: unknown): string {
 	return (
 		errors
 			.map((error) => {
 				const path = formatValidationPath(error);
 				const pathSegments = validationPathSegments(error);
-				const expectedSchema = schemaAtPath(schema, pathSegments);
+				const expectedSchema = schemaAtValidationError(schema, error);
 				const expectedFragment = formatCompactJson(
 					compactSchemaFragment(expectedSchema),
 					EXPECTED_FRAGMENT_MAX_LENGTH,
@@ -341,7 +438,7 @@ function formatValidationErrors(errors: readonly TLocalizedValidationError[], ar
 				const received = formatCompactJson(receivedValueAtPath(args, pathSegments), RECEIVED_VALUE_MAX_LENGTH);
 				const exampleText =
 					example === undefined ? "" : `; Example: ${formatCompactJson(example, RECEIVED_VALUE_MAX_LENGTH)}`;
-				return `  - ${path}: ${error.message}; Expected schema: ${expectedFragment}${exampleText}; Received: ${received}`;
+				return `  - ${path}: ${validationGuidance(error, expectedSchema)}; Expected schema: ${expectedFragment}${exampleText}; Received: ${received}`;
 			})
 			.join("\n") || "Unknown validation error"
 	);
@@ -357,7 +454,11 @@ function validationFailureSignature(errors: readonly TLocalizedValidationError[]
 	);
 }
 
-function formatValidationEnrichment(tool: Tool): string {
+/**
+ * Authoritative, bounded schema guidance for a provider- or validator-rejected tool call.
+ * Kept here so every recovery path teaches the same schema and validator-safe minimal example.
+ */
+export function formatToolValidationEnrichment(tool: Tool): string {
 	const example = minimalExample(tool.parameters);
 	const exampleText = example === undefined ? "" : `\nValid example:\n${formatCompactJson(example, 2000)}`;
 	return `Full tool schema:\n${formatCompactJson(tool.parameters, 4000)}${exampleText}`;
@@ -450,6 +551,6 @@ export function validateToolArguments(
 	throw new ToolArgumentValidationError(errorMessage, {
 		toolName: toolCall.name,
 		signature: validationFailureSignature(validationErrors),
-		enrichment: formatValidationEnrichment(tool),
+		enrichment: formatToolValidationEnrichment(tool),
 	});
 }

@@ -210,41 +210,26 @@ describe("secret_store tool", () => {
 		expect(JSON.stringify(activated)).not.toContain(secret);
 	});
 
-	it("requests only one masked BW_SESSION key and then completes the credential action", async () => {
-		const secret = "connected-after-owner-key";
-		const { storage, manager, tool } = createHarness({});
-		storage.records.set("deploy", {
-			profile: "deploy",
-			variables: [{ name: "DEPLOY_TOKEN", value: secret }],
-			projectKeys: [projectKey],
-		});
+	it("returns setup-required in the TUI without prompting for a session key", async () => {
+		const { storage, tool } = createHarness({});
 		const ui = createContext("tui", "/work/project");
-		ui.input.mockResolvedValue("valid-session");
+		ui.input.mockResolvedValue("must-not-be-read");
 
 		const result = await tool.execute("activate", { action: "activate" }, undefined, undefined, ui.context);
 
-		expect(result.details).toEqual({
-			action: "activate",
-			status: "activated",
-			profile: "deploy",
-			variableNames: ["DEPLOY_TOKEN"],
-			project: "project",
-		});
-		expect(ui.input).toHaveBeenCalledOnce();
-		expect(ui.input).toHaveBeenCalledWith("Connect Bitwarden", "Paste BW_SESSION session key", {
-			sensitive: true,
-		});
-		expect(manager.getEnvironmentForCwd("/work/project")).toEqual({ DEPLOY_TOKEN: secret });
-		expect(JSON.stringify(result)).not.toContain("valid-session");
+		expect(result.details).toMatchObject({ action: "activate", status: "unavailable", code: "owner_setup_required" });
+		expect(storage.connections).toEqual([]);
+		expect(ui.input).not.toHaveBeenCalled();
 		expect(ui.custom).not.toHaveBeenCalled();
 		expect(ui.confirm).not.toHaveBeenCalled();
+		expect(JSON.stringify(result)).not.toContain("must-not-be-read");
 	});
 
-	it("cancels without reading migration sources when the masked key prompt is dismissed", async () => {
+	it("returns setup-required for migration without loading sources or prompting", async () => {
 		const resolveMigrationSources = vi.fn(async () => [{ name: "DEPLOY_TOKEN", value: "must-not-be-loaded" }]);
 		const { tool } = createHarness({ resolveMigrationSources });
 		const ui = createContext("tui", "/work/project");
-		ui.input.mockResolvedValue(undefined);
+		ui.input.mockResolvedValue("must-not-be-read");
 
 		const result = await tool.execute(
 			"migrate",
@@ -258,37 +243,47 @@ describe("secret_store tool", () => {
 			ui.context,
 		);
 
-		expect(result.details).toEqual({ action: "migrate", status: "cancelled", code: "cancelled" });
-		expect(ui.input).toHaveBeenCalledOnce();
+		expect(result.details).toMatchObject({ action: "migrate", status: "unavailable", code: "owner_setup_required" });
+		expect(ui.input).not.toHaveBeenCalled();
 		expect(resolveMigrationSources).not.toHaveBeenCalled();
 		expect(ui.custom).not.toHaveBeenCalled();
 		expect(ui.confirm).not.toHaveBeenCalled();
 	});
 
-	it("replaces a stale process session by requesting only a fresh masked key", async () => {
-		const secret = "stale-session-recovery-secret";
-		const { storage, manager, tool } = createHarness({ initialSessionKey: "stale-session" });
+	it("returns setup-required for a stale process session without prompting", async () => {
+		const { storage, tool } = createHarness({ initialSessionKey: "stale-session" });
 		storage.rejectedSessionKeys.add("stale-session");
-		storage.records.set("deploy", {
-			profile: "deploy",
-			variables: [{ name: "DEPLOY_TOKEN", value: secret }],
-			projectKeys: [projectKey],
-		});
 		const ui = createContext("tui", "/work/project");
-		ui.input.mockResolvedValue("fresh-session");
+		ui.input.mockResolvedValue("must-not-be-read");
 
 		const result = await tool.execute("activate", { action: "activate" }, undefined, undefined, ui.context);
 
-		expect(result.details).toMatchObject({ status: "activated", profile: "deploy" });
-		expect(ui.input).toHaveBeenCalledOnce();
-		expect(ui.input).toHaveBeenCalledWith("Connect Bitwarden", "Paste BW_SESSION session key", {
-			sensitive: true,
-		});
-		expect(manager.getEnvironmentForCwd("/work/project")).toEqual({ DEPLOY_TOKEN: secret });
-		expect(JSON.stringify(result)).not.toContain("fresh-session");
+		expect(result.details).toMatchObject({ status: "unavailable", code: "owner_setup_required" });
+		expect(storage.connections).toEqual([{ sessionKey: "stale-session", provider: "bitwarden_password_manager" }]);
+		expect(ui.input).not.toHaveBeenCalled();
 		expect(ui.custom).not.toHaveBeenCalled();
 		expect(ui.confirm).not.toHaveBeenCalled();
 	});
+
+	it.each(["tui", "print", "rpc"] as const)(
+		"does not prompt for an invalid machine session in %s mode",
+		async (mode) => {
+			const { storage, tool } = createHarness({
+				resolveMachineSession: async () => ({
+					provider: "bitwarden_password_manager",
+					sessionKey: "\ninvalid-session",
+				}),
+			});
+			const ui = createContext(mode, "/work/project");
+			const result = await tool.execute("status", { action: "status" }, undefined, undefined, ui.context);
+
+			expect(result.details).toMatchObject({ status: "unavailable", code: "owner_setup_required" });
+			expect(storage.connections).toEqual([]);
+			expect(ui.input).not.toHaveBeenCalled();
+			expect(ui.custom).not.toHaveBeenCalled();
+			expect(ui.confirm).not.toHaveBeenCalled();
+		},
+	);
 
 	it("does not load migration sources before the external vault is available", async () => {
 		const resolveMigrationSources = vi.fn(async () => [{ name: "DEPLOY_TOKEN", value: "must-not-be-loaded" }]);
@@ -315,7 +310,9 @@ describe("secret_store tool", () => {
 		const [message] = result.content;
 		expect(message?.type).toBe("text");
 		if (message?.type !== "text") throw new Error("Expected a text-only owner setup result.");
-		expect(message.text).toContain("one owner input: a BW_SESSION key");
+		expect(message.text).toContain("Configure BWS_ACCESS_TOKEN or BW_SESSION");
+		expect(message.text).toContain("Pi never asks for credentials");
+		expect(message.text).not.toContain("owner input");
 		expect(message.text).not.toContain("/secrets");
 		expect(resolveMigrationSources).not.toHaveBeenCalled();
 		expect(ui.input).not.toHaveBeenCalled();
@@ -482,7 +479,9 @@ describe("secret_store tool", () => {
 		for (const forbidden of ['"set"', '"remove"', '"lock"', '"materialize"', '"dotenv"', '"value"', '"secret"']) {
 			expect(schema).not.toContain(forbidden);
 		}
-		expect(teachings).toContain("one masked BW_SESSION only");
+		expect(teachings).toContain("Pi reads machine BWS_ACCESS_TOKEN or BW_SESSION only");
+		expect(teachings).toContain("Pi never prompts for a session key");
+		expect(teachings).not.toContain("one masked BW_SESSION");
 		expect(teachings).toContain("current task genuinely requires credentials");
 		expect(teachings).toContain("never ask the owner for source paths or environment-variable names");
 		expect(teachings).toContain("Never probe or activate for an optional integration");

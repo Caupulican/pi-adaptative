@@ -938,6 +938,7 @@ describe("runaway-loop backstop", () => {
 		const stalls: Array<{ reason?: string }> = [];
 		const toolCounts: number[] = [];
 		const systemPrompts: string[] = [];
+		const repeatedThinking = "The operation is still blocked. I will report the unresolved blocker.";
 		let turns = 0;
 		const events = await drain(
 			agentLoop(
@@ -963,7 +964,10 @@ describe("runaway-loop backstop", () => {
 										type: "done",
 										reason: "stop",
 										message: assistantMessage(
-											[{ type: "text", text: "Stuck on one call; stopping." }],
+											[
+												{ type: "thinking", thinking: repeatedThinking, thinkingSignature: "reasoning" },
+												{ type: "text", text: "Stuck on one call; stopping." },
+											],
 											"stop",
 										),
 									}
@@ -972,6 +976,7 @@ describe("runaway-loop backstop", () => {
 										reason: "toolUse",
 										message: assistantMessage(
 											[
+												{ type: "thinking", thinking: repeatedThinking, thinkingSignature: "reasoning" },
 												{
 													type: "toolCall",
 													id: `echo-${turns}`,
@@ -1006,6 +1011,18 @@ describe("runaway-loop backstop", () => {
 				: [],
 		);
 		expect(assistantTexts).toContain("Stuck on one call; stopping.");
+		const closingAssistant = events.find(
+			(event) =>
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(
+					(block) => block.type === "text" && block.text === "Stuck on one call; stopping.",
+				),
+		);
+		expect(closingAssistant).toBeDefined();
+		if (closingAssistant?.type === "message_end" && closingAssistant.message.role === "assistant") {
+			expect(closingAssistant.message.content.some((block) => block.type === "thinking")).toBe(false);
+		}
 		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});

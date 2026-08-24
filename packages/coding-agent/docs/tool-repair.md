@@ -26,8 +26,10 @@ Canonical execution-failure template:
 - The execution gate refuses only the exact unchanged operation whose last run was unproductive. Unrelated tools and materially changed calls remain available. Any successful tool result or a new owner turn advances the world and re-admits it; internal custom continuation messages do not impersonate owner turns. Refused calls retain tool-result pairing but run no hooks or tool code. Only the bounded repeated-signature and provider-turn cost guards can stop a wedged run.
 - Repair is built-in and has no settings toggle. `PI_TOOL_REPAIR_DISABLED=1` is only an emergency diagnostic kill switch; normal configuration should leave repair on.
 - Teaching can be disabled independently with `toolRepair.teach: false` or `PI_TOOL_REPAIR_TEACH_DISABLED=1`. Repairs can still execute; the in-band "Tool argument repair note" is suppressed.
-- Tool-recovery logging can be disabled with `toolRepair.logging: false`. Repairs still run, but Pi does not enqueue recovery records or spawn the background recovery-log worker.
-- Text tool-call protocol calibration can be enabled per model with `textToolCallProtocol: true` in `models.json`. `/toolprobe [provider/model]` probes native calls first and can persist a host-local text-protocol verdict only when native calls are absent. A persisted native verdict always keeps that model off the text protocol, including when global or model settings enable it. Use `toolRepair.textProtocol` only as a global emergency force/kill switch for models without native proof; `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` always disables it.
+- Tool-recovery logging can be disabled with `toolRepair.logging: false`. Repairs, protocol-health accounting, and standing-rule teaching still run; Pi only skips recovery-log records and the background recovery-log worker.
+- Text tool-call protocol calibration can be enabled per model with `textToolCallProtocol: true` in `models.json`. `/toolprobe [provider/model]` grades native task-scale and echo calls first. When native calls are absent, each text dialect must round-trip both an echo and an exact nested multiline edit payload before Pi persists it. A persisted native verdict always keeps that model off the text protocol, including when global or model settings enable it. Use `toolRepair.textProtocol` only as a global emergency force/kill switch for models without native proof; `PI_TEXT_TOOL_CALL_PROTOCOL_DISABLED=1` always disables it.
+- Every bounced text-protocol call contributes protocol-health evidence, even when a valid sibling appears in the same assistant batch. Evidence is isolated by model, dialect, and failure class; a clean parsed turn ends the current in-memory failure episode. Repeated bounced repair shapes also feed the same bounded per-model standing-rule system as locally repaired calls.
+- The third identical validation bounce receives the live bounded schema and a validator-safe example in provider-visible tool feedback. Malformed JSON feedback retains a bounded offset and nearby source context when the serving runtime supplies it.
 
 Example project settings:
 
@@ -88,9 +90,9 @@ Use `/toolhealth` to see probe verdicts and which modes have become learned stan
 
 ## Text protocol calibration recovery
 
-Confirmed behavior: when text tool-call protocol calibration fails for every variant, Pi stores a host-local failed record and subsequent turns for that model fail fast until an explicit reset. Use `/toolprotocol-reset <provider/model>` (or RPC `reset_tool_protocol`) after changing the model, server template, or prompt configuration.
+When probing finds neither a task-capable native route nor a text dialect that passes both calibration tasks, Pi stores a host-local `none` verdict. Later non-routed turns do not silently retry the failed text dialect or an unproven native route: the provider request gets a bounded no-route instruction and no tools, and the session's exact active tool surface is restored when that run settles. Run `/toolprobe <provider/model>` again after changing the model, server template, or provider conditions. An explicit `toolRepair.textProtocol: true` remains the operator override.
 
-For a previously calibrated model, repeated live parse failures invalidate the stored protocol after three matching failures. The next turn reruns calibration before using the text protocol again.
+For a previously calibrated model, three live failures of the same model/dialect/failure class within one failure episode invalidate the stored protocol and persist a `none` verdict. Interleaved failure classes are counted independently, a valid sibling cannot erase a bounce, and only a clean parsed turn resets the volatile episode evidence.
 
 ## Source map
 

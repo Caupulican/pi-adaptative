@@ -12,6 +12,7 @@ import {
 	type SimpleStreamOptions,
 	type TextToolProtocolParseEvent,
 } from "@caupulican/pi-ai";
+import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -129,6 +130,7 @@ describe("text-protocol circuit breaker", () => {
 		model: TestModel,
 		requests: CapturedRequest[],
 		respond: (context: Context, index: number, model: Model<Api>) => string | AssistantMessage["content"],
+		settings: Parameters<typeof SettingsManager.inMemory>[0] = {},
 	) {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		authStorage.setRuntimeApiKey(model.provider, "test-api-key");
@@ -146,7 +148,7 @@ describe("text-protocol circuit breaker", () => {
 			model,
 			authStorage,
 			modelRegistry,
-			settingsManager: SettingsManager.create(cwd, agentDir),
+			settingsManager: SettingsManager.inMemory(settings),
 			sessionManager: SessionManager.inMemory(cwd),
 		});
 		const events: AgentSessionEvent[] = [];
@@ -156,6 +158,35 @@ describe("text-protocol circuit breaker", () => {
 
 	function warningMessages(events: AgentSessionEvent[]): string[] {
 		return events.filter((event) => event.type === "warning").map((event) => event.message);
+	}
+
+	function textProtocolBounce(model: Model<Api>): ToolArgumentValidationTelemetryEvent {
+		return {
+			outcome: "bounced",
+			provider: model.provider,
+			model: model.id,
+			tool: "edit",
+			source: "text-protocol",
+			failureModes: ["jsonStringParse"],
+			repairsApplied: [],
+			errorKeywords: ["type"],
+			taught: "none",
+			executionOutcome: "not_run",
+		};
+	}
+
+	function validTextProtocolSibling(model: Model<Api>): ToolArgumentValidationTelemetryEvent {
+		return {
+			outcome: "repaired",
+			provider: model.provider,
+			model: model.id,
+			tool: "bash",
+			source: "text-protocol",
+			failureModes: ["bashCommandArgvJoin"],
+			repairsApplied: ["bashCommandArgvJoin"],
+			taught: "none",
+			executionOutcome: "succeeded",
+		};
 	}
 
 	it("falls back to native with a warning instead of throwing when a stale 'failed' protocol is on record", async () => {
@@ -300,7 +331,9 @@ describe("text-protocol circuit breaker", () => {
 			expect(store.get(modelKey).protocol).toBeUndefined();
 			expect(store.get(modelKey).toolProbe).toMatchObject({ status: "none" });
 			expect(
-				warningMessages(created.events).some((message) => /stopped parsing after 3 attempts/i.test(message)),
+				warningMessages(created.events).some((message) =>
+					/stopped parsing after 3 failures within the current failure episode/i.test(message),
+				),
 			).toBe(true);
 
 			requests.length = 0;
@@ -308,6 +341,224 @@ describe("text-protocol circuit breaker", () => {
 			expect(requests).toHaveLength(1);
 			expect(requests.every((request) => !isCalibration(request.context))).toBe(true);
 			expect(requests[0]?.options?.textToolCallProtocol).toBeFalsy();
+		} finally {
+			await created.session.disposeAndWait();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("retains every malformed edit bounce beside a valid bash sibling and teaches the recurring failure", async () => {
+		const model = createModel("session-01a033ab-mixed-batch", { textProtocol: false });
+		const modelKey = `${model.provider}/${model.id}`;
+		ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+			version: 1,
+			status: "text-protocol",
+			variant: "tool-tag",
+			probedAt: "2026-08-24T00:00:00.000Z",
+		});
+		ModelAdaptationStore.forAgentDir(agentDir).setProtocol(modelKey, {
+			version: 1,
+			status: "calibrated",
+			variant: "tool-tag",
+			calibratedAt: "2026-08-24T00:00:00.000Z",
+		});
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, () => "done");
+		try {
+			created.session.agent.textToolCallProtocol = { variant: "tool-tag" };
+			// Session 01a033ab: one malformed text-protocol edit call shared an assistant batch with
+			// a valid bash/edit sibling, then the malformed edit repeated. The sibling must not erase
+			// the bounced call's protocol or standing-teaching evidence.
+			created.session.agent.onToolArgumentValidation?.(textProtocolBounce(model));
+			created.session.agent.onToolArgumentValidation?.(validTextProtocolSibling(model));
+			await created.session.prompt("finalize mixed first batch without double counting it");
+
+			created.session.agent.onToolArgumentValidation?.(textProtocolBounce(model));
+			await created.session.prompt("second malformed edit bounce");
+			created.session.agent.onToolArgumentValidation?.(textProtocolBounce(model));
+			await created.session.prompt("third malformed edit bounce");
+
+			const profile = ModelAdaptationStore.forAgentDir(agentDir).get(modelKey);
+			expect(profile.toolProbe).toMatchObject({ status: "none" });
+			expect(profile.rules).toEqual(expect.arrayContaining([expect.objectContaining({ mode: "jsonStringParse" })]));
+			expect(profile.teachStats.jsonStringParse).toMatchObject({ recurrenceBefore: 3, taught: 1 });
+			expect(requests).toHaveLength(3);
+		} finally {
+			await created.session.disposeAndWait();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("counts text-protocol failure classes independently and resets an episode only after a clean parsed turn", async () => {
+		const model = createModel("per-class-protocol-evidence", { textProtocol: false });
+		const modelKey = `${model.provider}/${model.id}`;
+		ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+			version: 1,
+			status: "text-protocol",
+			variant: "tool-tag",
+			probedAt: "2026-08-24T00:00:00.000Z",
+		});
+		ModelAdaptationStore.forAgentDir(agentDir).setProtocol(modelKey, {
+			version: 1,
+			status: "calibrated",
+			variant: "tool-tag",
+			calibratedAt: "2026-08-24T00:00:00.000Z",
+		});
+		const created = await createSession(model, [], () => "done");
+		const controller = (
+			created.session as unknown as {
+				_toolProtocol: {
+					resetTurnState(): void;
+					handleTextProtocolParse(event: TextToolProtocolParseEvent): void;
+					recordParseOutcomeFromLastAssistant(): void;
+				};
+			}
+		)._toolProtocol;
+		const complete = (
+			status: TextToolProtocolParseEvent["status"],
+			reason?: TextToolProtocolParseEvent["reason"],
+		) => {
+			controller.resetTurnState();
+			controller.handleTextProtocolParse({
+				provider: model.provider,
+				model: model.id,
+				variant: "tool-tag",
+				status,
+				callCount: status === "parsed" ? 1 : 0,
+				textLength: 12,
+				reason,
+			});
+			controller.recordParseOutcomeFromLastAssistant();
+		};
+		try {
+			complete("failed", "unrecognized");
+			complete("failed", "validation-failed");
+			complete("failed", "unrecognized");
+			expect(ModelAdaptationStore.forAgentDir(agentDir).get(modelKey).toolProbe).toMatchObject({
+				status: "text-protocol",
+			});
+			complete("failed", "unrecognized");
+			expect(ModelAdaptationStore.forAgentDir(agentDir).get(modelKey).toolProbe).toMatchObject({
+				status: "none",
+				diagnostic: expect.stringContaining("within the current failure episode"),
+			});
+
+			// A clean parsed turn is the only episode boundary. Re-seed to prove historical noise is
+			// not carried forever after that boundary, while a valid sibling in a failed batch is not it.
+			ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+				version: 1,
+				status: "text-protocol",
+				variant: "tool-tag",
+				probedAt: "2026-08-24T00:00:00.000Z",
+			});
+			ModelAdaptationStore.forAgentDir(agentDir).setProtocol(modelKey, {
+				version: 1,
+				status: "calibrated",
+				variant: "tool-tag",
+				calibratedAt: "2026-08-24T00:00:00.000Z",
+			});
+			complete("failed", "unrecognized");
+			complete("parsed");
+			complete("failed", "unrecognized");
+			complete("failed", "unrecognized");
+			expect(ModelAdaptationStore.forAgentDir(agentDir).get(modelKey).toolProbe).toMatchObject({
+				status: "text-protocol",
+			});
+		} finally {
+			await created.session.disposeAndWait();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("keeps protocol health and standing teaching active when recovery logging is disabled", async () => {
+		const model = createModel("logging-disabled-protocol-health", { textProtocol: false });
+		const modelKey = `${model.provider}/${model.id}`;
+		ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+			version: 1,
+			status: "text-protocol",
+			variant: "tool-tag",
+			probedAt: "2026-08-24T00:00:00.000Z",
+		});
+		ModelAdaptationStore.forAgentDir(agentDir).setProtocol(modelKey, {
+			version: 1,
+			status: "calibrated",
+			variant: "tool-tag",
+			calibratedAt: "2026-08-24T00:00:00.000Z",
+		});
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, () => "done", { toolRepair: { logging: false } });
+		try {
+			created.session.agent.textToolCallProtocol = { variant: "tool-tag" };
+			for (let attempt = 0; attempt < 3; attempt++) {
+				created.session.agent.onToolArgumentValidation?.(textProtocolBounce(model));
+				await created.session.prompt(`logging disabled bounce ${attempt}`);
+			}
+
+			const profile = ModelAdaptationStore.forAgentDir(agentDir).get(modelKey);
+			expect(profile.toolProbe).toMatchObject({ status: "none" });
+			expect(profile.rules).toEqual(expect.arrayContaining([expect.objectContaining({ mode: "jsonStringParse" })]));
+		} finally {
+			await created.session.disposeAndWait();
+			created.modelRegistry.unregisterProvider(model.provider);
+		}
+	});
+
+	it("keeps a model-declared text protocol demoted across non-routed turns", async () => {
+		const model = createModel("ox-like-non-routed-model");
+		const modelKey = `${model.provider}/${model.id}`;
+		const requests: CapturedRequest[] = [];
+		const created = await createSession(model, requests, () => "bounded text-only response");
+		try {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				created.session.agent.onTextToolProtocolParse?.({
+					provider: model.provider,
+					model: model.id,
+					variant: "tool-tag",
+					status: "failed",
+					callCount: 0,
+					textLength: 20,
+					reason: "validation-failed",
+				});
+			}
+
+			expect(ModelAdaptationStore.forAgentDir(agentDir).get(modelKey).toolProbe).toMatchObject({ status: "none" });
+			ModelAdaptationStore.forAgentDir(agentDir).addRule(modelKey, {
+				mode: "jsonStringParse",
+				text: "Schema array/object: raw JSON, never quoted JSON string.",
+			});
+			await created.session.prompt("the persisted no-route verdict must survive a non-routed turn");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.options?.textToolCallProtocol).toBeFalsy();
+			expect(requests[0]?.context.tools).toEqual([]);
+			expect(requests[0]?.context.systemPrompt).toContain("TOOL ROUTE UNAVAILABLE");
+			expect(requests[0]?.context.systemPrompt).toContain("Available tools:\n(none)");
+			expect(requests[0]?.context.systemPrompt).not.toContain("- bash:");
+			expect(requests[0]?.context.systemPrompt).not.toContain("MODEL TOOL SHAPE RULES");
+			expect(created.session.getActiveToolNames().length).toBeGreaterThan(0);
+			expect(warningMessages(created.events).some((message) => /no certified tool-call route/i.test(message))).toBe(
+				true,
+			);
+
+			delete model.textToolCallProtocol;
+			ModelAdaptationStore.forAgentDir(agentDir).setToolProbe(modelKey, {
+				version: 1,
+				status: "text-protocol",
+				variant: "tool-tag",
+				probedAt: "2026-08-24T00:00:00.000Z",
+			});
+			ModelAdaptationStore.forAgentDir(agentDir).setProtocol(modelKey, {
+				version: 1,
+				status: "calibrated",
+				variant: "tool-tag",
+				calibratedAt: "2026-08-24T00:00:00.000Z",
+			});
+			await created.session.prompt("a newly certified route receives the restored tool surface");
+			expect(requests).toHaveLength(2);
+			expect(requests[1]?.options?.textToolCallProtocol).toEqual({ variant: "tool-tag" });
+			expect(requests[1]?.context.tools).toBeUndefined();
+			expect(requests[1]?.context.systemPrompt).toContain("Text tool-call protocol is enabled.");
+			expect(requests[1]?.context.systemPrompt).toContain("- bash:");
+			expect(requests[1]?.context.systemPrompt).not.toContain("TOOL ROUTE UNAVAILABLE");
 		} finally {
 			await created.session.disposeAndWait();
 			created.modelRegistry.unregisterProvider(model.provider);

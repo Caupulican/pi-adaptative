@@ -11,16 +11,16 @@
  *   instead be adopted by a new parent). "No new turns" after that point is automatic: a dead
  *   parent injects no further follow-ups, so the worker simply runs out of work to do.
  * - A MASTER is everything else (no known parent). On startup it scans the matrix for orphaned
- *   workers (workers whose recorded parent is dead). Workers owned by this exact resumed session
- *   are restored automatically; foreign workers remain owner-gated interactively and report-only
- *   headlessly.
+ *   workers (workers whose recorded parent is dead). Workers tied to this master's exact resumed
+ *   session and goal identity recover automatically. Every non-matching worker is report-only:
+ *   dead workers are never resume-prompted and still-live workers are never adopt/cleanup-prompted.
  *
- * Sanctioned exceptions to "a worker's entry is written only by that worker": an exact resumed
- * parent may restore its recorded ownership, and an owner may explicitly approve adoption or
- * cooperative cleanup of a foreign orphan. The worker later confirms/applies the directive via
- * `pollWorkerDirective` and re-writes its own entry -- see `docs/process-matrix.md`. Outside these
- * identity/approval-fenced handshakes, a master NEVER writes another session's entry, and nothing
- * here ever kills a process directly.
+ * Sanctioned exception to "a worker's entry is written only by that worker": an exact resumed
+ * parent may restore its recorded ownership. The worker later confirms/applies the directive via
+ * `pollWorkerDirective` and re-writes its own entry -- see `docs/process-matrix.md`. Outside this
+ * identity-fenced handshake, the orphan claim scan NEVER writes another session's entry; bounded
+ * reconciliation may still perform generation-fenced lifecycle/TTL maintenance, and nothing here
+ * ever kills a process directly.
  */
 
 import { hostname as osHostname } from "node:os";
@@ -89,8 +89,6 @@ export interface ProcessMatrixRuntimeConfig {
 	agentDir: string;
 	/** Canonical logical identity for this process and any exact-session resume. */
 	agent: AgentIdentityContract;
-	/** Whether an interactive UI is available to ask the owner (see `promptConfirm`). */
-	hasUI: boolean;
 	settings: ResolvedProcessMatrixSettings;
 	isProcessAlive: (pid: number) => boolean;
 	now?: () => number;
@@ -98,15 +96,13 @@ export interface ProcessMatrixRuntimeConfig {
 	notify: (text: string) => void | Promise<void>;
 	/** Diagnostics sink (never throws into the session). */
 	onDiagnostic?: (message: string) => void;
-	/** The ask seam: resolves false on decline AND on any non-interactive/non-TTY caller. */
-	promptConfirm: (message: string) => Promise<boolean>;
 	/** Cooperative self-exit -- called by a worker once wound down (grace expiry or a
 	 * master-granted cleanup directive). Never called for the master's own lifecycle. */
 	requestExit: () => Promise<void>;
 	/** Stable goal/task identity. Automatic recovery requires an exact match. */
 	taskRef?: string;
 	taskSummary?: string;
-	/** False for terminal/blocked owner state; recovery then remains explicit-owner gated. */
+	/** False for terminal/blocked owner state: exact-session recovery stays report-only. */
 	allowAutomaticRecovery?: boolean;
 	/** Starts a replacement OS process for a dead resumable worker. Completion is an event-driven
 	 * terminal signal; worker product remains in its persisted session/artifacts. */
@@ -321,7 +317,7 @@ async function reconcileAndRunOrphanScan(
 	const currentEntries = await store.listEntries(config.agentDir);
 	await deliverTerminalNotifications(config, currentEntries, now, signal);
 	if (signal.aborted) return;
-	await runOrphanScan(config, currentEntries, now, signal);
+	await runOrphanScan(config, currentEntries, signal);
 }
 
 async function deliverTerminalNotifications(
@@ -372,10 +368,8 @@ function formatTerminalNotification(entry: ProcessMatrixEntry): string {
 async function runOrphanScan(
 	config: ProcessMatrixRuntimeConfig,
 	entries: ProcessMatrixEntry[],
-	now: () => number,
 	signal: AbortSignal,
 ): Promise<void> {
-	const store = resolveProcessMatrixStore(config);
 	const orphans = detectOrphanedWorkers(entries, {
 		isPidAlive: config.isProcessAlive,
 		ownSessionId: config.agent.resumeContext.sessionId,
@@ -386,56 +380,17 @@ async function runOrphanScan(
 		if (signal.aborted) return;
 		const recoveryBoundary = getAutomaticRecoveryBoundary(config, orphan);
 		const exactResumedParent = recoveryBoundary === undefined;
+		if (!exactResumedParent) {
+			// Foreign workers are never claimed or cleaned up implicitly. This applies equally to
+			// dead workers (no resume prompt) and still-live workers (no adopt/cleanup prompt).
+			reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
+			continue;
+		}
 		if (!config.isProcessAlive(orphan.pid)) {
-			if (!exactResumedParent) {
-				if (!config.hasUI) {
-					reportOwnerGatedOrphan(config, orphan, recoveryBoundary);
-					continue;
-				}
-				const payload = orphan.resumable;
-				if (!payload) {
-					config.onDiagnostic?.(
-						`process-matrix: dead worker ${orphan.entryId} is not resumable because its launch context is unavailable`,
-					);
-					continue;
-				}
-				const resume = await config.promptConfirm(
-					`resume agent ${payload.agent.agentId} from its persisted session?`,
-				);
-				if (!resume || signal.aborted) continue;
-			}
 			await resumeDeadOrphan(config, orphan, signal);
 			continue;
 		}
-
-		if (exactResumedParent) {
-			await adoptLiveOrphan(config, orphan, signal);
-			continue;
-		}
-		if (!config.hasUI) {
-			reportOwnerGatedOrphan(config, orphan, recoveryBoundary);
-			continue;
-		}
-		const adopt = await config.promptConfirm(
-			`adopt worker ${orphan.entryId} (lane ${orphan.agent.resumeContext.worktreeLaneKey ?? "none"})?`,
-		);
-		if (signal.aborted) return;
-		if (adopt) {
-			await adoptLiveOrphan(config, orphan, signal);
-			continue;
-		}
-		const cleanup = await config.promptConfirm(`clean up worker ${orphan.entryId} gracefully?`);
-		if (!cleanup || signal.aborted) continue;
-		const windingDown = beginWindDown(orphan, "user_cleanup", nowIso(now));
-		try {
-			if (!(await store.writeEntryIfUnchanged(config.agentDir, orphan.entryId, orphan, windingDown))) {
-				config.onDiagnostic?.(`process-matrix: cleanup skipped because ${orphan.entryId} changed`);
-			}
-		} catch (error) {
-			config.onDiagnostic?.(
-				`process-matrix: failed to write cleanup for ${orphan.entryId}: ${describeError(error)}`,
-			);
-		}
+		await adoptLiveOrphan(config, orphan, signal);
 	}
 }
 
@@ -454,9 +409,9 @@ function getAutomaticRecoveryBoundary(
 	return undefined;
 }
 
-function reportOwnerGatedOrphan(config: ProcessMatrixRuntimeConfig, orphan: ProcessMatrixEntry, reason: string): void {
+function reportUnrecoveredOrphan(config: ProcessMatrixRuntimeConfig, orphan: ProcessMatrixEntry, reason: string): void {
 	config.onDiagnostic?.(
-		`process-matrix: found owner-gated orphan ${orphan.entryId} (${reason}; report-only, non-interactive; nothing written, nothing killed)`,
+		`process-matrix: found unrecovered orphan ${orphan.entryId} (${reason}; report-only; nothing written, nothing killed)`,
 	);
 }
 

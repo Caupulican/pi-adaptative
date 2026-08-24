@@ -8,6 +8,7 @@ import {
 	CredentialManagerError,
 	type CredentialProfileRecord,
 	type CredentialProfileStorage,
+	type MachineCredentialSession,
 } from "../src/core/secrets/credential-manager.ts";
 import { SecretMenuController } from "../src/modes/interactive/secret-menu-controller.ts";
 
@@ -64,48 +65,127 @@ function createUi(options: {
 	const confirmations = [...(options.confirmations ?? [])];
 	const inputOptions: Array<ExtensionUIDialogOptions | undefined> = [];
 	const notify = vi.fn();
+	const input = vi.fn(async (_title: string, _placeholder?: string, dialogOptions?: ExtensionUIDialogOptions) => {
+		inputOptions.push(dialogOptions);
+		return inputs.shift();
+	});
 	const custom = vi.fn(async () => editors.shift());
 	const select = vi.fn(async () => selections.shift());
+	const confirm = vi.fn(async () => confirmations.shift() ?? false);
 	const ui = {
-		input: async (_title: string, _placeholder?: string, dialogOptions?: ExtensionUIDialogOptions) => {
-			inputOptions.push(dialogOptions);
-			return inputs.shift();
-		},
+		input,
 		select,
-		confirm: async () => confirmations.shift() ?? false,
+		confirm,
 		notify,
 		custom,
 	} as unknown as ExtensionUIContext;
-	return { ui, inputOptions, notify, custom, select };
+	return { ui, input, inputOptions, notify, custom, select, confirm };
 }
 
-function createController(storage: MemoryStorage, initialSessionKey?: string) {
+function createController(
+	storage: MemoryStorage,
+	options: {
+		initialSessionKey?: string;
+		resolveMachineSession?: () => Promise<MachineCredentialSession | undefined>;
+	} = {},
+) {
 	const manager = new CredentialManager({
 		storage,
 		resolveProject: async () => ({ key: projectKey, root: "/work/project", label: "project", portable: true }),
-		initialSessionKey,
+		initialSessionKey: options.initialSessionKey,
+		resolveMachineSession: options.resolveMachineSession,
 	});
 	return { manager, controller: new SecretMenuController({ manager, cwd: "/work/project" }) };
 }
 
 describe("SecretMenuController", () => {
-	it("asks for exactly one sensitive Bitwarden session key on first use", async () => {
-		const sessionKey = "owner-bitwarden-session-key";
+	it("does not prompt for Bitwarden credentials on first use", async () => {
 		const storage = new MemoryStorage();
 		const { controller } = createController(storage);
-		const testUi = createUi({ inputs: [sessionKey], selections: ["Close"] });
+		const testUi = createUi({ inputs: ["must-not-be-read"], selections: ["Close"] });
 
 		await controller.open(testUi.ui);
 
-		expect(storage.connectedWith).toEqual([sessionKey]);
-		expect(testUi.inputOptions).toEqual([expect.objectContaining({ sensitive: true })]);
-		expect(JSON.stringify(testUi.notify.mock.calls)).not.toContain(sessionKey);
+		expect(storage.connectedWith).toEqual([]);
+		expect(testUi.input).not.toHaveBeenCalled();
+		expect(testUi.select).not.toHaveBeenCalled();
+		expect(testUi.inputOptions).toEqual([]);
+		expect(testUi.notify).toHaveBeenCalledWith(
+			"Bitwarden is not connected. Set BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for it.",
+			"error",
+		);
+		expect(JSON.stringify(testUi.notify.mock.calls)).not.toContain("must-not-be-read");
+	});
+
+	it("does not prompt when a machine-owned session is stale", async () => {
+		const storage = new MemoryStorage();
+		storage.connect = vi.fn(async () => {
+			throw new Error("stale machine session");
+		});
+		const { controller } = createController(storage, {
+			resolveMachineSession: async () => ({
+				provider: "bitwarden_password_manager",
+				sessionKey: "stale-machine-session",
+			}),
+		});
+		const testUi = createUi({ inputs: ["must-not-be-read"] });
+
+		await controller.open(testUi.ui);
+
+		expect(storage.connectedWith).toEqual([]);
+		expect(storage.connect).toHaveBeenCalledWith("stale-machine-session", undefined, "bitwarden_password_manager");
+		expect(testUi.input).not.toHaveBeenCalled();
+		expect(testUi.select).not.toHaveBeenCalled();
+		expect(testUi.notify).toHaveBeenCalledWith(
+			"Bitwarden is not connected. Set BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for it.",
+			"error",
+		);
+	});
+
+	it("reconnects from machine-owned credentials without prompting", async () => {
+		const storage = new MemoryStorage();
+		const resolveMachineSession = vi.fn(async () => ({
+			provider: "bitwarden_password_manager" as const,
+			sessionKey: "machine-session",
+		}));
+		const { controller } = createController(storage, { resolveMachineSession });
+		const testUi = createUi({ inputs: ["must-not-be-read"], selections: ["Reconnect Bitwarden", "Close"] });
+
+		await controller.open(testUi.ui);
+
+		expect(storage.connectedWith).toEqual(["machine-session", "machine-session"]);
+		expect(testUi.input).not.toHaveBeenCalled();
+		expect(testUi.confirm).not.toHaveBeenCalled();
+		expect(testUi.select).toHaveBeenCalledTimes(2);
+		expect(resolveMachineSession).toHaveBeenCalledTimes(2);
+		expect(testUi.notify).toHaveBeenCalledWith("Bitwarden reconnected from machine-owned credentials.", "info");
+	});
+
+	it("reports setup-required when reconnect cannot reread machine credentials", async () => {
+		const storage = new MemoryStorage();
+		const resolveMachineSession = vi
+			.fn()
+			.mockResolvedValueOnce({ provider: "bitwarden_password_manager" as const, sessionKey: "machine-session" })
+			.mockResolvedValueOnce({ provider: "bitwarden_password_manager" as const, sessionKey: "\ninvalid-session" });
+		const { controller, manager } = createController(storage, { resolveMachineSession });
+		const testUi = createUi({ inputs: ["must-not-be-read"], selections: ["Reconnect Bitwarden"] });
+
+		await controller.open(testUi.ui);
+
+		expect(storage.connectedWith).toEqual(["machine-session"]);
+		expect(testUi.input).not.toHaveBeenCalled();
+		expect(testUi.confirm).not.toHaveBeenCalled();
+		expect(manager.status.connected).toBe(false);
+		expect(testUi.notify).toHaveBeenCalledWith(
+			"Bitwarden is not connected. Set BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for it.",
+			"error",
+		);
 	});
 
 	it("captures username and password privately and stores only through the manager", async () => {
 		const secret = "owner-password-marker";
 		const storage = new MemoryStorage();
-		const { controller } = createController(storage, "valid-session");
+		const { controller } = createController(storage, { initialSessionKey: "valid-session" });
 		const testUi = createUi({
 			selections: ["Add or update credentials", "Username and password"],
 			inputs: [
@@ -139,7 +219,7 @@ describe("SecretMenuController", () => {
 
 	it("keeps the credential hub open for consecutive owner actions", async () => {
 		const storage = new MemoryStorage();
-		const { controller, manager } = createController(storage, "valid-session");
+		const { controller, manager } = createController(storage, { initialSessionKey: "valid-session" });
 		const testUi = createUi({
 			selections: ["Add or update credentials", "Username and password", "Lock Pi credentials"],
 			inputs: ["service-login", "", "SERVICE_USER", "owner@example.com", "SERVICE_PASSWORD", "secret"],
@@ -159,7 +239,7 @@ describe("SecretMenuController", () => {
 		const secret = "-----BEGIN PRIVATE KEY-----\nprivate-key-marker\n-----END PRIVATE KEY-----\n";
 		await writeFile(keyPath, secret, { mode: 0o600 });
 		const storage = new MemoryStorage();
-		const { controller } = createController(storage, "valid-session");
+		const { controller } = createController(storage, { initialSessionKey: "valid-session" });
 		const testUi = createUi({
 			selections: ["Add or update credentials", "API token or private key"],
 			inputs: ["deploy-key", "deployment key", "DEPLOY_PRIVATE_KEY"],

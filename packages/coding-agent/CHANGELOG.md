@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed interactive prior-session worker resume, adoption, and cleanup prompts. Resume the owning session for exact session/task recovery; foreign same-directory workers remain isolated and dead foreign generations retain identity for bounded TTL pruning.
+- Removed Pi-side Bitwarden session-credential entry. Configure `BWS_ACCESS_TOKEN` or `BW_SESSION` outside Pi before startup; missing, stale, or invalid machine-owned sessions now report `owner_setup_required`.
+
+### Fixed
+
+- Stopped deferred-history notices from exposing raw journal-record counts as action/history totals after compaction.
+- Made text-tool protocol health count every bounced call per failure class independently of recovery logging, learn recurring bounced shapes, require nested edit calibration, and withhold tools when no route is certified.
+- Made `task_steps` arguments action-discriminated so invalid field combinations fail at the shared schema boundary instead of drifting into runtime-only validation.
+- Propagated foreground and background verification outcomes through Bash, task waits, restart, and bounded terminal batches without stale-pass clearing, and added a per-file V8 coverage gate to Linux CI.
+
 ## [0.96.5] - 2026-08-24
 
 ### Added

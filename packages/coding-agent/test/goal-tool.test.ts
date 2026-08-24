@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import { cancelPersistedGoal } from "../src/core/goals/goal-lifecycle.ts";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
 import {
 	createGoalLifecycleToolDefinitions,
@@ -10,7 +11,7 @@ import {
 
 const ctx = undefined as unknown as ExtensionContext;
 
-function createHarness() {
+function createHarness(options: { getActiveVerificationIds?: () => readonly string[] } = {}) {
 	let state: GoalState | undefined;
 	let counter = 0;
 	const saves: GoalState[] = [];
@@ -21,6 +22,7 @@ function createHarness() {
 			saves.push(next);
 		},
 		now: () => `T${counter++}`,
+		getActiveVerificationIds: options.getActiveVerificationIds,
 	});
 	const run = async (input: GoalToolInput) => {
 		const result = await tool.execute("call-1", input, undefined, undefined, ctx);
@@ -218,6 +220,93 @@ describe("goal tool", () => {
 			isError: true,
 			details: { applied: false, error: expect.stringContaining("pipeline store is inconsistent") },
 		});
+		expect(state?.status).toBe("active");
+	});
+
+	it("blocks complete and a completing increment while the same verification obligation remains active", async () => {
+		const activeIds = () => ["unit-suite"];
+		const complete = createHarness({ getActiveVerificationIds: activeIds });
+		await complete.run({ action: "start", goalId: "complete-goal", userGoal: "Ship" });
+		const completeSaves = complete.saves.length;
+
+		const blockedComplete = await complete.run({ action: "complete" });
+		expect(blockedComplete).toMatchObject({
+			isError: true,
+			details: { applied: false, error: expect.stringContaining("unit-suite") },
+		});
+		expect(complete.saves).toHaveLength(completeSaves);
+		expect(complete.getState()?.status).toBe("active");
+
+		const increment = createHarness({ getActiveVerificationIds: activeIds });
+		await increment.run({ action: "start", goalId: "increment-goal", userGoal: "Ship" });
+		const incrementSaves = increment.saves.length;
+		const blockedIncrement = await increment.run({ action: "increment" });
+		expect(blockedIncrement).toMatchObject({
+			isError: true,
+			details: { applied: false, error: expect.stringContaining("unit-suite") },
+		});
+		expect(increment.saves).toHaveLength(incrementSaves);
+		expect(increment.getState()?.status).toBe("active");
+	});
+
+	it("leaves get, model blocking, and owner cancellation available while verification remains active", async () => {
+		let verificationReads = 0;
+		const harness = createHarness({
+			getActiveVerificationIds: () => {
+				verificationReads++;
+				return ["unit-suite"];
+			},
+		});
+		await harness.run({ action: "start", goalId: "g1", userGoal: "Ship" });
+		await harness.run({ action: "no_progress" });
+		await harness.run({ action: "no_progress" });
+		await harness.run({ action: "no_progress" });
+
+		const viewed = await harness.run({ action: "get" });
+		const blocked = await harness.run({ action: "block_goal", reason: "waiting for owner access" });
+		expect(viewed.isError).not.toBe(true);
+		expect(blocked.isError).not.toBe(true);
+		expect(harness.getState()?.status).toBe("blocked");
+		expect(verificationReads).toBe(0);
+
+		let ownerState = harness.getState();
+		const cancelled = cancelPersistedGoal(
+			{
+				getGoalStateSnapshot: () => ownerState,
+				saveGoalStateSnapshot: (next) => {
+					ownerState = next;
+					return "owner-cancel";
+				},
+			},
+			"T-owner-cancel",
+		);
+		expect(cancelled).toMatchObject({ ok: true, state: { status: "cancelled" } });
+		expect(ownerState?.status).toBe("cancelled");
+	});
+
+	it("fails closed without saving when the completion verification accessor throws", async () => {
+		let state: GoalState | undefined;
+		const saves: GoalState[] = [];
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+				saves.push(next);
+			},
+			getActiveVerificationIds: () => {
+				throw new Error("verification state unavailable");
+			},
+			now: () => "T0",
+		});
+		await tool.execute("start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+		const savesBeforeCompletion = saves.length;
+
+		const result = await tool.execute("complete", { action: "complete" }, undefined, undefined, ctx);
+		expect(result).toMatchObject({
+			isError: true,
+			details: { applied: false, error: expect.stringContaining("verification state unavailable") },
+		});
+		expect(saves).toHaveLength(savesBeforeCompletion);
 		expect(state?.status).toBe("active");
 	});
 

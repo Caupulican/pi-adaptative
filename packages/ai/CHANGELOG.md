@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Improved tool-call validation guidance for union roots and literal values, generated bounded validator-safe examples, and preserved bounded malformed-JSON location context through text-protocol recovery.
+
 ## [0.96.5] - 2026-08-24
 
 ## [0.96.4] - 2026-08-23

@@ -35,10 +35,8 @@ async function stopSupervisionHandles(
 
 export interface SessionSupervisionRuntimeOptions {
 	agentDir: string;
-	hasUI: boolean;
 	orchestrationProfileId?: string;
 	isProcessAlive: (pid: number) => boolean;
-	promptConfirm: (message: string) => Promise<boolean>;
 	resumeWorker: (payload: ResumablePayload, parentSessionId: string) => Promise<ResumeWorkerLaunchOutcome>;
 	onDiagnostic: (message: string) => void;
 	requestExit: () => Promise<void>;
@@ -111,10 +109,8 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					taskSummary: goal?.userGoal,
 					allowAutomaticRecovery: goal === undefined || isGoalExecutionActive(goal.status),
 					resumeWorker: (payload) => this.options.resumeWorker(payload, sessionId),
-					hasUI: this.options.hasUI,
 					settings: session.settingsManager.getProcessMatrixSettings(),
 					isProcessAlive: this.options.isProcessAlive,
-					promptConfirm: this.options.promptConfirm,
 					notify: (text) => this.notify(session, "process-matrix-notice", text),
 					onDiagnostic: this.options.onDiagnostic,
 					requestExit: this.options.requestExit,

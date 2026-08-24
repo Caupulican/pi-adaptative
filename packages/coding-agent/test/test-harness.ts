@@ -335,6 +335,8 @@ export interface HarnessOptions {
 	sessionManager?: SessionManager;
 	/** Base tools override (replaces built-in read/bash/edit/write). */
 	baseToolsOverride?: Record<string, AgentTool>;
+	/** Workspace directory visible to the session; defaults to this harness's isolated temp directory. */
+	cwd?: string;
 	/** Optional resource loader override. */
 	resourceLoader?: ResourceLoader;
 	/** Inline extensions to load into the session resource loader. */
@@ -388,7 +390,8 @@ function createHarnessWithResourceLoader(
 	});
 
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
-	const settingsManager = SettingsManager.create(tempDir, tempDir);
+	const cwd = options.cwd ?? tempDir;
+	const settingsManager = SettingsManager.create(tempDir, cwd);
 
 	if (options.settings) {
 		settingsManager.applyOverrides(options.settings);
@@ -411,7 +414,7 @@ function createHarnessWithResourceLoader(
 		agent,
 		sessionManager,
 		settingsManager,
-		cwd: tempDir,
+		cwd,
 		agentDir: tempDir,
 		modelRegistry,
 		resourceLoader,

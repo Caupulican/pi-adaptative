@@ -37,6 +37,7 @@ export interface ToolTaskDetails {
 	status?: BackgroundToolTaskRecord["status"];
 	artifactId?: string;
 	reason?: string;
+	piVerification?: NonNullable<BackgroundToolTaskRecord["piVerification"]>;
 }
 
 function validTaskId(value: string | undefined): string | undefined {
@@ -116,6 +117,15 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 			try {
 				const record = await deps.wait(taskId, signal);
 				const isError = record.status === "failed" || record.status === "canceled";
+				// A pending terminal's first waiter is the authoritative model-facing delivery when the
+				// controller suppresses its wake. Delivered records are historical state: replaying a
+				// prior pass could clear a newer failure for the same verification identity.
+				const verification =
+					record.terminalDelivery === "pending" &&
+					record.piVerification?.originTaskId === record.taskId &&
+					(record.piVerification.status !== "passed" || record.status === "completed")
+						? record.piVerification
+						: undefined;
 				const text =
 					record.status === "running"
 						? `${record.summary}\nWait watchdog elapsed; continue independent work. The terminal handoff will wake the session.`
@@ -127,6 +137,7 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 						taskId,
 						status: record.status,
 						...(record.artifactId ? { artifactId: record.artifactId } : {}),
+						...(verification ? { piVerification: { ...verification } } : {}),
 					},
 					...(isError ? { isError: true, errorKind: "operation_outcome" as const } : {}),
 				};

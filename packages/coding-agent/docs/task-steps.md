@@ -26,14 +26,16 @@ Starting a step automatically returns any previous `in_progress` step to `pendin
 
 The native tool supports:
 
-- `set`: replace the ordered checklist.
-- `intake`: replace the checklist with a complete item-preserving `steps` array.
-- `add`: append one step.
-- `update`: change a selected step and append notes or evidence.
+- `set`: replace the ordered checklist; requires `steps`.
+- `intake`: replace the checklist with a complete item-preserving `steps` array; requires `steps`.
+- `add`: append one step; requires `content`.
+- `update`: change a selected step and append notes or evidence; requires `id`.
 - `list`: show open work; set `showCompleted` to include terminal steps.
 - `compact`: archive completed and cancelled counts while retaining open work.
 - `clear`: remove all tracked and archived steps.
 - `advance`: complete the current step and start the next pending step.
+
+The schema is action-discriminated and rejects fields belonging to another action. For example, `add` cannot carry `steps`, `set` cannot carry `content`, and lifecycle actions such as `clear` accept only `action`.
 
 An update selector can be `current`/`active`, an exact step ID, a unique ID prefix, or unique step content. IDs are shown in tool and command output for unambiguous updates.
 

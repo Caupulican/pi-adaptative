@@ -6,7 +6,7 @@ import {
 } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateBranchSummary, prepareBranchEntries } from "../../src/compaction/branch-summarization.ts";
-import type { SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
+import type { CompactionEntry, SessionEntry, SessionMessageEntry } from "../../src/session/session-manager.ts";
 import type { StreamFn } from "../../src/types.ts";
 
 function createModel(): Model<any> {
@@ -60,6 +60,30 @@ describe("generateBranchSummary reliability", () => {
 
 		expect([...result.fileOps.read]).toEqual(["read.ts"]);
 		expect([...result.fileOps.edited]).toEqual(["edited.ts"]);
+	});
+
+	it("retains trusted compaction details while preparing a branch summary", () => {
+		const details = { piVerificationObligations: { version: 1, activeIds: ["unit-suite"] } };
+		const compacted: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-1",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			summary: "Compacted verification checkpoint",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 100,
+			details,
+		};
+
+		const result = prepareBranchEntries([compacted]);
+
+		expect(result.messages).toMatchObject([
+			{
+				role: "compactionSummary",
+				summary: "Compacted verification checkpoint",
+				details,
+			},
+		]);
 	});
 
 	it("uses the injected stream function instead of bypassing through completeSimple", async () => {

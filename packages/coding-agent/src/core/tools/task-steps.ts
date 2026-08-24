@@ -85,45 +85,67 @@ const stepInputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const taskStepsSchema = Type.Object(
-	{
-		action: Type.Union(
-			[
-				Type.Literal("set"),
-				Type.Literal("add"),
-				Type.Literal("update"),
-				Type.Literal("list"),
-				Type.Literal("clear"),
-				Type.Literal("compact"),
-				Type.Literal("intake"),
-				Type.Literal("advance"),
-			],
-			{ description: "Checklist action. Use list to read without mutation." },
-		),
-		steps: Type.Optional(
-			Type.Array(stepInputSchema, {
-				maxItems: MAX_TASK_STEPS,
-				description: "Complete replacement list for set/intake. Intake preserves every supplied item in order.",
-			}),
-		),
-		id: Type.Optional(
-			Type.String({
-				description: "For update: current/active, exact step id, unique id prefix, or unique content selector.",
-			}),
-		),
-		content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
-		activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
-		...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
-		clearCompleted: Type.Optional(
-			Type.Boolean({ description: "For list: compact completed and cancelled steps before rendering." }),
-		),
-		showCompleted: Type.Optional(Type.Boolean({ description: "Include completed and cancelled steps in output." })),
-		maxItems: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TASK_STEPS })),
-	},
-	{ additionalProperties: false },
-);
+const replacementStepsSchema = Type.Array(stepInputSchema, {
+	maxItems: MAX_TASK_STEPS,
+	description: "Complete replacement list for set/intake. Intake preserves every supplied item in order.",
+});
 
-export type TaskStepsToolInput = Static<typeof taskStepsSchema>;
+const taskStepsSchema = Type.Union([
+	Type.Object({ action: Type.Literal("set"), steps: replacementStepsSchema }, { additionalProperties: false }),
+	Type.Object({ action: Type.Literal("intake"), steps: replacementStepsSchema }, { additionalProperties: false }),
+	Type.Object(
+		{
+			action: Type.Literal("add"),
+			content: Type.String({ minLength: 1, maxLength: 2_000 }),
+			activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
+			...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			action: Type.Literal("update"),
+			id: Type.String({
+				minLength: 1,
+				pattern: "\\S",
+				description: "Current/active, exact step id, unique id prefix, or unique content selector.",
+			}),
+			content: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
+			activeForm: Type.Optional(Type.String({ maxLength: 2_000 })),
+			...optionalTaskStepFields("Goal requirement ids this foreground step advances; [] clears existing links."),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			action: Type.Literal("list"),
+			clearCompleted: Type.Optional(
+				Type.Boolean({ description: "Compact completed and cancelled steps before rendering." }),
+			),
+			showCompleted: Type.Optional(
+				Type.Boolean({ description: "Include completed and cancelled steps in output." }),
+			),
+			maxItems: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TASK_STEPS })),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object({ action: Type.Literal("clear") }, { additionalProperties: false }),
+	Type.Object({ action: Type.Literal("compact") }, { additionalProperties: false }),
+	Type.Object({ action: Type.Literal("advance") }, { additionalProperties: false }),
+]);
+
+/**
+ * The runtime receives already-schema-validated calls, but it deliberately uses this broad view
+ * before its action switch. The TypeBox union above remains the single admission contract.
+ */
+export type TaskStepsToolInput = Static<typeof taskStepsSchema> &
+	Partial<TaskStepUpdate> & {
+		steps?: TaskStepInput[];
+		id?: string;
+		showCompleted?: boolean;
+		clearCompleted?: boolean;
+		maxItems?: number;
+	};
 export type TaskStepsAction = TaskStepsToolInput["action"];
 
 export interface TaskStepsToolDetails {

@@ -346,6 +346,8 @@ export interface RuntimeBuilderDeps {
 	/** Goal-tool state accessors. */
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
+	/** Trusted active verification identities reconstructed by the session owner. */
+	getActiveVerificationIds?(): readonly string[];
 	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
 	authorizeGoalStartFromTool?(
 		input: Pick<GoalToolInput, "userGoal" | "tokenBudget">,
@@ -1013,6 +1015,7 @@ export class RuntimeBuilder {
 			if (shouldBuildGoalExecutor) {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
 					authorizeStart: (input) =>
 						this.deps.authorizeGoalStartFromTool ? this.deps.authorizeGoalStartFromTool(input) : null,
 					saveGoalState: (state, expected) => {

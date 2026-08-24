@@ -48,17 +48,53 @@ const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
 const TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_STEER_INTERVAL = 5;
+const MAX_PARSE_FAILURE_EPISODES = 128;
 const AUTO_TOOL_PROBE_FRESHNESS_MS = 15 * 60 * 1000;
+const NO_CERTIFIED_TOOL_ROUTE_SYSTEM_GUIDANCE =
+	"TOOL ROUTE UNAVAILABLE: No tools are available for this turn. Do not emit provider-native tool calls or text tool envelopes. Complete only with available text evidence; if execution is required, state the bounded blocker and request a working tool route or model.";
 const TEXT_TOOL_PROTOCOL_ECHO_TOOL = {
 	name: "echo",
 	description: "Echo calibration data",
 	parameters: Type.Object({ data: Type.String() }),
 } satisfies Tool;
+const TEXT_TOOL_PROTOCOL_TASK_EDIT_TOOL = {
+	name: "edit",
+	description: "Apply exact text replacements",
+	parameters: Type.Object({
+		path: Type.String(),
+		edits: Type.Array(
+			Type.Object({
+				oldText: Type.String(),
+				newText: Type.String(),
+			}),
+		),
+	}),
+} satisfies Tool;
+const TEXT_TOOL_PROTOCOL_TASK_EDIT_ARGUMENTS = {
+	path: "src/calibration fixture.ts",
+	edits: [
+		{
+			oldText: 'const value = "before";\n',
+			newText: 'const value = "after";\nconsole.log("escaped \\"quote\\"");\n',
+		},
+	],
+};
 const NATIVE_TOOL_PROBE_READ_TOOL = {
 	name: "read",
 	description: "Read file contents",
 	parameters: Type.Object({ path: Type.String() }),
 } satisfies Tool;
+
+function toolProtocolProbeText(message: AssistantMessage): string {
+	return message.content
+		.filter(
+			(block): block is TextContent | ThinkingContent =>
+				block.type === "text" || (block.type === "thinking" && !block.redacted),
+		)
+		.map((block) => (block.type === "text" ? block.text : block.thinking))
+		.join("\n")
+		.trim();
+}
 
 export type ToolProbeVerdict = "native" | "text-protocol" | "none";
 
@@ -87,6 +123,7 @@ export interface ToolProtocolControllerDeps {
 	emitWarning(message: string): void;
 	sendCorrectiveSteer(message: string): Promise<void>;
 	findLastAssistantMessage(): AssistantMessage | undefined;
+	buildToolFreeSystemPrompt(suffix: string): string;
 	isDisposed(): boolean;
 	probeForAuto(model: Model<Api>): Promise<ToolProbeResult>;
 }
@@ -94,12 +131,16 @@ export interface ToolProtocolControllerDeps {
 /** Owns model tool-protocol selection, probing, circuit breaking, and repair teaching. */
 export class ToolProtocolController {
 	private readonly repairModeSessionCounts = new Map<string, number>();
-	private readonly parseFailures = new Map<string, { signature: string; repeats: number }>();
+	/** Bounded, independent evidence episodes keyed by model + protocol failure class. */
+	private readonly parseFailures = new Map<string, { repeats: number }>();
 	private parseObservedThisTurn = false;
+	private parsedTextProtocolThisTurn = false;
+	private readonly parseFailureKeysThisTurn = new Set<string>();
 	private correctiveSteerCount = 0;
 	private probeUsageReportSeq = 0;
 	private readonly autoProbedModels = new Set<string>();
-	private validationOutcomeThisTurn: TextToolProtocolParseEvent | undefined;
+	/** The exact active tool surface and prompt withheld for one no-route run; restored at completion. */
+	private withheldRouteState: { tools: Agent["state"]["tools"]; systemPrompt: string } | undefined;
 	private readonly deps: ToolProtocolControllerDeps;
 
 	constructor(deps: ToolProtocolControllerDeps) {
@@ -112,11 +153,12 @@ export class ToolProtocolController {
 
 	resetTurnState(): void {
 		this.parseObservedThisTurn = false;
-		this.validationOutcomeThisTurn = undefined;
+		this.parsedTextProtocolThisTurn = false;
+		this.parseFailureKeysThisTurn.clear();
 	}
 
 	getAdaptationRulesForPrompt(): ModelAdaptationRule[] {
-		if (!this.getRepairSettings().teach) return [];
+		if (!this.getRepairSettings().teach || this.withheldRouteState) return [];
 		const modelKey = this.modelKey(this.deps.agent.state.model);
 		return modelKey ? this.deps.adaptationStore.get(modelKey).rules : [];
 	}
@@ -133,19 +175,35 @@ export class ToolProtocolController {
 		const model = this.deps.agent.state.model;
 		const resolution = this.resolveModelToolProtocol(model);
 		this.deps.agent.textToolCallProtocol = resolution.protocol;
+		if (resolution.reasonCode === "probe_no_working_path") {
+			this.withholdToolsForNoRouteRun();
+		} else {
+			this.restoreWithheldTools();
+		}
 		if (
 			resolution.reasonCode !== "probe_calibration_missing" &&
 			resolution.reasonCode !== "probe_calibration_failed" &&
-			resolution.reasonCode !== "probe_calibration_invalid"
+			resolution.reasonCode !== "probe_calibration_invalid" &&
+			resolution.reasonCode !== "probe_no_working_path"
 		) {
 			return;
 		}
 		const modelKey = this.modelRef(model);
 		this.deps.emitWarning(
-			resolution.reasonCode === "probe_calibration_failed"
-				? `Text tool protocol calibration for ${modelKey} previously failed (variants tried: ${(resolution.variantsTried ?? []).join(", ")}); falling back to native tool calls this turn. Run /toolprobe ${modelKey} to recalibrate.`
-				: `Text tool protocol for ${modelKey} has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${modelKey} to calibrate.`,
+			resolution.reasonCode === "probe_no_working_path"
+				? `No certified tool-call route remains for ${modelKey}; the failed text protocol stays disabled and native support is not proven. This non-routed turn has no automatic escalation. Run /toolprobe ${modelKey} after changing provider conditions or select a model with a working tool route.`
+				: resolution.reasonCode === "probe_calibration_failed"
+					? `Text tool protocol calibration for ${modelKey} previously failed (variants tried: ${(resolution.variantsTried ?? []).join(", ")}); falling back to native tool calls this turn. Run /toolprobe ${modelKey} to recalibrate.`
+					: `Text tool protocol for ${modelKey} has no valid calibration on record; falling back to native tool calls this turn. Run /toolprobe ${modelKey} to calibrate.`,
 		);
+	}
+
+	/** Restore the normal active-tool surface after a bounded no-route run settles. */
+	restoreWithheldTools(): void {
+		if (!this.withheldRouteState) return;
+		this.deps.agent.state.tools = this.withheldRouteState.tools;
+		this.deps.agent.state.systemPrompt = this.withheldRouteState.systemPrompt;
+		this.withheldRouteState = undefined;
 	}
 
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined {
@@ -212,15 +270,20 @@ export class ToolProtocolController {
 		return { model: modelKey, verdict: "none", nativeGrade, diagnostic };
 	}
 
-	handleTextProtocolParse(event: TextToolProtocolParseEvent): void {
+	handleTextProtocolParse(event: TextToolProtocolParseEvent & { failureClass?: string }): void {
 		this.parseObservedThisTurn = true;
 		const modelKey = `${event.provider}/${event.model}`;
-		if (event.status === "parsed") return;
+		if (event.status === "parsed") {
+			this.parsedTextProtocolThisTurn = true;
+			return;
+		}
 		this.maybeInjectCorrectiveSteer(event.variant);
-		const signature = `${event.variant}:${event.reason ?? "failed"}`;
-		const previous = this.parseFailures.get(modelKey);
-		const repeats = previous?.signature === signature ? previous.repeats + 1 : 1;
-		this.parseFailures.set(modelKey, { signature, repeats });
+		const signature = `${event.variant}:${event.failureClass ?? event.reason ?? "failed"}`;
+		const failureKey = `${modelKey}\0${signature}`;
+		this.parseFailureKeysThisTurn.add(failureKey);
+		const repeats = (this.parseFailures.get(failureKey)?.repeats ?? 0) + 1;
+		this.parseFailures.set(failureKey, { repeats });
+		this.trimParseFailureEpisodes();
 		if (repeats < TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD) return;
 
 		const profile = this.deps.adaptationStore.get(modelKey);
@@ -228,7 +291,7 @@ export class ToolProtocolController {
 			this.deps.adaptationStore.removeProtocol(modelKey);
 			this.deps.agent.textToolCallProtocol = undefined;
 		}
-		this.parseFailures.delete(modelKey);
+		this.clearParseFailuresForModel(modelKey);
 		const probedAt = new Date().toISOString();
 		this.deps.adaptationStore.setToolProbe(
 			modelKey,
@@ -237,48 +300,42 @@ export class ToolProtocolController {
 				status: "none",
 				probedAt,
 				nativeGrade: profile.toolProbe?.nativeGrade,
-				diagnostic: `Text protocol parsing failed ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD}x in a row with signature "${signature}".`,
+				diagnostic: `Text protocol parsing failed ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD}x within the current failure episode with signature "${signature}".`,
 			},
 			probedAt,
 		);
 		this.deps.emitWarning(
-			`Text tool protocol for ${modelKey} stopped parsing after ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD} attempts; demoted to native fallback. Run /toolprobe ${modelKey} to recalibrate.`,
+			`Text tool protocol for ${modelKey} stopped parsing after ${TEXT_TOOL_PROTOCOL_PARSE_FAILURE_THRESHOLD} failures within the current failure episode; demoted to the no-route fallback. Run /toolprobe ${modelKey} to recalibrate.`,
 		);
 	}
 
 	handleValidationOutcome(event: ToolArgumentValidationTelemetryEvent): void {
-		if (event.source !== "text-protocol") return;
+		if (event.source !== "text-protocol" || event.outcome !== "bounced") return;
 		const protocol = this.deps.agent.textToolCallProtocol;
 		const variant = protocol === true ? "tool-tag" : protocol ? protocol.variant : undefined;
 		if (!variant) return;
-		const status = event.outcome === "bounced" ? "failed" : "parsed";
-		if (this.validationOutcomeThisTurn?.status === "parsed" && status === "failed") return;
-		this.validationOutcomeThisTurn = {
+		const failureClass =
+			[...new Set([...event.failureModes, ...(event.errorKeywords ?? [])])].sort().join("+") || "validation-failed";
+		// Validation events arrive once per finalized call, after the parser reported the assistant
+		// batch as parsed. Record each bounce immediately: a valid sibling must neither replace this
+		// evidence nor cause outer-turn finalization to count it a second time.
+		this.handleTextProtocolParse({
 			provider: event.provider ?? this.deps.agent.state.model.provider,
 			model: event.model ?? this.deps.agent.state.model.id,
 			variant,
-			status,
+			status: "failed",
 			callCount: 1,
 			textLength: 0,
-			...(status === "failed" && {
-				reason: event.errorKeywords?.includes("unknown_tool") ? "unknown-tool" : "validation-failed",
-			}),
-		};
+			reason: event.errorKeywords?.includes("unknown_tool") ? "unknown-tool" : "validation-failed",
+			failureClass,
+		});
 	}
 
 	recordParseOutcomeFromLastAssistant(): void {
-		const validationOutcome = this.validationOutcomeThisTurn;
-		this.validationOutcomeThisTurn = undefined;
-		if (validationOutcome?.status === "parsed") {
-			this.parseObservedThisTurn = true;
-			this.parseFailures.delete(`${validationOutcome.provider}/${validationOutcome.model}`);
+		if (this.parseObservedThisTurn) {
+			this.completeParseFailureEpisode();
 			return;
 		}
-		if (validationOutcome) {
-			this.handleTextProtocolParse(validationOutcome);
-			return;
-		}
-		if (this.parseObservedThisTurn) return;
 		const protocol = this.deps.agent.textToolCallProtocol;
 		if (protocol === false || protocol === true || !protocol?.variant) return;
 		const response = this.deps.findLastAssistantMessage();
@@ -301,6 +358,7 @@ export class ToolProtocolController {
 			callCount: parsed.calls.length,
 			textLength: responseText.length,
 		});
+		this.completeParseFailureEpisode();
 	}
 
 	tagAdaptationRuleTeaching(event: ToolArgumentValidationTelemetryEvent): ToolArgumentValidationTelemetryEvent {
@@ -321,14 +379,16 @@ export class ToolProtocolController {
 	}
 
 	handleAdaptationTelemetry(event: ToolArgumentValidationTelemetryEvent): void {
-		if (!this.getRepairSettings().teach || event.outcome !== "repaired" || event.repairsApplied.length === 0) return;
+		if (!this.getRepairSettings().teach || (event.outcome !== "repaired" && event.outcome !== "bounced")) return;
 		const modelKey =
 			event.provider && event.model
 				? `${event.provider}/${event.model}`
 				: this.modelKey(this.deps.agent.state.model);
 		if (!modelKey) return;
 		try {
-			for (const mode of [...new Set(event.repairsApplied)]) {
+			const modes =
+				event.outcome === "repaired" ? event.repairsApplied : event.failureModes.filter((mode) => mode !== "other");
+			for (const mode of [...new Set(modes)]) {
 				const profile = this.deps.adaptationStore.get(modelKey);
 				const stats = profile.teachStats[mode] ?? { taught: 0, recurrenceBefore: 0, recurrenceAfter: 0 };
 				if (profile.rules.some((rule) => rule.mode === mode)) {
@@ -396,7 +456,7 @@ export class ToolProtocolController {
 
 	resetProtocolCalibration(model: string): boolean {
 		const removed = this.deps.adaptationStore.removeProtocol(model);
-		this.parseFailures.delete(model);
+		this.clearParseFailuresForModel(model);
 		return removed;
 	}
 
@@ -446,6 +506,17 @@ export class ToolProtocolController {
 		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_ECHO_TOOL], { variant });
 		const exactEnvelope = formatVariantEnvelope(variant, "echo", JSON.stringify({ data: token }));
 		const instruction = `Text tool protocol calibration trial. Call echo, data exactly "${token}". Output only:\n${exactEnvelope}`;
+		return {
+			systemPrompt: `${primer}\n\n${instruction}`,
+			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
+		};
+	}
+
+	private textProtocolTaskCalibrationContext(variant: TextToolProtocolVariant): Context {
+		const primer = generateTextToolProtocolPrimer([TEXT_TOOL_PROTOCOL_TASK_EDIT_TOOL], { variant });
+		const argumentsJson = JSON.stringify(TEXT_TOOL_PROTOCOL_TASK_EDIT_ARGUMENTS);
+		const exactEnvelope = formatVariantEnvelope(variant, "edit", argumentsJson);
+		const instruction = `Text tool protocol calibration trial: task-scale nested edit. Call edit with this exact multiline escaped payload. Output only:\n${exactEnvelope}`;
 		return {
 			systemPrompt: `${primer}\n\n${instruction}`,
 			messages: [{ role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() }],
@@ -550,17 +621,30 @@ export class ToolProtocolController {
 			"text-protocol-calibration",
 			this.nextProbeUsageReportId(model, `text-protocol:${variant}`),
 		);
-		const text = message.content
-			.filter(
-				(block): block is TextContent | ThinkingContent =>
-					block.type === "text" || (block.type === "thinking" && !block.redacted),
-			)
-			.map((block) => (block.type === "text" ? block.text : block.thinking))
-			.join("\n")
-			.trim();
+		const text = toolProtocolProbeText(message);
 		if (!text) return false;
 		const parsed = parseTextToolCalls(text, [TEXT_TOOL_PROTOCOL_ECHO_TOOL]);
-		return parsed.calls.some((call) => call.name === "echo" && call.arguments.data === token);
+		if (!parsed.calls.some((call) => call.name === "echo" && call.arguments.data === token)) return false;
+
+		const taskStream = await this.streamForProbe(model, this.textProtocolTaskCalibrationContext(variant), {
+			textToolCallProtocol: false,
+			maxRetries: 0,
+			temperature: 0,
+			maxTokens: 768,
+		});
+		const taskMessage = await this.resolveProbeStreamCountingUsage(
+			taskStream,
+			"text-protocol-calibration",
+			this.nextProbeUsageReportId(model, `text-protocol-task:${variant}`),
+		);
+		const taskText = toolProtocolProbeText(taskMessage);
+		if (!taskText) return false;
+		const taskParsed = parseTextToolCalls(taskText, [TEXT_TOOL_PROTOCOL_TASK_EDIT_TOOL]);
+		return taskParsed.calls.some(
+			(call) =>
+				call.name === "edit" &&
+				JSON.stringify(call.arguments) === JSON.stringify(TEXT_TOOL_PROTOCOL_TASK_EDIT_ARGUMENTS),
+		);
 	}
 
 	private async calibrateTextToolProtocolForModel(
@@ -651,6 +735,41 @@ export class ToolProtocolController {
 		this.deps.sendCorrectiveSteer(reminder).catch(() => {
 			// Best-effort steer.
 		});
+	}
+
+	private withholdToolsForNoRouteRun(): void {
+		if (this.withheldRouteState) return;
+		this.withheldRouteState = {
+			tools: this.deps.agent.state.tools,
+			systemPrompt: this.deps.agent.state.systemPrompt,
+		};
+		this.deps.agent.state.tools = [];
+		// prepareRun built the normal prompt before protocol resolution. Rebuild against the empty
+		// surface so no tool primer, snippet, or guideline can advertise a call the provider cannot make.
+		this.deps.agent.state.systemPrompt = this.deps.buildToolFreeSystemPrompt(NO_CERTIFIED_TOOL_ROUTE_SYSTEM_GUIDANCE);
+	}
+
+	private completeParseFailureEpisode(): void {
+		// A fully parsed turn with no bounced calls is the explicit clean boundary for every
+		// in-memory episode. A parsed sibling alongside any bounce deliberately does not reset it.
+		if (!this.parsedTextProtocolThisTurn || this.parseFailureKeysThisTurn.size > 0) return;
+		const modelKey = this.modelKey(this.deps.agent.state.model);
+		if (modelKey) this.clearParseFailuresForModel(modelKey);
+	}
+
+	private clearParseFailuresForModel(modelKey: string): void {
+		const prefix = `${modelKey}\0`;
+		for (const key of this.parseFailures.keys()) {
+			if (key.startsWith(prefix)) this.parseFailures.delete(key);
+		}
+	}
+
+	private trimParseFailureEpisodes(): void {
+		while (this.parseFailures.size > MAX_PARSE_FAILURE_EPISODES) {
+			const oldest = this.parseFailures.keys().next().value;
+			if (!oldest) return;
+			this.parseFailures.delete(oldest);
+		}
 	}
 
 	private looksLikeTextProtocolAttempt(text: string): boolean {

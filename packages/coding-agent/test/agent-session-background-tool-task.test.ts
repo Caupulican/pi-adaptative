@@ -1,5 +1,6 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -309,6 +310,429 @@ describe("AgentSession background tool tasks", () => {
 			unsubscribe();
 			releaseSlow?.();
 			harness.cleanup();
+		}
+	});
+
+	it("keeps nine background calls across execution waves exact while a foreground sibling completes", async () => {
+		const taskCount = 9;
+		const release: Array<() => void> = [];
+		const completions = Array.from(
+			{ length: taskCount },
+			() =>
+				new Promise<void>((resolve) => {
+					release.push(resolve);
+				}),
+		);
+		const indexedParameters = Type.Object({ index: Type.Integer({ minimum: 0, maximum: taskCount - 1 }) });
+		const fastParameters = Type.Object({});
+		const slowExecutions: number[] = [];
+		const foregroundExecutions: string[] = [];
+		const slowTool: AgentTool<typeof indexedParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic multi-wave background tool",
+			parameters: indexedParameters,
+			execute: async (_toolCallId, args) => {
+				slowExecutions.push(args.index);
+				await completions[args.index];
+				return { content: [{ type: "text" as const, text: `slow ${args.index} completed` }], details: {} };
+			},
+		};
+		const fastTool: AgentTool<typeof fastParameters, Record<string, never>> = {
+			name: "fast",
+			label: "fast",
+			description: "Independent foreground control",
+			parameters: fastParameters,
+			execute: async (toolCallId) => {
+				foregroundExecutions.push(toolCallId);
+				return { content: [{ type: "text" as const, text: "fast foreground completed" }], details: {} };
+			},
+		};
+		const harness = createHarness({
+			baseToolsOverride: { slow: slowTool, fast: fastTool },
+			responses: [
+				{
+					toolCalls: [
+						...Array.from({ length: taskCount }, (_, index) => ({
+							id: `slow-call-${index}`,
+							name: "slow",
+							args: { index },
+						})),
+						{ id: "foreground-call", name: "fast", args: {} },
+					],
+				},
+				"foreground continued while every slow call is detached",
+				...Array.from({ length: taskCount }, () => "terminal acknowledged"),
+			],
+		});
+		harness.session.setActiveToolsByName(["slow", "fast", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+		const handoffTexts: string[] = [];
+		let acknowledgements = 0;
+		let waitForAcknowledgement: ((value: void | PromiseLike<void>) => void) | undefined;
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "background-tool-completion"
+			) {
+				handoffTexts.push(
+					typeof event.message.content === "string"
+						? event.message.content
+						: event.message.content
+								.filter((block) => block.type === "text")
+								.map((block) => block.text)
+								.join("\n"),
+				);
+			}
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			const text = event.message.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			if (!text.includes("terminal acknowledged")) return;
+			acknowledgements++;
+			waitForAcknowledgement?.();
+			waitForAcknowledgement = undefined;
+		});
+
+		try {
+			await harness.session.prompt("run nine slow tasks and one independent foreground task");
+			expect(foregroundExecutions).toEqual(["foreground-call"]);
+			expect([...slowExecutions].sort((left, right) => left - right)).toEqual(
+				Array.from({ length: taskCount }, (_, index) => index),
+			);
+			const initialResults = harness.agent.state.messages.filter(
+				(message): message is ToolResultMessage => message.role === "toolResult",
+			);
+			expect(initialResults.map((message) => message.toolCallId)).toEqual([
+				...Array.from({ length: taskCount }, (_, index) => `slow-call-${index}`),
+				"foreground-call",
+			]);
+
+			const running = harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				)
+				.filter((record) => record.status === "running");
+			expect(running).toHaveLength(taskCount);
+			const taskIdByCallId = new Map(running.map((record) => [record.toolCallId, record.taskId]));
+
+			// Release in an order that crosses the first/second/third four-call execution waves.
+			for (const index of [8, 0, 5, 1, 7, 2, 6, 3, 4]) {
+				const expectedAcknowledgements = acknowledgements + 1;
+				const acknowledged = new Promise<void>((resolve) => {
+					waitForAcknowledgement = resolve;
+				});
+				release[index]!();
+				await Promise.race([
+					acknowledged,
+					new Promise<never>((_resolve, reject) =>
+						setTimeout(() => reject(new Error(`terminal ${index} acknowledgement timed out`)), 1_000),
+					),
+				]);
+				expect(acknowledgements).toBe(expectedAcknowledgements);
+			}
+
+			expect(handoffTexts).toHaveLength(taskCount);
+			const handedOffTaskIds = handoffTexts.flatMap((text) => text.match(/tool-task-\d+/g) ?? []);
+			expect(handedOffTaskIds).toHaveLength(taskCount);
+			expect(new Set(handedOffTaskIds)).toEqual(new Set(Array.from(taskIdByCallId.values())));
+			const terminalRecords = harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				)
+				.filter((record) => record.status === "completed" && record.terminalDelivery === "delivered");
+			expect(terminalRecords).toHaveLength(taskCount);
+			expect(new Set(terminalRecords.map((record) => record.toolCallId))).toEqual(
+				new Set(Array.from({ length: taskCount }, (_, index) => `slow-call-${index}`)),
+			);
+		} finally {
+			unsubscribe();
+			for (const resolve of release) resolve();
+			await harness.cleanup();
+		}
+	});
+
+	it("keeps foreground work and two out-of-order background terminals scoped to their exact calls", async () => {
+		let releaseSlowA!: () => void;
+		const slowACompletion = new Promise<void>((resolve) => {
+			releaseSlowA = resolve;
+		});
+		let releaseSlowB!: () => void;
+		const slowBCompletion = new Promise<void>((resolve) => {
+			releaseSlowB = resolve;
+		});
+		const slowParameters = Type.Object({ task: Type.Union([Type.Literal("a"), Type.Literal("b")]) });
+		const fastParameters = Type.Object({});
+		const foregroundExecutions: string[] = [];
+		const slowTool: AgentTool<typeof slowParameters, Record<string, never>> = {
+			name: "slow",
+			label: "slow",
+			description: "Deterministic background test tool",
+			parameters: slowParameters,
+			execute: async (_toolCallId, args) => {
+				if (args.task === "a") {
+					await slowACompletion;
+					return { content: [{ type: "text" as const, text: "slow a completed" }], details: {} };
+				}
+				await slowBCompletion;
+				return {
+					content: [{ type: "text" as const, text: "slow b failed" }],
+					details: {},
+					isError: true,
+				};
+			},
+		};
+		const fastTool: AgentTool<typeof fastParameters, Record<string, never>> = {
+			name: "fast",
+			label: "fast",
+			description: "Deterministic foreground test tool",
+			parameters: fastParameters,
+			execute: async (toolCallId) => {
+				foregroundExecutions.push(toolCallId);
+				return { content: [{ type: "text" as const, text: "fast foreground completed" }], details: {} };
+			},
+		};
+		const harness = createHarness({
+			baseToolsOverride: { slow: slowTool, fast: fastTool },
+			responses: [
+				{
+					toolCalls: [
+						{ id: "slow-a-call", name: "slow", args: { task: "a" } },
+						{ id: "fast-call", name: "fast", args: {} },
+						{ id: "slow-b-call", name: "slow", args: { task: "b" } },
+					],
+				},
+				"foreground continued after the two handoffs",
+				"failed background terminal acknowledged",
+				"completed background terminal acknowledged",
+			],
+		});
+		harness.session.setActiveToolsByName(["slow", "fast", "tool_task"]);
+		harness.agent.backgroundToolCallAfterMs = 5;
+		const terminalHandoffs: string[] = [];
+		let slowATaskId = "";
+		let slowBTaskId = "";
+		let acknowledgeSlowB!: () => void;
+		const slowBAcknowledged = new Promise<void>((resolve) => {
+			acknowledgeSlowB = resolve;
+		});
+		let acknowledgeSlowA!: () => void;
+		const slowAAcknowledged = new Promise<void>((resolve) => {
+			acknowledgeSlowA = resolve;
+		});
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (
+				event.type !== "message_end" ||
+				event.message.role !== "custom" ||
+				event.message.customType !== "background-tool-completion"
+			) {
+				return;
+			}
+			const content =
+				typeof event.message.content === "string"
+					? event.message.content
+					: event.message.content
+							.filter((block) => block.type === "text")
+							.map((block) => block.text)
+							.join("\n");
+			terminalHandoffs.push(content);
+			if (slowBTaskId && content.includes(slowBTaskId)) acknowledgeSlowB();
+			if (slowATaskId && content.includes(slowATaskId)) acknowledgeSlowA();
+		});
+
+		try {
+			await harness.session.prompt("run mixed foreground and background work");
+			expect(foregroundExecutions).toEqual(["fast-call"]);
+			expect(harness.faux.callCount).toBe(2);
+
+			const runningRecords = harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				)
+				.filter((record) => record.status === "running");
+			const taskA = runningRecords.find((record) => record.toolCallId === "slow-a-call");
+			const taskB = runningRecords.find((record) => record.toolCallId === "slow-b-call");
+			expect(taskA).toMatchObject({ sessionId: harness.session.sessionId, status: "running" });
+			expect(taskB).toMatchObject({ sessionId: harness.session.sessionId, status: "running" });
+			if (!taskA || !taskB) throw new Error("Expected both slow calls to be handed off");
+			slowATaskId = taskA.taskId;
+			slowBTaskId = taskB.taskId;
+
+			releaseSlowB();
+			await Promise.race([
+				slowBAcknowledged,
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("slow B terminal notification timed out")), 1_000),
+				),
+			]);
+			releaseSlowA();
+			await Promise.race([
+				slowAAcknowledged,
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("slow A terminal notification timed out")), 1_000),
+				),
+			]);
+
+			expect(terminalHandoffs).toHaveLength(2);
+			expect(terminalHandoffs.every((handoff) => handoff.includes("Parent woke."))).toBe(true);
+			expect(terminalHandoffs[0]).toContain(`${taskB?.taskId}: failed tool=slow`);
+			expect(terminalHandoffs[1]).toContain(`${taskA?.taskId}: completed tool=slow`);
+			const terminals = harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				)
+				.filter((record) => record.status !== "running");
+			expect(terminals).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ taskId: taskA?.taskId, toolCallId: "slow-a-call", status: "completed" }),
+					expect.objectContaining({ taskId: taskB?.taskId, toolCallId: "slow-b-call", status: "failed" }),
+				]),
+			);
+		} finally {
+			unsubscribe();
+			releaseSlowA();
+			releaseSlowB();
+			harness.cleanup();
+		}
+	});
+
+	it("isolates colliding background task IDs for two sessions sharing one cwd", async () => {
+		let releaseA!: () => void;
+		const completionA = new Promise<void>((resolve) => {
+			releaseA = resolve;
+		});
+		let releaseB!: () => void;
+		const completionB = new Promise<void>((resolve) => {
+			releaseB = resolve;
+		});
+		const sessionTool = (
+			completion: Promise<void>,
+			output: string,
+		): AgentTool<typeof slowParameters, Record<string, never>> => ({
+			name: "slow",
+			label: "slow",
+			description: "Deterministic session-owned background tool",
+			parameters: slowParameters,
+			execute: async () => {
+				await completion;
+				return { content: [{ type: "text" as const, text: output }], details: {} };
+			},
+		});
+		const harnessA = createHarness({
+			baseToolsOverride: { slow: sessionTool(completionA, "session A completed") },
+			responses: [{ toolCalls: [{ id: "shared-call-a", name: "slow", args: {} }] }, "A foreground continued"],
+		});
+		const harnessB = createHarness({
+			cwd: harnessA.tempDir,
+			baseToolsOverride: { slow: sessionTool(completionB, "session B completed") },
+			responses: [
+				{ toolCalls: [{ id: "shared-call-b", name: "slow", args: {} }] },
+				"B foreground continued",
+				"B terminal acknowledged",
+			],
+		});
+		harnessA.session.setActiveToolsByName(["slow", "tool_task"]);
+		harnessB.session.setActiveToolsByName(["slow", "tool_task"]);
+		harnessA.agent.backgroundToolCallAfterMs = 5;
+		harnessB.agent.backgroundToolCallAfterMs = 5;
+		let acknowledgeBTerminal!: () => void;
+		const bTerminal = new Promise<void>((resolve) => {
+			acknowledgeBTerminal = resolve;
+		});
+		const unsubscribeB = harnessB.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "custom" &&
+				event.message.customType === "background-tool-completion"
+			) {
+				acknowledgeBTerminal();
+			}
+		});
+		const recordsFor = (harness: typeof harnessA) =>
+			harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
+						? [entry.data as BackgroundToolTaskRecord]
+						: [],
+				);
+
+		try {
+			await Promise.all([
+				harnessA.session.prompt("start session A background work"),
+				harnessB.session.prompt("start session B background work"),
+			]);
+			expect(harnessA.session.sessionId).not.toBe(harnessB.session.sessionId);
+			expect(recordsFor(harnessA)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ taskId: "tool-task-1", toolCallId: "shared-call-a", status: "running" }),
+				]),
+			);
+			expect(recordsFor(harnessB)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ taskId: "tool-task-1", toolCallId: "shared-call-b", status: "running" }),
+				]),
+			);
+
+			await harnessA.session.disposeAndWait();
+			releaseB();
+			await Promise.race([
+				bTerminal,
+				new Promise<never>((_resolve, reject) =>
+					setTimeout(() => reject(new Error("session B terminal notification timed out")), 1_000),
+				),
+			]);
+
+			const aRecords = recordsFor(harnessA);
+			const bRecords = recordsFor(harnessB);
+			expect(aRecords.every((record) => record.sessionId === harnessA.session.sessionId)).toBe(true);
+			expect(bRecords.every((record) => record.sessionId === harnessB.session.sessionId)).toBe(true);
+			expect(aRecords).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ taskId: "tool-task-1", toolCallId: "shared-call-a", status: "canceled" }),
+				]),
+			);
+			expect(bRecords).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ taskId: "tool-task-1", toolCallId: "shared-call-b", status: "completed" }),
+				]),
+			);
+			expect(
+				harnessA
+					.eventsOfType("message_end")
+					.filter(
+						(event) =>
+							event.message.role === "custom" && event.message.customType === "background-tool-completion",
+					),
+			).toHaveLength(0);
+			expect(
+				harnessB
+					.eventsOfType("message_end")
+					.filter(
+						(event) =>
+							event.message.role === "custom" && event.message.customType === "background-tool-completion",
+					),
+			).toHaveLength(1);
+		} finally {
+			unsubscribeB();
+			releaseA();
+			releaseB();
+			await harnessB.cleanup();
+			await harnessA.cleanup();
 		}
 	});
 

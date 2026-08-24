@@ -1069,10 +1069,8 @@ export async function main(args: string[], options?: MainOptions) {
 	if (!isReadOnlyCommand) {
 		const supervision = new SessionSupervisionRuntime({
 			agentDir,
-			hasUI: hasHumanUI,
 			orchestrationProfileId: parsed.orchestrationProfile?.trim() || undefined,
 			isProcessAlive: isReloadSessionProcessAlive,
-			promptConfirm,
 			resumeWorker: launchResumableWorker,
 			onDiagnostic: (message) => {
 				console.error(chalk.yellow(`Warning: ${message}`));

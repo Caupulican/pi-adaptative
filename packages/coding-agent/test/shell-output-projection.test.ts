@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createShellOutputProjector, isProjectableTestCommand } from "../src/core/tools/shell-output-projection.ts";
+import { createShellOutputProjector } from "../src/core/tools/shell-output-projection.ts";
+import { isProjectableTestCommand } from "../src/core/tools/shell-test-command.ts";
 
 function appendInChunks(projector: NonNullable<ReturnType<typeof createShellOutputProjector>>, output: string): void {
 	const bytes = Buffer.from(output, "utf-8");
@@ -12,14 +13,25 @@ describe("shell output projection", () => {
 	it.each([
 		"node ../../node_modules/vitest/dist/cli.js --run test/one.test.ts",
 		"npx vitest --run test/one.test.ts",
+		"npm exec vitest -- --run test/one.test.ts",
 		"npm run test:unit -- --runInBand",
 		"node --test",
 		"deno test tests/one_test.ts",
 		"pnpm vitest --run test/one.test.ts",
+		"pnpm exec jest test/one.test.ts",
+		"bun test test/one.test.ts",
+		"yarn dlx vitest --run test/one.test.ts",
 		"uv run pytest tests/test_one.py",
+		"poetry run pytest tests/test_one.py",
 		"make test",
+		"just test:unit",
 		"python -m pytest tests/test_one.py",
+		"python tests/test_one.py",
 		"cargo test focused_case",
+		"dotnet vstest focused.dll",
+		"mvn test",
+		"./gradlew test",
+		"env CI=1 vitest --run test/one.test.ts",
 		String.raw`.\BuildVersion.Tests.ps1`,
 		String.raw`D:\scripts\hb\run-tests.cmd > result.txt 2>&1`,
 		"./test.sh",
@@ -31,7 +43,12 @@ describe("shell output projection", () => {
 		"echo test",
 		"test -f package.json",
 		"npm run build",
+		"npm exec eslint .",
+		"npm pack",
+		"npx --yes",
 		"rg test packages/coding-agent",
+		"pnpm build",
+		"mvn package",
 		"npm test && echo cleanup-complete",
 		"cat test-results.txt",
 	])("does not claim unrelated or mixed commands: %s", (command) => {

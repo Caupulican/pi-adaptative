@@ -42,33 +42,33 @@ so it never kills anything. Recovery is identity-fenced:
   same logical agent. Terminal or still-blocked goals disable automatic recovery. This works in
   interactive, print, and RPC modes and is the process-level counterpart to `/resume` restoring the
   goal before supervisors start.
-- Every foreign orphan remains owner-gated. Interactive mode offers resume/adopt/cleanup; headless
-  modes report it without writes or process actions.
+- Every foreign orphan is report-only. Interactive mode never offers resume, adopt, or cleanup
+  prompts: `taskRef` is a caller-supplied correlation value rather than a session-scoped ownership
+  proof, and a shared cwd cannot establish ownership. The scan writes nothing, launches nothing,
+  and kills nothing for foreign workers.
 
-When a foreign worker's own process is dead and its resumable payload contains a Pi session
-context, the first prompt offers to resume that same logical agent. Acceptance launches the exact
-persisted session file with its agent ID, cwd, worktree, orchestration profile, resource pointers,
-and bounded wake task. The direct-argv launch prefers the exact persisted `sessionFile` over an ID
-lookup, carries the stable logical-agent ID in `PI_ORCHESTRATION_AGENT_ID`, and names the latest
-checkpoint plus bounded context pointers in the wake prompt instead of copying a second transcript.
-The resumed process overwrites the same `<role>-<sessionId>` matrix entry. The launcher publishes its
-PID before self-registration, and terminal persistence plus delivery acknowledgement conditionally
-replace only the process generation they observed. A stale completion can therefore never close a
-newer replacement. The terminal event is first persisted as an undelivered matrix handoff, then
-delivered to the owning parent session and marked delivered. If that owner switched sessions before
-the event arrived, the bounded handoff survives and replays on its next resume instead of being
-injected into the wrong transcript. A still-live foreign orphan follows the adopt/cleanup flow below.
+When an exact-session worker's own process is dead and its resumable payload contains a Pi session
+context, the scan launches the exact persisted session file with its agent ID, cwd, worktree,
+orchestration profile, resource pointers, and bounded wake task. The direct-argv launch prefers the
+exact persisted `sessionFile` over an ID lookup, carries the stable logical-agent ID in
+`PI_ORCHESTRATION_AGENT_ID`, and names the latest checkpoint plus bounded context pointers in the
+wake prompt instead of copying a second transcript. The resumed process overwrites the same
+`<role>-<sessionId>` matrix entry. The launcher publishes its PID before self-registration, and
+terminal persistence plus delivery acknowledgement conditionally replace only the process
+generation they observed. A stale completion can therefore never close a newer replacement. The
+terminal event is first persisted as an undelivered matrix handoff, then delivered to the owning
+parent session and marked delivered. If that owner switched sessions before the event arrived, the
+bounded handoff survives and replays on its next resume instead of being injected into the wrong
+transcript. The orphan claim/recovery scan leaves foreign entries untouched and report-only until
+their own worker-side wind-down/TTL handling resolves them. Bounded reconciliation still performs
+generation-fenced lifecycle maintenance, such as converting dead running Pi-worker records to
+resumable so TTL can prune them and pruning terminal or expired records; it does not change their
+parent/session identity or launch, adopt, or clean them up.
 
-1. Ask: *"adopt worker `<entryId>` (lane `<laneKey>`)?"* Yes → this session becomes the worker's
-   new parent (an adoption grant is written into the worker's own entry).
-2. If declined: ask *"clean up worker `<entryId>` gracefully?"* Yes → a cooperative wind-down
-   request is written into the worker's entry (the worker notices and self-exits; nothing is
-   killed).
-3. If both declined: leave the entry untouched.
-
-**Non-interactively** (print/RPC mode, or no TTY), foreign orphans are report-only: the scan logs
-what it found and writes nothing. Exact-session recovery remains active because it restores an
-already-recorded authority relationship rather than claiming another session's worker.
+This behavior is identical in interactive, print, and RPC modes: the foreign-orphan claim/recovery
+scan logs without prompting, writes, launches, or kills. Neutral reconciliation may still perform
+the bounded lifecycle maintenance described above. Exact-session recovery remains active because it
+restores an already-recorded authority relationship rather than claiming another session's worker.
 
 ### A worker on parent death: wind down, never vanish
 
@@ -126,11 +126,10 @@ process-matrix entry are a sanctioned artifact, exactly like its own session tra
 ceiling is untouched, and this is not a new escalation surface. A worker never writes any *other*
 session's entry.
 
-The narrow exceptions on the master side are identity-fenced exact-session recovery and the
-ask-gated foreign-orphan scan. Exact recovery may restore the same recorded parent session without
-another prompt. Claiming or cleaning up a foreign orphan still requires explicit owner approval and
-writes only that orphan's entry. Outside those handshakes, a master never writes another session's
-entry.
+The narrow exception in the orphan claim scan is identity-fenced exact-session recovery. Exact
+recovery may restore the same recorded parent session without another prompt. Foreign orphans are
+report-only and remain untouched by that scan; bounded reconciliation may still perform the
+generation-fenced lifecycle/TTL maintenance described above.
 
 ## Foreign-CLI limitation
 
@@ -142,12 +141,10 @@ rejected rather than represented as enforced across a boundary the host cannot s
 
 ## What this does not do
 
-- It never kills a process. Every termination is either the process's own cooperative self-exit or
-  an owner-confirmed grant the process itself later notices and applies.
-- It does not re-attach a tmux pane or re-dispatch a lane when adopting a still-live worker --
-  adoption changes who that worker considers its parent. Relaunch is reserved for a dead worker
-  with a complete persisted Pi resume context. Exact session+task recovery is automatic; every
-  mismatched or foreign identity remains owner-gated.
+- It never kills a process. Every termination is the process's own cooperative self-exit.
+- It does not re-attach a tmux pane or re-dispatch a lane when a foreign worker is found. Relaunch
+  is reserved for a dead worker with a complete persisted Pi resume context and exact session+task
+  identity. Mismatched and foreign identities remain report-only.
 - Correctness never depends on a heartbeat or watcher tick arriving. Each master activation runs
   the pure reconciliation pass once: a Pi worker interrupted before its own resumable write is
   repaired from its durable logical-agent identity, closed and unrecoverable records are removed,

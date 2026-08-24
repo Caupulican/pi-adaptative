@@ -145,6 +145,8 @@ export interface CompactionControllerDeps {
 	estimateCurrentContextTokens(messages: AgentMessage[]): number;
 	buildPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined;
 	getMemoryPreCompressInsight(): Promise<string>;
+	/** Add bounded host-owned metadata to the compaction details before persistence. */
+	decorateCompactionDetails?(details: unknown): unknown;
 	refreshAfterCompaction(): void;
 	getFailureCorpus(): FailureCorpusRecorder;
 	measureLiveContextTokens(): number;
@@ -1067,6 +1069,9 @@ export class CompactionController {
 	}
 
 	private async applyResult(result: CompactionResult, fromExtension: boolean): Promise<string> {
+		if (this.deps.decorateCompactionDetails) {
+			result.details = this.deps.decorateCompactionDetails(result.details);
+		}
 		const sessionFile = this.deps.sessionManager.getSessionFile();
 		if (result.retention?.mode === "original-user" && sessionFile) {
 			const transcriptPointer = `Full pre-compaction transcript: ${sessionFile}`;

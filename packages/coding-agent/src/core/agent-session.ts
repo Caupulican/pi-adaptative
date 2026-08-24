@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
+import {
+	type Agent,
+	AgentBusyError,
+	createVerificationObligationSnapshotDetails,
+	VerificationObligationTracker,
+} from "@caupulican/pi-agent-core";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
@@ -466,6 +471,7 @@ export class AgentSession {
 		);
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
+		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		if (config.orchestrationProfile) {
 			validateOrchestrationProfile(config.orchestrationProfile);
 			const resolved = resolveConfiguredOrchestrationModel(config.orchestrationProfile, config.modelRegistry);
@@ -516,6 +522,10 @@ export class AgentSession {
 					{ deliverAs: "nextTurn" },
 				),
 			findLastAssistantMessage: () => this._findLastAssistantMessage(),
+			buildToolFreeSystemPrompt: (suffix) =>
+				this._systemPromptBuilder.enforceSystemPromptBudget(
+					`${this._systemPromptBuilder.buildSystemPromptForToolNames([])}\n\n${suffix}`,
+				),
 			isDisposed: () => this._disposed,
 			probeForAuto: (model) => this._probeToolCallingForModel(model),
 		});
@@ -736,6 +746,7 @@ export class AgentSession {
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
 			buildPreDigest: () => this._buildCompactionPreDigest(),
 			getMemoryPreCompressInsight: () => this._memory.onPreCompress(),
+			decorateCompactionDetails: (details) => this._decorateCompactionDetails(details),
 			refreshAfterCompaction: () => this._refreshAfterCompaction(),
 			getFailureCorpus: () => this._failureCorpus,
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
@@ -792,6 +803,7 @@ export class AgentSession {
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},
 			afterRun: async () => {
+				this._toolProtocol.restoreWithheldTools();
 				this._flushPendingBashMessages();
 				await this._drainQueuedExtensionCommands();
 			},
@@ -964,6 +976,7 @@ export class AgentSession {
 			initializeMemory: () => this._memory.initialize(),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state) => this.saveGoalStateSnapshot(state),
+			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			authorizeGoalStartFromTool: (input) => this._goals.authorizeStartFromTool(input),
 			getTaskStepsStateSnapshot: () => this.getTaskStepsStateSnapshot(),
 			saveTaskStepsStateSnapshot: (state) => this.saveTaskStepsStateSnapshot(state),
@@ -1073,11 +1086,13 @@ export class AgentSession {
 				this._toolSelection.recordValidation(taggedEvent.tool, taggedEvent.outcome);
 			}
 			previousToolArgumentValidation?.(taggedEvent);
+			// Protocol health and adaptation are deterministic runtime behavior, not optional recovery
+			// logging. Keep them outside the analytics logger's enabled/disabled result.
+			this._toolProtocol.handleValidationOutcome(taggedEvent);
+			this._toolProtocol.handleAdaptationTelemetry(taggedEvent);
 			const logRecord = this._toolRecoveryLogger.recordToolArgumentValidation(taggedEvent);
 			if (!logRecord) return;
 			this._analytics.recordToolArgumentValidation(logRecord);
-			this._toolProtocol.handleValidationOutcome(taggedEvent);
-			this._toolProtocol.handleAdaptationTelemetry(taggedEvent);
 		};
 		this._treeNavigator = new SessionTreeNavigator({
 			getSessionManager: () => this.sessionManager,
@@ -1351,6 +1366,19 @@ export class AgentSession {
 			messages: this.agent.state.messages.slice(),
 			tools: this.agent.state.tools.slice(),
 		};
+	}
+
+	/** Reconstruct trusted active verification IDs at the goal-execution boundary. */
+	private _getActiveVerificationIds(): readonly string[] {
+		return new VerificationObligationTracker(this.agent.state.messages).getActiveIds();
+	}
+
+	/** Preserve validated active verification IDs inside the compaction checkpoint. */
+	private _decorateCompactionDetails(details: unknown): unknown {
+		const snapshot = createVerificationObligationSnapshotDetails(this._getActiveVerificationIds());
+		if (!snapshot) return details;
+		if (!details || typeof details !== "object" || Array.isArray(details)) return snapshot;
+		return { ...details, ...snapshot };
 	}
 
 	/** Compatibility seam retained for focused auto-probe regressions. */

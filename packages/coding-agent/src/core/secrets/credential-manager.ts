@@ -578,7 +578,7 @@ export class CredentialManager {
 				if (!sessionKey || !provider) {
 					throw new CredentialManagerError(
 						"owner_setup_required",
-						"No machine-owned Bitwarden session is available; TUI can accept one masked BW_SESSION key.",
+						"No machine-owned Bitwarden session is available. Configure BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never prompts.",
 					);
 				}
 				await this.storage.connect(sessionKey, signal, provider);

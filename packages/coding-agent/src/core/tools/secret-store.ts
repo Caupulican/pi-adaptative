@@ -12,10 +12,7 @@ import {
 	type CredentialMigrationSourceResolver,
 	resolveCredentialMigrationSources,
 } from "../secrets/credential-migration-source.ts";
-import {
-	connectCredentialSessionWithMaskedPrompt,
-	isCredentialSessionKeyRequired,
-} from "../secrets/credential-session-connection.ts";
+import { isCredentialSessionKeyRequired } from "../secrets/credential-session-connection.ts";
 import {
 	CredentialMigrationDiscoveryError,
 	type CredentialMigrationSourceCandidate,
@@ -133,7 +130,7 @@ function result(details: SecretStoreToolDetails, text: string): SecretStoreResul
 
 function ownerSetupRequired(action: SecretStoreToolInput["action"]): SecretStoreResult {
 	const message =
-		"No usable machine-owned Bitwarden session was found. TUI needs one owner input: a BW_SESSION key supplied through Pi's masked prompt, never through chat.";
+		"No usable machine-owned Bitwarden session was found. Configure BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for credentials.";
 	return result(
 		{
 			action,
@@ -263,7 +260,7 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 			"Only when the current task genuinely requires credentials: call secret_store. Never probe or activate for an optional integration; its absence does not block unrelated work.",
 			"When required credentials are already on this machine or exact descriptors are unknown, call discover; never ask the owner for source paths or environment-variable names.",
 			"Discover names/paths only from bounded project, machine, and environment sources; migrate relevant candidates without exposing values.",
-			"Pi tries machine BWS_ACCESS_TOKEN or BW_SESSION first. If both fail, TUI may request one masked BW_SESSION only; never chat.",
+			"Pi reads machine BWS_ACCESS_TOKEN or BW_SESSION only. If neither works, report owner_setup_required; Pi never prompts for a session key.",
 			"activate before credential work; TUI/print/RPC return metadata only.",
 			"One project binding: omit profile. Multiple: use list, select authorized profile.",
 			"Never request credentials in chat/tool arguments.",
@@ -296,11 +293,16 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 			if (validation) return validation;
 			try {
 				if (input.action === "status") {
-					const status = await manager.ensureAvailable(signal);
-					return result(
-						{ action: input.action, status: "available", connected: status.connected },
-						"Bitwarden is connected for this Pi session.",
-					);
+					try {
+						const status = await manager.ensureAvailable(signal);
+						return result(
+							{ action: input.action, status: "available", connected: status.connected },
+							"Bitwarden is connected for this Pi session.",
+						);
+					} catch (error) {
+						if (isCredentialSessionKeyRequired(error)) return ownerSetupRequired(input.action);
+						throw error;
+					}
 				}
 				if (input.action === "discover") {
 					const discovered = await discoverSources(ctx.cwd, signal);
@@ -385,19 +387,13 @@ export function createSecretStoreToolDefinition(options: SecretStoreToolOptions)
 					);
 				};
 
-				const connectWithOwnerKey = async (): Promise<SecretStoreResult | undefined> => {
-					if (!ctx.hasUI) return ownerSetupRequired(input.action);
-					const connection = await connectCredentialSessionWithMaskedPrompt(manager, ctx.ui, signal);
-					return connection === "connected" ? undefined : cancelled(input.action);
-				};
-
 				try {
 					return await executeCredentialAction();
 				} catch (error) {
+					// Owner rule: Pi never asks for a Bitwarden session key. A missing machine session
+					// surfaces owner_setup_required; the owner configures the key themselves.
 					if (!isCredentialSessionKeyRequired(error)) throw error;
-					const setup = await connectWithOwnerKey();
-					if (setup) return setup;
-					return await executeCredentialAction();
+					return ownerSetupRequired(input.action);
 				}
 			} catch (error) {
 				return failed(input, error);

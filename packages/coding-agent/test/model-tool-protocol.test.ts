@@ -40,6 +40,30 @@ describe("resolveModelToolProtocol", () => {
 		});
 	});
 
+	test("does not silently restore a model-declared text path after a persisted no-route verdict", () => {
+		const textModel = { ...model, textToolCallProtocol: true };
+		const noRouteProfile = adaptation({
+			toolProbe: {
+				version: MODEL_TOOL_PROTOCOL_VERSION,
+				status: "none",
+				nativeGrade: "absent",
+				probedAt: "2026-08-24T00:00:00.000Z",
+			},
+		});
+		expect(
+			resolveModelToolProtocol({
+				model: textModel,
+				adaptation: noRouteProfile,
+			}),
+		).toEqual({ protocol: undefined, reasonCode: "probe_no_working_path" });
+		expect(
+			resolveModelToolProtocol({ model: textModel, settingsOverride: true, adaptation: noRouteProfile }),
+		).toEqual({
+			protocol: true,
+			reasonCode: "settings_enabled",
+		});
+	});
+
 	test("keeps a proven native model off the text protocol even when settings or model metadata enable it", () => {
 		const nativeProfile = adaptation({
 			toolProbe: {

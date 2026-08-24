@@ -50,6 +50,12 @@ export interface TextToolProtocolParseOptions {
 	callIndexOffset?: number;
 }
 
+export interface TextToolProtocolJsonParseDiagnostic {
+	kind: "malformed-json";
+	offset: number;
+	context: string;
+}
+
 type EnvelopeKind = "pi_call" | "tool_call" | "fenced_json" | "function_xml";
 
 interface EnvelopeMatch {
@@ -295,10 +301,28 @@ function normalizedJsonCandidates(raw: string): string[] {
 	return candidates;
 }
 
-function parseJsonValue(raw: string): { ok: true; value: unknown } | { ok: false } {
+function jsonParseOffset(error: unknown, raw: string): number {
+	const message = error instanceof Error ? error.message : "";
+	const match = /position (\d+)/i.exec(message);
+	if (match?.[1]) return Math.min(Number(match[1]), raw.length);
+	return 0;
+}
+
+function jsonParseDiagnostic(raw: string, error: unknown): TextToolProtocolJsonParseDiagnostic {
+	const offset = jsonParseOffset(error, raw);
+	const radius = 72;
+	const start = Math.max(0, offset - radius);
+	const end = Math.min(raw.length, offset + radius);
+	return { kind: "malformed-json", offset, context: raw.slice(start, end) };
+}
+
+function parseJsonValue(
+	raw: string,
+): { ok: true; value: unknown } | { ok: false; diagnostic: TextToolProtocolJsonParseDiagnostic } {
 	try {
 		return { ok: true, value: JSON.parse(raw) as unknown };
-	} catch {
+	} catch (error) {
+		const diagnostic = jsonParseDiagnostic(raw, error);
 		for (const normalized of normalizedJsonCandidates(raw)) {
 			try {
 				return { ok: true, value: JSON.parse(normalized) as unknown };
@@ -306,7 +330,7 @@ function parseJsonValue(raw: string): { ok: true; value: unknown } | { ok: false
 				// Try the next bounded normalization candidate.
 			}
 		}
-		return { ok: false };
+		return { ok: false, diagnostic };
 	}
 }
 
@@ -343,7 +367,7 @@ function parsePiCallEnvelope(
 		id: textToolCallId(idPrefix, index),
 		name: match.name,
 		arguments: args.arguments,
-		rawArguments: parsed.ok ? args.rawArguments : { text: match.body.trim() },
+		rawArguments: parsed.ok ? args.rawArguments : { text: match.body.trim(), parseDiagnostic: parsed.diagnostic },
 		source: "text-protocol",
 		errorMessage: textToolErrorMessage(match.name, names),
 	};
@@ -390,8 +414,8 @@ function parseEnvelope(
 	if (match.kind === "pi_call") return parsePiCallEnvelope(match, names, index, idPrefix);
 	if (match.kind === "function_xml") return parseFunctionXmlEnvelope(match, names, index, idPrefix);
 
-	const parsed = parseJsonObject(match.body);
-	if (!parsed) {
+	const parsedValue = parseJsonValue(match.body);
+	if (!parsedValue.ok || !isRecord(parsedValue.value)) {
 		const name = extractNameFromMalformedJson(match.body);
 		if (!name) return undefined;
 		return {
@@ -399,11 +423,15 @@ function parseEnvelope(
 			id: textToolCallId(idPrefix, index),
 			name,
 			arguments: match.body.trim() as unknown as Record<string, unknown>,
-			rawArguments: { text: match.body.trim() },
+			rawArguments: {
+				text: match.body.trim(),
+				...(!parsedValue.ok ? { parseDiagnostic: parsedValue.diagnostic } : {}),
+			},
 			source: "text-protocol",
 			errorMessage: textToolErrorMessage(name, names),
 		};
 	}
+	const parsed = parsedValue.value;
 
 	const wrappedTool = isRecord(parsed.tool) ? parsed.tool : undefined;
 	const nameValue = parsed.name ?? (typeof parsed.tool === "string" ? parsed.tool : undefined) ?? wrappedTool?.name;

@@ -489,4 +489,133 @@ describe("tool-owned failure recovery contracts", () => {
 			await disposeShellExecutionSessionAndWait(shellSessionKey);
 		}
 	});
+
+	it("carries one bounded verification id from a failed test command to its green rerun", async () => {
+		const cwd = await createTemporaryRoot("pi-shell-verification-metadata-");
+		const command = "vitest --run test/focused.test.ts";
+		let verificationRuns = 0;
+		const bash = createBashTool(cwd, {
+			operations: {
+				exec: async (shellCommand, _cwd, options) => {
+					if (shellCommand === command) {
+						verificationRuns++;
+						options.onData(Buffer.from(verificationRuns === 1 ? "FAIL focused test\n" : "PASS focused test\n"));
+						return { exitCode: verificationRuns === 1 ? 1 : 0 };
+					}
+					options.onData(Buffer.from("inspected current source\n"));
+					return { exitCode: 0 };
+				},
+			},
+			outputDirectory: cwd,
+		});
+		const calls = [command, "echo inspected current source", command];
+		let turn = 0;
+		const events: AgentEvent[] = [];
+		const stream = agentLoop(
+			[{ role: "user", content: "repair then verify the focused test", timestamp: 1 }],
+			{ systemPrompt: "", messages: [], tools: [bash] },
+			{
+				model: {
+					id: "mock",
+					name: "mock",
+					api: "openai-responses",
+					provider: "openai",
+					baseUrl: "https://example.invalid",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 2048,
+				},
+				convertToLlm: (messages: AgentMessage[]) =>
+					messages.filter(
+						(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					) as Message[],
+			},
+			undefined,
+			() => {
+				const mock = new EventStream<AssistantMessageEvent, AssistantMessage>(
+					(event) => event.type === "done" || event.type === "error",
+					(event) => {
+						if (event.type === "done") return event.message;
+						if (event.type === "error") return event.error;
+						throw new Error("Unexpected event type");
+					},
+				);
+				queueMicrotask(() => {
+					turn++;
+					mock.push(
+						turn <= calls.length
+							? {
+									type: "done",
+									reason: "toolUse",
+									message: {
+										role: "assistant",
+										content: [
+											{
+												type: "toolCall",
+												id: `verification-${turn}`,
+												name: "bash",
+												arguments: { command: calls[turn - 1] },
+											},
+										],
+										api: "openai-responses",
+										provider: "openai",
+										model: "mock",
+										usage: {
+											input: 0,
+											output: 0,
+											cacheRead: 0,
+											cacheWrite: 0,
+											totalTokens: 0,
+											cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+										},
+										stopReason: "toolUse",
+										timestamp: turn,
+									},
+								}
+							: {
+									type: "done",
+									reason: "stop",
+									message: {
+										role: "assistant",
+										content: [{ type: "text", text: "Verification passed." }],
+										api: "openai-responses",
+										provider: "openai",
+										model: "mock",
+										usage: {
+											input: 0,
+											output: 0,
+											cacheRead: 0,
+											cacheWrite: 0,
+											totalTokens: 0,
+											cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+										},
+										stopReason: "stop",
+										timestamp: turn,
+									},
+								},
+					);
+				});
+				return mock;
+			},
+		);
+		for await (const event of stream) events.push(event);
+
+		const toolResults = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "toolResult" ? [event.message] : [],
+		);
+		expect(verificationRuns).toBe(2);
+		expect(toolResults).toHaveLength(3);
+
+		const failed = (toolResults[0].details as { piVerification?: unknown } | undefined)?.piVerification;
+		const passed = (toolResults[2].details as { piVerification?: unknown } | undefined)?.piVerification;
+		expect(failed).toMatchObject({ version: 1, status: "failed", id: expect.any(String) });
+		expect(passed).toMatchObject({ version: 1, status: "passed", id: expect.any(String) });
+		const failedId = (failed as { id?: string } | undefined)?.id;
+		const passedId = (passed as { id?: string } | undefined)?.id;
+		expect(failedId).toBe(passedId);
+		expect(failedId).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+		expect(failedId?.length).toBeLessThanOrEqual(256);
+	});
 });
