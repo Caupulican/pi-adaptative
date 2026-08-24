@@ -172,7 +172,9 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 		});
 
 		it("nonrecursive ls renders entry lines directly for unusual directory names", () => {
-			const unusual = "directory:\nwith-newline";
+			// Colon/newline exercises the former header-splitting bug on POSIX. Windows forbids
+			// both characters in directory names, so retain a filesystem-valid unusual name there.
+			const unusual = process.platform === "win32" ? "directory-with-newline" : "directory:\nwith-newline";
 			mkdirSync(join(root, unusual));
 			writeFileSync(join(root, unusual, "child.txt"), "");
 			const res = p(python as string, "ls", ["ls", unusual]);
