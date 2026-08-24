@@ -23,6 +23,7 @@ import * as bundledPiAgentCoreToolProtocolResidue from "@caupulican/pi-agent-cor
 import * as bundledPiAgentCoreTruncate from "@caupulican/pi-agent-core/truncate";
 import * as bundledPiAgentCoreTypes from "@caupulican/pi-agent-core/types";
 import * as bundledPiAgentCoreUsage from "@caupulican/pi-agent-core/usage";
+import * as bundledPiAgentCoreVerificationObligations from "@caupulican/pi-agent-core/verification-obligations";
 import * as bundledPiAi from "@caupulican/pi-ai";
 import * as bundledPiAiAbortSignals from "@caupulican/pi-ai/abort-signals";
 import * as bundledPiAiApiRegistry from "@caupulican/pi-ai/api-registry";
@@ -61,6 +62,7 @@ import {
 const piAgentCoreVirtualSubpaths: Record<PiAgentCoreExtensionSubpath, unknown> = {
 	agent: bundledPiAgentCoreAgent,
 	"agent-loop": bundledPiAgentCoreAgentLoop,
+	"verification-obligations": bundledPiAgentCoreVerificationObligations,
 	compaction: bundledPiAgentCoreCompaction,
 	"compaction/branch-summarization": bundledPiAgentCoreBranchSummarization,
 	"compaction/compaction": bundledPiAgentCoreCompactionCore,

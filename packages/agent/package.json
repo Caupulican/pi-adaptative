@@ -21,6 +21,11 @@
 			"pi-source": "./src/agent.ts",
 			"import": "./dist/agent.js"
 		},
+		"./verification-obligations": {
+			"types": "./dist/verification-obligations.d.ts",
+			"pi-source": "./src/verification-obligations.ts",
+			"import": "./dist/verification-obligations.js"
+		},
 		"./agent-loop": {
 			"types": "./dist/agent-loop.d.ts",
 			"pi-source": "./src/agent-loop.ts",

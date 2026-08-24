@@ -1,11 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import {
-	type Agent,
-	AgentBusyError,
-	createVerificationObligationSnapshotDetails,
-	VerificationObligationTracker,
-} from "@caupulican/pi-agent-core";
+import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
@@ -27,6 +22,10 @@ import type {
 	ThinkingLevel,
 	ToolValidationEscalationEvent,
 } from "@caupulican/pi-agent-core/types";
+import {
+	createVerificationObligationSnapshotDetails,
+	VerificationObligationTracker,
+} from "@caupulican/pi-agent-core/verification-obligations";
 import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";

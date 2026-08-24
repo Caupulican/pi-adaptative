@@ -1,6 +1,7 @@
 export const PI_AGENT_CORE_EXTENSION_SUBPATHS = {
 	agent: "agent/src/agent.ts",
 	"agent-loop": "agent/src/agent-loop.ts",
+	"verification-obligations": "agent/src/verification-obligations.ts",
 	compaction: "agent/src/compaction/index.ts",
 	"compaction/branch-summarization": "agent/src/compaction/branch-summarization.ts",
 	"compaction/compaction": "agent/src/compaction/compaction.ts",

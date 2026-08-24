@@ -5,6 +5,9 @@ import { piAiSourceAliases } from "../agent/vitest-ai-source-aliases.ts";
 const codingAgentSrcIndex = fileURLToPath(new URL("./src/index.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const agentSrcAgent = fileURLToPath(new URL("../agent/src/agent.ts", import.meta.url));
+const agentSrcVerificationObligations = fileURLToPath(
+	new URL("../agent/src/verification-obligations.ts", import.meta.url),
+);
 const agentSrcAgentLoop = fileURLToPath(new URL("../agent/src/agent-loop.ts", import.meta.url));
 const agentSrcCompaction = fileURLToPath(new URL("../agent/src/compaction/index.ts", import.meta.url));
 const agentSrcBranchSummarization = fileURLToPath(
@@ -120,6 +123,10 @@ export default defineConfig({
 			{ find: /^@mariozechner\/pi-coding-agent$/, replacement: codingAgentSrcIndex },
 			{ find: /^@caupulican\/pi-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@caupulican\/pi-agent-core\/agent$/, replacement: agentSrcAgent },
+			{
+				find: /^@caupulican\/pi-agent-core\/verification-obligations$/,
+				replacement: agentSrcVerificationObligations,
+			},
 			{ find: /^@caupulican\/pi-agent-core\/agent-loop$/, replacement: agentSrcAgentLoop },
 			{ find: /^@caupulican\/pi-agent-core\/compaction$/, replacement: agentSrcCompaction },
 			{

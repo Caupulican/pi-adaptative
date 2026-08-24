@@ -18,6 +18,9 @@
 			"@caupulican/pi-agent-core": ["./packages/agent/src/index.ts"],
 			"@caupulican/pi-agent-core/node": ["./packages/agent/src/node.ts"],
 			"@caupulican/pi-agent-core/agent": ["./packages/agent/src/agent.ts"],
+			"@caupulican/pi-agent-core/verification-obligations": [
+				"./packages/agent/src/verification-obligations.ts"
+			],
 			"@caupulican/pi-agent-core/agent-loop": ["./packages/agent/src/agent-loop.ts"],
 			"@caupulican/pi-agent-core/compaction": ["./packages/agent/src/compaction/index.ts"],
 			"@caupulican/pi-agent-core/compaction/*": ["./packages/agent/src/compaction/*"],
