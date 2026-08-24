@@ -168,20 +168,25 @@ test("release publication is gated on deterministic Node-package and Bun-binary 
 	assert.match(releaseJob, /needs: \[[^\]]*verify-node-bun-release[^\]]*\]/u);
 });
 
-test("npm publish uses environment-bound trusted publishing without long-lived tokens", () => {
+test("npm publish preserves the proven npm-token path with OIDC provenance", () => {
 	const publishJobStart = releaseWorkflow.indexOf("  publish-npm:");
 	assert.notEqual(publishJobStart, -1, "release workflow must define the npm publish job");
 	const nextJobMatch = releaseWorkflow.slice(publishJobStart + 2).match(/^  [a-z0-9-]+:\n/mu);
 	const publishJobEnd =
 		nextJobMatch?.index === undefined ? releaseWorkflow.length : publishJobStart + 2 + nextJobMatch.index;
 	const publishJob = releaseWorkflow.slice(publishJobStart, publishJobEnd);
-	assert.match(publishJob, /^    environment: npm-publish$/mu);
 	assert.match(publishJob, /^      id-token: write$/mu);
+	assert.doesNotMatch(publishJob, /^    environment:/mu, "token publication must not acquire a new environment binding");
+	assert.match(publishJob, /registry-url: 'https:\/\/registry\.npmjs\.org'/u);
+	assert.match(publishJob, /cache: npm/u, "npm dependency caching must remain enabled for the publish job");
 
 	const publishStepStart = publishJob.indexOf("      - name: Publish npm packages");
 	assert.notEqual(publishStepStart, -1, "release workflow must define the npm publish step");
-	assert.doesNotMatch(publishJob, /NODE_AUTH_TOKEN/u);
-	assert.doesNotMatch(publishJob, /secrets\.(?:NPM_TOKEN|NODE_AUTH_TOKEN)/u);
+	assert.match(
+		publishJob,
+		/- name: Publish npm packages\n        env:\n          NODE_AUTH_TOKEN: \$\{\{ secrets\.NPM_TOKEN \}\}\n        run: node scripts\/publish\.mjs/u,
+		"publish must use the repository's established NPM_TOKEN secret",
+	);
 });
 
 test("release jobs do not resolve runner-scoped paths before a step starts", () => {
