@@ -1262,7 +1262,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await settle();
+		await handle.waitForIdle();
 
 		expect(resumeWorker).not.toHaveBeenCalled();
 		expect(harness.diagnostics.some((message) => message.includes("unrecovered orphan"))).toBe(true);
