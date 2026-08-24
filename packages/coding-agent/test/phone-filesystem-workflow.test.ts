@@ -235,7 +235,7 @@ describe("non-native phone filesystem workflow", () => {
 		await writeFile(targetPath, "target-before", "utf8");
 		await writeFile(needlePath, "needle", "utf8");
 
-		const responses = [
+		const responses: PhoneResponseStep[] = [
 			[
 				phoneCall("read", { path: sourcePath }),
 				phoneCall("edit", {
@@ -249,19 +249,53 @@ describe("non-native phone filesystem workflow", () => {
 				phoneCall("bash", { command: "ls -la" }),
 				phoneCall("bash", { command: "ls -R" }),
 			].join("\n"),
-			"mixed batch reconciled",
 		];
 		const created = await createPhoneWorkflowSession(cwd, agentDir, responses);
+		// Exercise the production handoff seam deterministically. The first three calls are the
+		// read/edit/edit control path; only the three independent bash siblings are forced into
+		// background tasks so this regression covers multiple terminal waits without making the
+		// read/edit ordering timing-dependent.
+		const originalSubscribeHandoff = created.session.agent.subscribeToolCallHandoffRequest;
+		const waitedTaskIds = new Set<string>();
+		created.session.agent.subscribeToolCallHandoffRequest = (toolCallId, request) => {
+			const unsubscribe = originalSubscribeHandoff?.(toolCallId, request) ?? (() => {});
+			if (/(?:-4|-5|-6)$/u.test(toolCallId)) queueMicrotask(request);
+			return unsubscribe;
+		};
+		const waitForBackgroundTaskOrComplete = (context: Context): string => {
+			const contextText = `${context.systemPrompt ?? ""}\n${JSON.stringify(context.messages)}`;
+			const taskIds = [...contextText.matchAll(/\btool-task-[1-9]\d*\b/gu)].map((match) => match[0]);
+			const nextTaskId = taskIds.find((taskId) => !waitedTaskIds.has(taskId));
+			if (!nextTaskId) throw new Error("phone workflow expected another background task before reconciliation");
+			waitedTaskIds.add(nextTaskId);
+			return phoneCall("tool_task", { action: "wait", taskId: nextTaskId });
+		};
+		responses.push(
+			waitForBackgroundTaskOrComplete,
+			waitForBackgroundTaskOrComplete,
+			waitForBackgroundTaskOrComplete,
+			"mixed batch reconciled",
+		);
 
 		try {
 			await created.session.prompt("Run the mixed filesystem batch.");
 
 			expect(await readFile(targetPath, "utf8")).toBe("target-after");
-			expect(created.responseIndex).toBe(2);
+			expect(waitedTaskIds).toEqual(new Set(["tool-task-1", "tool-task-2", "tool-task-3"]));
+			expect(responses).toHaveLength(5);
+			expect(created.responseIndex).toBe(responses.length);
+			const assistantMessages = created.session.messages.filter((message) => message.role === "assistant");
+			expect(
+				assistantMessages.every((message) => message.stopReason !== "error" && message.stopReason !== "aborted"),
+			).toBe(true);
+			const assistantTexts = assistantMessages.flatMap((message) =>
+				message.content.filter((block) => block.type === "text").map((block) => block.text),
+			);
+			expect(assistantTexts.at(-1)).toBe("mixed batch reconciled");
 			const toolResults = created.session.messages.filter(
 				(message): message is ToolResultMessage => message.role === "toolResult",
 			);
-			expect(toolResults.map((message) => [message.toolName, message.isError ?? false])).toEqual([
+			expect(toolResults.slice(0, 6).map((message) => [message.toolName, message.isError ?? false])).toEqual([
 				["read", false],
 				["edit", false],
 				["edit", true],
@@ -269,22 +303,39 @@ describe("non-native phone filesystem workflow", () => {
 				["bash", false],
 				["bash", false],
 			]);
+			const waitResults = toolResults.slice(6);
+			expect(waitResults.map((message) => [message.toolName, message.isError ?? false])).toEqual([
+				["tool_task", false],
+				["tool_task", false],
+				["tool_task", false],
+			]);
+			expect(waitResults).toMatchObject([
+				{ details: { kind: "wait", status: "completed" } },
+				{ details: { kind: "wait", status: "completed" } },
+				{ details: { kind: "wait", status: "completed" } },
+			]);
 			expect(toolResults[2]?.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")).toContain(
 				'"failure_code":"invalid_arguments"',
 			);
 			const bashOutputs = toolResults
+				.slice(0, 6)
 				.slice(3)
 				.map((result) => result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"));
-			expect(bashOutputs[0]).toContain("needle");
-			expect(bashOutputs[0]?.toLowerCase()).not.toContain("command not found");
-			expect(bashOutputs[2]).toContain(".:\n");
-			expect(bashOutputs[2]).toContain("source.txt");
-			expect(bashOutputs[2]).toContain("needle.txt");
+			expect(bashOutputs).toHaveLength(3);
+			expect(bashOutputs.every((output) => output.includes("running as session task"))).toBe(true);
+			const waitedOutputs = waitResults.map((result) =>
+				result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"),
+			);
+			expect(waitedOutputs.some((output) => output.includes("needle"))).toBe(true);
+			expect(waitedOutputs.every((output) => !output.toLowerCase().includes("command not found"))).toBe(true);
+			const recursiveOutput = waitedOutputs.find((output) => output.includes(".:\n"));
+			expect(recursiveOutput).toContain("source.txt");
+			expect(recursiveOutput).toContain("needle.txt");
 			const calls = created.session.messages
 				.filter((message) => message.role === "assistant")
 				.flatMap((message) => message.content)
 				.filter((content): content is ToolCall => content.type === "toolCall");
-			expect(calls.map((call) => [call.name, call.source])).toEqual([
+			expect(calls.slice(0, 6).map((call) => [call.name, call.source])).toEqual([
 				["read", "text-protocol"],
 				["edit", "text-protocol"],
 				["edit", "text-protocol"],
@@ -292,10 +343,18 @@ describe("non-native phone filesystem workflow", () => {
 				["bash", "text-protocol"],
 				["bash", "text-protocol"],
 			]);
-			expect(calls.slice(3).map((call) => call.arguments)).toEqual([
+			expect(calls.slice(6).map((call) => [call.name, call.source])).toEqual([
+				["tool_task", "text-protocol"],
+				["tool_task", "text-protocol"],
+				["tool_task", "text-protocol"],
+			]);
+			expect(calls.slice(3, 6).map((call) => call.arguments)).toEqual([
 				{ command: "rg 'needle' needle.txt | rg 'needle'" },
 				{ command: "ls -la" },
 				{ command: "ls -R" },
+			]);
+			expect(calls.slice(6).map((call) => call.arguments)).toEqual([
+				...Array.from(waitedTaskIds, (taskId) => ({ action: "wait", taskId })),
 			]);
 		} finally {
 			await created.dispose();

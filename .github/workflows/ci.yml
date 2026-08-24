@@ -28,7 +28,7 @@ jobs:
   build-check-test:
     name: Build, check, test (${{ matrix.os }})
     strategy:
-      fail-fast: true
+      fail-fast: false
       # Job-level `if` cannot see `matrix` (evaluated before expansion). Compute
       # the OS list instead: skip Windows when tests are already proven.
       matrix:
@@ -120,7 +120,7 @@ jobs:
       inputs.skip_tests != true &&
       (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         shard: [1, 2, 3, 4]

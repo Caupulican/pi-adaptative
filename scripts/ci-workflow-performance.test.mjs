@@ -104,6 +104,23 @@ test("normal CI keeps small workspaces on the quality job and shards coding-agen
 	assert.doesNotMatch(workflow, /^\s+run: npm test\s*$/mu);
 });
 
+test("CI keeps every matrix failure available for evidence collection", () => {
+	const jobSections = ["build-check-test", "coding-agent-test"].map((jobName, index, jobs) => {
+		const start = workflow.indexOf(`  ${jobName}:`);
+		assert.notEqual(start, -1, `${jobName} must exist`);
+		const nextStart = index + 1 < jobs.length ? workflow.indexOf(`  ${jobs[index + 1]}:`, start + 1) : workflow.length;
+		assert.notEqual(nextStart, -1, `${jobName} section must have a boundary`);
+		return workflow.slice(start, nextStart);
+	});
+
+	for (const [jobName, section] of [
+		["build-check-test", jobSections[0]],
+		["coding-agent-test", jobSections[1]],
+	]) {
+		assert.match(section, /^    strategy:\n      fail-fast: false$/mu, `${jobName} must retain every matrix result`);
+	}
+});
+
 test("normal CI reserves twenty minutes for runner setup plus bounded suite execution", () => {
 	const shardJobStart = workflow.indexOf("  coding-agent-test:");
 	assert.notEqual(shardJobStart, -1);
