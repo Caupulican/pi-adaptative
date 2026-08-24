@@ -151,6 +151,22 @@ test("release publication is gated on deterministic Node-package and Bun-binary 
 	assert.match(releaseJob, /needs: \[[^\]]*verify-node-bun-release[^\]]*\]/u);
 });
 
+test("npm publish uses environment-bound trusted publishing without long-lived tokens", () => {
+	const publishJobStart = releaseWorkflow.indexOf("  publish-npm:");
+	assert.notEqual(publishJobStart, -1, "release workflow must define the npm publish job");
+	const nextJobMatch = releaseWorkflow.slice(publishJobStart + 2).match(/^  [a-z0-9-]+:\n/mu);
+	const publishJobEnd =
+		nextJobMatch?.index === undefined ? releaseWorkflow.length : publishJobStart + 2 + nextJobMatch.index;
+	const publishJob = releaseWorkflow.slice(publishJobStart, publishJobEnd);
+	assert.match(publishJob, /^    environment: npm-publish$/mu);
+	assert.match(publishJob, /^      id-token: write$/mu);
+
+	const publishStepStart = publishJob.indexOf("      - name: Publish npm packages");
+	assert.notEqual(publishStepStart, -1, "release workflow must define the npm publish step");
+	assert.doesNotMatch(publishJob, /NODE_AUTH_TOKEN/u);
+	assert.doesNotMatch(publishJob, /secrets\.(?:NPM_TOKEN|NODE_AUTH_TOKEN)/u);
+});
+
 test("release jobs do not resolve runner-scoped paths before a step starts", () => {
 	const invalidJobEnvEntries = releaseWorkflow.match(/^      [A-Z_][A-Z0-9_]*:.*\$\{\{\s*runner\./gmu) ?? [];
 	assert.deepEqual(invalidJobEnvEntries, []);

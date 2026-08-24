@@ -425,6 +425,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    environment: npm-publish
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
@@ -473,6 +474,4 @@ jobs:
         run: git diff --exit-code
 
       - name: Publish npm packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish.mjs
