@@ -68,7 +68,7 @@ describe("bash verification boundary", () => {
 		const tool = createBashTool(process.cwd(), { operations });
 
 		const verification = await tool.execute("verification-null-exit", {
-			command: "./coverage-verification-harness.sh",
+			command: "npm run coverage:verification-harness",
 		});
 		const ordinary = await tool.execute("ordinary-null-exit", { command: "echo ordinary" });
 
