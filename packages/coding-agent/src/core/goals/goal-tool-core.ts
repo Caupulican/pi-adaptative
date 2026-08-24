@@ -1,6 +1,10 @@
 import { type BackgroundToolTaskRef, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
-import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import {
+	getTrustedRequirementEvidence,
+	getUnprovenGoalRequirementIds,
+	isTrustedGoalEvidence,
+} from "./goal-acceptance.ts";
 import { formatGoalRecord, projectGoalRecord } from "./goal-record.ts";
 import {
 	applyGoalEvent,
@@ -157,19 +161,32 @@ export function applyGoalAction(
 	}
 
 	if (action.action === "increment") {
-		const firstOpen = current.requirements.find((requirement) => requirement.status === "open");
-		if (firstOpen) {
+		const requireVerifiedEvidence = options?.requireVerifiedEvidenceForCompletion ?? true;
+		const firstPending = current.requirements.find(
+			(requirement) =>
+				requirement.status === "open" ||
+				(requireVerifiedEvidence &&
+					requirement.status === "satisfied" &&
+					getTrustedRequirementEvidence(current, requirement).length === 0),
+		);
+		if (firstPending) {
 			const used = new Set(current.requirements.flatMap((requirement) => requirement.evidenceIds));
-			const unused = current.evidence.filter((evidence) => !used.has(evidence.id)).map((evidence) => evidence.id);
+			const unused = current.evidence
+				.filter(
+					(evidence) => !used.has(evidence.id) && (!requireVerifiedEvidence || isTrustedGoalEvidence(evidence)),
+				)
+				.map((evidence) => evidence.id);
 			if (unused.length === 0) {
+				const evidenceKind = requireVerifiedEvidence ? " accepted as verified or user-confirmed" : "";
+				const requirementState = firstPending.status === "open" ? "open" : "unproven";
 				return {
 					ok: false,
-					error: `Cannot increment goal: open requirement '${firstOpen.id}' has no unused evidence. Record evidence, then increment.`,
+					error: `Cannot increment goal: ${requirementState} requirement '${firstPending.id}' has no unused evidence${evidenceKind}. Record evidence, then increment.`,
 				};
 			}
 			return applyGoalAction(
 				current,
-				{ action: "satisfy_requirement", requirementId: firstOpen.id, evidenceIds: unused },
+				{ action: "satisfy_requirement", requirementId: firstPending.id, evidenceIds: unused },
 				now,
 				options,
 			);
@@ -229,6 +246,17 @@ function toGoalEvent(
 					return {
 						ok: false,
 						error: `Unknown evidence '${evidenceId}'. Record it with action 'add_evidence' first.`,
+					};
+				}
+			}
+			if (options?.requireVerifiedEvidenceForCompletion !== false) {
+				const trustedEvidence = state.evidence.some(
+					(evidence) => evidenceIds.includes(evidence.id) && isTrustedGoalEvidence(evidence),
+				);
+				if (!trustedEvidence) {
+					return {
+						ok: false,
+						error: `Cannot satisfy requirement '${id}': cite at least one verified or user-confirmed evidence entry.`,
 					};
 				}
 			}
@@ -418,8 +446,19 @@ export function summarizeGoalState(
 			.filter((requirement) => requirement.status === "open")
 			.slice(0, 20)
 			.map((requirement) => requirement.id);
+		const unprovenIds = state.requirements
+			.filter(
+				(requirement) =>
+					requirement.status === "satisfied" && getTrustedRequirementEvidence(state, requirement).length === 0,
+			)
+			.slice(0, 20)
+			.map((requirement) => requirement.id);
+		const pending = [
+			...(openIds.length > 0 ? [`open: ${openIds.join(", ")}`] : []),
+			...(unprovenIds.length > 0 ? [`unproven: ${unprovenIds.join(", ")}`] : []),
+		];
 		lines.push(
-			`Legacy ledger: ${state.requirements.length} requirements, ${state.evidence.length} evidence${openIds.length > 0 ? `; open: ${openIds.join(", ")}` : ""}.`,
+			`Legacy ledger: ${state.requirements.length} requirements, ${state.evidence.length} evidence${pending.length > 0 ? `; ${pending.join("; ")}` : ""}.`,
 		);
 	}
 	if (options?.action) {

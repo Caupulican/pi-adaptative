@@ -164,17 +164,83 @@ describe("goal evidence ref verification", () => {
 		expect(state?.evidence.find((e) => e.id === "e-nouri")?.verified).toBeUndefined();
 	});
 
-	it("blocks 'complete' by default when no satisfied requirement has verified/user evidence backing", async () => {
+	it("rejects satisfy_requirement when the cited evidence is not trusted", async () => {
 		const { run, getState } = createProducer();
 
 		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		await run({ action: "add_evidence", evidenceId: "e1", kind: "finding", summary: "self-asserted" });
+
+		const result = await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] });
+		expect(result.details.applied).toBe(false);
+		expect(result.details.error).toContain("verified or user-confirmed evidence");
+		expect(getState()?.requirements[0]).toMatchObject({ status: "open", evidenceIds: [] });
+	});
+
+	it("blocks 'complete' for a legacy satisfied requirement with no verified/user evidence backing", async () => {
+		let requireVerifiedEvidence = false;
+		const { run, getState } = createProducer({
+			requireVerifiedEvidenceForCompletion: () => requireVerifiedEvidence,
+		});
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
 		await run({ action: "satisfy_requirement", requirementId: "r1" });
+		requireVerifiedEvidence = true;
 
 		const result = await run({ action: "complete" });
 		expect(result.details.applied).toBe(false);
 		expect(result.details.error).toContain("verified evidence");
 		expect(getState()?.status).toBe("active");
+	});
+
+	it("increment leaves an open requirement open until unused trusted evidence exists", async () => {
+		const { run, getState } = createProducer();
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		await run({ action: "add_evidence", evidenceId: "e-unverified", kind: "finding", summary: "self-asserted" });
+
+		const blocked = await run({ action: "increment" });
+		expect(blocked.details.applied).toBe(false);
+		expect(blocked.details.error).toContain("no unused evidence accepted as verified or user-confirmed");
+		expect(getState()?.requirements[0]).toMatchObject({ status: "open", evidenceIds: [] });
+
+		await run({ action: "add_evidence", evidenceId: "e-user", kind: "user", summary: "owner confirmed" });
+		const satisfied = await run({ action: "increment" });
+		expect(satisfied.details.applied).toBe(true);
+		expect(getState()?.requirements[0]).toMatchObject({ status: "satisfied", evidenceIds: ["e-user"] });
+	});
+
+	it("increment repairs a legacy satisfied requirement that lacks trusted evidence before completing", async () => {
+		const { run, getState } = createProducer();
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Do the thing" });
+		await run({ action: "add_evidence", evidenceId: "e-unverified", kind: "finding", summary: "self-asserted" });
+		await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e-unverified"] });
+		await run({ action: "add_evidence", evidenceId: "e-user", kind: "user", summary: "owner confirmed" });
+
+		const repaired = await run({ action: "increment" });
+		expect(repaired.details.applied).toBe(true);
+		expect(getState()?.requirements[0]).toMatchObject({ status: "satisfied", evidenceIds: ["e-user"] });
+		expect(getState()?.status).toBe("active");
+
+		const completed = await run({ action: "increment" });
+		expect(completed.details.applied).toBe(true);
+		expect(getState()?.status).toBe("completed");
+	});
+
+	it("reports evidence ids and trust status in the model-visible response", async () => {
+		const { run } = createProducer();
+
+		await run({ action: "start", goalId: "g1", userGoal: "Ship it" });
+		const result = await run({ action: "add_evidence", evidenceId: "e-user", kind: "user", summary: "confirmed" });
+
+		const first = result.content[0];
+		expect(first?.type).toBe("text");
+		if (first?.type !== "text") return;
+		expect(first.text).toContain("Evidence 'e-user' recorded (user-confirmed)");
 	});
 
 	it("allows 'complete' when a satisfied requirement is backed by verified 'tool' evidence", async () => {
@@ -223,7 +289,9 @@ describe("goal evidence ref verification", () => {
 		expect(added.ok).toBe(true);
 		if (!added.ok) return;
 		state = added.state;
-		const satisfied = applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T2");
+		const satisfied = applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T2", {
+			requireVerifiedEvidenceForCompletion: false,
+		});
 		expect(satisfied.ok).toBe(true);
 		if (!satisfied.ok) return;
 		state = satisfied.state;

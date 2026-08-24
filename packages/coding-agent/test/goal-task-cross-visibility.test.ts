@@ -122,7 +122,7 @@ describe("goal<->task cross-visibility", () => {
 				),
 			);
 			const satisfyAction = { action: "satisfy_requirement", requirementId: "req-2" } as const;
-			state = expectOk(applyGoalAction(state, satisfyAction, "T2"));
+			state = expectOk(applyGoalAction(state, satisfyAction, "T2", { requireVerifiedEvidenceForCompletion: false }));
 
 			const openTaskSteps: OpenTaskStepRef[] = [
 				{ id: "step-9", content: "Task: Add rate limiting to the API before release" },
@@ -138,7 +138,7 @@ describe("goal<->task cross-visibility", () => {
 				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"),
 			);
 			const satisfyAction = { action: "satisfy_requirement", requirementId: "r1" } as const;
-			state = expectOk(applyGoalAction(state, satisfyAction, "T2"));
+			state = expectOk(applyGoalAction(state, satisfyAction, "T2", { requireVerifiedEvidenceForCompletion: false }));
 
 			const unrelated: OpenTaskStepRef[] = [{ id: "step-1", content: "Write the changelog entry" }];
 			expect(buildGoalTaskCrossVisibilityNudges(satisfyAction, state, unrelated)).toEqual([]);
@@ -154,7 +154,7 @@ describe("goal<->task cross-visibility", () => {
 				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Add rate limiting" }, "T1"),
 			);
 			const satisfyAction = { action: "satisfy_requirement", requirementId: "r1" } as const;
-			state = expectOk(applyGoalAction(state, satisfyAction, "T2"));
+			state = expectOk(applyGoalAction(state, satisfyAction, "T2", { requireVerifiedEvidenceForCompletion: false }));
 
 			expect(buildGoalTaskCrossVisibilityNudges(satisfyAction, state, undefined)).toEqual([]);
 			expect(buildGoalTaskCrossVisibilityNudges(satisfyAction, state, [])).toEqual([]);
@@ -224,7 +224,7 @@ describe("goal<->task cross-visibility", () => {
 				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Add rate limiting" }, "T1"),
 			);
 			const satisfyAction = { action: "satisfy_requirement", requirementId: "r1" } as const;
-			state = expectOk(applyGoalAction(state, satisfyAction, "T2"));
+			state = expectOk(applyGoalAction(state, satisfyAction, "T2", { requireVerifiedEvidenceForCompletion: false }));
 
 			const step = Object.freeze({ id: "step-1", content: "Verify r1 is covered by tests" });
 			const openTaskSteps = Object.freeze([step]);
@@ -248,7 +248,7 @@ describe("goal<->task cross-visibility", () => {
 				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Add rate limiting" }, "T1"),
 			);
 			const satisfyAction = { action: "satisfy_requirement", requirementId: "r1" } as const;
-			state = expectOk(applyGoalAction(state, satisfyAction, "T2"));
+			state = expectOk(applyGoalAction(state, satisfyAction, "T2", { requireVerifiedEvidenceForCompletion: false }));
 
 			const openTaskSteps: OpenTaskStepRef[] = [{ id: "step-1", content: "Verify r1 is covered by tests" }];
 			const summary = summarizeGoalState(state, { action: satisfyAction, openTaskSteps });

@@ -3,6 +3,7 @@
 ### Fixed
 
 - Stopped repeated tool-call cycles after three identical observable-result periods without preempting changing results before the existing configurable coarse fuse, and gave active goals state-changing recovery guidance instead of re-polling unchanged status.
+- Kept goal satisfaction and increment aligned with final acceptance by requiring trusted evidence before either transition, repairing legacy satisfied-but-unproven requirements before completion, surfacing unproven requirement IDs, and returning generated evidence IDs with their trust status.
 
 ## [0.96.4] - 2026-08-23
 

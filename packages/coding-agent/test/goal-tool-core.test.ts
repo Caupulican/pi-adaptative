@@ -58,7 +58,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(dup.ok).toBe(false);
 	});
 
-	it("satisfies a requirement only with known evidence ids", () => {
+	it("satisfies a requirement only with known trusted evidence ids", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
 
@@ -70,7 +70,7 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(missingEvidence.ok).toBe(false);
 
 		state = expectOk(
-			applyGoalAction(state, { action: "add_evidence", evidenceId: "e1", kind: "file", summary: "edited" }, "T3"),
+			applyGoalAction(state, { action: "add_evidence", evidenceId: "e1", kind: "user", summary: "confirmed" }, "T3"),
 		);
 		state = expectOk(
 			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T4"),
@@ -180,7 +180,11 @@ describe("applyGoalAction (goal producer core)", () => {
 		let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
 		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
 		// satisfy with no cited evidence at all -- nothing unsatisfied, but nothing verified either
-		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T2"));
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1" }, "T2", {
+				requireVerifiedEvidenceForCompletion: false,
+			}),
+		);
 
 		const blocked = applyGoalAction(state, { action: "complete" }, "T3");
 		expect(blocked.ok).toBe(false);
@@ -196,7 +200,12 @@ describe("applyGoalAction (goal producer core)", () => {
 			),
 		);
 		state = expectOk(
-			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e-bogus"] }, "T5"),
+			applyGoalAction(
+				state,
+				{ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e-bogus"] },
+				"T5",
+				{ requireVerifiedEvidenceForCompletion: false },
+			),
 		);
 		const stillBlocked = applyGoalAction(state, { action: "complete" }, "T6");
 		expect(stillBlocked.ok).toBe(false);
@@ -240,7 +249,11 @@ describe("applyGoalAction (goal producer core)", () => {
 		state = expectOk(
 			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T4"),
 		);
-		state = expectOk(applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r2" }, "T5"));
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r2" }, "T5", {
+				requireVerifiedEvidenceForCompletion: false,
+			}),
+		);
 
 		const blocked = applyGoalAction(state, { action: "complete" }, "T6");
 		expect(blocked.ok).toBe(false);
@@ -271,6 +284,25 @@ describe("applyGoalAction (goal producer core)", () => {
 		const summary = summarizeGoalState(state);
 		expect(summary).toContain("Goal 'g1'");
 		expect(summary).toContain("Legacy ledger: 1 requirements, 0 evidence; open: r1.");
+	});
+
+	it("summarizes satisfied requirements that still lack trusted acceptance evidence", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Ship", now: "T0" });
+		state = expectOk(applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"));
+		state = expectOk(
+			applyGoalAction(
+				state,
+				{ action: "add_evidence", evidenceId: "e1", kind: "finding", summary: "self-asserted" },
+				"T2",
+			),
+		);
+		state = expectOk(
+			applyGoalAction(state, { action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] }, "T3", {
+				requireVerifiedEvidenceForCompletion: false,
+			}),
+		);
+
+		expect(summarizeGoalState(state)).toContain("unproven: r1");
 	});
 
 	it("refuses agent complete or terminal increment while any open task_steps remain", () => {

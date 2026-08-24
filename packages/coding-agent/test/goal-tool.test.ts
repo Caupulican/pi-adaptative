@@ -123,7 +123,12 @@ describe("goal tool", () => {
 
 		const evidence = await run({ action: "add_evidence", kind: "finding", summary: "Owner verified" });
 		expect(evidence.isError).not.toBe(true);
-		expect(getState()?.evidence[0]?.id).toMatch(/^ev-[a-f0-9]{16}$/);
+		const evidenceId = getState()?.evidence[0]?.id;
+		expect(evidenceId).toMatch(/^ev-[a-f0-9]{16}$/);
+		const first = evidence.content[0];
+		expect(first?.type).toBe("text");
+		if (first?.type !== "text") return;
+		expect(first.text).toContain(`Evidence '${evidenceId}' recorded (unverified)`);
 	});
 
 	it("does not persist when an action fails validation", async () => {
@@ -147,7 +152,7 @@ describe("goal tool", () => {
 		const { run, getState } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
 		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
-		await run({ action: "add_evidence", evidenceId: "e1", kind: "file", summary: "wrote X" });
+		await run({ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed X" });
 		const satisfied = await run({ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e1"] });
 		expect(satisfied.details.applied).toBe(true);
 

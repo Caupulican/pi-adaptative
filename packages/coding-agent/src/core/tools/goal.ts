@@ -639,9 +639,13 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 
 			const summary = summarizeGoalState(nextState, { action, openTaskSteps: deps.getOpenTaskSteps?.() });
-			const text = dispatchNote
-				? `goal ${input.action} recorded.\n${summary}\n${dispatchNote}`
-				: `goal ${input.action} recorded.\n${summary}`;
+			const evidenceNote =
+				action.action === "add_evidence"
+					? `Evidence '${action.evidenceId}' recorded (${action.kind === "user" ? "user-confirmed" : action.verified === true ? "verified" : "unverified"}).`
+					: "";
+			const text = [`goal ${input.action} recorded.`, evidenceNote, summary, dispatchNote]
+				.filter((line): line is string => Boolean(line))
+				.join("\n");
 			return {
 				content: [{ type: "text" as const, text }],
 				details: {
