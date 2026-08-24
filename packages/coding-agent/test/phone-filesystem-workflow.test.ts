@@ -231,6 +231,7 @@ describe("non-native phone filesystem workflow", () => {
 		const sourcePath = join(cwd, "source.txt");
 		const targetPath = join(cwd, "target.txt");
 		const needlePath = join(cwd, "needle.txt");
+		const expectedTaskIds = ["tool-task-1", "tool-task-2", "tool-task-3"];
 		await writeFile(sourcePath, "source-before", "utf8");
 		await writeFile(targetPath, "target-before", "utf8");
 		await writeFile(needlePath, "needle", "utf8");
@@ -249,6 +250,10 @@ describe("non-native phone filesystem workflow", () => {
 				phoneCall("bash", { command: "ls -la" }),
 				phoneCall("bash", { command: "ls -R" }),
 			].join("\n"),
+			// Wait all three handoffs in one text-protocol batch. A task may already have completed
+			// and auto-delivered by this boundary; tool_task wait remains authoritative for its output.
+			[...expectedTaskIds.map((taskId) => phoneCall("tool_task", { action: "wait", taskId }))].join("\n"),
+			"mixed batch reconciled",
 		];
 		const created = await createPhoneWorkflowSession(cwd, agentDir, responses);
 		// Exercise the production handoff seam deterministically. The first three calls are the
@@ -256,33 +261,17 @@ describe("non-native phone filesystem workflow", () => {
 		// background tasks so this regression covers multiple terminal waits without making the
 		// read/edit ordering timing-dependent.
 		const originalSubscribeHandoff = created.session.agent.subscribeToolCallHandoffRequest;
-		const waitedTaskIds = new Set<string>();
 		created.session.agent.subscribeToolCallHandoffRequest = (toolCallId, request) => {
 			const unsubscribe = originalSubscribeHandoff?.(toolCallId, request) ?? (() => {});
 			if (/(?:-4|-5|-6)$/u.test(toolCallId)) queueMicrotask(request);
 			return unsubscribe;
 		};
-		const waitForBackgroundTaskOrComplete = (context: Context): string => {
-			const contextText = `${context.systemPrompt ?? ""}\n${JSON.stringify(context.messages)}`;
-			const taskIds = [...contextText.matchAll(/\btool-task-[1-9]\d*\b/gu)].map((match) => match[0]);
-			const nextTaskId = taskIds.find((taskId) => !waitedTaskIds.has(taskId));
-			if (!nextTaskId) throw new Error("phone workflow expected another background task before reconciliation");
-			waitedTaskIds.add(nextTaskId);
-			return phoneCall("tool_task", { action: "wait", taskId: nextTaskId });
-		};
-		responses.push(
-			waitForBackgroundTaskOrComplete,
-			waitForBackgroundTaskOrComplete,
-			waitForBackgroundTaskOrComplete,
-			"mixed batch reconciled",
-		);
 
 		try {
 			await created.session.prompt("Run the mixed filesystem batch.");
 
 			expect(await readFile(targetPath, "utf8")).toBe("target-after");
-			expect(waitedTaskIds).toEqual(new Set(["tool-task-1", "tool-task-2", "tool-task-3"]));
-			expect(responses).toHaveLength(5);
+			expect(responses).toHaveLength(3);
 			expect(created.responseIndex).toBe(responses.length);
 			const assistantMessages = created.session.messages.filter((message) => message.role === "assistant");
 			expect(
@@ -354,7 +343,7 @@ describe("non-native phone filesystem workflow", () => {
 				{ command: "ls -R" },
 			]);
 			expect(calls.slice(6).map((call) => call.arguments)).toEqual([
-				...Array.from(waitedTaskIds, (taskId) => ({ action: "wait", taskId })),
+				...expectedTaskIds.map((taskId) => ({ action: "wait", taskId })),
 			]);
 		} finally {
 			await created.dispose();
