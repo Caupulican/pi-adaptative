@@ -495,6 +495,7 @@ describe("tool-owned failure recovery contracts", () => {
 		const command = "vitest --run test/focused.test.ts";
 		let verificationRuns = 0;
 		const bash = createBashTool(cwd, {
+			platform: "linux",
 			operations: {
 				exec: async (shellCommand, _cwd, options) => {
 					if (shellCommand === command) {
