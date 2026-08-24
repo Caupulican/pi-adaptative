@@ -139,6 +139,54 @@ export function tokenizeShellCommand(
 	return tokenize(command, { operators: true, dialect });
 }
 
+export interface ShellInvocationPrefixResult {
+	args: string[];
+	nonExecutingQuery: boolean;
+}
+
+/** Parse shell environment assignments and supported command/env wrappers from one invocation. */
+export function parseShellInvocationPrefixes(args: string[]): ShellInvocationPrefixResult {
+	let index = 0;
+	let nonExecutingQuery = false;
+	while (index < args.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(args[index] ?? "")) index++;
+	if (args[index] === "command") {
+		index++;
+		while (index < args.length && args[index].startsWith("-")) {
+			if (args[index] === "-v" || args[index] === "-V") nonExecutingQuery = true;
+			index++;
+		}
+	}
+	if (args[index] === "env") {
+		index++;
+		while (index < args.length) {
+			const arg = args[index];
+			if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(arg)) {
+				index++;
+				continue;
+			}
+			if (arg === "--") {
+				index++;
+				break;
+			}
+			if (arg === "-u" || arg === "--unset" || arg === "-C" || arg === "--chdir") {
+				index += 2;
+				continue;
+			}
+			if (arg.startsWith("--unset=") || arg.startsWith("--chdir=") || arg.startsWith("-")) {
+				index++;
+				continue;
+			}
+			break;
+		}
+	}
+	return { args: args.slice(index), nonExecutingQuery };
+}
+
+/** Strip shell environment assignments and the supported command/env wrappers from one invocation. */
+export function stripShellInvocationPrefixes(args: string[]): string[] {
+	return parseShellInvocationPrefixes(args).args;
+}
+
 export interface ParsedCommand {
 	envVars: Record<string, string>;
 	coreCommandTokens: string[];

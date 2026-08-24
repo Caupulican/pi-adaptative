@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
-import { tokenizeShellCommand } from "./shell-command-parser.ts";
+import { stripShellInvocationPrefixes, tokenizeShellCommand } from "./shell-command-parser.ts";
 
 export const BROAD_SEARCH_OUTPUT_ROUTE = "route-to-file" as const;
 
@@ -390,22 +390,8 @@ function commandName(value: string): string {
 		.replace(/\.exe$/u, "");
 }
 
-function stripInvocationPrefixes(args: string[]): string[] {
-	let index = 0;
-	while (index < args.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(args[index])) index++;
-	if (args[index] === "command") {
-		index++;
-		while (args[index]?.startsWith("-")) index++;
-	}
-	if (args[index] === "env") {
-		index++;
-		while (args[index]?.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(args[index] ?? "")) index++;
-	}
-	return args.slice(index);
-}
-
 function assessInvocation(args: string[], cwd: string, readsPipe: boolean): SearchScopeAssessment {
-	const invocation = stripInvocationPrefixes(args);
+	const invocation = stripShellInvocationPrefixes(args);
 	const name = commandName(invocation[0] ?? "");
 	const commandArgs = invocation.slice(1);
 	switch (name) {
@@ -507,7 +493,7 @@ export function expectedContentSearchNoMatch(
 
 	// `prior && search` can return the prior command's exit 1 without executing the search.
 	if (!finalInvocation || finalInvocationConnector === "&&") return undefined;
-	const normalizedInvocation = stripInvocationPrefixes(finalInvocation);
+	const normalizedInvocation = stripShellInvocationPrefixes(finalInvocation);
 	const name = commandName(normalizedInvocation[0] ?? "");
 	if (name === "rg" || name === "ripgrep") return "rg";
 	return name === "grep" ? "grep" : undefined;

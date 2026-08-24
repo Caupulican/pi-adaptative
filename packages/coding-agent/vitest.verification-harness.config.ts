@@ -9,6 +9,9 @@ export default mergeConfig(
 				provider: "v8",
 				all: true,
 				include: [
+					"src/core/tools/managed-shell-preparation.ts",
+					"src/core/bash-execution-controller.ts",
+					"src/utils/shell.ts",
 					"src/core/tools/shell-test-command.ts",
 					"src/core/tools/shell-output-projection.ts",
 					"src/core/tools/bash.ts",
@@ -25,6 +28,9 @@ export default mergeConfig(
 				reportsDirectory: "coverage/verification-harness",
 				thresholds: {
 					perFile: true,
+					"src/core/tools/managed-shell-preparation.ts": { statements: 97, branches: 83, functions: 100, lines: 100 },
+					"src/core/bash-execution-controller.ts": { statements: 82, branches: 83, functions: 83, lines: 82 },
+					"src/utils/shell.ts": { statements: 38, branches: 35, functions: 58, lines: 39 },
 					"src/core/tools/shell-test-command.ts": { statements: 96, branches: 91, functions: 100, lines: 99 },
 					"src/core/tools/shell-output-projection.ts": { statements: 89, branches: 77, functions: 100, lines: 91 },
 					"src/core/tools/bash.ts": { statements: 61, branches: 55, functions: 61, lines: 62 },

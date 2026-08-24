@@ -26,6 +26,22 @@ def _to_posix(path: str) -> str:
     return path.replace("\\", "/")
 
 
+def _is_link_or_reparse(path: str) -> bool:
+    if os.path.islink(path):
+        return True
+    is_junction = getattr(os.path, "isjunction", None)
+    if is_junction is not None and is_junction(path):
+        return True
+    try:
+        return bool(getattr(os.lstat(path), "st_reparse_tag", 0))
+    except OSError:
+        return False
+
+
+def _directory_identity(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
 def _split_flags(argv: list[str], allowed: set[str], name: str) -> tuple[set[str], list[str]]:
     """Parse `-x`/`-xy` short flags plus `--` end-of-options; positional args pass through.
 
@@ -52,7 +68,7 @@ def ls(ctx: "BuiltinContext") -> int:
     # `-l` is a compatibility no-op: this bounded engine always emits one name per
     # line, but accepting the ubiquitous `ls -la` spelling keeps the Python tier
     # aligned with the PowerShell floor when chaining routes the command here.
-    flags, positional = _split_flags(ctx.argv[1:], {"a", "A", "1", "l", "r"}, "ls")
+    flags, positional = _split_flags(ctx.argv[1:], {"a", "A", "1", "l", "r", "R"}, "ls")
     if len(positional) > 1:
         if any(os.path.isdir(resolve_request_path(ctx.cwd, p)) for p in positional):
             raise UnsupportedConstruct("unsupported-flag", "ls: only one directory operand is supported")
@@ -78,23 +94,55 @@ def ls(ctx: "BuiltinContext") -> int:
         return 1
     show_all = "a" in flags
     almost_all = "A" in flags
-    entries: list[str] = []
-    if show_all:
-        entries.append(".")
-        entries.append("..")
-    for name in os.listdir(abs_target):
-        if name.startswith(".") and not (show_all or almost_all):
-            continue
-        entries.append(name)
-    entries.sort()
-    if "r" in flags:
-        entries.reverse()
-    lines = []
-    for name in entries:
-        full = os.path.join(abs_target, name)
-        suffix = "/" if os.path.isdir(full) else ""
-        lines.append(name + suffix)
-    ctx.stdout.write("".join(line + "\n" for line in lines).encode())
+    recursive = "R" in flags
+
+    def list_entries(directory: str) -> list[str]:
+        entries: list[str] = []
+        if show_all:
+            entries.extend([".", ".."])
+        for name in os.listdir(directory):
+            if name.startswith(".") and not (show_all or almost_all):
+                continue
+            entries.append(name)
+        entries.sort()
+        if "r" in flags:
+            entries.reverse()
+        return entries
+
+    sections: list[str] = []
+    visited_directories: set[str] = set()
+
+    def render_section(directory: str, display_directory: str, entries: list[str]) -> str:
+        lines: list[str] = []
+        for name in entries:
+            full = os.path.join(directory, name)
+            suffix = "/" if os.path.isdir(full) else ""
+            lines.append(name + suffix)
+        rendered = "".join(line + "\n" for line in lines)
+        return f"{_to_posix(display_directory)}:\n{rendered}" if recursive else rendered
+
+    def append_section(directory: str, display_directory: str) -> None:
+        identity = _directory_identity(directory)
+        if identity in visited_directories:
+            return
+        visited_directories.add(identity)
+        entries = list_entries(directory)
+        sections.append(render_section(directory, display_directory, entries))
+        if not recursive:
+            return
+        for name in entries:
+            if name in (".", ".."):
+                continue
+            full = os.path.join(directory, name)
+            if os.path.isdir(full) and not _is_link_or_reparse(full):
+                child_display = os.path.join(display_directory, name)
+                append_section(full, child_display)
+
+    if recursive:
+        append_section(abs_target, target)
+        ctx.stdout.write("\n".join(sections).encode())
+    else:
+        ctx.stdout.write(render_section(abs_target, target, list_entries(abs_target)).encode())
     return 0
 
 

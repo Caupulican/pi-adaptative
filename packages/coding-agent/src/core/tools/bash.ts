@@ -26,6 +26,7 @@ import {
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
+import type { ManagedToolResolver } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
 	type FileFailureRecoveryAuthority,
@@ -35,6 +36,7 @@ import {
 } from "./file-failure-recovery.ts";
 import { withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
+import { prepareManagedShellEnvironment } from "./managed-shell-preparation.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import {
@@ -343,6 +345,8 @@ export interface BashToolOptions {
 	prewarmWindowsShell?: boolean;
 	/** Test/embedding hook: override the managed directory used for complete command output. */
 	outputDirectory?: string;
+	/** Injectable managed-tool resolver for local shell preparation. */
+	managedToolResolver?: ManagedToolResolver;
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -914,6 +918,13 @@ function createShellToolDefinition(
 				const spawnContext = resolveSpawnContext(resolvedCommand, effectiveCwd, spawnHook);
 				if (routesWindowsContract) {
 					spawnContext.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), spawnContext.env);
+				}
+				if (options?.operations === undefined) {
+					spawnContext.env = await prepareManagedShellEnvironment(
+						spawnContext.command,
+						spawnContext.env,
+						options?.managedToolResolver,
+					);
 				}
 
 				let exitCode: number | null;

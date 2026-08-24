@@ -10,9 +10,12 @@
 import { randomUUID } from "node:crypto";
 import type { Agent, BashExecutionMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { getShellEnv } from "../utils/shell.ts";
+import type { ManagedToolResolver } from "../utils/tools-manager.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { type BashOperations, createLocalPlatformShellOperations, resolveCommandTimeoutSeconds } from "./tools/bash.ts";
+import { prepareManagedShellEnvironment } from "./tools/managed-shell-preparation.ts";
 
 export interface BashExecutionControllerDeps {
 	getAgent(): Agent;
@@ -37,6 +40,8 @@ export interface BashExecutionOptions {
 	timeout?: number;
 	/** Route complex/state-mutating Bash constructs to the Python engine on Windows. Default: true. */
 	pythonEngine?: boolean;
+	/** Injectable managed-tool resolver for local shell preparation. */
+	managedToolResolver?: ManagedToolResolver;
 }
 
 export class BashExecutionController {
@@ -64,7 +69,9 @@ export class BashExecutionController {
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
 		const cwd = this.deps.getSessionManager().getCwd();
-		const environment: NodeJS.ProcessEnv = { ...process.env, ...this.deps.getEnvironment?.(cwd) };
+		const inheritedEnvironment: NodeJS.ProcessEnv = { ...process.env, ...this.deps.getEnvironment?.(cwd) };
+		const environment: NodeJS.ProcessEnv =
+			options?.operations === undefined ? getShellEnv(inheritedEnvironment, platform) : inheritedEnvironment;
 		delete environment.BW_SESSION;
 		const operations = createLocalPlatformShellOperations(
 			{
@@ -78,12 +85,16 @@ export class BashExecutionController {
 		);
 
 		try {
+			const preparedEnvironment =
+				options?.operations === undefined
+					? await prepareManagedShellEnvironment(command, environment, options?.managedToolResolver)
+					: environment;
 			const result = await executeBashWithOperations(command, cwd, operations, {
 				onChunk,
 				signal: abortController.signal,
 				enableGitFilter,
 				timeout: resolveCommandTimeoutSeconds(options?.timeout),
-				environment,
+				environment: preparedEnvironment,
 				windowsCompatibleEncoding: platform === "win32",
 			});
 

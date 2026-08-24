@@ -272,6 +272,14 @@ describe("non-native phone filesystem workflow", () => {
 			expect(toolResults[2]?.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")).toContain(
 				'"failure_code":"invalid_arguments"',
 			);
+			const bashOutputs = toolResults
+				.slice(3)
+				.map((result) => result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"));
+			expect(bashOutputs[0]).toContain("needle");
+			expect(bashOutputs[0]?.toLowerCase()).not.toContain("command not found");
+			expect(bashOutputs[2]).toContain(".:\n");
+			expect(bashOutputs[2]).toContain("source.txt");
+			expect(bashOutputs[2]).toContain("needle.txt");
 			const calls = created.session.messages
 				.filter((message) => message.role === "assistant")
 				.flatMap((message) => message.content)

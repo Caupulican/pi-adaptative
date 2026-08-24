@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BashExecutionController } from "../src/core/bash-execution-controller.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
@@ -179,6 +179,83 @@ describe("BashExecutionController", () => {
 			} finally {
 				await disposeShellExecutionSessionAndWait(sessionKey);
 				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"keeps POSIX session cwd and exports across managed rg preparation",
+		async () => {
+			const originalEnvironment = { ...process.env };
+			const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-controller-managed-agent-")));
+			const binDir = join(agentDir, "bin");
+			const credentialBinDir = join(agentDir, "credential-bin");
+			const subDir = join(agentDir, "project");
+			const sessionKey = `controller-managed-rg-${Math.random().toString(36).slice(2)}`;
+			mkdirSync(binDir);
+			mkdirSync(credentialBinDir);
+			mkdirSync(subDir);
+			writeFileSync(join(subDir, "needle.txt"), "needle\n");
+			const credentialToolPath = join(credentialBinDir, "credential-tool");
+			writeFileSync(credentialToolPath, "#!/bin/sh\nprintf '%s' credential-path\n", { mode: 0o755 });
+			chmodSync(credentialToolPath, 0o755);
+			const rgPath = join(binDir, "rg");
+			writeFileSync(
+				rgPath,
+				'#!/bin/sh\npattern=$1\nshift\nif [ $# -gt 0 ]; then cat "$1"; else cat; fi | grep "$pattern"\n',
+				{ mode: 0o755 },
+			);
+			chmodSync(rgPath, 0o755);
+			process.env.PI_ADAPTATIVE_CODING_AGENT_DIR = agentDir;
+			try {
+				const controller = new BashExecutionController({
+					getAgent: () => ({ state: { messages: [] } }) as never,
+					getSessionManager: () => ({ getCwd: () => agentDir, appendMessage: () => undefined }) as never,
+					getSettingsManager: () =>
+						({ getShellCommandPrefix: () => undefined, getShellPath: () => undefined }) as never,
+					isStreaming: () => false,
+					getShellSessionKey: () => sessionKey,
+					getEnvironment: () => ({
+						PATH: [credentialBinDir, originalEnvironment.PATH].filter(Boolean).join(delimiter),
+						PI_CONTROLLER_CREDENTIAL: "present",
+					}),
+				});
+				const resolver = async () => ({ status: "available" as const, path: rgPath });
+
+				const setup = await controller.executeBash(
+					`cd '${subDir}' && export PI_MANAGED_SESSION_MARKER=survives`,
+					undefined,
+					{ platform: "linux", managedToolResolver: resolver },
+				);
+				expect(setup.exitCode).toBe(0);
+				const search = await controller.executeBash("rg 'needle' needle.txt | rg 'needle'", undefined, {
+					platform: "linux",
+					managedToolResolver: resolver,
+				});
+				expect(search.exitCode).toBe(0);
+				expect(search.output).toContain("needle");
+				const credentialPath = await controller.executeBash("credential-tool", undefined, {
+					platform: "linux",
+					managedToolResolver: resolver,
+				});
+				expect(credentialPath.output).toBe("credential-path");
+				const cwd = await controller.executeBash("pwd", undefined, {
+					platform: "linux",
+					managedToolResolver: resolver,
+				});
+				expect(realpathSync(cwd.output.trim())).toBe(subDir);
+				const marker = await controller.executeBash("printf '%s' \"$PI_MANAGED_SESSION_MARKER\"", undefined, {
+					platform: "linux",
+					managedToolResolver: resolver,
+				});
+				expect(marker.output).toBe("survives");
+			} finally {
+				await disposeShellExecutionSessionAndWait(sessionKey);
+				for (const key of Object.keys(process.env)) {
+					if (!(key in originalEnvironment)) delete process.env[key];
+				}
+				Object.assign(process.env, originalEnvironment);
+				rmSync(agentDir, { recursive: true, force: true });
 			}
 		},
 	);

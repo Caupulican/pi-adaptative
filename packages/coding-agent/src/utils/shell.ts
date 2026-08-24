@@ -145,7 +145,10 @@ export function getShellConfig(
 	return { shell: resolved.shell, args: [...resolved.args] };
 }
 
-export function getShellEnv(): NodeJS.ProcessEnv {
+export function getShellEnv(
+	environment: NodeJS.ProcessEnv = process.env,
+	targetPlatform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
 	if (!managedJscpdProvisionAttempted) {
 		managedJscpdProvisionAttempted = true;
 		try {
@@ -155,14 +158,22 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 		}
 	}
 	const binDir = getBinDir();
-	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-	const currentPath = process.env[pathKey] ?? "";
+	const pathKeys =
+		targetPlatform === "win32" ? Object.keys(environment).filter((key) => key.toLowerCase() === "path") : ["PATH"];
+	const pathKey = targetPlatform === "win32" ? (pathKeys.at(-1) ?? "PATH") : "PATH";
+	const currentPath = environment[pathKey] ?? "";
 	const pathEntries = currentPath.split(delimiter).filter(Boolean);
 	const hasBinDir = pathEntries.includes(binDir);
 	const updatedPath = hasBinDir ? currentPath : [binDir, currentPath].filter(Boolean).join(delimiter);
 
+	const normalizedEnvironment = { ...environment };
+	if (targetPlatform === "win32") {
+		for (const duplicateKey of pathKeys) {
+			if (duplicateKey !== pathKey) delete normalizedEnvironment[duplicateKey];
+		}
+	}
 	return {
-		...process.env,
+		...normalizedEnvironment,
 		[pathKey]: updatedPath,
 	};
 }

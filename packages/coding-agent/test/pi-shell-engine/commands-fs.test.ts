@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -110,6 +110,104 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 			const res = p(python as string, "ls", ["ls", "-r"]);
 			expect(res.exitCode).toBe(0);
 			expect(res.stdout).toBe("b.txt\na.txt\n");
+		});
+
+		it("-R recursively lists nested directories with deterministic section headers", () => {
+			writeFileSync(join(root, "root.txt"), "");
+			mkdirSync(join(root, "sub"));
+			writeFileSync(join(root, "sub", "child.txt"), "");
+			mkdirSync(join(root, "sub", "nested"));
+			writeFileSync(join(root, "sub", "nested", "deep.txt"), "");
+			const res = p(python as string, "ls", ["ls", "-R"]);
+			expect(res.error).toBeNull();
+			expect(res.exitCode).toBe(0);
+			expect(res.stdout).toBe(".:\nroot.txt\nsub/\n\n./sub:\nchild.txt\nnested/\n\n./sub/nested:\ndeep.txt\n");
+		});
+
+		it("-R lists directory links without following cycles", ({ skip }) => {
+			mkdirSync(join(root, "real"));
+			writeFileSync(join(root, "real", "marker.txt"), "");
+			const linkName = process.platform === "win32" ? "junction" : "symlink";
+			try {
+				if (process.platform === "win32") {
+					symlinkSync(root, join(root, linkName), "junction");
+				} else {
+					symlinkSync(root, join(root, linkName), "dir");
+				}
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				skip(`directory link creation unavailable: ${reason}`);
+				return;
+			}
+
+			const res = p(python as string, "ls", ["ls", "-R"]);
+			expect(res.error).toBeNull();
+			expect(res.exitCode).toBe(0);
+			const topEntries = [linkName, "real"]
+				.sort()
+				.map((entry) => `${entry}/\n`)
+				.join("");
+			expect(res.stdout).toBe(`.:\n${topEntries}\n./real:\nmarker.txt\n`);
+		});
+
+		it("lowercase -r remains reverse sorting without recursion", () => {
+			writeFileSync(join(root, "root.txt"), "");
+			mkdirSync(join(root, "sub"));
+			writeFileSync(join(root, "sub", "child.txt"), "");
+			const res = p(python as string, "ls", ["ls", "-r"]);
+			expect(res.exitCode).toBe(0);
+			expect(res.stdout).toBe("sub/\nroot.txt\n");
+		});
+
+		it("-Rr reverses entries within every section and recursive traversal order", () => {
+			writeFileSync(join(root, "root.txt"), "");
+			mkdirSync(join(root, "a-dir"));
+			writeFileSync(join(root, "a-dir", "aa.txt"), "");
+			mkdirSync(join(root, "b-dir"));
+			writeFileSync(join(root, "b-dir", "bb.txt"), "");
+			writeFileSync(join(root, "b-dir", "cc.txt"), "");
+			const res = p(python as string, "ls", ["ls", "-Rr"]);
+			expect(res.exitCode).toBe(0);
+			expect(res.stdout).toBe(".:\nroot.txt\nb-dir/\na-dir/\n\n./b-dir:\ncc.txt\nbb.txt\n\n./a-dir:\naa.txt\n");
+		});
+
+		it("nonrecursive ls renders entry lines directly for unusual directory names", () => {
+			const unusual = "directory:\nwith-newline";
+			mkdirSync(join(root, unusual));
+			writeFileSync(join(root, unusual, "child.txt"), "");
+			const res = p(python as string, "ls", ["ls", unusual]);
+			expect(res.exitCode).toBe(0);
+			expect(res.stdout).toBe("child.txt\n");
+		});
+
+		it("-Ra and -RA include hidden entries and recurse into hidden directories", () => {
+			mkdirSync(join(root, ".hidden-dir"));
+			writeFileSync(join(root, ".hidden-file"), "");
+			writeFileSync(join(root, ".hidden-dir", ".deep-hidden"), "");
+			writeFileSync(join(root, ".hidden-dir", "visible.txt"), "");
+			const all = p(python as string, "ls", ["ls", "-Ra"]);
+			expect(all.exitCode).toBe(0);
+			expect(all.stdout).toContain(".hidden-dir/\n");
+			expect(all.stdout).toContain(".hidden-file\n");
+			expect(all.stdout).toContain("./.hidden-dir:\n./\n../\n.deep-hidden\nvisible.txt\n");
+
+			const almostAll = p(python as string, "ls", ["ls", "-RA"]);
+			expect(almostAll.exitCode).toBe(0);
+			expect(almostAll.stdout).toContain(".hidden-dir/\n");
+			expect(almostAll.stdout).toContain(".hidden-file\n");
+			expect(almostAll.stdout).toContain("./.hidden-dir:\n.deep-hidden\nvisible.txt\n");
+			expect(almostAll.stdout).not.toContain("./.hidden-dir:\n./\n");
+		});
+
+		it("-R preserves missing and non-directory errors", () => {
+			const missing = p(python as string, "ls", ["ls", "-R", "nope"]);
+			expect(missing.exitCode).toBe(1);
+			expect(missing.stdout).toContain("No such file or directory");
+
+			writeFileSync(join(root, "file.txt"), "");
+			const file = p(python as string, "ls", ["ls", "-R", "file.txt"]);
+			expect(file.exitCode).toBe(1);
+			expect(file.stdout).toContain("Not a directory");
 		});
 
 		it("-1 is accepted (no-op formatting change)", () => {
