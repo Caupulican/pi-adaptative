@@ -316,6 +316,14 @@ Use `/settings` to modify common options, or edit JSON files directly:
 
 See [docs/settings.md](docs/settings.md) for all options.
 
+### Automatic durable learning
+
+Eligible root turns carry one provider-only reflection cue inside the existing model request; Pi does not create a separate learner request. The cue asks the active model to revalidate durable intent, corrections, repeated patterns, reusable procedures, and verified project knowledge. Canonical project truth belongs in OKF. ICM/workflow context keeps status plus OKF references instead of copying that truth; preferences, compact hot facts, and reusable procedures route to USER, MEMORY, and skills respectively.
+
+Pi records the installed runtime version and durable-memory policy in `~/.pi/agent/state/durable-learning-state.json`. First observation, runtime changes, and policy changes schedule evidence-gated review; version movement alone never authorizes a semantic write. State is bounded, lock-serialized, and root-only. Child and worker sessions create no durable-learning state footprint. Unsupported or oversized state remains byte-preserved and read-only while ordinary turns continue.
+
+Disable this behavior with `autoLearn.enabled: false`, `autoLearn.reflectionReview: false`, `PI_NATIVE_REFLECTION=0`, or `PI_AUTO_LEARN_CHILD=1`. See [docs/durable-learning-state-design.md](docs/durable-learning-state-design.md) for the state, claim, recovery, and compatibility contract.
+
 ### Telemetry and update checks
 
 Pi has two separate startup features:

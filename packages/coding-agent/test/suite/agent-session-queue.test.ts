@@ -36,6 +36,7 @@ async function createWaitingHarness(
 		},
 	};
 	const harness = await createHarness({
+		settings: { autoLearn: { reflectionReview: false } },
 		tools: [waitTool, ...(options.tools ?? [])],
 		extensionFactories: options.extensionFactories,
 	});

@@ -189,7 +189,7 @@ export interface AutoLearnSettings {
 	leaseMinutes?: number; // default: 90 for background learner state leases
 	maxConcurrentLearners?: number; // preset default: 1 per session tenant
 	applyHighConfidence?: boolean; // default: false unless the learning extension config opts in
-	reflectionReview?: boolean; // default: true when Auto Learn is enabled - queue a root-session cue for the next ordinary turn after corrective/complex turns
+	reflectionReview?: boolean; // default: true when Auto Learn is enabled - include one root-session cue on eligible external turns; completed-turn signals coalesce
 	reflectionMinToolCalls?: number; // default: 12 tool calls in a turn before a root-session reflection cue is queued
 	reflectionCooldownMinutes?: number; // default: 1440 per session tenant between root-session reflection cues
 	complexTaskToolCalls?: number; // default: 12 tool calls before bypassing reflection cooldown as a complex task

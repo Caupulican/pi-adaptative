@@ -499,7 +499,9 @@ export const PACKAGE_NAME: string = pkg.name || "@caupulican/pi-adaptative";
 export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
-export const VERSION: string = pkg.version || "0.0.0";
+/** True only when installed package metadata supplied the runtime identity. */
+export const VERSION_SOURCE_AVAILABLE: boolean = typeof pkg.version === "string" && pkg.version.trim().length > 0;
+export const VERSION: string = VERSION_SOURCE_AVAILABLE ? (pkg.version as string) : "0.0.0";
 
 /**
  * Build a POSIX-valid environment-variable name from an app name and a suffix.

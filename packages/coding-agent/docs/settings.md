@@ -272,7 +272,7 @@ Environment kill switches override their diagnostic layers: `PI_TOOL_REPAIR_DISA
 
 ### Auto Learn Advanced
 
-Native reflection belongs only to the main/orchestrator session. Eligible turns append a durable cue to the orchestrator's next ordinary current-session provider turn; reflection never starts a separate/background model request. Workers cannot run reflection or mutate durable memory; they return evidence to the parent, which decides what should be retained. A fresh main session uses this audited learning policy:
+Native reflection belongs only to the main/orchestrator session. Each eligible external root turn carries one provider-only cue in that same current-session request; completed-turn evidence coalesces into the next eligible cue. Reflection never starts a separate/background model request. Workers cannot run reflection or mutate durable memory; they return evidence to the parent, which decides what should be retained. A fresh main session uses this audited learning policy:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -288,7 +288,7 @@ Safe `memory_add`, `okf_add`, and `okf_organize` writes can therefore land auton
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `autoLearn.enabled` | boolean | `true` in every autonomy mode | Enable root-session current-turn reflection. Disabling it immediately dismisses any pending cue and removes the standing reflection contract; re-enabling does not resurrect dismissed evidence. Automatic reflection never schedules a separate or background model request. |
+| `autoLearn.enabled` | boolean | `true` in every autonomy mode | Enable root-session current-turn reflection. Disabling it immediately dismisses the session cue and releases any exact version claim. Re-enabling lets the next external root turn reconcile a still-pending version transition, but does not resurrect ordinary dismissed cue evidence. Automatic reflection never schedules a separate or background model request. |
 | `autoLearn.model` | string | `modelRouter.learningModel`, otherwise `"active"` | Legacy/direct override for the background learner; `"active"` uses the current session model, otherwise use a `pi --model` pattern |
 | `autoLearn.longSessionMessages` | number | `32` | Readiness threshold after this many message entries in the active branch for an eligible learner run |
 | `autoLearn.longSessionContextPercent` | number | `70` | Readiness threshold when current context usage reaches this percent |
@@ -296,9 +296,11 @@ Safe `memory_add`, `okf_add`, and `okf_organize` writes can therefore land auton
 | `autoLearn.leaseMinutes` | number | `90` | Shared-state lease duration for a running background learner |
 | `autoLearn.maxConcurrentLearners` | number | `1` | Maximum running Auto Learn background learners per session tenant |
 | `autoLearn.applyHighConfidence` | boolean | `false` | Allow the learner to apply high-confidence memory candidates; broader write authority is controlled by `autonomy.mode` |
-| `autoLearn.reflectionReview` | boolean | `true` | When enabled, allow root-only automatic reflection cues after eligible corrective or complex turns; the cue is consumed by the next ordinary current-session turn |
+| `autoLearn.reflectionReview` | boolean | `true` | Allow root-only provider cues on eligible external turns. Corrective, durable, complex, and version-transition evidence coalesces into the one current cue; accepted delivery is distinct from strict terminal review completion. |
 | `autoLearn.reflectionMinToolCalls` | number | `12` | Queue a root-session reflection cue after this many tool calls in one completed turn |
 | `autoLearn.reflectionCooldownMinutes` | number | `1440` | Per-session-tenant cooldown between automatic root-session reflection cues; corrective and complex-task signals can bypass it |
+
+Eligible root sessions also reconcile `~/.pi/agent/state/durable-learning-state.json`, which records only bounded runtime/memory-policy transition control state. First observation and version changes are audit cues, not semantic-write authority. Child and worker sessions receive no state owner; unsupported or oversized state remains byte-preserved and read-only. Canonical project truth routes to OKF, while ICM/workflow context keeps status plus OKF references instead of a duplicate fact copy.
 
 Use `/settings` → **Model Router** for the preferred place to choose the learner/skill-creator model. Automatic reflection uses the orchestrator's current session turn rather than a separate or background model request. Use `/settings` → **Auto Learn Advanced** for readiness/cooldown/concurrency overrides and the legacy direct `autoLearn.model` override. Use `/autonomy status` for the compact preset dashboard, `/auto-learn status` to inspect readiness and running leases, or `/auto-learn run` to explicitly start one bounded background learner immediately. Workers never receive reflection or durable-memory mutation authority; they return evidence to the root orchestrator.
 

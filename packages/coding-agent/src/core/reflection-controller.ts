@@ -35,6 +35,14 @@ import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./a
 import { PI_OKF_TYPES, type PiOkfType } from "./context/okf-memory.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import {
+	type DurableLearningClaimToken,
+	type DurableLearningCueAttachOutcome,
+	type DurableLearningReviewMetadata,
+	type DurableLearningState,
+	isDurableLearningClaimToken,
+	isDurableLearningReviewMetadata,
+} from "./learning/durable-learning-state.ts";
+import {
 	APPLY_WRITE_REFUSED_REASON_CODE,
 	appendLearningAuditSnapshot,
 	contradictionsForReflectionWrite,
@@ -123,6 +131,14 @@ export interface ReflectionControllerDeps {
 	getCwd?(): string;
 	/** Already-loaded root skill universe; avoids a second unbounded filesystem discovery during reflection. */
 	getSkillsForAudit?(): readonly Skill[];
+	/** Root-owned durable version transition state; omitted by legacy or test hosts. */
+	getDurableLearningState?(): DurableLearningState | undefined;
+	/** Installed runtime identity used only for root-owned durable transition detection. */
+	getRuntimeVersion?(): string | undefined;
+	/** Versioned durable-memory interpretation policy. */
+	getMemoryPolicyVersion?(): string | undefined;
+	/** Bounded host warning sink for fail-safe state degradation. */
+	warn?(message: string): void;
 }
 
 // reasonCode when an automatic skill promotion is blocked by an overlap with an existing skill
@@ -135,7 +151,7 @@ export const SKILL_AUDIT_UNAVAILABLE_REASON_CODE = "skill_audit_unavailable";
 export const CURRENT_TURN_REFLECTION_CUSTOM_TYPE = "reflection_cue";
 export const CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE = "reflection_cue_state";
 
-export type CurrentTurnReflectionTrigger = "root-turn" | Exclude<DemandSignals["trigger"], "none">;
+export type CurrentTurnReflectionTrigger = "root-turn" | "version-change" | Exclude<DemandSignals["trigger"], "none">;
 
 export interface CurrentTurnReflectionCueState {
 	version: 1;
@@ -145,6 +161,13 @@ export interface CurrentTurnReflectionCueState {
 	triggers: CurrentTurnReflectionTrigger[];
 	createdAt: string;
 	updatedAt: string;
+	/** Provider-hidden token proving exact ownership of one version transition. */
+	versionChange?: {
+		token: DurableLearningClaimToken;
+		metadata: DurableLearningReviewMetadata;
+	};
+	/** Provider-hidden identity of the currently accepted cue-bearing request. */
+	activeRunToken?: string;
 }
 
 export interface CurrentTurnReflectionCuePlan {
@@ -157,12 +180,15 @@ const CURRENT_TURN_REFLECTION_CUE = [
 	"Root reflection contract for this current turn:",
 	"- Decide during this same turn whether the request or resulting evidence warrants durable learning.",
 	"- When warranted, confront existing memory first, then use this root session's memory or skill tools now.",
+	"- Route canonical project semantics and evidence to OKF; keep ICM/workflow context as status plus OKF references, never duplicated project truth.",
+	"- Route stable collaborator preferences to USER, compact hot facts to MEMORY, and reusable procedures to skills.",
 	"- Do not defer reflection, request another model turn, call an isolated completion, or launch a background learner or worker for reflection.",
 	"- When nothing durable is warranted, continue normally and do not mention this cue.",
 ].join("\n");
 
 const CURRENT_TURN_REFLECTION_TRIGGERS = new Set<CurrentTurnReflectionTrigger>([
 	"root-turn",
+	"version-change",
 	"complex",
 	"corrective",
 	"durable",
@@ -183,7 +209,12 @@ function parseCurrentTurnReflectionCueState(value: unknown): CurrentTurnReflecti
 		candidate.triggers.length === 0 ||
 		candidate.triggers.some((trigger) => !CURRENT_TURN_REFLECTION_TRIGGERS.has(trigger)) ||
 		typeof candidate.createdAt !== "string" ||
-		typeof candidate.updatedAt !== "string"
+		typeof candidate.updatedAt !== "string" ||
+		(candidate.activeRunToken !== undefined && typeof candidate.activeRunToken !== "string") ||
+		(candidate.versionChange !== undefined &&
+			(!candidate.versionChange ||
+				!isDurableLearningClaimToken(candidate.versionChange.token) ||
+				!isDurableLearningReviewMetadata(candidate.versionChange.metadata)))
 	) {
 		return undefined;
 	}
@@ -195,7 +226,36 @@ function parseCurrentTurnReflectionCueState(value: unknown): CurrentTurnReflecti
 		triggers: [...new Set(candidate.triggers)],
 		createdAt: candidate.createdAt,
 		updatedAt: candidate.updatedAt,
+		...(candidate.versionChange
+			? {
+					versionChange: {
+						token: { ...candidate.versionChange.token },
+						metadata: { ...candidate.versionChange.metadata },
+					},
+				}
+			: {}),
+		...(candidate.activeRunToken ? { activeRunToken: candidate.activeRunToken } : {}),
 	};
+}
+
+function versionClaimTokensMatch(left: DurableLearningClaimToken, right: DurableLearningClaimToken): boolean {
+	return (
+		left.transitionId === right.transitionId &&
+		left.claimId === right.claimId &&
+		left.ownerId === right.ownerId &&
+		left.runtimeVersion === right.runtimeVersion &&
+		left.memoryPolicyVersion === right.memoryPolicyVersion
+	);
+}
+
+function hasStrictSuccessfulAssistantTerminal(messages: AgentMessage[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message.role !== "assistant") continue;
+		if (message.stopReason !== "stop" || message.errorMessage) return false;
+		return message.content.some((part) => part.type === "text" && part.text.trim().length > 0);
+	}
+	return false;
 }
 
 interface ReflectionApplyResult {
@@ -215,8 +275,11 @@ function parseOkfRollbackTarget(target: string | undefined): { type: PiOkfType; 
 export class ReflectionController {
 	private readonly deps: ReflectionControllerDeps;
 	private readonly unsubscribeSettingsChanges: () => void;
+	private readonly durableLearningOwnerId = randomUUID();
+	private readonly emittedWarningCodes = new Set<string>();
 	private cueStateCacheInitialized = false;
 	private cueStateCache: CurrentTurnReflectionCueState | undefined;
+	private activeRunToken: string | undefined;
 
 	constructor(deps: ReflectionControllerDeps) {
 		this.deps = deps;
@@ -227,6 +290,7 @@ export class ReflectionController {
 	}
 
 	dispose(): void {
+		this.dismissCurrentTurnCue();
 		this.unsubscribeSettingsChanges();
 	}
 
@@ -260,7 +324,19 @@ export class ReflectionController {
 	}
 
 	/** Branch/session navigation invalidates the lazy latest-state index; ordinary appends do not. */
-	invalidateCurrentTurnCueStateCache(): void {
+	invalidateCurrentTurnCueStateCache(options: { releaseActiveClaim?: boolean } = {}): void {
+		if (options.releaseActiveClaim) {
+			const current = this.cueStateCacheInitialized ? this.cueStateCache : undefined;
+			const isActive =
+				current?.status === "pending" ||
+				(current?.status === "consumed" &&
+					!!current.activeRunToken &&
+					current.activeRunToken === this.activeRunToken);
+			if (isActive && current?.versionChange) {
+				this.deps.getDurableLearningState?.()?.releaseClaim(current.versionChange.token);
+			}
+			this.activeRunToken = undefined;
+		}
 		this.cueStateCacheInitialized = false;
 		this.cueStateCache = undefined;
 	}
@@ -271,66 +347,206 @@ export class ReflectionController {
 		this.cueStateCacheInitialized = true;
 	}
 
-	private synchronizeCurrentTurnCueWithSettings(): void {
-		if (this.isAutomaticReflectionEnabled()) return;
-		const current = this.getCurrentTurnCueState();
-		if (current?.status !== "pending") return;
-		this.persistCurrentTurnCueState({
-			...current,
-			revision: current.revision + 1,
-			status: "dismissed",
-			updatedAt: new Date().toISOString(),
-		});
+	private warnOnce(code: string, message: string): void {
+		if (this.emittedWarningCodes.has(code)) return;
+		this.emittedWarningCodes.add(code);
+		this.deps.warn?.(message);
 	}
 
-	/**
-	 * Persist one logical pending cue. Repeated triggers merge into the existing pending snapshot;
-	 * they never append competing pending cues or retain raw transcript text.
-	 */
-	queueCurrentTurnCue(trigger: CurrentTurnReflectionTrigger): boolean {
-		if (!this.isAutomaticReflectionEnabled()) {
-			this.synchronizeCurrentTurnCueWithSettings();
-			return false;
-		}
+	private dismissCurrentTurnCue(): void {
 		const current = this.getCurrentTurnCueState();
-		const updatedAt = new Date().toISOString();
-		if (current?.status === "pending") {
-			if (current.triggers.includes(trigger)) return false;
-			const next = {
+		const isActive =
+			current?.status === "pending" ||
+			(current?.status === "consumed" && !!current.activeRunToken && current.activeRunToken === this.activeRunToken);
+		if (!current || !isActive) return;
+		try {
+			this.persistCurrentTurnCueState({
 				...current,
 				revision: current.revision + 1,
-				triggers: [...current.triggers, trigger],
-				updatedAt,
-			} satisfies CurrentTurnReflectionCueState;
-			this.persistCurrentTurnCueState(next);
-			return true;
+				status: "dismissed",
+				activeRunToken: undefined,
+				updatedAt: new Date().toISOString(),
+			});
+		} catch {
+			this.warnOnce(
+				"cue-dismiss-failed",
+				"Automatic reflection cue dismissal failed; its durable claim will expire safely.",
+			);
+			return;
 		}
-		const next = {
-			version: 1,
-			revision: 1,
-			cueId: randomUUID(),
-			status: "pending",
-			triggers: [trigger],
-			createdAt: updatedAt,
-			updatedAt,
-		} satisfies CurrentTurnReflectionCueState;
-		this.persistCurrentTurnCueState(next);
-		return true;
+		this.activeRunToken = undefined;
+		if (current.versionChange) this.deps.getDurableLearningState?.()?.releaseClaim(current.versionChange.token);
+	}
+
+	private synchronizeCurrentTurnCueWithSettings(): void {
+		if (this.isAutomaticReflectionEnabled()) return;
+		this.dismissCurrentTurnCue();
+	}
+
+	private attachCurrentTurnCue(
+		trigger: CurrentTurnReflectionTrigger,
+		versionChange?: { token: DurableLearningClaimToken; metadata: DurableLearningReviewMetadata },
+		clearVersionChange = false,
+	): DurableLearningCueAttachOutcome {
+		if (!this.isAutomaticReflectionEnabled()) {
+			this.synchronizeCurrentTurnCueWithSettings();
+			return "disabled";
+		}
+		try {
+			const current = this.getCurrentTurnCueState();
+			const updatedAt = new Date().toISOString();
+			if (current?.status === "pending") {
+				if (clearVersionChange && current.versionChange) {
+					const triggers: CurrentTurnReflectionTrigger[] = current.triggers.filter(
+						(existing) => existing !== "version-change",
+					);
+					if (!triggers.includes(trigger)) triggers.push(trigger);
+					this.persistCurrentTurnCueState({
+						...current,
+						revision: current.revision + 1,
+						triggers,
+						versionChange: undefined,
+						updatedAt,
+					});
+					return "replaced-stale";
+				}
+				const alreadyHasTrigger = current.triggers.includes(trigger);
+				const alreadyHasVersionTrigger = !versionChange || current.triggers.includes("version-change");
+				const sameVersionClaim =
+					!versionChange ||
+					(!!current.versionChange && versionClaimTokensMatch(current.versionChange.token, versionChange.token));
+				if (alreadyHasTrigger && alreadyHasVersionTrigger && sameVersionClaim) return "coalesced";
+				const replacingVersionClaim = !!versionChange && !!current.versionChange && !sameVersionClaim;
+				const triggers = [...current.triggers];
+				if (!triggers.includes(trigger)) triggers.push(trigger);
+				if (versionChange && !triggers.includes("version-change")) triggers.push("version-change");
+				this.persistCurrentTurnCueState({
+					...current,
+					revision: current.revision + 1,
+					triggers,
+					updatedAt,
+					...(versionChange ? { versionChange } : {}),
+				});
+				return replacingVersionClaim ? "replaced-stale" : "attached";
+			}
+			const triggers: CurrentTurnReflectionTrigger[] = [trigger];
+			if (versionChange && !triggers.includes("version-change")) triggers.push("version-change");
+			this.persistCurrentTurnCueState({
+				version: 1,
+				revision: 1,
+				cueId: randomUUID(),
+				status: "pending",
+				triggers,
+				createdAt: updatedAt,
+				updatedAt,
+				...(versionChange ? { versionChange } : {}),
+			});
+			return "attached";
+		} catch {
+			this.warnOnce(
+				"cue-attach-failed",
+				"Automatic reflection cue persistence failed; durable learning was not claimed.",
+			);
+			return "failed";
+		}
+	}
+
+	/** Persist one logical ordinary cue without exposing claim metadata to callers. */
+	queueCurrentTurnCue(trigger: CurrentTurnReflectionTrigger): boolean {
+		const outcome = this.attachCurrentTurnCue(trigger);
+		return outcome === "attached" || outcome === "replaced-stale";
 	}
 
 	/**
-	 * Preview one transient provider-only cue. Discarded/replanned previews do nothing; the accepted
-	 * provider-plan commit closes exactly the captured cue id + revision.
+	 * Root-turn entrypoint: reconcile installed runtime/policy state and atomically attach any exact
+	 * version claim to the same provider cue. Fail-safe state faults degrade to an ordinary root cue.
+	 */
+	queueExternalRootTurnCue(): DurableLearningCueAttachOutcome {
+		if (!this.isAutomaticReflectionEnabled()) {
+			this.synchronizeCurrentTurnCueWithSettings();
+			return "disabled";
+		}
+		const state = this.deps.getDurableLearningState?.();
+		const runtimeVersion = this.deps.getRuntimeVersion?.();
+		const memoryPolicyVersion = this.deps.getMemoryPolicyVersion?.();
+		if (!state || !runtimeVersion || !memoryPolicyVersion) {
+			if (state && (!runtimeVersion || !memoryPolicyVersion)) {
+				this.warnOnce(
+					"version-identity-unavailable",
+					"Installed runtime identity is unavailable; continuing with ordinary root reflection only.",
+				);
+			}
+			return this.attachCurrentTurnCue("root-turn", undefined, true);
+		}
+		const result = state.reconcileClaimAndAttach(
+			{ runtimeVersion, memoryPolicyVersion },
+			this.durableLearningOwnerId,
+			(token, metadata) => this.attachCurrentTurnCue("root-turn", { token, metadata }),
+		);
+		if (result.warningCode) {
+			this.warnOnce(
+				result.warningCode,
+				`Durable learning state warning (${result.warningCode}); semantic memory remained unchanged.`,
+			);
+		}
+		if (
+			result.status === "attached" ||
+			result.status === "coalesced" ||
+			result.status === "replaced-stale" ||
+			result.status === "disabled" ||
+			result.status === "failed"
+		) {
+			return result.status;
+		}
+		return this.attachCurrentTurnCue("root-turn", undefined, true);
+	}
+
+	/**
+	 * Preview one transient provider-only cue. An accepted cue remains visible across provider-tool
+	 * continuation requests until AgentSession reports one strict terminal success or failure.
 	 */
 	previewCurrentTurnCue(): CurrentTurnReflectionCuePlan | undefined {
-		const current = this.getCurrentTurnCueState();
-		if (current?.status !== "pending" || !this.isAutomaticReflectionEnabled()) return undefined;
+		let current = this.getCurrentTurnCueState();
+		if (!current || !this.isAutomaticReflectionEnabled()) return undefined;
+		let pending = current.status === "pending";
+		let continuing =
+			current.status === "consumed" && !!this.activeRunToken && current.activeRunToken === this.activeRunToken;
+		if (!pending && !continuing) return undefined;
+		if (continuing && current.versionChange) {
+			const renewed = this.deps.getDurableLearningState?.()?.renewClaim(current.versionChange.token) ?? false;
+			if (!renewed) {
+				const withoutStaleClaim = {
+					...current,
+					revision: current.revision + 1,
+					triggers: current.triggers.filter((trigger) => trigger !== "version-change"),
+					versionChange: undefined,
+					updatedAt: new Date().toISOString(),
+				} satisfies CurrentTurnReflectionCueState;
+				try {
+					this.persistCurrentTurnCueState(withoutStaleClaim);
+					current = withoutStaleClaim;
+					pending = false;
+					continuing = true;
+				} catch {
+					this.warnOnce(
+						"cue-stale-claim-removal-failed",
+						"A stale durable version claim could not be removed from provider cue state; version metadata was withheld.",
+					);
+					return undefined;
+				}
+			}
+		}
 		const cueId = current.cueId;
 		const revision = current.revision;
+		const expectedStatus = current.status;
+		const expectedRunToken = current.activeRunToken;
+		const versionLine = current.versionChange
+			? `\n- Installed-state transition: ${current.versionChange.metadata.reason}; runtime ${current.versionChange.metadata.previousRuntimeVersion ?? "unobserved"} to ${current.versionChange.metadata.runtimeVersion}; memory policy ${current.versionChange.metadata.previousMemoryPolicyVersion ?? "unobserved"} to ${current.versionChange.metadata.memoryPolicyVersion}. First observation is audit-only, and version movement alone is never semantic evidence. Revalidate current sources; update only the canonical durable owner when warranted.`
+			: "";
 		const message: AgentMessage = {
 			role: "custom",
 			customType: CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
-			content: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.`,
+			content: `${CURRENT_TURN_REFLECTION_CUE}\n- Pending evidence classes: ${current.triggers.join(", ")}.${versionLine}`,
 			display: false,
 			details: {
 				version: 1,
@@ -338,6 +554,7 @@ export class ReflectionController {
 				automaticProviderRequests: 0,
 				cueId: current.cueId,
 				triggers: current.triggers,
+				...(current.versionChange ? { versionChange: { ...current.versionChange.metadata } } : {}),
 			},
 			timestamp: Date.now(),
 		};
@@ -345,9 +562,10 @@ export class ReflectionController {
 			const latest = this.getCurrentTurnCueState();
 			return (
 				this.isAutomaticReflectionEnabled() &&
-				latest?.status === "pending" &&
+				latest?.status === expectedStatus &&
 				latest.cueId === cueId &&
-				latest.revision === revision
+				latest.revision === revision &&
+				latest.activeRunToken === expectedRunToken
 			);
 		};
 		return {
@@ -355,17 +573,84 @@ export class ReflectionController {
 			isCurrent,
 			commit: () => {
 				if (!isCurrent()) throw new Error("Reflection cue changed before provider-plan commit");
+				if (expectedStatus === "consumed") return;
 				const latest = this.getCurrentTurnCueState();
 				if (!latest) throw new Error("Reflection cue disappeared before provider-plan commit");
-				const next = {
+				const activeRunToken = randomUUID();
+				this.persistCurrentTurnCueState({
 					...latest,
 					revision: latest.revision + 1,
 					status: "consumed",
+					activeRunToken,
 					updatedAt: new Date().toISOString(),
-				} satisfies CurrentTurnReflectionCueState;
-				this.persistCurrentTurnCueState(next);
+				});
+				this.activeRunToken = activeRunToken;
 			},
 		};
+	}
+
+	/** Settle one accepted cue-bearing provider run at its authoritative AgentSession boundary. */
+	finishCurrentTurnCue(messages: AgentMessage[], options: { willRetry: boolean }): void {
+		if (!this.isAutomaticReflectionEnabled()) {
+			this.synchronizeCurrentTurnCueWithSettings();
+			return;
+		}
+		const current = this.getCurrentTurnCueState();
+		if (current?.status !== "consumed" || !current.activeRunToken || current.activeRunToken !== this.activeRunToken) {
+			return;
+		}
+		const state = this.deps.getDurableLearningState?.();
+		if (options.willRetry) {
+			let versionChange = current.versionChange;
+			if (versionChange && !state?.renewClaim(versionChange.token)) versionChange = undefined;
+			try {
+				this.persistCurrentTurnCueState({
+					...current,
+					revision: current.revision + 1,
+					status: "pending",
+					activeRunToken: undefined,
+					triggers: versionChange
+						? current.triggers
+						: current.triggers.filter((trigger) => trigger !== "version-change"),
+					versionChange,
+					updatedAt: new Date().toISOString(),
+				});
+				this.activeRunToken = undefined;
+			} catch {
+				this.warnOnce(
+					"cue-retry-failed",
+					"Automatic reflection cue retry persistence failed; any durable claim will expire safely.",
+				);
+			}
+			return;
+		}
+
+		const success = hasStrictSuccessfulAssistantTerminal(messages);
+		try {
+			this.persistCurrentTurnCueState({
+				...current,
+				revision: current.revision + 1,
+				activeRunToken: undefined,
+				updatedAt: new Date().toISOString(),
+			});
+			this.activeRunToken = undefined;
+		} catch {
+			this.warnOnce(
+				"cue-finish-failed",
+				"Automatic reflection cue completion persistence failed; any durable claim will expire safely.",
+			);
+			return;
+		}
+		if (!current.versionChange || !state) return;
+		const settled = success
+			? state.completeReview(current.versionChange.token)
+			: state.releaseClaim(current.versionChange.token);
+		if (!settled) {
+			this.warnOnce(
+				"version-claim-settle-failed",
+				"Durable version claim no longer matched its exact transition; no semantic memory state was marked complete.",
+			);
+		}
 	}
 
 	/** Pure completed-turn projection used only by deterministic memory synchronization. */

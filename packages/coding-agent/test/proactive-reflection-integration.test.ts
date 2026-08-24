@@ -1,5 +1,6 @@
 import { type Context, fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { DurableLearningState } from "../src/core/learning/durable-learning-state.ts";
 import {
 	CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
 	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
@@ -55,12 +56,15 @@ describe("current-session reflection", () => {
 			contexts[0]?.messages.some((message) => getMessageText(message).includes("Root reflection contract")),
 		).toBe(true);
 		expect(
+			contexts[0]?.messages.some((message) => getMessageText(message).includes("Installed-state transition")),
+		).toBe(true);
+		expect(
 			harness.sessionManager
 				.getEntries()
 				.filter(
 					(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 				),
-		).toHaveLength(2);
+		).toHaveLength(3);
 		expect(
 			harness.sessionManager
 				.getEntries()
@@ -68,7 +72,19 @@ describe("current-session reflection", () => {
 					(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 				)
 				.at(-1),
-		).toMatchObject({ data: { status: "consumed", revision: 2, triggers: ["root-turn"] } });
+		).toMatchObject({
+			data: {
+				status: "consumed",
+				revision: 3,
+				triggers: ["root-turn", "version-change"],
+				versionChange: { metadata: { reason: "first-observation" } },
+			},
+		});
+		expect(DurableLearningState.forAgentDir(harness.tempDir).readSnapshot()).toMatchObject({
+			currentTransitionId: null,
+			currentClaimOwnerId: null,
+			resolvedTransitions: 1,
+		});
 		expect(
 			harness.sessionManager
 				.getEntries()

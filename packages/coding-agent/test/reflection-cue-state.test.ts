@@ -11,6 +11,10 @@ import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	DURABLE_LEARNING_MEMORY_POLICY_VERSION,
+	DurableLearningState,
+} from "../src/core/learning/durable-learning-state.ts";
+import {
 	ProviderRequestContextController,
 	type ProviderRequestContextControllerDeps,
 } from "../src/core/provider-request-context-controller.ts";
@@ -70,12 +74,20 @@ function compactSession(sessionManager: SessionManager): string {
 function createCueController(
 	sessionManager: SessionManager,
 	settingsManager = SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } }),
+	options: { agentDir?: string; isChildSession?: boolean; runtimeVersion?: string } = {},
 ): ReflectionController {
+	const durableLearningState = options.agentDir
+		? DurableLearningState.forAgentDir(options.agentDir, { leaseMs: 60_000 })
+		: undefined;
 	return new ReflectionController({
 		getSettingsManager: () => settingsManager,
 		getSessionManager: () => sessionManager,
-		isChildSession: () => false,
+		isChildSession: () => options.isChildSession ?? false,
 		isDisposed: () => false,
+		getDurableLearningState: () => durableLearningState,
+		getRuntimeVersion: () => options.runtimeVersion ?? "0.96.5",
+		getMemoryPolicyVersion: () => DURABLE_LEARNING_MEMORY_POLICY_VERSION,
+		warn: () => undefined,
 	} as unknown as ReflectionControllerDeps);
 }
 
@@ -127,6 +139,10 @@ describe("durable current-turn reflection cue state", () => {
 		expect(preview?.isCurrent()).toBe(true);
 		preview?.commit();
 		expect(resumed.getCurrentTurnCueState()).toMatchObject({ status: "consumed", revision: 3 });
+		const continuation = resumed.previewCurrentTurnCue();
+		expect(continuation).toBeDefined();
+		continuation?.commit();
+		resumed.finishCurrentTurnCue([assistantReply("finished")], { willRetry: false });
 		expect(resumed.previewCurrentTurnCue()).toBeUndefined();
 	});
 
@@ -168,9 +184,16 @@ describe("durable current-turn reflection cue state", () => {
 		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "consumed", revision: 2 });
 		expect(discarded.isCurrent?.()).toBe(false);
 
-		const afterCommit = await controller.plan(source);
-		expect(cueMessages(afterCommit.transientMessages ?? [])).toHaveLength(0);
-		expect(cueMessages(afterCommit.messages)).toHaveLength(0);
+		const continuation = await controller.plan(source);
+		expect(cueMessages(continuation.transientMessages ?? [])).toHaveLength(1);
+		expect(cueMessages(continuation.messages)).toHaveLength(0);
+		expect(continuation.prepareCommit?.()).toBe(true);
+		continuation.commit?.();
+
+		reflection.finishCurrentTurnCue([assistantReply("finished")], { willRetry: false });
+		const afterTerminal = await controller.plan(source);
+		expect(cueMessages(afterTerminal.transientMessages ?? [])).toHaveLength(0);
+		expect(cueMessages(afterTerminal.messages)).toHaveLength(0);
 	});
 
 	it("dismisses pending evidence under the kill switch and never replays it after re-enable", () => {
@@ -222,6 +245,149 @@ describe("durable current-turn reflection cue state", () => {
 			cueId: staleCueId,
 			status: "dismissed",
 			revision: 2,
+		});
+	});
+
+	it("attaches a provider-hidden version claim and completes only its exact successful cue-bearing run", () => {
+		const directory = join(tmpdir(), `pi-version-cue-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDirs.push(directory);
+		mkdirSync(directory, { recursive: true });
+		const sessionManager = SessionManager.inMemory();
+		const reflection = createCueController(
+			sessionManager,
+			SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } }),
+			{ agentDir: directory },
+		);
+
+		expect(reflection.queueExternalRootTurnCue()).toBe("attached");
+		const pending = reflection.getCurrentTurnCueState();
+		expect(pending).toMatchObject({
+			status: "pending",
+			triggers: ["root-turn", "version-change"],
+			versionChange: {
+				metadata: {
+					reason: "first-observation",
+					runtimeVersion: "0.96.5",
+					memoryPolicyVersion: DURABLE_LEARNING_MEMORY_POLICY_VERSION,
+				},
+			},
+		});
+		expect(pending?.versionChange?.token.claimId).toMatch(/^[0-9a-f-]{36}$/);
+		const preview = reflection.previewCurrentTurnCue();
+		const previewDetails = preview?.message.role === "custom" ? preview.message.details : undefined;
+		expect(previewDetails).toMatchObject({
+			versionChange: { reason: "first-observation", runtimeVersion: "0.96.5" },
+		});
+		expect(JSON.stringify(preview?.message)).not.toContain(pending?.versionChange?.token.claimId);
+		preview?.commit();
+		const continuationMessage = reflection.previewCurrentTurnCue()?.message;
+		const continuationDetails = continuationMessage?.role === "custom" ? continuationMessage.details : undefined;
+		expect(continuationDetails).toMatchObject({ cueId: pending?.cueId });
+
+		reflection.finishCurrentTurnCue([assistantReply("Reviewed current semantics")], { willRetry: false });
+		expect(reflection.previewCurrentTurnCue()).toBeUndefined();
+		expect(DurableLearningState.forAgentDir(directory).readSnapshot()).toMatchObject({
+			observedRuntimeVersion: "0.96.5",
+			currentTransitionId: null,
+			resolvedTransitions: 1,
+		});
+	});
+
+	it("requeues the same claimed cue for retry and releases it on terminal failure", () => {
+		const directory = join(tmpdir(), `pi-version-retry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDirs.push(directory);
+		mkdirSync(directory, { recursive: true });
+		const reflection = createCueController(
+			SessionManager.inMemory(),
+			SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } }),
+			{ agentDir: directory },
+		);
+		reflection.queueExternalRootTurnCue();
+		const cueId = reflection.getCurrentTurnCueState()?.cueId;
+		const claimId = reflection.getCurrentTurnCueState()?.versionChange?.token.claimId;
+		reflection.previewCurrentTurnCue()?.commit();
+
+		reflection.finishCurrentTurnCue([assistantReply("retryable failure")], { willRetry: true });
+		expect(reflection.getCurrentTurnCueState()).toMatchObject({
+			cueId,
+			status: "pending",
+			versionChange: { token: { claimId } },
+		});
+		reflection.previewCurrentTurnCue()?.commit();
+		const failed = assistantReply("");
+		failed.stopReason = "error";
+		failed.errorMessage = "provider failed";
+		reflection.finishCurrentTurnCue([failed], { willRetry: false });
+		expect(DurableLearningState.forAgentDir(directory).readSnapshot()).toMatchObject({
+			currentTransitionId: expect.any(String),
+			currentClaimOwnerId: null,
+			resolvedTransitions: 0,
+		});
+	});
+
+	it("releases a mid-turn version claim when the kill switch changes and leaves child access at zero footprint", () => {
+		const directory = join(tmpdir(), `pi-version-disable-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDirs.push(directory);
+		mkdirSync(directory, { recursive: true });
+		const settingsManager = SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } });
+		const reflection = createCueController(SessionManager.inMemory(), settingsManager, { agentDir: directory });
+		reflection.queueExternalRootTurnCue();
+		reflection.previewCurrentTurnCue()?.commit();
+		settingsManager.setAutoLearnSettings({ enabled: false, reflectionReview: true });
+		expect(reflection.getCurrentTurnCueState()).toMatchObject({ status: "dismissed" });
+		expect(DurableLearningState.forAgentDir(directory).readSnapshot()?.currentClaimOwnerId).toBeNull();
+
+		const childDirectory = join(directory, "child");
+		const child = createCueController(
+			SessionManager.inMemory(),
+			SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } }),
+			{ agentDir: childDirectory, isChildSession: true },
+		);
+		expect(child.queueExternalRootTurnCue()).toBe("disabled");
+		expect(existsSync(join(childDirectory, "state"))).toBe(false);
+	});
+
+	it("strips stale version metadata when another live root owns the transition", () => {
+		const directory = join(tmpdir(), `pi-version-busy-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDirs.push(directory);
+		mkdirSync(directory, { recursive: true });
+		const sessionManager = SessionManager.inMemory();
+		const settings = SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } });
+		const owner = createCueController(sessionManager, settings, { agentDir: directory });
+		expect(owner.queueExternalRootTurnCue()).toBe("attached");
+		const ownedClaimId = owner.getCurrentTurnCueState()?.versionChange?.token.claimId;
+
+		const competingRoot = createCueController(sessionManager, settings, { agentDir: directory });
+		expect(competingRoot.queueExternalRootTurnCue()).toBe("replaced-stale");
+		expect(competingRoot.getCurrentTurnCueState()).toMatchObject({
+			status: "pending",
+			triggers: ["root-turn"],
+		});
+		expect(competingRoot.getCurrentTurnCueState()?.versionChange).toBeUndefined();
+		expect(DurableLearningState.forAgentDir(directory).readSnapshot()?.currentClaimOwnerId).toBe(
+			owner.getCurrentTurnCueState()?.versionChange?.token.ownerId,
+		);
+		expect(JSON.stringify(competingRoot.previewCurrentTurnCue()?.message)).not.toContain(ownedClaimId);
+	});
+
+	it("releases the exact active version claim when branch navigation invalidates its cue", () => {
+		const directory = join(tmpdir(), `pi-version-branch-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDirs.push(directory);
+		mkdirSync(directory, { recursive: true });
+		const reflection = createCueController(
+			SessionManager.inMemory(),
+			SettingsManager.inMemory({ autoLearn: { enabled: true, reflectionReview: true } }),
+			{ agentDir: directory },
+		);
+		reflection.queueExternalRootTurnCue();
+		reflection.previewCurrentTurnCue()?.commit();
+		reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
+
+		expect(reflection.previewCurrentTurnCue()).toBeUndefined();
+		expect(DurableLearningState.forAgentDir(directory).readSnapshot()).toMatchObject({
+			currentTransitionId: expect.any(String),
+			currentClaimOwnerId: null,
+			resolvedTransitions: 0,
 		});
 	});
 });

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Added
+
+- Added root-only version-aware durable learning state that recognizes installed runtime and memory-policy transitions, attaches one exact claim to the existing provider reflection turn, and automatically revalidates durable intent, corrections, reusable procedures, preferences, and project knowledge through the existing evidence-gated memory and skill tools.
+- Added bounded, lock-serialized transition history with strict retry/continuation settlement, child and worker zero-footprint behavior, byte-preserving unsupported-state fallback, and canonical OKF routing while workflow context keeps references instead of duplicate truth.
+
 ### Fixed
 
 - Stopped repeated tool-call cycles after three identical observable-result periods without preempting changing results before the existing configurable coarse fuse, and gave active goals state-changing recovery guidance instead of re-polling unchanged status.

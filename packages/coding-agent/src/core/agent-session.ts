@@ -26,7 +26,7 @@ import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, 
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { streamSimple } from "@caupulican/pi-ai/stream";
-import { getAgentDir } from "../config.ts";
+import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import { resourceDir, stateFile } from "./agent-paths.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import type {
@@ -117,6 +117,7 @@ import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { HumanInputController } from "./human-input-controller.ts";
+import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
@@ -373,6 +374,8 @@ export class AgentSession {
 	private _disposed = false;
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
+	/** Root-owned version transition state; construction performs no filesystem I/O. */
+	private readonly _durableLearningState: DurableLearningState | undefined;
 	/** Root current-turn reflection cue + explicit learning-apply/rollback compatibility path. */
 	private readonly _reflection: ReflectionController;
 	/** Durable goal lifecycle, accounting, and raw continuation loop. */
@@ -488,6 +491,8 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._agentDir = agentDir;
+		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
+		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
 			getSkills: () => this._resourceLoader.getActiveSkills(),
 			getMaxBodyBytes: () => resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
@@ -850,6 +855,10 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			getAgentDir: () => this._agentDir,
+			getDurableLearningState: () => this._durableLearningState,
+			getRuntimeVersion: () => (VERSION_SOURCE_AVAILABLE ? VERSION : undefined),
+			getMemoryPolicyVersion: () => DURABLE_LEARNING_MEMORY_POLICY_VERSION,
+			warn: (message) => this._emit({ type: "warning", message }),
 			getCwd: () => this._cwd,
 			getSkillsForAudit: () => this._resourceLoader.getActiveSkills(),
 			isChildSession: () => this._isChildSession,
@@ -882,7 +891,6 @@ export class AgentSession {
 			: undefined;
 		this._isExplicitModel = config.isExplicitModel ?? false;
 		this._isExplicitThinking = config.isExplicitThinking ?? false;
-		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({
@@ -1869,13 +1877,18 @@ export class AgentSession {
 				this._foregroundRecovery.observeAssistant(assistantMsg);
 			}
 		}
-		if (event.type === "agent_end" && !this._willRetryAfterAgentEnd(event)) {
-			const reflectionTurn = this._reflection.analyzeCompletedTurn(event.messages);
-			// The shared projection excludes raw tool-result payloads and bounds both roles before any
-			// deterministic memory sync. No reflection provider request is scheduled at this boundary.
-			this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
-			if (reflectionTurn.trigger !== "none") this._reflection.queueCurrentTurnCue(reflectionTurn.trigger);
-			this._goals.endQueuedOwnerChatGoalExecution();
+		if (event.type === "agent_end") {
+			const willRetry = this._willRetryAfterAgentEnd(event);
+			// Settle the exact cue-bearing run before completed-turn analysis can queue a later cue.
+			this._reflection.finishCurrentTurnCue(event.messages, { willRetry });
+			if (!willRetry) {
+				const reflectionTurn = this._reflection.analyzeCompletedTurn(event.messages);
+				// The shared projection excludes raw tool-result payloads and bounds both roles before any
+				// deterministic memory sync. No reflection provider request is scheduled at this boundary.
+				this._memory.scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
+				if (reflectionTurn.trigger !== "none") this._reflection.queueCurrentTurnCue(reflectionTurn.trigger);
+				this._goals.endQueuedOwnerChatGoalExecution();
+			}
 		}
 		// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
 		// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
@@ -2703,7 +2716,7 @@ export class AgentSession {
 
 			// Queue one durable logical cue. ProviderRequestContextController owns its transient preview
 			// and accepted-plan commit, so it never enters or needs cleanup from agent history.
-			if (!options?.internalContextType) this._reflection.queueCurrentTurnCue("root-turn");
+			if (!options?.internalContextType) this._reflection.queueExternalRootTurnCue();
 
 			// Add user message (built earlier, before the router judge, so it could be painted
 			// immediately — see the early message_start emit above).
@@ -3489,7 +3502,7 @@ export class AgentSession {
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
 		const result = await this._treeNavigator.navigateTree(targetId, options);
-		this._reflection.invalidateCurrentTurnCueStateCache();
+		this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: !result.cancelled });
 		return result;
 	}
 

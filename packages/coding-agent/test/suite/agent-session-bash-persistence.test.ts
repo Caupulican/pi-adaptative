@@ -172,12 +172,17 @@ describe("AgentSession bash and persistence characterization", () => {
 			"foreground_tool_terminal",
 			"request_snapshot",
 			"message",
+			"custom",
 		]);
-		expect(
-			entries.filter(
-				(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
-			),
-		).toMatchObject([{ data: { status: "pending" } }, { data: { status: "consumed" } }]);
+		const reflectionCueStates = entries.filter(
+			(entry) => entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+		);
+		expect(reflectionCueStates).toMatchObject([
+			{ data: { status: "pending" } },
+			{ data: { status: "consumed", activeRunToken: expect.any(String) } },
+			{ data: { status: "consumed" } },
+		]);
+		expect(reflectionCueStates[2]).not.toMatchObject({ data: { activeRunToken: expect.any(String) } });
 		expect(entries.some((entry) => entry.type === "custom" && entry.customType === "tool_argument_validation")).toBe(
 			false,
 		);
@@ -229,13 +234,23 @@ describe("AgentSession bash and persistence characterization", () => {
 		await harness.session.abort();
 		await promptPromise;
 
-		const lastEntry = harness.sessionManager.getEntries()[harness.sessionManager.getEntries().length - 1];
-		expect(lastEntry?.type).toBe("message");
-		if (lastEntry?.type === "message") {
-			expect(lastEntry.message.role).toBe("assistant");
-			if (lastEntry.message.role === "assistant") {
-				expect(lastEntry.message.stopReason).toBe("aborted");
+		const entries = harness.sessionManager.getEntries();
+		const lastMessageEntry = entries.filter((entry) => entry.type === "message").at(-1);
+		expect(lastMessageEntry?.type).toBe("message");
+		if (lastMessageEntry?.type === "message") {
+			expect(lastMessageEntry.message.role).toBe("assistant");
+			if (lastMessageEntry.message.role === "assistant") {
+				expect(lastMessageEntry.message.stopReason).toBe("aborted");
 			}
+		}
+		const finalEntry = entries.at(-1);
+		expect(finalEntry).toMatchObject({
+			type: "custom",
+			customType: CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+			data: { status: "consumed" },
+		});
+		if (finalEntry?.type === "custom") {
+			expect(finalEntry.data).not.toMatchObject({ activeRunToken: expect.any(String) });
 		}
 	});
 

@@ -8,7 +8,12 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { DurableLearningState } from "../src/core/learning/durable-learning-state.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import {
+	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
+	type CurrentTurnReflectionCueState,
+} from "../src/core/reflection-controller.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -53,8 +58,14 @@ type SessionWithExtensionEmitHook = {
 describe("AgentSession retry", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	const originalNativeReflection = process.env.PI_NATIVE_REFLECTION;
+	const originalAutoLearnChild = process.env.PI_AUTO_LEARN_CHILD;
+	const originalSessionRole = process.env.PI_SESSION_ROLE;
 
 	beforeEach(() => {
+		delete process.env.PI_NATIVE_REFLECTION;
+		delete process.env.PI_AUTO_LEARN_CHILD;
+		delete process.env.PI_SESSION_ROLE;
 		tempDir = join(tmpdir(), `pi-retry-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 	});
@@ -66,6 +77,12 @@ describe("AgentSession retry", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
+		if (originalNativeReflection === undefined) delete process.env.PI_NATIVE_REFLECTION;
+		else process.env.PI_NATIVE_REFLECTION = originalNativeReflection;
+		if (originalAutoLearnChild === undefined) delete process.env.PI_AUTO_LEARN_CHILD;
+		else process.env.PI_AUTO_LEARN_CHILD = originalAutoLearnChild;
+		if (originalSessionRole === undefined) delete process.env.PI_SESSION_ROLE;
+		else process.env.PI_SESSION_ROLE = originalSessionRole;
 	});
 
 	function createSession(options?: {
@@ -74,6 +91,7 @@ describe("AgentSession retry", () => {
 		delayAssistantMessageEndMs?: number;
 		baseDelayMs?: number;
 		onRequest?: (callCount: number, maxTokens: number | undefined) => void;
+		autoLearn?: boolean;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
@@ -112,13 +130,17 @@ describe("AgentSession retry", () => {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries, baseDelayMs } });
+		settingsManager.applyOverrides({
+			retry: { enabled: true, maxRetries, baseDelayMs },
+			...(options?.autoLearn ? { autoLearn: { enabled: true, reflectionReview: true } } : {}),
+		});
 
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
+			agentDir: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
 		});
@@ -150,6 +172,35 @@ describe("AgentSession retry", () => {
 		expect(created.getCallCount()).toBe(2);
 		expect(events).toEqual(["start:1", "end:success=true"]);
 		expect(created.session.isRetrying).toBe(false);
+	});
+
+	it("keeps one exact version claim across automatic retry and completes it only after success", async () => {
+		const created = createSession({
+			failCount: 1,
+			autoLearn: true,
+		});
+		await created.session.bindExtensions({});
+
+		await created.session.prompt("Retry while retaining the exact version claim");
+
+		expect(created.getCallCount()).toBe(2);
+		const states = created.session.sessionManager
+			.getEntries()
+			.flatMap((entry) =>
+				entry.type === "custom" && entry.customType === CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE
+					? [entry.data as CurrentTurnReflectionCueState]
+					: [],
+			);
+		const claimIds = states
+			.map((state) => state.versionChange?.token.claimId)
+			.filter((claimId): claimId is string => !!claimId);
+		expect(new Set(claimIds)).toHaveLength(1);
+		expect(states.map((state) => state.status)).toEqual(["pending", "consumed", "pending", "consumed", "consumed"]);
+		expect(DurableLearningState.forAgentDir(tempDir).readSnapshot()).toMatchObject({
+			currentTransitionId: null,
+			currentClaimOwnerId: null,
+			resolvedTransitions: 1,
+		});
 	});
 
 	it("queues steering during retry backoff instead of starting a concurrent run", async () => {

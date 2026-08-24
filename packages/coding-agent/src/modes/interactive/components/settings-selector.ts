@@ -1516,7 +1516,7 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 				id: "auto-learn-reflection-review",
 				label: "Reflection review",
 				description:
-					"After corrective or complex turns, queue a durable root-session reflection cue for the next ordinary turn",
+					"Include one durable root-session reflection cue on eligible external turns; completed-turn signals coalesce into it",
 				currentValue: booleanSettingValue(this.state.reflectionReview, defaults.reflectionReview),
 				values: ["true", "false"],
 			},
