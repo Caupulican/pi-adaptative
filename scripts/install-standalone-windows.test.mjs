@@ -74,13 +74,23 @@ function runOfflineInstaller(shell, environment, candidateInstallerPath = instal
 }
 
 function normalizePowerShellDiagnostic(output) {
-	return stripVTControlCharacters(output).replace(/\s+/gu, " ").trim();
+	return stripVTControlCharacters(output).replace(/\s+\|\s+/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
 test("normalizes PowerShell diagnostics without changing semantic text", () => {
-	const formatted = "\u001b[31;1mPi Adaptative installer: staged pi.exe --version did not report exactly\u001b[0m\n\u001b[31;1m1.2.3.\u001b[0m";
-	assert.equal(normalizePowerShellDiagnostic(formatted), "Pi Adaptative installer: staged pi.exe --version did not report exactly 1.2.3.");
+	const formatted = [
+		"\u001b[31;1mException: /tmp/install.ps1:16\u001b[0m",
+		"Line |",
+		" 16 | throw 'Pi Adaptative installer: staged pi.exe --version did not report exactly'",
+		"    | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+		"    | Pi Adaptative installer: staged pi.exe --version did not report exactly",
+		"    | 1.2.3.",
+	].join("\n");
+	const normalized = normalizePowerShellDiagnostic(formatted);
+	assert.match(normalized, /did not report exactly 1\.2\.3\./u);
+	assert.doesNotMatch(normalized, /\s\|\s/u);
 	assert.equal(normalizePowerShellDiagnostic("plain diagnostic"), "plain diagnostic");
+	assert.equal(normalizePowerShellDiagnostic("plain|diagnostic"), "plain|diagnostic");
 });
 
 test("Windows installer is a self-contained, owned-release PowerShell script", () => {
