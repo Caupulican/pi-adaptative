@@ -19,6 +19,7 @@
 ### Fixed
 
 - Made Windows installer checksum verification use the .NET SHA-256 implementation so it also works in Windows PowerShell 5.1 installations without `Get-FileHash`.
+- Made standalone installer verification portable across CI hosts by honoring explicit Windows install roots before profile defaults and scoping POSIX installer harnesses to POSIX runners.
 - Made Ctrl+V attach clipboard screenshots directly, including terminals that surface image paste as an empty bracketed-paste event, without consuming ordinary pasted paths.
 
 ### Removed

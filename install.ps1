@@ -309,9 +309,16 @@ function Install-PiAdaptative {
     $version = Get-ReleaseVersion
     $assetName = "pi-windows-$architecture.zip"
     $baseUrl = Get-ReleaseBaseUrl $version
-    $localAppData = $env:LOCALAPPDATA
-    if ([string]::IsNullOrWhiteSpace($localAppData)) { $localAppData = Join-Path $env:USERPROFILE "AppData\Local" }
-    $installRootValue = if ([string]::IsNullOrWhiteSpace($env:PI_INSTALL_DIR)) { Join-Path $localAppData "PiAdaptative" } else { $env:PI_INSTALL_DIR }
+    $installRootValue = $env:PI_INSTALL_DIR
+    if ([string]::IsNullOrWhiteSpace($installRootValue)) {
+        $localAppData = $env:LOCALAPPDATA
+        if ([string]::IsNullOrWhiteSpace($localAppData)) {
+            $userProfile = $env:USERPROFILE
+            if ([string]::IsNullOrWhiteSpace($userProfile)) { Fail "LOCALAPPDATA and USERPROFILE are unavailable; set PI_INSTALL_DIR." }
+            $localAppData = Join-Path $userProfile "AppData\Local"
+        }
+        $installRootValue = Join-Path $localAppData "PiAdaptative"
+    }
     $installRoot = Get-InstallerPath $installRootValue "PI_INSTALL_DIR"
     $binDirValue = if ([string]::IsNullOrWhiteSpace($env:PI_BIN_DIR)) { Join-Path $installRoot "bin" } else { $env:PI_BIN_DIR }
     $binDir = Get-InstallerPath $binDirValue "PI_BIN_DIR"

@@ -67,9 +67,7 @@ describe("install method and self-update instructions", () => {
 		setExecPath("/opt/npm/lib/node_modules/@caupulican/pi-adaptative/dist/cli.js");
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(getUpdateInstruction("@caupulican/pi-adaptative")).toContain(
-			"https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh",
-		);
+		expect(getUpdateInstruction("@caupulican/pi-adaptative")).toBe(getStandaloneInstallInstruction());
 		expect(getUpdateInstruction("@caupulican/pi-adaptative")).not.toContain("npm install");
 	});
 });

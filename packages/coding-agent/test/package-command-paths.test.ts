@@ -156,7 +156,9 @@ describe("package commands", () => {
 		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
 
 		try {
-			await expect(handlePackageCommand(["update", "--self", "--force"], { runInstaller })).resolves.toBe(true);
+			await expect(
+				handlePackageCommand(["update", "--self", "--force"], { runInstaller, platform: "linux" }),
+			).resolves.toBe(true);
 
 			expect(process.exitCode).toBeUndefined();
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
@@ -186,7 +188,9 @@ describe("package commands", () => {
 		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
 
 		try {
-			await expect(handlePackageCommand(["update", "--self"], { runInstaller })).resolves.toBe(true);
+			await expect(handlePackageCommand(["update", "--self"], { runInstaller, platform: "linux" })).resolves.toBe(
+				true,
+			);
 
 			expect(process.exitCode).toBeUndefined();
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");

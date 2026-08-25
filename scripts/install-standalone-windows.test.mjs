@@ -189,6 +189,8 @@ test("offline Windows installer verifies, activates the complete tree, rolls bac
 	const binRoot = join(root, "bin");
 	const firstFixture = createReleaseFixture(root, "1.2.3", "1.2.3", true, shell);
 	const first = runOfflineInstaller(shell, {
+		LOCALAPPDATA: "",
+		USERPROFILE: "",
 		PI_VERSION: "v1.2.3",
 		PI_INSTALL_TEST_BASE_URL: powershellPath(shell, firstFixture),
 		PI_INSTALL_TEST_VERSION_OUTPUT: "1.2.3",

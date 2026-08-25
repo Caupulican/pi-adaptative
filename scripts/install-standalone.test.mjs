@@ -20,6 +20,7 @@ import test from "node:test";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const installerPath = join(repositoryRoot, "install.sh");
 const officialRepository = "https://github.com/Caupulican/pi-adaptative";
+const posixBehaviorTest = process.platform === "win32" ? test.skip : test;
 
 function escapeRegExp(value) {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -131,7 +132,7 @@ test("standalone installers are owned by Caupulican/pi-adaptative and avoid lega
 	assert.doesNotMatch(installer, /\bsudo\b/u);
 });
 
-test("Linux x64 and arm64 installs retain the complete archive tree and publish an atomic current link", (context) => {
+posixBehaviorTest("Linux x64 and arm64 installs retain the complete archive tree and publish an atomic current link", (context) => {
 	for (const architecture of ["x86_64", "aarch64"]) {
 		const harness = createHarness();
 		context.after(() => rmSync(harness.root, { recursive: true, force: true }));
@@ -188,7 +189,7 @@ test("Linux x64 and arm64 installs retain the complete archive tree and publish 
 	}
 });
 
-test("retention only removes managed release directories and preserves unknown version-looking data", (context) => {
+posixBehaviorTest("retention only removes managed release directories and preserves unknown version-looking data", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const firstFixture = createFixture(harness.root, "pi-linux-x64.tar.gz", "1.2.3");
@@ -215,7 +216,7 @@ test("retention only removes managed release directories and preserves unknown v
 	assert.equal(existsSync(join(installDir, "releases", "v1.2.3")), false);
 });
 
-test("same-version pre-existing release data is rejected without deletion or activation", (context) => {
+posixBehaviorTest("same-version pre-existing release data is rejected without deletion or activation", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const firstFixture = createFixture(harness.root, "pi-linux-x64.tar.gz", "1.2.3");
@@ -249,7 +250,7 @@ test("same-version pre-existing release data is rejected without deletion or act
 	assert.equal(execFileSync(join(binDir, "pi"), ["--version"], { encoding: "utf8" }).trim(), "1.2.3");
 });
 
-test("legacy active release is validated before ownership adoption", (context) => {
+posixBehaviorTest("legacy active release is validated before ownership adoption", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const fixture = createFixture(harness.root, "pi-linux-x64.tar.gz", "1.2.3");
@@ -286,7 +287,7 @@ test("legacy active release is validated before ownership adoption", (context) =
 	assert.equal(readFileSync(sentinel, "utf8"), "preserve\n");
 });
 
-test("latest resolves once to an exact release tag before downloading the archive", (context) => {
+posixBehaviorTest("latest resolves once to an exact release tag before downloading the archive", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const assetName = "pi-linux-x64.tar.gz";
@@ -307,7 +308,7 @@ test("latest resolves once to an exact release tag before downloading the archiv
 	assert.equal(urls.filter((url) => url.includes("/releases/download/v1.2.3/")).length, 2);
 });
 
-test("release workflow test mode installs from a local verified artifact directory without network", (context) => {
+posixBehaviorTest("release workflow test mode installs from a local verified artifact directory without network", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const assetName = "pi-linux-x64.tar.gz";
@@ -323,7 +324,7 @@ test("release workflow test mode installs from a local verified artifact directo
 	assert.equal(existsSync(harness.urlLog), false, "local test mode must not invoke curl");
 });
 
-test("checksum failure preserves the previously active release and unsafe roots fail closed", (context) => {
+posixBehaviorTest("checksum failure preserves the previously active release and unsafe roots fail closed", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const assetName = "pi-linux-x64.tar.gz";
@@ -421,7 +422,7 @@ test("checksum failure preserves the previously active release and unsafe roots 
 	assert.match(`${locked.stdout}\n${locked.stderr}`, /already active|lock/iu);
 });
 
-test("wrong-root archives and unowned launchers are rejected without activation", (context) => {
+posixBehaviorTest("wrong-root archives and unowned launchers are rejected without activation", (context) => {
 	const harness = createHarness();
 	context.after(() => rmSync(harness.root, { recursive: true, force: true }));
 	const badRoot = join(harness.root, "wrong-root");
