@@ -291,7 +291,7 @@ function Get-CurrentVersion([string]$Pointer) {
 }
 
 function Prune-Releases([string]$ReleaseDir, [string]$CurrentVersion, [string]$PreviousVersion) {
-    $releaseRoot = [System.IO.Path]::GetFullPath($ReleaseDir).TrimEnd([char]92, [char]47) + [char]92
+    $releaseRoot = [System.IO.Path]::GetFullPath($ReleaseDir).TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
     foreach ($item in Get-ChildItem -LiteralPath $ReleaseDir -Directory) {
         if ($item.Name -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { continue }
         $candidate = [System.IO.Path]::GetFullPath($item.FullName)
