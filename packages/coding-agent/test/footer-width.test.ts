@@ -5,7 +5,7 @@ import type { AgentSession } from "../src/core/agent-session.ts";
 import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
 import type { CostGuardDecision } from "../src/core/cost-guard.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
-import { FooterComponent, formatCwdForFooter, wrapPipeParts } from "../src/modes/interactive/components/footer.ts";
+import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 
 type FooterUsageSnapshotForTest = {
@@ -447,7 +447,7 @@ describe("FooterComponent width handling", () => {
 });
 
 describe("footer metric layout", () => {
-	it("folds TPS and cumulative tokens into the model/context rows", () => {
+	it("preserves the user-approved three-row organization", () => {
 		const session = createSession({
 			sessionName: "",
 			usage: {
@@ -455,32 +455,30 @@ describe("footer metric layout", () => {
 				output: 400,
 				cacheRead: 200,
 				cacheWrite: 100,
-				totalTokens: 1_900,
 				cost: { total: 0 },
 			},
 		});
-		const footer = new FooterComponent(session, createFooterData(1, new Map([["tps", "TPS 24.0 tok/s"]])));
-
-		const lines = footer.render(240).map(stripAnsi);
-
-		expect(lines).toHaveLength(2);
-		expect(lines[1]).toContain(
-			"in 1.2k | out 400 | cache 300 | toks 1.9k | 12.3%/200k (auto) | test-model | TPS 24.0 tok/s",
+		const footer = new FooterComponent(
+			session,
+			createFooterData(2, new Map([["tps", "TPS 24.0 tok/s"]]), "Goal [goal-test]: active, open reqs: 1 | Lanes: 6"),
 		);
-	});
-});
+		const width = 240;
 
-describe("wrapPipeParts", () => {
-	it("keeps metrics together with pipes when they fit", () => {
-		expect(wrapPipeParts(["in 12k", "out 3k", "cache 8k", "model"], 80)).toEqual([
-			"in 12k | out 3k | cache 8k | model",
-		]);
-	});
+		const lines = footer.render(width).map(stripAnsi);
 
-	it("wraps only between complete metrics", () => {
-		expect(wrapPipeParts(["in 12k", "out 3k", "cache 8k", "model"], 19)).toEqual([
-			"in 12k | out 3k",
-			"cache 8k | model",
-		]);
+		expect(lines).toHaveLength(3);
+		expect(lines[1]).toContain("↑1.2k ↓400 R200 W100");
+		expect(lines[1]).toContain("12.3%/200k (auto)");
+		expect(lines[1]).not.toContain(" | ");
+		expect(lines[1]).not.toContain("TPS");
+		expect(lines[1]).toMatch(/\(test\) test-model$/);
+		expect(visibleWidth(lines[1] ?? "")).toBe(width);
+		expect(lines[2]).toBe("Goal [goal-test]: active, open reqs: 1 | Lanes: 6 TPS 24.0 tok/s");
+
+		const narrowLines = footer.render(60);
+		expect(narrowLines).toHaveLength(3);
+		for (const line of narrowLines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(60);
+		}
 	});
 });

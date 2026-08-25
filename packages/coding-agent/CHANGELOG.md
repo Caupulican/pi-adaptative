@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Restored the status footer's user-approved three-row organization: repository path; cost and context with the model right-aligned; then goal, lanes, TPS, and token details—without changing live action labels or direct clipboard-image paste.
+
 ## [0.97.2] - 2026-08-25
 
 ## [0.97.1] - 2026-08-25

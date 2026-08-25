@@ -20,40 +20,6 @@ function sanitizeStatusText(text: string): string {
 		.trim();
 }
 
-/** Join footer chips with " | ", wrapping onto new lines when the width is too small. */
-export function wrapPipeParts(parts: readonly string[], width: number): string[] {
-	const lines: string[] = [];
-	let current = "";
-	for (const part of parts) {
-		if (!part) continue;
-		const next = current ? `${current} | ${part}` : part;
-		if (visibleWidth(next) <= width) {
-			current = next;
-		} else {
-			if (current) lines.push(current);
-			if (visibleWidth(part) <= width) {
-				current = part;
-			} else {
-				lines.push(truncateToWidth(part, width, "…"));
-				current = "";
-			}
-		}
-	}
-	if (current) lines.push(current);
-	return lines.length > 0 ? lines : [""];
-}
-
-function dimFooterLine(line: string, fastModeEnabled: boolean): string {
-	if (!fastModeEnabled) return theme.fg("dim", line);
-	const badgeIndex = line.indexOf(FAST_MODE_BADGE);
-	if (badgeIndex === -1) return theme.fg("dim", line);
-	return (
-		theme.fg("dim", line.slice(0, badgeIndex)) +
-		theme.bg("selectedBg", theme.bold(theme.fg("accent", FAST_MODE_BADGE))) +
-		theme.fg("dim", line.slice(badgeIndex + FAST_MODE_BADGE.length))
-	);
-}
-
 function stripAnsi(text: string): string {
 	return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
@@ -79,7 +45,6 @@ function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string[
 	let sawLearningStatus = false;
 
 	for (const [key, rawText] of Array.from(statuses.entries()).sort(([a], [b]) => a.localeCompare(b))) {
-		if (key === "tps") continue;
 		const text = sanitizeStatusText(rawText);
 		const plain = stripAnsi(text).trim();
 		const plainLower = plain.toLowerCase();
@@ -148,7 +113,6 @@ type FooterUsageSnapshot = {
 	messageCount: number;
 	totalInput: number;
 	totalOutput: number;
-	totalTokens: number;
 	totalCacheRead: number;
 	totalCacheWrite: number;
 	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
@@ -210,7 +174,6 @@ export class FooterComponent implements Component {
 		const canExtend = previous !== undefined && entryCount >= previous.entryCount;
 		let totalInput = canExtend ? previous.totalInput : 0;
 		let totalOutput = canExtend ? previous.totalOutput : 0;
-		let totalTokens = canExtend ? previous.totalTokens : 0;
 		let totalCacheRead = canExtend ? previous.totalCacheRead : 0;
 		let totalCacheWrite = canExtend ? previous.totalCacheWrite : 0;
 
@@ -225,7 +188,6 @@ export class FooterComponent implements Component {
 			if (!usage) continue;
 			totalInput += usage.input;
 			totalOutput += usage.output;
-			totalTokens += usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 			totalCacheRead += usage.cacheRead;
 			totalCacheWrite += usage.cacheWrite;
 		}
@@ -234,7 +196,6 @@ export class FooterComponent implements Component {
 			entryCount,
 			totalInput,
 			totalOutput,
-			totalTokens,
 			totalCacheRead,
 			totalCacheWrite,
 		};
@@ -252,7 +213,7 @@ export class FooterComponent implements Component {
 	render(width: number): string[] {
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
-		const { totalInput, totalOutput, totalTokens, totalCacheRead, totalCacheWrite, contextUsage } = usageSnapshot;
+		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, contextUsage } = usageSnapshot;
 		const costSummary = this.session.getCostSummary();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
@@ -275,11 +236,10 @@ export class FooterComponent implements Component {
 
 		// Build stats line
 		const statsParts = [];
-		if (totalInput) statsParts.push(`in ${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`out ${formatTokens(totalOutput)}`);
-		const cacheTotal = totalCacheRead + totalCacheWrite;
-		if (cacheTotal) statsParts.push(`cache ${formatTokens(cacheTotal)}`);
-		if (totalTokens) statsParts.push(`toks ${formatTokens(totalTokens)}`);
+		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
+		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
+		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
+		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		statsParts.push(...formatFooterCostParts(costSummary, 3, { subscription: usingSubscription }));
@@ -307,29 +267,84 @@ export class FooterComponent implements Component {
 		}
 		statsParts.push(contextPercentStr);
 
+		let statsLeft = statsParts.join(" ");
+
+		// Add model display name on the right side, plus thinking level if model supports it
 		const modelName = state.model?.name || state.model?.id || "no-model";
 		const fastModeEnabled = getFastModeStatus(this.session).enabled;
 		const modelDisplayName = fastModeEnabled ? `${modelName} ${FAST_MODE_BADGE}` : modelName;
 
-		const extensionStatuses = this.footerData.getExtensionStatuses();
-		const tpsStatus = sanitizeStatusText(extensionStatuses.get("tps") ?? "");
-		const pipeParts = [...statsParts];
-		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
-			pipeParts.push(`(${state.model.provider})`);
+		let statsLeftWidth = visibleWidth(statsLeft);
+
+		// If statsLeft is too wide, truncate it
+		if (statsLeftWidth > width) {
+			statsLeft = truncateToWidth(statsLeft, width, "...");
+			statsLeftWidth = visibleWidth(statsLeft);
 		}
-		pipeParts.push(modelDisplayName);
+
+		// Calculate available space for padding (minimum 2 spaces between stats and model)
+		const minPadding = 2;
+
+		// Add thinking level indicator if model supports reasoning
+		let rightSideWithoutProvider = modelDisplayName;
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
-			pipeParts.push(thinkingLevel === "off" ? "thinking off" : thinkingLevel);
+			rightSideWithoutProvider =
+				thinkingLevel === "off" ? `${modelDisplayName} • thinking off` : `${modelDisplayName} • ${thinkingLevel}`;
 		}
-		if (tpsStatus) pipeParts.push(tpsStatus);
-		const wrapped = wrapPipeParts(pipeParts, width);
+
+		// Prepend the provider in parentheses if there are multiple providers and there's enough room
+		let rightSide = rightSideWithoutProvider;
+		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
+			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
+			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
+				// Too wide, fall back
+				rightSide = rightSideWithoutProvider;
+			}
+		}
+
+		const rightSideWidth = visibleWidth(rightSide);
+		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+
+		let statsLine: string;
+		if (totalNeeded <= width) {
+			// Both fit - add padding to right-align model
+			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+			statsLine = statsLeft + padding + rightSide;
+		} else {
+			// Need to truncate right side
+			const availableForRight = width - statsLeftWidth - minPadding;
+			if (availableForRight > 0) {
+				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
+				const truncatedRightWidth = visibleWidth(truncatedRight);
+				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
+				statsLine = statsLeft + padding + truncatedRight;
+			} else {
+				// Not enough space for right side at all
+				statsLine = statsLeft;
+			}
+		}
+
+		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
+		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
+		// before and after the colored section independently.
+		const dimStatsLeft = theme.fg("dim", statsLeft);
+		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
+		const badgeIndex = fastModeEnabled ? remainder.indexOf(FAST_MODE_BADGE) : -1;
+		const dimRemainder =
+			badgeIndex === -1
+				? theme.fg("dim", remainder)
+				: theme.fg("dim", remainder.slice(0, badgeIndex)) +
+					theme.bg("selectedBg", theme.bold(theme.fg("accent", FAST_MODE_BADGE))) +
+					theme.fg("dim", remainder.slice(badgeIndex + FAST_MODE_BADGE.length));
+
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, ...wrapped.map((line) => dimFooterLine(line, fastModeEnabled))];
+		const lines = [pwdLine, dimStatsLeft + dimRemainder];
 
 		// Add extension statuses on a single line. Learning-related statuses are
 		// folded into one compact chip so independent learning systems do not render
 		// brittle duplicates like "(learning) (learning) auto".
+		const extensionStatuses = this.footerData.getExtensionStatuses();
 		const autonomyStatus = this.footerData.getAutonomyStatus();
 
 		const statusParts: string[] = [];
