@@ -278,7 +278,11 @@ test("offline Windows installer verifies, activates the complete tree, rolls bac
 	});
 	assert.equal(third.status, 0, `${third.stdout}\n${third.stderr}`);
 	assert.equal(readFileSync(unknownSentinel, "utf8"), "unmanaged\n");
-	assert.equal(existsSync(join(installRoot, "releases", "v1.2.3")), false);
+	assert.equal(
+		existsSync(join(installRoot, "releases", "v1.2.3")),
+		false,
+		`expected v1.2.3 to be pruned\nstdout:\n${third.stdout}\nstderr:\n${third.stderr}`,
+	);
 	assert.equal(existsSync(join(installRoot, "releases", "v1.2.4")), true);
 	assert.equal(existsSync(join(installRoot, "releases", "v1.2.5")), true);
 });
