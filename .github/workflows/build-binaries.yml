@@ -419,15 +419,7 @@ jobs:
           case "$release_subject" in
             "Release v"*|"Repair release v"*)
               tested_sha="$(git rev-parse "${release_sha}^")"
-              mapfile -d '' changed_paths < <(git diff --name-only -z "$tested_sha" "$release_sha")
-              for changed_path in "${changed_paths[@]}"; do
-                case "$changed_path" in
-                  package.json|package-lock.json|packages/agent/package.json|packages/agent/CHANGELOG.md|packages/ai/package.json|packages/ai/CHANGELOG.md|packages/coding-agent/package.json|packages/coding-agent/CHANGELOG.md|packages/tui/package.json|packages/tui/CHANGELOG.md) ;;
-                  *)
-                    echo "::error::Release metadata commit changes untested path ${changed_path}" >&2
-                    exit 1 ;;
-                esac
-              done ;;
+              node scripts/verify-release-metadata-diff.mjs "$tested_sha" "$release_sha" ;;
           esac
 
           successful_run_ids() {

@@ -75,6 +75,14 @@ export function computeReleaseAllowlist(repoRoot = ".") {
 	return allowlist;
 }
 
+export function partitionReleasePaths(changedPaths, repoRoot = ".") {
+	const allowlist = computeReleaseAllowlist(repoRoot);
+	return {
+		allowed: changedPaths.filter((path) => allowlist.has(path)),
+		unexpected: changedPaths.filter((path) => !allowlist.has(path)),
+	};
+}
+
 /** Prefer a successful run for a SHA over an earlier cancelled/failed one. */
 export function pickWorkflowConclusion(runs, sha) {
 	const matches = runs.filter((run) => run.headSha === sha);
@@ -141,10 +149,5 @@ export function stripEmptyUnreleasedSection(content) {
 }
 
 export function partitionReleaseChanges(statusOutput, repoRoot = ".") {
-	const allowlist = computeReleaseAllowlist(repoRoot);
-	const changedPaths = collectChangedPaths(statusOutput);
-	return {
-		allowed: changedPaths.filter((path) => allowlist.has(path)),
-		unexpected: changedPaths.filter((path) => !allowlist.has(path)),
-	};
+	return partitionReleasePaths(collectChangedPaths(statusOutput), repoRoot);
 }

@@ -8,6 +8,7 @@
 $ErrorActionPreference = "Stop"
 $script:ManagedMarkerName = ".pi-adaptative-managed"
 $script:ManagedMarkerContent = "pi-adaptative-managed-release-v1"
+$script:TestRemoveFailuresRemaining = $null
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
@@ -212,6 +213,44 @@ function Invoke-VersionSmoke([string]$Executable, [string]$Version) {
     }
 }
 
+function Remove-InstallerDirectory([string]$Path, [string]$Description) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ($null -eq $script:TestRemoveFailuresRemaining) {
+        $script:TestRemoveFailuresRemaining = 0
+        if ($env:PI_INSTALL_TEST_MODE -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:PI_INSTALL_TEST_REMOVE_FAILURES)) {
+            [int]$parsedFailures = 0
+            if (-not [int]::TryParse($env:PI_INSTALL_TEST_REMOVE_FAILURES, [ref]$parsedFailures) -or $parsedFailures -lt 0) {
+                Fail "PI_INSTALL_TEST_REMOVE_FAILURES must be a non-negative integer."
+            }
+            $script:TestRemoveFailuresRemaining = $parsedFailures
+        }
+    }
+
+    $maxAttempts = 8
+    $delayMilliseconds = if ($env:PI_INSTALL_TEST_MODE -eq "1") { 1 } else { 100 }
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            if ($Description -eq "staging" -and $env:PI_INSTALL_TEST_MODE -eq "1" -and $script:TestRemoveFailuresRemaining -gt 0) {
+                $script:TestRemoveFailuresRemaining -= 1
+                $simulatedLock = [System.IO.IOException]::new("simulated transient executable lock")
+                throw $simulatedLock
+            }
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -ge $maxAttempts) {
+                throw "Could not clean $Description directory after $maxAttempts attempts: $($_.Exception.Message)"
+            }
+            if ($Description -eq "staging") {
+                Write-Warning "Staging cleanup hit a transient lock; retrying ($attempt/$maxAttempts)."
+            } else {
+                Write-Warning "$Description cleanup failed; retrying ($attempt/$maxAttempts)."
+            }
+            Start-Sleep -Milliseconds $delayMilliseconds
+        }
+    }
+}
+
 function Set-AtomicTextFile([string]$Path, [string]$Content) {
     $temporary = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
     [System.IO.File]::WriteAllText($temporary, $Content, [System.Text.UTF8Encoding]::new($false))
@@ -341,6 +380,9 @@ function Install-PiAdaptative {
         $staging = Join-Path $releaseDir (".staging-" + [Guid]::NewGuid().ToString('N'))
         $downloadDir = Join-Path $parent (".pi-download-" + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Force -Path $staging, $downloadDir | Out-Null
+        $installError = $null
+        $cleanupErrors = @()
+        $stagingCleanupAttempted = $false
         try {
             $checksumPath = Join-Path $downloadDir "SHA256SUMS"
             $archivePath = Join-Path $downloadDir $assetName
@@ -361,7 +403,8 @@ function Install-PiAdaptative {
                 if (-not (Test-Path -LiteralPath (Join-Path $targetDir "pi.exe") -PathType Leaf)) { Fail "existing release directory is incomplete." }
                 Invoke-VersionSmoke (Join-Path $targetDir "pi.exe") $version
                 Ensure-ManagedRelease $targetDir
-                Remove-Item -LiteralPath $staging -Recurse -Force
+                $stagingCleanupAttempted = $true
+                Remove-InstallerDirectory $staging "staging"
             } else {
                 New-ManagedMarker $staging
                 Move-Item -LiteralPath $staging -Destination $targetDir
@@ -372,10 +415,21 @@ function Install-PiAdaptative {
             [void](Ensure-UserPath $binDir)
             Write-Output "Pi Adaptative $version installed for Windows $architecture."
             Write-Output "Open a new PowerShell window, then run: pi --version"
+        } catch {
+            $installError = $_
         } finally {
-            if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
-            if (Test-Path -LiteralPath $downloadDir) { Remove-Item -LiteralPath $downloadDir -Recurse -Force }
+            if (-not $stagingCleanupAttempted) {
+                try { Remove-InstallerDirectory $staging "staging" } catch { $cleanupErrors += $_ }
+            }
+            try { Remove-InstallerDirectory $downloadDir "download" } catch { $cleanupErrors += $_ }
         }
+        if ($null -ne $installError) {
+            foreach ($cleanupError in $cleanupErrors) {
+                Write-Warning "$($cleanupError.Exception.Message) Preserving original installation error."
+            }
+            throw $installError
+        }
+        if ($cleanupErrors.Count -gt 0) { throw $cleanupErrors[0] }
     } finally {
         if ($locked) { $mutex.ReleaseMutex() }
         $mutex.Dispose()

@@ -237,7 +237,11 @@ test("direct tag publication proves a full tested tree and exact-commit destruct
 	assert.match(provenanceJob, /git rev-parse "\$\{RELEASE_TAG\}\^\{commit\}"/u);
 	assert.match(provenanceJob, /release_subject=/u);
 	assert.match(provenanceJob, /tested_sha=.*git rev-parse "\$\{release_sha\}\^"/u);
-	assert.match(provenanceJob, /git diff --name-only -z "\$tested_sha" "\$release_sha"/u);
+	assert.match(
+		provenanceJob,
+		/node scripts\/verify-release-metadata-diff\.mjs "\$tested_sha" "\$release_sha"/u,
+	);
+	assert.doesNotMatch(provenanceJob, /git diff --name-only -z/u);
 	assert.match(provenanceJob, /gh run view "\$run_id"[\s\S]*--json jobs/u);
 	assert.match(provenanceJob, /Build, check, test \(ubuntu-latest\)/u);
 	assert.match(provenanceJob, /Build, check, test \(windows-latest\)/u);

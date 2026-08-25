@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -32,12 +33,49 @@ test("collectChangedPaths does not trim the porcelain prefix", () => {
 
 test("lockstep workspace package files are on the release allowlist", () => {
 	const allowlist = computeReleaseAllowlist(repoRoot);
-	assert.ok(allowlist.has("package-lock.json"));
-	assert.ok(allowlist.has("packages/agent/CHANGELOG.md"));
-	assert.ok(allowlist.has("packages/coding-agent/examples/extensions/sandbox/package.json"));
+	const expected = [
+		"package-lock.json",
+		"packages/agent/CHANGELOG.md",
+		"packages/coding-agent/examples/extensions/custom-provider-anthropic/package-lock.json",
+		"packages/coding-agent/examples/extensions/custom-provider-anthropic/package.json",
+		"packages/coding-agent/examples/extensions/custom-provider-gitlab-duo/package.json",
+		"packages/coding-agent/examples/extensions/sandbox/package-lock.json",
+		"packages/coding-agent/examples/extensions/sandbox/package.json",
+		"packages/coding-agent/examples/extensions/with-deps/package-lock.json",
+		"packages/coding-agent/examples/extensions/with-deps/package.json",
+	];
+	for (const path of expected) assert.ok(allowlist.has(path), path);
 	for (const path of allowlist) {
 		assert.equal(path.includes("\\"), false, path);
 	}
+});
+
+test("release provenance delegates metadata paths to the release-staging owner", () => {
+	const workflow = readFileSync(join(repoRoot, ".github", "workflows", "build-binaries.yml"), "utf8");
+	assert.match(workflow, /node scripts\/verify-release-metadata-diff\.mjs "\$tested_sha" "\$release_sha"/);
+	assert.doesNotMatch(workflow, /mapfile -d '' changed_paths/);
+
+	const releasePaths = [
+		"package-lock.json",
+		"packages/agent/CHANGELOG.md",
+		"packages/agent/package.json",
+		"packages/ai/CHANGELOG.md",
+		"packages/ai/package.json",
+		"packages/coding-agent/CHANGELOG.md",
+		"packages/coding-agent/examples/extensions/custom-provider-anthropic/package-lock.json",
+		"packages/coding-agent/examples/extensions/custom-provider-anthropic/package.json",
+		"packages/coding-agent/examples/extensions/custom-provider-gitlab-duo/package.json",
+		"packages/coding-agent/examples/extensions/sandbox/package-lock.json",
+		"packages/coding-agent/examples/extensions/sandbox/package.json",
+		"packages/coding-agent/examples/extensions/with-deps/package-lock.json",
+		"packages/coding-agent/examples/extensions/with-deps/package.json",
+		"packages/coding-agent/package.json",
+		"packages/tui/CHANGELOG.md",
+		"packages/tui/package.json",
+	];
+	const releaseStatus = releasePaths.map((path) => ` M ${path}`).join("\n");
+	assert.deepEqual(partitionReleaseChanges(releaseStatus, repoRoot).unexpected, []);
+	assert.deepEqual(partitionReleaseChanges(`${releaseStatus}\n M install.ps1`, repoRoot).unexpected, ["install.ps1"]);
 });
 
 test("partitionReleaseChanges accepts a typical unstaged version-bump tree", () => {

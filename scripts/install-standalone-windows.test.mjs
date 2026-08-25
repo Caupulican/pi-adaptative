@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -285,6 +285,73 @@ test("offline Windows installer verifies, activates the complete tree, rolls bac
 	);
 	assert.equal(existsSync(join(installRoot, "releases", "v1.2.4")), true);
 	assert.equal(existsSync(join(installRoot, "releases", "v1.2.5")), true);
+});
+
+test("offline Windows installer bounds staging cleanup and preserves the primary failure", (context) => {
+	const shell = powershellExecutable();
+	if (!shell || process.platform === "win32") {
+		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		return;
+	}
+	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-cleanup-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const installRoot = join(root, "install");
+	const binRoot = join(root, "bin");
+	const fixture = createReleaseFixture(root, "1.2.3", "1.2.3", true, shell);
+	const baseEnv = {
+		PI_VERSION: "v1.2.3",
+		PI_INSTALL_TEST_BASE_URL: powershellPath(shell, fixture),
+		PI_INSTALL_TEST_VERSION_OUTPUT: "1.2.3",
+		PI_INSTALL_DIR: powershellPath(shell, installRoot),
+		PI_BIN_DIR: powershellPath(shell, binRoot),
+	};
+	const first = runOfflineInstaller(shell, baseEnv);
+	assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+
+	const transient = runOfflineInstaller(shell, {
+		...baseEnv,
+		PI_INSTALL_TEST_VERSION_OUTPUT: "0.0.0",
+		PI_INSTALL_TEST_REMOVE_FAILURES: "2",
+	});
+	const transientOutput = `${transient.stdout}\n${transient.stderr}`;
+	assert.notEqual(transient.status, 0, transientOutput);
+	assert.match(transientOutput, /did not report exactly 1\.2\.3/);
+	assert.match(transientOutput, /Staging cleanup hit a transient lock; retrying/);
+	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
+	assert.deepEqual(
+		readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-")),
+		[],
+	);
+
+	const cleanupOnly = runOfflineInstaller(shell, {
+		...baseEnv,
+		PI_INSTALL_TEST_REMOVE_FAILURES: "99",
+	});
+	const cleanupOnlyOutput = `${cleanupOnly.stdout}\n${cleanupOnly.stderr}`;
+	assert.notEqual(cleanupOnly.status, 0, cleanupOnlyOutput);
+	assert.match(cleanupOnlyOutput, /Could not clean staging directory after 8 attempts/);
+	assert.equal(
+		cleanupOnlyOutput.match(/Staging cleanup hit a transient lock; retrying/g)?.length,
+		7,
+		cleanupOnlyOutput,
+	);
+	assert.doesNotMatch(cleanupOnlyOutput, /Preserving original installation error/);
+	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
+	const strandedStaging = readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-"));
+	assert.equal(strandedStaging.length, 1, cleanupOnlyOutput);
+	rmSync(join(installRoot, "releases", strandedStaging[0]), { recursive: true, force: true });
+
+	const permanent = runOfflineInstaller(shell, {
+		...baseEnv,
+		PI_INSTALL_TEST_VERSION_OUTPUT: "0.0.0",
+		PI_INSTALL_TEST_REMOVE_FAILURES: "99",
+	});
+	const permanentOutput = `${permanent.stdout}\n${permanent.stderr}`;
+	assert.notEqual(permanent.status, 0, permanentOutput);
+	assert.match(permanentOutput, /did not report exactly 1\.2\.3/);
+	assert.match(permanentOutput, /Could not clean staging directory after 8 attempts/);
+	assert.match(permanentOutput, /Preserving original installation error/);
+	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
 });
 
 if (process.env.PI_WINDOWS_INSTALLER_DEBUG === "1") {
