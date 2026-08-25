@@ -3,21 +3,37 @@
 Pi Adaptative is an independent coding-agent harness for work that needs durable
 orchestration, explicit recovery, and evidence that survives long sessions.
 
-It began from the Pi codebase, but it is no longer a lightweight Pi distribution.
-The project deliberately spends more code, state, and runtime overhead on durable
-sessions, compaction, background workers, tool-call recovery, process lifecycle
-management, and evidence-gated changes. That is the tradeoff: this is intended for
-reliable, inspectable agent work rather than the smallest possible terminal wrapper.
+It began from the Pi codebase and is built for durable, inspectable agent work.
+The project invests in durable sessions, compaction, background workers, tool-call
+recovery, process lifecycle management, and evidence-gated changes so long-running
+work remains observable and recoverable.
 
-## Install the standalone release
+## Install and update the standalone release
+
+Pi Adaptative ships as a native standalone release for Linux and Windows on x64 or
+arm64. Every release includes a deployment script, a matching binary archive, and
+`SHA256SUMS`. The installer selects the right archive, verifies its SHA-256 digest,
+and activates it only after the staged binary passes its version check. End users do
+not need npm or Node.js to install or update Pi.
 
 Releases are published from this repository:
 
 <https://github.com/Caupulican/pi-adaptative/releases>
 
-The supported installers are limited to Linux and Windows on x64 or arm64. They
-download the matching standalone archive and verify it against the release's
-`SHA256SUMS` before activation. End users do not need npm or Node.js.
+### Update Pi
+
+The fastest way to update an installed release is:
+
+```sh
+pi update --self
+```
+
+Pi pulls the current platform deployment script from the latest GitHub release and
+runs it. On Linux that is `install.sh`; on Windows it is `install.ps1`. The script
+downloads and verifies the matching archive before activating it, while keeping the
+previous release available for rollback. `pi update pi` is an equivalent self-update
+target, and plain `pi update` updates extensions/packages before updating Pi itself.
+Use `pi update --extensions` when you want to update extensions/packages only.
 
 ### Linux
 
@@ -26,8 +42,10 @@ curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/
 ```
 
 The installer places the managed `pi` launcher in the user-local installation
-location. Run `pi --version` after installation. Review the installer before
-piping it to a shell if your environment requires that policy.
+location, selects the native x64 or arm64 archive, verifies `SHA256SUMS`, and keeps
+the previous release available for rollback. Run `pi --version` after installation.
+Review the installer before piping it to a shell if your environment requires that
+policy.
 
 ### Windows PowerShell
 
@@ -35,16 +53,15 @@ piping it to a shell if your environment requires that policy.
 irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
 ```
 
-The PowerShell installer selects the native x64 or arm64 archive, verifies its
-checksum, and installs the matching `pi.exe`. Windows users can also download the
-corresponding archive and `SHA256SUMS` directly from the
+The PowerShell installer selects the native x64 or arm64 archive, verifies it against
+`SHA256SUMS`, and installs the matching `pi.exe` with the previous release available
+for rollback. Windows users can also download the corresponding archive and
+`SHA256SUMS` directly from the
 [latest release](https://github.com/Caupulican/pi-adaptative/releases/latest).
 
-The release archives are the supported distribution format. There is no public
-package-registry distribution, third-party web installer, or package-manager
-self-update path. `pi update --self` directs legacy installations to the standalone
-installer instead of mutating them in place. npm and Node.js remain development and
-extension tooling for contributors; they are not end-user installation requirements.
+The release archives and deployment scripts are the supported distribution format.
+npm and Node.js remain available for source development and third-party extension
+packages; they are not end-user installation requirements.
 
 ## What the harness provides
 

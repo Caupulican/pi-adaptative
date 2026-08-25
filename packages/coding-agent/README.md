@@ -14,8 +14,8 @@ The standalone release is installed and used as `pi`. Its scope is deliberately 
 - make source-backed self-modifications with validation;
 - scope loaded resources through profiles when needed;
 - keep per-repo configuration out of the repo by using user-level state;
-- ship native Linux and Windows binaries with verified, rollback-safe installers;
-- keep Node.js and npm available for source development and third-party extension/package workflows, not for installing or publishing the CLI.
+- ship native Linux and Windows binaries with verified SHA-256 checksums and rollback-safe installers;
+- give end users a complete CLI installation and update path without npm or Node.js.
 
 ## Compatibility mode
 
@@ -51,15 +51,35 @@ Pi Adaptative runs in four modes: interactive, print or JSON, RPC for process in
 
 ## Quick Start
 
+Pi Adaptative is distributed as a standalone release for Linux and Windows on x64 or
+arm64. Every release ships a platform deployment script, a matching binary archive,
+and `SHA256SUMS`; the installer verifies the archive before activation.
+
 ```bash
 curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh
 ```
 
-The installer downloads the verified Linux release binary and manages the `pi` launcher outside the repository. Re-run it to update. On Windows, use the native PowerShell installer:
+The Linux installer selects the native archive, verifies its SHA-256 digest, stages
+the release, and activates it after the binary passes its version check. It manages
+the `pi` launcher outside the repository. On Windows, use the native PowerShell
+installer:
 
 ```powershell
 irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
 ```
+
+The Windows installer provides the same verified, rollback-safe deployment for
+`pi.exe`. End users do not need npm or Node.js. To update an installed Pi release,
+pull and run the current platform deployment script with:
+
+```bash
+pi update --self
+```
+
+This command runs `install.sh` on Linux or `install.ps1` on Windows. `pi update pi`
+is an equivalent self-update target. Plain `pi update` updates extensions/packages
+and then updates the standalone Pi release; use `pi update --extensions` for an
+extensions/packages-only update.
 
 Authenticate with an API key:
 
@@ -402,15 +422,22 @@ pi install ssh://git@github.com/user/repo@v1    # tag or commit
 pi remove npm:@foo/pi-tools
 pi uninstall npm:@foo/pi-tools          # alias for remove
 pi list
-pi update                               # update extensions/packages, then print installer guidance and exit nonzero
-pi update --extensions                  # update extensions/packages only; exit successfully
-pi update --self                        # refuse CLI self-update; print standalone installer guidance and exit nonzero
-pi update --self --force                # compatibility flag; same refusal, no reinstall
+pi update                               # update extensions/packages, then update the standalone Pi release
+pi update --extensions                  # update extensions/packages only
+pi update --self                        # pull and run the current platform deployment script
+pi update --self --force                # pull and run the current platform deployment script
 pi update npm:@foo/pi-tools             # update one package
 pi config                               # enable/disable extensions, skills, prompts, themes
 ```
 
-Pi Adaptative is distributed as a standalone Linux or Windows release. Legacy npm, pnpm, yarn, and Bun package installations are no longer updated in place. Plain `pi update` updates extensions/packages, then prints the matching standalone installer command and exits nonzero. `pi update --extensions` is the successful extension/package-only path. `pi update --self` always refuses a CLI self-update, exits nonzero, and prints installer guidance; `--force` is retained only as a compatibility flag and does not reinstall. Node.js and npm remain useful for building from source and for third-party extension/package dependencies.
+Pi Adaptative's standalone deployment scripts are the authoritative CLI update path.
+`pi update --self` and `pi update pi` pull the current `install.sh` or `install.ps1`
+from the latest GitHub release and run it. The script selects the native x64 or arm64
+archive, verifies its SHA-256 digest against `SHA256SUMS`, and activates the release
+only after the staged binary passes its version check. Plain `pi update` updates
+extensions/packages and then updates Pi; `pi update --extensions` updates
+extensions/packages only. npm and Node.js are for source development and third-party
+extension/package workflows, not for end-user CLI installation or updates.
 
 Packages install to `~/.pi/agent/git/` (git) or `~/.pi/agent/npm/` (npm). Use `-l` for project-local installs (`.pi/git/`, `.pi/npm/`). Git `@ref` values are pinned tags or commits; pinned packages are skipped by `pi update`, so use `pi install git:host/user/repo@new-ref` to move an existing package to a new ref. Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@24", "--", "npm"]`.
 
@@ -493,10 +520,10 @@ pi [options] [@files...] [messages...]
 pi install <source> [-l]     # Install package, -l for project-local
 pi remove <source> [-l]      # Remove package
 pi uninstall <source> [-l]   # Alias for remove
-pi update [source|self|pi]   # Update extensions/packages, then print installer guidance and exit nonzero
-pi update --extensions       # Update extensions/packages only; exit successfully
-pi update --self             # Refuse CLI self-update and print installer guidance; exit nonzero
-pi update --self --force     # Compatibility flag; same refusal, no reinstall
+pi update [source|self|pi]   # Update extensions/packages, then update the standalone Pi release
+pi update --extensions       # Update extensions/packages only
+pi update --self             # Pull and run the current platform deployment script
+pi update --self --force     # Pull and run the current platform deployment script
 pi update --extension <src>  # Update one package
 pi list                      # List installed packages
 pi config                    # Enable/disable package resources

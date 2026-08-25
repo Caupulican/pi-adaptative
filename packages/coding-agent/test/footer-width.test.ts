@@ -5,7 +5,7 @@ import type { AgentSession } from "../src/core/agent-session.ts";
 import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
 import type { CostGuardDecision } from "../src/core/cost-guard.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
-import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
+import { FooterComponent, formatCwdForFooter, wrapPipeParts } from "../src/modes/interactive/components/footer.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 
 type FooterUsageSnapshotForTest = {
@@ -18,6 +18,7 @@ type AssistantUsage = {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	totalTokens?: number;
 	cost: { total: number };
 };
 
@@ -442,5 +443,44 @@ describe("FooterComponent width handling", () => {
 
 		const lines = footer.render(120);
 		expect(lines.length).toBe(2); // Only pwd and stats
+	});
+});
+
+describe("footer metric layout", () => {
+	it("folds TPS and cumulative tokens into the model/context rows", () => {
+		const session = createSession({
+			sessionName: "",
+			usage: {
+				input: 1_200,
+				output: 400,
+				cacheRead: 200,
+				cacheWrite: 100,
+				totalTokens: 1_900,
+				cost: { total: 0 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(1, new Map([["tps", "TPS 24.0 tok/s"]])));
+
+		const lines = footer.render(240).map(stripAnsi);
+
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain(
+			"in 1.2k | out 400 | cache 300 | toks 1.9k | 12.3%/200k (auto) | test-model | TPS 24.0 tok/s",
+		);
+	});
+});
+
+describe("wrapPipeParts", () => {
+	it("keeps metrics together with pipes when they fit", () => {
+		expect(wrapPipeParts(["in 12k", "out 3k", "cache 8k", "model"], 80)).toEqual([
+			"in 12k | out 3k | cache 8k | model",
+		]);
+	});
+
+	it("wraps only between complete metrics", () => {
+		expect(wrapPipeParts(["in 12k", "out 3k", "cache 8k", "model"], 19)).toEqual([
+			"in 12k | out 3k",
+			"cache 8k | model",
+		]);
 	});
 });

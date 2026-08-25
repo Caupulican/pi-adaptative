@@ -290,6 +290,9 @@ export class Editor implements Component, Focusable {
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
 
+	/** If it returns true, the default text insertion is skipped. */
+	public onPaste?: (pastedText: string) => boolean | undefined;
+
 	// Autocomplete support
 	private autocompleteProvider?: AutocompleteProvider;
 	private autocompleteList?: SelectList;
@@ -636,9 +639,7 @@ export class Editor implements Component, Focusable {
 		const pasteResult = this.bracketedPaste.consume(data);
 		if (pasteResult.kind === "pending") return;
 		if (pasteResult.kind === "complete") {
-			if (pasteResult.content.length > 0) {
-				this.handlePaste(pasteResult.content);
-			}
+			this.handlePaste(pasteResult.content);
 			if (pasteResult.remainder.length > 0) {
 				this.handleInput(pasteResult.remainder);
 			}
@@ -1142,6 +1143,9 @@ export class Editor implements Component, Focusable {
 	}
 
 	private handlePaste(pastedText: string): void {
+		if (this.onPaste?.(pastedText) === true || pastedText.length === 0) {
+			return;
+		}
 		this.cancelAutocomplete();
 		this.historyIndex = -1; // Exit history browsing mode
 		this.lastAction = null;

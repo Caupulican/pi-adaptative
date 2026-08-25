@@ -100,12 +100,7 @@ export function formatAutonomyStatus(args: AutonomyStatusSnapshot): string {
 	}
 
 	if (args.activeGoal) {
-		const goal = args.activeGoal;
-		const requirements = goal.openRequirements !== undefined ? `, open reqs: ${goal.openRequirements}` : "";
-		const stalls = goal.stallTurns !== undefined ? `, stalls: ${goal.stallTurns}` : "";
-		parts.push(
-			`Goal [${redactAndTruncateString(goal.goalId)}]: ${redactAndTruncateString(goal.status)}${requirements}${stalls}`,
-		);
+		parts.push(`Goal: ${redactAndTruncateString(args.activeGoal.status)}`);
 	}
 
 	if (args.activeLaneCount !== undefined) {

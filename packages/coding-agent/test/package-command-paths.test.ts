@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR, VERSION } from "../src/config.ts";
 import { main } from "../src/main.ts";
+import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import { windowsLoadedSuiteTimeout } from "./windows-loaded-suite-timeout.ts";
 
 describe("package commands", () => {
@@ -152,22 +153,29 @@ describe("package commands", () => {
 			configurable: true,
 		});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
 
 		try {
-			await expect(main(["update", "--self", "--force"])).resolves.toBeUndefined();
+			await expect(handlePackageCommand(["update", "--self", "--force"], { runInstaller })).resolves.toBe(true);
 
-			expect(process.exitCode).toBe(1);
+			expect(process.exitCode).toBeUndefined();
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stderr).toContain("no longer updates package-manager installations");
-			expect(stderr).toContain("https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh");
+			expect(stderr).not.toContain("no longer updates package-manager installations");
 			expect(stderr).not.toContain("npm install");
+			expect(runInstaller).toHaveBeenCalledTimes(1);
+			const [command, args] = runInstaller.mock.calls[0] ?? [];
+			expect(command).toBe("sh");
+			expect(args).toEqual([
+				"-c",
+				"curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh",
+			]);
 			expect(() => readFileSync(recordPath, "utf-8")).toThrow();
 		} finally {
 			errorSpy.mockRestore();
 		}
 	});
 
-	it("always directs current standalone installs to the installer instead of reporting self-update success", async () => {
+	it("runs current standalone installs through the installer and reports success", async () => {
 		process.env.PI_PACKAGE_DIR = packageDir;
 		vi.stubGlobal(
 			"fetch",
@@ -175,16 +183,56 @@ describe("package commands", () => {
 		);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
 
 		try {
-			await expect(main(["update", "--self"])).resolves.toBeUndefined();
+			await expect(handlePackageCommand(["update", "--self"], { runInstaller })).resolves.toBe(true);
 
-			expect(process.exitCode).toBe(1);
+			expect(process.exitCode).toBeUndefined();
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).not.toContain("already up to date");
-			expect(stderr).toContain("no longer updates");
-			expect(stderr).toContain("https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh");
+			expect(stdout).toContain("Updated pi");
+			expect(stderr).not.toContain("no longer updates");
+			expect(runInstaller).toHaveBeenCalledTimes(1);
+			const [command, args] = runInstaller.mock.calls[0] ?? [];
+			expect(command).toBe("sh");
+			expect(args).toEqual([
+				"-c",
+				"curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh",
+			]);
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("does not invoke the standalone installer for extension-only updates", async () => {
+		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 0);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		try {
+			await expect(handlePackageCommand(["update", "--extensions"], { runInstaller })).resolves.toBe(true);
+
+			expect(runInstaller).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+		}
+	});
+
+	it("reports a failed standalone installer without claiming self-update success", async () => {
+		const runInstaller = vi.fn(async (_command: string, _args: string[]) => 17);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(handlePackageCommand(["update", "--self"], { runInstaller })).resolves.toBe(true);
+
+			expect(process.exitCode).toBe(1);
+			expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining("Updated pi"));
+			expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+				"Standalone installer exited with code 17.",
+			);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();

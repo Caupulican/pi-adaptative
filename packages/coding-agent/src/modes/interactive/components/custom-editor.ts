@@ -20,6 +20,13 @@ export class CustomEditor extends Editor {
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, options?: EditorOptions) {
 		super(tui, theme, options);
 		this.keybindings = keybindings;
+		this.onPaste = (text) => {
+			if (this.onPasteImage && text.trim().length === 0) {
+				this.onPasteImage();
+				return true;
+			}
+			return false;
+		};
 	}
 
 	/**

@@ -43,11 +43,14 @@ describe("Autonomy Status Formatters (Phase 8A)", () => {
 			expect(status).toContain("Costs: CURRENT $0.1235, TODAY $1.5000, SUBAGENTS $0.0500 (included in CURRENT)");
 		});
 
-		it("active goal appears when present", () => {
+		it("shows only the active goal status", () => {
 			const status = formatAutonomyStatus({
 				activeGoal: { goalId: "g1", status: "active", openRequirements: 2, stallTurns: 1 },
 			});
-			expect(status).toContain("Goal [g1]: active, open reqs: 2, stalls: 1");
+			expect(status).toBe("Goal: active");
+			expect(status).not.toContain("g1");
+			expect(status).not.toContain("open reqs");
+			expect(status).not.toContain("stalls");
 		});
 
 		it("active lane count appears when present", () => {

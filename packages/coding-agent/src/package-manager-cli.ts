@@ -1,9 +1,10 @@
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
-import { APP_NAME, getAgentDir, getStandaloneInstallInstruction } from "./config.ts";
+import { APP_NAME, getAgentDir, getStandaloneInstallerCommand, getStandaloneInstallInstruction } from "./config.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
+import { spawnProcess, waitForChildProcess } from "./utils/child-process.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -22,6 +23,18 @@ interface PackageCommandOptions {
 	missingOptionValue?: string;
 	conflictingOptions?: string;
 }
+
+export type PackageCommandInstallerRunner = (command: string, args: string[]) => Promise<number | null>;
+
+export interface PackageCommandDependencies {
+	runInstaller?: PackageCommandInstallerRunner;
+	platform?: NodeJS.Platform;
+}
+
+const runInstaller: PackageCommandInstallerRunner = async (command, args) => {
+	const child = spawnProcess(command, args, { stdio: "inherit" });
+	return waitForChildProcess(child);
+};
 
 function reportSettingsErrors(settingsManager: SettingsManager, context: string): void {
 	const errors = settingsManager.drainErrors();
@@ -91,20 +104,20 @@ Examples:
 			console.log(`${chalk.bold("Usage:")}
   ${getPackageCommandUsage("update")}
 
-Update installed packages and show the standalone installer required to update pi.
+Update installed packages and run the standalone installer to update pi.
 
 Options:
-  --self                  Print the standalone pi installer command and exit nonzero
+  --self                  Download and run the standalone pi installer
   --extensions            Update installed packages only
   --extension <source>    Update one package only
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
-  --force                 Compatibility flag; pi still requires the standalone installer
+  --force                 Compatibility flag for standalone self-updates
 
 Short forms:
-  ${APP_NAME} update                Update extensions, then print pi installer guidance
+  ${APP_NAME} update                Update extensions, then run the standalone pi installer
   ${APP_NAME} update <source>       Update one package
-  ${APP_NAME} update pi             Print pi installer guidance (self is an alias)
+  ${APP_NAME} update pi             Run the standalone pi installer (self is an alias)
 `);
 			return;
 
@@ -286,14 +299,16 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 	return target.type === "all" || target.type === "extensions";
 }
 
-function printSelfUpdateUnavailable(): void {
-	console.error(`error: ${APP_NAME} no longer updates package-manager installations or standalone releases in place.`);
-	console.error(getStandaloneInstallInstruction());
+async function runStandaloneInstaller(dependencies: PackageCommandDependencies): Promise<void> {
+	const platform = dependencies.platform ?? process.platform;
+	const installer = getStandaloneInstallerCommand(platform);
+	if (!installer) {
+		throw new Error(getStandaloneInstallInstruction(platform));
+	}
 
-	const entrypoint = process.argv[1];
-	if (entrypoint) {
-		console.error("");
-		console.error(`Location of pi executable: ${entrypoint}`);
+	const exitCode = await (dependencies.runInstaller ?? runInstaller)(installer.command, installer.args);
+	if (exitCode !== 0) {
+		throw new Error(`Standalone installer exited with code ${exitCode ?? "unknown"}.`);
 	}
 }
 
@@ -339,7 +354,10 @@ export async function handleConfigCommand(args: string[]): Promise<boolean> {
 	process.exit(0);
 }
 
-export async function handlePackageCommand(args: string[]): Promise<boolean> {
+export async function handlePackageCommand(
+	args: string[],
+	dependencies: PackageCommandDependencies = {},
+): Promise<boolean> {
 	const options = parsePackageCommand(args);
 	if (!options) {
 		return false;
@@ -471,8 +489,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					printSelfUpdateUnavailable();
-					process.exitCode = 1;
+					await runStandaloneInstaller(dependencies);
+					console.log(chalk.green(`Updated ${APP_NAME}`));
 					return true;
 				}
 				return true;

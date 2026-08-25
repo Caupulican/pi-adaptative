@@ -131,6 +131,23 @@ describe("activity lane", () => {
 		lane.dispose();
 	});
 
+	it("projects status-only goal badges and a completion notice", () => {
+		const active = createGoalState({ goalId: "active", userGoal: "Keep the objective private", now: "T0" });
+		const completed = applyGoalEvent(active, {
+			type: "complete_goal",
+			now: "T1",
+		});
+
+		expect(projectActivityLane({ goalState: active, laneRecords: [] })).toEqual({
+			active: [expect.objectContaining({ kind: "goal", status: "active", label: "active" })],
+			terminal: [],
+		});
+		expect(projectActivityLane({ goalState: completed, laneRecords: [] })).toEqual({
+			active: [],
+			terminal: [expect.objectContaining({ kind: "goal", status: "success", label: "Goal achieved" })],
+		});
+	});
+
 	it("projects budget-limited goals as terminal while keeping blocked goals live", () => {
 		const budgetLimited = applyGoalEvent(createGoalState({ goalId: "budget", userGoal: "Spend less", now: "T0" }), {
 			type: "system_stop_goal",
@@ -152,7 +169,7 @@ describe("activity lane", () => {
 			expect.objectContaining({ kind: "goal", status: "neutral", label: "Goal closed" }),
 		]);
 		expect(blockedProjection.active).toEqual([
-			expect.objectContaining({ kind: "goal", status: "waiting", label: expect.stringContaining("Goal blocked") }),
+			expect.objectContaining({ kind: "goal", status: "waiting", label: "blocked" }),
 		]);
 		expect(blockedProjection.terminal).toEqual([]);
 	});
@@ -179,7 +196,7 @@ describe("activity lane slots", () => {
 	const render = (items: Parameters<typeof renderActivityLaneLine>[1], width: number) =>
 		stripAnsi(renderActivityLaneLine(theme, items, width).join("\n"));
 
-	it("anchors the turn slot as 'working' and gives the plan slot to the task step", () => {
+	it("puts the live turn label in the turn slot and keeps the task step in the plan slot", () => {
 		const taskState = addTaskStep(
 			createTaskStepsState("T0"),
 			{ content: "Audit reconcile flow", activeForm: "Auditing reconcile flow", status: "in_progress" },
@@ -191,14 +208,15 @@ describe("activity lane slots", () => {
 		];
 		const text = render(items, 100);
 
-		expect(text).toMatch(/^\s*● working\s+Step 1\/1 · Auditing reconcile flow/);
-		// The streamed working message never competes with the plan slot.
-		expect(text).not.toContain("Confirming duplicate charge risk");
+		expect(text).toMatch(/●\s+Confirming duplicate charge risk/);
+		expect(text).toContain("Step 1/1 · Auditing reconcile flow");
+		expect(text).not.toMatch(/●\s+working\s+Step/);
 	});
 
-	it("falls back to the working message in the plan slot when no task exists", () => {
+	it("shows the live working message in the turn slot when no task exists", () => {
 		const text = render([runtimeTurn("Confirming duplicate charge risk")], 80);
-		expect(text).toMatch(/^\s*● working\s+Confirming duplicate charge risk\s*$/);
+		expect(text).toMatch(/^\s*●\s+Confirming duplicate charge risk\s*$/);
+		expect(text).not.toMatch(/●\s+working\s+Confirming/);
 	});
 
 	it("aggregates concurrent tools by tag with a bounded group count", () => {

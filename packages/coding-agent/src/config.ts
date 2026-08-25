@@ -11,9 +11,9 @@ import { getProcessWorkRun } from "./utils/work-directory.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const PI_ADAPTATIVE_RELEASES_URL = "https://github.com/Caupulican/pi-adaptative/releases/latest";
-const PI_ADAPTATIVE_LINUX_INSTALLER_URL = `${PI_ADAPTATIVE_RELEASES_URL}/download/install.sh`;
-const PI_ADAPTATIVE_WINDOWS_INSTALLER_URL = `${PI_ADAPTATIVE_RELEASES_URL}/download/install.ps1`;
+export const PI_ADAPTATIVE_RELEASES_URL = "https://github.com/Caupulican/pi-adaptative/releases/latest";
+export const PI_ADAPTATIVE_LINUX_INSTALLER_URL = `${PI_ADAPTATIVE_RELEASES_URL}/download/install.sh`;
+export const PI_ADAPTATIVE_WINDOWS_INSTALLER_URL = `${PI_ADAPTATIVE_RELEASES_URL}/download/install.ps1`;
 
 /**
  * Detect if we're running as a Bun compiled binary.
@@ -30,6 +30,39 @@ export const isBunRuntime = !!process.versions.bun;
 // =============================================================================
 
 export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+
+export interface StandaloneInstallerCommand {
+	command: string;
+	args: string[];
+	url: string;
+}
+
+export function getStandaloneInstallerCommand(
+	platform: NodeJS.Platform = process.platform,
+): StandaloneInstallerCommand | undefined {
+	if (platform === "win32") {
+		return {
+			command: "powershell.exe",
+			args: [
+				"-NoProfile",
+				"-NonInteractive",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				`irm ${PI_ADAPTATIVE_WINDOWS_INSTALLER_URL} | iex`,
+			],
+			url: PI_ADAPTATIVE_WINDOWS_INSTALLER_URL,
+		};
+	}
+	if (platform === "linux") {
+		return {
+			command: "sh",
+			args: ["-c", `curl -fsSL ${PI_ADAPTATIVE_LINUX_INSTALLER_URL} | sh`],
+			url: PI_ADAPTATIVE_LINUX_INSTALLER_URL,
+		};
+	}
+	return undefined;
+}
 
 export function getStandaloneInstallInstruction(platform: NodeJS.Platform = process.platform): string {
 	if (platform === "win32") {

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added countable provider retry attempt telemetry and classified first-class `ProviderRateLimitError` failures upon retry exhaustion while preserving redacted retry directives.
+
 ### Breaking Changes
 
 - Retired npm publication; this package is now a private workspace component shipped only inside Pi Adaptative standalone releases.

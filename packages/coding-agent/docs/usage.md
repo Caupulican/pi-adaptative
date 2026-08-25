@@ -162,16 +162,16 @@ pi [options] [@files...] [messages...]
 pi install <source> [-l]     # Install package, -l for project-local
 pi remove <source> [-l]      # Remove package
 pi uninstall <source> [-l]   # Alias for remove
-pi update [source|self|pi]   # Update extensions/packages, print installer guidance, then exit nonzero
-pi update --extensions       # Update extensions/packages only; exit successfully
-pi update --self             # Refuse CLI self-update and print installer guidance; exit nonzero
-pi update --self --force     # Compatibility flag; same refusal, no reinstall
+pi update [source|self|pi]   # Update extensions, then download and run the standalone installer
+pi update --extensions       # Update extensions/packages only
+pi update --self             # Download and run the Linux install.sh or Windows install.ps1 installer
+pi update --self --force     # Compatibility flag; still runs the standalone installer
 pi update --extension <src>  # Update one package
 pi list                      # List installed packages
 pi config                    # Enable/disable package resources
 ```
 
-These commands manage pi packages, not the pi CLI installation. Plain `pi update` updates extensions/packages, then exits nonzero after printing the matching `install.sh` or `install.ps1` command. Use `pi update --extensions` for the successful extension/package-only path. `pi update --self` always refuses legacy npm/pnpm/yarn/Bun CLI updates, exits nonzero, and prints installer guidance; `--force` is only a compatibility flag and does not reinstall. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
+These commands manage pi packages and the standalone CLI. Plain `pi update` updates extensions, then downloads and runs the current verified Linux `install.sh` or Windows `install.ps1` installer. Use `pi update --extensions` for the extension/package-only path. `pi update --self` pulls and runs that installer instead of npm. `--force` remains a compatibility flag and still runs the installer. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
 
 See [Pi Packages](packages.md) for package sources and security notes.
 

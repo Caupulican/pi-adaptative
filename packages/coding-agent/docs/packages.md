@@ -28,15 +28,15 @@ pi install ./relative/path/to/package
 
 pi remove npm:@foo/bar
 pi list                     # show installed packages from settings
-pi update                   # update extensions/packages, print installer guidance, then exit nonzero
-pi update --extensions      # update extensions/packages only; exit successfully
-pi update --self            # refuse CLI self-update, print installer guidance, then exit nonzero
-pi update --self --force    # compatibility flag; same refusal and no reinstall
+pi update                   # update extensions, then download and run the standalone installer
+pi update --extensions      # update extensions/packages only
+pi update --self            # download and run the Linux install.sh or Windows install.ps1 installer
+pi update --self --force    # compatibility flag; still runs the standalone installer
 pi update npm:@foo/bar      # update one package
 pi update --extension npm:@foo/bar
 ```
 
-These commands manage pi packages, not the pi CLI installation. Plain `pi update` updates extensions/packages and then deliberately exits nonzero after printing the standalone installer command. Use `pi update --extensions` when you want the successful extension/package-only path. `pi update --self` always refuses legacy npm/pnpm/yarn/Bun CLI updates, exits nonzero, and prints the standalone installer command; `--force` is only a compatibility flag and does not reinstall. Re-run the Linux `install.sh` or Windows `install.ps1` installer to update the CLI. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
+These commands manage pi packages and the standalone CLI. Plain `pi update` updates extensions, then downloads and runs the current verified Linux `install.sh` or Windows `install.ps1` installer. Use `pi update --extensions` for the extension/package-only path. `pi update --self` is the dedicated CLI update: it pulls and runs that installer instead of npm. `--force` remains a compatibility flag and still runs the installer. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
 
 By default, `install` and `remove` write to user settings (`~/.pi/agent/settings.json`). Use `-l` to write to project settings (`.pi/settings.json`) instead. Project settings can be shared with your team, and pi installs any missing packages automatically on startup.
 

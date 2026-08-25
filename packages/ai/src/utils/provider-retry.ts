@@ -2,10 +2,19 @@ import { abortableSleep, createAbortError } from "./abort-signals.ts";
 
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
+export interface ProviderRetryTelemetry {
+	attempts: number;
+	delayMs: number;
+	status?: number;
+	exhausted: boolean;
+}
+
 export interface ProviderRetryOptions {
 	maxRetries?: number;
 	maxRetryDelayMs?: number;
 	signal?: AbortSignal;
+	onRetry?: (telemetry: ProviderRetryTelemetry) => void;
+	telemetry?: (telemetry: ProviderRetryTelemetry) => void;
 }
 
 export interface ProviderRetryDirective {
@@ -25,6 +34,42 @@ interface ProviderError extends Error {
 }
 
 const providerRetryDirectiveOverrides = new WeakMap<Error, ProviderRetryDirective>();
+
+export class ProviderRateLimitError extends Error {
+	readonly failureCode = "rate_limit" as const;
+	readonly status: number;
+	readonly headers?: ProviderHeaders;
+	readonly error?: unknown;
+	readonly attempts: number;
+	readonly retryAfterMs?: number;
+	readonly directive?: ProviderRetryDirective;
+
+	constructor(
+		message: string,
+		options: {
+			status?: number;
+			headers?: ProviderHeaders;
+			error?: unknown;
+			attempts: number;
+			retryAfterMs?: number;
+			directive?: ProviderRetryDirective;
+			cause?: unknown;
+		},
+	) {
+		super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
+		this.name = "ProviderRateLimitError";
+		this.status = options.status ?? 429;
+		this.headers = options.headers;
+		this.error = options.error;
+		this.attempts = options.attempts;
+		const directive = options.directive ?? (options.cause ? getProviderRetryDirective(options.cause) : undefined);
+		this.directive = directive;
+		this.retryAfterMs = options.retryAfterMs ?? directive?.retryAfterMs;
+		if (directive) {
+			providerRetryDirectiveOverrides.set(this, directive);
+		}
+	}
+}
 
 function isProviderHeaders(value: unknown): value is ProviderHeaders | undefined {
 	return value === undefined || (typeof value === "object" && value !== null);
@@ -146,6 +191,26 @@ function isRetryableProviderError(error: ProviderError): boolean {
 	return error.status === 408 || error.status === 409 || error.status === 429 || error.status >= 500;
 }
 
+export function isRateLimitError(error: unknown): boolean {
+	if (error instanceof ProviderRateLimitError) return true;
+	if (isProviderError(error)) {
+		if (error.status === 429) return true;
+		if (typeof error.message === "string" && /rate.?limit|too many requests/i.test(error.message)) return true;
+		const body = asRecord(error.error);
+		const code = typeof body?.code === "string" ? body.code : undefined;
+		if (code && /rate_limit|rate.?limit/i.test(code)) return true;
+		const type = typeof body?.type === "string" ? body.type : undefined;
+		if (type && /rate_limit/i.test(type)) return true;
+	}
+	if (
+		error instanceof Error &&
+		/rate.?limit|too many requests|(?<![A-Za-z0-9])429(?![A-Za-z0-9])/i.test(error.message)
+	) {
+		return true;
+	}
+	return false;
+}
+
 function createRetryDelayExceededError(error: ProviderError, delayMs: number, maxDelayMs: number): Error {
 	const boundedError = new Error(
 		`Server requested ${formatRetrySeconds(delayMs)}s retry delay (max: ${formatRetrySeconds(maxDelayMs)}s). ${error.message}`,
@@ -182,6 +247,7 @@ export async function retryProviderRequest<T>(
 ): Promise<T> {
 	const maxRetries = Math.max(0, Math.floor(options.maxRetries ?? 0));
 	let retriesRemaining = maxRetries;
+	let attempts = 0;
 
 	for (;;) {
 		try {
@@ -190,16 +256,52 @@ export async function retryProviderRequest<T>(
 			if (options.signal?.aborted) throw createAbortError();
 			if (!isProviderError(error) || !isRetryableProviderError(error)) throw error;
 
+			attempts++;
 			const serverDelayMs = getServerRetryDelayMs(error);
 			const boundedServerDelayMs =
 				serverDelayMs === undefined
 					? undefined
 					: validateServerRetryDelayMs(serverDelayMs, options.maxRetryDelayMs, error);
-			if (retriesRemaining <= 0) throw error;
+
+			if (retriesRemaining <= 0) {
+				const telemetryEvent: ProviderRetryTelemetry = {
+					attempts,
+					delayMs: boundedServerDelayMs ?? 0,
+					status: error.status,
+					exhausted: true,
+				};
+				options.onRetry?.(telemetryEvent);
+				options.telemetry?.(telemetryEvent);
+
+				if (isRateLimitError(error)) {
+					const directive = getProviderRetryDirective(error);
+					throw new ProviderRateLimitError(error.message, {
+						status: error.status ?? 429,
+						headers: error.headers,
+						error: error.error,
+						attempts,
+						retryAfterMs: directive?.retryAfterMs,
+						directive,
+						cause: error,
+					});
+				}
+				throw error;
+			}
 
 			const retryIndex = maxRetries - retriesRemaining;
 			retriesRemaining--;
-			await abortableSleep(boundedServerDelayMs ?? getFallbackRetryDelayMs(retryIndex), options.signal);
+			const delayMs = boundedServerDelayMs ?? getFallbackRetryDelayMs(retryIndex);
+
+			const telemetryEvent: ProviderRetryTelemetry = {
+				attempts,
+				delayMs,
+				status: error.status,
+				exhausted: false,
+			};
+			options.onRetry?.(telemetryEvent);
+			options.telemetry?.(telemetryEvent);
+
+			await abortableSleep(delayMs, options.signal);
 		}
 	}
 }

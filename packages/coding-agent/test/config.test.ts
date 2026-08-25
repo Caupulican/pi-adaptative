@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
 	getSelfUpdateUnavailableInstruction,
+	getStandaloneInstallerCommand,
 	getStandaloneInstallInstruction,
 	getUpdateInstruction,
 } from "../src/config.ts";
@@ -28,6 +29,20 @@ describe("install method and self-update instructions", () => {
 	test("never recommends the Linux installer on unsupported host platforms", () => {
 		expect(getStandaloneInstallInstruction("darwin")).toContain("support Linux and Windows");
 		expect(getStandaloneInstallInstruction("darwin")).not.toContain("install.sh");
+		expect(getStandaloneInstallerCommand("darwin")).toBeUndefined();
+	});
+
+	test("builds the Windows installer runner from the release asset URL", () => {
+		const installer = getStandaloneInstallerCommand("win32");
+
+		expect(installer).toMatchObject({
+			command: "powershell.exe",
+			url: "https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1",
+		});
+		expect(installer?.args).toContain("-NoProfile");
+		expect(installer?.args.at(-1)).toBe(
+			"irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex",
+		);
 	});
 
 	test("detects pnpm from Windows .pnpm install paths", () => {

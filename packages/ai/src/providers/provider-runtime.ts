@@ -14,11 +14,18 @@ import type {
 import { createEmptyUsage } from "../usage.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { appendProviderRetryDirective, type ProviderRetryOptions } from "../utils/provider-retry.ts";
+import {
+	appendProviderRetryDirective,
+	type ProviderRetryOptions,
+	type ProviderRetryTelemetry,
+} from "../utils/provider-retry.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 type ProviderRequestOptions = Pick<StreamOptions | ImagesOptions, "signal" | "timeoutMs">;
-type ProviderRetrySource = Pick<StreamOptions | ImagesOptions, "signal" | "maxRetries" | "maxRetryDelayMs">;
+type ProviderRetrySource = Pick<StreamOptions | ImagesOptions, "signal" | "maxRetries" | "maxRetryDelayMs"> & {
+	onRetry?: (telemetry: ProviderRetryTelemetry) => void;
+	telemetry?: (telemetry: ProviderRetryTelemetry) => void;
+};
 type AssistantMessageOverrides = Partial<Pick<AssistantMessage, "stopReason" | "errorMessage">>;
 type StreamingScratchField = "index" | "partialArgs" | "partialArgsComplete" | "partialJson" | "streamIndex";
 
@@ -101,6 +108,8 @@ export function createProviderRetryOptions(
 		maxRetries: options?.maxRetries ?? defaultMaxRetries,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
 		signal: options?.signal,
+		...(options?.onRetry ? { onRetry: options.onRetry } : {}),
+		...(options?.telemetry ? { telemetry: options.telemetry } : {}),
 	};
 }
 

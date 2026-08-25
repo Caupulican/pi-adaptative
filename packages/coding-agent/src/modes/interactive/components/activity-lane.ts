@@ -101,17 +101,14 @@ function projectTaskState(state: TaskStepsState | undefined): ActivityLaneProjec
 
 function projectGoalState(state: GoalState | undefined): ActivityLaneProjection {
 	if (!state) return { active: [], terminal: [] };
-	const satisfied = state.requirements.filter((requirement) => requirement.status === "satisfied").length;
-	const progress = state.requirements.length > 0 ? ` ${satisfied}/${state.requirements.length}` : "";
 	if (isGoalUnfinishedStatus(state.status)) {
 		const goalActive = isGoalExecutionActive(state.status);
-		const stopped = goalActive ? "" : ` ${state.status.replace("_", " ")}`;
 		return {
 			active: [
 				{
 					id: `goal:${state.goalId}`,
 					kind: "goal",
-					label: boundedLabel(`Goal${stopped}${progress} · ${state.userGoal}`),
+					label: goalActive ? "active" : state.status.replaceAll("_", " "),
 					status: goalActive ? "active" : "waiting",
 				},
 			],
@@ -280,20 +277,32 @@ export function renderActivityLaneLine(theme: Theme, items: readonly ActivityLan
 	const indent = " ";
 	const gap = " ".repeat(SLOT_GAP_WIDTH);
 
-	// Turn slot: alive-anchor glyph plus a short state. The generic working state keeps the
-	// word "working"; load-bearing runtime labels (retry, compaction, routing) pass through.
+	// Turn slot: alive-anchor glyph plus the live runtime label. Never hardcode "working".
+	// Generic Working... is omitted when a more specific plan, tool, queue, or event exists.
 	let turnPart = "";
-	const planFromTurn = slots.turn?.id === "runtime:turn" ? slots.turn.label : undefined;
 	if (slots.turn) {
-		const text = slots.turn.id === "runtime:turn" ? "working" : slots.turn.label;
+		const liveLabel = slots.turn.label.trim();
+		const normalized = liveLabel.toLowerCase();
+		const generic = normalized === "working" || normalized === "working." || normalized === "working...";
+		const hasSpecific =
+			Boolean(slots.plan) || slots.groups.length > 0 || Boolean(slots.queue) || Boolean(slots.event);
+		const text = generic && hasSpecific ? "" : slots.turn.label;
 		const dotColor: ThemeColor = slots.turn.status === "waiting" ? "warning" : "accent";
-		turnPart = `${theme.fg(dotColor, "●")} ${theme.fg("muted", truncateToWidth(text, TURN_TEXT_MAX, "…"))}`;
+		turnPart = text
+			? `${theme.fg(dotColor, "●")} ${theme.fg("muted", truncateToWidth(text, TURN_TEXT_MAX, "…"))}`
+			: `${theme.fg(dotColor, "●")}`;
 	}
 
-	// Plan slot content: task step, else goal, else the live working message.
+	// Plan slot: task/goal only. Do not copy the turn label into the plan slot.
 	const planItem = slots.plan;
-	const planText = planItem?.label ?? planFromTurn ?? "";
-	const planColor: ThemeColor = planItem ? (planItem.status === "waiting" ? "warning" : "text") : "muted";
+	const planText = planItem?.label ?? "";
+	const planColor: ThemeColor = planItem
+		? planItem.kind === "goal"
+			? "accent"
+			: planItem.status === "waiting"
+				? "warning"
+				: "text"
+		: "muted";
 
 	// Right-aligned slots at natural size. Events and concurrency drop before the plan
 	// shrinks below its preferred width; the user-owned queue state remains visible.
