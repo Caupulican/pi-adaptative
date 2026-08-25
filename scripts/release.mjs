@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Release script for pi-mono
+ * Release script for Pi Adaptative
  *
  * Usage:
  *   node scripts/release.mjs <major|minor|patch>
@@ -18,12 +18,11 @@
  *    never runs the full suite locally.
  * 3. Bump version via npm run version:xxx or set an explicit version.
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date.
- * 5. Regenerate the coding-agent shrinkwrap.
- * 6. Run checks.
- * 7. Commit "Release vX.Y.Z" and push main. CI on that commit is build+check only;
+ * 5. Run checks.
+ * 6. Commit "Release vX.Y.Z" and push main. CI on that commit is build+check only;
  *    the complete suite already ran on the preflight SHA in GitHub Actions.
- * 8. Add new [Unreleased] sections to changelogs, commit, and push main again.
- * Any failure during steps 3-8 resets the local tree back to the preflight commit.
+ * 7. Add new [Unreleased] sections to changelogs, commit, and push main again.
+ * Any failure during steps 3-7 resets the local tree back to the preflight commit.
  *
  * REPAIR - recover an untagged prepared version after a gate exposed a required fix:
  * - Require successful exact-HEAD CI, the original Release commit in current main's ancestry,
@@ -33,11 +32,11 @@
  * - Promote the repaired candidate through exact-SHA CI and destructive gates normally.
  *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
- * 9. Locate the "Release vX.Y.Z" commit and poll GitHub Actions (workflow ci.yml) for its
+ * 8. Locate the "Release vX.Y.Z" commit and poll GitHub Actions (workflow ci.yml) for its
  *    conclusion on that exact SHA.
- * 10. Poll destructive.yml on the same SHA. If none exists, push `release-vX.Y.Z` at that
+ * 9. Poll destructive.yml on the same SHA. If none exists, push `release-vX.Y.Z` at that
  *     SHA and dispatch workflow_dispatch on that branch (GitHub rejects a raw SHA ref).
- * 11. Only on success of both: create and push the vX.Y.Z tag, which triggers build-binaries.yml.
+ * 10. Only on success of both: create and push the vX.Y.Z tag, which triggers build-binaries.yml.
  * On CI failure or timeout, no tag is created; rerun `npm run release:promote` to resume once
  * CI is fixed or rerun. Never rerun the prepare step (release:patch/minor/major) for the same
  * version once its release commit has been pushed.
@@ -146,8 +145,8 @@ function stageChangedFiles() {
 }
 
 function bumpOrSetVersion(target) {
-	// npm's package-age gate can otherwise block resolving a workspace package's own version
-	// immediately after it was published; scoped to just this lockfile-refresh invocation.
+	// Keep npm's package-age gate scoped to the lockfile refresh used by versioning. This
+	// prevents a recently resolved dependency from making a release non-reproducible.
 	const lockfileRefreshEnv = { ...process.env, npm_config_min_release_age: "0" };
 
 	if (BUMP_TYPES.has(target)) {
@@ -337,22 +336,12 @@ function prepareRelease() {
 		updateChangelogsForRelease(version);
 		console.log();
 
-		// 5. Regenerate release artifacts. The generated model catalogs are intentionally NOT
-		// regenerated here: builds are hermetic by default (see
-		// packages/ai/scripts/model-catalog-generation-policy.ts), so this step no longer fetches
-		// live data - the release is a pure function of the already-committed, already-tested tree.
-		// Refreshing the catalogs from live pricing is a separate, explicitly reviewed change
-		// (PI_FETCH_MODELS=1 npm run generate-models), governed by the weekly drift check.
-		console.log("Regenerating release artifacts...");
-		run("npm run shrinkwrap:coding-agent");
-		console.log();
-
-		// 6. Run checks
+		// 5. Run checks. Binary packaging and installer verification happen in the tag workflow.
 		console.log("Running checks...");
 		run("npm run check");
 		console.log();
 
-		// 7. Commit and push (no tag yet - see promoteRelease)
+		// 6. Commit and push (no tag yet - see promoteRelease)
 		console.log("Committing release...");
 		stageChangedFiles();
 		run(`git commit -m "Release v${version}"`);
@@ -362,7 +351,7 @@ function prepareRelease() {
 		run("git push origin main");
 		console.log();
 
-		// 8. Add new [Unreleased] sections for the next cycle
+		// 7. Add new [Unreleased] sections for the next cycle
 		console.log("Adding [Unreleased] sections for next cycle...");
 		addUnreleasedSection();
 		console.log();
@@ -568,7 +557,7 @@ async function promoteRelease(versionArg) {
 		throw error;
 	}
 
-	console.log(`\n=== Released ${tag}; CI publishing starts now ===\n`);
+	console.log(`\n=== Released ${tag}; standalone binary publishing starts now ===\n`);
 }
 
 // Main flow

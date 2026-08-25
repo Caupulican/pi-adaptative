@@ -221,7 +221,6 @@ describe("Library Manage UX - Increment 2", () => {
 					hideThinkingBlock: false,
 					projectContextFiles: "off",
 					collapseChangelog: false,
-					enableInstallTelemetry: false,
 					doubleEscapeAction: "none",
 					treeFilterMode: "default",
 					showHardwareCursor: false,

@@ -1,101 +1,139 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-</p>
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
-
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
 # Pi Adaptative
 
-Pi Adaptative is a fork of Pi focused on adaptive agent runtime: reloading changes, making bounded self-modifications, and staying compatible with normal Pi workflows.
+Pi Adaptative is an independent coding-agent harness for work that needs durable
+orchestration, explicit recovery, and evidence that survives long sessions.
 
-**Fork credit:** Built on Pi by Mario Zechner / badlogic.
+It began from the Pi codebase, but it is no longer a lightweight Pi distribution.
+The project deliberately spends more code, state, and runtime overhead on durable
+sessions, compaction, background workers, tool-call recovery, process lifecycle
+management, and evidence-gated changes. That is the tradeoff: this is intended for
+reliable, inspectable agent work rather than the smallest possible terminal wrapper.
 
-## Purpose
+## Install the standalone release
 
-This repo keeps the scope simple:
+Releases are published from this repository:
 
-- reload supported runtime changes while working;
-- make source-backed self-modifications with validation;
-- scope loaded resources through profiles when needed;
-- keep per-repo configuration out of the repo by using user-level state;
-- keep the package installable and usable as a normal coding-agent CLI.
+<https://github.com/Caupulican/pi-adaptative/releases>
 
-## Compatibility mode
+The supported installers are limited to Linux and Windows on x64 or arm64. They
+download the matching standalone archive and verify it against the release's
+`SHA256SUMS` before activation. End users do not need npm or Node.js.
 
-`pi-adaptative` keeps Pi-compatible CLI, SDK, settings, skills, prompt templates, themes, extensions, and package loading where practical. Adaptive features are additive. Legacy settings such as `disabledResources` still work as aliases for profile blocks.
+### Linux
 
-* **[@caupulican/pi-adaptative](packages/coding-agent)**: Interactive CLI and self-evolution harness
-* **[@caupulican/pi-agent-core](packages/agent)**: Agent runtime package published for this fork
-* **[@caupulican/pi-ai](packages/ai)**: Multi-provider LLM API package published for this fork
-* **[@caupulican/pi-tui](packages/tui)**: Terminal UI package published for this fork
+```sh
+curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh
+```
 
-## Share your OSS coding agent sessions
+The installer places the managed `pi` launcher in the user-local installation
+location. Run `pi --version` after installation. Review the installer before
+piping it to a shell if your environment requires that policy.
 
-If you use pi or other coding agents for open source work, please share your sessions.
+### Windows PowerShell
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
+```powershell
+irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
+```
 
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
+The PowerShell installer selects the native x64 or arm64 archive, verifies its
+checksum, and installs the matching `pi.exe`. Windows users can also download the
+corresponding archive and `SHA256SUMS` directly from the
+[latest release](https://github.com/Caupulican/pi-adaptative/releases/latest).
 
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
+The release archives are the supported distribution format. There is no public
+package-registry distribution, third-party web installer, or package-manager
+self-update path. `pi update --self` directs legacy installations to the standalone
+installer instead of mutating them in place. npm and Node.js remain development and
+extension tooling for contributors; they are not end-user installation requirements.
 
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
+## What the harness provides
 
-I regularly publish my own `pi-mono` work sessions here:
+- Durable session and process ownership across long-running work.
+- Compaction that preserves bounded, verifiable context instead of treating a
+  transcript as an unbounded action counter.
+- Background workers with explicit ownership, completion handoffs, bounded output,
+  and controlled cleanup when sessions overlap in one directory.
+- Tool-call validation and recovery that teaches corrective usage, scopes failures
+  to the operation that failed, and keeps unrelated work admissible.
+- Persistent shell execution with explicit cancellation, timeout, and process-tree
+  cleanup semantics.
+- Evidence-gated development workflows with focused red tests, coverage gates,
+  adversarial checks, and release artifact verification.
+- A terminal coding-agent interface with provider adapters, extensions, themes,
+  skills, and SDK support.
 
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
+These controls improve observability and recovery; they do not make model output,
+shell commands, provider APIs, or repository changes inherently safe. Review model
+permissions, tool surfaces, credentials, and proposed edits before granting an
+agent access to important systems. Use isolated worktrees or disposable
+environments for untrusted tasks.
 
-## All Packages
+## Use the agent
 
-| Package | Description |
-|---------|-------------|
-| **[@caupulican/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@caupulican/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@caupulican/pi-adaptative](packages/coding-agent)** | Interactive coding agent CLI and adaptive harness |
-| **[@caupulican/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+After installation, start in the repository you want to work on:
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+```sh
+pi
+```
 
-## Contributing
+Useful checks:
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
+```sh
+pi --version
+pi --help
+pi --list-models
+```
+
+Provider setup, settings, sessions, extensions, and the full CLI reference live in
+the [coding-agent documentation](packages/coding-agent/docs/index.md). Provider
+configuration is documented in [providers.md](packages/coding-agent/docs/providers.md),
+and the project-specific runtime contract is in [AGENTS.md](AGENTS.md).
+
+## Repository map
+
+| Path | Responsibility |
+| --- | --- |
+| [`packages/coding-agent`](packages/coding-agent) | Standalone CLI, TUI integration, sessions, tools, extensions, and harness policy |
+| [`packages/agent`](packages/agent) | Agent state machine, tool execution, orchestration, and durable runtime primitives |
+| [`packages/ai`](packages/ai) | Provider-neutral model, streaming, tool-call, usage, and cost interfaces |
+| [`packages/tui`](packages/tui) | Terminal rendering and interactive input components |
+| [`scripts`](scripts) | Build, release, installer, verification, and repository gates |
+| [`.github/workflows`](.github/workflows) | Release artifact and verification automation |
+
+The package directories are a source workspace and architectural map. They are not
+separate npm products or a second installation path.
 
 ## Development
 
+Contributor work requires Node.js and npm because the repository uses TypeScript,
+workspace builds, and development checks. This is separate from end-user runtime
+installation.
+
 ```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build        # Build all packages
-npm run check        # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+npm ci --ignore-scripts
+npm run check
+npm run build
 ```
 
-## Supply-chain hardening
+Run the smallest targeted test for the code you changed. The repository contract in
+[AGENTS.md](AGENTS.md) defines the required Detect → Verify → Score → Gate workflow,
+coverage thresholds, red-test expectations, concurrency checks, and release rules.
+Do not treat a successful command as evidence when a probe was skipped, truncated,
+or failed.
 
-We treat npm dependency changes as reviewed code changes.
+## Contributing
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before opening a
+change. Contributions should identify an observable invariant, add or update a
+focused regression test, explain rejected candidates and remaining risks, and keep
+ownership in the authoritative subsystem. Do not commit generated artifacts or
+change release behavior without corresponding verification evidence.
 
-## License
+## Attribution and license
 
-MIT
+Pi Adaptative began from the open-source Pi codebase by Mario Zechner and
+contributors. The adaptive harness, reliability work, packaging, and release
+process in this repository are maintained independently. See the repository history
+and package notices for source-level attribution.
+
+This project is released under the [MIT License](LICENSE).

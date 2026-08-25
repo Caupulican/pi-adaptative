@@ -31,7 +31,7 @@
 ## Commands
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Never run `npm run build` or `npm test` unless requested by the user. Release verification delegates the full suite to GitHub Actions; the local release smoke below may build its unpublished artifacts but must not run the full suite.
+- Never run `npm run build` or `npm test` unless requested by the user. Release verification delegates the full suite to GitHub Actions; local release checks use the focused standalone-installer and binary regressions.
 - While developing, run only the targeted tests specific to the code you touched: `./test.sh <specific-test-path>` or from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`. Do not run the full suite to iterate on a change.
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. The full non-e2e suite is owned by GitHub Actions; local `./test.sh` with no arguments is forbidden unless the user explicitly requests it.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
@@ -45,7 +45,6 @@
 - Treat npm dep and lockfile changes as reviewed code. Direct external deps stay pinned to exact versions.
 - Hydrate/update locally with `npm install --ignore-scripts`; clean/CI-style with `npm ci --ignore-scripts`. Don't run lifecycle scripts unless the user asks.
 - If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
-- If `packages/coding-agent/npm-shrinkwrap.json` needs regen, run `node scripts/generate-coding-agent-shrinkwrap.mjs` (verify with `--check` or `npm run check`). New deps with lifecycle scripts require review and an explicit allowlist entry in that script; never add one silently.
 - Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Don't bypass unless the user wants the lockfile change committed.
 
 ## Git
@@ -130,26 +129,7 @@ Attribution:
 
 2. **GitHub full test suite (mandatory)**: push the exact committed release candidate and require its `ci.yml` run to finish fully green. Inspect every matrix job; targeted local tests do not substitute for it. Never run `./test.sh` locally as part of release preparation. Missing, pending, skipped unexpectedly, or failed GitHub evidence blocks the release unless the user explicitly accepts the risk.
 
-3. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
-   ```bash
-   npm run release:local -- --out /tmp/pi-local-release --force
-   cd /tmp
-
-   # Node package install smoke tests
-   /tmp/pi-local-release/node/pi --help
-   /tmp/pi-local-release/node/pi --version
-   /tmp/pi-local-release/node/pi --list-models
-   /tmp/pi-local-release/node/pi -p "Say exactly: ok"
-   /tmp/pi-local-release/node/pi
-
-   # Bun binary smoke tests
-   /tmp/pi-local-release/bun/pi --help
-   /tmp/pi-local-release/bun/pi --version
-   /tmp/pi-local-release/bun/pi --list-models
-   /tmp/pi-local-release/bun/pi -p "Say exactly: ok"
-   /tmp/pi-local-release/bun/pi
-   ```
-   Verify both Node and Bun startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/pi-local-release/node/pi` and `/tmp/pi-local-release/bun/pi` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
+3. **Standalone release verification**: the tag workflow builds the Linux, Windows, and retained macOS archives, executes both repository installers against the just-built archives, and uploads `install.sh`, `install.ps1`, and `SHA256SUMS` to the GitHub release. The normal local check gate runs the focused installer and binary regression suites; do not substitute npm package or local registry smoke tests.
 
 4. **Run the release script**: the flow is split into `prepare` (bump/changelog/commit/push, no tag) and `promote` (gate on CI, then tag/push) so a CI failure never burns a version number.
    ```bash
@@ -159,10 +139,10 @@ Attribution:
    No env flags are required for the normal case: `scripts/check-lockfile-commit.mjs` already auto-allows a `package-lock.json` diff that only touches workspace-package metadata (the usual outcome of a lockstep version bump), and `npm_config_min_release_age=0` is scoped inside `scripts/release.mjs` to just the lockfile-refresh command it runs, not exported for the whole release. If the pre-commit lockfile guard blocks a release for a real reason (external dependency changes bundled into the same commit), stop and review the diff rather than bypassing it - that's the guard doing its job.
 
    `release:patch`/`release:minor`/`release:major` run **prepare** then automatically chain into **promote**:
-   - Prepare: preflight (on `main`, clean tree, `origin/main` is an ancestor of `HEAD`, prospective tag unused, **HEAD already has a successful complete `ci.yml` run**) -> version bump -> changelogs -> shrinkwrap regen -> `npm run check` -> commit `Release vX.Y.Z` -> push `main` -> add fresh `## [Unreleased]` sections -> commit `Add [Unreleased] section for next cycle` -> push `main`. Preflight refuses immediately if exact-HEAD CI is missing, pending, or red. The release command never runs the full suite locally. The metadata-only Release commit's CI skips tests and the Windows runner because exact-preflight-HEAD GitHub CI already proved the complete suite. A failure anywhere after preflight resets the local tree back to the preflight commit; nothing is tagged.
+   - Prepare: preflight (on `main`, clean tree, `origin/main` is an ancestor of `HEAD`, prospective tag unused, **HEAD already has a successful complete `ci.yml` run**) -> version bump -> changelogs -> `npm run check` -> commit `Release vX.Y.Z` -> push `main` -> add fresh `## [Unreleased]` sections -> commit `Add [Unreleased] section for next cycle` -> push `main`. Preflight refuses immediately if exact-HEAD CI is missing, pending, or red. The release command never runs the full suite locally. The metadata-only Release commit's CI skips tests and the Windows runner because exact-preflight-HEAD GitHub CI already proved the complete suite. A failure anywhere after preflight resets the local tree back to the preflight commit; nothing is tagged.
    - Promote: finds the `Release vX.Y.Z` commit, polls GitHub Actions (`ci.yml`) then `destructive.yml` for their conclusions on that exact commit SHA (dispatching a destructive run if none exists), and only on success of both creates and pushes the `vX.Y.Z` tag (which triggers `.github/workflows/build-binaries.yml`).
 
-   Review any lockfile or shrinkwrap diffs the release creates before push. Model catalogs (`packages/ai/src/*.generated.ts`) are never regenerated by the release script - it's a pure function of the already-committed, already-tested tree; catalog freshness is governed separately by the weekly `check:model-catalog` workflow.
+   Review any lockfile diffs the release creates before push. Model catalogs (`packages/ai/src/*.generated.ts`) are never regenerated by the release script - it's a pure function of the already-committed, already-tested tree; catalog freshness is governed separately by the weekly `check:model-catalog` workflow.
 
    **If CI fails after prepare pushed the release commit**: nothing is tagged yet. Fix or rerun CI for that commit, then resume with:
    ```bash
@@ -170,9 +150,9 @@ Attribution:
    ```
    This is also how to resume if the `promote` step's CI poll times out or the local process is interrupted after prepare succeeded. If a failed gate requires a committed fix, commit and push the fix, wait for successful exact-HEAD `ci.yml`, then run `npm run release:repair`. Repair requires the tag to remain free and every next-cycle `[Unreleased]` section to remain empty; it removes only those empty markers, creates and pushes `Repair release vX.Y.Z` without another version bump, restores the markers, and promotes the repaired exact SHA through CI and destructive gates. Do not rerun `release:patch`/`release:minor`/`release:major` for the same version once its release commit has been pushed - that would bump the version again.
 
-5. **CI publishes npm packages**: the `vX.Y.Z` tag (pushed only after CI succeeds on the release commit) triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
+5. **GitHub release assets**: the `vX.Y.Z` tag (pushed only after CI succeeds on the release commit) triggers `.github/workflows/build-binaries.yml`. That workflow publishes only the standalone archives, native installers, and checksums to the GitHub release. The first-party workspaces remain private; npm is development and dependency tooling only.
 
-6. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch`/`release:minor`/`release:major` for the same version.
+6. **If the asset workflow fails**: inspect the failed `build-binaries.yml` job and rerun that tag workflow after fixing the failure or waiting out a transient GitHub/runner issue. Do not rerun `release:patch`/`release:minor`/`release:major` for the same version.
 
 ## User Override
 
@@ -238,4 +218,4 @@ anything fully encoded in code, tests, or docs does not belong here.
 - Windows vitest runs the same worker count as Linux; serialization is a ruled-out dead end. Crashes attributed to parallelism were libuv 8.3-short-path asserts, fixed by `realpathSync.native(tmpdir())` fixtures — do not re-serialize without evidence a failure is load-dependent.
 - `pgrep -f` self-matches its own `execSync` `/bin/sh -c` wrapper; no-leftover-process assertions anchor the pattern to the start of the command line.
 - Workspace consumers resolve `@caupulican/pi-agent-core` through its gitignored `dist/`, which goes stale silently and surfaces as `TypeError: X is not a function` in consumers. Rebuild `packages/agent` and confirm the export exists in `dist/` before wiring it into a consumer.
-- `.git/info/exclude` cannot stop a commit once a path is staged; the pre-commit hook derives a blocklist from it — never bypass with `git add -f` or `--no-verify`. The coding-agent package ships everything tracked under its `docs/` in the npm tarball; check `npm pack --dry-run` when adding docs.
+- `.git/info/exclude` cannot stop a commit once a path is staged; the pre-commit hook derives a blocklist from it — never bypass with `git add -f` or `--no-verify`. The coding-agent package ships its tracked `docs/` in the standalone release archives; verify archive contents when changing packaged documentation.

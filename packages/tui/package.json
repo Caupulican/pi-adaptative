@@ -1,6 +1,7 @@
 {
 	"name": "@caupulican/pi-tui",
 	"version": "0.97.0",
+	"private": true,
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
 	"type": "module",
 	"main": "dist/index.js",
@@ -16,8 +17,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"build": "node ../../scripts/run-tsc.mjs -p tsconfig.build.json",
-		"test": "node --test test/*.test.ts",
-		"prepublishOnly": "npm run clean && npm run build"
+		"test": "node --test test/*.test.ts"
 	},
 	"files": [
 		"dist/**/*",

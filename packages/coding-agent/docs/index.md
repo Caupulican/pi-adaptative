@@ -1,30 +1,22 @@
-# Pi Documentation
+# Pi Adaptative Documentation
 
-Pi is a minimal terminal coding harness. It is designed to stay small at the core while being extended through TypeScript extensions, skills, prompt templates, themes, and pi packages.
+Pi Adaptative is a reliability-first coding-agent harness with bounded tool recovery, durable orchestration, long-session safeguards, and an extensible CLI/SDK. Extensions, skills, prompt templates, themes, and packages provide additional capabilities without weakening the core guarantees.
 
 ## Quick start
 
-Install Pi with npm:
+Install the standalone Linux release:
 
 ```bash
-npm install -g --ignore-scripts @caupulican/pi-adaptative
+curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh
 ```
 
-`--ignore-scripts` disables dependency lifecycle scripts during install. Pi does not require install scripts for normal npm installs.
+Re-run the installer to update. For ownership-checked removal instructions, see [Quickstart](quickstart.md#uninstall); user settings and sessions under `~/.pi/agent/` are preserved. On Windows, use the native PowerShell installer:
 
-On Linux or macOS, you can also use the installer:
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
+```powershell
+irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
 ```
 
-To uninstall pi itself, use npm for curl and npm installs:
-
-```bash
-npm uninstall -g @caupulican/pi-adaptative
-```
-
-For pnpm, Yarn, or Bun installs, use the matching global remove command: `pnpm remove -g @caupulican/pi-adaptative`, `yarn global remove @caupulican/pi-adaptative`, or `bun uninstall -g @caupulican/pi-adaptative`.
+The CLI is distributed only as standalone Linux and Windows releases. Node.js and npm are source-development and extension/package tooling, not installation or publication channels for the CLI.
 
 Then run it in a project directory:
 
@@ -81,7 +73,6 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 - [Windows](windows.md)
 - [Transient work directory](work-directory.md) - multi-tenant runtime output, leases, and retention.
-- [Termux on Android](termux.md)
 - [tmux](tmux.md)
 - [Terminal setup](terminal-setup.md)
 - [Shell aliases](shell-aliases.md)

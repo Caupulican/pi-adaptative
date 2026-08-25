@@ -41,13 +41,14 @@ describe("version checks", () => {
 		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
 	});
 
-	it("uses the pi-adaptative npm metadata endpoint with a pi user agent", async () => {
-		const fetchMock = vi.fn(async () => Response.json({ name: "@caupulican/pi-adaptative", version: "1.2.4" }));
+	it("uses the Caupulican GitHub release endpoint with a pi user agent", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ tag_name: "v1.2.4", name: "v1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 
 		await expect(getLatestPiVersion("1.2.3")).resolves.toBe("1.2.4");
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({ version: "1.2.4" });
 		expect(fetchMock).toHaveBeenCalledWith(
-			"https://registry.npmjs.org/@caupulican%2fpi-adaptative/latest",
+			"https://api.github.com/repos/Caupulican/pi-adaptative/releases/latest",
 			expect.objectContaining({
 				headers: expect.objectContaining({
 					"User-Agent": expect.stringMatching(/^pi\/1\.2\.3 /),
@@ -72,19 +73,16 @@ describe("version checks", () => {
 		});
 	});
 
-	it("uses npm package names when the metadata omits packageName", async () => {
+	it("does not treat a GitHub release title as package identity", async () => {
 		const fetchMock = vi.fn(async () =>
 			Response.json({
-				name: "@caupulican/pi-adaptative",
-				version: "1.2.4",
+				name: "Pi Adaptative v1.2.4",
+				tag_name: "v1.2.4",
 			}),
 		);
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
-			packageName: "@caupulican/pi-adaptative",
-			version: "1.2.4",
-		});
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({ version: "1.2.4" });
 	});
 
 	it("returns update notes from the version check api", async () => {

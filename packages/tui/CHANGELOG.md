@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Retired npm publication; this package is now a private workspace component shipped only inside Pi Adaptative standalone releases.
+
 ## [0.97.0] - 2026-08-24
 
 ## [0.96.5] - 2026-08-24

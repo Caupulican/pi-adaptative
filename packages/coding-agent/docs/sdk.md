@@ -11,7 +11,7 @@ The SDK provides programmatic access to pi's agent capabilities. Use it to embed
 - Build custom tools that spawn sub-agents
 - Test agent behavior programmatically
 
-See [examples/sdk/](../examples/sdk/) for working examples from minimal to full control.
+See [examples/sdk/](../examples/sdk/) for working examples from basic setup to full control.
 
 ## Quick Start
 
@@ -39,11 +39,16 @@ await session.prompt("What files are in the current directory?");
 
 ## Installation
 
+The SDK is included in this repository's standalone source tree. This is a developer workflow, not the CLI installation path: clone the owned repository and install its development dependencies before building:
+
 ```bash
-npm install @caupulican/pi-adaptative
+git clone https://github.com/Caupulican/pi-adaptative.git
+cd pi-adaptative
+npm install --ignore-scripts
+npm run build
 ```
 
-The SDK is included in the main package. No separate installation needed.
+The first-party workspace packages are private and are not installed from npm.
 
 ## Core Concepts
 
@@ -56,7 +61,7 @@ The main factory function for a single `AgentSession`.
 ```typescript
 import { createAgentSession, SessionManager } from "@caupulican/pi-adaptative";
 
-// Minimal: defaults with DefaultResourceLoader
+// Defaults with DefaultResourceLoader
 const { session } = await createAgentSession();
 
 // Custom: override specific options

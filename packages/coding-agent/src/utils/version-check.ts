@@ -1,6 +1,6 @@
 import { getPiUserAgent } from "./pi-user-agent.ts";
 
-const LATEST_VERSION_URL = "https://registry.npmjs.org/@caupulican%2fpi-adaptative/latest";
+const LATEST_VERSION_URL = "https://api.github.com/repos/Caupulican/pi-adaptative/releases/latest";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestPiRelease {
@@ -69,23 +69,27 @@ export async function getLatestPiRelease(
 	if (!response.ok) return undefined;
 
 	const data = (await response.json()) as {
-		name?: unknown;
+		tag_name?: unknown;
 		packageName?: unknown;
 		version?: unknown;
+		body?: unknown;
 		note?: unknown;
 	};
-	if (typeof data.version !== "string" || !data.version.trim()) {
+	const version =
+		typeof data.tag_name === "string" && data.tag_name.trim()
+			? data.tag_name.trim()
+			: typeof data.version === "string" && data.version.trim()
+				? data.version.trim()
+				: undefined;
+	if (!version) {
 		return undefined;
 	}
 	const packageName =
-		typeof data.packageName === "string" && data.packageName.trim()
-			? data.packageName.trim()
-			: typeof data.name === "string" && data.name.trim()
-				? data.name.trim()
-				: undefined;
-	const note = typeof data.note === "string" && data.note.trim() ? data.note.trim() : undefined;
+		typeof data.packageName === "string" && data.packageName.trim() ? data.packageName.trim() : undefined;
+	const noteValue = typeof data.body === "string" ? data.body : data.note;
+	const note = typeof noteValue === "string" && noteValue.trim() ? noteValue.trim() : undefined;
 	return {
-		version: data.version.trim(),
+		version: version.startsWith("v") ? version.slice(1) : version,
 		packageName,
 		...(note ? { note } : {}),
 	};

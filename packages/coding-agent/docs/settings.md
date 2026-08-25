@@ -43,7 +43,6 @@ Edit directly or use `/settings` for common options.
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
 | `quietStartup` | boolean | `false` | Hide startup header |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
-| `enableInstallTelemetry` | boolean | `true` | Send an anonymous install/update version ping after first install or changelog-detected updates. This does not control update checks |
 | `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"`, `"fork"`, or `"none"` |
 | `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
@@ -64,11 +63,12 @@ Edit directly or use `/settings` for common options.
 
 Enable from `/settings` → **Project AGENTS.md**. Choose save scope (this directory, this project, or all projects) and Load (`global-only` or `on-demand`). `--no-context-files` (`-nc`) also skips project files for that session. Neither disables the global file. Restart or `/reload` after changing the setting.
 
-### Telemetry and update checks
+### Update checks
 
-`enableInstallTelemetry` only controls the anonymous install/update ping to `https://pi.dev/api/report-install`. Opting out of telemetry does not disable update checks; Pi can still fetch `https://registry.npmjs.org/@caupulican%2fpi-adaptative/latest` to look for the latest Pi Adaptative version.
-
-Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
+Pi can fetch `https://api.github.com/repos/Caupulican/pi-adaptative/releases/latest` at startup to
+look for a newer Pi Adaptative version. Set `PI_SKIP_VERSION_CHECK=1` to disable that check. Use
+`--offline` or `PI_OFFLINE=1` to disable all startup network operations, including update checks
+and package update checks.
 
 ### Warnings
 
@@ -115,7 +115,7 @@ The agent is instructed to edit only that source checkout, preserve unrelated ch
 
 Use `/settings` → **Autonomy** to choose one preset and the foreground goal-loop round budget, or `/autonomy off|safe|balanced|full` to switch the preset while preserving the configured round budget. Main-session reflection is enabled in every mode, including `off`; eligible turns queue a durable root-only cue for the orchestrator's next ordinary current-session provider turn. It does not create a separate or background model request, and increasing autonomy never disables learning. `full` additionally grants standing authority for broader user/project skill, extension/tool, autonomy-setting, and authorized self-modification work when validation and rollback evidence are recorded.
 
-Hard stops still require explicit foreground approval even in `full`: publishing, npm release, git push, tag creation, credential disclosure or provider-auth changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. An active user-plane `secret_store` grant is the narrow exception: model-blind activation and migration from named accessible sources require no duplicate confirmation. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
+Hard stops still require explicit foreground approval even in `full`: GitHub release publication, git push, tag creation, credential disclosure or provider-auth changes, destructive user-data deletion, network-exposed services, or authority expansion beyond this policy. An active user-plane `secret_store` grant is the narrow exception: model-blind activation and migration from named accessible sources require no duplicate confirmation. `/autonomy status` shows the active grant and the Auto Learn audit/log directory.
 
 ```json
 {
@@ -496,7 +496,7 @@ To keep captures in an explicit location:
 |---------|------|---------|-------------|
 | `shellPath` | string | platform default | Custom platform-shell path (`pwsh.exe` on Windows; Bash-compatible shell elsewhere) |
 | `shellCommandPrefix` | string | - | Platform-shell snippet prepended to every command (for example, `"shopt -s expand_aliases"` on Bash) |
-| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@24", "--", "npm"]`) |
+| `npmCommand` | string[] | - | Optional command argv for third-party npm extension/package lookup and install operations (e.g., `["mise", "exec", "node@24", "--", "npm"]`); it never installs or publishes the Pi Adaptative CLI |
 | `windowsShell.pythonEngine` | boolean | `true` | Windows only. Routes pipelines, redirection, expansion, chaining, and state-mutating commands (`cd`/`export`/`unset`) through the bundled Python shell engine. Explicit `false` restores the PowerShell-only, simple-command-only contract verbatim — the same fail-closed behavior for pipelines/redirection/expansion/chaining as before the engine existed. |
 
 Pi exposes one stable `bash` contract to the model on every platform. On Windows, the tool router parses a finite simple-command grammar, converts supported Bash-like forms to literal-path PowerShell, and rejects pipelines, redirection, expansion, chaining, nested shells, POSIX scripts, and unsupported builtin forms instead of guessing. Legacy `powershell` tool/profile references map to `bash`. The Windows backend requires PowerShell 7 (`pwsh.exe`) and runs it with `-NoLogo -NoProfile -NonInteractive -Command`, process-only headless settings, silent progress, and a warmed persistent command path. Pi does not overwrite PowerShell's input or output encoding; its output path preserves Unicode UTF-8 and recovers Windows-1252 bytes. `shellCommandPrefix` uses backend-native syntax because Pi applies it after routing. Agent, interactive, and RPC shell calls default to a 120-second wall-clock deadline; agent-tool overrides cap at one hour.
@@ -511,7 +511,7 @@ The native `python` tool is active by default and resolves Python through pinned
 }
 ```
 
-`npmCommand` is used for all npm package-manager operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers.
+`npmCommand` is used only for third-party npm package operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers. The CLI itself is a standalone Linux or Windows release and has no npm publication path.
 
 ### Sessions
 

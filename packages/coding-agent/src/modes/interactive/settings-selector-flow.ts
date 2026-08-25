@@ -95,7 +95,6 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				projectContextFiles: host.settingsManager.getProjectContextFiles(),
 				projectContextFilesScope: host.settingsManager.getProjectContextFilesScope(),
 				collapseChangelog: host.settingsManager.getCollapseChangelog(),
-				enableInstallTelemetry: host.settingsManager.getEnableInstallTelemetry(),
 				doubleEscapeAction: host.settingsManager.getDoubleEscapeAction(),
 				treeFilterMode: host.settingsManager.getTreeFilterMode(),
 				showHardwareCursor: host.settingsManager.getShowHardwareCursor(),
@@ -242,9 +241,6 @@ export function showSettingsSelector(host: SettingsSelectorHost): void {
 				},
 				onCollapseChangelogChange: (collapsed) => {
 					host.settingsManager.setCollapseChangelog(collapsed);
-				},
-				onEnableInstallTelemetryChange: (enabled) => {
-					host.settingsManager.setEnableInstallTelemetry(enabled);
 				},
 				onQuietStartupChange: (enabled) => {
 					host.settingsManager.setQuietStartup(enabled);

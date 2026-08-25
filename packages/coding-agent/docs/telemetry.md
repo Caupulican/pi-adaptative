@@ -5,7 +5,6 @@ retention policy:
 
 | Data | Location | Contract |
 |---|---|---|
-| Install/update ping | `https://pi.dev/api/report-install` | Anonymous version ping only when enabled. `PI_TELEMETRY=0` or offline mode disables it. |
 | Autonomy diagnostics | Active session JSONL as redacted `autonomy-telemetry` custom entries | Bounded payloads for routes, gates, worker lifecycle, evidence, and learning decisions. Local only. |
 | Orchestration events | `<agentDir>/state/orchestration/<session>/events/*.json` | Lossless authoritative task/runtime history with ordinals and idempotency markers. Never rotated as telemetry. |
 | Tool recovery | `<agentDir>/state/tool-recovery-events.jsonl` | Local bounded diagnostic log: 4 MiB high-water, 3 MiB rotation target, at most 5,000 retained records. |

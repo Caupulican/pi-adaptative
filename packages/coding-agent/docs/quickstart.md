@@ -4,33 +4,36 @@ This page gets you from install to a useful first pi session.
 
 ## Install
 
-Pi is distributed as an npm package:
+Pi Adaptative is distributed as standalone Linux and Windows releases. On Linux:
 
 ```bash
-npm install -g --ignore-scripts @caupulican/pi-adaptative
+curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh
 ```
 
-`--ignore-scripts` disables dependency lifecycle scripts during install. Pi does not require install scripts for normal npm installs.
+The installer downloads and verifies the release binary and places a managed `pi` launcher on your `PATH`. Re-run the command to update to the latest release. On Windows, run the native PowerShell installer:
+
+```powershell
+irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
+```
+
+The standalone CLI does not require Node.js or npm. Those tools are needed only when building from source or developing extension/package code.
 
 ### Uninstall
 
-Use the package manager that installed pi. The curl installer uses npm globally, so curl and npm installs are removed with npm:
+Remove the default managed launcher on Linux only after verifying that it points into the standalone install tree. This leaves settings, credentials, sessions, and installed pi packages in `~/.pi/agent/`:
 
-```bash
-# curl installer or npm install -g
-npm uninstall -g @caupulican/pi-adaptative
-
-# pnpm
-pnpm remove -g @caupulican/pi-adaptative
-
-# Yarn
-yarn global remove @caupulican/pi-adaptative
-
-# Bun
-bun uninstall -g @caupulican/pi-adaptative
+```sh
+launcher="$HOME/.local/bin/pi"
+managed_pi="${XDG_DATA_HOME:-$HOME/.local/share}/pi-adaptative/current/pi"
+if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$managed_pi" ]; then
+	rm -f -- "$launcher"
+else
+	printf '%s\n' "Refusing to remove an unmanaged pi launcher: $launcher" >&2
+	exit 1
+fi
 ```
 
-Uninstalling pi leaves settings, credentials, sessions, and installed pi packages in `~/.pi/agent/`.
+If you used `PI_INSTALL_DIR` or `PI_BIN_DIR`, substitute those locations. After inspecting it, remove the managed `pi-adaptative` install directory to reclaim the downloaded binaries. The installer never stores user data there.
 
 Then start pi in the project directory you want it to work on:
 
@@ -162,4 +165,4 @@ Use `--mode json` for JSON event output or `--mode rpc` for process integration.
 - [Keybindings](keybindings.md) - shortcuts and customization.
 - [Pi Packages](packages.md) - install shared extensions, skills, prompts, and themes.
 
-Platform notes: [Windows](windows.md), [Termux](termux.md), [tmux](tmux.md), [Terminal setup](terminal-setup.md), [Shell aliases](shell-aliases.md).
+Platform notes: [Windows](windows.md), [tmux](tmux.md), [Terminal setup](terminal-setup.md), [Shell aliases](shell-aliases.md).

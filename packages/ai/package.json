@@ -1,6 +1,7 @@
 {
 	"name": "@caupulican/pi-ai",
 	"version": "0.97.0",
+	"private": true,
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -179,8 +180,7 @@
 		"generate-models": "node scripts/generate-models.ts",
 		"generate-image-models": "node scripts/generate-image-models.ts",
 		"build": "npm run generate-models && npm run generate-image-models && node ../../scripts/run-tsc.mjs -p tsconfig.build.json",
-		"test": "vitest --run --bail=1",
-		"prepublishOnly": "npm run clean && npm run build"
+		"test": "vitest --run --bail=1"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "0.117.1",

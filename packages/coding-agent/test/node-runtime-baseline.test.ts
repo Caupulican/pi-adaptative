@@ -11,7 +11,7 @@ function readJson(path: string): Record<string, unknown> {
 }
 
 describe("Node runtime baseline", () => {
-	it("pins development, CI, and every published package to the same LTS patch", () => {
+	it("pins development, CI, and every standalone workspace package to the same LTS patch", () => {
 		expect(readFileSync(join(REPOSITORY_ROOT, ".nvmrc"), "utf-8").trim()).toBe(NODE_RUNTIME_BASELINE);
 
 		for (const relativePath of [

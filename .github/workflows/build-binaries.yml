@@ -11,12 +11,12 @@ on:
         required: true
         type: string
       skip_windows_verify:
-        description: Skip Windows RPC/performance verification; GitHub and npm publishing remain blocked
+        description: Skip Windows RPC/performance verification; GitHub release publication remains blocked
         required: false
         type: boolean
         default: false
       verify_only:
-        description: Build and verify artifacts without creating a GitHub Release or publishing npm
+        description: Build and verify artifacts without creating a GitHub Release
         required: false
         type: boolean
         default: false
@@ -55,10 +55,44 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.18.0'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Build binaries
         run: ./scripts/build-binaries.sh
+
+      - name: Verify pinned native toolchain
+        run: npm ls vite@8.2.1 vitest@4.1.10 --depth=0
+
+      - name: Verify Linux standalone installer
+        run: |
+          fixture_dir="${RUNNER_TEMP}/pi-adaptative/linux-installer-fixture"
+          install_dir="${RUNNER_TEMP}/pi-adaptative/linux-installer-root"
+          bin_dir="${RUNNER_TEMP}/pi-adaptative/linux-installer-bin"
+          mkdir -p "${fixture_dir}"
+          cp packages/coding-agent/binaries/pi-linux-x64.tar.gz "${fixture_dir}/"
+          (
+            cd "${fixture_dir}"
+            sha256sum pi-linux-x64.tar.gz > SHA256SUMS
+          )
+          PI_VERSION="${RELEASE_TAG}" \
+          PI_INSTALL_DIR="${install_dir}" \
+          PI_BIN_DIR="${bin_dir}" \
+          PI_INSTALL_TEST_MODE=1 \
+          PI_INSTALL_TEST_BASE_URL="${fixture_dir}" \
+            ./install.sh
+          test "$("${bin_dir}/pi" --version)" = "${RELEASE_TAG#v}"
+          test -x "${install_dir}/current/pi"
+          test -s "${install_dir}/current/package.json"
+
+      - name: Verify Linux arm64 release layout
+        run: |
+          extract_dir="${RUNNER_TEMP}/pi-adaptative/linux-arm64-layout"
+          mkdir -p "${extract_dir}"
+          tar -xzf packages/coding-agent/binaries/pi-linux-arm64.tar.gz \
+            -C "${extract_dir}" \
+            --strip-components=1
+          test -x "${extract_dir}/pi"
+          test -s "${extract_dir}/package.json"
+          readelf -h "${extract_dir}/pi" | grep -Eq 'Machine:[[:space:]]+AArch64'
 
       - name: Upload release binaries for platform verification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -67,54 +101,6 @@ jobs:
           path: packages/coding-agent/binaries/pi-*
           if-no-files-found: error
           retention-days: 7
-
-  verify-node-bun-release:
-    name: Smoke Node package and Bun binary releases
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: build
-    permissions:
-      contents: read
-    env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-    steps:
-      - name: Checkout release-smoke harness
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          persist-credentials: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.18.0'
-          cache: npm
-
-      - name: Download release binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-binaries
-          path: artifacts
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Build isolated Node package release
-        env:
-          LOCAL_RELEASE_DIR: ${{ runner.temp }}/pi-adaptative/local-release
-        run: npm run release:local -- --out "${LOCAL_RELEASE_DIR}" --force --skip-check --skip-bun-install --skip-binary-build
-
-      - name: Smoke Node package and Bun binary conversations
-        env:
-          LOCAL_RELEASE_DIR: ${{ runner.temp }}/pi-adaptative/local-release
-        run: |
-          bun_dir="${LOCAL_RELEASE_DIR}/bun"
-          mkdir -p "${bun_dir}"
-          tar -xzf artifacts/pi-linux-x64.tar.gz -C "${bun_dir}" --strip-components=1
-          node scripts/release-artifact-smoke.mjs \
-            --node "${LOCAL_RELEASE_DIR}/node/pi" \
-            --bun "${bun_dir}/pi" \
-            --expected-version "${RELEASE_TAG#v}"
 
   verify-windows-binary:
     name: Verify Windows binary (${{ matrix.arch }})
@@ -150,6 +136,59 @@ jobs:
         with:
           name: release-binaries
           path: artifacts
+
+      - name: Verify Windows standalone installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $arch = "${{ matrix.arch }}"
+          $assetName = "pi-windows-$arch.zip"
+          $archive = Join-Path $PWD "artifacts\$assetName"
+          $fixtureDir = Join-Path $env:RUNNER_TEMP "pi-adaptative\windows-installer-fixture-$arch"
+          $installDir = Join-Path $env:RUNNER_TEMP "pi-adaptative\windows-installer-root-$arch"
+          $binDir = Join-Path $env:RUNNER_TEMP "pi-adaptative\windows-installer-bin-$arch"
+          New-Item -ItemType Directory -Force -Path $fixtureDir | Out-Null
+          Copy-Item -LiteralPath $archive -Destination (Join-Path $fixtureDir $assetName)
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText(
+            (Join-Path $fixtureDir "SHA256SUMS"),
+            "$digest  $assetName`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          $env:PI_VERSION = $env:RELEASE_TAG
+          $env:PI_INSTALL_DIR = $installDir
+          $env:PI_BIN_DIR = $binDir
+          $env:PI_INSTALL_TEST_MODE = "1"
+          $env:PI_INSTALL_TEST_BASE_URL = $fixtureDir
+          $env:PI_INSTALL_TEST_SKIP_PATH = "1"
+          & (Join-Path $PWD "install.ps1")
+
+          $pointer = Join-Path $installDir "current.version"
+          if ((Get-Content -LiteralPath $pointer -Raw).Trim() -ne $env:RELEASE_TAG) {
+            throw "Windows $arch installer did not activate $env:RELEASE_TAG"
+          }
+          $launcher = Join-Path $binDir "pi.cmd"
+          $installedVersion = (& $launcher --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $installedVersion -ne $env:RELEASE_TAG.Substring(1)) {
+            throw "Windows $arch installed launcher reported '$installedVersion'"
+          }
+          $releaseDir = Join-Path (Join-Path $installDir "releases") $env:RELEASE_TAG
+          if (-not (Test-Path -LiteralPath (Join-Path $releaseDir "collect-pi-incident.ps1") -PathType Leaf)) {
+            throw "Windows $arch installer did not retain the complete release tree"
+          }
+
+          $env:PI_VERSION = "v999.0.0"
+          $rejected = $false
+          try {
+            & (Join-Path $PWD "install.ps1")
+          } catch {
+            $rejected = $true
+          }
+          if (-not $rejected) { throw "Windows $arch installer accepted an archive with the wrong version" }
+          if ((Get-Content -LiteralPath $pointer -Raw).Trim() -ne $env:RELEASE_TAG) {
+            throw "Windows $arch failed upgrade changed current.version"
+          }
 
       - name: Smoke test native Windows binary
         shell: pwsh
@@ -349,13 +388,115 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  release-provenance:
+    name: Verify exact-commit release provenance
+    if: github.event_name == 'push' || inputs.verify_only != true
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require successful CI and destructive evidence for the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_sha="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          release_subject="$(git show -s --format=%s "$release_sha")"
+
+          # Release/repair commits contain version and changelog metadata only. Their
+          # parent is the immutable tree that release.mjs required the complete CI
+          # matrix to prove before it created that metadata commit.
+          tested_sha="$release_sha"
+          case "$release_subject" in
+            "Release v"*|"Repair release v"*)
+              tested_sha="$(git rev-parse "${release_sha}^")"
+              mapfile -d '' changed_paths < <(git diff --name-only -z "$tested_sha" "$release_sha")
+              for changed_path in "${changed_paths[@]}"; do
+                case "$changed_path" in
+                  package.json|package-lock.json|packages/agent/package.json|packages/agent/CHANGELOG.md|packages/ai/package.json|packages/ai/CHANGELOG.md|packages/coding-agent/package.json|packages/coding-agent/CHANGELOG.md|packages/tui/package.json|packages/tui/CHANGELOG.md) ;;
+                  *)
+                    echo "::error::Release metadata commit changes untested path ${changed_path}" >&2
+                    exit 1 ;;
+                esac
+              done ;;
+          esac
+
+          successful_run_ids() {
+            workflow="$1"
+            sha="$2"
+            gh run list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --workflow "$workflow" \
+              --commit "$sha" \
+              --limit 100 \
+              --json databaseId,headSha,status,conclusion |
+              jq --arg sha "$sha" -r '.[] | select(.headSha == $sha and .status == "completed" and .conclusion == "success") | .databaseId'
+          }
+
+          verify_workflow() {
+            workflow="$1"
+            sha="$2"
+            if [ -z "$(successful_run_ids "$workflow" "$sha")" ]; then
+              echo "::error::${workflow} has no successful completed run for exact commit ${sha}" >&2
+              exit 1
+            fi
+          }
+
+          verify_full_ci() {
+            sha="$1"
+            run_ids="$(successful_run_ids ci.yml "$sha")"
+            for run_id in $run_ids; do
+              jobs="$(gh run view "$run_id" --repo "${GITHUB_REPOSITORY}" --json jobs)"
+              linux_quality="$(
+                printf '%s' "$jobs" | jq '[.jobs[] | select(
+                  .name == "Build, check, test (ubuntu-latest)" and
+                  .status == "completed" and .conclusion == "success" and
+                  any(.steps[]; .name == "Verification-harness coverage gate" and .conclusion == "success") and
+                  any(.steps[]; .name == "Test non-coding-agent workspaces" and .conclusion == "success")
+                )] | length'
+              )"
+              windows_quality="$(
+                printf '%s' "$jobs" | jq '[.jobs[] | select(
+                  .name == "Build, check, test (windows-latest)" and
+                  .status == "completed" and .conclusion == "success" and
+                  any(.steps[]; .name == "Test non-coding-agent workspaces" and .conclusion == "success") and
+                  any(.steps[]; .name == "Test native incident collector with Windows PowerShell 5.1" and .conclusion == "success")
+                )] | length'
+              )"
+              coding_shards="$(
+                printf '%s' "$jobs" | jq '[.jobs[] | select(
+                  (.name | startswith("Coding-agent test (")) and
+                  .status == "completed" and .conclusion == "success" and
+                  any(.steps[]; .name == "Test coding-agent shard" and .conclusion == "success")
+                )] | length'
+              )"
+              if [ "$linux_quality" -eq 1 ] && [ "$windows_quality" -eq 1 ] && [ "$coding_shards" -eq 8 ]; then
+                return 0
+              fi
+            done
+            echo "::error::ci.yml has no successful complete Linux/Windows matrix for tested commit ${sha}" >&2
+            exit 1
+          }
+
+          verify_full_ci "$tested_sha"
+          verify_workflow destructive.yml "$release_sha"
+
   release:
     if: github.event_name == 'push' || inputs.verify_only != true
     runs-on: ubuntu-latest
-    # GitHub and npm publishing stay blocked until both native Windows binaries pass
+    # GitHub release publication stays blocked until both native Windows binaries pass
     # functional RPC smoke and absolute startup/warm-path budgets. Linux-relative
     # ratios remain in the report as cross-runner performance telemetry.
-    needs: [quality-gate, build, verify-node-bun-release, verify-release-binary-performance]
+    needs: [quality-gate, build, release-provenance, verify-release-binary-performance]
     permissions:
       contents: write
     env:
@@ -385,6 +526,28 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare standalone release installer and checksums
+        run: |
+          BINARIES_DIR="packages/coding-agent/binaries"
+          test -s install.sh
+          test -s install.ps1
+          chmod +x install.sh
+          cp install.sh "${BINARIES_DIR}/install.sh"
+          cp install.ps1 "${BINARIES_DIR}/install.ps1"
+          (
+            cd "${BINARIES_DIR}"
+            sha256sum \
+              install.sh \
+              install.ps1 \
+              pi-darwin-arm64.tar.gz \
+              pi-darwin-x64.tar.gz \
+              pi-linux-x64.tar.gz \
+              pi-linux-arm64.tar.gz \
+              pi-windows-x64.zip \
+              pi-windows-arm64.zip \
+              > SHA256SUMS
+          )
+
       - name: Create GitHub Release and upload verified binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -400,6 +563,9 @@ jobs:
             "${BINARIES_DIR}/pi-linux-arm64.tar.gz" \
             "${BINARIES_DIR}/pi-windows-x64.zip" \
             "${BINARIES_DIR}/pi-windows-arm64.zip" \
+            "${BINARIES_DIR}/install.sh" \
+            "${BINARIES_DIR}/install.ps1" \
+            "${BINARIES_DIR}/SHA256SUMS" \
             2>/dev/null || \
           gh release upload "${RELEASE_TAG}" \
             "${BINARIES_DIR}/pi-darwin-arm64.tar.gz" \
@@ -408,71 +574,7 @@ jobs:
             "${BINARIES_DIR}/pi-linux-arm64.tar.gz" \
             "${BINARIES_DIR}/pi-windows-x64.zip" \
             "${BINARIES_DIR}/pi-windows-arm64.zip" \
+            "${BINARIES_DIR}/install.sh" \
+            "${BINARIES_DIR}/install.ps1" \
+            "${BINARIES_DIR}/SHA256SUMS" \
             --clobber
-
-  publish-npm:
-    runs-on: ubuntu-latest
-    # The binary build is a mandatory release gate: packages publish to npm only
-    # after the cross-platform binaries build successfully, so a broken build
-    # never ships a release. quality-gate (ci.yml) already ran check+test on this
-    # exact ref, so this job only rebuilds the npm publish artifacts (dist/, which
-    # is gitignored and not shared between jobs) and verifies their integrity -
-    # it does not re-run lint/typecheck/tests, so a flake there can no longer
-    # leave a public GitHub release with no matching npm packages.
-    needs: release
-    # Override the top-level contents:write — this job only needs to read the
-    # repo and mint an OIDC token for npm provenance attestations.
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          persist-credentials: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.18.0'
-          registry-url: 'https://registry.npmjs.org'
-          cache: npm
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
-          sudo ln -s $(which fdfind) /usr/local/bin/fd
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Verify native TypeScript test toolchain
-        run: |
-          npm ls vite@8.2.1 vitest@4.1.10 --depth=0
-          node node_modules/vitest/vitest.mjs --version
-          node node_modules/vite/bin/vite.js --version
-
-      - name: Build
-        # Deterministic CI: builds are hermetic by default (see
-        # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
-        # catalogs instead of refetching live pricing that can drift between the release commit
-        # and this run (drift would otherwise fail the artifact verification below and abort the
-        # npm publish). Live refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which
-        # this job never does.
-        run: npm run build
-
-      - name: Verify release artifacts are committed
-        # Artifact-integrity check: the build above must be a pure function of the checked-out
-        # release commit. Any tracked file it touches (e.g. a generated catalog) that doesn't
-        # match what's committed means the tagged release and the published npm packages would
-        # diverge from source control - fail before publishing rather than after.
-        run: git diff --exit-code
-
-      - name: Publish npm packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: node scripts/publish.mjs

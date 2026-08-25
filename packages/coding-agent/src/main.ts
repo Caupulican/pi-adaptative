@@ -16,7 +16,7 @@ import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
 import { selectSession } from "./cli/session-picker.ts";
-import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import { ENV_SESSION_DIR, expandTildePath, getAgentDir, VERSION } from "./config.ts";
 import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
@@ -83,7 +83,6 @@ import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
-import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
 
 function getSelfLaunchTarget(): { executable: string; argsPrefix: string[] } | undefined {
@@ -661,10 +660,6 @@ export async function main(args: string[], options?: MainOptions) {
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
-	}
-
-	if (process.platform === "win32") {
-		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
 	}
 
 	if (args[0] === "doctor") {

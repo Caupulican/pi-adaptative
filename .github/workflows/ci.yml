@@ -79,7 +79,7 @@ jobs:
         # Deterministic CI: builds are hermetic by default (see
         # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
         # catalogs instead of refetching live pricing that can drift between the release commit
-        # and this run (drift fails the artifact verification and aborts the npm publish). Live
+        # and this run (drift fails the artifact verification and aborts the release). Live
         # refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which this job never does.
         run: npm run build
 

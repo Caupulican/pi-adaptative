@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Retired first-party npm publication and in-place package-manager self-update; existing npm, pnpm, yarn, or Bun package installations must migrate through the standalone release installer.
+- Removed install telemetry, the `PI_TELEMETRY` override, and the `enableInstallTelemetry` setting.
+
+### Added
+
+- Added checksum-verified Linux x64/arm64 and native Windows x64/arm64 installers with atomic activation, rollback-safe ownership checks, and bounded release retention.
+
+### Changed
+
+- Replaced the npm release path with idempotent Caupulican GitHub Release assets, full-matrix tested-tree provenance, and exact-commit destructive gates; startup version checks now read that repository's latest release.
+- Rewrote the project and coding-agent documentation around the reliability-first harness, its operational tradeoffs, and its standalone distribution.
+
+### Removed
+
+- Removed the inherited pi.dev runtime dependency and promotional links; sharing defaults to GitHub Gist links and OpenRouter attribution identifies this repository.
+
 ## [0.97.0] - 2026-08-24
 
 ### Breaking Changes

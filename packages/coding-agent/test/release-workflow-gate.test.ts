@@ -28,7 +28,7 @@ describe("release workflow quality gate", () => {
 		expect(release).toContain("--warm-iterations 10");
 	});
 
-	it("gates GitHub and npm publishing on package conversations plus native Windows correctness and performance", () => {
+	it("gates standalone GitHub release assets on native Windows correctness and performance", () => {
 		const ci = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
 		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
 
@@ -44,13 +44,15 @@ describe("release workflow quality gate", () => {
 		expect(release).toContain("name: Enforce Windows performance budgets");
 		const performanceGate = release.slice(
 			release.indexOf("  verify-release-binary-performance:"),
-			release.indexOf("\n  release:", release.indexOf("  verify-release-binary-performance:")),
+			release.indexOf("\n  release-provenance:", release.indexOf("  verify-release-binary-performance:")),
 		);
 		expect(performanceGate).not.toContain(`ref: \${{ env.RELEASE_TAG }}`);
 		expect(release).toContain("release-binary-performance-gate.mjs");
-		expect(release).toContain("verify-node-bun-release:");
-		expect(release).toContain(
-			"needs: [quality-gate, build, verify-node-bun-release, verify-release-binary-performance]",
-		);
+		expect(release).toContain("needs: [quality-gate, build, release-provenance, verify-release-binary-performance]");
+		expect(release).toContain("install.sh");
+		expect(release).toContain("install.ps1");
+		expect(release).toContain("SHA256SUMS");
+		expect(release).not.toContain("publish-npm:");
+		expect(release).not.toContain("NODE_AUTH_TOKEN");
 	});
 });

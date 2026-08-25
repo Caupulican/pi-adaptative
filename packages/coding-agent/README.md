@@ -1,59 +1,27 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@caupulican/pi-adaptative"><img alt="npm" src="https://img.shields.io/npm/v/@caupulican/pi-adaptative?style=flat-square" /></a>
-</p>
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
-
 > New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 ---
 
 # Pi Adaptative
 
-Pi Adaptative is a fork of Pi focused on adaptive agent runtime: reloading changes, making bounded self-modifications, and staying compatible with normal Pi workflows.
-
-**Fork credit:** Built on Pi by Mario Zechner / badlogic.
+Pi Adaptative is an independent, reliability-first coding-agent harness. It keeps compatible CLI, SDK, extension, session, and provider workflows while adding bounded adaptive behavior, stronger tool recovery, and evidence-gated orchestration.
 
 ## Purpose
 
-This package is meant to be installed and used as `@caupulican/pi-adaptative`. It keeps the scope simple:
+The standalone release is installed and used as `pi`. Its scope is deliberately broad where reliability requires it:
 
 - reload supported runtime changes while working;
 - make source-backed self-modifications with validation;
 - scope loaded resources through profiles when needed;
 - keep per-repo configuration out of the repo by using user-level state;
-- keep the package installable and usable as a normal coding-agent CLI.
+- ship native Linux and Windows binaries with verified, rollback-safe installers;
+- keep Node.js and npm available for source development and third-party extension/package workflows, not for installing or publishing the CLI.
 
 ## Compatibility mode
 
 `pi-adaptative` keeps Pi-compatible CLI, SDK, settings, skills, prompt templates, themes, extensions, and package loading where practical. Adaptive features are additive. Legacy settings such as `disabledResources` still work as aliases for profile blocks.
 
 Pi Adaptative runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. It remains extensible with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), [Themes](#themes), and [Pi Packages](#pi-packages).
-
-## Share your OSS coding agent sessions
-
-If you use pi for open source work, please share your coding agent sessions.
-
-Public OSS session data helps improve models, prompts, tools, and evaluations using real development workflows.
-
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
 
 ## Table of Contents
 
@@ -84,15 +52,13 @@ I regularly publish my own `pi-mono` work sessions here:
 ## Quick Start
 
 ```bash
-npm install -g --ignore-scripts @caupulican/pi-adaptative
+curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh
 ```
 
-`--ignore-scripts` disables dependency lifecycle scripts during install. Pi does not require install scripts for normal npm installs.
+The installer downloads the verified Linux release binary and manages the `pi` launcher outside the repository. Re-run it to update. On Windows, use the native PowerShell installer:
 
-Installer alternative:
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
+```powershell
+irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
 ```
 
 Authenticate with an API key:
@@ -111,7 +77,7 @@ pi
 
 Then just talk to pi. By default, pi gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
-**Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
+**Platform notes:** [Windows](docs/windows.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
 ---
 
@@ -156,7 +122,6 @@ You can also spell the model explicitly, e.g. `pi --model openai-codex/gpt-5.5` 
 - ZAI
 - OpenCode Zen
 - OpenCode Go
-- Hugging Face
 - Fireworks
 - Together AI
 - Kimi For Coding
@@ -324,14 +289,12 @@ Pi records the installed runtime version and durable-memory policy in `~/.pi/age
 
 Disable this behavior with `autoLearn.enabled: false`, `autoLearn.reflectionReview: false`, `PI_NATIVE_REFLECTION=0`, or `PI_AUTO_LEARN_CHILD=1`. See [docs/durable-learning-state-design.md](docs/durable-learning-state-design.md) for the state, claim, recovery, and compatibility contract.
 
-### Telemetry and update checks
+### Update checks
 
-Pi has two separate startup features:
-
-- **Update check:** fetches `https://registry.npmjs.org/@caupulican%2fpi-adaptative/latest` to check whether a newer Pi Adaptative version exists. Disable it with `PI_SKIP_VERSION_CHECK=1`. Disabling update checks only turns off this check.
-- **Install/update telemetry:** after first install or a changelog-detected update, sends an anonymous version ping to `https://pi.dev/api/report-install`. Opt out by setting `enableInstallTelemetry` to `false` in `settings.json`, or by setting `PI_TELEMETRY=0`. This does not disable update checks; Pi may still contact the npm registry for the latest Pi Adaptative version unless update checks are disabled or offline mode is enabled.
-
-Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
+At startup, Pi Adaptative checks the latest GitHub Release at
+`https://api.github.com/repos/Caupulican/pi-adaptative/releases/latest` for a newer version.
+Disable this check with `PI_SKIP_VERSION_CHECK=1`. Use `--offline` or `PI_OFFLINE=1` to disable
+startup network operations, including update checks and package update checks.
 
 Runtime orchestration, recovery, and learning telemetry stays local. See [docs/telemetry.md](docs/telemetry.md) for its trust boundaries, locations, and retention rules.
 
@@ -421,7 +384,7 @@ Place in `~/.pi/agent/themes/`, `.pi/themes/`, or a [pi package](#pi-packages) t
 
 ### Pi Packages
 
-Bundle and share extensions, skills, prompts, and themes via npm or git. Find packages on [npmjs.com](https://www.npmjs.com/search?q=keywords%3Api-package) or [Discord](https://discord.com/channels/1456806362351669492/1457744485428629628).
+Bundle and share extensions, skills, prompts, and themes via npm or git. Review third-party package source before installing it.
 
 > **Security:** Pi packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
 
@@ -439,13 +402,15 @@ pi install ssh://git@github.com/user/repo@v1    # tag or commit
 pi remove npm:@foo/pi-tools
 pi uninstall npm:@foo/pi-tools          # alias for remove
 pi list
-pi update                               # update pi and packages (skips pinned packages)
-pi update --extensions                  # update packages only
-pi update --self                        # update pi only
-pi update --self --force                # reinstall pi even if current
+pi update                               # update extensions/packages, then print installer guidance and exit nonzero
+pi update --extensions                  # update extensions/packages only; exit successfully
+pi update --self                        # refuse CLI self-update; print standalone installer guidance and exit nonzero
+pi update --self --force                # compatibility flag; same refusal, no reinstall
 pi update npm:@foo/pi-tools             # update one package
 pi config                               # enable/disable extensions, skills, prompts, themes
 ```
+
+Pi Adaptative is distributed as a standalone Linux or Windows release. Legacy npm, pnpm, yarn, and Bun package installations are no longer updated in place. Plain `pi update` updates extensions/packages, then prints the matching standalone installer command and exits nonzero. `pi update --extensions` is the successful extension/package-only path. `pi update --self` always refuses a CLI self-update, exits nonzero, and prints installer guidance; `--force` is retained only as a compatibility flag and does not reinstall. Node.js and npm remain useful for building from source and for third-party extension/package dependencies.
 
 Packages install to `~/.pi/agent/git/` (git) or `~/.pi/agent/npm/` (npm). Use `-l` for project-local installs (`.pi/git/`, `.pi/npm/`). Git `@ref` values are pinned tags or commits; pinned packages are skipped by `pi update`, so use `pi install git:host/user/repo@new-ref` to move an existing package to a new ref. Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@24", "--", "npm"]`.
 
@@ -473,6 +438,10 @@ See [docs/packages.md](docs/packages.md).
 ## Programmatic Usage
 
 ### SDK
+
+The SDK remains available to source-workspace consumers, but the first-party
+packages are private and are not published to npm. See the source setup in
+[docs/sdk.md](docs/sdk.md) before using these imports.
 
 ```typescript
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@caupulican/pi-adaptative";
@@ -508,21 +477,7 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 ## Philosophy
 
-Pi is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [pi packages](#pi-packages). This keeps the core minimal while letting you shape pi to fit how you work.
-
-**No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
-
-**No sub-agents.** There's many ways to do this. Spawn pi instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
-
-**No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
-
-**No plan mode.** Write plans to files, or build it with [extensions](#extensions), or install a package.
-
-**No built-in to-dos.** They confuse models. Use a TODO.md file, or build your own with [extensions](#extensions).
-
-**No background bash.** Use tmux. Full observability, direct interaction.
-
-Read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) for the full rationale.
+Pi Adaptative keeps execution observable and bounded. Tool calls pass validation and scoped recovery; background work reports terminal state to its owning session; session and compaction state is persisted with bounded retention; and project resources are explicit. Extensions, skills, prompt templates, themes, and packages provide the variation without making those guarantees optional. Detailed behavior and limits live in the owned documentation under `docs/`.
 
 ---
 
@@ -538,10 +493,10 @@ pi [options] [@files...] [messages...]
 pi install <source> [-l]     # Install package, -l for project-local
 pi remove <source> [-l]      # Remove package
 pi uninstall <source> [-l]   # Alias for remove
-pi update [source|self|pi]   # Update pi and packages (skips pinned packages)
-pi update --extensions       # Update packages only
-pi update --self             # Update pi only
-pi update --self --force     # Reinstall pi even if current
+pi update [source|self|pi]   # Update extensions/packages, then print installer guidance and exit nonzero
+pi update --extensions       # Update extensions/packages only; exit successfully
+pi update --self             # Refuse CLI self-update and print installer guidance; exit nonzero
+pi update --self --force     # Compatibility flag; same refusal, no reinstall
 pi update --extension <src>  # Update one package
 pi list                      # List installed packages
 pi config                    # Enable/disable package resources
@@ -677,9 +632,8 @@ pi --thinking high "Solve this complex problem"
 | `PI_CODING_AGENT_DIR` | Override config directory (default: `~/.pi/agent`) |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
-| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
-| `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
-| `PI_TELEMETRY` | Override install/update telemetry. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
+| `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
+| `PI_SKIP_VERSION_CHECK` | Skip the Pi Adaptative GitHub Releases version check at startup |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
@@ -695,8 +649,6 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines and [docs/developmen
 
 MIT
 
-## See Also
+## Repository packages
 
-- [@caupulican/pi-ai](https://www.npmjs.com/package/@caupulican/pi-ai): Core LLM toolkit for this fork
-- [@caupulican/pi-agent-core](https://www.npmjs.com/package/@caupulican/pi-agent-core): Agent framework for this fork
-- [@caupulican/pi-tui](https://www.npmjs.com/package/@caupulican/pi-tui): Terminal UI components for this fork
+The core implementation is maintained in this repository under `packages/ai`, `packages/agent`, and `packages/tui`. These workspace packages are private implementation dependencies of the standalone release.

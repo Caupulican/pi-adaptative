@@ -1,9 +1,9 @@
 /**
- * Startup notices and update/telemetry checks extracted from interactive-mode.
+ * Startup notices and update checks extracted from interactive-mode.
  *
  * These render the "What's New" changelog notice and the untrusted-project
- * warning, probe for package/tmux configuration issues, surface update
- * notifications, and report anonymous install telemetry. They read
+ * warning, probe for package/tmux configuration issues, and surface update
+ * notifications. They read
  * session/settings state and render into the chat container through a narrow
  * `StartupChecksHost` seam (`startupNoticesShown` is threaded via get/set);
  * interactive-mode keeps thin delegating wrappers.
@@ -14,13 +14,11 @@ import type { Container, MarkdownTheme, TUI } from "@caupulican/pi-tui";
 import { getCapabilities, hyperlink, Markdown, Spacer, Text } from "@caupulican/pi-tui";
 import { APP_NAME, getAgentDir, VERSION } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import { isInstallTelemetryEnabled } from "../../core/install-telemetry.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { hasProjectTrustInputs } from "../../core/trust-manager.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import type { LatestPiRelease } from "../../utils/version-check.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { theme } from "./theme/theme.ts";
@@ -112,39 +110,18 @@ export function getChangelogForDisplay(host: StartupChecksHost): string | undefi
 	const entries = parseChangelog(changelogPath);
 
 	if (!lastVersion) {
-		// Fresh install - record the version, send telemetry, don't show changelog
+		// Fresh install - record the version without showing the full changelog.
 		host.settingsManager.setLastChangelogVersion(VERSION);
-		reportInstallTelemetry(host, VERSION);
 		return undefined;
 	}
 
 	const newEntries = getNewEntries(entries, lastVersion);
 	if (newEntries.length > 0) {
 		host.settingsManager.setLastChangelogVersion(VERSION);
-		reportInstallTelemetry(host, VERSION);
 		return newEntries.map((e) => e.content).join("\n\n");
 	}
 
 	return undefined;
-}
-
-function reportInstallTelemetry(host: StartupChecksHost, version: string): void {
-	if (process.env.PI_OFFLINE) {
-		return;
-	}
-
-	if (!isInstallTelemetryEnabled(host.settingsManager)) {
-		return;
-	}
-
-	void fetch(`https://pi.dev/api/report-install?version=${encodeURIComponent(version)}`, {
-		headers: {
-			"User-Agent": getPiUserAgent(version),
-		},
-		signal: AbortSignal.timeout(5000),
-	})
-		.then(() => undefined)
-		.catch(() => undefined);
 }
 
 export function showStartupNoticesIfNeeded(host: StartupChecksHost): void {
@@ -210,7 +187,7 @@ function finishWarningNotification(host: StartupChecksHost): void {
 export function showNewVersionNotification(host: StartupChecksHost, release: LatestPiRelease): void {
 	const action = theme.fg("accent", `${APP_NAME} update`);
 	const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
-	const changelogUrl = "https://pi.dev/changelog";
+	const changelogUrl = "https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/CHANGELOG.md";
 	const changelogLink = getCapabilities().hyperlinks
 		? hyperlink(theme.fg("accent", "open changelog"), changelogUrl)
 		: theme.fg("accent", changelogUrl);

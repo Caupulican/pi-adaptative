@@ -72,9 +72,6 @@ export function computeReleaseAllowlist(repoRoot = ".") {
 		}
 	}
 
-	const shrinkwrapRel = posixJoin("packages", "coding-agent", "npm-shrinkwrap.json");
-	if (existsSync(join(repoRoot, shrinkwrapRel))) allowlist.add(shrinkwrapRel);
-
 	return allowlist;
 }
 

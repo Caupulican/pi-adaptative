@@ -1,11 +1,10 @@
 # Windows
 
-Pi supports native Windows on x64 and ARM64. The Node.js package runs under Windows Node.js; release archives contain a native `pi.exe`. WSL is optional, not required.
+Pi supports native Windows on x64 and ARM64. The standalone release archives contain a native `pi.exe`. WSL is optional, not required.
 
 ## Prerequisites
 
 - Windows 10 or newer
-- Node.js 24.18 or newer for the npm package
 - PowerShell 7 (`pwsh.exe`)
 - Git for Windows for native Git commands
 - Windows Terminal, WezTerm, or the VS Code terminal for the best keyboard support
@@ -88,14 +87,18 @@ To select an explicit PowerShell executable:
 
 ## Install
 
-With npm:
+The native PowerShell installer downloads and verifies the matching archive:
 
 ```powershell
-npm install -g --ignore-scripts @caupulican/pi-adaptative
-pi
+irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
 ```
 
-Or download `pi-windows-x64.zip` or `pi-windows-arm64.zip` from the matching GitHub release, extract it, and run `pi.exe`.
+Alternatively, download the matching archive from [Caupulican/pi-adaptative releases](https://github.com/Caupulican/pi-adaptative/releases/latest), verify it against `SHA256SUMS`, extract it, and run `pi.exe`:
+
+- `pi-windows-x64.zip` for standard 64-bit Windows
+- `pi-windows-arm64.zip` for Windows on ARM
+
+The archive is standalone and does not require Node.js or npm. Re-run the PowerShell installer to update safely; it verifies the archive and keeps the previous version available for rollback. Manual archive extraction is an advanced fallback only. To uninstall, remove the managed install directory; your settings, credentials, sessions, and installed pi packages under `%USERPROFILE%\.pi\agent\` are preserved.
 
 ## Incident collection
 
@@ -120,7 +123,7 @@ The archive contains the selected session, its session-owned orchestration recor
 
 ## Capability contract
 
-A Windows release is expected to preserve the same Pi features as Linux and macOS. Platform prerequisites and operating-system concepts are called out explicitly instead of being silently downgraded.
+A Windows release is expected to preserve the same Pi features as the Linux release. Platform prerequisites and operating-system concepts are called out explicitly instead of being silently downgraded.
 
 | Capability | Windows contract | Repository acceptance evidence |
 | --- | --- | --- |
@@ -135,7 +138,7 @@ A Windows release is expected to preserve the same Pi features as Linux and macO
 | Managed `rg`, `jq`, `fd`, Ollama, and Transformers runtimes | Native where the upstream runtime supports the architecture | Platform selection, install, process, and lifecycle tests on Windows |
 | Toolkit scripts | Native | PowerShell, Bash, and `uv` runners use the same bounded process lifecycle |
 | External editor and browser launch | Native | Windows process-launch tests; `$EDITOR`/`$VISUAL` and the default browser remain user choices |
-| Self-update | npm and pnpm global installs | Windows native-dependency quarantine and update-path tests |
+| Self-update | Managed standalone archive | Download and verify the matching Windows archive from the repository release |
 | Release binary | Native x64 and ARM64 | Each archive runs `--version`, `--help`, `--list-models`, RPC state, and an RPC platform-shell command on its matching GitHub-hosted Windows architecture |
 | tmux agent manager | Available only when a real tmux is supplied by WSL, MSYS2, or Cygwin | Optional integration; core background delegation does not require tmux |
 | Suspend with `Ctrl+Z` | Not an applicable Windows process concept | Pi reports the platform limitation instead of hanging or pretending to suspend |
@@ -184,9 +187,4 @@ Apply the Windows Terminal mappings above, then fully close and reopen the termi
 
 ### Native module fails to load
 
-Confirm that the package or archive matches the machine architecture (`x64` or `arm64`). Reinstall without lifecycle scripts:
-
-```powershell
-npm uninstall -g @caupulican/pi-adaptative
-npm install -g --ignore-scripts @caupulican/pi-adaptative
-```
+Confirm that the archive matches the machine architecture (`x64` or `arm64`), then download the matching release archive again.

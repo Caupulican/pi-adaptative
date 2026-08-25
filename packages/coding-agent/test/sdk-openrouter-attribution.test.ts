@@ -19,7 +19,6 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
-	let originalTelemetryEnv: string | undefined;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-sdk-openrouter-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -27,16 +26,9 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 		agentDir = join(tempDir, "agent");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
-		originalTelemetryEnv = process.env.PI_TELEMETRY;
-		delete process.env.PI_TELEMETRY;
 	});
 
 	afterEach(() => {
-		if (originalTelemetryEnv === undefined) {
-			delete process.env.PI_TELEMETRY;
-		} else {
-			process.env.PI_TELEMETRY = originalTelemetryEnv;
-		}
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -83,16 +75,12 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 	async function captureHeaders(
 		model: Model<Api>,
 		options: {
-			telemetryEnabled?: boolean;
 			providerHeaders?: Record<string, string>;
 			requestHeaders?: Record<string, string>;
 			sessionId?: string;
 		} = {},
 	): Promise<Record<string, string> | undefined> {
 		const settingsManager = SettingsManager.create(cwd, agentDir);
-		if (options.telemetryEnabled === false) {
-			settingsManager.setEnableInstallTelemetry(false);
-		}
 
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		authStorage.setRuntimeApiKey(model.provider, "test-api-key");
@@ -149,25 +137,15 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 	it("adds default attribution headers for OpenRouter models", async () => {
 		const headers = await captureHeaders(createModel("openrouter", "https://openrouter.ai/api/v1"));
 
-		expect(headers?.["HTTP-Referer"]).toBe("https://pi.dev");
+		expect(headers?.["HTTP-Referer"]).toBe("https://github.com/Caupulican/pi-adaptative");
 		expect(headers?.["X-OpenRouter-Title"]).toBe("pi");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("cli-agent");
-	});
-
-	it("does not add attribution headers when telemetry is disabled", async () => {
-		const headers = await captureHeaders(createModel("openrouter", "https://openrouter.ai/api/v1"), {
-			telemetryEnabled: false,
-		});
-
-		expect(headers?.["HTTP-Referer"]).toBeUndefined();
-		expect(headers?.["X-OpenRouter-Title"]).toBeUndefined();
-		expect(headers?.["X-OpenRouter-Categories"]).toBeUndefined();
 	});
 
 	it("adds attribution headers for custom providers routed through OpenRouter", async () => {
 		const headers = await captureHeaders(createModel("custom-openrouter", "https://openrouter.ai/api/v1"));
 
-		expect(headers?.["HTTP-Referer"]).toBe("https://pi.dev");
+		expect(headers?.["HTTP-Referer"]).toBe("https://github.com/Caupulican/pi-adaptative");
 		expect(headers?.["X-OpenRouter-Title"]).toBe("pi");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("cli-agent");
 	});

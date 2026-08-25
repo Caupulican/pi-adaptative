@@ -1,6 +1,7 @@
 {
 	"name": "@caupulican/pi-agent-core",
 	"version": "0.97.0",
+	"private": true,
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -148,8 +149,7 @@
 		"test": "vitest --run --bail=1",
 		"test:harness": "vitest --run --config vitest.harness.config.ts",
 		"coverage:harness": "vitest --run --config vitest.harness.config.ts --coverage",
-		"coverage:verification-harness": "vitest --run --config vitest.verification-harness.config.ts --coverage",
-		"prepublishOnly": "npm run clean && npm run build"
+		"coverage:verification-harness": "vitest --run --config vitest.verification-harness.config.ts --coverage"
 	},
 	"dependencies": {
 		"@caupulican/pi-ai": "^0.97.0",

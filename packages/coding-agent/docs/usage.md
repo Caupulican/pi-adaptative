@@ -30,7 +30,7 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 | File reference | Type `@` to fuzzy-search project files |
 | Path completion | Press Tab to complete paths |
 | Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
-| Images | Paste with Ctrl+V on Unix/macOS, Alt+V on Windows, or either on WSL; the same action pastes text when no image is present |
+| Images | Paste with Ctrl+V on Linux, Alt+V on Windows, or either on WSL; the same action pastes text when no image is present |
 | Platform shell command | `!command` runs in PowerShell on Windows or Bash elsewhere and sends output to the model |
 | Hidden platform shell command | `!!command` runs without sending output to the model |
 | External editor | Ctrl+G opens `$VISUAL` or `$EDITOR` |
@@ -150,8 +150,6 @@ Use `/export [file]` to write a session to HTML.
 
 Use `/share` to upload a private GitHub gist with a shareable HTML link.
 
-If you use pi for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
-
 ## CLI Reference
 
 ```bash
@@ -164,15 +162,16 @@ pi [options] [@files...] [messages...]
 pi install <source> [-l]     # Install package, -l for project-local
 pi remove <source> [-l]      # Remove package
 pi uninstall <source> [-l]   # Alias for remove
-pi update [source|self|pi]   # Update pi and packages; reconcile pinned git refs
-pi update --extensions       # Update packages only; reconcile pinned git refs
-pi update --self             # Update pi only
+pi update [source|self|pi]   # Update extensions/packages, print installer guidance, then exit nonzero
+pi update --extensions       # Update extensions/packages only; exit successfully
+pi update --self             # Refuse CLI self-update and print installer guidance; exit nonzero
+pi update --self --force     # Compatibility flag; same refusal, no reinstall
 pi update --extension <src>  # Update one package
 pi list                      # List installed packages
 pi config                    # Enable/disable package resources
 ```
 
-These commands manage pi packages, not the pi CLI installation. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
+These commands manage pi packages, not the pi CLI installation. Plain `pi update` updates extensions/packages, then exits nonzero after printing the matching `install.sh` or `install.ps1` command. Use `pi update --extensions` for the successful extension/package-only path. `pi update --self` always refuses legacy npm/pnpm/yarn/Bun CLI updates, exits nonzero, and prints installer guidance; `--force` is only a compatibility flag and does not reinstall. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
 
 See [Pi Packages](packages.md) for package sources and security notes.
 
@@ -307,9 +306,8 @@ pi --exclude-tools ask_question
 | `PI_CODING_AGENT_DIR` | Override config directory; default is `~/.pi/agent` |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
-| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
-| `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
-| `PI_TELEMETRY` | Override install/update telemetry: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
+| `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
+| `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the GitHub Releases latest-version request |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `BW_SESSION` | Optional Bitwarden CLI session key for autonomous activation in a new Pi process |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
@@ -318,4 +316,4 @@ pi --exclude-tools ask_question
 
 Pi keeps the core focused and pushes project-specific workflows into extensions, skills, prompt templates, and packages. Core includes the cross-project lifecycle primitives it depends on itself: native goals, task steps, durable root-managed leaf-worker orchestration, and a platform-selected shell. Broader integrations such as MCP and external-provider teams remain extension/package territory.
 
-For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).
+For design rationale and release guarantees, see the repository [README](../../../README.md) and the owned architecture documents in this directory.

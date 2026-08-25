@@ -2,7 +2,7 @@
 
 # Pi Packages
 
-Pi packages bundle extensions, skills, prompt templates, and themes so you can share them through npm or git. A package can declare resources in `package.json` under the `pi` key, or use conventional directories.
+Pi packages bundle extensions, skills, prompt templates, and themes so you can share them through npm or git. This package mechanism is for third-party resources; the Pi Adaptative CLI itself is not installed or published through npm. A package can declare resources in `package.json` under the `pi` key, or use conventional directories.
 
 ## Table of Contents
 
@@ -28,15 +28,15 @@ pi install ./relative/path/to/package
 
 pi remove npm:@foo/bar
 pi list                     # show installed packages from settings
-pi update                   # update pi, update packages, and reconcile pinned git refs
-pi update --extensions      # update packages and reconcile pinned git refs only
-pi update --self            # update pi only
-pi update --self --force    # reinstall pi even if current
+pi update                   # update extensions/packages, print installer guidance, then exit nonzero
+pi update --extensions      # update extensions/packages only; exit successfully
+pi update --self            # refuse CLI self-update, print installer guidance, then exit nonzero
+pi update --self --force    # compatibility flag; same refusal and no reinstall
 pi update npm:@foo/bar      # update one package
 pi update --extension npm:@foo/bar
 ```
 
-These commands manage pi packages, not the pi CLI installation. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
+These commands manage pi packages, not the pi CLI installation. Plain `pi update` updates extensions/packages and then deliberately exits nonzero after printing the standalone installer command. Use `pi update --extensions` when you want the successful extension/package-only path. `pi update --self` always refuses legacy npm/pnpm/yarn/Bun CLI updates, exits nonzero, and prints the standalone installer command; `--force` is only a compatibility flag and does not reinstall. Re-run the Linux `install.sh` or Windows `install.ps1` installer to update the CLI. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
 
 By default, `install` and `remove` write to user settings (`~/.pi/agent/settings.json`). Use `-l` to write to project settings (`.pi/settings.json`) instead. Project settings can be shared with your team, and pi installs any missing packages automatically on startup.
 
@@ -132,7 +132,7 @@ Paths are relative to the package root. Arrays support glob patterns and `!exclu
 
 ### Gallery Metadata
 
-The [package gallery](https://pi.dev/packages) displays packages tagged with `pi-package`. Add `video` or `image` fields to show a preview:
+Package metadata can include `video` or `image` fields for repository-owned tooling that displays previews:
 
 ```json
 {

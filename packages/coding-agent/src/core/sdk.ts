@@ -26,7 +26,6 @@ import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
-import { isInstallTelemetryEnabled } from "./install-telemetry.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
@@ -176,11 +175,7 @@ function getDefaultAgentDir(): string {
 	return getAgentDir();
 }
 
-function getAttributionHeaders(
-	model: Model<Api>,
-	settingsManager: SettingsManager,
-	sessionId?: string,
-): Record<string, string> | undefined {
+function getAttributionHeaders(model: Model<Api>, sessionId?: string): Record<string, string> | undefined {
 	if (
 		sessionId &&
 		(model.provider === "opencode" || model.provider === "opencode-go" || model.baseUrl.includes("opencode.ai"))
@@ -188,13 +183,9 @@ function getAttributionHeaders(
 		return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
 	}
 
-	if (!isInstallTelemetryEnabled(settingsManager)) {
-		return undefined;
-	}
-
 	if (model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai")) {
 		return {
-			"HTTP-Referer": "https://pi.dev",
+			"HTTP-Referer": "https://github.com/Caupulican/pi-adaptative",
 			"X-OpenRouter-Title": "pi",
 			"X-OpenRouter-Categories": "cli-agent",
 		};
@@ -494,7 +485,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-			const attributionHeaders = getAttributionHeaders(model, settingsManager, options?.sessionId);
+			const attributionHeaders = getAttributionHeaders(model, options?.sessionId);
 			const fastModeServiceTier = resolveFastModeServiceTier(
 				model,
 				settingsManager.getFastModeEnabled(model.provider),

@@ -8,6 +8,16 @@ import { fileURLToPath } from "node:url";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const releaseWorkflow = readFileSync(new URL("../.github/workflows/build-binaries.yml", import.meta.url), "utf8");
+const releaseScript = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
+const rootPackage = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const firstPartyPackages = ["ai", "agent", "tui", "coding-agent"].map((name) => ({
+	name,
+	manifest: JSON.parse(readFileSync(new URL(`../packages/${name}/package.json`, import.meta.url), "utf8")),
+}));
+const codingAgentReadme = readFileSync(new URL("../packages/coding-agent/README.md", import.meta.url), "utf8");
+const quickstartDocs = readFileSync(new URL("../packages/coding-agent/docs/quickstart.md", import.meta.url), "utf8");
+const indexDocs = readFileSync(new URL("../packages/coding-agent/docs/index.md", import.meta.url), "utf8");
+const windowsDocs = readFileSync(new URL("../packages/coding-agent/docs/windows.md", import.meta.url), "utf8");
 const installScript = readFileSync(new URL("../scripts/install-linux-ci-deps.sh", import.meta.url), "utf8");
 const installScriptPath = fileURLToPath(new URL("../scripts/install-linux-ci-deps.sh", import.meta.url));
 
@@ -121,6 +131,32 @@ test("CI keeps every matrix failure available for evidence collection", () => {
 	}
 });
 
+test("npm publication is structurally disabled for every first-party workspace", () => {
+	for (const { name, manifest } of firstPartyPackages) {
+		assert.equal(manifest.private, true, `${name} must be private and not publishable`);
+		assert.equal(manifest.publishConfig, undefined, `${name} must not define npm publication configuration`);
+		assert.equal(manifest.scripts?.prepublishOnly, undefined, `${name} must not have a publication lifecycle hook`);
+	}
+
+	for (const scriptName of ["publish", "publish:dry", "prepublishOnly"]) {
+		assert.equal(rootPackage.scripts?.[scriptName], undefined, `root package must not expose ${scriptName}`);
+	}
+	assert.equal(existsSync(new URL("./publish.mjs", import.meta.url)), false, "publication helper must be removed");
+	assert.equal(rootPackage.scripts?.["release:local"], undefined, "npm package release helper must not be exposed");
+	assert.equal(existsSync(new URL("./local-release.mjs", import.meta.url)), false, "npm package release helper must be removed");
+	assert.equal(existsSync(new URL("./release-artifact-smoke.mjs", import.meta.url)), false, "npm artifact smoke helper must be removed");
+	assert.equal(existsSync(new URL("./release-artifact-smoke.test.mjs", import.meta.url)), false, "npm artifact smoke test must be removed");
+	assert.doesNotMatch(rootPackage.scripts?.["check:release-binary-benchmark"] ?? "", /release-artifact-smoke/u);
+	assert.equal(rootPackage.scripts?.["check:shrinkwrap"], undefined, "npm publication shrinkwrap check must be removed");
+	assert.equal(existsSync(new URL("./generate-coding-agent-shrinkwrap.mjs", import.meta.url)), false, "npm shrinkwrap generator must be removed");
+	assert.equal(existsSync(new URL("../packages/coding-agent/npm-shrinkwrap.json", import.meta.url)), false, "npm shrinkwrap must be removed");
+	assert.doesNotMatch(
+		releaseScript,
+		/npm publish|publish-npm|trusted publishing|NODE_AUTH_TOKEN|NPM_TOKEN|release:local|shrinkwrap/iu,
+		"the release coordinator must not regain npm publication or shrinkwrap paths",
+	);
+});
+
 test("normal CI reserves twenty minutes for runner setup plus bounded suite execution", () => {
 	const shardJobStart = workflow.indexOf("  coding-agent-test:");
 	assert.notEqual(shardJobStart, -1);
@@ -142,51 +178,108 @@ test("release fast paths skip every coding-agent shard after the exact suite alr
 	assert.match(shardJob, /!startsWith\(github\.event\.head_commit\.message, 'Release v'\)/u);
 });
 
-test("release publication is gated on deterministic Node-package and Bun-binary conversation smoke", () => {
-	const smokeJobStart = releaseWorkflow.indexOf("  verify-node-bun-release:");
-	assert.notEqual(smokeJobStart, -1, "release workflow must define the Node/Bun smoke job");
-	const nextJobMatch = releaseWorkflow.slice(smokeJobStart + 2).match(/^  [a-z0-9-]+:\n/mu);
-	assert.ok(nextJobMatch?.index !== undefined, "release smoke job must be followed by another job");
-	const smokeJobEnd = smokeJobStart + 2 + nextJobMatch.index;
-	const smokeJob = releaseWorkflow.slice(smokeJobStart, smokeJobEnd);
-
-	assert.match(smokeJob, /^    needs: build$/mu);
-	assert.match(smokeJob, /name: release-binaries/u);
-	assert.match(smokeJob, /npm ci --ignore-scripts/u);
-	assert.match(smokeJob, /npm run release:local -- --out .* --force --skip-check --skip-bun-install --skip-binary-build/u);
-	assert.match(smokeJob, /node scripts\/release-artifact-smoke\.mjs/u);
-	assert.match(smokeJob, /--node /u);
-	assert.match(smokeJob, /--bun /u);
-	assert.doesNotMatch(smokeJob, /secrets\./u, "deterministic smoke must not require provider credentials");
-	assert.doesNotMatch(smokeJob, /build-binaries\.sh/u, "smoke must reuse the already-built Bun artifact");
-
+test("release publishes standalone installer assets and no npm distribution job", () => {
 	const releaseJobStart = releaseWorkflow.indexOf("  release:");
-	const publishJobStart = releaseWorkflow.indexOf("  publish-npm:");
 	assert.notEqual(releaseJobStart, -1);
-	assert.notEqual(publishJobStart, -1);
-	const releaseJob = releaseWorkflow.slice(releaseJobStart, publishJobStart);
-	assert.match(releaseJob, /needs: \[[^\]]*verify-node-bun-release[^\]]*\]/u);
+	const releaseJob = releaseWorkflow.slice(releaseJobStart);
+	assert.doesNotMatch(releaseWorkflow, /^  publish-npm:/mu);
+	assert.doesNotMatch(releaseWorkflow, /NODE_AUTH_TOKEN|NPM_TOKEN|Publish npm packages/u);
+	assert.match(releaseJob, /install\.sh/u);
+	assert.match(releaseJob, /install\.ps1/u);
+	assert.match(releaseJob, /SHA256SUMS/u);
+	assert.match(releaseJob, /sha256sum/u);
+	assert.match(releaseJob, /--clobber/u, "release asset upload must be idempotent");
+	for (const asset of [
+		"pi-darwin-arm64.tar.gz",
+		"pi-darwin-x64.tar.gz",
+		"pi-linux-x64.tar.gz",
+		"pi-linux-arm64.tar.gz",
+		"pi-windows-x64.zip",
+		"pi-windows-arm64.zip",
+	]) {
+		assert.match(releaseJob, new RegExp(asset.replaceAll(".", "\\."), "u"), `release must upload ${asset}`);
+	}
 });
 
-test("npm publish preserves the proven npm-token path with OIDC provenance", () => {
-	const publishJobStart = releaseWorkflow.indexOf("  publish-npm:");
-	assert.notEqual(publishJobStart, -1, "release workflow must define the npm publish job");
-	const nextJobMatch = releaseWorkflow.slice(publishJobStart + 2).match(/^  [a-z0-9-]+:\n/mu);
-	const publishJobEnd =
-		nextJobMatch?.index === undefined ? releaseWorkflow.length : publishJobStart + 2 + nextJobMatch.index;
-	const publishJob = releaseWorkflow.slice(publishJobStart, publishJobEnd);
-	assert.match(publishJob, /^      id-token: write$/mu);
-	assert.doesNotMatch(publishJob, /^    environment:/mu, "token publication must not acquire a new environment binding");
-	assert.match(publishJob, /registry-url: 'https:\/\/registry\.npmjs\.org'/u);
-	assert.match(publishJob, /cache: npm/u, "npm dependency caching must remain enabled for the publish job");
+test("release gates execute both standalone installers against the just-built archives", () => {
+	const buildJobStart = releaseWorkflow.indexOf("  build:");
+	const windowsJobStart = releaseWorkflow.indexOf("  verify-windows-binary:");
+	const linuxJobStart = releaseWorkflow.indexOf("  benchmark-linux-binary:");
+	assert.notEqual(buildJobStart, -1);
+	assert.notEqual(windowsJobStart, -1);
+	assert.notEqual(linuxJobStart, -1);
 
-	const publishStepStart = publishJob.indexOf("      - name: Publish npm packages");
-	assert.notEqual(publishStepStart, -1, "release workflow must define the npm publish step");
+	const buildJob = releaseWorkflow.slice(buildJobStart, windowsJobStart);
+	const windowsJob = releaseWorkflow.slice(windowsJobStart, linuxJobStart);
+	assert.match(buildJob, /Verify Linux standalone installer/u);
+	assert.match(buildJob, /PI_INSTALL_TEST_MODE=1/u);
+	assert.match(buildJob, /\.\/install\.sh/u);
+	assert.match(buildJob, /pi-linux-x64\.tar\.gz/u);
+	assert.match(buildJob, /Verify Linux arm64 release layout/u);
+	assert.match(buildJob, /pi-linux-arm64\.tar\.gz/u);
+	assert.match(buildJob, /readelf -h/u);
+	assert.match(buildJob, /AArch64/u);
+	assert.match(windowsJob, /Verify Windows standalone installer/u);
+	assert.match(windowsJob, /PI_INSTALL_TEST_MODE/u);
+	assert.match(windowsJob, /install\.ps1/u);
+	assert.match(windowsJob, /pi-windows-\$arch\.zip/u);
+	assert.match(windowsJob, /current\.version/u);
+});
+
+test("direct tag publication proves a full tested tree and exact-commit destructive provenance", () => {
+	const provenanceStart = releaseWorkflow.indexOf("  release-provenance:");
+	const releaseStart = releaseWorkflow.indexOf("  release:");
+	assert.notEqual(provenanceStart, -1);
+	assert.notEqual(releaseStart, -1);
+	const provenanceJob = releaseWorkflow.slice(provenanceStart, releaseStart);
+	const releaseJob = releaseWorkflow.slice(releaseStart);
+	assert.match(provenanceJob, /^      actions: read$/mu);
+	assert.match(provenanceJob, /git rev-parse "\$\{RELEASE_TAG\}\^\{commit\}"/u);
+	assert.match(provenanceJob, /release_subject=/u);
+	assert.match(provenanceJob, /tested_sha=.*git rev-parse "\$\{release_sha\}\^"/u);
+	assert.match(provenanceJob, /git diff --name-only -z "\$tested_sha" "\$release_sha"/u);
+	assert.match(provenanceJob, /gh run view "\$run_id"[\s\S]*--json jobs/u);
+	assert.match(provenanceJob, /Build, check, test \(ubuntu-latest\)/u);
+	assert.match(provenanceJob, /Build, check, test \(windows-latest\)/u);
+	assert.match(provenanceJob, /Verification-harness coverage gate/u);
+	assert.match(provenanceJob, /Test non-coding-agent workspaces/u);
+	assert.match(provenanceJob, /Test coding-agent shard/u);
+	assert.match(provenanceJob, /\[ "\$coding_shards" -eq 8 \]/u);
+	assert.match(provenanceJob, /verify_full_ci "\$tested_sha"/u);
+	assert.match(provenanceJob, /verify_workflow destructive\.yml "\$release_sha"/u);
+	assert.match(provenanceJob, /\.headSha == \$sha/u);
+	assert.match(provenanceJob, /\.status == "completed"/u);
+	assert.match(provenanceJob, /\.conclusion == "success"/u);
+	assert.match(releaseJob, /needs: \[quality-gate, build, release-provenance, verify-release-binary-performance\]/u);
+});
+
+test("the normal check gate executes standalone installer regressions", () => {
+	const gate = rootPackage.scripts?.["check:release-binary-benchmark"] ?? "";
+	assert.match(gate, /install-standalone\.test\.mjs/u);
+	assert.match(gate, /install-standalone-windows\.test\.mjs/u);
+});
+
+test("primary distribution docs use the repository release installer and reject upstream install owners", () => {
+	const installerUrl = "https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh";
+	assert.match(codingAgentReadme, new RegExp(installerUrl.replaceAll(".", "\\."), "u"));
+	assert.match(quickstartDocs, new RegExp(installerUrl.replaceAll(".", "\\."), "u"));
+	assert.match(indexDocs, new RegExp(installerUrl.replaceAll(".", "\\."), "u"));
+	assert.match(windowsDocs, /pi-windows-x64\.zip/u);
+	assert.match(windowsDocs, /pi-windows-arm64\.zip/u);
 	assert.match(
-		publishJob,
-		/- name: Publish npm packages\n        env:\n          NODE_AUTH_TOKEN: \$\{\{ secrets\.NPM_TOKEN \}\}\n        run: node scripts\/publish\.mjs/u,
-		"publish must use the repository's established NPM_TOKEN secret",
+		windowsDocs,
+		/irm https:\/\/github\.com\/Caupulican\/pi-adaptative\/releases\/latest\/download\/install\.ps1 \| iex/u,
 	);
+
+	const forbiddenDistributionOwners = /pi\.dev\/install|github\.com\/(?:badlogic\/pi-mono|earendil-works\/pi-mono)|@(?:earendil-works|mariozechner)\/pi-/u;
+	for (const [label, content] of [
+		["coding-agent README", codingAgentReadme],
+		["quickstart", quickstartDocs],
+		["index", indexDocs],
+		["Windows", windowsDocs],
+	]) {
+		assert.doesNotMatch(content, forbiddenDistributionOwners, `${label} must not advertise an upstream installer`);
+	}
 });
 
 test("release jobs do not resolve runner-scoped paths before a step starts", () => {
