@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const installerPath = join(repositoryRoot, "install.ps1");
@@ -71,6 +72,16 @@ function runOfflineInstaller(shell, environment, candidateInstallerPath = instal
 		env: process.env,
 	});
 }
+
+function normalizePowerShellDiagnostic(output) {
+	return stripVTControlCharacters(output).replace(/\s+/gu, " ").trim();
+}
+
+test("normalizes PowerShell diagnostics without changing semantic text", () => {
+	const formatted = "\u001b[31;1mPi Adaptative installer: staged pi.exe --version did not report exactly\u001b[0m\n\u001b[31;1m1.2.3.\u001b[0m";
+	assert.equal(normalizePowerShellDiagnostic(formatted), "Pi Adaptative installer: staged pi.exe --version did not report exactly 1.2.3.");
+	assert.equal(normalizePowerShellDiagnostic("plain diagnostic"), "plain diagnostic");
+});
 
 test("Windows installer is a self-contained, owned-release PowerShell script", () => {
 	assert.ok(existsSync(installerPath));
@@ -314,9 +325,10 @@ test("offline Windows installer bounds staging cleanup and preserves the primary
 		PI_INSTALL_TEST_REMOVE_FAILURES: "2",
 	});
 	const transientOutput = `${transient.stdout}\n${transient.stderr}`;
+	const transientDiagnostic = normalizePowerShellDiagnostic(transientOutput);
 	assert.notEqual(transient.status, 0, transientOutput);
-	assert.match(transientOutput, /did not report exactly 1\.2\.3/);
-	assert.match(transientOutput, /Staging cleanup hit a transient lock; retrying/);
+	assert.match(transientDiagnostic, /did not report exactly 1\.2\.3/);
+	assert.match(transientDiagnostic, /Staging cleanup hit a transient lock; retrying/);
 	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
 	assert.deepEqual(
 		readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-")),
@@ -328,14 +340,15 @@ test("offline Windows installer bounds staging cleanup and preserves the primary
 		PI_INSTALL_TEST_REMOVE_FAILURES: "99",
 	});
 	const cleanupOnlyOutput = `${cleanupOnly.stdout}\n${cleanupOnly.stderr}`;
+	const cleanupOnlyDiagnostic = normalizePowerShellDiagnostic(cleanupOnlyOutput);
 	assert.notEqual(cleanupOnly.status, 0, cleanupOnlyOutput);
-	assert.match(cleanupOnlyOutput, /Could not clean staging directory after 8 attempts/);
+	assert.match(cleanupOnlyDiagnostic, /Could not clean staging directory after 8 attempts/);
 	assert.equal(
-		cleanupOnlyOutput.match(/Staging cleanup hit a transient lock; retrying/g)?.length,
+		cleanupOnlyDiagnostic.match(/Staging cleanup hit a transient lock; retrying/g)?.length,
 		7,
 		cleanupOnlyOutput,
 	);
-	assert.doesNotMatch(cleanupOnlyOutput, /Preserving original installation error/);
+	assert.doesNotMatch(cleanupOnlyDiagnostic, /Preserving original installation error/);
 	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
 	const strandedStaging = readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-"));
 	assert.equal(strandedStaging.length, 1, cleanupOnlyOutput);
@@ -347,10 +360,11 @@ test("offline Windows installer bounds staging cleanup and preserves the primary
 		PI_INSTALL_TEST_REMOVE_FAILURES: "99",
 	});
 	const permanentOutput = `${permanent.stdout}\n${permanent.stderr}`;
+	const permanentDiagnostic = normalizePowerShellDiagnostic(permanentOutput);
 	assert.notEqual(permanent.status, 0, permanentOutput);
-	assert.match(permanentOutput, /did not report exactly 1\.2\.3/);
-	assert.match(permanentOutput, /Could not clean staging directory after 8 attempts/);
-	assert.match(permanentOutput, /Preserving original installation error/);
+	assert.match(permanentDiagnostic, /did not report exactly 1\.2\.3/);
+	assert.match(permanentDiagnostic, /Could not clean staging directory after 8 attempts/);
+	assert.match(permanentDiagnostic, /Preserving original installation error/);
 	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
 });
 
