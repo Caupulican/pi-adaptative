@@ -954,6 +954,10 @@ function convertMessages(
 ): Message[] {
 	const result: Message[] = [];
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	let latestAssistantIndex = -1;
+	for (let i = 0; i < transformedMessages.length; i++) {
+		if (transformedMessages[i].role === "assistant") latestAssistantIndex = i;
+	}
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -1020,6 +1024,25 @@ function convertMessages(
 										},
 									});
 								}
+								break;
+							}
+
+							// Bedrock Anthropic validates signed thinking in the latest assistant turn
+							// byte-for-byte. Keep opaque text unchanged, matching the direct adapter.
+							if (
+								i === latestAssistantIndex &&
+								supportsThinkingSignature(model) &&
+								typeof c.thinkingSignature === "string" &&
+								c.thinkingSignature.length > 0
+							) {
+								contentBlocks.push({
+									reasoningContent: {
+										reasoningText: {
+											text: c.thinking,
+											signature: c.thinkingSignature,
+										},
+									},
+								});
 								break;
 							}
 

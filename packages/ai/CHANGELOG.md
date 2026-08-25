@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved latest-assistant Anthropic signed thinking text byte-for-byte during Amazon Bedrock replay while retaining exact redacted-thinking bytes and existing normalization elsewhere.
+
 ## [0.97.3] - 2026-08-25
 
 ## [0.97.2] - 2026-08-25

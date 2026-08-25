@@ -64,9 +64,9 @@ afterEach(() => {
 	bedrockMock.streamEvents = undefined;
 });
 
-async function capturePayload(context: Context): Promise<unknown> {
+async function capturePayload(context: Context, model = baseModel): Promise<unknown> {
 	let capturedPayload: unknown;
-	const s = streamBedrock(baseModel, context, {
+	const s = streamBedrock(model, context, {
 		cacheRetention: "none",
 		signal: AbortSignal.abort(),
 		onPayload: (payload) => {
@@ -78,6 +78,26 @@ async function capturePayload(context: Context): Promise<unknown> {
 		if (event.type === "error") break;
 	}
 	return capturedPayload;
+}
+
+function makeAssistant(content: AssistantMessage["content"], model = baseModel): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 1,
+	};
 }
 
 describe("bedrock redacted thinking", () => {
@@ -130,6 +150,73 @@ describe("bedrock redacted thinking", () => {
 		const p = payload as { messages: Array<{ role: string; content: Array<{ reasoningContent: unknown }> }> };
 		expect(p.messages).toHaveLength(1);
 		expect(p.messages[0].content).toEqual([{ reasoningContent: { redactedContent: new Uint8Array([5, 6, 7]) } }]);
+	});
+});
+
+describe("bedrock Anthropic signed thinking replay", () => {
+	it("replays signed thinking in the latest assistant message without text normalization", async () => {
+		const rawThinking = `raw ${String.fromCharCode(0xd800)}`;
+		const payload = await capturePayload({
+			messages: [makeAssistant([{ type: "thinking", thinking: rawThinking, thinkingSignature: "signature" }])],
+		});
+		const request = payload as {
+			messages: Array<{
+				content: Array<{ reasoningContent?: { reasoningText?: { text: string; signature?: string } } }>;
+			}>;
+		};
+
+		expect(request.messages[0].content[0]).toEqual({
+			reasoningContent: { reasoningText: { text: rawThinking, signature: "signature" } },
+		});
+	});
+
+	it("keeps normalizing signed thinking outside the latest assistant message", async () => {
+		const rawThinking = `older ${String.fromCharCode(0xd800)}`;
+		const payload = await capturePayload({
+			messages: [
+				makeAssistant([{ type: "thinking", thinking: rawThinking, thinkingSignature: "signature" }]),
+				{ role: "user", content: "continue", timestamp: 2 },
+				makeAssistant([{ type: "text", text: "latest" }]),
+			],
+		});
+		const request = payload as {
+			messages: Array<{
+				content: Array<{ reasoningContent?: { reasoningText?: { text: string; signature?: string } } }>;
+			}>;
+		};
+
+		expect(request.messages[0].content[0]).toEqual({
+			reasoningContent: { reasoningText: { text: "older ", signature: "signature" } },
+		});
+	});
+
+	it("keeps normalizing latest signed thinking for non-Anthropic Bedrock models", async () => {
+		const nonAnthropicModel = {
+			...baseModel,
+			id: "amazon.nova-pro-v1:0",
+			name: "Amazon Nova Pro",
+		};
+		const rawThinking = `raw ${String.fromCharCode(0xd800)}`;
+		const payload = await capturePayload(
+			{
+				messages: [
+					makeAssistant(
+						[{ type: "thinking", thinking: rawThinking, thinkingSignature: "signature" }],
+						nonAnthropicModel,
+					),
+				],
+			},
+			nonAnthropicModel,
+		);
+		const request = payload as {
+			messages: Array<{
+				content: Array<{ reasoningContent?: { reasoningText?: { text: string; signature?: string } } }>;
+			}>;
+		};
+
+		expect(request.messages[0].content[0]).toEqual({
+			reasoningContent: { reasoningText: { text: "raw " } },
+		});
 	});
 });
 
