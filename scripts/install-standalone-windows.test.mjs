@@ -54,7 +54,7 @@ function createReleaseFixture(root, version, reportedVersion, checksum = true, s
 	return fixture;
 }
 
-function runOfflineInstaller(shell, environment) {
+function runOfflineInstaller(shell, environment, candidateInstallerPath = installerPath) {
 	const values = {
 		PROCESSOR_ARCHITECTURE: "AMD64",
 		PROCESSOR_ARCHITEW6432: "",
@@ -65,7 +65,7 @@ function runOfflineInstaller(shell, environment) {
 	};
 	const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
 	const assignments = Object.entries(values).map(([name, value]) => `$env:${name}=${quote(value)}`).join("; ");
-	const command = `${assignments}; & ${quote(installerPath)}`;
+	const command = `${assignments}; & ${quote(candidateInstallerPath)}`;
 	return spawnSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
 		encoding: "utf8",
 		env: process.env,
@@ -85,7 +85,9 @@ test("Windows installer is a self-contained, owned-release PowerShell script", (
 	assert.match(installer, /MSYSTEM/u);
 	assert.match(installer, /PI_VERSION/u);
 	assert.match(installer, /SHA256SUMS/u);
-	assert.match(installer, /Get-FileHash[^\n]*SHA256/u);
+	assert.match(installer, /System\.Security\.Cryptography\.SHA256\]::Create/u);
+	assert.match(installer, /ComputeHash\(\$stream\)/u);
+	assert.doesNotMatch(installer, /Get-FileHash/u);
 	assert.match(installer, /exactly one valid checksum entry/u);
 	assert.match(installer, /Split\('\/'\) -contains '\.\.'/u);
 	assert.match(installer, /Expand-Archive/u);
@@ -144,6 +146,35 @@ test("release version resolution has one latest lookup and pinned asset URLs", (
 	assert.match(installer, /Assert-Version \$version/u);
 	assert.match(installer, /\$baseUrl\/SHA256SUMS/u);
 	assert.match(installer, /\$baseUrl\/\$assetName/u);
+});
+
+test("checksum verification works in native Windows PowerShell without Get-FileHash", (context) => {
+	const shell = "powershell.exe";
+	const probe = spawnSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
+		encoding: "utf8",
+	});
+	if (probe.status !== 0) {
+		context.skip("native Windows PowerShell is not available on this host");
+		return;
+	}
+
+	const root = mkdtempSync(join(process.platform === "win32" ? tmpdir() : powershellTempDirectory(shell), "pi-windows-powershell-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const nativeInstallerPath = join(root, "install.ps1");
+	writeFileSync(nativeInstallerPath, installer);
+	const fixture = createReleaseFixture(root, "1.2.3", "1.2.3", true, shell);
+	const result = runOfflineInstaller(
+		shell,
+		{
+			PI_VERSION: "v1.2.3",
+			PI_INSTALL_TEST_BASE_URL: powershellPath(shell, fixture),
+			PI_INSTALL_TEST_VERSION_OUTPUT: "1.2.3",
+			PI_INSTALL_DIR: powershellPath(shell, join(root, "install")),
+			PI_BIN_DIR: powershellPath(shell, join(root, "bin")),
+		},
+		powershellPath(shell, nativeInstallerPath),
+	);
+	assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
 
 test("offline Windows installer verifies, activates the complete tree, rolls back, and retains two releases", (context) => {

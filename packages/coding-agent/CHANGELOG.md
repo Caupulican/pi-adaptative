@@ -14,6 +14,10 @@
 - Replaced the npm release path with idempotent Caupulican GitHub Release assets, full-matrix tested-tree provenance, and exact-commit destructive gates; startup version checks now read that repository's latest release.
 - Rewrote the project and coding-agent documentation around the reliability-first harness, its operational tradeoffs, and its standalone distribution.
 
+### Fixed
+
+- Made Windows installer checksum verification use the .NET SHA-256 implementation so it also works in Windows PowerShell 5.1 installations without `Get-FileHash`.
+
 ### Removed
 
 - Removed the inherited pi.dev runtime dependency and promotional links; sharing defaults to GitHub Gist links and OpenRouter attribution identifies this repository.
