@@ -1,10 +1,12 @@
 import type { Model } from "@caupulican/pi-ai";
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
+import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "../model-capability.ts";
 import {
 	type ModelAdaptationProfile,
 	type ModelAdaptationRule,
 	ModelAdaptationStore,
 } from "../models/adaptation-store.ts";
+import { formatContextFilesForPrompt } from "../system-prompt.ts";
 
 export interface WorkerModelGuidance {
 	rules: ModelAdaptationRule[];
@@ -23,6 +25,12 @@ export interface BuildWorkerSystemPromptOptions {
 	rolePrompt: string;
 	/** Materialized worker resource system prompt (skills/tools). */
 	workerResourceSystemPrompt?: string;
+	/** Final profile-filtered context files from the parent ResourceLoader. */
+	contextFiles?: ReadonlyArray<{ path: string; content?: string }>;
+	/** Whether deferred context paths remain reachable through the worker read tool. */
+	canReadContextFiles?: boolean;
+	/** Selected worker model capability; enforces the same fail-closed prompt budget as root. */
+	modelCapability?: Pick<ModelCapabilityProfile, "class" | "systemPromptMaxChars">;
 	/** Override for all layers above Level-0 subagent core. */
 	override?: string;
 	/** Session agent directory to resolve ModelAdaptationStore. */
@@ -124,13 +132,26 @@ export function buildWorkerSystemPrompt(options: BuildWorkerSystemPromptOptions)
 		}
 	}
 
-	const rolePromptParts = [options.rolePrompt, options.workerResourceSystemPrompt, modelGuidancePrompt].filter(
-		(part): part is string => Boolean(part && part.trim().length > 0),
-	);
+	const contextPrompt =
+		options.contextFiles && options.contextFiles.length > 0
+			? formatContextFilesForPrompt(options.contextFiles, {
+					deferContents: false,
+					canRead: options.canReadContextFiles === true,
+				}).trim()
+			: undefined;
+	const rolePromptParts = [
+		options.rolePrompt,
+		options.workerResourceSystemPrompt,
+		modelGuidancePrompt,
+		contextPrompt,
+	].filter((part): part is string => Boolean(part && part.trim().length > 0));
 
-	return composeSubagentSystemPrompt({
+	const systemPrompt = composeSubagentSystemPrompt({
 		soul: options.soul,
 		rolePrompt: rolePromptParts.join("\n\n"),
 		override: options.override,
-	});
+	}).replace(/\r\n?/g, "\n");
+	return options.modelCapability
+		? enforceModelCapabilitySystemPromptBudget(systemPrompt, options.modelCapability)
+		: systemPrompt;
 }

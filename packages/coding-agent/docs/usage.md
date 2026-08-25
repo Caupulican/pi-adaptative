@@ -135,6 +135,8 @@ Pi discovers `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` context files from:
 
 Global files are scanned for prompt-injection/exfiltration phrases and injected into the system prompt. Repository files are off until you opt in (`/settings` → Project AGENTS.md). Opt-in lists their paths so the agent can read them; they are not injected at startup. Set Load to **global-only**, or pass `--no-context-files` (`-nc`), to keep only the global file.
 
+Delegated workers receive the same final, profile-filtered context snapshot selected for the parent: sanitized global contents plus opted-in project paths. An explicit worker `path` still narrows native filesystem tools; carrying context into the worker does not widen its read/write scope.
+
 ### System Prompt Files
 
 Replace the default system prompt with:

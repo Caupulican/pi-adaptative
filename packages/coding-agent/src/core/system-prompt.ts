@@ -101,8 +101,8 @@ function compactPromptText(value: string, maxChars: number): string {
 	return `${normalized.slice(0, end)}…`;
 }
 
-function formatContextFilesForPrompt(
-	contextFiles: Array<{ path: string; content?: string }>,
+export function formatContextFilesForPrompt(
+	contextFiles: ReadonlyArray<{ path: string; content?: string }>,
 	options: { deferContents: boolean; canRead: boolean },
 ): string {
 	if (contextFiles.length === 0) {

@@ -138,9 +138,10 @@ export interface WorkerAttemptExecutorOptions {
 	cwd: string;
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
-	laneCapability: Pick<ModelCapabilityProfile, "laneMaxOutputTokens">;
+	laneCapability: Pick<ModelCapabilityProfile, "class" | "laneMaxOutputTokens" | "systemPromptMaxChars">;
 	soul?: string;
 	workerResourceSystemPrompt: string;
+	workerContextFiles: ReadonlyArray<{ path: string; content?: string }>;
 	initialUsage: AttemptUsageSnapshot;
 	hasPersistedUsageCheckpoint: boolean;
 	usageReportId: string;
@@ -539,6 +540,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										soul: options.soul,
 										rolePrompt: systemPrompt,
 										workerResourceSystemPrompt: options.workerResourceSystemPrompt,
+										contextFiles: options.workerContextFiles,
+										canReadContextFiles: options.toolSurface.allowedTools.includes("read"),
+										modelCapability: options.laneCapability,
 										agentDir: options.agentDir,
 										model: options.model,
 									}),

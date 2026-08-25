@@ -1901,6 +1901,10 @@ export class WorkerDelegationController {
 		if (!immutableWorker) return { started: false, skipReason: "orchestration_execution_contract_missing" };
 		let grant: ExecutionGrant;
 		const workerResourceSystemPrompt = preparedAgent.resourceSystemPrompt;
+		const workerContextFiles = this.deps
+			.getResourceLoader()
+			.getAgentsFiles()
+			.agentsFiles.map((file) => ({ ...file }));
 		if (prepared.attempt.grant) {
 			if (
 				!this.recovery.durableGrantIsStillPermitted(prepared.attempt.grant, executionPlan, preparedAgent.resources)
@@ -2172,6 +2176,7 @@ export class WorkerDelegationController {
 			laneCapability,
 			...(soul ? { soul } : {}),
 			workerResourceSystemPrompt,
+			workerContextFiles,
 			initialUsage,
 			hasPersistedUsageCheckpoint: checkpointUsage !== undefined,
 			usageReportId,

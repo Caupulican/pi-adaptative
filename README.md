@@ -68,8 +68,9 @@ packages; they are not end-user installation requirements.
 - Durable session and process ownership across long-running work.
 - Compaction that preserves bounded, verifiable context instead of treating a
   transcript as an unbounded action counter.
-- Background workers with explicit ownership, completion handoffs, bounded output,
-  and controlled cleanup when sessions overlap in one directory.
+- Delegated workers that carry the final profile-filtered context-file snapshot,
+  preserve explicit workspace scope, enforce model prompt budgets, return bounded
+  completion handoffs, and coordinate cleanup across overlapping sessions.
 - Tool-call validation and recovery that teaches corrective usage, scopes failures
   to the operation that failed, and keeps unrelated work admissible.
 - Persistent shell execution with explicit cancellation, timeout, and process-tree
@@ -79,11 +80,9 @@ packages; they are not end-user installation requirements.
 - A terminal coding-agent interface with provider adapters, extensions, themes,
   skills, and SDK support.
 
-These controls improve observability and recovery; they do not make model output,
-shell commands, provider APIs, or repository changes inherently safe. Review model
-permissions, tool surfaces, credentials, and proposed edits before granting an
-agent access to important systems. Use isolated worktrees or disposable
-environments for untrusted tasks.
+Together, these capabilities turn long-running agent work into an observable,
+recoverable, evidence-backed workflow across Linux and Windows—from the first tool
+call through the verified release artifact.
 
 ## Use the agent
 

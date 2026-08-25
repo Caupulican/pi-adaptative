@@ -72,6 +72,7 @@ function createExecutorHarness(
 	maxWallClockMs = 30_000,
 	autoPreflight = true,
 	sharedBudget?: SharedCapabilityBudget,
+	workerContextFiles: ReadonlyArray<{ path: string; content?: string }> = [],
 ) {
 	const events: string[] = [];
 	const conversation = workerConversation();
@@ -180,8 +181,9 @@ function createExecutorHarness(
 		cwd: process.cwd(),
 		model: { provider: "faux", id: "faux-1" } as Model<Api>,
 		thinkingLevel: "off",
-		laneCapability: { laneMaxOutputTokens: 128 },
+		laneCapability: { class: "full", laneMaxOutputTokens: 128, systemPromptMaxChars: undefined },
 		workerResourceSystemPrompt: "",
+		workerContextFiles,
 		initialUsage: ZERO_ATTEMPT_USAGE,
 		hasPersistedUsageCheckpoint: false,
 		usageReportId: "usage",
@@ -226,6 +228,37 @@ turn context
 (none)`;
 
 describe("worker attempt executor", () => {
+	it("threads final worker context into the isolated system prompt", async () => {
+		let capturedSystemPrompt = "";
+		const harness = createExecutorHarness(
+			async (options) => {
+				capturedSystemPrompt = options.systemPrompt;
+				const finalAssistant = fauxAssistantMessage('{"summary":"context loaded","status":"completed"}');
+				await options.onMessage?.(finalAssistant);
+				return {
+					text: '{"summary":"context loaded","status":"completed"}',
+					usage: ZERO_USAGE,
+					stopReason: "stop",
+					messages: [...(options.history ?? []), finalAssistant],
+				};
+			},
+			100,
+			undefined,
+			undefined,
+			undefined,
+			30_000,
+			true,
+			undefined,
+			[{ path: "/agent/AGENTS.md", content: "worker-global-rule" }],
+		);
+
+		const result = await harness.executor.run();
+
+		expect(result.rawOutcome.accepted).toBe(true);
+		expect(capturedSystemPrompt).toContain("PROJECT-SPECIFIC INSTRUCTIONS");
+		expect(capturedSystemPrompt).toContain("worker-global-rule");
+	});
+
 	it("persists ordered boundaries and narrows a later request to the remaining token budget", async () => {
 		const requestCaps: Array<number | undefined> = [];
 		const harness = createExecutorHarness(async (options) => {

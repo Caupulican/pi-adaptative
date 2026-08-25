@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevented delegated workers from losing sanitized global context and opted-in project paths while preserving explicit workspace narrowing, deterministic prompt bytes, worker overrides, and fail-closed model prompt limits.
+
 ## [0.97.4] - 2026-08-25
 
 ## [0.97.3] - 2026-08-25

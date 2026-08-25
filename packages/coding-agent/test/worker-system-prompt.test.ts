@@ -58,4 +58,48 @@ describe("worker-system-prompt", () => {
 		expect(prompt).toContain("Analyze dependency graphs.");
 		expect(prompt).toContain("Tool: edit.");
 	});
+
+	it("injects final context files with deterministic source labels and deferred project paths", () => {
+		const prompt = buildWorkerSystemPrompt({
+			rolePrompt: "Inspect the focused source.",
+			contextFiles: [
+				{ path: "C:\\Users\\Cau\\.pi\\agent\\AGENTS.md", content: "global-rule\r\napply-it\rlone-cr" },
+				{ path: "C:\\repo\\AGENTS.md" },
+				{ path: "C:\\Users\\Cau\\.pi\\agent\\AGENTS.md", content: "global-rule\r\napply-it\rlone-cr" },
+			],
+			canReadContextFiles: true,
+			modelCapability: { class: "full", systemPromptMaxChars: undefined },
+		});
+
+		expect(prompt).toContain("PROJECT-SPECIFIC INSTRUCTIONS (apply in listed order)");
+		expect(prompt).toContain('FILE "C:\\\\Users\\\\Cau\\\\.pi\\\\agent\\\\AGENTS.md"');
+		expect(prompt).toContain("global-rule\napply-it\nlone-cr");
+		expect(prompt.match(/global-rule/g)).toHaveLength(1);
+		expect(prompt).toContain("PROJECT RULE PATHS — contents not preloaded.");
+		expect(prompt).toContain('- "C:\\\\repo\\\\AGENTS.md"');
+		expect(prompt).not.toContain("\r");
+	});
+
+	it("preserves explicit worker override authority over context layers", () => {
+		const prompt = buildWorkerSystemPrompt({
+			rolePrompt: "Default worker role.",
+			contextFiles: [{ path: "/agent/AGENTS.md", content: "global worker rule" }],
+			override: "Owner replacement prompt.",
+			modelCapability: { class: "full", systemPromptMaxChars: undefined },
+		});
+
+		expect(prompt).toContain("Owner replacement prompt.");
+		expect(prompt).not.toContain("Default worker role.");
+		expect(prompt).not.toContain("global worker rule");
+	});
+
+	it("fails closed when context exceeds the worker model prompt budget", () => {
+		expect(() =>
+			buildWorkerSystemPrompt({
+				rolePrompt: "Focused role.",
+				contextFiles: [{ path: "/agent/AGENTS.md", content: "x".repeat(4_096) }],
+				modelCapability: { class: "minimal", systemPromptMaxChars: 512 },
+			}),
+		).toThrow("minimal system prompt exceeds its 512-character capability budget");
+	});
 });
