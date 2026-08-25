@@ -61,7 +61,12 @@ function buildQueuingDeps(
 		getAgentDir: () => agentDir,
 		getSessionManager: () => sessionManager,
 		getSettingsManager: () => settingsManager,
-		getResourceLoader: () => ({ getDiscoverableSkillPaths: () => [], getDiscoverablePromptPaths: () => [] }) as never,
+		getResourceLoader: () =>
+			({
+				getDiscoverableSkillPaths: () => [],
+				getDiscoverablePromptPaths: () => [],
+				getAgentsFiles: () => ({ agentsFiles: [] }),
+			}) as never,
 		getModelRegistry: () => ({ find: () => model, hasConfiguredAuth: () => true }) as never,
 		getModel: () => model,
 		isModelExhausted: () => false,
