@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved every replayed Anthropic signed-thinking block byte-for-byte across long Amazon Bedrock conversations, preventing late-history signature rejection after newer assistant turns.
+
 ## [0.97.5] - 2026-08-25
 
 ## [0.97.4] - 2026-08-25

@@ -170,13 +170,18 @@ describe("bedrock Anthropic signed thinking replay", () => {
 		});
 	});
 
-	it("keeps normalizing signed thinking outside the latest assistant message", async () => {
-		const rawThinking = `older ${String.fromCharCode(0xd800)}`;
+	it("replays every signed thinking block byte-for-byte after multiple later assistant turns", async () => {
+		const firstRawThinking = `first ${String.fromCharCode(0xd800)}`;
+		const middleRawThinking = `middle ${String.fromCharCode(0xd801)}`;
 		const payload = await capturePayload({
 			messages: [
-				makeAssistant([{ type: "thinking", thinking: rawThinking, thinkingSignature: "signature" }]),
-				{ role: "user", content: "continue", timestamp: 2 },
+				{ role: "user", content: "start", timestamp: 1 },
+				makeAssistant([{ type: "thinking", thinking: firstRawThinking, thinkingSignature: "signature-1" }]),
+				{ role: "user", content: "continue once", timestamp: 2 },
+				makeAssistant([{ type: "thinking", thinking: middleRawThinking, thinkingSignature: "signature-2" }]),
+				{ role: "user", content: "continue twice", timestamp: 3 },
 				makeAssistant([{ type: "text", text: "latest" }]),
+				{ role: "user", content: "continue much later", timestamp: 4 },
 			],
 		});
 		const request = payload as {
@@ -185,9 +190,24 @@ describe("bedrock Anthropic signed thinking replay", () => {
 			}>;
 		};
 
-		expect(request.messages[0].content[0]).toEqual({
-			reasoningContent: { reasoningText: { text: "older ", signature: "signature" } },
+		expect(request.messages[1].content[0]).toEqual({
+			reasoningContent: { reasoningText: { text: firstRawThinking, signature: "signature-1" } },
 		});
+		expect(request.messages[3].content[0]).toEqual({
+			reasoningContent: { reasoningText: { text: middleRawThinking, signature: "signature-2" } },
+		});
+	});
+
+	it("still sanitizes unsigned partial thinking into plain text", async () => {
+		const rawThinking = `partial ${String.fromCharCode(0xd800)}`;
+		const payload = await capturePayload({
+			messages: [makeAssistant([{ type: "thinking", thinking: rawThinking }])],
+		});
+		const request = payload as {
+			messages: Array<{ content: Array<{ text?: string; reasoningContent?: unknown }> }>;
+		};
+
+		expect(request.messages[0].content[0]).toEqual({ text: "partial " });
 	});
 
 	it("keeps normalizing latest signed thinking for non-Anthropic Bedrock models", async () => {
