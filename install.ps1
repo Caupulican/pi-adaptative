@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $script:ManagedMarkerName = ".pi-adaptative-managed"
 $script:ManagedMarkerContent = "pi-adaptative-managed-release-v1"
 $script:TestRemoveFailuresRemaining = $null
+$script:TestMoveFailuresRemaining = $null
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
@@ -251,6 +252,37 @@ function Remove-InstallerDirectory([string]$Path, [string]$Description) {
     }
 }
 
+function Move-InstallerDirectory([string]$Source, [string]$Destination) {
+    if ($null -eq $script:TestMoveFailuresRemaining) {
+        $script:TestMoveFailuresRemaining = 0
+        if ($env:PI_INSTALL_TEST_MODE -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:PI_INSTALL_TEST_MOVE_FAILURES)) {
+            [int]$parsedFailures = 0
+            if (-not [int]::TryParse($env:PI_INSTALL_TEST_MOVE_FAILURES, [ref]$parsedFailures) -or $parsedFailures -lt 0) {
+                Fail "PI_INSTALL_TEST_MOVE_FAILURES must be a non-negative integer."
+            }
+            $script:TestMoveFailuresRemaining = $parsedFailures
+        }
+    }
+
+    $maxAttempts = 8
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            if ($env:PI_INSTALL_TEST_MODE -eq "1" -and $script:TestMoveFailuresRemaining -gt 0) {
+                $script:TestMoveFailuresRemaining -= 1
+                throw [System.IO.IOException]::new("simulated transient executable lock")
+            }
+            Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -ge $maxAttempts) {
+                throw "Could not activate release after $maxAttempts attempts: $($_.Exception.Message)"
+            }
+            Write-Warning "Release activation hit a transient lock; retrying ($attempt/$maxAttempts)."
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Set-AtomicTextFile([string]$Path, [string]$Content) {
     $temporary = "$Path.tmp-$([Guid]::NewGuid().ToString('N'))"
     [System.IO.File]::WriteAllText($temporary, $Content, [System.Text.UTF8Encoding]::new($false))
@@ -407,7 +439,7 @@ function Install-PiAdaptative {
                 Remove-InstallerDirectory $staging "staging"
             } else {
                 New-ManagedMarker $staging
-                Move-Item -LiteralPath $staging -Destination $targetDir
+                Move-InstallerDirectory $staging $targetDir
             }
             New-Launcher $launcher $installRoot
             Set-AtomicTextFile $pointer "$version`r`n"

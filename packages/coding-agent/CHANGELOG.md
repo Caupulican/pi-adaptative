@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Retried bounded release activation on transient Windows executable locks, preventing native arm64 installer failures after staged version verification.
+
 ## [0.97.6] - 2026-08-26
 
 ### Fixed

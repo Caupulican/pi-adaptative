@@ -308,6 +308,60 @@ test("offline Windows installer verifies, activates the complete tree, rolls bac
 	assert.equal(existsSync(join(installRoot, "releases", "v1.2.5")), true);
 });
 
+test("offline Windows installer retries transient release activation locks and fails closed when exhausted", (context) => {
+	const shell = powershellExecutable();
+	if (!shell || process.platform === "win32") {
+		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		return;
+	}
+	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-activation-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const installRoot = join(root, "install");
+	const binRoot = join(root, "bin");
+	const firstFixture = createReleaseFixture(root, "1.2.3", "1.2.3", true, shell);
+	const first = runOfflineInstaller(shell, {
+		PI_VERSION: "v1.2.3",
+		PI_INSTALL_TEST_BASE_URL: powershellPath(shell, firstFixture),
+		PI_INSTALL_TEST_VERSION_OUTPUT: "1.2.3",
+		PI_INSTALL_TEST_MOVE_FAILURES: "2",
+		PI_INSTALL_DIR: powershellPath(shell, installRoot),
+		PI_BIN_DIR: powershellPath(shell, binRoot),
+	});
+	const firstOutput = `${first.stdout}\n${first.stderr}`;
+	assert.equal(first.status, 0, firstOutput);
+	assert.equal(firstOutput.match(/Release activation hit a transient lock; retrying/g)?.length, 2, firstOutput);
+	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
+	assert.deepEqual(
+		readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-")),
+		[],
+	);
+
+	const secondFixture = createReleaseFixture(root, "1.2.4", "1.2.4", true, shell);
+	const exhausted = runOfflineInstaller(shell, {
+		PI_VERSION: "v1.2.4",
+		PI_INSTALL_TEST_BASE_URL: powershellPath(shell, secondFixture),
+		PI_INSTALL_TEST_VERSION_OUTPUT: "1.2.4",
+		PI_INSTALL_TEST_MOVE_FAILURES: "99",
+		PI_INSTALL_DIR: powershellPath(shell, installRoot),
+		PI_BIN_DIR: powershellPath(shell, binRoot),
+	});
+	const exhaustedOutput = `${exhausted.stdout}\n${exhausted.stderr}`;
+	const exhaustedDiagnostic = normalizePowerShellDiagnostic(exhaustedOutput);
+	assert.notEqual(exhausted.status, 0, exhaustedOutput);
+	assert.match(exhaustedDiagnostic, /Could not activate release after 8 attempts/);
+	assert.equal(
+		exhaustedDiagnostic.match(/Release activation hit a transient lock; retrying/g)?.length,
+		7,
+		exhaustedOutput,
+	);
+	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
+	assert.equal(existsSync(join(installRoot, "releases", "v1.2.4")), false);
+	assert.deepEqual(
+		readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-")),
+		[],
+	);
+});
+
 test("offline Windows installer bounds staging cleanup and preserves the primary failure", (context) => {
 	const shell = powershellExecutable();
 	if (!shell || process.platform === "win32") {
