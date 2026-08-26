@@ -390,6 +390,15 @@ Content`,
 			const userPackageSkill = join(tempDir, "user-skill-package", "skills", "user-package-skill");
 			const projectPackageSkill = join(tempDir, "project-skill-package", "skills", "project-package-skill");
 			const sharedPackageSkill = join(tempDir, "shared-skill-package", "skills", "shared-package-skill");
+			const projectPackageExtension = join(
+				tempDir,
+				"project-skill-package",
+				"extensions",
+				"project-skill-package.ts",
+			);
+			const projectPackagePrompt = join(tempDir, "project-skill-package", "prompts", "project-skill-package.md");
+			const sharedPackageExtension = join(tempDir, "shared-skill-package", "extensions", "shared-skill-package.ts");
+			const sharedPackagePrompt = join(tempDir, "shared-skill-package", "prompts", "shared-skill-package.md");
 			const projectAutoExtension = join(tempDir, ".pi", "extensions", "project-auto.ts");
 			const projectAutoPrompt = join(tempDir, ".pi", "prompts", "project-auto.md");
 			const projectAutoTheme = join(tempDir, ".pi", "themes", "project-auto.json");
@@ -471,20 +480,14 @@ Content`,
 					packageRoot === join(tempDir, "shared-skill-package") && metadata.scope === "user",
 			);
 			expect(shadowedGlobalDiscovery?.[4]).toEqual(["extensions", "skills", "prompts"]);
+			expect(globalOnly.extensions.some((resource) => resource.path === projectPackageExtension)).toBe(false);
+			expect(globalOnly.prompts.some((resource) => resource.path === projectPackagePrompt)).toBe(false);
 			expect(
-				globalOnly.extensions.some((resource) => resource.path.includes("project-skill-package/extensions")),
-			).toBe(false);
-			expect(globalOnly.prompts.some((resource) => resource.path.includes("project-skill-package/prompts"))).toBe(
-				false,
+				globalOnly.extensions.find((resource) => resource.path === sharedPackageExtension)?.metadata.scope,
+			).toBe("user");
+			expect(globalOnly.prompts.find((resource) => resource.path === sharedPackagePrompt)?.metadata.scope).toBe(
+				"user",
 			);
-			expect(
-				globalOnly.extensions.find((resource) => resource.path.includes("shared-skill-package/extensions"))
-					?.metadata.scope,
-			).toBe("user");
-			expect(
-				globalOnly.prompts.find((resource) => resource.path.includes("shared-skill-package/prompts"))?.metadata
-					.scope,
-			).toBe("user");
 
 			collectPackageResources.mockClear();
 			settingsManager.setProjectContextFiles("on-demand", "global");
@@ -513,13 +516,11 @@ Content`,
 			);
 			expect(optedInProjectDiscovery?.[4]).toEqual(["extensions", "skills", "prompts", "themes"]);
 			expect(
-				projectEnabled.extensions.find((resource) => resource.path.includes("shared-skill-package/extensions"))
-					?.metadata.scope,
+				projectEnabled.extensions.find((resource) => resource.path === sharedPackageExtension)?.metadata.scope,
 			).toBe("project");
-			expect(
-				projectEnabled.prompts.find((resource) => resource.path.includes("shared-skill-package/prompts"))?.metadata
-					.scope,
-			).toBe("project");
+			expect(projectEnabled.prompts.find((resource) => resource.path === sharedPackagePrompt)?.metadata.scope).toBe(
+				"project",
+			);
 		});
 
 		it("excludes direct and fallback project package extensions while preserving global packages and project themes", async () => {

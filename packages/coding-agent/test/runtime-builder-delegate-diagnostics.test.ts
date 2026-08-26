@@ -13,6 +13,7 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { RuntimeBuilder, type RuntimeBuilderDeps } from "../src/core/runtime-builder.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { SkillVaultController } from "../src/core/skill-vault.ts";
+import type { Skill } from "../src/core/skills.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
 
 /**
@@ -44,12 +45,13 @@ vi.mock("../src/core/tools/delegate.ts", () => ({
 }));
 
 function unreachable(name: string): never {
-	throw new Error(`${name} should not be called by a buildRuntime() restricted to the delegate tool`);
+	throw new Error(`${name} should not be called by a restricted buildRuntime()`);
 }
 
 function makeDeps(
 	cwd: string,
 	resourceLoader: ResourceLoader,
+	allowedTools: string[] = ["delegate"],
 ): { deps: RuntimeBuilderDeps; getWarnings: () => string[] } {
 	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
@@ -88,19 +90,18 @@ function makeDeps(
 			baseSystemPrompt = prompt;
 		},
 		getCustomTools: () => [],
-		// No override: the real built-in tool-factory block runs, restricted to just "delegate" via
-		// getToolProfileFilter below so every other factory (goal/task-steps/model-fitness/scout/
-		// toolkit-script/worktree-sync) stays unreached, matching this test's narrow scope.
+		// No override: the real built-in tool-factory block runs, restricted through the explicit
+		// profile below so unrelated factories stay unreached and each test owns a narrow surface.
 		getBaseToolsOverride: () => undefined,
 		getRequestedActiveToolNames: () => requestedActiveToolNames,
 		setRequestedActiveToolNames: (names) => {
 			requestedActiveToolNames = names;
 		},
-		getToolProfileFilter: () => ({ allow: ["delegate"], block: [] }),
+		getToolProfileFilter: () => ({ allow: allowedTools, block: [] }),
 		setToolProfileFilter: () => {},
 		getAllowedToolNames: () => undefined,
 		getExcludedToolNames: () => undefined,
-		deriveToolProfileFilter: () => ({ allow: ["delegate"], block: [] }),
+		deriveToolProfileFilter: () => ({ allow: allowedTools, block: [] }),
 		isToolOrCommandAllowedByProfile: () => true,
 		isExtensionPathAllowed: (_path, authority) => authority === "explicit",
 		filterExtensionsForRuntime: (extensions) => extensions,
@@ -194,6 +195,49 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 			getDiscoverableExtensionPaths: async () => [],
 		};
 	}
+
+	it("supplies resource-loader-admitted skills to both built-in audit tools", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-skill-tools-"));
+		const baseDir = join(tempDir, "skills", "admitted-runtime-skill");
+		const filePath = join(baseDir, "SKILL.md");
+		const admittedSkill: Skill = {
+			name: "admitted-runtime-skill",
+			description: "An admitted runtime skill",
+			filePath,
+			baseDir,
+			sourceInfo: { path: filePath, source: "test", scope: "user", origin: "top-level" },
+			disableModelInvocation: false,
+		};
+		const getSkills = vi.fn(() => ({ skills: [admittedSkill], diagnostics: [] }));
+		const resourceLoader: ResourceLoader = {
+			...buildResourceLoader(),
+			getSkills,
+			getActiveSkills: () => [admittedSkill],
+		};
+		const { deps } = makeDeps(tempDir, resourceLoader, ["skill_audit", "skillify"]);
+		const runtimeBuilder = new RuntimeBuilder(deps);
+		runtimeBuilder.buildRuntime({ activeToolNames: ["skill_audit", "skillify"] });
+		const signal = new AbortController().signal;
+
+		const auditResult = await runtimeBuilder.getRegisteredTool("skill_audit")?.execute("audit", {}, signal);
+		const skillifyResult = await runtimeBuilder.getRegisteredTool("skillify")?.execute(
+			"skillify",
+			{
+				name: "runtime-builder-proposal",
+				description: "A distinct runtime builder proposal",
+				body: "# Runtime builder proposal",
+			},
+			signal,
+		);
+
+		expect(auditResult?.details).toMatchObject({
+			skills: [{ name: admittedSkill.name, path: filePath, scope: "user" }],
+		});
+		expect(skillifyResult?.details).toMatchObject({
+			audit: { skills: [{ name: admittedSkill.name, path: filePath, scope: "user" }] },
+		});
+		expect(getSkills).toHaveBeenCalledTimes(2);
+	});
 
 	it("forwards createDelegateToolDefinition's warn callback to deps.setDelegatePromptGuidelineWarnings", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-delegate-diagnostics-"));
