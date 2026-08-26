@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stopped active-goal provider turns from repeatedly requesting already-completed `get_goal` and `task_steps` hydration, while retaining one required hydration pass for genuine continuation recovery.
+
 ## [0.97.5] - 2026-08-25
 
 ### Fixed

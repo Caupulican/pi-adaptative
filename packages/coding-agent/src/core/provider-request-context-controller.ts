@@ -5,7 +5,7 @@ import type { PromptEnforcementReport } from "./context/context-prompt-enforceme
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import type { ContextGcReport } from "./context-gc.ts";
-import { injectCompactGoalContext } from "./goals/compact-goal-context.ts";
+import { captureGoalContextProjection, injectCompactGoalContext } from "./goals/compact-goal-context.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
@@ -48,6 +48,7 @@ export class ProviderRequestContextController {
 	async plan(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
 		const extensionPlan = await this.deps.transformExtensions(transformed);
+		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages);
 		const reflectionCuePlan = this.deps.previewReflectionCue?.();
 		const providerTransients = [
 			...extensionPlan.transientMessages,
@@ -71,7 +72,7 @@ export class ProviderRequestContextController {
 			[...compactableMessages, ...withExtensionTransients],
 			memoryReport,
 		);
-		const beforeSkill = injectCompactGoalContext(withMemory, goalState);
+		const beforeSkill = injectCompactGoalContext(withMemory, goalState, goalContextProjection);
 		if (!isDeepStrictEqual(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
