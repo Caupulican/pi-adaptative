@@ -120,6 +120,8 @@ test("Windows installer is a self-contained, owned-release PowerShell script", (
 	assert.match(installer, /PI_INSTALL_TEST_MODE[\s\S]*Copy-Item/u);
 	assert.match(installer, /PI_INSTALL_TEST_SKIP_PATH/u);
 	assert.match(installer, /Prune-Releases/u);
+	assert.match(installer, /\[System\.IO\.Directory\]::Move\(\$Source, \$Destination\)/u);
+	assert.doesNotMatch(installer, /Move-Item -LiteralPath \$Source -Destination \$Destination/u);
 	assert.doesNotMatch(installer, /\bnpm\b/iu);
 	assert.doesNotMatch(installer, /\bnode(?:\.js)?\b/iu);
 	assert.doesNotMatch(installer, /pi\.dev/iu);
@@ -331,6 +333,8 @@ test("offline Windows installer retries transient release activation locks and f
 	assert.equal(first.status, 0, firstOutput);
 	assert.equal(firstOutput.match(/Release activation hit a transient lock; retrying/g)?.length, 2, firstOutput);
 	assert.equal(readFileSync(join(installRoot, "current.version"), "utf8").trim(), "v1.2.3");
+	assert.equal(existsSync(join(installRoot, "releases", "v1.2.3", "pi.exe")), true);
+	assert.equal(existsSync(join(installRoot, "releases", "v1.2.3", "docs", "retained.txt")), true);
 	assert.deepEqual(
 		readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-")),
 		[],
@@ -360,6 +364,49 @@ test("offline Windows installer retries transient release activation locks and f
 		readdirSync(join(installRoot, "releases")).filter((entry) => entry.startsWith(".staging-")),
 		[],
 	);
+});
+
+test("offline Windows installer fails closed when a partial activation target appears before rename", (context) => {
+	const shell = powershellExecutable();
+	if (!shell || process.platform === "win32") {
+		context.skip("offline Linux-hosted PowerShell harness is only run on this host");
+		return;
+	}
+	const root = mkdtempSync(join(powershellTempDirectory(shell), "pi-windows-partial-activation-"));
+	context.after(() => rmSync(root, { recursive: true, force: true }));
+	const installRoot = join(root, "install");
+	const binRoot = join(root, "bin");
+	const fixture = createReleaseFixture(root, "1.2.3", "1.2.3", true, shell);
+	const activationCall = "                Move-InstallerDirectory $staging $targetDir";
+	const injectedActivation = [
+		"                if ($env:PI_INSTALL_TEST_MODE -eq \"1\" -and $env:PI_INSTALL_TEST_PARTIAL_ACTIVATION -eq \"1\") {",
+		"                    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null",
+		"                    Move-Item -LiteralPath (Join-Path $staging \"docs\") -Destination $targetDir -ErrorAction Stop",
+		"                }",
+		activationCall,
+	].join("\n");
+	const candidateInstaller = installer.replace(activationCall, injectedActivation);
+	assert.notEqual(candidateInstaller, installer, "activation instrumentation anchor must match");
+	const candidateInstallerPath = join(root, "install-partial-activation.ps1");
+	writeFileSync(candidateInstallerPath, candidateInstaller);
+
+	const result = runOfflineInstaller(
+		shell,
+		{
+			PI_VERSION: "v1.2.3",
+			PI_INSTALL_TEST_BASE_URL: powershellPath(shell, fixture),
+			PI_INSTALL_TEST_VERSION_OUTPUT: "1.2.3",
+			PI_INSTALL_TEST_PARTIAL_ACTIVATION: "1",
+			PI_INSTALL_DIR: powershellPath(shell, installRoot),
+			PI_BIN_DIR: powershellPath(shell, binRoot),
+		},
+		powershellPath(shell, candidateInstallerPath),
+	);
+	const output = `${result.stdout}\n${result.stderr}`;
+	assert.notEqual(result.status, 0, output);
+	assert.match(normalizePowerShellDiagnostic(output), /activat|destination|target/iu);
+	assert.equal(existsSync(join(installRoot, "current.version")), false);
+	assert.equal(existsSync(join(installRoot, "releases", "v1.2.3", "pi.exe")), false);
 });
 
 test("offline Windows installer bounds staging cleanup and preserves the primary failure", (context) => {

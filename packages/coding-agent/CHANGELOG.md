@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Made Windows release activation use a guarded atomic directory rename and fail closed on partial target state, preventing transient executable locks from nesting the remaining payload and leaving ARM64 launchers without root-level `pi.exe`.
+
 ## [0.97.8] - 2026-08-26
 
 ### Changed

@@ -271,9 +271,20 @@ function Move-InstallerDirectory([string]$Source, [string]$Destination) {
                 $script:TestMoveFailuresRemaining -= 1
                 throw [System.IO.IOException]::new("simulated transient executable lock")
             }
-            Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+                throw [System.IO.IOException]::new("activation source is missing")
+            }
+            if (Test-Path -LiteralPath $Destination) {
+                throw [System.IO.IOException]::new("activation destination already exists")
+            }
+            [System.IO.Directory]::Move($Source, $Destination)
             return
         } catch {
+            $sourceIsComplete = Test-Path -LiteralPath $Source -PathType Container
+            $destinationExists = Test-Path -LiteralPath $Destination
+            if (-not $sourceIsComplete -or $destinationExists) {
+                throw "Release activation entered an ambiguous state after attempt $attempt; source must remain complete and destination absent: $($_.Exception.Message)"
+            }
             if ($attempt -ge $maxAttempts) {
                 throw "Could not activate release after $maxAttempts attempts: $($_.Exception.Message)"
             }
@@ -440,6 +451,9 @@ function Install-PiAdaptative {
             } else {
                 New-ManagedMarker $staging
                 Move-InstallerDirectory $staging $targetDir
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $targetDir "pi.exe") -PathType Leaf)) {
+                Fail "activated release directory is incomplete."
             }
             New-Launcher $launcher $installRoot
             Set-AtomicTextFile $pointer "$version`r`n"
