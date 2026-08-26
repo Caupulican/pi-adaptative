@@ -34,6 +34,13 @@ interface PackageManagerInternals {
 		options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
 	): Promise<string>;
 	getLocalGitUpdateTarget(installedPath: string): Promise<{ ref: string; head: string; fetchArgs: string[] }>;
+	collectPackageResources(
+		packageRoot: string,
+		accumulator: unknown,
+		filter: unknown,
+		metadata: { scope: string },
+		resourceTypes?: readonly string[],
+	): boolean;
 }
 
 // Helper to check if a resource is enabled
@@ -68,7 +75,7 @@ describe("DefaultPackageManager", () => {
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 
-		settingsManager = SettingsManager.inMemory();
+		settingsManager = SettingsManager.inMemory({ projectContextFiles: "on-demand" });
 		packageManager = new DefaultPackageManager({
 			cwd: tempDir,
 			agentDir,
@@ -371,6 +378,184 @@ Content`,
 
 			// Should NOT find helper.ts (not declared in manifest)
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "helper.ts"))).toBe(false);
+		});
+	});
+
+	describe("global-only project instruction policy", () => {
+		it("excludes project instruction resources while preserving user resources until enabled", async () => {
+			const userSkill = join(agentDir, "skills", "user-skill");
+			const projectSkill = join(tempDir, ".pi", "skills", "project-skill");
+			const agentsSkill = join(tempDir, ".agents", "skills", "agents-skill");
+			const configuredProjectSkill = join(tempDir, ".pi", "configured-skills", "configured-project");
+			const userPackageSkill = join(tempDir, "user-skill-package", "skills", "user-package-skill");
+			const projectPackageSkill = join(tempDir, "project-skill-package", "skills", "project-package-skill");
+			const sharedPackageSkill = join(tempDir, "shared-skill-package", "skills", "shared-package-skill");
+			const projectAutoExtension = join(tempDir, ".pi", "extensions", "project-auto.ts");
+			const projectAutoPrompt = join(tempDir, ".pi", "prompts", "project-auto.md");
+			const projectAutoTheme = join(tempDir, ".pi", "themes", "project-auto.json");
+			for (const [directory, name] of [
+				[userSkill, "user-skill"],
+				[projectSkill, "project-skill"],
+				[agentsSkill, "agents-skill"],
+				[configuredProjectSkill, "configured-project"],
+				[userPackageSkill, "user-package-skill"],
+				[projectPackageSkill, "project-package-skill"],
+				[sharedPackageSkill, "shared-package-skill"],
+			] as const) {
+				mkdirSync(directory, { recursive: true });
+				writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: Test\n---\n`);
+			}
+
+			for (const [packageRoot, packageName] of [
+				[join(tempDir, "user-skill-package"), "user-skill-package"],
+				[join(tempDir, "project-skill-package"), "project-skill-package"],
+				[join(tempDir, "shared-skill-package"), "shared-skill-package"],
+			] as const) {
+				writeFileSync(
+					join(packageRoot, "package.json"),
+					JSON.stringify({
+						name: packageName,
+						pi: { extensions: ["extensions"], skills: ["skills"], prompts: ["prompts"] },
+					}),
+				);
+				mkdirSync(join(packageRoot, "extensions"), { recursive: true });
+				mkdirSync(join(packageRoot, "prompts"), { recursive: true });
+				writeFileSync(join(packageRoot, "extensions", `${packageName}.ts`), "export default () => {};");
+				writeFileSync(join(packageRoot, "prompts", `${packageName}.md`), `Prompt from ${packageName}`);
+			}
+			for (const path of [projectAutoExtension, projectAutoPrompt, projectAutoTheme]) {
+				mkdirSync(join(path, ".."), { recursive: true });
+			}
+			writeFileSync(projectAutoExtension, "export default () => {};");
+			writeFileSync(projectAutoPrompt, "Project auto prompt");
+			writeFileSync(projectAutoTheme, JSON.stringify({ name: "project-auto" }));
+
+			settingsManager.setProjectSkillPaths(["configured-skills"]);
+			settingsManager.setPackages([join(tempDir, "user-skill-package"), join(tempDir, "shared-skill-package")]);
+			settingsManager.setProjectPackages([
+				join(tempDir, "project-skill-package"),
+				join(tempDir, "shared-skill-package"),
+			]);
+			settingsManager.setProjectContextFiles("off", "global");
+			const collectPackageResources = vi.spyOn(
+				packageManager as unknown as PackageManagerInternals,
+				"collectPackageResources",
+			);
+			const globalOnly = await packageManager.resolve();
+			expect(globalOnly.skills.some((resource) => resource.path === join(userSkill, "SKILL.md"))).toBe(true);
+			expect(globalOnly.extensions.some((resource) => resource.path === projectAutoExtension)).toBe(false);
+			expect(globalOnly.prompts.some((resource) => resource.path === projectAutoPrompt)).toBe(false);
+			expect(globalOnly.themes.find((resource) => resource.path === projectAutoTheme)?.metadata.scope).toBe(
+				"project",
+			);
+			expect(globalOnly.skills.some((resource) => resource.path === join(projectSkill, "SKILL.md"))).toBe(false);
+			expect(globalOnly.skills.some((resource) => resource.path === join(agentsSkill, "SKILL.md"))).toBe(false);
+			expect(globalOnly.skills.some((resource) => resource.path === join(configuredProjectSkill, "SKILL.md"))).toBe(
+				false,
+			);
+			expect(globalOnly.skills.some((resource) => resource.path === join(userPackageSkill, "SKILL.md"))).toBe(true);
+			expect(globalOnly.skills.some((resource) => resource.path === join(projectPackageSkill, "SKILL.md"))).toBe(
+				false,
+			);
+			const sharedGlobalSkill = globalOnly.skills.find(
+				(resource) => resource.path === join(sharedPackageSkill, "SKILL.md"),
+			);
+			expect(sharedGlobalSkill?.metadata.scope).toBe("user");
+			const projectPackageDiscovery = collectPackageResources.mock.calls.find(
+				([packageRoot, , , metadata]) =>
+					packageRoot === join(tempDir, "project-skill-package") && metadata.scope === "project",
+			);
+			expect(projectPackageDiscovery?.[4]).toEqual(["themes"]);
+			const shadowedGlobalDiscovery = collectPackageResources.mock.calls.find(
+				([packageRoot, , , metadata]) =>
+					packageRoot === join(tempDir, "shared-skill-package") && metadata.scope === "user",
+			);
+			expect(shadowedGlobalDiscovery?.[4]).toEqual(["extensions", "skills", "prompts"]);
+			expect(
+				globalOnly.extensions.some((resource) => resource.path.includes("project-skill-package/extensions")),
+			).toBe(false);
+			expect(globalOnly.prompts.some((resource) => resource.path.includes("project-skill-package/prompts"))).toBe(
+				false,
+			);
+			expect(
+				globalOnly.extensions.find((resource) => resource.path.includes("shared-skill-package/extensions"))
+					?.metadata.scope,
+			).toBe("user");
+			expect(
+				globalOnly.prompts.find((resource) => resource.path.includes("shared-skill-package/prompts"))?.metadata
+					.scope,
+			).toBe("user");
+
+			collectPackageResources.mockClear();
+			settingsManager.setProjectContextFiles("on-demand", "global");
+			const projectEnabled = await packageManager.resolve();
+			expect(projectEnabled.skills.some((resource) => resource.path === join(userSkill, "SKILL.md"))).toBe(true);
+			expect(projectEnabled.extensions.some((resource) => resource.path === projectAutoExtension)).toBe(true);
+			expect(projectEnabled.prompts.some((resource) => resource.path === projectAutoPrompt)).toBe(true);
+			expect(projectEnabled.skills.some((resource) => resource.path === join(projectSkill, "SKILL.md"))).toBe(true);
+			expect(projectEnabled.skills.some((resource) => resource.path === join(agentsSkill, "SKILL.md"))).toBe(true);
+			expect(
+				projectEnabled.skills.some((resource) => resource.path === join(configuredProjectSkill, "SKILL.md")),
+			).toBe(true);
+			expect(projectEnabled.skills.some((resource) => resource.path === join(userPackageSkill, "SKILL.md"))).toBe(
+				true,
+			);
+			expect(projectEnabled.skills.some((resource) => resource.path === join(projectPackageSkill, "SKILL.md"))).toBe(
+				true,
+			);
+			const sharedProjectSkill = projectEnabled.skills.find(
+				(resource) => resource.path === join(sharedPackageSkill, "SKILL.md"),
+			);
+			expect(sharedProjectSkill?.metadata.scope).toBe("project");
+			const optedInProjectDiscovery = collectPackageResources.mock.calls.find(
+				([packageRoot, , , metadata]) =>
+					packageRoot === join(tempDir, "project-skill-package") && metadata.scope === "project",
+			);
+			expect(optedInProjectDiscovery?.[4]).toEqual(["extensions", "skills", "prompts", "themes"]);
+			expect(
+				projectEnabled.extensions.find((resource) => resource.path.includes("shared-skill-package/extensions"))
+					?.metadata.scope,
+			).toBe("project");
+			expect(
+				projectEnabled.prompts.find((resource) => resource.path.includes("shared-skill-package/prompts"))?.metadata
+					.scope,
+			).toBe("project");
+		});
+
+		it("excludes direct and fallback project package extensions while preserving global packages and project themes", async () => {
+			const userDirectExtension = join(tempDir, "user-direct-extension.ts");
+			const userFallbackExtension = join(tempDir, "user-fallback-extension");
+			const projectDirectExtension = join(tempDir, "project-direct-extension.ts");
+			const projectFallbackExtension = join(tempDir, "project-fallback-extension");
+			const projectThemePackage = join(tempDir, "project-theme-package");
+			const projectTheme = join(projectThemePackage, "themes", "project-theme.json");
+
+			for (const extensionPath of [userDirectExtension, projectDirectExtension]) {
+				writeFileSync(extensionPath, "export default () => {};");
+			}
+			for (const extensionDirectory of [userFallbackExtension, projectFallbackExtension]) {
+				mkdirSync(extensionDirectory, { recursive: true });
+				writeFileSync(join(extensionDirectory, "index.ts"), "export default () => {};");
+			}
+			mkdirSync(join(projectThemePackage, "themes"), { recursive: true });
+			writeFileSync(projectTheme, JSON.stringify({ name: "project-theme" }));
+
+			settingsManager.setPackages([userDirectExtension, userFallbackExtension]);
+			settingsManager.setProjectPackages([projectDirectExtension, projectFallbackExtension, projectThemePackage]);
+			settingsManager.setProjectContextFiles("off", "global");
+
+			const globalOnly = await packageManager.resolve();
+			expect(globalOnly.extensions.some((resource) => resource.path === userDirectExtension)).toBe(true);
+			expect(globalOnly.extensions.some((resource) => resource.path === userFallbackExtension)).toBe(true);
+			expect(globalOnly.extensions.some((resource) => resource.path === projectDirectExtension)).toBe(false);
+			expect(globalOnly.extensions.some((resource) => resource.path === projectFallbackExtension)).toBe(false);
+			expect(globalOnly.themes.find((resource) => resource.path === projectTheme)?.metadata.scope).toBe("project");
+
+			settingsManager.setProjectContextFiles("on-demand", "global");
+			const projectEnabled = await packageManager.resolve();
+			expect(projectEnabled.extensions.some((resource) => resource.path === projectDirectExtension)).toBe(true);
+			expect(projectEnabled.extensions.some((resource) => resource.path === projectFallbackExtension)).toBe(true);
+			expect(projectEnabled.themes.some((resource) => resource.path === projectTheme)).toBe(true);
 		});
 	});
 

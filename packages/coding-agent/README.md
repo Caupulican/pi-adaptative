@@ -324,9 +324,9 @@ Runtime orchestration, recovery, and learning telemetry stays local. See [docs/t
 
 Pi Adaptative discovers `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` context files from:
 - `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` (global) — always loaded into the system prompt
-- Parent directories and the current directory — listed by path after opt-in (`/settings` → Project AGENTS.md), then read on demand, not injected at startup
+- Parent directories and the current directory — listed by path after opt-in (`/settings` → **Project instructions**), then read on demand, not injected at startup
 
-Use the global file for standing instructions. A repo `AGENTS.md` is off until you opt in for that directory: `/settings` → **Project AGENTS.md**. Then the agent sees the path and can read it. Set Load to **global-only** to keep only `~/.pi/agent`. `--no-context-files` (`-nc`) skips project files for that session. The global file always loads.
+Use the global file for standing instructions. A repo `AGENTS.md` is off until you opt in for that directory: `/settings` → **Project instructions** → **on-demand**. Then the agent sees the path and can read it. **global-only** excludes project instruction carriers even when a built-in SDK option explicitly supplies their path; trusted global/bundled resources remain available. `--no-context-files` (`-nc`) separately skips project context-file paths for that session. See [Project Instructions](docs/settings.md#project-instructions) for the canonical boundary.
 
 ### System Prompt
 

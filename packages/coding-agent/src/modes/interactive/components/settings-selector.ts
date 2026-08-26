@@ -745,7 +745,7 @@ class ProjectContextFilesSubmenu extends SettingsListSubmenu {
 					id: "project-context-load",
 					label: "Load",
 					description:
-						"global-only uses ~/.pi/agent/AGENTS.md. on-demand also lists this project's AGENTS.md for the agent to read.",
+						"global-only excludes project AGENTS-family files, extensions, skills, and prompts. on-demand admits them.",
 					currentValue: this.mode === "on-demand" ? "on-demand" : "global-only",
 					values: ["global-only", "on-demand"],
 				},
@@ -2378,9 +2378,9 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "project-context-files",
-				label: "Project AGENTS.md",
+				label: "Project instructions",
 				description:
-					"Opt in to listing this directory's AGENTS.md/CLAUDE.md/GEMINI.md. Global ~/.pi/agent files always load.",
+					"Opt in to this directory's AGENTS-family files, extensions, skills, and prompts. Global/bundled resources remain available.",
 				currentValue: projectContextFilesSummary(config.projectContextFiles, config.projectContextFilesScope),
 				submenu: (_currentValue, done) =>
 					new ProjectContextFilesSubmenu(

@@ -1,4 +1,4 @@
-import { type BackgroundToolTaskRef, findBackgroundToolTask } from "../background-tool-task-controller.ts";
+import { type BackgroundToolTaskRef, collectCitedRunningToolTaskIds } from "../background-tool-task-controller.ts";
 import { taskStepReferencesRequirement } from "../tasks/task-projection.ts";
 import {
 	getTrustedRequirementEvidence,
@@ -379,7 +379,7 @@ function toGoalEvent(
 			if (pendingToolTasks.length > 0) {
 				return {
 					ok: false,
-					error: `Cannot complete goal: goal-owned or cited tool_task(s) are not complete (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
+					error: `Cannot complete goal: goal-owned or cited tool_task(s) are still running (${pendingToolTasks.join(", ")}). Wait once via tool_task, then record the terminal result.`,
 				};
 			}
 			const activePipeline = options?.activePipeline;
@@ -499,10 +499,11 @@ function findBlockingToolTasks(
 	for (const task of backgroundToolTasks) {
 		if (task.goalId === state.goalId && task.status === "running") pending.add(task.taskId);
 	}
-	for (const evidence of state.evidence) {
-		if (evidence.kind !== "tool" || !evidence.uri) continue;
-		const task = findBackgroundToolTask(backgroundToolTasks, evidence.uri);
-		if (task && task.status !== "completed") pending.add(task.taskId);
+	const citedUris = state.evidence.flatMap((evidence) =>
+		evidence.kind === "tool" && evidence.uri ? [evidence.uri] : [],
+	);
+	for (const taskId of collectCitedRunningToolTaskIds({ records: backgroundToolTasks, uris: citedUris })) {
+		pending.add(taskId);
 	}
 	return [...pending];
 }

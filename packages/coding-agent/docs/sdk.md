@@ -629,9 +629,15 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 > See [examples/sdk/04-skills.ts](../examples/sdk/04-skills.ts)
 
-### Context Files
+### Project Instructions
 
-Global `~/.pi/agent` files are always loaded. Repository `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` stay off until `projectContextFiles` is `"on-demand"` (per directory overlay, project `.pi/settings.json`, or global settings).
+Global `~/.pi/agent` instruction files and trusted global/bundled instruction resources remain available by default. Repository `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`, project `.pi/SYSTEM.md`/`.pi/APPEND_SYSTEM.md`, and project-scoped extensions, skills, and prompt templates stay excluded until `projectContextFiles` is `"on-demand"` (per directory overlay, project `.pi/settings.json`, or global settings).
+
+**Confirmed:** explicit file-path arguments do not bypass `projectContextFiles: "off"`. `DefaultResourceLoader` rejects project-local paths supplied through `systemPrompt`, `appendSystemPrompt`, `additionalExtensionPaths`, `additionalSkillPaths`, `additionalPromptTemplatePaths`, path-backed `skillsOverride` or `agentsFilesOverride` entries, `getDiscoverableExtensionPaths()`, `loadSingleExtension()`, `loadIsolatedExtension()`, and extension-contributed skill or prompt paths. Admission runs before file content reads, module imports, or discoverable-list insertion. A blocked explicit system file falls back to global `SYSTEM.md`; an append list falls back to global `APPEND_SYSTEM.md` when filtering leaves no explicit append content.
+
+Path classification checks both the supplied path and its canonical target. A project symlink to an external file and an external alias into the project are both excluded. Repository/project roots, ancestor AGENTS-family files, and ancestor `.pi` resource trees count as project-local. Registering and trusting an external-resource catalog authorizes scanning but does not reclassify a physical project path; physically external catalog resources remain available under the existing resource-profile and extension-import gates.
+
+Already-materialized caller data remains distinct: literal `systemPrompt`/`appendSystemPrompt` content, content-bearing context entries, `PromptTemplate.content`, and inline extension factories require no project-file read and remain available. A path-only context entry or `Skill.filePath` is deferred file input and is filtered. The low-level `loadProjectContextFiles({ includeProject: true })` option is itself the policy choice equivalent to enabling on-demand mode; derive it from your application policy. A fully custom `ResourceLoader` owns its own file-admission behavior. See [Project Instructions](settings.md#project-instructions) for the canonical boundary.
 
 ```typescript
 import { createAgentSession, DefaultResourceLoader } from "@caupulican/pi-adaptative";

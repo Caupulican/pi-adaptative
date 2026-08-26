@@ -372,8 +372,55 @@ describe("applyGoalAction (goal producer core)", () => {
 		expect(blocked.ok).toBe(false);
 		if (blocked.ok) return;
 		expect(blocked.error).toContain("tool_task");
+		expect(blocked.error).toContain("still running");
 		expect(blocked.error).toContain("tool-task-1");
 	});
+
+	it.each(["failed", "canceled"] as const)(
+		"allows agent complete after a cited %s tool_task is terminal without trusting its result",
+		(status) => {
+			let state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });
+			state = expectOk(
+				applyGoalAction(state, { action: "add_requirement", requirementId: "r1", text: "Do X" }, "T1"),
+			);
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{ action: "add_evidence", evidenceId: "e-proof", kind: "user", summary: "owner confirmed" },
+					"T2",
+				),
+			);
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{ action: "satisfy_requirement", requirementId: "r1", evidenceIds: ["e-proof"] },
+					"T3",
+				),
+			);
+			state = expectOk(
+				applyGoalAction(
+					state,
+					{
+						action: "add_evidence",
+						evidenceId: "e-terminal-task",
+						kind: "tool",
+						summary: "terminal result observed but not accepted as proof",
+						uri: "tool-task-1",
+						verified: false,
+					},
+					"T4",
+				),
+			);
+
+			const completed = applyGoalAction(state, { action: "complete" }, "T5", {
+				backgroundToolTasks: [{ taskId: "tool-task-1", toolCallId: "call-1", goalId: "g1", status }],
+			});
+
+			expect(completed.ok).toBe(true);
+			if (!completed.ok) return;
+			expect(completed.state.status).toBe("completed");
+		},
+	);
 
 	it("refuses agent complete while an uncited goal-owned tool_task is still running", () => {
 		const state = createGoalState({ goalId: "g1", userGoal: "A", now: "T0" });

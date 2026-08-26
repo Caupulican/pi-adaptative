@@ -161,25 +161,41 @@ describe("settings selector", () => {
 		expect(onCostGuardChange).toHaveBeenCalledWith({ enabled: true, maxTurnUsd: 0.5, action: "warn" }, "global");
 	});
 
-	it("exposes project AGENTS.md opt-in in the searchable settings TUI", () => {
+	it("exposes project instruction opt-in in the searchable settings TUI", () => {
 		const selector = new SettingsSelectorComponent(makeConfig({ projectContextFiles: "off" }), makeCallbacks());
 
-		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("project instructions");
 		const output = selector.render(140).join("\n");
 
-		expect(output).toContain("Project AGENTS.md");
+		expect(output).toContain("Project instructions");
 		expect(output).toContain("global only");
 		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "project-context")).toBe(false);
 	});
 
-	it("opts in to this directory's AGENTS.md from the Project AGENTS.md submenu", () => {
+	it("describes the complete project instruction resource boundary", () => {
+		const selector = new SettingsSelectorComponent(makeConfig({ projectContextFiles: "off" }), makeCallbacks());
+
+		selector.getSettingsList().handleInput("project instructions");
+		const settingOutput = selector.render(140).join("\n");
+		expect(settingOutput).toContain("extensions");
+		expect(settingOutput).toContain("skills");
+		expect(settingOutput).toContain("prompts");
+
+		selector.getSettingsList().handleInput("\r");
+		selector.getSettingsList().handleInput("\x1b[B");
+		const submenuOutput = selector.render(140).join("\n");
+		expect(submenuOutput).toContain("global-only excludes project AGENTS-family files");
+		expect(submenuOutput).toContain("extensions, skills, and prompts");
+	});
+
+	it("opts in to this directory's instructions from the Project instructions submenu", () => {
 		const onProjectContextFilesChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ projectContextFiles: "off" }),
 			makeCallbacks({ onProjectContextFilesChange }),
 		);
 
-		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("project instructions");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
@@ -187,14 +203,14 @@ describe("settings selector", () => {
 		expect(onProjectContextFilesChange).toHaveBeenCalledWith("on-demand", "directoryProfile");
 	});
 
-	it("opts in to this project's AGENTS.md from the Project AGENTS.md submenu", () => {
+	it("opts in to this project's instructions from the Project instructions submenu", () => {
 		const onProjectContextFilesChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ projectContextFiles: "off" }),
 			makeCallbacks({ onProjectContextFilesChange }),
 		);
 
-		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("project instructions");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -203,14 +219,14 @@ describe("settings selector", () => {
 		expect(onProjectContextFilesChange).toHaveBeenCalledWith("on-demand", "project");
 	});
 
-	it("opts in for all projects from the Project AGENTS.md submenu", () => {
+	it("opts in for all projects from the Project instructions submenu", () => {
 		const onProjectContextFilesChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ projectContextFiles: "off" }),
 			makeCallbacks({ onProjectContextFilesChange }),
 		);
 
-		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("project instructions");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\r");
@@ -220,14 +236,14 @@ describe("settings selector", () => {
 		expect(onProjectContextFilesChange).toHaveBeenCalledWith("on-demand", "global");
 	});
 
-	it("returns this directory to global-only from the Project AGENTS.md submenu", () => {
+	it("returns this directory to global-only from the Project instructions submenu", () => {
 		const onProjectContextFilesChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
 			makeConfig({ projectContextFiles: "on-demand", projectContextFilesScope: "directoryProfile" }),
 			makeCallbacks({ onProjectContextFilesChange }),
 		);
 
-		selector.getSettingsList().handleInput("project agents");
+		selector.getSettingsList().handleInput("project instructions");
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("bundled skills discovery", () => {
 	let tempDir: string;
@@ -330,7 +331,9 @@ description: Project override of bundled skill
 This is a project skill that overrides the bundled one.`,
 		);
 
-		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		const settingsManager = SettingsManager.create(cwd, agentDir);
+		settingsManager.setProjectContextFiles("on-demand", "global");
+		const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 		await loader.reload();
 
 		const { skills } = loader.getSkills();

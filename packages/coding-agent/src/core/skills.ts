@@ -262,8 +262,10 @@ export interface LoadSkillsOptions {
 	agentDir: string;
 	/** Explicit skill paths (files or directories) */
 	skillPaths: string[];
-	/** Include default skills directories. */
+	/** Include default global skills directories. */
 	includeDefaults: boolean;
+	/** Include the default cwd .pi/skills directory. Defaults to includeDefaults for compatibility. */
+	includeProjectDefaults?: boolean;
 	/** Profile UAC gate: when provided, files it denies are never read from disk. */
 	isPathAllowed?: (path: string) => boolean;
 }
@@ -317,6 +319,8 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 	if (includeDefaults) {
 		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", options.isPathAllowed));
+	}
+	if (options.includeProjectDefaults ?? includeDefaults) {
 		addSkills(
 			loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", options.isPathAllowed),
 		);

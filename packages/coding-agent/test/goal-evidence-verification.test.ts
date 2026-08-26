@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Message } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { isCompletedBackgroundToolEvidence } from "../src/core/background-tool-task-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createGoalState, isGoalState, parseGoalState, serializeGoalState } from "../src/core/goals/goal-state.ts";
 import { applyGoalAction } from "../src/core/goals/goal-tool-core.ts";
@@ -75,6 +76,20 @@ describe("goal evidence ref verification", () => {
 		const state = getState();
 		expect(state?.evidence.find((e) => e.id === "e-real")?.verified).toBe(true);
 		expect(state?.evidence.find((e) => e.id === "e-bogus")?.verified).toBe(false);
+	});
+
+	it.each([
+		["running", false],
+		["failed", false],
+		["canceled", false],
+		["completed", true],
+	] as const)("only a %s background tool_task verifies as completed=%s", (status, expected) => {
+		expect(
+			isCompletedBackgroundToolEvidence(
+				[{ taskId: "tool-task-1", toolCallId: "call-1", goalId: "g1", status }],
+				"tool-task-1",
+			),
+		).toBe(expected);
 	});
 
 	it("kind 'tool' verifies false (not true) when hasToolCallId is not wired at all", async () => {

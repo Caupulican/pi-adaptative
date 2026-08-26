@@ -3149,9 +3149,14 @@ export class SettingsManager {
 		return this.settings.quietStartup ?? false;
 	}
 
-	/** Repository context files are off unless a settings layer opts in. Global agent-dir files always load. */
+	/** Repository instruction resources are off unless a settings layer opts in. Global resources always load. */
 	getProjectContextFiles(): "on-demand" | "off" {
 		return this.settings.projectContextFiles === "on-demand" ? "on-demand" : "off";
+	}
+
+	/** One authoritative admission decision for project AGENTS-family context and instruction-bearing resources. */
+	areProjectInstructionsEnabled(): boolean {
+		return this.getProjectContextFiles() === "on-demand";
 	}
 
 	/** Which settings layer last set `projectContextFiles`, if any. */

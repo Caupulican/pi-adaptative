@@ -64,7 +64,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
-| `/settings` | Thinking level, theme, Project AGENTS.md, message delivery, transport |
+| `/settings` | Thinking level, theme, project instructions, message delivery, transport |
 | `/secrets` | Manage Bitwarden-backed project credential profiles |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
@@ -126,16 +126,17 @@ Useful session commands:
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
-## Context Files
+## Project Instructions
 
-Pi discovers `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` context files from:
+Pi always injects global `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` files from `~/.pi/agent/` and admits global/bundled instruction resources. Project instruction resources remain off until explicitly enabled:
 
-- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions (always injected)
-- parent directories and the current directory, only after that directory/project opts in
+- project `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` paths from parent directories and the current directory
+- project `.pi/SYSTEM.md` and `.pi/APPEND_SYSTEM.md` system-prompt overrides
+- project-scoped extensions, skills, and prompt templates discovered through project directories, settings, packages, extensions, or built-in SDK file-path inputs
 
-Global files are scanned for prompt-injection/exfiltration phrases and injected into the system prompt. Repository files are off until you opt in (`/settings` → Project AGENTS.md). Opt-in lists their paths so the agent can read them; they are not injected at startup. Set Load to **global-only**, or pass `--no-context-files` (`-nc`), to keep only the global file.
+Use `/settings` → **Project instructions**. **global-only** excludes those project instruction resources; explicitly supplying a project path through the built-in SDK does not enable it. **on-demand** lists project context-file paths for the agent to read and admits project system-prompt overrides plus project-scoped extension, skill, and prompt sources. Global AGENTS-family files are scanned for prompt-injection/exfiltration phrases and injected into the system prompt. Project AGENTS-family files are listed, not injected at startup. `--no-context-files` (`-nc`) separately suppresses project context-file paths for one session. See [Project Instructions](settings.md#project-instructions) for the operator boundary and [SDK: Project Instructions](sdk.md#project-instructions) for exact file-backed inputs.
 
-Delegated workers receive the same final, profile-filtered context snapshot selected for the parent: sanitized global contents plus opted-in project paths. An explicit worker `path` still narrows native filesystem tools; carrying context into the worker does not widen its read/write scope.
+Delegated workers receive the same final, profile-filtered context snapshot and global-only guidance selected for the parent. An explicit worker `path` still narrows native filesystem tools; carrying context into the worker does not widen its read/write scope.
 
 ### System Prompt Files
 
@@ -144,7 +145,7 @@ Replace the default system prompt with:
 - `.pi/SYSTEM.md` for a project
 - `~/.pi/agent/SYSTEM.md` globally
 
-Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location.
+Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location. Project copies are discovered only when **Project instructions** is **on-demand** and the project is trusted; otherwise matching global files remain the fallback.
 
 ## Exporting and Sharing Sessions
 

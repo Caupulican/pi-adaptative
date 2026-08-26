@@ -213,6 +213,8 @@ interface PackageFilter {
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
 const RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts", "themes"];
+const PROJECT_INSTRUCTION_RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts"];
+const NON_PROJECT_INSTRUCTION_RESOURCE_TYPES: ResourceType[] = ["themes"];
 
 const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	extensions: /\.(ts|js)$/,
@@ -628,10 +630,37 @@ export class DefaultPackageManager implements PackageManager {
 		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
+		const projectInstructionsEnabled = this.settingsManager.areProjectInstructionsEnabled();
 
-		// Dedupe: project scope wins over global for same package identity
-		const packageSources = this.dedupePackages(collectConfiguredPackageSources(globalSettings, projectSettings));
-		await this.resolvePackageSources(packageSources, accumulator, onMissing);
+		const configuredPackageSources = collectConfiguredPackageSources(globalSettings, projectSettings);
+		const packageSources = this.dedupePackages(configuredPackageSources);
+		await this.resolvePackageSources(packageSources, accumulator, onMissing, {
+			includeProjectInstructionResources: projectInstructionsEnabled,
+		});
+		if (!projectInstructionsEnabled) {
+			// A duplicate project package remains authoritative for non-skill resources, but its
+			// globally configured counterpart still authorizes global skills. Resolve only those
+			// shadowed global skills so project skill directories are never traversed first.
+			const retainedGlobalPackageIdentities = new Set(
+				packageSources
+					.filter((entry) => entry.scope === "user")
+					.map((entry) =>
+						this.getPackageIdentity(typeof entry.pkg === "string" ? entry.pkg : entry.pkg.source, "user"),
+					),
+			);
+			const shadowedGlobalPackages = this.dedupePackages(
+				configuredPackageSources.filter(
+					(entry) =>
+						entry.scope === "user" &&
+						!retainedGlobalPackageIdentities.has(
+							this.getPackageIdentity(typeof entry.pkg === "string" ? entry.pkg : entry.pkg.source, "user"),
+						),
+				),
+			);
+			await this.resolvePackageSources(shadowedGlobalPackages, accumulator, onMissing, {
+				resourceTypes: PROJECT_INSTRUCTION_RESOURCE_TYPES,
+			});
+		}
 
 		const globalBaseDir = this.agentDir;
 		const projectBaseDir = join(this.cwd, CONFIG_DIR_NAME);
@@ -639,7 +668,10 @@ export class DefaultPackageManager implements PackageManager {
 		for (const resourceType of RESOURCE_TYPES) {
 			const target = this.getTargetMap(accumulator, resourceType);
 			const globalEntries = (globalSettings[resourceType] ?? []) as string[];
-			const projectEntries = (projectSettings[resourceType] ?? []) as string[];
+			const projectEntries =
+				resourceType !== "themes" && !projectInstructionsEnabled
+					? []
+					: ((projectSettings[resourceType] ?? []) as string[]);
 			this.resolveLocalEntries(
 				projectEntries,
 				resourceType,
@@ -952,8 +984,14 @@ export class DefaultPackageManager implements PackageManager {
 		sources: Array<{ pkg: PackageSource; scope: SourceScope }>,
 		accumulator: ResourceAccumulator,
 		onMissing?: (source: string) => Promise<MissingSourceAction>,
+		options?: { includeProjectInstructionResources?: boolean; resourceTypes?: readonly ResourceType[] },
 	): Promise<void> {
 		for (const { pkg, scope } of sources) {
+			const resourceTypes =
+				options?.resourceTypes ??
+				(scope === "project" && options?.includeProjectInstructionResources === false
+					? NON_PROJECT_INSTRUCTION_RESOURCE_TYPES
+					: RESOURCE_TYPES);
 			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
 			const filter = typeof pkg === "object" ? pkg : undefined;
 			const parsed = this.parseSource(sourceStr);
@@ -961,7 +999,7 @@ export class DefaultPackageManager implements PackageManager {
 
 			if (parsed.type === "local") {
 				const baseDir = this.getBaseDirForScope(scope);
-				this.resolveLocalExtensionSource(parsed, accumulator, filter, metadata, baseDir);
+				this.resolveLocalExtensionSource(parsed, accumulator, filter, metadata, baseDir, resourceTypes);
 				continue;
 			}
 
@@ -991,7 +1029,7 @@ export class DefaultPackageManager implements PackageManager {
 					installedPath = this.getNpmInstallPath(parsed, scope);
 				}
 				metadata.baseDir = installedPath;
-				this.collectPackageResources(installedPath, accumulator, filter, metadata);
+				this.collectPackageResources(installedPath, accumulator, filter, metadata, resourceTypes);
 				continue;
 			}
 
@@ -1004,7 +1042,7 @@ export class DefaultPackageManager implements PackageManager {
 					await this.refreshTemporaryGitSource(parsed, sourceStr);
 				}
 				metadata.baseDir = installedPath;
-				this.collectPackageResources(installedPath, accumulator, filter, metadata);
+				this.collectPackageResources(installedPath, accumulator, filter, metadata, resourceTypes);
 			}
 		}
 	}
@@ -1015,23 +1053,26 @@ export class DefaultPackageManager implements PackageManager {
 		filter: PackageFilter | undefined,
 		metadata: PathMetadata,
 		baseDir: string,
+		resourceTypes: readonly ResourceType[] = RESOURCE_TYPES,
 	): void {
 		const resolved = this.resolvePathFromBase(source.path, baseDir);
 		if (!existsSync(resolved)) {
 			return;
 		}
+		const extensionsAllowed = resourceTypes.includes("extensions");
 
 		try {
 			const stats = statSync(resolved);
 			if (stats.isFile()) {
+				if (!extensionsAllowed) return;
 				metadata.baseDir = dirname(resolved);
 				this.addResource(accumulator.extensions, resolved, metadata, true);
 				return;
 			}
 			if (stats.isDirectory()) {
 				metadata.baseDir = resolved;
-				const resources = this.collectPackageResources(resolved, accumulator, filter, metadata);
-				if (!resources) {
+				const resources = this.collectPackageResources(resolved, accumulator, filter, metadata, resourceTypes);
+				if (!resources && extensionsAllowed) {
 					this.addResource(accumulator.extensions, resolved, metadata, true);
 				}
 			}
@@ -1366,10 +1407,7 @@ export class DefaultPackageManager implements PackageManager {
 		});
 	}
 
-	/**
-	 * Dedupe packages: if same package identity appears in both global and project,
-	 * keep only the project one (project wins).
-	 */
+	/** Dedupe package identities; project settings remain authoritative for duplicate sources. */
 	private dedupePackages(
 		packages: Array<{ pkg: PackageSource; scope: SourceScope }>,
 	): Array<{ pkg: PackageSource; scope: SourceScope }> {
@@ -1383,11 +1421,9 @@ export class DefaultPackageManager implements PackageManager {
 			if (!existing) {
 				seen.set(identity, entry);
 			} else if (entry.scope === "project" && existing.scope === "user") {
-				// Project wins over user
 				seen.set(identity, entry);
 			}
-			// If existing is project and new is global, keep existing (project)
-			// If both are same scope, keep first one
+			// Equal scopes keep their first entry; project keeps precedence over user.
 		}
 
 		return Array.from(seen.values());
@@ -1760,9 +1796,10 @@ export class DefaultPackageManager implements PackageManager {
 		accumulator: ResourceAccumulator,
 		filter: PackageFilter | undefined,
 		metadata: PathMetadata,
+		resourceTypes: readonly ResourceType[] = RESOURCE_TYPES,
 	): boolean {
 		if (filter) {
-			for (const resourceType of RESOURCE_TYPES) {
+			for (const resourceType of resourceTypes) {
 				const patterns = filter[resourceType as keyof PackageFilter];
 				const target = this.getTargetMap(accumulator, resourceType);
 				if (patterns !== undefined) {
@@ -1776,7 +1813,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		const manifest = this.readPiManifest(packageRoot);
 		if (manifest) {
-			for (const resourceType of RESOURCE_TYPES) {
+			for (const resourceType of resourceTypes) {
 				const entries = manifest[resourceType as keyof PiManifest];
 				this.addManifestEntries(
 					entries,
@@ -1790,7 +1827,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		let hasAnyDir = false;
-		for (const resourceType of RESOURCE_TYPES) {
+		for (const resourceType of resourceTypes) {
 			const dir = join(packageRoot, resourceType);
 			if (existsSync(dir)) {
 				// Collect all files from the directory (all enabled by default)
@@ -2001,9 +2038,11 @@ export class DefaultPackageManager implements PackageManager {
 		};
 		const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
 		const projectTrusted = this.settingsManager.isProjectTrusted();
-		const projectAgentsSkillDirs = projectTrusted
-			? collectAncestorAgentsSkillDirs(this.cwd).filter((dir) => resolve(dir) !== resolve(userAgentsSkillsDir))
-			: [];
+		const projectInstructionsEnabled = this.settingsManager.areProjectInstructionsEnabled();
+		const projectAgentsSkillDirs =
+			projectTrusted && projectInstructionsEnabled
+				? collectAncestorAgentsSkillDirs(this.cwd).filter((dir) => resolve(dir) !== resolve(userAgentsSkillsDir))
+				: [];
 
 		const addResources = (
 			resourceType: ResourceType,
@@ -2019,7 +2058,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		};
 
-		if (projectTrusted) {
+		if (projectTrusted && projectInstructionsEnabled) {
 			// Project extensions from .pi/
 			addResources(
 				"extensions",
@@ -2028,7 +2067,9 @@ export class DefaultPackageManager implements PackageManager {
 				projectOverrides.extensions,
 				projectBaseDir,
 			);
+		}
 
+		if (projectTrusted && projectInstructionsEnabled) {
 			// Project skills from .pi/
 			addResources(
 				"skills",
@@ -2055,7 +2096,7 @@ export class DefaultPackageManager implements PackageManager {
 			);
 		}
 
-		if (projectTrusted) {
+		if (projectTrusted && projectInstructionsEnabled) {
 			addResources(
 				"prompts",
 				collectAutoPromptEntries(projectDirs.prompts),
@@ -2063,6 +2104,9 @@ export class DefaultPackageManager implements PackageManager {
 				projectOverrides.prompts,
 				projectBaseDir,
 			);
+		}
+
+		if (projectTrusted) {
 			addResources(
 				"themes",
 				collectAutoThemeEntries(projectDirs.themes),

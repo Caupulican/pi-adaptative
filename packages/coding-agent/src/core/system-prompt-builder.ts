@@ -237,6 +237,16 @@ export class SystemPromptBuilder {
 		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools only when the current request explicitly asks for them or genuinely depends on their data/action; cwd, repository, prior session, wildcard profile, or tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
 
+	private _buildProjectInstructionIsolationPrompt(profile: ModelCapabilityProfile): string | undefined {
+		const mode = this.deps.getSettingsManager().getProjectContextFiles?.();
+		if (mode !== "off") return undefined;
+		if (profile.class !== "full") {
+			return "NO PROJECT INSTRUCTIONS.";
+		}
+		return `PI PROJECT INSTRUCTION ISOLATION
+- Global-only mode is active. Never discover, read, or apply project-local AGENTS-family files or skills. Never use cwd/ancestor .pi/skills, .agents/skills, .codex/skills, or .claude/skills through ordinary tools. Global, bundled, and explicitly external user resources remain available. Enable project instructions on-demand before using project-local instruction resources.`;
+	}
+
 	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
 		if (this.deps.isChildSession()) return undefined;
 		const settingsManager = this.deps.getSettingsManager();
@@ -320,6 +330,7 @@ export class SystemPromptBuilder {
 			this._buildSituationSoulPrompt(),
 			// Always-on untrusted-content boundary contract (gives the <untrusted_content> fences meaning).
 			UNTRUSTED_BOUNDARY_SYSTEM_RULE,
+			this._buildProjectInstructionIsolationPrompt(modelCapability),
 			this._buildSelfModificationPrompt(modelCapability),
 			this._buildAutonomyPrompt(modelCapability),
 			this._buildWorkLifecyclePrompt(validToolNames),

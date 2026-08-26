@@ -4,7 +4,7 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
-import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH, validateSkillName } from "../skills.ts";
+import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH, type Skill, validateSkillName } from "../skills.ts";
 import { runSkillAudit, type SkillAuditReport } from "./skill-audit.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -34,11 +34,14 @@ export interface SkillifyToolDetails {
 	report?: SkillifyReport;
 }
 
-export interface SkillifyToolOptions {}
+export interface SkillifyToolOptions {
+	/** Host-admitted skill universe; omitting it retains standalone backwards compatibility. */
+	getSkills?: () => readonly Skill[];
+}
 
 export function createSkillifyToolDefinition(
 	cwd: string,
-	_options?: SkillifyToolOptions,
+	options?: SkillifyToolOptions,
 ): ToolDefinition<typeof skillifySchema, SkillifyReport> {
 	return {
 		name: "skillify",
@@ -82,10 +85,11 @@ export function createSkillifyToolDefinition(
 			}
 
 			// Do not tokenize an oversized draft; retain the existing-skill report for the proposal.
+			const admittedSkills = options?.getSkills?.();
 			const audit =
 				bodyBytes > MAX_ACTIVE_SKILL_BODY_BYTES
-					? runSkillAudit(cwd)
-					: runSkillAudit(cwd, { name, description, body });
+					? runSkillAudit(cwd, undefined, admittedSkills)
+					: runSkillAudit(cwd, { name, description, body }, admittedSkills);
 
 			const valid = errors.length === 0;
 			const proposedPath = join(homedir(), ".pi", "agent", "skills", name, "SKILL.md");

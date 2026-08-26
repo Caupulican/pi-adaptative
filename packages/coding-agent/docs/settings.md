@@ -49,11 +49,11 @@ Edit directly or use `/settings` for common options.
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
 | `showHardwareCursor` | boolean | `false` | Show the terminal cursor while TUI positions it for IME support |
 
-### Context Files
+### Project Instructions
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `projectContextFiles` | string | `"off"` | Opt-in for repository `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`. `"off"` (default) loads only `~/.pi/agent` files. `"on-demand"` lists this project's files for the agent to read. Save per directory, per project, or globally. |
+| `projectContextFiles` | string | `"off"` | Project-instruction policy. `"off"` (default, shown as `global-only`) admits trusted global/bundled resources and physically external configured catalogs but excludes project `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`, `.pi/SYSTEM.md`/`.pi/APPEND_SYSTEM.md`, extensions, skills, and prompt templates even when a built-in SDK option or trusted catalog explicitly supplies their path. `"on-demand"` admits those project instruction resources. Save per directory, per project, or globally. |
 
 ```json
 {
@@ -61,7 +61,11 @@ Edit directly or use `/settings` for common options.
 }
 ```
 
-Enable from `/settings` → **Project AGENTS.md**. Choose save scope (this directory, this project, or all projects) and Load (`global-only` or `on-demand`). `--no-context-files` (`-nc`) also skips project files for that session. Neither disables the global file. Restart or `/reload` after changing the setting.
+Use `/settings` → **Project instructions**. Choose save scope (this directory, this project, or all projects) and Load (`global-only` or `on-demand`). In `global-only`, Pi excludes project instruction paths before content reads, discoverable-list insertion, or module import. The same decision covers automatic discovery, direct settings and project packages, extension-contributed paths, explicit built-in SDK file options, path-backed overrides, direct extension load/list methods, and registered external-resource catalogs. Path explicitness or catalog trust does not grant project authority; lexical and canonical targets are both checked, so symlink aliases cannot cross the boundary. Registering and trusting a project directory authorizes catalog scanning but does not reclassify its instruction files as external.
+
+Trusted global/bundled resources, configured catalogs that resolve outside the physical project, inert project themes, and already-materialized caller content remain available. A true external SDK path remains subject to its existing resource-profile and extension-import gates. `--no-context-files` (`-nc`) separately skips project context files for that session. Restart or `/reload` after changing the setting.
+
+**Confirmed scope:** system-prompt file resolution, package/resource discovery, SDK/resource-loader path admission, skill audit/skillify inputs, root/worker system guidance, and reload behavior enforce the same persisted setting. Ordinary project files remain available as task data; global-only mode is an instruction-admission boundary, not a hidden-filesystem sandbox. See [SDK: Project Instructions](sdk.md#project-instructions) for the exact built-in file-backed inputs and materialized-data controls.
 
 ### Update checks
 

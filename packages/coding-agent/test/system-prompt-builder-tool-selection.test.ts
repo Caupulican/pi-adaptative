@@ -23,6 +23,7 @@ function makeDeps(overrides: Partial<SystemPromptBuilderDeps> = {}): SystemPromp
 		getAutoLearnSettings: () => ({ enabled: false }),
 		getAutonomySettings: () => ({ mode: "off" }),
 		getWorkerDelegationSettings: () => ({ enabled: false }),
+		getProjectContextFiles: () => "off",
 	} as unknown as SettingsManager;
 	const resourceLoader = {
 		getSystemPrompt: () => undefined,
@@ -106,6 +107,42 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 
 		expect(prompt).not.toContain("PI AUTONOMY");
 		expect(prompt).not.toContain("ROOT REFLECTION");
+	});
+
+	it("applies global-only project instruction isolation to root and worker prompts", () => {
+		const root = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt(["read", "skill"]);
+		expect(root).toContain("PI PROJECT INSTRUCTION ISOLATION");
+		expect(root).toContain("Never discover, read, or apply project-local AGENTS-family files or skills");
+
+		const child = new SystemPromptBuilder(makeDeps({ isChildSession: () => true })).rebuildSystemPrompt([
+			"read",
+			"skill",
+		]);
+		expect(child).toContain("PI PROJECT INSTRUCTION ISOLATION");
+
+		const constrained = new SystemPromptBuilder(
+			makeDeps({
+				getModelCapabilityProfile: () => ({
+					class: "chat",
+					contextWindow: 4_096,
+					reasonCode: "test",
+					systemPromptMaxChars: 2_048,
+					backgroundLanesEnabled: false,
+					laneMaxOutputTokens: 1_024,
+				}),
+			}),
+		).rebuildSystemPrompt(["read", "skill"]);
+		expect(constrained).toContain("NO PROJECT INSTRUCTIONS.");
+		expect(constrained).not.toContain("PI PROJECT INSTRUCTION ISOLATION");
+
+		const enabledSettings = {
+			...makeDeps().getSettingsManager(),
+			getProjectContextFiles: () => "on-demand" as const,
+		} as SettingsManager;
+		const enabled = new SystemPromptBuilder(
+			makeDeps({ getSettingsManager: () => enabledSettings }),
+		).rebuildSystemPrompt(["read", "skill"]);
+		expect(enabled).not.toContain("PI PROJECT INSTRUCTION ISOLATION");
 	});
 
 	it("renders the five-step root lifecycle and gates tool-specific ownership", () => {

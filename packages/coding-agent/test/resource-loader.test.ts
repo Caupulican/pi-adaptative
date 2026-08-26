@@ -76,6 +76,54 @@ Skill content here.`,
 			expect(skills.some((s) => s.name === "test-skill")).toBe(true);
 		});
 
+		it("keeps user resources but excludes project instruction resources while global-only", async () => {
+			const userSkill = join(agentDir, "skills", "user-only");
+			const projectSkill = join(cwd, ".pi", "skills", "project-only");
+			const projectExtension = join(cwd, ".pi", "extensions", "project-only.ts");
+			const projectPrompt = join(cwd, ".pi", "prompts", "project-only.md");
+			for (const [directory, name] of [
+				[userSkill, "user-only"],
+				[projectSkill, "project-only"],
+			] as const) {
+				mkdirSync(directory, { recursive: true });
+				writeFileSync(
+					join(directory, "SKILL.md"),
+					`---\nname: ${name}\ndescription: Test skill\n---\nSkill content`,
+				);
+			}
+			mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(projectExtension, "export default function() {}");
+			writeFileSync(projectPrompt, "---\ndescription: Project-only prompt\n---\nProject content");
+
+			const globalOnly = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: SettingsManager.inMemory({ projectContextFiles: "off" }),
+			});
+			await globalOnly.reload();
+			expect(globalOnly.getSkills().skills.map((skill) => skill.name)).toContain("user-only");
+			expect(globalOnly.getSkills().skills.map((skill) => skill.name)).not.toContain("project-only");
+			expect(globalOnly.getExtensions().extensions.map((extension) => extension.path)).not.toContain(
+				projectExtension,
+			);
+			expect(globalOnly.getPrompts().prompts.map((prompt) => prompt.name)).not.toContain("project-only");
+
+			const projectEnabledSettings = settingsWithExtensionsGranted("project-only.ts");
+			projectEnabledSettings.setProjectContextFiles("on-demand", "global");
+			const projectEnabled = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: projectEnabledSettings,
+			});
+			await projectEnabled.reload();
+			expect(projectEnabled.getSkills().skills.map((skill) => skill.name)).toContain("project-only");
+			expect(projectEnabled.getExtensions().extensions.map((extension) => extension.path)).toContain(
+				projectExtension,
+			);
+			expect(projectEnabled.getPrompts().prompts.map((prompt) => prompt.name)).toContain("project-only");
+		});
+
 		it("should ignore extra markdown files in auto-discovered skill dirs", async () => {
 			const skillDir = join(agentDir, "skills", "pi-skills", "browser-tools");
 			mkdirSync(skillDir, { recursive: true });
@@ -184,7 +232,11 @@ Project skill`,
 			}
 			writeFileSync(projectThemePath, JSON.stringify(baseTheme, null, 2));
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: SettingsManager.inMemory({ projectContextFiles: "on-demand" }),
+			});
 			await loader.reload();
 
 			const prompt = loader.getPrompts().prompts.find((p) => p.name === "commit");
@@ -216,6 +268,7 @@ Project skill`,
 			createDirectoryLink(sharedExtDir, join(cwd, ".pi", "extensions"));
 
 			const settingsManager = settingsWithExtensionsGranted("shared.ts");
+			settingsManager.setProjectContextFiles("on-demand", "global");
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir,
@@ -269,11 +322,9 @@ Project skill`,
 }`,
 			);
 
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				settingsManager: settingsWithExtensionsGranted("project.ts", "user.ts"),
-			});
+			const settingsManager = settingsWithExtensionsGranted("project.ts", "user.ts");
+			settingsManager.setProjectContextFiles("on-demand", "global");
+			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 			await loader.reload();
 
 			const extensionsResult = loader.getExtensions();
@@ -937,7 +988,11 @@ Content`,
 			mkdirSync(piDir, { recursive: true });
 			writeFileSync(join(piDir, "SYSTEM.md"), "You are a helpful assistant.");
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: SettingsManager.inMemory({ projectContextFiles: "on-demand" }),
+			});
 			await loader.reload();
 
 			expect(loader.getSystemPrompt()).toBe("You are a helpful assistant.");
@@ -948,11 +1003,42 @@ Content`,
 			mkdirSync(piDir, { recursive: true });
 			writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "Additional instructions.");
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager: SettingsManager.inMemory({ projectContextFiles: "on-demand" }),
+			});
 			await loader.reload();
 
 			expect(loader.getAppendSystemPrompt()).toContain("Additional instructions.");
 		});
+
+		it.each([
+			["off", "GLOBAL_SYSTEM", "GLOBAL_APPEND", "PROJECT_SYSTEM", "PROJECT_APPEND"],
+			["on-demand", "PROJECT_SYSTEM", "PROJECT_APPEND", "GLOBAL_SYSTEM", "GLOBAL_APPEND"],
+		] as const)(
+			"applies %s policy before project SYSTEM.md and APPEND_SYSTEM.md discovery",
+			async (projectContextFiles, expectedSystem, expectedAppend, excludedSystem, excludedAppend) => {
+				const piDir = join(cwd, ".pi");
+				mkdirSync(piDir, { recursive: true });
+				writeFileSync(join(piDir, "SYSTEM.md"), "PROJECT_SYSTEM");
+				writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "PROJECT_APPEND");
+				writeFileSync(join(agentDir, "SYSTEM.md"), "GLOBAL_SYSTEM");
+				writeFileSync(join(agentDir, "APPEND_SYSTEM.md"), "GLOBAL_APPEND");
+
+				const loader = new DefaultResourceLoader({
+					cwd,
+					agentDir,
+					settingsManager: SettingsManager.inMemory({ projectContextFiles }),
+				});
+				await loader.reload();
+
+				expect.soft(loader.getSystemPrompt()).toBe(expectedSystem);
+				expect.soft(loader.getSystemPrompt()).not.toContain(excludedSystem);
+				expect.soft(loader.getAppendSystemPrompt()).toContain(expectedAppend);
+				expect.soft(loader.getAppendSystemPrompt()).not.toContain(excludedAppend);
+			},
+		);
 	});
 
 	describe("extendResources", () => {
@@ -1020,6 +1106,63 @@ Extra prompt content`,
 			expect(loadedPrompt?.sourceInfo?.source).toBe("extension:extra");
 			expect(loadedPrompt?.sourceInfo?.path).toBe(promptPath);
 		});
+
+		it.each([
+			["off", false],
+			["on-demand", true],
+		] as const)(
+			"applies %s policy to project-scoped extension-contributed skills and prompts",
+			async (projectContextFiles, projectResourcesExpected) => {
+				const projectSkillDir = join(tempDir, "extension-project-skills", "project-extension-skill");
+				const userSkillDir = join(tempDir, "extension-user-skills", "user-extension-skill");
+				const projectPromptPath = join(tempDir, "extension-project-prompts", "project-extension-prompt.md");
+				const userPromptPath = join(tempDir, "extension-user-prompts", "user-extension-prompt.md");
+				for (const [directory, name] of [
+					[projectSkillDir, "project-extension-skill"],
+					[userSkillDir, "user-extension-skill"],
+				] as const) {
+					mkdirSync(directory, { recursive: true });
+					writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: Test\n---\nBody`);
+				}
+				for (const [promptPath, description] of [
+					[projectPromptPath, "Project extension prompt"],
+					[userPromptPath, "User extension prompt"],
+				] as const) {
+					mkdirSync(join(promptPath, ".."), { recursive: true });
+					writeFileSync(promptPath, `---\ndescription: ${description}\n---\nBody`);
+				}
+
+				const loader = new DefaultResourceLoader({
+					cwd,
+					agentDir,
+					settingsManager: SettingsManager.inMemory({ projectContextFiles }),
+				});
+				await loader.reload();
+				const metadata = (scope: "project" | "user", baseDir: string) => ({
+					source: `extension:${scope}`,
+					scope,
+					origin: "top-level" as const,
+					baseDir,
+				});
+				loader.extendResources({
+					skillPaths: [
+						{ path: projectSkillDir, metadata: metadata("project", projectSkillDir) },
+						{ path: userSkillDir, metadata: metadata("user", userSkillDir) },
+					],
+					promptPaths: [
+						{ path: projectPromptPath, metadata: metadata("project", join(projectPromptPath, "..")) },
+						{ path: userPromptPath, metadata: metadata("user", join(userPromptPath, "..")) },
+					],
+				});
+
+				const skillNames = loader.getSkills().skills.map((skill) => skill.name);
+				const promptNames = loader.getPrompts().prompts.map((prompt) => prompt.name);
+				expect(skillNames).toContain("user-extension-skill");
+				expect(promptNames).toContain("user-extension-prompt");
+				expect.soft(skillNames.includes("project-extension-skill")).toBe(projectResourcesExpected);
+				expect.soft(promptNames.includes("project-extension-prompt")).toBe(projectResourcesExpected);
+			},
+		);
 
 		it("should apply the active resource profile to extension-contributed (resources_discover) resources", async () => {
 			// Regression: an allowed extension could re-introduce skills/prompts the profile blocks,

@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../src/core/skill-vault.ts";
@@ -46,6 +48,35 @@ describe("skillify", () => {
 		expect(result.details.errors).toHaveLength(0);
 		expect(result.details.proposedPath).toContain("my-test-skill");
 		expect(result.details.draft.name).toBe("my-test-skill");
+	});
+
+	it("audits only the host-admitted skill set instead of rediscovering cwd project skills", async () => {
+		const root = mkdtempSync(join(tmpdir(), "skillify-global-only-"));
+		try {
+			const projectSkill = join(root, ".pi", "skills", "project-only");
+			mkdirSync(projectSkill, { recursive: true });
+			writeFileSync(
+				join(projectSkill, "SKILL.md"),
+				"---\nname: project-only\ndescription: Must remain excluded\n---\nProject instructions",
+			);
+			const tool = createSkillifyToolDefinition(root, { getSkills: () => [] });
+
+			const result = await tool.execute(
+				"test-global-only",
+				{
+					name: "admitted-only",
+					description: "Audit only host-admitted skills",
+					body: "Procedure",
+				},
+				undefined,
+				undefined,
+				createMockContext(),
+			);
+
+			expect(result.details.audit.skills.map((skill) => skill.name)).not.toContain("project-only");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects invalid skill name", async () => {

@@ -942,6 +942,8 @@ export class RuntimeBuilder {
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
 			artifact_retrieve: { artifactStore: toolArtifactStore },
+			skill_audit: { getSkills: () => resourceLoader.getSkills().skills },
+			skillify: { getSkills: () => resourceLoader.getSkills().skills },
 			extensionify: {
 				agentDir: this.deps.getAgentDir(),
 				loadExtension: async ({ extensionPath, cwd }) => {

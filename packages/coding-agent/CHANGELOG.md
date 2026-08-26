@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Made `projectContextFiles: "off"` a complete global-only instruction boundary: project context files, project `.pi/SYSTEM.md`/`.pi/APPEND_SYSTEM.md` overrides, and project-scoped extensions, skills, and prompts are excluded before instruction-content reads, returned listing contribution, or import across built-in SDK file options, path-backed overrides, direct extension loaders, contributed resources, trusted external-resource catalogs, audit, runtime guidance, reloads, and delegated workers. Lexical and canonical path checks close symlink aliases, and catalog trust cannot relabel a physical project path; trusted global/bundled resources, physically external catalogs, caller-materialized content, on-demand mode, and inert project themes remain available.
+
+### Fixed
+
+- Stopped cited failed or canceled background tool tasks from permanently blocking goal completion after terminal settlement, while running tasks still block and terminal failures remain invalid as completion evidence.
+
 ## [0.97.7] - 2026-08-26
 
 ### Fixed

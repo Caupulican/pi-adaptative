@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME, getBundledExtensionsDir, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
@@ -7,7 +7,7 @@ import type { ResourceDiagnostic } from "./diagnostics.ts";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
-import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
+import { canonicalizePath, getCwdRelativePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { configFile, resourceDir } from "./agent-paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
@@ -128,21 +128,78 @@ interface ResourceLoaderSnapshot {
 	lastThemePaths: string[];
 }
 
-function resolvePromptInput(input: string | undefined, description: string): string | undefined {
-	if (!input) {
-		return undefined;
-	}
+const PROJECT_CONTEXT_FILENAMES = new Set(["agents.md", "claude.md", "gemini.md"]);
+const PROJECT_ROOT_MARKERS = [
+	".git",
+	".hg",
+	".svn",
+	"package.json",
+	"pyproject.toml",
+	"Cargo.toml",
+	"go.mod",
+	join(CONFIG_DIR_NAME, "settings.json"),
+] as const;
 
-	if (existsSync(input)) {
-		try {
-			return readFileSync(input, "utf-8");
-		} catch (error) {
-			console.error(chalk.yellow(`Warning: Could not read ${description} file ${input}: ${error}`));
-			return input;
+interface ResolvedPromptInput {
+	content: string | undefined;
+	blockedProjectPath: boolean;
+}
+
+function isPathWithin(candidatePath: string, rootPath: string): boolean {
+	return getCwdRelativePath(candidatePath, rootPath) !== undefined;
+}
+
+function collectProjectInstructionRoots(cwd: string): string[] {
+	const roots = new Set<string>();
+	let current = resolvePath(cwd);
+	roots.add(current);
+	while (true) {
+		if (PROJECT_ROOT_MARKERS.some((marker) => existsSync(join(current, marker)))) {
+			roots.add(current);
 		}
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return Array.from(roots);
+}
+
+function isProjectInstructionLocation(candidatePath: string, cwd: string, projectRoots: string[]): boolean {
+	if (projectRoots.some((root) => isPathWithin(candidatePath, root))) return true;
+	if (
+		PROJECT_CONTEXT_FILENAMES.has(basename(candidatePath).toLowerCase()) &&
+		isPathWithin(cwd, dirname(candidatePath))
+	) {
+		return true;
 	}
 
-	return input;
+	let current = resolvePath(cwd);
+	while (true) {
+		if (isPathWithin(candidatePath, join(current, CONFIG_DIR_NAME))) return true;
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return false;
+}
+
+function resolvePromptInput(
+	input: string | undefined,
+	description: string,
+	isPathAdmitted: (path: string) => boolean,
+): ResolvedPromptInput {
+	if (!input) return { content: undefined, blockedProjectPath: false };
+
+	const resolvedInput = resolvePath(input);
+	if (!existsSync(resolvedInput)) return { content: input, blockedProjectPath: false };
+	if (!isPathAdmitted(resolvedInput)) return { content: undefined, blockedProjectPath: true };
+
+	try {
+		return { content: readFileSync(resolvedInput, "utf-8"), blockedProjectPath: false };
+	} catch (error) {
+		console.error(chalk.yellow(`Warning: Could not read ${description} file ${input}: ${error}`));
+		return { content: input, blockedProjectPath: false };
+	}
 }
 
 /**
@@ -389,6 +446,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private extensionThemeSourceInfos: Map<string, SourceInfo>;
 	private lastPromptPaths: string[];
 	private lastThemePaths: string[];
+	private readonly projectInstructionRoots: string[];
+	private readonly alwaysTrustedInstructionRoots: string[];
 	private pendingReloadSnapshot: ResourceLoaderSnapshot | undefined;
 
 	constructor(options: DefaultResourceLoaderOptions) {
@@ -396,6 +455,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.agentDir = resolvePath(options.agentDir);
 		this.settingsManager = options.settingsManager ?? SettingsManager.create(this.cwd, this.agentDir);
 		this.eventBus = options.eventBus ?? createEventBus();
+		this.projectInstructionRoots = Array.from(
+			new Set([
+				...collectProjectInstructionRoots(this.cwd),
+				...collectProjectInstructionRoots(canonicalizePath(this.cwd)),
+			]),
+		);
+		this.alwaysTrustedInstructionRoots = Array.from(
+			new Set(
+				[this.agentDir, getBundledExtensionsDir(), getBundledSkillsDir(), getBundledPromptsDir()].map((path) =>
+					resolvePath(path),
+				),
+			),
+		);
 		this.packageManager = new DefaultPackageManager({
 			cwd: this.cwd,
 			agentDir: this.agentDir,
@@ -553,6 +625,52 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return this.appendSystemPrompt;
 	}
 
+	private isAlwaysTrustedInstructionLocation(candidatePath: string): boolean {
+		const canonicalCandidate = canonicalizePath(candidatePath);
+		return this.alwaysTrustedInstructionRoots.some((root) => {
+			const resolvedRoot = resolvePath(root);
+			return (
+				isPathWithin(candidatePath, resolvedRoot) &&
+				isPathWithin(canonicalCandidate, canonicalizePath(resolvedRoot))
+			);
+		});
+	}
+
+	private isProjectInstructionPath(resourcePath: string): boolean {
+		if (!isLocalPath(resourcePath)) return false;
+		const resolvedCwd = resolvePath(this.cwd);
+		const canonicalCwd = canonicalizePath(resolvedCwd);
+		const canonicalRoots = this.projectInstructionRoots.map((root) => canonicalizePath(root));
+		const candidates = new Set([resolvePath(resourcePath), resolvePath(resourcePath, this.cwd)]);
+		for (const candidate of candidates) {
+			if (this.isAlwaysTrustedInstructionLocation(candidate)) continue;
+			const canonicalCandidate = canonicalizePath(candidate);
+			if (
+				isProjectInstructionLocation(candidate, resolvedCwd, this.projectInstructionRoots) ||
+				isProjectInstructionLocation(canonicalCandidate, canonicalCwd, canonicalRoots)
+			) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private isInstructionPathAdmitted(resourcePath: string, scope?: PathMetadata["scope"]): boolean {
+		if (this.settingsManager.areProjectInstructionsEnabled()) return true;
+		return scope !== "project" && !this.isProjectInstructionPath(resourcePath);
+	}
+
+	private filterInstructionPaths(paths: string[], metadataByPath?: Map<string, PathMetadata>): string[] {
+		return paths.filter((path) => this.isInstructionPathAdmitted(path, metadataByPath?.get(path)?.scope));
+	}
+
+	private blockedExtensionLoadResult(extensionPath: string): { extension: Extension | null; error: string | null } {
+		return {
+			extension: null,
+			error: `Project context files are disabled; refused project instruction path: ${extensionPath}`,
+		};
+	}
+
 	/**
 	 * Get all discoverable extension paths (enabled and disabled).
 	 * Used for profile resource filtering to show the full universe of available extensions.
@@ -560,25 +678,23 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async getDiscoverableExtensionPaths(): Promise<string[]> {
 		await this.settingsManager.reload();
 		const resolvedPaths = await this.packageManager.resolve();
-		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
+		const additionalExtensionPaths = this.filterInstructionPaths(this.additionalExtensionPaths);
+		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(additionalExtensionPaths, {
 			temporary: true,
 		});
-		// Return all paths (enabled and disabled) from resolved, CLI, AND external-resource-root sources.
-		// External-root extensions are loaded just like the others (see reload), so they MUST appear in the
-		// profile editor's universe too — otherwise they're active but unblockable, and the editor wrongly
-		// shows "(none available)" while they run (bug: external extensions invisible to the profile editor).
+		// Return all admitted paths (enabled and disabled) from resolved, CLI, AND external-resource-root sources.
 		const allPaths = new Set<string>();
 		for (const resource of resolvedPaths.extensions) {
-			allPaths.add(resource.path);
+			if (this.isInstructionPathAdmitted(resource.path, resource.metadata.scope)) allPaths.add(resource.path);
 		}
 		for (const resource of cliExtensionPaths.extensions) {
-			allPaths.add(resource.path);
+			if (this.isInstructionPathAdmitted(resource.path, resource.metadata.scope)) allPaths.add(resource.path);
 		}
-		for (const p of this.discoverExternalExtensionPaths()) {
-			allPaths.add(p);
+		for (const path of this.discoverExternalExtensionPaths()) {
+			if (this.isInstructionPathAdmitted(path)) allPaths.add(path);
 		}
-		for (const p of this.discoverBundledExtensionPaths()) {
-			allPaths.add(p);
+		for (const path of this.discoverBundledExtensionPaths()) {
+			if (this.isInstructionPathAdmitted(path)) allPaths.add(path);
 		}
 		return Array.from(allPaths);
 	}
@@ -637,6 +753,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	 * Returns the loaded extension or null with error details.
 	 */
 	async loadSingleExtension(extensionPath: string): Promise<{ extension: Extension | null; error: string | null }> {
+		if (!this.isInstructionPathAdmitted(extensionPath)) return this.blockedExtensionLoadResult(extensionPath);
 		const result = await loadExtension(extensionPath, this.cwd, this.eventBus, this.extensionsResult.runtime, {
 			fresh: true,
 			agentDir: this.agentDir,
@@ -657,6 +774,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		extensionPath: string,
 		cwd: string,
 	): Promise<{ extension: Extension | null; error: string | null }> {
+		if (!this.isInstructionPathAdmitted(extensionPath)) return this.blockedExtensionLoadResult(extensionPath);
 		return loadExtension(extensionPath, cwd, createEventBus(), createExtensionRuntime(), {
 			fresh: true,
 			agentDir: this.agentDir,
@@ -683,7 +801,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		// Extension-contributed resources (via the resources_discover event) must respect the
 		// active resource profile too — otherwise an allowed extension can re-introduce skills/
 		// prompts/themes the profile blocks.
-		const allowPath = (entry: { path: string }, kind: ResourceProfileKind): boolean =>
+		const allowPath = (entry: { path: string; metadata: PathMetadata }, kind: ResourceProfileKind): boolean =>
+			(kind === "themes" || this.isInstructionPathAdmitted(entry.path, entry.metadata.scope)) &&
 			this.filterPathsByProfile([entry.path], kind).length > 0;
 		const skillPaths = this.normalizeExtensionPaths(paths.skillPaths ?? []).filter((e) => allowPath(e, "skills"));
 		const promptPaths = this.normalizeExtensionPaths(paths.promptPaths ?? []).filter((e) => allowPath(e, "prompts"));
@@ -802,7 +921,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 				await this.settingsManager.reload();
 			}
 			const resolvedPaths = await this.packageManager.resolve();
-			const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
+			const additionalExtensionPaths = this.filterInstructionPaths(this.additionalExtensionPaths);
+			const cliExtensionPaths = await this.packageManager.resolveExtensionSources(additionalExtensionPaths, {
 				temporary: true,
 			});
 			const metadataByPath = new Map<string, PathMetadata>();
@@ -827,9 +947,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 				resources: Array<{ path: string; enabled: boolean; metadata: PathMetadata }>,
 			): string[] => getEnabledResources(resources).map((r) => r.path);
 
-			const enabledExtensions = getEnabledPaths(resolvedPaths.extensions);
-			const enabledSkillResources = getEnabledResources(resolvedPaths.skills);
-			const enabledPrompts = getEnabledPaths(resolvedPaths.prompts);
+			const enabledExtensions = getEnabledResources(resolvedPaths.extensions)
+				.filter((resource) => this.isInstructionPathAdmitted(resource.path, resource.metadata.scope))
+				.map((resource) => resource.path);
+			const enabledSkillResources = getEnabledResources(resolvedPaths.skills).filter((resource) =>
+				this.isInstructionPathAdmitted(resource.path, resource.metadata.scope),
+			);
+			const enabledPrompts = getEnabledResources(resolvedPaths.prompts)
+				.filter((resource) => this.isInstructionPathAdmitted(resource.path, resource.metadata.scope))
+				.map((resource) => resource.path);
 			const enabledThemes = getEnabledPaths(resolvedPaths.themes);
 
 			const mapSkillPath = (resource: { path: string; metadata: PathMetadata }): string => {
@@ -868,9 +994,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
-			const cliEnabledExtensions = getEnabledPaths(cliExtensionPaths.extensions);
-			const cliEnabledSkills = getEnabledPaths(cliExtensionPaths.skills);
-			const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
+			const cliEnabledExtensions = this.filterInstructionPaths(getEnabledPaths(cliExtensionPaths.extensions));
+			const cliEnabledSkills = this.filterInstructionPaths(getEnabledPaths(cliExtensionPaths.skills));
+			const cliEnabledPrompts = this.filterInstructionPaths(getEnabledPaths(cliExtensionPaths.prompts));
 			const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
 			// Gather effective external resource roots
@@ -921,14 +1047,17 @@ export class DefaultResourceLoader implements ResourceLoader {
 				? filterPathsByProfile(externalExtensions, "extensions")
 				: [];
 
-			const extensionPaths = this.noExtensions
-				? profileFilteredCliExtensions
-				: this.mergePaths(profileFilteredCliExtensions, [
-						...defaultOnBundledExtensions,
-						...profileFilteredBundledExtensions,
-						...profileFilteredConfiguredExtensions,
-						...profileFilteredExternalExtensions,
-					]);
+			const extensionPaths = this.filterInstructionPaths(
+				this.noExtensions
+					? profileFilteredCliExtensions
+					: this.mergePaths(profileFilteredCliExtensions, [
+							...defaultOnBundledExtensions,
+							...profileFilteredBundledExtensions,
+							...profileFilteredConfiguredExtensions,
+							...profileFilteredExternalExtensions,
+						]),
+				metadataByPath,
+			);
 
 			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus, {
 				agentDir: this.agentDir,
@@ -944,7 +1073,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				extensionsResult.errors.push({ path: conflict.path, error: conflict.message });
 			}
 
-			for (const p of this.additionalExtensionPaths) {
+			for (const p of additionalExtensionPaths) {
 				if (isLocalPath(p)) {
 					const resolved = this.resolveResourcePath(p);
 					if (!existsSync(resolved)) {
@@ -988,28 +1117,36 @@ export class DefaultResourceLoader implements ResourceLoader {
 					const skillFile = join(entry.path, "SKILL.md");
 					return existsSync(skillFile) ? skillFile : entry.path;
 				});
-			const skillPaths = this.noSkills
-				? this.mergePaths([...cliEnabledSkills], this.additionalSkillPaths)
-				: this.mergePaths(
-						[...cliEnabledSkills, ...enabledSkills, ...externalSkills, ...bundledSkillPaths],
-						this.additionalSkillPaths,
-					);
+			const additionalSkillPaths = this.filterInstructionPaths(this.additionalSkillPaths);
+			const skillPaths = this.filterInstructionPaths(
+				this.noSkills
+					? this.mergePaths([...cliEnabledSkills], additionalSkillPaths)
+					: this.mergePaths(
+							[...cliEnabledSkills, ...enabledSkills, ...externalSkills, ...bundledSkillPaths],
+							additionalSkillPaths,
+						),
+				metadataByPath,
+			);
 
 			this.lastSkillPaths = skillPaths;
-			// Discovery universe: ALL package-resolved skills (profile-denied entries survive
-			// resolve() with enabled=false) plus every other source, pre-filter.
-			this.discoverableSkillPaths = this.mergePaths(
-				[
-					...cliEnabledSkills,
-					...enabledSkillResources.map(mapSkillPath),
-					...resolvedPaths.skills.map(mapSkillPath),
-					...externalSkills,
-					...bundledSkillPaths,
-				],
-				this.additionalSkillPaths,
+			const discoverableResolvedSkillPaths = resolvedPaths.skills
+				.filter((resource) => this.isInstructionPathAdmitted(resource.path, resource.metadata.scope))
+				.map(mapSkillPath);
+			this.discoverableSkillPaths = this.filterInstructionPaths(
+				this.mergePaths(
+					[
+						...cliEnabledSkills,
+						...enabledSkillResources.map(mapSkillPath),
+						...discoverableResolvedSkillPaths,
+						...externalSkills,
+						...bundledSkillPaths,
+					],
+					additionalSkillPaths,
+				),
+				metadataByPath,
 			);
 			this.updateSkillsFromPaths(skillPaths, metadataByPath);
-			for (const p of this.additionalSkillPaths) {
+			for (const p of additionalSkillPaths) {
 				if (isLocalPath(p)) {
 					const resolved = this.resolveResourcePath(p);
 					if (!existsSync(resolved) && !this.skillDiagnostics.some((d) => d.path === resolved)) {
@@ -1044,26 +1181,36 @@ export class DefaultResourceLoader implements ResourceLoader {
 						skipNodeModules: true,
 					})
 				: [];
-			const promptPaths = this.noPromptTemplates
-				? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
-				: this.mergePaths(
-						[...cliEnabledPrompts, ...enabledPrompts, ...externalPrompts, ...bundledPromptPaths],
-						this.additionalPromptTemplatePaths,
-					);
+			const additionalPromptTemplatePaths = this.filterInstructionPaths(this.additionalPromptTemplatePaths);
+			const promptPaths = this.filterInstructionPaths(
+				this.noPromptTemplates
+					? this.mergePaths(cliEnabledPrompts, additionalPromptTemplatePaths)
+					: this.mergePaths(
+							[...cliEnabledPrompts, ...enabledPrompts, ...externalPrompts, ...bundledPromptPaths],
+							additionalPromptTemplatePaths,
+						),
+				metadataByPath,
+			);
 
 			this.lastPromptPaths = promptPaths;
-			this.discoverablePromptPaths = this.mergePaths(
-				[
-					...cliEnabledPrompts,
-					...enabledPrompts,
-					...resolvedPaths.prompts.map((resource) => resource.path),
-					...externalPrompts,
-					...bundledPromptPaths,
-				],
-				this.additionalPromptTemplatePaths,
+			const discoverableResolvedPromptPaths = resolvedPaths.prompts
+				.filter((resource) => this.isInstructionPathAdmitted(resource.path, resource.metadata.scope))
+				.map((resource) => resource.path);
+			this.discoverablePromptPaths = this.filterInstructionPaths(
+				this.mergePaths(
+					[
+						...cliEnabledPrompts,
+						...enabledPrompts,
+						...discoverableResolvedPromptPaths,
+						...externalPrompts,
+						...bundledPromptPaths,
+					],
+					additionalPromptTemplatePaths,
+				),
+				metadataByPath,
 			);
 			this.updatePromptsFromPaths(promptPaths, metadataByPath);
-			for (const p of this.additionalPromptTemplatePaths) {
+			for (const p of additionalPromptTemplatePaths) {
 				if (isLocalPath(p)) {
 					const resolved = this.resolveResourcePath(p);
 					if (!existsSync(resolved) && !this.promptDiagnostics.some((d) => d.path === resolved)) {
@@ -1163,20 +1310,43 @@ export class DefaultResourceLoader implements ResourceLoader {
 						]
 					: [];
 			const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
-			this.agentsFiles = resolvedAgentsFiles.agentsFiles;
-
-			const baseSystemPrompt = resolvePromptInput(
-				this.systemPromptSource ?? this.discoverSystemPromptFile(),
-				"system prompt",
+			this.agentsFiles = resolvedAgentsFiles.agentsFiles.filter(
+				(file) => file.content !== undefined || this.isInstructionPathAdmitted(file.path),
 			);
+
+			const resolveSystemPrompt = (source: string | undefined): ResolvedPromptInput =>
+				resolvePromptInput(source, "system prompt", (path) => this.isInstructionPathAdmitted(path));
+			let baseSystemPrompt: string | undefined;
+			if (this.systemPromptSource !== undefined) {
+				const explicitSystemPrompt = resolveSystemPrompt(this.systemPromptSource);
+				baseSystemPrompt = explicitSystemPrompt.blockedProjectPath
+					? resolveSystemPrompt(this.discoverSystemPromptFile()).content
+					: explicitSystemPrompt.content;
+			} else {
+				baseSystemPrompt = resolveSystemPrompt(this.discoverSystemPromptFile()).content;
+			}
 			this.systemPrompt = this.systemPromptOverride ? this.systemPromptOverride(baseSystemPrompt) : baseSystemPrompt;
 
-			const appendSources =
-				this.appendSystemPromptSource ??
-				(this.discoverAppendSystemPromptFile() ? [this.discoverAppendSystemPromptFile()!] : []);
-			const baseAppend = appendSources
-				.map((s) => resolvePromptInput(s, "append system prompt"))
-				.filter((s): s is string => s !== undefined);
+			const resolveAppendSource = (source: string): ResolvedPromptInput =>
+				resolvePromptInput(source, "append system prompt", (path) => this.isInstructionPathAdmitted(path));
+			let baseAppend: string[];
+			if (this.appendSystemPromptSource !== undefined) {
+				const explicitAppend = this.appendSystemPromptSource.map(resolveAppendSource);
+				baseAppend = explicitAppend
+					.map((result) => result.content)
+					.filter((content): content is string => content !== undefined);
+				if (baseAppend.length === 0 && explicitAppend.some((result) => result.blockedProjectPath)) {
+					const discoveredAppend = this.discoverAppendSystemPromptFile();
+					baseAppend = discoveredAppend
+						? ([resolveAppendSource(discoveredAppend).content].filter(Boolean) as string[])
+						: [];
+				}
+			} else {
+				const discoveredAppend = this.discoverAppendSystemPromptFile();
+				baseAppend = discoveredAppend
+					? ([resolveAppendSource(discoveredAppend).content].filter(Boolean) as string[])
+					: [];
+			}
 			this.appendSystemPrompt = this.appendSystemPromptOverride
 				? this.appendSystemPromptOverride(baseAppend)
 				: baseAppend;
@@ -1209,39 +1379,48 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private updateSkillsFromPaths(skillPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+		const admittedSkillPaths = skillPaths.filter((path) =>
+			this.isInstructionPathAdmitted(path, metadataByPath?.get(path)?.scope),
+		);
 		let skillsResult: { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
-		if (this.noSkills && skillPaths.length === 0) {
+		if (this.noSkills && admittedSkillPaths.length === 0) {
 			skillsResult = { skills: [], diagnostics: [] };
 		} else {
 			skillsResult = loadSkills({
 				cwd: this.cwd,
 				agentDir: this.agentDir,
-				skillPaths,
+				skillPaths: admittedSkillPaths,
 				includeDefaults: false,
+				includeProjectDefaults: false,
 				// Profile UAC: denied skill files are never read from disk.
 				isPathAllowed: (path) => this.filterPathsByProfile([path], "skills").length > 0,
 			});
 		}
 		const resolvedSkills = this.skillsOverride ? this.skillsOverride(skillsResult) : skillsResult;
-		this.skills = resolvedSkills.skills.map((skill) => ({
-			...skill,
-			sourceInfo:
-				this.findSourceInfoForPath(skill.filePath, this.extensionSkillSourceInfos, metadataByPath) ??
-				skill.sourceInfo ??
-				this.getDefaultSourceInfoForPath(skill.filePath),
-		}));
+		this.skills = resolvedSkills.skills
+			.filter((skill) => this.isInstructionPathAdmitted(skill.filePath, skill.sourceInfo?.scope))
+			.map((skill) => ({
+				...skill,
+				sourceInfo:
+					this.findSourceInfoForPath(skill.filePath, this.extensionSkillSourceInfos, metadataByPath) ??
+					skill.sourceInfo ??
+					this.getDefaultSourceInfoForPath(skill.filePath),
+			}));
 		this.skillDiagnostics = resolvedSkills.diagnostics;
 	}
 
 	private updatePromptsFromPaths(promptPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+		const admittedPromptPaths = promptPaths.filter((path) =>
+			this.isInstructionPathAdmitted(path, metadataByPath?.get(path)?.scope),
+		);
 		let promptsResult: { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
-		if (this.noPromptTemplates && promptPaths.length === 0) {
+		if (this.noPromptTemplates && admittedPromptPaths.length === 0) {
 			promptsResult = { prompts: [], diagnostics: [] };
 		} else {
 			const allPrompts = loadPromptTemplates({
 				cwd: this.cwd,
 				agentDir: this.agentDir,
-				promptPaths,
+				promptPaths: admittedPromptPaths,
 				includeDefaults: false,
 				// Profile UAC: denied prompt templates are never read from disk.
 				isPathAllowed: (path) => this.filterPathsByProfile([path], "prompts").length > 0,
@@ -1553,7 +1732,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private discoverSystemPromptFile(): string | undefined {
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md");
-		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
+		if (
+			this.settingsManager.areProjectInstructionsEnabled() &&
+			this.settingsManager.isProjectTrusted() &&
+			existsSync(projectPath)
+		) {
 			return projectPath;
 		}
 
@@ -1567,7 +1750,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private discoverAppendSystemPromptFile(): string | undefined {
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md");
-		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
+		if (
+			this.settingsManager.areProjectInstructionsEnabled() &&
+			this.settingsManager.isProjectTrusted() &&
+			existsSync(projectPath)
+		) {
 			return projectPath;
 		}
 

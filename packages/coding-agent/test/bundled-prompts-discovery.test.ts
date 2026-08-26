@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("bundled prompts discovery", () => {
 	let tempDir: string;
@@ -115,7 +116,9 @@ argument-hint: "[custom lesson]"
 This is a project prompt that overrides the bundled learn prompt.`,
 		);
 
-		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		const settingsManager = SettingsManager.create(cwd, agentDir);
+		settingsManager.setProjectContextFiles("on-demand", "global");
+		const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 		await loader.reload();
 
 		const { prompts } = loader.getPrompts();

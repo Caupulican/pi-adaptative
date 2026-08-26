@@ -101,9 +101,10 @@ Global instructions live in `~/.pi/agent/AGENTS.md` and are always injected. Add
 Pi discovers:
 
 - `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` in `~/.pi/agent/` for global instructions (always injected)
-- `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` from parent directories and the current directory (paths only; read on demand)
+- global and bundled skills
+- project `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` paths, project `.pi/SYSTEM.md`/`.pi/APPEND_SYSTEM.md` system-prompt overrides, and project-scoped extensions, skills, and prompt templates only after project instructions are enabled
 
-Repo `AGENTS.md` is off until you opt in: `/settings` → **Project AGENTS.md**. Set Load to **global-only** to keep only `~/.pi/agent`. Restart pi, or run `/reload`, after changing the setting or global context file contents.
+Project instructions are off by default. Use `/settings` → **Project instructions** and choose **on-demand** to admit those project instruction resources. Choose **global-only** to exclude them while preserving trusted global/bundled resources and inert project themes. Explicit built-in SDK file paths do not bypass this choice; see [SDK: Project Instructions](sdk.md#project-instructions). The canonical operator boundary is in [Project Instructions](settings.md#project-instructions). Restart Pi, or run `/reload`, after changing the setting or global instruction files.
 
 ## Common things to try
 
