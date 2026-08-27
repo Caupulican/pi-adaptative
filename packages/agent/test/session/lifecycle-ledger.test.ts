@@ -308,6 +308,103 @@ describe("session lifecycle ledger", () => {
 		]);
 	});
 
+	it("plans a closer for a start whose assistant toolCall has no request snapshot", () => {
+		const session = SessionManager.inMemory();
+		const assistantMessageEntryId = appendAssistantTools(session, { id: "call-123", name: "bash" });
+		const startEntryId = session.appendForegroundToolStart("r1", assistantMessageEntryId, "call-123", "bash");
+		const inspection = inspectSessionLifecycle(session.getEntries());
+		expect(inspection.unmatchedToolStarts).toEqual([]);
+		expect(inspection.unknownToolOutcomes).toMatchObject([
+			{ requestId: "r1", assistantMessageEntryId, callId: "call-123", startEntryId },
+		]);
+		expect(planSessionLifecycleRepair(session.getEntries()).refused).toBe(false);
+	});
+
+	it("refuses unmatched lifecycle tool starts instead of planning closers", () => {
+		const entries: SessionEntry[] = [
+			entry({
+				type: "message",
+				id: "user-1",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:00.000Z",
+				message: { role: "user", content: "hi", timestamp: 1 },
+			}),
+			entry({
+				type: "message",
+				id: "asst-1",
+				parentId: "user-1",
+				timestamp: "2025-01-01T00:00:01.000Z",
+				message: fauxAssistantMessage("ok"),
+			}),
+			entry({
+				type: "foreground_tool_start",
+				id: "start-1",
+				parentId: "asst-1",
+				timestamp: "2025-01-01T00:00:02.000Z",
+				requestId: "request-1",
+				assistantMessageEntryId: "asst-1",
+				callId: "orphan-call",
+				toolName: "bash",
+			}),
+		];
+		const inspection = inspectSessionLifecycle(entries);
+		expect(inspection.unmatchedToolStarts).toMatchObject([{ id: "start-1", callId: "orphan-call" }]);
+		expect(inspection.unknownToolOutcomes).toEqual([]);
+		const plan = planSessionLifecycleRepair(entries);
+		expect(plan.refused).toBe(true);
+		expect(plan.refusalReasons).toContain("unmatched lifecycle tool starts");
+		expect(plan.toolClosers).toEqual([]);
+	});
+
+	it("refuses unmatched starts loaded through SessionManager.open", () => {
+		const dir = makeTempDir();
+		const file = join(dir, "unmatched.jsonl");
+		const timestamp = "2025-01-01T00:00:00.000Z";
+		writeFileSync(
+			file,
+			`${[
+				JSON.stringify({
+					type: "session",
+					version: 4,
+					id: "s1",
+					timestamp,
+					cwd: dir,
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "m1",
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: "hi", timestamp: 1 },
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "m2",
+					parentId: "m1",
+					timestamp,
+					message: fauxAssistantMessage("ok"),
+				}),
+				JSON.stringify({
+					type: "foreground_tool_start",
+					id: "fs1",
+					parentId: "m2",
+					timestamp,
+					requestId: "r1",
+					assistantMessageEntryId: "m2",
+					callId: "orphan-call",
+					toolName: "bash",
+				}),
+			].join("\n")}\n`,
+		);
+		const session = SessionManager.open(file, dir, dir);
+		const inspection = session.inspectSessionLifecycle();
+		expect(inspection.unmatchedToolStarts).toMatchObject([{ id: "fs1", callId: "orphan-call" }]);
+		expect(inspection.refusalReasons).toContain("unmatched lifecycle tool starts");
+		const plan = session.planSessionLifecycleRepair();
+		expect(plan.refused).toBe(true);
+		expect(plan.toolClosers).toEqual([]);
+	});
+
 	it("maps a legacy assistant call without a request snapshot to outcome unknown, never not-started", () => {
 		const session = SessionManager.inMemory();
 		const assistantMessageEntryId = appendAssistantTools(session, { id: "legacy-call", name: "read" });

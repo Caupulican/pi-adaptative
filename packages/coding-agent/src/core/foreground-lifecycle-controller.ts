@@ -394,18 +394,11 @@ export class ForegroundLifecycleController {
 		const index = this.deps.sessionManager.getSessionLifecycleIndex();
 		const warnings: string[] = [];
 		for (const closer of plan.toolClosers) {
-			const call = index.assistantToolCalls.find(
-				(candidate) =>
-					candidate.assistantMessageEntryId === closer.assistantMessageEntryId &&
-					candidate.callId === closer.callId &&
-					candidate.requestId === closer.requestId,
+			const record = index.toolsByIdentity.get(
+				sessionLifecycleToolIdentityKey(closer.requestId, closer.assistantMessageEntryId, closer.callId),
 			);
-			if (!call) {
-				warnings.push(
-					boundedWarning(`Session lifecycle repair skipped tool ${closer.callId}: assistant call is missing.`),
-				);
-				continue;
-			}
+			const call = record?.assistantCalls[0];
+			if (!call) continue;
 			const synthetic = this.appendRepairResult(closer.toolName, closer.callId, closer.code);
 			if (closer.sourceEntryId && closer.requestId !== undefined) {
 				this.deps.sessionManager.appendForegroundToolTerminal(

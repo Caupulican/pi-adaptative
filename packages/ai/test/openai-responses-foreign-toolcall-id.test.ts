@@ -63,4 +63,32 @@ describe("OpenAI Responses foreign tool call ID normalization", () => {
 		expect(functionCall.id?.length ?? 0).toBeLessThanOrEqual(64);
 		expect(functionCall.id).toMatch(/^fc_[A-Za-z0-9]+$/);
 	});
+
+	it("does not throw when a toolResult toolCallId is missing", () => {
+		const model = getModel("openai-codex", "gpt-5.5");
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_1", name: "edit", arguments: { path: "a.ts" } }],
+			api: "openai-responses",
+			provider: "openai-codex",
+			model: "gpt-5.5",
+			usage,
+			stopReason: "toolUse",
+			timestamp: Date.now() - 2000,
+		};
+		const toolResult = {
+			role: "toolResult",
+			toolName: "edit",
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: Date.now() - 1000,
+		} as ToolResultMessage;
+		const context: Context = {
+			systemPrompt: "You are concise.",
+			messages: [{ role: "user", content: "Use the tool.", timestamp: Date.now() - 3000 }, assistant, toolResult],
+		};
+		expect(() =>
+			convertResponsesMessages(model, context, new Set(["openai", "openai-codex", "opencode"])),
+		).not.toThrow();
+	});
 });

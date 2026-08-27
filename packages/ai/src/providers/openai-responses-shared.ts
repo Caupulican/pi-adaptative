@@ -338,7 +338,7 @@ export function convertResponsesMessages<TApi extends Api>(
 			const textResult = joinTextContent(msg.content);
 			const hasImages = msg.content.some((c): c is ImageContent => c.type === "image");
 			const hasText = textResult.length > 0;
-			const [callId] = msg.toolCallId.split("|");
+			const [callId] = (msg.toolCallId || "").split("|");
 
 			let output: string | ResponseFunctionCallOutputItemList;
 			if (hasImages && model.input.includes("image")) {
