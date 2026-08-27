@@ -146,6 +146,8 @@ export interface WorkerAttemptExecutorOptions {
 	hasPersistedUsageCheckpoint: boolean;
 	usageReportId: string;
 	processCapable: boolean;
+	/** Parent projectContextFiles mode. Omitted defaults to off. */
+	projectContextFiles?: "off" | "on-demand";
 	verificationSubjectTaskId?: string;
 	recoveredTerminal?: RecoveredWorkerTerminalCompletion;
 	retentionPolicy?: WorkerConversationRetentionPolicy;
@@ -545,6 +547,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										modelCapability: options.laneCapability,
 										agentDir: options.agentDir,
 										model: options.model,
+										projectContextFiles: options.projectContextFiles,
 									}),
 									history,
 									messages: [],

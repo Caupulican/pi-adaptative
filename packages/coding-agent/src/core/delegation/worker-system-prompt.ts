@@ -6,6 +6,10 @@ import {
 	type ModelAdaptationRule,
 	ModelAdaptationStore,
 } from "../models/adaptation-store.ts";
+import {
+	buildProjectInstructionIsolationPrompt,
+	type ProjectContextFilesMode,
+} from "../project-instruction-isolation.ts";
 import { formatContextFilesForPrompt } from "../system-prompt.ts";
 
 export interface WorkerModelGuidance {
@@ -41,6 +45,8 @@ export interface BuildWorkerSystemPromptOptions {
 	modelId?: string;
 	/** Target model instance if available. */
 	model?: Model<any>;
+	/** Parent projectContextFiles mode. Omitted defaults to off. */
+	projectContextFiles?: ProjectContextFilesMode;
 }
 
 /** Formats provider and model ID into standard modelRef key. */
@@ -151,7 +157,12 @@ export function buildWorkerSystemPrompt(options: BuildWorkerSystemPromptOptions)
 		rolePrompt: rolePromptParts.join("\n\n"),
 		override: options.override,
 	}).replace(/\r\n?/g, "\n");
+	const isolation = buildProjectInstructionIsolationPrompt({
+		mode: options.projectContextFiles,
+		capabilityClass: options.modelCapability?.class,
+	});
+	const withIsolation = isolation ? `${systemPrompt}\n\n${isolation}` : systemPrompt;
 	return options.modelCapability
-		? enforceModelCapabilitySystemPromptBudget(systemPrompt, options.modelCapability)
-		: systemPrompt;
+		? enforceModelCapabilitySystemPromptBudget(withIsolation, options.modelCapability)
+		: withIsolation;
 }

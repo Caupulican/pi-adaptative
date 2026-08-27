@@ -2181,6 +2181,7 @@ export class WorkerDelegationController {
 			hasPersistedUsageCheckpoint: checkpointUsage !== undefined,
 			usageReportId,
 			processCapable: executionPlan.processEnabled,
+			projectContextFiles: this.deps.getSettingsManager().getProjectContextFiles(),
 			...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),
 			...(recoveredTerminal ? { recoveredTerminal } : {}),
 			...(retentionPolicy ? { retentionPolicy } : {}),

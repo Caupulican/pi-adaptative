@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Injected the global-only project-instruction isolation block into native delegated worker system prompts when `projectContextFiles` is `off`, matching the root session. Isolation survives worker override.
+
 ## [0.97.9] - 2026-08-26
 
 ### Fixed

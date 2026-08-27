@@ -102,4 +102,49 @@ describe("worker-system-prompt", () => {
 			}),
 		).toThrow("minimal system prompt exceeds its 512-character capability budget");
 	});
+
+	it("injects project instruction isolation by default for full workers", () => {
+		const prompt = buildWorkerSystemPrompt({
+			rolePrompt: "Focused role.",
+			modelCapability: { class: "full", systemPromptMaxChars: undefined },
+		});
+
+		expect(prompt).toContain("PI PROJECT INSTRUCTION ISOLATION");
+		expect(prompt).toContain("Never discover, read, or apply project-local AGENTS-family files or skills");
+	});
+
+	it("omits isolation when projectContextFiles is on-demand", () => {
+		const prompt = buildWorkerSystemPrompt({
+			rolePrompt: "Focused role.",
+			projectContextFiles: "on-demand",
+			modelCapability: { class: "full", systemPromptMaxChars: undefined },
+		});
+
+		expect(prompt).not.toContain("PI PROJECT INSTRUCTION ISOLATION");
+		expect(prompt).not.toContain("NO PROJECT INSTRUCTIONS.");
+	});
+
+	it("keeps isolation after worker override", () => {
+		const prompt = buildWorkerSystemPrompt({
+			rolePrompt: "Default worker role.",
+			override: "Owner replacement prompt.",
+			projectContextFiles: "off",
+			modelCapability: { class: "full", systemPromptMaxChars: undefined },
+		});
+
+		expect(prompt).toContain("Owner replacement prompt.");
+		expect(prompt).toContain("PI PROJECT INSTRUCTION ISOLATION");
+		expect(prompt).not.toContain("Default worker role.");
+	});
+
+	it("uses compact isolation for constrained worker models", () => {
+		const prompt = buildWorkerSystemPrompt({
+			rolePrompt: "Focused role.",
+			projectContextFiles: "off",
+			modelCapability: { class: "chat", systemPromptMaxChars: undefined },
+		});
+
+		expect(prompt).toContain("NO PROJECT INSTRUCTIONS.");
+		expect(prompt).not.toContain("PI PROJECT INSTRUCTION ISOLATION");
+	});
 });

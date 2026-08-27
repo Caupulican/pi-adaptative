@@ -24,6 +24,7 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelAdaptationRule } from "./models/adaptation-store.ts";
+import { buildProjectInstructionIsolationPrompt } from "./project-instruction-isolation.ts";
 import {
 	CHAT_WORK_LIFECYCLE_SYSTEM_RULE,
 	DELEGATION_DECISION_RULE,
@@ -238,13 +239,10 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildProjectInstructionIsolationPrompt(profile: ModelCapabilityProfile): string | undefined {
-		const mode = this.deps.getSettingsManager().getProjectContextFiles?.();
-		if (mode !== "off") return undefined;
-		if (profile.class !== "full") {
-			return "NO PROJECT INSTRUCTIONS.";
-		}
-		return `PI PROJECT INSTRUCTION ISOLATION
-- Global-only mode is active. Never discover, read, or apply project-local AGENTS-family files or skills. Never use cwd/ancestor .pi/skills, .agents/skills, .codex/skills, or .claude/skills through ordinary tools. Global, bundled, and explicitly external user resources remain available. Enable project instructions on-demand before using project-local instruction resources.`;
+		return buildProjectInstructionIsolationPrompt({
+			mode: this.deps.getSettingsManager().getProjectContextFiles?.(),
+			capabilityClass: profile.class,
+		});
 	}
 
 	private _buildAutonomyPrompt(profile: ModelCapabilityProfile): string | undefined {
