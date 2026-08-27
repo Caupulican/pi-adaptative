@@ -871,10 +871,7 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		);
 
 		expect(entries.some((entry) => entry.entryId === fresh.entryId)).toBe(true);
-		await awaitState(
-			async () => harness.diagnostics,
-			(diagnostics) => diagnostics.some((text) => text.includes("pruned 2")),
-		);
+		expect(harness.diagnostics.some((text) => /pruned \d+ terminal/.test(text))).toBe(false);
 		await handle.stop();
 	});
 

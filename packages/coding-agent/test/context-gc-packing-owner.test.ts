@@ -135,12 +135,12 @@ describe("context GC packed-message commit", () => {
 	});
 });
 
-describe("context GC reference protection (ledger #144)", () => {
+describe("context GC out-of-window packing (ledger #144)", () => {
 	function packedIds(result: ReturnType<typeof applyContextGc>): string[] {
 		return result.report.records.map((record) => record.toolCallId);
 	}
 
-	it("keeps a shell result whose command is cited by recent assistant text while packing its unreferenced sibling", () => {
+	it("packs out-of-window bulky results even when recent assistant text still cites them", () => {
 		const messages: AgentMessage[] = [
 			assistantToolCall("bash-cited", "bash", { command: "git log --oneline -30" }),
 			toolResult("bash-cited", "bash", bulky("CITED BASH")),
@@ -156,29 +156,73 @@ describe("context GC reference protection (ledger #144)", () => {
 			writePayloads: false,
 		});
 
-		expect(packedIds(result)).toEqual(["bash-uncited"]);
-		expect(result.messages[1]).toBe(messages[1]);
+		expect(packedIds(result)).toEqual(["bash-cited", "bash-uncited"]);
+		expect(JSON.stringify(result.messages[1])).toContain("Context GC packed stale tool result");
 		expect(JSON.stringify(result.messages[3])).toContain("Context GC packed stale tool result");
 	});
 
-	it("keeps a path-scoped result whose file name is cited by recent assistant text while packing an unreferenced sibling", () => {
+	it("does not pack bulky results still inside preserveRecentMessages", () => {
 		const messages: AgentMessage[] = [
-			assistantToolCall("rg-cited", "rg", { pattern: "breaking", path: "docs/CHANGELOG.md" }),
-			toolResult("rg-cited", "rg", bulky("CITED RG")),
-			assistantToolCall("rg-uncited", "rg", { pattern: "notes", path: "src/other-notes.txt" }),
-			toolResult("rg-uncited", "rg", bulky("UNCITED RG")),
-			assistantText("Per CHANGELOG.md the breaking change shipped in the previous minor version."),
+			assistantToolCall("bash-recent", "bash", { command: "git log --oneline -30" }),
+			toolResult("bash-recent", "bash", bulky("RECENT BASH")),
+			assistantText("The git log output shows the regression landed two releases ago."),
 		];
 
 		const result = applyContextGc(messages, {
 			cwd: "/repo",
-			preserveRecentMessages: 0,
+			preserveRecentMessages: 24,
 			minToolResultChars: 20,
 			writePayloads: false,
 		});
 
-		expect(packedIds(result)).toEqual(["rg-uncited"]);
+		expect(packedIds(result)).toEqual([]);
 		expect(result.messages[1]).toBe(messages[1]);
+	});
+
+	it("packs a cited bulky result once it ages out of preserveRecentMessages", () => {
+		const messages: AgentMessage[] = [
+			assistantToolCall("bash-cited", "bash", { command: "git log --oneline -30" }),
+			toolResult("bash-cited", "bash", bulky("CITED BASH")),
+			...Array.from({ length: 24 }, (_, index) => assistantText(`The git log still matters; note ${index}`)),
+		];
+
+		const result = applyContextGc(messages, {
+			cwd: "/repo",
+			preserveRecentMessages: 24,
+			minToolResultChars: 20,
+			writePayloads: false,
+		});
+
+		expect(packedIds(result)).toEqual(["bash-cited"]);
+	});
+
+	it("packs a second-wave bulky result after an earlier pack under the production window", () => {
+		const firstMessages: AgentMessage[] = [
+			assistantToolCall("bash-first", "bash", { command: "git log --oneline -30" }),
+			toolResult("bash-first", "bash", bulky("FIRST WAVE")),
+			...Array.from({ length: 24 }, (_, index) => assistantText(`first-wave note ${index}`)),
+		];
+		const first = applyContextGc(firstMessages, {
+			cwd: "/repo",
+			preserveRecentMessages: 24,
+			minToolResultChars: 20,
+			writePayloads: false,
+		});
+		expect(packedIds(first)).toEqual(["bash-first"]);
+
+		const secondMessages: AgentMessage[] = [
+			...first.messages,
+			assistantToolCall("bash-second", "bash", { command: "npm run typecheck" }),
+			toolResult("bash-second", "bash", bulky("SECOND WAVE")),
+			...Array.from({ length: 24 }, (_, index) => assistantText(`second-wave note ${index}`)),
+		];
+		const second = applyContextGc(secondMessages, {
+			cwd: "/repo",
+			preserveRecentMessages: 24,
+			minToolResultChars: 20,
+			writePayloads: false,
+		});
+		expect(packedIds(second)).toContain("bash-second");
 	});
 
 	it("still packs a superseded read regardless of recent references to its file", () => {
@@ -200,89 +244,5 @@ describe("context GC reference protection (ledger #144)", () => {
 		expect(result.report.records).toHaveLength(1);
 		expect(result.report.records[0]).toMatchObject({ toolCallId: "read-old", reason: "superseded-read" });
 		expect(result.messages[3]).toBe(messages[3]);
-	});
-
-	it("keeps a python code result whose code is cited by recent assistant text while packing an uncited sibling", () => {
-		const messages: AgentMessage[] = [
-			assistantToolCall("py-cited", "python", {
-				code: "manifest = load_manifest()\nprint(manifest.total_bytes)",
-			}),
-			toolResult("py-cited", "python", bulky("CITED PYTHON")),
-			assistantToolCall("py-uncited", "python", { code: "cache.purge()\nprint(cache.stats())" }),
-			toolResult("py-uncited", "python", bulky("UNCITED PYTHON")),
-			assistantText("The manifest totals confirm the size regression."),
-		];
-
-		const result = applyContextGc(messages, {
-			cwd: "/repo",
-			preserveRecentMessages: 0,
-			minToolResultChars: 20,
-			writePayloads: false,
-		});
-
-		expect(packedIds(result)).toEqual(["py-uncited"]);
-		expect(result.messages[1]).toBe(messages[1]);
-	});
-
-	it("keeps a python script result whose scriptPath is cited by recent assistant text while packing an uncited sibling", () => {
-		const messages: AgentMessage[] = [
-			assistantToolCall("script-cited", "python", { scriptPath: "tools/build_report.py" }),
-			toolResult("script-cited", "python", bulky("CITED SCRIPT")),
-			assistantToolCall("script-uncited", "python", { scriptPath: "tools/cleanup_cache.py" }),
-			toolResult("script-uncited", "python", bulky("UNCITED SCRIPT")),
-			assistantText("Per build_report.py the nightly job regressed."),
-		];
-
-		const result = applyContextGc(messages, {
-			cwd: "/repo",
-			preserveRecentMessages: 0,
-			minToolResultChars: 20,
-			writePayloads: false,
-		});
-
-		expect(packedIds(result)).toEqual(["script-uncited"]);
-		expect(result.messages[1]).toBe(messages[1]);
-	});
-
-	it("keeps a run_process result whose argv is cited by recent assistant text while packing an uncited sibling", () => {
-		const messages: AgentMessage[] = [
-			assistantToolCall("proc-cited", "run_process", {
-				executable: "cargo",
-				args: ["build", "--release", "--target-dir", "out/release-build"],
-			}),
-			toolResult("proc-cited", "run_process", bulky("CITED PROCESS")),
-			assistantToolCall("proc-uncited", "run_process", { executable: "7zip", args: ["a", "backup.zip"] }),
-			toolResult("proc-uncited", "run_process", bulky("UNCITED PROCESS")),
-			assistantText("The cargo build output pins the failure to the linker step."),
-		];
-
-		const result = applyContextGc(messages, {
-			cwd: "/repo",
-			preserveRecentMessages: 0,
-			minToolResultChars: 20,
-			tools: ["run_process"],
-			writePayloads: false,
-		});
-
-		expect(packedIds(result)).toEqual(["proc-uncited"]);
-		expect(result.messages[1]).toBe(messages[1]);
-	});
-
-	it("stops protecting once the citation falls outside the last 8 assistant messages", () => {
-		const messages: AgentMessage[] = [
-			assistantToolCall("bash-once-cited", "bash", { command: "git log --oneline -30" }),
-			toolResult("bash-once-cited", "bash", bulky("ONCE CITED BASH")),
-			assistantText("The git log output shows the regression landed two releases ago."),
-			...Array.from({ length: 8 }, (_, index) => assistantText(`unrelated follow-up note ${index}`)),
-		];
-
-		const result = applyContextGc(messages, {
-			cwd: "/repo",
-			preserveRecentMessages: 0,
-			minToolResultChars: 20,
-			writePayloads: false,
-		});
-
-		expect(packedIds(result)).toEqual(["bash-once-cited"]);
 	});
 });

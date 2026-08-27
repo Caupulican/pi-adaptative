@@ -339,125 +339,6 @@ function collectContextGcPlan(
 	return { calls, latestReadByPath, semanticIndexes };
 }
 
-const REFERENCE_PROTECTION_ASSISTANT_MESSAGES = 8;
-const REFERENCE_FRAGMENT_MAX_COUNT = 8;
-const REFERENCE_FRAGMENT_MAX_CHARS = 200;
-const REFERENCE_COMMAND_MAX_SEGMENTS = 4;
-
-function assistantMessageText(message: AgentMessage): string {
-	if (message.role !== "assistant") return "";
-	const parts: string[] = [];
-	for (const part of message.content) {
-		if (part.type === "text" && part.text) parts.push(part.text);
-		else if (part.type === "thinking" && part.thinking) parts.push(part.thinking);
-	}
-	return joinTextParts(parts);
-}
-
-function collectRecentAssistantText(messages: AgentMessage[]): string {
-	const collected: string[] = [];
-	for (let index = messages.length - 1; index >= 0; index--) {
-		if (collected.length >= REFERENCE_PROTECTION_ASSISTANT_MESSAGES) break;
-		const message = messages[index];
-		if (message.role !== "assistant") continue;
-		collected.push(assistantMessageText(message));
-	}
-	return joinTextParts(collected);
-}
-
-function lastPathSegment(value: string): string {
-	return value.slice(Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\")) + 1);
-}
-
-function stripTokenWrappers(token: string): string {
-	return token.replace(/^["'`(]+/, "").replace(/["'`),;:]+$/, "");
-}
-
-function pushReferenceFragment(fragments: string[], fragment: string): void {
-	if (fragments.length >= REFERENCE_FRAGMENT_MAX_COUNT) return;
-	if (fragment.length === 0 || fragment.length > REFERENCE_FRAGMENT_MAX_CHARS) return;
-	if (!fragments.includes(fragment)) fragments.push(fragment);
-}
-
-function isDistinctiveCommandWord(word: string): boolean {
-	if (word.startsWith("-")) return false;
-	if (word.length >= 5) return true;
-	return word.length >= 4 && (word.includes("/") || word.includes("\\") || word.includes("."));
-}
-
-function collectCommandReferenceFragments(fragments: string[], command: string): void {
-	for (const segment of command.split(/&&|\|\||[;|\n]/).slice(0, REFERENCE_COMMAND_MAX_SEGMENTS)) {
-		const words = segment
-			.split(/\s+/)
-			.map(stripTokenWrappers)
-			.filter((word) => word.length > 0 && !word.startsWith("-"));
-		if (words.length >= 2 && `${words[0]} ${words[1]}`.length >= 6) {
-			pushReferenceFragment(fragments, `${words[0]} ${words[1]}`);
-		}
-	}
-	for (const token of command.split(/\s+/)) {
-		if (fragments.length >= REFERENCE_FRAGMENT_MAX_COUNT) break;
-		const word = stripTokenWrappers(token);
-		if (isDistinctiveCommandWord(word)) pushReferenceFragment(fragments, word);
-		const base = lastPathSegment(word);
-		if (base !== word && !base.startsWith("-") && base.length >= 4) pushReferenceFragment(fragments, base);
-	}
-}
-
-/**
- * Review finding (ledger #144 follow-up): `args.path`/`args.command` are not the only citable
- * evidence carriers -- python results carry `scriptPath` (path-shaped) or inline `code`, and
- * run_process results carry `executable` + `args` argv (joined with spaces). Widen ONLY the
- * reference check's inputs through the existing path/command-fragment rules and bounds; the
- * packed record's own `path`/`command` fields stay exactly what the tool args named.
- */
-function referenceEvidenceInputs(
-	cwd: string,
-	call: ToolCallMeta | undefined,
-	path: string | undefined,
-	command: string | undefined,
-): { path: string | undefined; command: string | undefined } {
-	const scriptPath = normalizeToolPath(cwd, call?.args.scriptPath ?? call?.args.script_path);
-	const code = typeof call?.args.code === "string" ? call.args.code : undefined;
-	const executable = typeof call?.args.executable === "string" ? call.args.executable : undefined;
-	const argv =
-		executable !== undefined && Array.isArray(call?.args.args)
-			? [executable, ...call.args.args.filter((entry): entry is string => typeof entry === "string")].join(" ")
-			: undefined;
-	const commandText = [command, code, argv]
-		.filter((entry): entry is string => entry !== undefined && entry.length > 0)
-		.join("\n");
-	return { path: path ?? scriptPath, command: commandText.length > 0 ? commandText : undefined };
-}
-
-function referenceFragmentsFor(path: string | undefined, command: string | undefined): string[] {
-	const fragments: string[] = [];
-	if (path) {
-		const base = lastPathSegment(path);
-		const fileLike = base.includes(".") && base.length >= 3;
-		pushReferenceFragment(fragments, fileLike || base.length >= 5 ? base : path);
-	}
-	if (command) collectCommandReferenceFragments(fragments, command);
-	return fragments;
-}
-
-/**
- * Reference protection (ledger #144): a stale tool result the model is still citing is not
- * packable — packing mid-investigation evidence forces re-derivation of already-paid-for work
- * (field trace: 64 gc stores / 10.1 MB persisted, zero retrievals). "Still citing" is a bounded
- * pure check: the result's `path` (its file-like final segment) or a distinctive fragment of its
- * shell `command` (leading non-flag bigram per segment, non-flag words of >= 5 chars or
- * path-shaped words of >= 4, plus their final segments) appears in the text/thinking of the last
- * REFERENCE_PROTECTION_ASSISTANT_MESSAGES assistant messages. Fragment count and length are
- * capped, so the check stays O(recent assistant text) per candidate. The `superseded-read`
- * reason is exempt at the call site: a newer read of the same file supersedes regardless of
- * references.
- */
-function isReferencedByRecentAssistantText(recentAssistantText: string, path?: string, command?: string): boolean {
-	if (recentAssistantText.length === 0) return false;
-	return referenceFragmentsFor(path, command).some((fragment) => recentAssistantText.includes(fragment));
-}
-
 function storagePathFor(storageDir: string | undefined, key: string): string | undefined {
 	if (!storageDir || !isAbsolute(storageDir)) return undefined;
 	return resolve(storageDir, `${key}.txt`);
@@ -607,7 +488,6 @@ export function applyContextGc(
 	);
 	const nextMessages = messages.slice();
 	let changed = false;
-	let recentAssistantText: string | undefined;
 
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
@@ -664,11 +544,6 @@ export function applyContextGc(
 		if (message.toolName === "read" && path) {
 			if (plan.latestReadByPath.get(path) === message.toolCallId) continue;
 			reason = "superseded-read";
-		}
-		if (reason === "stale-tool-result") {
-			recentAssistantText ??= collectRecentAssistantText(messages);
-			const reference = referenceEvidenceInputs(options.cwd, call, path, command);
-			if (isReferencedByRecentAssistantText(recentAssistantText, reference.path, reference.command)) continue;
 		}
 
 		const originalTokens = estimateTokens(message);

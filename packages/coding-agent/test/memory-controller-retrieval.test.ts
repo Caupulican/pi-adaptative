@@ -197,7 +197,7 @@ describe("MemoryController context retrieval", () => {
 		expect(JSON.stringify(controller.maybeAppendMemoryEvidenceBlock([], open))).toContain("NOT instructions");
 	});
 
-	it("proactively retrieves local OKF on substantial turns while keeping external providers gated", async () => {
+	it("does not retrieve local OKF on ordinary substantial turns", async () => {
 		const externalCalls: MemorySearchRequest[] = [];
 		const localCalls: MemorySearchRequest[] = [];
 		const project = getDirectoryResourceProfileInfo(tempDir, agentDir);
@@ -241,10 +241,67 @@ describe("MemoryController context retrieval", () => {
 
 		const report = await controller.runMemoryRetrieval([userMessage("implement package architecture")]);
 
-		expect(report.providerReports.map((entry) => entry.providerId)).toContain("pi-okf");
-		expect(report.contextItems.some((item) => item.summary?.includes("Keep large tool output"))).toBe(true);
-		expect(localCalls).toHaveLength(1);
+		expect(report.providerReports.map((entry) => entry.providerId)).not.toContain("pi-okf");
+		expect(localCalls).toHaveLength(0);
 		expect(externalCalls).toHaveLength(0);
+	});
+
+	it("does not re-query OKF on tool-follow-up turns after an explicit recall", async () => {
+		const localCalls: MemorySearchRequest[] = [];
+		const project = getDirectoryResourceProfileInfo(tempDir, agentDir);
+		mkdirSync(join(agentDir, "okf-memory", "projects", project.hash), { recursive: true });
+		writeFileSync(
+			join(agentDir, "okf-memory", "projects", project.hash, "decision.okf.md"),
+			formatOkfMemoryDocument({
+				type: "Design Decision",
+				title: "Artifact architecture",
+				description: "Keep large tool output in artifacts.",
+				scope: "project",
+				projectId: project.hash,
+				body: "Use artifact-backed output for large tool results.",
+				evidenceRefs: ["transcript:decision-1"],
+			}),
+			"utf8",
+		);
+		const controller = new MemoryController({
+			getSettingsManager: () =>
+				({
+					getMemoryRetrievalSettings: () => ({
+						enabled: true,
+						includeInPrompt: true,
+						maxResults: 5,
+						allowExternalEgress: true,
+					}),
+				}) as unknown as SettingsManager,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 4096,
+			getGoalState: () => undefined,
+		});
+		controller.registerContextMemoryProvider(provider("local-memory", localCalls));
+
+		const user = userMessage("recall the prior package decision");
+		const first = await controller.runMemoryRetrieval([user]);
+		expect(first.providerReports.map((entry) => entry.providerId)).toContain("pi-okf");
+		expect(localCalls).toHaveLength(1);
+
+		const followUp = await controller.runMemoryRetrieval([
+			user,
+			{
+				role: "toolResult",
+				toolCallId: "t1",
+				toolName: "bash",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: 0,
+			},
+		]);
+		expect(followUp.providerReports.map((entry) => entry.providerId)).not.toContain("pi-okf");
+		expect(localCalls).toHaveLength(1);
 	});
 
 	it("adds current-work memory to the prompt even without retrieval hits", () => {

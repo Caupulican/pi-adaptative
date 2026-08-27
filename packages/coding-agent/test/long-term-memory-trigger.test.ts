@@ -35,11 +35,10 @@ describe("shouldQueryLongTermMemory", () => {
 		).toMatchObject({ shouldQuery: false });
 	});
 
-	it("proactively queries local OKF for substantial ordinary turns without opening external providers", () => {
+	it("skips ordinary substantial work turns instead of querying local OKF", () => {
 		expect(shouldQueryLongTermMemory({ latestUserText: "implement the package decision from yesterday" })).toEqual({
-			shouldQuery: true,
-			reason: "proactive_local_turn",
-			shouldQueryExternal: false,
+			shouldQuery: false,
+			reason: "ordinary_work_turn",
 		});
 	});
 

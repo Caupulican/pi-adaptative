@@ -285,7 +285,7 @@ async function reconcileAndRunOrphanScan(
 	});
 	const originalByEntryId = new Map(entries.map((entry) => [entry.entryId, entry]));
 	const recoveredEntryIdSet = new Set(reconciled.recoveredEntryIds);
-	const [prunedOutcomes, recoveredOutcomes] = await Promise.all([
+	const [, recoveredOutcomes] = await Promise.all([
 		Promise.all(
 			reconciled.prunedEntryIds.map((entryId) => {
 				const original = originalByEntryId.get(entryId);
@@ -303,15 +303,9 @@ async function reconcileAndRunOrphanScan(
 	]);
 	if (signal.aborted) return;
 	const recoveredCount = recoveredOutcomes.filter(Boolean).length;
-	const prunedCount = prunedOutcomes.filter(Boolean).length;
 	if (recoveredCount > 0) {
 		config.onDiagnostic?.(
 			`process-matrix: recovered ${recoveredCount} interrupted Pi worker entr${recoveredCount === 1 ? "y" : "ies"}`,
-		);
-	}
-	if (prunedCount > 0) {
-		config.onDiagnostic?.(
-			`process-matrix: pruned ${prunedCount} terminal or expired entr${prunedCount === 1 ? "y" : "ies"}`,
 		);
 	}
 	const currentEntries = await store.listEntries(config.agentDir);

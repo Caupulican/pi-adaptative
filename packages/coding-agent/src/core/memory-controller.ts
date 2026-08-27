@@ -60,6 +60,10 @@ import { getDirectoryResourceProfileInfo, type SettingsManager } from "./setting
  * surface from the file-store retrieval fallback when the static memory prompt cannot fit,
  * while long-term providers remain gated by shouldQueryLongTermMemory().
  */
+function lastMessageIsUserTurn(messages: AgentMessage[]): boolean {
+	return messages.at(-1)?.role === "user";
+}
+
 function latestUserMessageText(messages: AgentMessage[]): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
@@ -276,7 +280,7 @@ export class MemoryController {
 				currentWorkCandidateCount: currentWork.length,
 			});
 			const providers = this._shouldQueryFileStoreFallback(budget) ? [this._getFileStoreMemoryProvider()] : [];
-			if (longTermDecision.shouldQuery) {
+			if (longTermDecision.shouldQuery && lastMessageIsUserTurn(messages)) {
 				providers.push(
 					this._getMemoryOkfProvider(),
 					...this._pendingContextMemoryProviders.filter((provider) => provider.capabilities.localOnly),
