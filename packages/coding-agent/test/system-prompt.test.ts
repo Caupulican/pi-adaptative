@@ -74,9 +74,9 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Never drop not/never/no/only/except");
 			expect(prompt).toContain("never invent abbreviations or use causal arrows");
 			expect(prompt).toContain("REFERENCE POINTS");
-			expect(prompt).toContain("D for decisions");
-			expect(prompt).toContain("P for paths");
-			expect(prompt).toContain("Never invent p/ tokens the harness did not assign");
+			expect(prompt).toContain("D decisions");
+			expect(prompt).toContain("PATH ALIASES");
+			expect(prompt).toContain("Never invent p/ tokens");
 			expect(prompt).toContain("Preserve numbers, units, code symbols, function/API names, commands, errors");
 			expect(prompt).toContain("Full grammar: security, irreversible actions, ambiguous order");
 			expect(prompt).toContain(

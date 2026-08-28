@@ -304,6 +304,58 @@ describe("MemoryController context retrieval", () => {
 		expect(localCalls).toHaveLength(1);
 	});
 
+	it("still queries OKF for explicit recall when a custom transient follows the user message", async () => {
+		const localCalls: MemorySearchRequest[] = [];
+		const project = getDirectoryResourceProfileInfo(tempDir, agentDir);
+		mkdirSync(join(agentDir, "okf-memory", "projects", project.hash), { recursive: true });
+		writeFileSync(
+			join(agentDir, "okf-memory", "projects", project.hash, "decision.okf.md"),
+			formatOkfMemoryDocument({
+				type: "Design Decision",
+				title: "Artifact architecture",
+				description: "Keep large tool output in artifacts.",
+				scope: "project",
+				projectId: project.hash,
+				body: "Use artifact-backed output for large tool results.",
+				evidenceRefs: ["transcript:decision-1"],
+			}),
+			"utf8",
+		);
+		const controller = new MemoryController({
+			getSettingsManager: () =>
+				({
+					getMemoryRetrievalSettings: () => ({
+						enabled: true,
+						includeInPrompt: true,
+						maxResults: 5,
+						allowExternalEgress: true,
+					}),
+				}) as unknown as SettingsManager,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 4096,
+			getGoalState: () => undefined,
+		});
+		controller.registerContextMemoryProvider(provider("local-memory", localCalls));
+
+		const report = await controller.runMemoryRetrieval([
+			userMessage("recall the prior package decision"),
+			{
+				role: "custom",
+				customType: "pi.current-turn-reflection",
+				content: "Pending evidence classes: root-turn.",
+				display: false,
+				timestamp: 1,
+			},
+		]);
+		expect(report.providerReports.map((entry) => entry.providerId)).toContain("pi-okf");
+		expect(localCalls).toHaveLength(1);
+	});
+
 	it("adds current-work memory to the prompt even without retrieval hits", () => {
 		const controller = new MemoryController({
 			getSettingsManager: settings,

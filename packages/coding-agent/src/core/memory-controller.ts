@@ -61,7 +61,12 @@ import { getDirectoryResourceProfileInfo, type SettingsManager } from "./setting
  * while long-term providers remain gated by shouldQueryLongTermMemory().
  */
 function lastMessageIsUserTurn(messages: AgentMessage[]): boolean {
-	return messages.at(-1)?.role === "user";
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role === "custom") continue;
+		return message.role === "user";
+	}
+	return false;
 }
 
 function latestUserMessageText(messages: AgentMessage[]): string {
