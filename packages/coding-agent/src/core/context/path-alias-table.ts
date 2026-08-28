@@ -3,7 +3,7 @@ import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 
 const MIN_ALIAS_CHARS = 20;
 const MIN_SEPARATORS = 2;
-const PATH_ALIAS_TOKEN_RE = /\bP(\d+)\b/g;
+const PATH_ALIAS_TOKEN_RE = /\bp\/(?:[\w.+@-]+\/)*[\w.+@-]+/g;
 const WINDOWS_PATH_RE = /\b[A-Za-z]:[\\/][^\s"'<>|*?]+/g;
 const POSIX_ABS_PATH_RE = /(?:^|[\s"'=(`[])(\/(?:[\w.+@-]+\/)+[\w.+@-]+)/g;
 const RELATIVE_PATH_RE = /(?:^|[\s"'=(`[])((?:[\w.+@-]+\/){2,}[\w.+@-]+)/g;
@@ -28,7 +28,7 @@ function separatorCount(value: string): number {
 
 function shouldAlias(path: string): boolean {
 	if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("git@")) return false;
-	if (/^P\d+$/.test(path)) return false;
+	if (/^P#?\d+$/i.test(path) || path.startsWith("p/")) return false;
 	return path.length >= MIN_ALIAS_CHARS || separatorCount(path) >= MIN_SEPARATORS;
 }
 
@@ -67,21 +67,53 @@ export function emptyPathAliasTable(cwd: string): PathAliasTable {
 	return { cwd, entries: [] };
 }
 
+function shortestUniqueSuffixes(paths: readonly string[]): Map<string, string> {
+	const segments = new Map<string, string[]>();
+	for (const path of paths) {
+		segments.set(
+			path,
+			path.split("/").filter((segment) => segment.length > 0),
+		);
+	}
+	const ids = new Map<string, string>();
+	for (const path of paths) {
+		const segs = segments.get(path) ?? [];
+		let depth = 1;
+		while (depth <= segs.length) {
+			const suffix = segs.slice(-depth).join("/");
+			const clash = paths.some((other) => {
+				if (other === path) return false;
+				const otherSegs = segments.get(other) ?? [];
+				return otherSegs.slice(-depth).join("/") === suffix;
+			});
+			if (!clash) {
+				ids.set(path, `p/${suffix}`);
+				break;
+			}
+			depth += 1;
+		}
+		if (!ids.has(path)) ids.set(path, `p/${segs.join("/")}`);
+	}
+	return ids;
+}
+
 export function buildPathAliasTable(cwd: string, texts: readonly string[]): PathAliasTable {
-	const byKey = new Map<string, PathAliasEntry>();
-	const entries: PathAliasEntry[] = [];
+	const byKey = new Map<string, string>();
+	const uniquePaths: string[] = [];
 	for (const text of texts) {
 		for (const candidate of extractPathCandidates(text)) {
 			const path = displayPath(candidate, cwd);
 			const key = path.toLowerCase();
 			if (byKey.has(key)) continue;
-			const id = `P${entries.length + 1}`;
-			const entry = { id, path };
-			byKey.set(key, entry);
-			entries.push(entry);
+			byKey.set(key, path);
+			uniquePaths.push(path);
 		}
 	}
-	return { cwd, entries };
+	const ids = shortestUniqueSuffixes(uniquePaths);
+	return {
+		cwd,
+		entries: uniquePaths.map((path) => ({ id: ids.get(path) ?? `p/${path}`, path })),
+	};
 }
 
 export function formatPathAliasLegend(table: PathAliasTable): string | undefined {
@@ -110,7 +142,7 @@ export function rewriteText(table: PathAliasTable, text: string): string {
 export function expandText(table: PathAliasTable, text: string): string {
 	if (table.entries.length === 0) return text;
 	const byId = new Map(table.entries.map((entry) => [entry.id, entry.path]));
-	return text.replace(PATH_ALIAS_TOKEN_RE, (token, digits: string) => byId.get(`P${digits}`) ?? token);
+	return text.replace(PATH_ALIAS_TOKEN_RE, (token) => byId.get(token) ?? token);
 }
 
 export function expandParams(table: PathAliasTable, params: unknown): unknown {

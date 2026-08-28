@@ -76,7 +76,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("REFERENCE POINTS");
 			expect(prompt).toContain("D for decisions");
 			expect(prompt).toContain("P for paths");
-			expect(prompt).toContain("Never invent P# the harness did not assign");
+			expect(prompt).toContain("Never invent p/ tokens the harness did not assign");
 			expect(prompt).toContain("Preserve numbers, units, code symbols, function/API names, commands, errors");
 			expect(prompt).toContain("Full grammar: security, irreversible actions, ambiguous order");
 			expect(prompt).toContain(

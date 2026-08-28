@@ -56,11 +56,11 @@ Use codes to name important items. This lets you refer back without repeating yo
 - R for risks
 - Q for questions
 - A for actions
-- P for paths (harness-assigned; tool args accept P# or a literal path)
+- P for paths (harness-assigned unique suffix p/grep.ts; tool args accept p/… or a literal path)
 - Invent new references for sections we don't have
 - Preserve your codes throughout the conversation
 - Don't create codes for short simple answers
-- Never invent P# the harness did not assign`;
+- Never invent p/ tokens the harness did not assign`;
 
 const PI_ADAPTATIVE_CORE_SECTION = `
 
