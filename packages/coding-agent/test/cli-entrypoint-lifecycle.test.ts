@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const cliEntrypoint = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+const bunEntrypoint = readFileSync(new URL("../src/bun/cli.ts", import.meta.url), "utf8");
 
 describe("CLI entrypoint lifecycle", () => {
 	it("awaits main so a compiled RPC process retains ownership of its lifetime", () => {
@@ -12,10 +13,21 @@ describe("CLI entrypoint lifecycle", () => {
 	it("keeps finite version and help fast paths ahead of main startup", () => {
 		const mainImport = cliEntrypoint.indexOf('await import("./main.ts")');
 		const powerShellWarmStart = cliEntrypoint.indexOf("startCliPowerShellWarmStart({");
+		const httpDispatcherImport = cliEntrypoint.indexOf('await import("./core/http-dispatcher.ts")');
 		expect(mainImport).toBeGreaterThan(0);
 		expect(cliEntrypoint.indexOf('firstArg === "--version"')).toBeLessThan(mainImport);
+		expect(cliEntrypoint.indexOf('firstArg === "--version"')).toBeLessThan(httpDispatcherImport);
 		expect(cliEntrypoint.indexOf('cliArgs.includes("--help")')).toBeLessThan(mainImport);
 		expect(powerShellWarmStart).toBeGreaterThan(cliEntrypoint.indexOf('cliArgs.includes("--help")'));
 		expect(powerShellWarmStart).toBeLessThan(mainImport);
+	});
+
+	it("prints compiled --version before Bedrock or the full CLI graph", () => {
+		const versionIdx = bunEntrypoint.indexOf('firstArg === "--version"');
+		const bedrockIdx = bunEntrypoint.indexOf('await import("./register-bedrock.ts")');
+		const cliIdx = bunEntrypoint.indexOf('await import("../cli.ts")');
+		expect(versionIdx).toBeGreaterThan(0);
+		expect(versionIdx).toBeLessThan(bedrockIdx);
+		expect(versionIdx).toBeLessThan(cliIdx);
 	});
 });
