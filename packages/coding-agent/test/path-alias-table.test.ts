@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { resolve as pathResolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { describe, expect, it } from "vitest";
 import {
@@ -234,7 +235,11 @@ describe("path alias table", () => {
 	});
 
 	it("rewrites full absolute mentions to a single alias token", () => {
-		const cwd = "/srv/checkout/product";
+		// A real OS-absolute path (drive-letter-bearing on Windows), not a literal posix
+		// "/srv/..." string — node:path treats a bare leading "/" as current-drive-relative
+		// on Windows, so it would not actually be absolute there and the text's own
+		// embedded mention would never match the computed absolute form.
+		const cwd = pathResolve("/srv/checkout/product").replaceAll("\\", "/");
 		const rel = "packages/coding-agent/src/core/context/path-alias-table.ts";
 		const table = buildPathAliasTable(cwd, [`read ${cwd}/${rel}`]);
 		expect(table.entries).toEqual([{ id: "p/path-alias-table.ts", path: rel }]);
