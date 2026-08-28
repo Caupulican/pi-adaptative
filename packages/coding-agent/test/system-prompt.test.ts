@@ -248,4 +248,27 @@ describe("buildSystemPrompt", () => {
 			expect(prompt.match(/- Use dynamic_tool for summaries\./g)).toHaveLength(1);
 		});
 	});
+
+	describe("chat class", () => {
+		test("keeps compact reference points without ultra-terse or path aliases", () => {
+			const prompt = buildSystemPrompt({
+				modelCapability: {
+					class: "chat",
+					contextWindow: 4096,
+					reasonCode: "test",
+					systemPromptMaxChars: 2048,
+				},
+				selectedTools: ["read", "skill"],
+				toolSnippets: { skill: "Search, load, unload specialized instructions on demand." },
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("REFERENCE POINTS");
+			expect(prompt).not.toContain("ULTRA-TERSE OUTPUT");
+			expect(prompt).not.toContain("PATH ALIASES");
+			expect(prompt.length).toBeLessThanOrEqual(2048);
+		});
+	});
 });

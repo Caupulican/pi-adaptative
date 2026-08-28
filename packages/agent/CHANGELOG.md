@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Lifecycle ledger tests cover requestId-dissociated foreground tool starts so resume can rebind in-flight tools.
+
 ## [0.97.9] - 2026-08-26
 
 ## [0.97.8] - 2026-08-26

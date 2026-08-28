@@ -134,6 +134,9 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		).rebuildSystemPrompt(["read", "skill"]);
 		expect(constrained).toContain("NO PROJECT INSTRUCTIONS.");
 		expect(constrained).not.toContain("PI PROJECT INSTRUCTION ISOLATION");
+		expect(constrained).toContain("REFERENCE POINTS");
+		expect(constrained).not.toContain("ULTRA-TERSE OUTPUT");
+		expect(constrained.length).toBeLessThanOrEqual(2048);
 
 		const enabledSettings = {
 			...makeDeps().getSettingsManager(),

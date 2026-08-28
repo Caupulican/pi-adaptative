@@ -42,6 +42,21 @@ describe("shouldQueryLongTermMemory", () => {
 		});
 	});
 
+	it("still queries missing-background recall without treating audit or orientation as recall", () => {
+		expect(shouldQueryLongTermMemory({ latestUserText: "what was the widget rollout plan?" })).toEqual({
+			shouldQuery: true,
+			reason: "missing_background",
+		});
+		expect(shouldQueryLongTermMemory({ latestUserText: "audit the context please" })).toEqual({
+			shouldQuery: false,
+			reason: "ordinary_work_turn",
+		});
+		expect(shouldQueryLongTermMemory({ latestUserText: "become familiar here" })).toEqual({
+			shouldQuery: false,
+			reason: "ordinary_work_turn",
+		});
+	});
+
 	it("fails closed on disabled budgets and secret-like queries", () => {
 		expect(
 			shouldQueryLongTermMemory({ latestUserText: "recall", budget: resolveMemoryPromptBudget({}) }),

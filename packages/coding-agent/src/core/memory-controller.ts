@@ -139,6 +139,8 @@ export class MemoryController {
 	private _localGraphResolved = false;
 	private _latestMemoryRetrievalReport: MemoryRetrievalReport | undefined = undefined;
 	private _latestMemoryPromptInclusionReport: MemoryPromptInclusionReport | undefined = undefined;
+	/** True only when this pass actually admitted long-term providers. */
+	private _lastLongTermQueryAttempted = false;
 	/** Plug-and-play memory subsystem. Recreated on each (re)initialize so reload is safe. */
 	private _memoryManager: MemoryManager = new MemoryManager();
 	/** Active generation's single durable file/OKF writer, also used by parent-owned reflection. */
@@ -268,9 +270,11 @@ export class MemoryController {
 	 * failure (including a provider search error) degrades to an empty report.
 	 */
 	async runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
+		let queriedLongTerm = false;
 		try {
 			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 			if (!settings.enabled) {
+				this._lastLongTermQueryAttempted = false;
 				const report = emptyMemoryRetrievalReport(settings.maxResults);
 				this._latestMemoryRetrievalReport = report;
 				return report;
@@ -284,8 +288,11 @@ export class MemoryController {
 				budget,
 				currentWorkCandidateCount: currentWork.length,
 			});
-			const providers = this._shouldQueryFileStoreFallback(budget) ? [this._getFileStoreMemoryProvider()] : [];
-			if (longTermDecision.shouldQuery && lastMessageIsUserTurn(messages)) {
+			queriedLongTerm = longTermDecision.shouldQuery && lastMessageIsUserTurn(messages);
+			this._lastLongTermQueryAttempted = queriedLongTerm;
+			const queryFileStore = this._shouldQueryFileStoreFallback(budget);
+			const providers = queryFileStore ? [this._getFileStoreMemoryProvider()] : [];
+			if (queriedLongTerm) {
 				providers.push(
 					this._getMemoryOkfProvider(),
 					...this._pendingContextMemoryProviders.filter((provider) => provider.capabilities.localOnly),
@@ -311,11 +318,20 @@ export class MemoryController {
 						: DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 				},
 			);
-			this._latestMemoryRetrievalReport = report;
+			if (
+				queriedLongTerm ||
+				this._latestMemoryRetrievalReport === undefined ||
+				(queryFileStore && (report.contextItems.length > 0 || report.providerReports.length > 0))
+			) {
+				this._latestMemoryRetrievalReport = report;
+			}
 			return report;
 		} catch {
+			this._lastLongTermQueryAttempted = queriedLongTerm;
 			const report = emptyMemoryRetrievalReport(0);
-			this._latestMemoryRetrievalReport = report;
+			if (queriedLongTerm || this._latestMemoryRetrievalReport === undefined) {
+				this._latestMemoryRetrievalReport = report;
+			}
 			return report;
 		}
 	}
@@ -408,6 +424,9 @@ export class MemoryController {
 				return messages;
 			}
 			if (candidates.length === 0) {
+				if (!this._lastLongTermQueryAttempted && this._latestMemoryPromptInclusionReport) {
+					return messages;
+				}
 				this._latestMemoryPromptInclusionReport = {
 					...base,
 					status: "no_results",

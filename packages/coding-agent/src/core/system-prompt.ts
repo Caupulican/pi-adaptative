@@ -95,7 +95,10 @@ CHAT RULES
 
 - Answer concisely from conversation; state uncertainty.
 - No execution tools are active. Do not claim to read files, run commands, or make changes.
-- Say when the request requires a tool-capable model or additional user-provided context.`;
+- Say when the request requires a tool-capable model or additional user-provided context.
+
+REFERENCE POINTS
+D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections. Preserve codes. Do not code short answers.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
 const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;
@@ -260,7 +263,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 				: PI_ADAPTATIVE_CHAT_CORE_SECTION;
 	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}` : "";
 	const pathAliasRule = capabilityClass === "chat" ? "" : PATH_ALIAS_PROMPT_RULE;
-	const operatingContract = `${coreSection}${skillVaultContract}${ULTRA_TERSE_OUTPUT_POLICY}${pathAliasRule}`;
+	const styleContract = capabilityClass === "chat" ? "" : ULTRA_TERSE_OUTPUT_POLICY;
+	const operatingContract = `${coreSection}${skillVaultContract}${styleContract}${pathAliasRule}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;

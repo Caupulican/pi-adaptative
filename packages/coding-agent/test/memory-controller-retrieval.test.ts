@@ -356,6 +356,61 @@ describe("MemoryController context retrieval", () => {
 		expect(localCalls).toHaveLength(1);
 	});
 
+	it("preserves last long-term retrieval diagnostics across an ordinary follow-up user turn", async () => {
+		const localCalls: MemorySearchRequest[] = [];
+		const project = getDirectoryResourceProfileInfo(tempDir, agentDir);
+		mkdirSync(join(agentDir, "okf-memory", "projects", project.hash), { recursive: true });
+		writeFileSync(
+			join(agentDir, "okf-memory", "projects", project.hash, "widget-rollout.okf.md"),
+			formatOkfMemoryDocument({
+				type: "Design Decision",
+				title: "Widget rollout plan",
+				description: "Design decision about the widget rollout plan.",
+				scope: "project",
+				projectId: project.hash,
+				body: "Body.",
+				evidenceRefs: ["transcript:accepted-review"],
+			}),
+			"utf8",
+		);
+		const controller = new MemoryController({
+			getSettingsManager: () =>
+				({
+					getMemoryRetrievalSettings: () => ({
+						enabled: true,
+						includeInPrompt: true,
+						maxResults: 5,
+						allowExternalEgress: true,
+					}),
+				}) as unknown as SettingsManager,
+			getTurnIndex: () => 3,
+			getAgentDir: () => agentDir,
+			getCwd: () => tempDir,
+			getSessionId: () => "session-1",
+			isChildSession: () => false,
+			refreshToolRegistry: () => {},
+			getContextWindow: () => 4096,
+			getGoalState: () => undefined,
+		});
+		controller.registerContextMemoryProvider(provider("local-memory", localCalls));
+
+		const recall = userMessage("what was the widget rollout plan?");
+		const first = await controller.runMemoryRetrieval([recall]);
+		expect(first.providerReports.map((entry) => entry.providerId)).toContain("pi-okf");
+		expect(first.contextItems.length).toBeGreaterThan(0);
+		controller.maybeAppendMemoryEvidenceBlock([recall], first);
+		expect(controller.getMemoryPromptInclusionReport().status).toBe("included");
+
+		const followUp = await controller.runMemoryRetrieval([userMessage("audit the context please")]);
+		expect(followUp.providerReports.map((entry) => entry.providerId)).not.toContain("pi-okf");
+		expect(localCalls).toHaveLength(1);
+		expect(controller.getMemoryRetrievalReport().providerReports.map((entry) => entry.providerId)).toContain(
+			"pi-okf",
+		);
+		controller.maybeAppendMemoryEvidenceBlock([userMessage("audit the context please")], followUp);
+		expect(controller.getMemoryPromptInclusionReport().status).toBe("included");
+	});
+
 	it("adds current-work memory to the prompt even without retrieval hits", () => {
 		const controller = new MemoryController({
 			getSettingsManager: settings,

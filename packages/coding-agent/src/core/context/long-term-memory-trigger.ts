@@ -32,7 +32,7 @@ const PREFERENCE_RE =
 	/\b(preferences?|prefers?|rules?|instructions?|policy|how should|how do you usually|project context|user context)\b/i;
 const DURABLE_ID_RE =
 	/\b(?:goal-[a-z0-9-]+|[A-Z]+-\d+|#[0-9]+|[a-f0-9]{8,40}|build\s*#?\d+|artifact|trello|jenkins|branch)\b/i;
-const MISSING_BACKGROUND_RE = /\b(context|background|what did|where were|what was|remind me|familiar|ready)\b/i;
+const MISSING_BACKGROUND_RE = /\b(background|what did|where were|what was|remind me)\b/i;
 
 function substantial(text: string): boolean {
 	return (

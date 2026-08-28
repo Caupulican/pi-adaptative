@@ -1,8 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Session-stable unique-suffix `p/` path aliases, frozen in session sqlite so the same file keeps the same short code across a session.
+
 ### Fixed
 
 - Injected the global-only project-instruction isolation block into native delegated worker system prompts when `projectContextFiles` is `off`, matching the root session. Isolation survives worker override.
+- Chat-class system prompts omit ULTRA-TERSE and keep compact REFERENCE POINTS so the 2048-character capability budget holds with isolation, skill vault, and lifecycle appends.
+- Silenced process-matrix prune-terminal diagnostics. Context GC packs cited out-of-window bulky tool results.
+- Gated local OKF retrieval to recall-like turns. Ordinary follow-up turns, including `context_audit`, no longer clobber the last long-term retrieval or prompt-inclusion diagnostics.
+- Repaired requestId-dissociated foreground tool starts on resume.
 
 ## [0.97.9] - 2026-08-26
 

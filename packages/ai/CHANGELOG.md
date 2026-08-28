@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- OpenAI Responses replay now keeps foreign tool-call ids so resumed turns can match requestId-dissociated tool starts.
+
 ## [0.97.9] - 2026-08-26
 
 ## [0.97.8] - 2026-08-26
