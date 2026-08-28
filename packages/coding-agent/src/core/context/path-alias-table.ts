@@ -206,6 +206,24 @@ function shortestUniqueSuffixes(
 	return ids;
 }
 
+/**
+ * Upper bound on retained reserved tokens. Without one, an archive listing that contains
+ * a real `p/` tree can push thousands of reservations into the table (and, through the
+ * runtime, into a durable JSON meta blob rewritten every sync) with no decay. The policy
+ * is first-come-keep: once at the cap, later observations are refused rather than
+ * rotating older ones out — eviction would thrash (dropped tokens still visible in
+ * history re-enter on every sync), while refusal is stable and keeps protection on the
+ * repo's own early-observed `p/` paths. Reservations are defense-in-depth either way:
+ * the on-disk `isIdTaken` check remains the hard guard for real `p/` files at mint time.
+ */
+export const MAX_RESERVED_TOKENS = 4_096;
+
+function addReservation(reservations: Set<string>, token: string): void {
+	if (reservations.has(token)) return;
+	if (reservations.size >= MAX_RESERVED_TOKENS) return;
+	reservations.add(token);
+}
+
 export interface ExtendPathAliasOptions {
 	/**
 	 * Texts to scan for reserved `p/...` tokens. Defaults to `texts`. The runtime passes
@@ -228,7 +246,7 @@ export function extendPathAliasTable(
 	const newPaths: string[] = [];
 	for (const text of options?.reservationTexts ?? texts) {
 		for (const match of text.matchAll(STANDALONE_TOKEN_RE)) {
-			if (!entryIds.has(match[0])) reservations.add(match[0]);
+			if (!entryIds.has(match[0])) addReservation(reservations, match[0]);
 		}
 	}
 	for (const text of texts) {
@@ -238,7 +256,7 @@ export function extendPathAliasTable(
 			// `p/` directory, reached via an absolute or `./` mention) is never aliased —
 			// it is reserved so no alias can collide with it.
 			if (path.startsWith("p/")) {
-				reservations.add(path);
+				addReservation(reservations, path);
 				continue;
 			}
 			const key = dedupeKey(path);
@@ -268,11 +286,11 @@ export function buildPathAliasTable(
 	const uniquePaths: string[] = [];
 	const reservations = new Set<string>();
 	for (const text of texts) {
-		for (const match of text.matchAll(STANDALONE_TOKEN_RE)) reservations.add(match[0]);
+		for (const match of text.matchAll(STANDALONE_TOKEN_RE)) addReservation(reservations, match[0]);
 		for (const candidate of extractPathCandidates(text)) {
 			const path = displayPath(candidate, cwd);
 			if (path.startsWith("p/")) {
-				reservations.add(path);
+				addReservation(reservations, path);
 				continue;
 			}
 			const key = dedupeKey(path);

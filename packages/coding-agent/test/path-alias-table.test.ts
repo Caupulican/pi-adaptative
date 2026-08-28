@@ -347,6 +347,19 @@ describe("path alias table", () => {
 		);
 	});
 
+	it("caps reserved tokens at a fixed bound with first-come-keep", () => {
+		const lines: string[] = [];
+		for (let i = 0; i < 5000; i++) lines.push(`entry p/tree/deep-file-${i}.json listed`);
+		const table = buildPathAliasTable("/repo", [lines.join("\n")]);
+		expect(table.reservedIds?.length).toBe(4096);
+		// first-come-keep: the earliest observations survive, the flood tail is refused
+		expect(table.reservedIds).toContain("p/tree/deep-file-0.json");
+		expect(table.reservedIds).not.toContain("p/tree/deep-file-4999.json");
+		// growing an already-capped table stays capped and stable
+		const extended = extendPathAliasTable(table, ["see p/tree/late-arrival.json now"]);
+		expect(extended.table.reservedIds?.length).toBe(4096);
+	});
+
 	it("handles an archive-listing-sized message without quadratic blowup", () => {
 		// Regression pin for a real hang: a single tool result listing thousands of
 		// Windows paths (a 7z archive listing) made candidate dedupe and suffix-clash

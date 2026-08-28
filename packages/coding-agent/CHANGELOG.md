@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Search tool calls no longer stall behind FFF index scans. Every `find`/`grep` routed to the resident FFF backend awaited finder creation inline, and creation waits on a filesystem crawl (up to 15 seconds per attempt, effectively unbounded over WSL `/mnt` mounts with home-directory scanning enabled) — a burst of searches, as when asked to get familiar with a codebase, could stall for minutes. The built-in backend now exposes non-blocking acquisition: a cold finder warms in the background while the search is served immediately by the fd/rg fallback, and FFF takes over once its scan completes. Extension-supplied backends (e.g. SSH remote search) keep their existing awaited contract.
+- Cross-session transcript recall no longer does quadratic work per query: the best-snippet window search rescanned every match position per candidate window (O(m²) for a query token dense in one document, burning the recall worker's budget) and re-lowercased every indexed document on every query. Both are now linear per document.
+- Bounded the path-alias reserved-token set (4,096, first-come-keep, legacy oversized metadata trimmed on load). An archive listing containing a real `p/` tree could previously push thousands of reservations into the durable table with no decay, growing memory and rewriting an ever-larger JSON metadata blob every sync. Refusal beyond the cap is stable (no per-sync churn) and keeps protection on the earliest-observed real `p/` paths; on-disk collision checking at id-mint time remains the hard guard.
+
 ## [0.97.16] - 2026-08-28
 
 ### Fixed

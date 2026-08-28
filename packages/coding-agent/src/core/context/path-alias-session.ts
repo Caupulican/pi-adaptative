@@ -8,6 +8,7 @@ import {
 	emptyPathAliasTable,
 	extendPathAliasTable,
 	formatPathAliasLegend,
+	MAX_RESERVED_TOKENS,
 	type PathAliasTable,
 	rewriteAgentMessages,
 } from "./path-alias-table.ts";
@@ -155,7 +156,10 @@ function readReservedTokens(raw: string | undefined): string[] {
 	if (!raw) return [];
 	try {
 		const parsed = JSON.parse(raw);
-		return Array.isArray(parsed) ? parsed.filter((token) => typeof token === "string") : [];
+		if (!Array.isArray(parsed)) return [];
+		// A legacy meta blob written before the cap existed could exceed it; trim on load
+		// (first-come-keep, matching the in-table policy) so it can never grow again.
+		return parsed.filter((token) => typeof token === "string").slice(0, MAX_RESERVED_TOKENS);
 	} catch {
 		return [];
 	}

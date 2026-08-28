@@ -287,6 +287,38 @@ describe("DefaultFffSearchBackend: install retry semantics", () => {
 		expect(ensureModuleCalls).toBe(1);
 	});
 
+	it("peekFinder never blocks on a scan: cold returns undefined, warms in the background", async () => {
+		const { DefaultFffSearchBackend } = await import("../src/core/tools/fff-search-backend.ts");
+
+		let releaseScan: (() => void) | undefined;
+		const scanGate = new Promise<void>((resolve) => {
+			releaseScan = resolve;
+		});
+		const finder = {
+			...fakeFinder(),
+			waitForScan: async () => {
+				await scanGate;
+				return { ok: true as const, value: true };
+			},
+		};
+		const backend = new DefaultFffSearchBackend({
+			ensureFffModule: async () =>
+				({
+					FileFinder: { create: () => ({ ok: true as const, value: finder }), isAvailable: () => true },
+				}) as never,
+			ensureFffNodePackage: async () => undefined,
+			isInstallRetryable: () => false,
+		});
+
+		// Cold: must answer immediately (fd/rg fallback serves the search) while the
+		// scan — potentially minutes on a WSL /mnt tree — continues in the background.
+		expect(backend.peekFinder("/tmp/slow-scan")).toBeUndefined();
+
+		releaseScan?.();
+		await backend.getFinder("/tmp/slow-scan");
+		expect(backend.peekFinder("/tmp/slow-scan")).toBe(finder);
+	});
+
 	it("uses the real tools-manager wiring by default (no deps injected)", async () => {
 		const { DefaultFffSearchBackend } = await import("../src/core/tools/fff-search-backend.ts");
 		// Just proves the class is constructible with no args and implements the

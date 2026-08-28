@@ -16,6 +16,8 @@ export interface TranscriptDoc {
 interface IndexedDoc {
 	doc: TranscriptDoc;
 	tokens: string[];
+	/** Lowercased once at index time; lowering every document per query is wasted work. */
+	lowerText: string;
 }
 
 export class TranscriptIndex {
@@ -25,6 +27,7 @@ export class TranscriptIndex {
 		this.indexedDocs = docs.map((doc) => ({
 			doc,
 			tokens: tokenize(doc.text),
+			lowerText: doc.text.toLowerCase(),
 		}));
 	}
 
@@ -41,7 +44,7 @@ export class TranscriptIndex {
 		const qSet = new Set(qTokens);
 		const hits: RecallHit[] = [];
 
-		for (const { doc, tokens } of this.indexedDocs) {
+		for (const { doc, tokens, lowerText } of this.indexedDocs) {
 			const dSet = new Set(tokens);
 			let intersection = 0;
 			for (const token of qSet) {
@@ -55,7 +58,6 @@ export class TranscriptIndex {
 			}
 
 			// Find matching indices of query tokens in the document text (case-insensitive)
-			const lowerText = doc.text.toLowerCase();
 			const matchIndices: number[] = [];
 			for (const token of qTokens) {
 				let pos = lowerText.indexOf(token);
@@ -72,6 +74,12 @@ export class TranscriptIndex {
 				matchIndices.sort((a, b) => a - b);
 				let maxMatchesInWindow = 0;
 
+				// Candidate windows are derived from ascending centers, so their start and
+				// end are both non-decreasing: two monotone pointers count the matches per
+				// window instead of rescanning every index for every center, which was
+				// quadratic in match count (a query token dense in one document).
+				let lo = 0;
+				let hi = 0;
 				for (const center of matchIndices) {
 					let start = Math.max(0, center - Math.floor(maxSnippetChars / 2));
 					const end = Math.min(doc.text.length, start + maxSnippetChars);
@@ -79,12 +87,10 @@ export class TranscriptIndex {
 						start = Math.max(0, end - maxSnippetChars);
 					}
 
-					let matches = 0;
-					for (const idx of matchIndices) {
-						if (idx >= start && idx < end) {
-							matches++;
-						}
-					}
+					while (lo < matchIndices.length && (matchIndices[lo] ?? Number.POSITIVE_INFINITY) < start) lo++;
+					if (hi < lo) hi = lo;
+					while (hi < matchIndices.length && (matchIndices[hi] ?? Number.POSITIVE_INFINITY) < end) hi++;
+					const matches = hi - lo;
 
 					if (matches > maxMatchesInWindow) {
 						maxMatchesInWindow = matches;

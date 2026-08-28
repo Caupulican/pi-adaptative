@@ -106,6 +106,18 @@ export interface FffModule {
 
 export interface FffSearchBackend {
 	getFinder(basePath: string): Promise<FffFileFinder | undefined>;
+	/**
+	 * Non-blocking acquisition: the finder for this basePath ONLY when it is already
+	 * warm. When nothing is warm yet, implementations start (or continue) warming in the
+	 * background and return undefined so the current search is served by the fd/rg
+	 * fallback instead of stalling on an index scan — finder creation waits on a
+	 * filesystem crawl (up to 15s per attempt, effectively unbounded over WSL /mnt
+	 * mounts), and a search tool call must never block on an index build.
+	 *
+	 * Optional so extension-supplied backends (e.g. SSH remote search) keep their
+	 * existing awaited-acquisition contract unchanged.
+	 */
+	peekFinder?(basePath: string): FffFileFinder | undefined;
 }
 
 /**
@@ -128,8 +140,26 @@ export async function safeGetFinder(backend: FffSearchBackend, cwd: string): Pro
 }
 
 /**
- * Acquire an FFF finder only when all three routing stages accept it. Finder startup begins before
- * routing so a lazy managed install can progress even when the current request falls back to fd/rg.
+ * Non-throwing wrapper around an optional backend.peekFinder, mirroring safeGetFinder's
+ * guarantee for non-conforming backends: a synchronous throw degrades to "unavailable
+ * for this call" rather than failing the tool call.
+ */
+function safePeekFinder(backend: FffSearchBackend, cwd: string): FffFileFinder | undefined {
+	if (backend.peekFinder === undefined) return undefined;
+	try {
+		return backend.peekFinder(cwd);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Acquire an FFF finder only when all three routing stages accept it. A backend that
+ * supports non-blocking acquisition (peekFinder) is consulted without awaiting: a cold
+ * finder warms in the background while this call falls back to fd/rg, so no search ever
+ * stalls behind an index scan. Backends without peekFinder (extension-supplied) keep the
+ * awaited path, with finder startup begun before routing so a lazy managed install can
+ * progress even when the current request falls back.
  */
 export async function resolveRoutedFffFinder(options: {
 	backend: FffSearchBackend;
@@ -142,7 +172,12 @@ export async function resolveRoutedFffFinder(options: {
 	limit: number;
 	readGitignoreInTree: () => Promise<boolean> | boolean;
 }): Promise<{ finder: FffFileFinder; searchPathRelativeToCwd: string } | undefined> {
-	const finderPromise = safeGetFinder(options.backend, options.cwd);
+	const nonBlocking = options.backend.peekFinder !== undefined;
+	// Warm-up starts before routing so a lazy managed install can progress even when
+	// this call falls back to fd/rg: non-blocking backends warm via the peek itself,
+	// legacy ones via the awaited promise.
+	const peeked = nonBlocking ? safePeekFinder(options.backend, options.cwd) : undefined;
+	const finderPromise = nonBlocking ? undefined : safeGetFinder(options.backend, options.cwd);
 	const searchPathRelativeToCwd = relativePathInside(options.cwd, options.searchPath);
 	const route = (finderAvailable: boolean, pathResolvable: boolean, gitignoreInTree: boolean) =>
 		options.router.route({
@@ -159,7 +194,7 @@ export async function resolveRoutedFffFinder(options: {
 	if (searchPathRelativeToCwd === undefined) return undefined;
 	if (route(true, true, await options.readGitignoreInTree()).backend !== "fff") return undefined;
 
-	const finder = await finderPromise;
+	const finder = nonBlocking ? peeked : await finderPromise;
 	if (!finder || route(true, true, false).backend !== "fff") return undefined;
 	return { finder, searchPathRelativeToCwd };
 }
@@ -287,6 +322,8 @@ const realFffFinderDeps: FffFinderDeps = {
 
 export class DefaultFffSearchBackend implements FffSearchBackend {
 	private readonly finders = new Map<string, Promise<FffFileFinder | undefined>>();
+	/** Settled outcomes only, so peekFinder can answer without awaiting creation. */
+	private readonly warmFinders = new Map<string, FffFileFinder | undefined>();
 	private readonly deps: FffFinderDeps;
 
 	constructor(deps: FffFinderDeps = realFffFinderDeps) {
@@ -303,15 +340,18 @@ export class DefaultFffSearchBackend implements FffSearchBackend {
 		const created = this.createFinder(normalizedBasePath);
 		void created.then(
 			(finder) => {
+				if (this.finders.get(normalizedBasePath) !== created) return;
 				// A genuine install failure (network hiccup, registry blip, ...) must
 				// not permanently gate FFF out of this basePath for the rest of the
 				// process: drop the cache entry so the NEXT search retries instead of
 				// being silently stuck on the fd/rg fallback forever. A stable
 				// "not applicable" outcome (offline mode, unsupported platform) is left
 				// cached, since retrying it would just repeat the same answer.
-				if (!finder && this.deps.isInstallRetryable() && this.finders.get(normalizedBasePath) === created) {
+				if (!finder && this.deps.isInstallRetryable()) {
 					this.finders.delete(normalizedBasePath);
+					return;
 				}
+				this.warmFinders.set(normalizedBasePath, finder);
 			},
 			() => undefined,
 		);
@@ -320,12 +360,27 @@ export class DefaultFffSearchBackend implements FffSearchBackend {
 		return created;
 	}
 
+	peekFinder(basePath: string): FffFileFinder | undefined {
+		if (isFffRuntimeDisabled()) return undefined;
+		const normalizedBasePath = path.resolve(basePath);
+		if (this.warmFinders.has(normalizedBasePath)) return this.warmFinders.get(normalizedBasePath);
+		// Cold: kick off (or continue) creation in the background and let this call fall
+		// back to fd/rg. getFinder never rejects from here (createFinder catches its own
+		// failures into undefined), but guard anyway for non-conforming injected deps.
+		void this.getFinder(normalizedBasePath).then(
+			() => undefined,
+			() => undefined,
+		);
+		return undefined;
+	}
+
 	private evictIfNeeded(): void {
 		while (this.finders.size > MAX_FINDER_CACHE_SIZE) {
 			const firstKey = this.finders.keys().next().value;
 			if (!firstKey) return;
 			const first = this.finders.get(firstKey);
 			this.finders.delete(firstKey);
+			this.warmFinders.delete(firstKey);
 			void first?.then(destroyFinder, () => undefined);
 		}
 	}

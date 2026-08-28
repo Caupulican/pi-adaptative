@@ -81,6 +81,11 @@ class FakeFffBackend implements FffSearchBackend {
 		this.basePaths.push(basePath);
 		return this.finder;
 	}
+
+	peekFinder(basePath: string) {
+		this.basePaths.push(basePath);
+		return this.finder;
+	}
 }
 
 function getText(result: TextToolResult): string {
@@ -568,6 +573,44 @@ describe("FFF-backed built-in search tools", () => {
 			await expect(
 				tryFffGrep({
 					backend: throwingBackend,
+					router: defaultSearchRouter,
+					cwd: tempRoot,
+					searchPath: tempRoot,
+					pattern: "TODO",
+					contextValue: 0,
+					effectiveLimit: 10,
+					isDirectory: true,
+					toolCallId: "call-1",
+				}),
+			).resolves.toBeUndefined();
+		});
+
+		it("never awaits finder creation when the backend supports non-blocking peek", async () => {
+			// Regression pin for a real WSL hang: finder creation waits on an index scan
+			// (unbounded over /mnt mounts), and the search path used to await it inline —
+			// every grep/find stalled behind the scan. With peekFinder present, a cold
+			// finder must fall back to fd/rg immediately; getFinder hanging forever must
+			// not matter.
+			const coldBackend: FffSearchBackend = {
+				getFinder: () => new Promise<FffFileFinder | undefined>(() => {}),
+				peekFinder: () => undefined,
+			};
+
+			await expect(
+				tryFffFind({
+					backend: coldBackend,
+					router: defaultSearchRouter,
+					cwd: tempRoot,
+					searchPath: tempRoot,
+					pattern: "foo",
+					effectiveLimit: 10,
+					toolCallId: "call-1",
+				}),
+			).resolves.toBeUndefined();
+
+			await expect(
+				tryFffGrep({
+					backend: coldBackend,
 					router: defaultSearchRouter,
 					cwd: tempRoot,
 					searchPath: tempRoot,
