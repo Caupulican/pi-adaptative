@@ -349,7 +349,14 @@ describe("path alias table", () => {
 
 	it("keeps case-differing posix paths distinct and windows case variants deduped", () => {
 		const posix = buildPathAliasTable("/repo", ["packages/app/src/Types.ts and packages/app/src/types.ts"]);
-		expect(posix.entries.map((entry) => entry.id).sort()).toEqual(["p/Types.ts", "p/types.ts"].sort());
+		// dedupeKey is host-aware: case-sensitive on a posix host (matching ext4/APFS-style
+		// semantics, including WSL where process.platform is "linux"), case-insensitive on
+		// a native win32 host (matching NTFS, where the two mentions really are one file).
+		if (process.platform === "win32") {
+			expect(posix.entries).toHaveLength(1);
+		} else {
+			expect(posix.entries.map((entry) => entry.id).sort()).toEqual(["p/Types.ts", "p/types.ts"].sort());
+		}
 		const windows = buildPathAliasTable("/repo", [
 			String.raw`C:\Users\Dev\Downloads\notes-archive.txt then c:\users\dev\downloads\NOTES-ARCHIVE.TXT`,
 		]);
