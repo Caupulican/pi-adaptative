@@ -67,7 +67,10 @@ export function emptyPathAliasTable(cwd: string): PathAliasTable {
 	return { cwd, entries: [] };
 }
 
-function shortestUniqueSuffixes(paths: readonly string[]): Map<string, string> {
+function shortestUniqueSuffixes(
+	paths: readonly string[],
+	reservedIds: ReadonlySet<string> = new Set(),
+): Map<string, string> {
 	const segments = new Map<string, string[]>();
 	for (const path of paths) {
 		segments.set(
@@ -81,13 +84,16 @@ function shortestUniqueSuffixes(paths: readonly string[]): Map<string, string> {
 		let depth = 1;
 		while (depth <= segs.length) {
 			const suffix = segs.slice(-depth).join("/");
-			const clash = paths.some((other) => {
-				if (other === path) return false;
-				const otherSegs = segments.get(other) ?? [];
-				return otherSegs.slice(-depth).join("/") === suffix;
-			});
+			const aliasId = `p/${suffix}`;
+			const clash =
+				reservedIds.has(aliasId) ||
+				paths.some((other) => {
+					if (other === path) return false;
+					const otherSegs = segments.get(other) ?? [];
+					return otherSegs.slice(-depth).join("/") === suffix;
+				});
 			if (!clash) {
-				ids.set(path, `p/${suffix}`);
+				ids.set(path, aliasId);
 				break;
 			}
 			depth += 1;
@@ -95,6 +101,28 @@ function shortestUniqueSuffixes(paths: readonly string[]): Map<string, string> {
 		if (!ids.has(path)) ids.set(path, `p/${segs.join("/")}`);
 	}
 	return ids;
+}
+
+export function extendPathAliasTable(
+	table: PathAliasTable,
+	texts: readonly string[],
+): { table: PathAliasTable; inserted: PathAliasEntry[] } {
+	const existingPaths = new Set(table.entries.map((entry) => entry.path.toLowerCase()));
+	const reservedIds = new Set(table.entries.map((entry) => entry.id));
+	const newPaths: string[] = [];
+	for (const text of texts) {
+		for (const candidate of extractPathCandidates(text)) {
+			const path = displayPath(candidate, table.cwd);
+			const key = path.toLowerCase();
+			if (existingPaths.has(key)) continue;
+			existingPaths.add(key);
+			newPaths.push(path);
+		}
+	}
+	if (newPaths.length === 0) return { table, inserted: [] };
+	const ids = shortestUniqueSuffixes(newPaths, reservedIds);
+	const inserted = newPaths.map((path) => ({ id: ids.get(path) ?? `p/${path}`, path }));
+	return { table: { cwd: table.cwd, entries: [...table.entries, ...inserted] }, inserted };
 }
 
 export function buildPathAliasTable(cwd: string, texts: readonly string[]): PathAliasTable {

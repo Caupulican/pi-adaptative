@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
 	applyPathAliases,
 	buildPathAliasTable,
+	emptyPathAliasTable,
 	expandParams,
 	expandText,
+	extendPathAliasTable,
 	extractPathCandidates,
 	rewriteText,
 } from "../src/core/context/path-alias-table.ts";
@@ -80,5 +82,18 @@ describe("path alias table", () => {
 		expect(Array.isArray(content) && content[0] && "text" in content[0] ? content[0].text : "").toBe(
 			"p/grep.ts:125:name",
 		);
+	});
+
+	it("freezes alias ids when a colliding sibling later disappears", () => {
+		let table = emptyPathAliasTable("/repo");
+		const first = extendPathAliasTable(table, [
+			"packages/coding-agent/src/foo.ts",
+			"packages/coding-agent/test/foo.ts",
+		]);
+		expect(first.inserted.map((entry) => entry.id).sort()).toEqual(["p/src/foo.ts", "p/test/foo.ts"]);
+		table = first.table;
+		const second = extendPathAliasTable(table, ["packages/coding-agent/src/foo.ts"]);
+		expect(second.inserted).toEqual([]);
+		expect(table.entries.find((entry) => entry.path.endsWith("/src/foo.ts"))?.id).toBe("p/src/foo.ts");
 	});
 });

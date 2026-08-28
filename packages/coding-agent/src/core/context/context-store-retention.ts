@@ -17,7 +17,7 @@ const MAX_LEGACY_FILES_PER_SESSION = 100_000;
 const CONTEXT_WORK_TENANT = "sessions";
 const WORK_RUN_MANIFEST_FILE = ".pi-work-run.json";
 
-export type ContextStoreKind = "gc" | "artifacts";
+export type ContextStoreKind = "gc" | "artifacts" | "index";
 
 export interface ContextStoreRetentionOptions {
 	maxAgeMs?: number;
@@ -29,6 +29,7 @@ export interface ContextStoreRetentionOptions {
 export interface ContextStoreRetentionLease {
 	readonly gcDir: string;
 	readonly artifactsDir: string;
+	readonly indexDir: string;
 	release(): void;
 }
 
@@ -198,6 +199,7 @@ export function acquireContextStoreRetention(
 	return {
 		gcDir: join(lease.path, "gc"),
 		artifactsDir: join(lease.path, "artifacts"),
+		indexDir: join(lease.path, "index"),
 		release(): void {
 			if (released) return;
 			released = true;

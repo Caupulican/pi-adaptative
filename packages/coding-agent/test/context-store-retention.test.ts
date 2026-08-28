@@ -29,6 +29,7 @@ describe("context store retention", () => {
 
 		expect(lease.gcDir).toBe(join(agentDir, "work", "context", "sessions", "session-1", "gc"));
 		expect(lease.artifactsDir).toBe(join(agentDir, "work", "context", "sessions", "session-1", "artifacts"));
+		expect(lease.indexDir).toBe(join(agentDir, "work", "context", "sessions", "session-1", "index"));
 		expect(existsSync(dirname(lease.gcDir))).toBe(true);
 		expect(existsSync(lease.gcDir)).toBe(false);
 		expect(existsSync(lease.artifactsDir)).toBe(false);

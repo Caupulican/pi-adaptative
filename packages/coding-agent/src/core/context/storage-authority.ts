@@ -65,4 +65,16 @@ export const CONTEXT_STORAGE_TABLE_AUTHORITY: readonly StorageTableAuthority[] =
 			"and permitted by egress/redaction policy at rebuild time; it is not unconditionally rebuildable " +
 			"the way the OKF-bundle-backed portion is.",
 	},
+	{
+		table: "path_aliases",
+		authorityClass: "canonical_local_state",
+		notes:
+			"Frozen p/ path alias ids. Unique suffixes are not rebuildable from the transcript after compaction " +
+			"shrinks the path set, so this row is the only stable mapping across pause/resume.",
+	},
+	{
+		table: "path_alias_meta",
+		authorityClass: "runtime_cache_disposable",
+		notes: "Scan watermark (last_scanned_timestamp) for incremental path extraction; safe to drop and rescan.",
+	},
 ];

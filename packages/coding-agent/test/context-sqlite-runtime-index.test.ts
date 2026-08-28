@@ -10,6 +10,7 @@ import type { PolicyDecision } from "../src/core/context/policy-types.ts";
 import {
 	createSqliteContextStore,
 	createSqliteMemoryIndexStore,
+	createSqlitePathAliasStore,
 	SQLITE_CONTEXT_INDEX_TABLES,
 	SQLITE_RUNTIME_INDEX_SCHEMA_VERSION,
 	type SqliteContextStore,
@@ -98,7 +99,11 @@ describe("SQLite runtime index stores", () => {
 		return track(createSqliteMemoryIndexStore({ databasePath }));
 	}
 
-	it("creates all authority-declared runtime-index tables under schema version 1", () => {
+	function openPathAliasStore() {
+		return track(createSqlitePathAliasStore({ databasePath }));
+	}
+
+	it("creates all authority-declared runtime-index tables under the current schema version", () => {
 		openContextStore();
 		const database = new DatabaseSync(databasePath);
 		try {
@@ -240,5 +245,24 @@ describe("SQLite runtime index stores", () => {
 		const second = openContextStore();
 		expect(second.getItem("bad")).toBeUndefined();
 		expect(second.listItems()).toEqual([]);
+	});
+
+	it("persists frozen path aliases across store instances", () => {
+		const first = openPathAliasStore();
+		first.upsert({ fullPath: "packages/coding-agent/src/foo.ts", aliasId: "p/src/foo.ts", createdAtTurn: 2 });
+		first.setMeta("last_scanned_timestamp", "42");
+		first.close();
+
+		const second = openPathAliasStore();
+		expect(second.list()).toEqual([
+			{ fullPath: "packages/coding-agent/src/foo.ts", aliasId: "p/src/foo.ts", createdAtTurn: 2 },
+		]);
+		expect(second.getMeta("last_scanned_timestamp")).toBe("42");
+		second.upsert({
+			fullPath: "packages/coding-agent/src/foo.ts",
+			aliasId: "p/foo.ts",
+			createdAtTurn: 9,
+		});
+		expect(second.list()[0]?.aliasId).toBe("p/src/foo.ts");
 	});
 });

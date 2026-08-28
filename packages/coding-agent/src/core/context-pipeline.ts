@@ -23,6 +23,7 @@
  * the pipeline — keeping request planning the one place the two subsystems meet.
  */
 
+import { join } from "node:path";
 import {
 	calculateContextTokens,
 	estimateTokens,
@@ -61,6 +62,8 @@ import {
 	migrateLegacyContextStores,
 } from "./context/context-store-retention.ts";
 import { latestUserPromptText, textContentPrefix } from "./context/message-text.ts";
+import { PathAliasRuntime } from "./context/path-alias-session.ts";
+import { formatPathAliasLegend, type PathAliasTable } from "./context/path-alias-table.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
@@ -174,6 +177,7 @@ export class ContextPipeline {
 	private _lastCurationSkipReason: string | undefined = undefined;
 	private _lastPreDigestSkipReason: string | undefined = undefined;
 	private _toolArtifactStore: ArtifactStore | undefined = undefined;
+	private _pathAliasRuntime: PathAliasRuntime | undefined = undefined;
 	private _contextStoreRetentionLease: ContextStoreRetentionLease | undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
@@ -220,6 +224,33 @@ export class ContextPipeline {
 		return getContextStoreDir(this.deps.getAgentDir(), "artifacts", this.deps.getSessionManager().getSessionId());
 	}
 
+	private _indexDir(): string {
+		this._ensureContextStoreRetention();
+		return getContextStoreDir(this.deps.getAgentDir(), "index", this.deps.getSessionManager().getSessionId());
+	}
+
+	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string } {
+		this._pathAliasRuntime ??= new PathAliasRuntime(
+			() => this.deps.getCwd(),
+			() => join(this._indexDir(), "runtime.sqlite"),
+			() => this.deps.getTurnIndex(),
+		);
+		return this._pathAliasRuntime.sync(messages);
+	}
+
+	peekPathAliasLegend(): string | undefined {
+		return this._pathAliasRuntime?.peekLegend() ?? formatPathAliasLegend(this.peekPathAliasTable());
+	}
+
+	peekPathAliasTable(): PathAliasTable {
+		return (
+			this._pathAliasRuntime?.peekTable() ?? {
+				cwd: this.deps.getCwd(),
+				entries: [],
+			}
+		);
+	}
+
 	/**
 	 * Session-scoped, filesystem-backed artifact store for first-capture-then-bound tool
 	 * output (grep/find/run_toolkit_script -- see tool-output-artifacts.md). Lazily created and
@@ -250,6 +281,8 @@ export class ContextPipeline {
 	 */
 	cleanupToolArtifactStoreOnDispose(): void {
 		this._toolArtifactStore?.cleanup();
+		this._pathAliasRuntime?.close();
+		this._pathAliasRuntime = undefined;
 		this._contextStoreRetentionLease?.release();
 		this._contextStoreRetentionLease = undefined;
 		// Release memoized message references promptly so a disposed session's messages are

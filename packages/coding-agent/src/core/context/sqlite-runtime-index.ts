@@ -7,7 +7,7 @@ import type { ContextStore, PolicyDecisionRecord, RetrievalRecord } from "./cont
 import type { MemoryIndexRecord, MemoryIndexStore } from "./memory-index-store.ts";
 import type { PolicyDecision } from "./policy-types.ts";
 
-export const SQLITE_RUNTIME_INDEX_SCHEMA_VERSION = 1;
+export const SQLITE_RUNTIME_INDEX_SCHEMA_VERSION = 2;
 
 export const SQLITE_CONTEXT_INDEX_TABLES = [
 	"context_items",
@@ -16,6 +16,8 @@ export const SQLITE_CONTEXT_INDEX_TABLES = [
 	"policy_decisions",
 	"retrieval_records",
 	"memory_index",
+	"path_aliases",
+	"path_alias_meta",
 ] as const;
 
 export interface SqliteRuntimeIndexOptions {
@@ -149,6 +151,17 @@ export function migrateSqliteRuntimeIndex(database: DatabaseSync): void {
 
 			CREATE INDEX IF NOT EXISTS idx_memory_index_scope
 				ON memory_index(scope, provider_id, item_id);
+
+			CREATE TABLE IF NOT EXISTS path_aliases (
+				full_path TEXT PRIMARY KEY NOT NULL,
+				alias_id TEXT NOT NULL UNIQUE,
+				created_at_turn INTEGER NOT NULL
+			) STRICT;
+
+			CREATE TABLE IF NOT EXISTS path_alias_meta (
+				key TEXT PRIMARY KEY NOT NULL,
+				value TEXT NOT NULL
+			) STRICT;
 
 			PRAGMA user_version = ${SQLITE_RUNTIME_INDEX_SCHEMA_VERSION};
 			COMMIT;
@@ -443,6 +456,62 @@ export function createSqliteMemoryIndexStore(options: SqliteRuntimeIndexOptions)
 		},
 
 		close(): void {
+			database[Symbol.dispose]();
+		},
+	};
+}
+
+export interface SqlitePathAliasRow {
+	fullPath: string;
+	aliasId: string;
+	createdAtTurn: number;
+}
+
+export interface SqlitePathAliasStore {
+	list(): SqlitePathAliasRow[];
+	upsert(row: SqlitePathAliasRow): void;
+	getMeta(key: string): string | undefined;
+	setMeta(key: string, value: string): void;
+	close(): void;
+}
+
+export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): SqlitePathAliasStore {
+	const database = openDatabase(options);
+	const listAll = database.prepare(
+		"SELECT full_path, alias_id, created_at_turn FROM path_aliases ORDER BY created_at_turn, alias_id",
+	);
+	const upsert = database.prepare(
+		"INSERT INTO path_aliases(full_path, alias_id, created_at_turn) VALUES(?, ?, ?) ON CONFLICT(full_path) DO NOTHING",
+	);
+	const getMeta = database.prepare("SELECT value FROM path_alias_meta WHERE key = ?");
+	const setMeta = database.prepare(
+		"INSERT INTO path_alias_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+	);
+	return {
+		list(): SqlitePathAliasRow[] {
+			return listAll.all().map((row) => {
+				const record = row as Record<string, unknown>;
+				return {
+					fullPath: String(record.full_path),
+					aliasId: String(record.alias_id),
+					createdAtTurn: Number(record.created_at_turn),
+				};
+			});
+		},
+		upsert(row: SqlitePathAliasRow): void {
+			upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
+		},
+		getMeta(key: string): string | undefined {
+			const record = getMeta.get(key) as { value?: unknown } | undefined;
+			return typeof record?.value === "string" ? record.value : undefined;
+		},
+		setMeta(key: string, value: string): void {
+			setMeta.run(key, value);
+		},
+		close(): void {
+			try {
+				database.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+			} catch {}
 			database[Symbol.dispose]();
 		},
 	};
