@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Open session sqlite through `bun:sqlite` in compiled binaries so standalone `pi --version` no longer dies on missing `node:sqlite`.
+
 ## [0.97.12] - 2026-08-28
 
 ## [0.97.11] - 2026-08-28

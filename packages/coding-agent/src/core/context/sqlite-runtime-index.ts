@@ -1,11 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { ContextItem } from "./context-item.ts";
 import type { ContextStore, PolicyDecisionRecord, RetrievalRecord } from "./context-store.ts";
 import type { MemoryIndexRecord, MemoryIndexStore } from "./memory-index-store.ts";
 import type { PolicyDecision } from "./policy-types.ts";
+import { openSqliteDatabase, type SqliteDatabase } from "./sqlite-database.ts";
 
 export const SQLITE_RUNTIME_INDEX_SCHEMA_VERSION = 2;
 
@@ -38,11 +38,11 @@ function prepareDatabasePath(databasePath: string): void {
 	mkdirSync(dirname(databasePath), { recursive: true });
 }
 
-function openDatabase(options: SqliteRuntimeIndexOptions): DatabaseSync {
+function openDatabase(options: SqliteRuntimeIndexOptions): SqliteDatabase {
 	prepareDatabasePath(options.databasePath);
-	const database = new DatabaseSync(options.databasePath, {
-		enableForeignKeyConstraints: true,
-		timeout: options.busyTimeoutMs ?? 5_000,
+	const database = openSqliteDatabase({
+		databasePath: options.databasePath,
+		busyTimeoutMs: options.busyTimeoutMs,
 	});
 	try {
 		database.exec(`
@@ -58,13 +58,13 @@ function openDatabase(options: SqliteRuntimeIndexOptions): DatabaseSync {
 	}
 }
 
-function currentSchemaVersion(database: DatabaseSync): number {
+function currentSchemaVersion(database: SqliteDatabase): number {
 	const row = database.prepare("PRAGMA user_version").get();
 	const value = row?.user_version;
 	return typeof value === "number" ? value : 0;
 }
 
-export function migrateSqliteRuntimeIndex(database: DatabaseSync): void {
+export function migrateSqliteRuntimeIndex(database: SqliteDatabase): void {
 	const version = currentSchemaVersion(database);
 	if (version > SQLITE_RUNTIME_INDEX_SCHEMA_VERSION) {
 		throw new Error(
