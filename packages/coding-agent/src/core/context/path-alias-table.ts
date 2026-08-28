@@ -90,10 +90,13 @@ function aliasWorthwhile(displayPath: string): boolean {
 
 export function extractPathCandidates(text: string): string[] {
 	const found: string[] = [];
+	const seen = new Set<string>();
 	const push = (raw: string) => {
 		const path = stripTrailingPunctuation(raw);
 		if (!shouldAlias(path)) return;
-		if (!found.includes(path)) found.push(path);
+		if (seen.has(path)) return;
+		seen.add(path);
+		found.push(path);
 	};
 	// Windows spans are claimed first: a forward-slash drive path (`C:/Users/...`) must
 	// not also yield a phantom posix candidate starting after its drive colon.
@@ -103,12 +106,17 @@ export function extractPathCandidates(text: string): string[] {
 		windowsSpans.push([start, start + match[0].length]);
 		push(match[0]);
 	}
-	const insideWindows = (index: number) => windowsSpans.some(([start, end]) => index >= start && index < end);
 	const pushPosixMatches = (regex: RegExp) => {
+		// Both spans and match starts ascend, so one monotone cursor replaces a per-match
+		// scan over all spans.
+		let cursor = 0;
 		for (const match of text.matchAll(regex)) {
 			const path = match[1];
 			if (!path) continue;
-			if (insideWindows((match.index ?? 0) + match[0].length - path.length)) continue;
+			const start = (match.index ?? 0) + match[0].length - path.length;
+			while (cursor < windowsSpans.length && (windowsSpans[cursor]?.[1] ?? 0) <= start) cursor += 1;
+			const span = windowsSpans[cursor];
+			if (span !== undefined && start >= span[0] && start < span[1]) continue;
 			push(path);
 		}
 	};
@@ -135,46 +143,58 @@ function shortestUniqueSuffixes(
 	reservedIds: ReadonlySet<string> = new Set(),
 	isIdTaken?: (aliasId: string) => boolean,
 ): Map<string, string> {
-	const segments = new Map<string, string[]>();
 	const tails = new Map<string, string[]>();
+	// How many batch paths end in each suffix, precomputed once so the per-path clash
+	// check is O(1) instead of a scan over every other path (which made a single sync
+	// over an archive-listing-sized message quadratic and hang the session). A joined
+	// suffix string is unambiguous: segments cannot contain "/", so suffixes of
+	// different segment counts can never collide as strings.
+	const suffixCounts = new Map<string, number>();
 	for (const path of paths) {
 		const segs = path.split("/").filter((segment) => segment.length > 0);
-		segments.set(path, segs);
 		tails.set(path, aliasableTail(segs));
+		let suffix = "";
+		for (let depth = 1; depth <= segs.length; depth += 1) {
+			const segment = segs[segs.length - depth] ?? "";
+			suffix = depth === 1 ? segment : `${segment}/${suffix}`;
+			suffixCounts.set(suffix, (suffixCounts.get(suffix) ?? 0) + 1);
+		}
 	}
 	const ids = new Map<string, string>();
 	const assigned = new Set<string>();
-	// An alias id clashes when it's reserved, already assigned this batch, taken on disk,
-	// or another path's segments end in the same suffix (so expansion would be ambiguous).
-	const clashes = (path: string, aliasId: string, suffixSegs: readonly string[]): boolean =>
+	// An alias id clashes when it's reserved, already assigned this batch, shared as a
+	// suffix with another batch path (so expansion would be ambiguous), or taken on disk.
+	// The disk check runs last: it can be a real filesystem stat, expensive on slow
+	// mounts (WSL /mnt drives), so every cheap check must short-circuit it.
+	const clashes = (aliasId: string, suffix: string, othersThreshold: number): boolean =>
 		reservedIds.has(aliasId) ||
 		assigned.has(aliasId) ||
-		(isIdTaken?.(aliasId) ?? false) ||
-		paths.some((other) => {
-			if (other === path) return false;
-			const otherSegs = segments.get(other) ?? [];
-			if (otherSegs.length < suffixSegs.length) return false;
-			return otherSegs.slice(-suffixSegs.length).join("/") === suffixSegs.join("/");
-		});
+		(suffixCounts.get(suffix) ?? 0) > othersThreshold ||
+		(isIdTaken?.(aliasId) ?? false);
 	for (const path of paths) {
 		const tail = tails.get(path) ?? [];
-		let depth = 1;
-		while (depth <= tail.length) {
-			const suffixSegs = tail.slice(-depth);
-			const aliasId = `p/${suffixSegs.join("/")}`;
-			if (!clashes(path, aliasId, suffixSegs)) {
+		let suffix = "";
+		for (let depth = 1; depth <= tail.length; depth += 1) {
+			const segment = tail[tail.length - depth] ?? "";
+			suffix = depth === 1 ? segment : `${segment}/${suffix}`;
+			const aliasId = `p/${suffix}`;
+			// This path's own suffix always contributes 1 to the count.
+			if (!clashes(aliasId, suffix, 1)) {
 				ids.set(path, aliasId);
 				assigned.add(aliasId);
 				break;
 			}
-			depth += 1;
 		}
 		if (!ids.has(path)) {
+			const tailJoined = tail.join("/");
 			let counter = 2;
 			while (true) {
-				const suffixSegs = [String(counter), ...tail];
-				const aliasId = `p/${suffixSegs.join("/")}`;
-				if (!clashes(path, aliasId, suffixSegs)) {
+				const counterSuffix = `${counter}/${tailJoined}`;
+				const aliasId = `p/${counterSuffix}`;
+				// A counter-prefixed suffix is never one of this path's own suffixes (the
+				// aliasable tail is maximal, so the segment before it can't be a bare number
+				// in the tail's alphabet), so any count at all is another path's.
+				if (!clashes(aliasId, counterSuffix, 0)) {
 					ids.set(path, aliasId);
 					assigned.add(aliasId);
 					break;

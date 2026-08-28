@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a session hang when a single message carried thousands of paths (e.g. a 7z archive listing on Windows/WSL). Path-alias candidate dedupe and suffix-clash detection were quadratic in the number of new paths (10+ seconds at 6,000 paths, minutes at real listing sizes, repeated up to three times per request), and every candidate alias id cost a synchronous filesystem stat — ruinous on WSL `/mnt` drives. All three are now linear: suffix clashes use one precomputed count map, candidate dedupe uses a set, and the on-disk id check stats the `p/` parent once per sync (per-id stats only when it exists, memoized). 6,000 paths: 10,137ms → 95ms.
+- A follow-up sweep for the same complexity class across the package: bulk alias inserts now commit in one sqlite transaction instead of one WAL commit per row (thousands of rows per large sync), and package-manager force-include matching no longer rescans the accumulated file list per path. A 12,000-path first sync, sqlite persistence included, completes in ~0.5s end to end.
+
 ## [0.97.15] - 2026-08-28
 
 ### Fixed

@@ -11,7 +11,11 @@ import {
 	type PathAliasTable,
 	rewriteAgentMessages,
 } from "./path-alias-table.ts";
-import { createSqlitePathAliasStore, type SqlitePathAliasStore } from "./sqlite-runtime-index.ts";
+import {
+	createSqlitePathAliasStore,
+	type SqlitePathAliasRow,
+	type SqlitePathAliasStore,
+} from "./sqlite-runtime-index.ts";
 
 const LAST_SCANNED_TS_KEY = "last_scanned_timestamp";
 const RESERVED_TOKENS_KEY = "reserved_alias_tokens";
@@ -48,17 +52,33 @@ export class PathAliasRuntime {
 		this.ensureLoaded();
 		// A candidate id that names a real file or directory under cwd (a literal `p/`
 		// tree) must never be assigned, or expansion would redirect real-file references.
+		// Every id lives under the literal relative prefix `p/`, so when no `p` entry
+		// exists under cwd at all, one stat clears every candidate — a per-candidate stat
+		// is a synchronous filesystem roundtrip that hangs large syncs on slow mounts
+		// (WSL /mnt drives). When `p` does exist, per-id results are memoized for the sync.
+		const pEntryExists = existsSync(join(this.table.cwd, "p"));
+		const idTakenMemo = new Map<string, boolean>();
 		const extended = extendPathAliasTable(this.table, this.textsToScan(messages), {
 			reservationTexts: collectMessageTexts(messages),
-			isIdTaken: (aliasId) => existsSync(join(this.table.cwd, aliasId)),
+			isIdTaken: (aliasId) => {
+				if (!pEntryExists) return false;
+				let taken = idTakenMemo.get(aliasId);
+				if (taken === undefined) {
+					taken = existsSync(join(this.table.cwd, aliasId));
+					idTakenMemo.set(aliasId, taken);
+				}
+				return taken;
+			},
 		});
 		if (extended.inserted.length > 0 || extended.table !== this.table) {
 			const turn = this.getTurnIndex();
+			const rows: SqlitePathAliasRow[] = [];
 			for (const entry of extended.inserted) {
 				const absolute = toStoredAbsolute(entry.path, this.table.cwd);
 				this.records.push({ absolute, id: entry.id });
-				this.store?.upsert({ fullPath: absolute, aliasId: entry.id, createdAtTurn: turn });
+				rows.push({ fullPath: absolute, aliasId: entry.id, createdAtTurn: turn });
 			}
+			this.store?.upsertMany(rows);
 			const reservationsGrew = (extended.table.reservedIds?.length ?? 0) !== (this.table.reservedIds?.length ?? 0);
 			this.table = extended.table;
 			if (reservationsGrew) {

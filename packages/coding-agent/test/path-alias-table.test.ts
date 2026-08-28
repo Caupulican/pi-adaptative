@@ -347,6 +347,20 @@ describe("path alias table", () => {
 		);
 	});
 
+	it("handles an archive-listing-sized message without quadratic blowup", () => {
+		// Regression pin for a real hang: a single tool result listing thousands of
+		// Windows paths (a 7z archive listing) made candidate dedupe and suffix-clash
+		// detection quadratic — 10s+ at this size, minutes at real sizes. The linear
+		// implementation finishes well inside the default test timeout.
+		const lines: string[] = [];
+		for (let i = 0; i < 6000; i++) {
+			lines.push(String.raw`C:\Users\Dev\Downloads\archive\dir-${i % 40}\file-${i}.json`);
+		}
+		const table = buildPathAliasTable("/repo", [lines.join("\n")]);
+		expect(table.entries).toHaveLength(6000);
+		expect(new Set(table.entries.map((entry) => entry.id)).size).toBe(6000);
+	});
+
 	it("keeps case-differing posix paths distinct and windows case variants deduped", () => {
 		const posix = buildPathAliasTable("/repo", ["packages/app/src/Types.ts and packages/app/src/types.ts"]);
 		// dedupeKey is host-aware: case-sensitive on a posix host (matching ext4/APFS-style

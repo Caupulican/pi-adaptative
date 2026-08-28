@@ -501,9 +501,11 @@ function applyPatterns(allPaths: string[], patterns: string[], baseDir: string):
 
 	// Step 3: Force-include (add back from allPaths, overriding exclusions)
 	if (forceIncludes.length > 0) {
+		const resultSet = new Set(result);
 		for (const filePath of allPaths) {
-			if (!result.includes(filePath) && matchesAnyExactPattern(filePath, forceIncludes, baseDir)) {
+			if (!resultSet.has(filePath) && matchesAnyExactPattern(filePath, forceIncludes, baseDir)) {
 				result.push(filePath);
+				resultSet.add(filePath);
 			}
 		}
 	}

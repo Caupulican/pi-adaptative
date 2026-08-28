@@ -470,6 +470,12 @@ export interface SqlitePathAliasRow {
 export interface SqlitePathAliasStore {
 	list(): SqlitePathAliasRow[];
 	upsert(row: SqlitePathAliasRow): void;
+	/**
+	 * One transaction for the whole batch: a large sync can insert thousands of rows,
+	 * and one implicit transaction per row means one WAL commit each — seconds of
+	 * blocking on slow filesystems (WSL /mnt drives).
+	 */
+	upsertMany(rows: readonly SqlitePathAliasRow[]): void;
 	getMeta(key: string): string | undefined;
 	setMeta(key: string, value: string): void;
 	close(): void;
@@ -500,6 +506,22 @@ export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): 
 		},
 		upsert(row: SqlitePathAliasRow): void {
 			upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
+		},
+		upsertMany(rows: readonly SqlitePathAliasRow[]): void {
+			if (rows.length === 0) return;
+			database.exec("BEGIN");
+			try {
+				for (const row of rows) upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
+				database.exec("COMMIT");
+			} catch (error) {
+				try {
+					database.exec("ROLLBACK");
+				} catch {
+					// The primary failure is rethrown below; a rollback error on an already-
+					// aborted transaction must not mask it.
+				}
+				throw error;
+			}
 		},
 		getMeta(key: string): string | undefined {
 			const record = getMeta.get(key) as { value?: unknown } | undefined;
