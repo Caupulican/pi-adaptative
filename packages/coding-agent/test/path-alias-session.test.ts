@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as pathResolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { PathAliasRuntime } from "../src/core/context/path-alias-session.ts";
@@ -21,7 +21,11 @@ describe("PathAliasRuntime", () => {
 	const tempDirs: string[] = [];
 
 	afterEach(() => {
-		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+		// maxRetries/retryDelay: on Windows a just-closed sqlite handle can hold a
+		// transient AV/indexer lock past close() returning — plain force:true does not
+		// retry EPERM. Same pattern as test/auto-learn-spawn.test.ts.
+		for (const dir of tempDirs.splice(0))
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	});
 
 	it("resumes frozen aliases from sqlite without rescanning older messages", () => {
@@ -57,9 +61,16 @@ describe("PathAliasRuntime", () => {
 	it("keeps alias meaning anchored to the original file when resumed under a different cwd", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
 		tempDirs.push(dir);
+		// Real OS-absolute directories (drive-letter-bearing on Windows) rather than a
+		// literal posix "/repoA" string, which node:path treats as current-drive-relative
+		// on Windows and so is not actually absolute there.
+		const cwdA = mkdtempSync(join(tmpdir(), "pi-path-alias-repoA-"));
+		tempDirs.push(cwdA);
+		const cwdB = mkdtempSync(join(tmpdir(), "pi-path-alias-repoB-"));
+		tempDirs.push(cwdB);
 		const databasePath = join(dir, "runtime.sqlite");
 		const first = new PathAliasRuntime(
-			() => "/repoA",
+			() => cwdA,
 			() => databasePath,
 			() => 1,
 		);
@@ -67,15 +78,18 @@ describe("PathAliasRuntime", () => {
 		expect(first.peekTable().entries[0]).toEqual({ id: "p/foo.ts", path: "packages/coding-agent/src/foo.ts" });
 		first.close();
 		const second = new PathAliasRuntime(
-			() => "/repoB",
+			() => cwdB,
 			() => databasePath,
 			() => 2,
 		);
 		second.sync([toolResult("hello", 2)]);
-		expect(second.peekTable().entries[0]).toEqual({
-			id: "p/foo.ts",
-			path: "/repoA/packages/coding-agent/src/foo.ts",
-		});
+		const entry = second.peekTable().entries[0];
+		expect(entry?.id).toBe("p/foo.ts");
+		// The invariant: whichever spelling (relative or absolute) the display picker
+		// chose against the NEW cwd, resolving it must still land on the ORIGINAL file —
+		// not on a same-named file that happened to exist under the new cwd.
+		const resolved = pathResolve(cwdB, entry?.path ?? "");
+		expect(resolved).toBe(pathResolve(cwdA, "packages/coding-agent/src/foo.ts"));
 		second.close();
 	});
 
