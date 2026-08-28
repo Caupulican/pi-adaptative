@@ -60,7 +60,7 @@ describe("buildSystemPrompt", () => {
 			);
 			expect(prompt).not.toContain("N+2 ARCHITECTURE");
 			expect(prompt).not.toContain("EVIDENCE GATE");
-			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(2_700);
+			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_200);
 		});
 
 		test("applies ultra-terse output without dropping meaning-bearing words or exact technical text", () => {
@@ -73,6 +73,10 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("ULTRA-TERSE OUTPUT");
 			expect(prompt).toContain("Never drop not/never/no/only/except");
 			expect(prompt).toContain("never invent abbreviations or use causal arrows");
+			expect(prompt).toContain("REFERENCE POINTS");
+			expect(prompt).toContain("D for decisions");
+			expect(prompt).toContain("P for paths");
+			expect(prompt).toContain("Never invent P# the harness did not assign");
 			expect(prompt).toContain("Preserve numbers, units, code symbols, function/API names, commands, errors");
 			expect(prompt).toContain("Full grammar: security, irreversible actions, ambiguous order");
 			expect(prompt).toContain(

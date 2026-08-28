@@ -35,6 +35,8 @@ export interface ProviderRequestContextControllerDeps {
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
+	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string };
+	peekPathAliasLegend(): string | undefined;
 }
 
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
@@ -60,7 +62,8 @@ export class ProviderRequestContextController {
 		const shadowReport = this.deps.runPromptPolicyPlanning(auditReport);
 		const memoryReport = await this.deps.runMemoryRetrieval(extensionMessages);
 		const previewGc = this.deps.applyContextGc(durableMessages, false);
-		const previewProviderMessages = [...previewGc.messages, ...providerTransients];
+		const pathAliasPlan = this.deps.applyPathAliases(previewGc.messages);
+		const previewProviderMessages = [...pathAliasPlan.messages, ...providerTransients];
 		const previewEnforcement = this.deps.runPromptEnforcement(previewProviderMessages, shadowReport);
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {
 			throw new Error("Provider request enforcement changed message cardinality");
@@ -77,7 +80,8 @@ export class ProviderRequestContextController {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
 		const transientMessages = beforeSkill.slice(compactableMessages.length);
-		const transientSystemPrompt = this.deps.skillVault.previewSystemPromptSection();
+		const skillSection = this.deps.skillVault.previewSystemPromptSection();
+		const transientSystemPrompt = [skillSection, pathAliasPlan.legend].filter(Boolean).join("\n\n") || undefined;
 		const skillRevision = this.deps.skillVault.getContextRevision();
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
@@ -86,10 +90,15 @@ export class ProviderRequestContextController {
 			isDeepStrictEqual(this.deps.getGoalState(), goalState);
 		const projectCommit = (writePayloads: boolean) => {
 			const gc = this.deps.applyContextGc(durableMessages, writePayloads);
-			const providerMessages = [...gc.messages, ...providerTransients];
+			const aliased = this.deps.applyPathAliases(gc.messages);
+			const providerMessages = [...aliased.messages, ...providerTransients];
 			const enforcement = this.deps.runPromptEnforcement(providerMessages, shadowReport);
 			return { enforcement, gc, providerMessages };
 		};
+		const composedTransient = () =>
+			[this.deps.skillVault.previewSystemPromptSection(), this.deps.peekPathAliasLegend()]
+				.filter(Boolean)
+				.join("\n\n") || undefined;
 
 		return {
 			messages: compactableMessages,
@@ -101,7 +110,7 @@ export class ProviderRequestContextController {
 				const projected = projectCommit(false);
 				return (
 					isDeepStrictEqual(projected.enforcement.messages, previewEnforcement.messages) &&
-					this.deps.skillVault.previewSystemPromptSection() === transientSystemPrompt
+					composedTransient() === transientSystemPrompt
 				);
 			},
 			commit: () => {
@@ -112,7 +121,10 @@ export class ProviderRequestContextController {
 				this.deps.correlatePromptPolicyWithContextGc(committed.gc.report);
 				this.deps.enqueueRelevanceCuration(committed.providerMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration();
-				if (this.deps.skillVault.commitSystemPromptSection() !== transientSystemPrompt) {
+				const committedSkill = this.deps.skillVault.commitSystemPromptSection();
+				const committedTransient =
+					[committedSkill, this.deps.peekPathAliasLegend()].filter(Boolean).join("\n\n") || undefined;
+				if (committedTransient !== transientSystemPrompt) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();

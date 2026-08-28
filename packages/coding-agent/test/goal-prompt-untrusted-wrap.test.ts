@@ -33,6 +33,8 @@ function createProviderRequestController(state: GoalState): ProviderRequestConte
 		appendMemoryEvidence: (messages: AgentMessage[]) => messages,
 		getGoalState: () => state,
 		skillVault,
+		applyPathAliases: (messages: AgentMessage[]) => ({ messages }),
+		peekPathAliasLegend: () => undefined,
 	} as unknown as ProviderRequestContextControllerDeps);
 }
 

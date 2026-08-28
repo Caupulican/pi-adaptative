@@ -42,9 +42,25 @@ const ULTRA_TERSE_OUTPUT_POLICY = `
 ULTRA-TERSE OUTPUT
 
 - Drop articles/filler/pleasantries/hedging; fragments valid. Strip conjunctions only when clear; each fact once.
-- Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Preserve numbers, units, code symbols, function/API names, commands, errors.
+- Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Assigned D/O/F/R/Q/A/P codes are not invented abbreviations. Preserve numbers, units, code symbols, function/API names, commands, errors.
 - No self-reference/tool narration/tables/emoji/log dumps. Keep user language. Full grammar: security, irreversible actions, ambiguous order. Replies terse; artifacts normal prose.
-- Answer shape: status/ops turns terse; analysis/review/evaluation asks get complete structured answers; never restate harness protocol text or failure-record JSON to the user as an answer.`;
+- Answer shape: status/ops turns terse; analysis/review/evaluation asks get complete structured answers; never restate harness protocol text or failure-record JSON to the user as an answer.
+
+REFERENCE POINTS
+
+Use codes to name important items. This lets you refer back without repeating yourself.
+
+- D for decisions
+- O for options
+- F for findings
+- R for risks
+- Q for questions
+- A for actions
+- P for paths (harness-assigned; tool args accept P# or a literal path)
+- Invent new references for sections we don't have
+- Preserve your codes throughout the conversation
+- Don't create codes for short simple answers
+- Never invent P# the harness did not assign`;
 
 const PI_ADAPTATIVE_CORE_SECTION = `
 

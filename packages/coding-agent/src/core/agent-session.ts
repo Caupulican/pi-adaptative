@@ -72,6 +72,13 @@ import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
+import {
+	applyPathAliases,
+	emptyPathAliasTable,
+	formatPathAliasLegend,
+	type PathAliasTable,
+} from "./context/path-alias-table.ts";
+import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.ts";
 import type { ContextGcReport } from "./context-gc.ts";
 import { ContextPipeline } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
@@ -409,6 +416,8 @@ export class AgentSession {
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn.
 	// The paired _baseSystemPromptOptions and their construction live in SystemPromptBuilder.
 	private _baseSystemPrompt = "";
+	private _pathAliases: PathAliasTable = emptyPathAliasTable(".");
+	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -495,6 +504,7 @@ export class AgentSession {
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
+		this._pathAliases = emptyPathAliasTable(config.cwd);
 		this._agentDir = agentDir;
 		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
@@ -773,6 +783,12 @@ export class AgentSession {
 			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
+			applyPathAliases: (messages) => {
+				const aliased = applyPathAliases(this._cwd, messages);
+				this._pathAliases = aliased.table;
+				return { messages: aliased.messages, legend: aliased.legend };
+			},
+			peekPathAliasLegend: () => formatPathAliasLegend(this._pathAliases),
 		});
 		this._providerRequestRuntime = new ProviderRequestRuntimeController({
 			agent: this.agent,
@@ -2302,7 +2318,9 @@ export class AgentSession {
 		) {
 			addIfRegistered("artifact_retrieve");
 		}
-		this.agent.state.tools = tools;
+		this.agent.state.tools = tools.map((tool) =>
+			wrapToolWithPathAliasExpansion(tool, () => this._pathAliases, this._pathAliasWrappedTools),
+		);
 
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
