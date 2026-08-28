@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import "../core/extensions/bundled-virtual-modules.ts";
 import { APP_NAME, VERSION } from "../config.ts";
 
 process.title = APP_NAME;
@@ -12,9 +11,8 @@ if ((firstArg === "--version" || firstArg === "-v") && cliArgs.length === 1) {
 	process.exit(0);
 }
 
-import { restoreSandboxEnv } from "./restore-sandbox-env.ts";
-
+await import("../core/extensions/bundled-virtual-modules.ts");
+const { restoreSandboxEnv } = await import("./restore-sandbox-env.ts");
 restoreSandboxEnv();
-
 await import("./register-bedrock.ts");
 await import("../cli.ts");

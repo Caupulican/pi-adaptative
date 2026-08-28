@@ -22,11 +22,13 @@ describe("CLI entrypoint lifecycle", () => {
 		expect(powerShellWarmStart).toBeLessThan(mainImport);
 	});
 
-	it("prints compiled --version before Bedrock or the full CLI graph", () => {
+	it("prints compiled --version before bundled modules, Bedrock, or the full CLI graph", () => {
 		const versionIdx = bunEntrypoint.indexOf('firstArg === "--version"');
+		const bundledIdx = bunEntrypoint.indexOf("bundled-virtual-modules");
 		const bedrockIdx = bunEntrypoint.indexOf('await import("./register-bedrock.ts")');
 		const cliIdx = bunEntrypoint.indexOf('await import("../cli.ts")');
 		expect(versionIdx).toBeGreaterThan(0);
+		expect(versionIdx).toBeLessThan(bundledIdx);
 		expect(versionIdx).toBeLessThan(bedrockIdx);
 		expect(versionIdx).toBeLessThan(cliIdx);
 	});

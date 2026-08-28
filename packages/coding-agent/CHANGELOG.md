@@ -13,7 +13,7 @@
 - Injected the global-only project-instruction isolation block into native delegated worker system prompts when `projectContextFiles` is `off`, matching the root session. Isolation survives worker override.
 - Chat-class system prompts omit ULTRA-TERSE and keep compact REFERENCE POINTS so the 2048-character capability budget holds with isolation, skill vault, and lifecycle appends.
 - Lean-class system prompts omit host cwd so the 8192-character budget does not depend on Windows/temp path length; tools still receive cwd at runtime.
-- Compiled `pi --version` prints before Bedrock and HTTP dispatcher setup so standalone installer verification cannot die on import-time provider init.
+- Compiled `pi --version` prints before bundled virtual modules, Bedrock, and HTTP dispatcher setup so standalone installer verification cannot die on import-time provider init.
 - Silenced process-matrix prune-terminal diagnostics. Context GC packs cited out-of-window bulky tool results.
 - Gated local OKF retrieval to recall-like turns. Ordinary follow-up turns, including `context_audit`, no longer clobber the last long-term retrieval or prompt-inclusion diagnostics.
 - Repaired requestId-dissociated foreground tool starts on resume.
