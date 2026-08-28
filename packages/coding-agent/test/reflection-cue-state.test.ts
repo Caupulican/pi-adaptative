@@ -170,7 +170,6 @@ describe("durable current-turn reflection cue state", () => {
 			getGoalState: () => undefined,
 			skillVault,
 			applyPathAliases: (messages: AgentMessage[]) => ({ messages }),
-			peekPathAliasLegend: () => undefined,
 		} as unknown as ProviderRequestContextControllerDeps);
 		const source: AgentMessage[] = [{ role: "user", content: "ordinary", timestamp: 1 }];
 

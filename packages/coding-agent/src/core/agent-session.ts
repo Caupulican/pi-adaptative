@@ -776,7 +776,6 @@ export class AgentSession {
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),
-			peekPathAliasLegend: () => this._pipeline.peekPathAliasLegend(),
 		});
 		this._providerRequestRuntime = new ProviderRequestRuntimeController({
 			agent: this.agent,

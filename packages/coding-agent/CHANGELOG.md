@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Fixed
+
+- Path-alias rewriting runs in a single pass with token-boundary guards, so overlapping alias substitutions can no longer cascade into corrupted `p/p/...` tokens and aliases no longer swallow the head of longer tokens such as `file.ts.bak`.
+- Provider request commit consumes the path-alias legend computed from the committed plan instead of re-peeking mutable session state, so a table that grows between preview and commit can no longer fail the request with a divergence error.
+
+- Windows path candidates cut grep `:line` and compiler `(line,col)` suffixes, and alias ids never contain drive segments, so every alias the rewriter emits can be expanded back. Legacy stored aliases that cannot round-trip are excluded from rewriting but stay expandable.
+- Paths whose display form is no longer than an alias (the repo root `.`, bare basenames) are no longer aliased, so `git add .` and similar commands cannot be rewritten into `p/.` tokens.
+- Case-differing posix paths get distinct aliases instead of collapsing into one case-insensitive entry; Windows drive-letter paths keep case-insensitive dedupe.
+- Session resume can no longer re-point aliases at wrong files: the alias store persists absolute paths (legacy relative rows stay anchored to their recorded cwd) and derives cwd-relative displays per session, so a session resumed under a different working directory expands every existing alias to the file it originally named. Reserved `p/...` names are also re-derived from all visible history on every sync, so pre-upgrade databases gain the protection without rescanning.
+- A repo with a real `p/` directory works: its paths pass through rewrite and expansion untouched, observed `p/...` paths are durably reserved so no alias can take their name, and new alias ids are checked against the filesystem so an id never collides with an on-disk `p/` file and redirects a real-file reference. The reservation also applies at display level — a `p/` file reached via an absolute or `./` mention is reserved instead of aliased, and legacy entries whose display lives in the `p/` namespace are fenced out of rewriting — so an alias-shaped path can never enter the rewrite map. Forward-slash drive paths (`C:/...`) no longer spawn phantom posix entries.
+- Path aliasing is idempotent in both directions. Rewriting leaves text that already carries `p/...` ids unchanged instead of corrupting it into nested unexpandable tokens, and expansion only parses standalone tokens back — an alias-shaped substring embedded in a real path (`src/p/util-helpers.ts`) is never expanded, so repeated passes are stable. Extraction, rewriting, and expansion share one boundary vocabulary (whitespace, quotes, brackets, shell operators, `:`, `,`, braces), so an id is only ever emitted where the containing path could have registered — `git show HEAD:path` and `host:path` spellings round-trip instead of being prefix-mangled. Alias tokens never swallow sentence-final dots, so a path aliased at the end of a sentence keeps its legend line and expands back. Dot-relative spellings (`./path`) compress via an explicit form, and tails inside unknown absolute prefixes are left raw rather than half-aliased.
+
+### Changed
+
+- The PATH ALIASES legend is scoped to aliases present in the current context window instead of the whole session table, cutting prompt overhead on long sessions; the sqlite table still durably retains every alias.
+- Path aliasing covers long single-separator relative paths and `~/` home paths, skips MIME types, and compiles the alias rewriter once per table instead of once per text block.
+- Path discovery recognizes paths directly adjacent to shell operators and table pipes (`|`, `;`, `<`, `>`), and absolute mentions of in-repo files now compress to a single alias token instead of leaving the cwd prefix raw.
+
 ## [0.97.13] - 2026-08-28
 
 ### Fixed

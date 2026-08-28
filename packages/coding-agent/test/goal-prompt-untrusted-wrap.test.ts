@@ -34,7 +34,6 @@ function createProviderRequestController(state: GoalState): ProviderRequestConte
 		getGoalState: () => state,
 		skillVault,
 		applyPathAliases: (messages: AgentMessage[]) => ({ messages }),
-		peekPathAliasLegend: () => undefined,
 	} as unknown as ProviderRequestContextControllerDeps);
 }
 

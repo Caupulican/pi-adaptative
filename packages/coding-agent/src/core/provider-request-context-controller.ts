@@ -36,7 +36,6 @@ export interface ProviderRequestContextControllerDeps {
 	getGoalState(): GoalState | undefined;
 	skillVault: SkillVaultController;
 	applyPathAliases(messages: AgentMessage[]): { messages: AgentMessage[]; legend?: string };
-	peekPathAliasLegend(): string | undefined;
 }
 
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
@@ -93,12 +92,8 @@ export class ProviderRequestContextController {
 			const aliased = this.deps.applyPathAliases(gc.messages);
 			const providerMessages = [...aliased.messages, ...providerTransients];
 			const enforcement = this.deps.runPromptEnforcement(providerMessages, shadowReport);
-			return { enforcement, gc, providerMessages };
+			return { enforcement, gc, providerMessages, aliased };
 		};
-		const composedTransient = () =>
-			[this.deps.skillVault.previewSystemPromptSection(), this.deps.peekPathAliasLegend()]
-				.filter(Boolean)
-				.join("\n\n") || undefined;
 
 		return {
 			messages: compactableMessages,
@@ -108,9 +103,13 @@ export class ProviderRequestContextController {
 			prepareCommit: () => {
 				if (!dependenciesCurrent()) return false;
 				const projected = projectCommit(false);
+				const projectedTransient =
+					[this.deps.skillVault.previewSystemPromptSection(), projected.aliased.legend]
+						.filter(Boolean)
+						.join("\n\n") || undefined;
 				return (
 					isDeepStrictEqual(projected.enforcement.messages, previewEnforcement.messages) &&
-					composedTransient() === transientSystemPrompt
+					projectedTransient === transientSystemPrompt
 				);
 			},
 			commit: () => {
@@ -123,7 +122,7 @@ export class ProviderRequestContextController {
 				this.deps.maybeDrainBrainCuration();
 				const committedSkill = this.deps.skillVault.commitSystemPromptSection();
 				const committedTransient =
-					[committedSkill, this.deps.peekPathAliasLegend()].filter(Boolean).join("\n\n") || undefined;
+					[committedSkill, committed.aliased.legend].filter(Boolean).join("\n\n") || undefined;
 				if (committedTransient !== transientSystemPrompt) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}

@@ -63,7 +63,7 @@ import {
 } from "./context/context-store-retention.ts";
 import { latestUserPromptText, textContentPrefix } from "./context/message-text.ts";
 import { PathAliasRuntime } from "./context/path-alias-session.ts";
-import { formatPathAliasLegend, type PathAliasTable } from "./context/path-alias-table.ts";
+import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { applyContextGc, type ContextGcReport } from "./context-gc.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
@@ -236,10 +236,6 @@ export class ContextPipeline {
 			() => this.deps.getTurnIndex(),
 		);
 		return this._pathAliasRuntime.sync(messages);
-	}
-
-	peekPathAliasLegend(): string | undefined {
-		return this._pathAliasRuntime?.peekLegend() ?? formatPathAliasLegend(this.peekPathAliasTable());
 	}
 
 	peekPathAliasTable(): PathAliasTable {
