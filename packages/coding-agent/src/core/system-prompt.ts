@@ -196,9 +196,10 @@ function appendPromptResources(
 	}
 	// Day-granularity only; keep this tail stable across every call on the same calendar day.
 	result += `\nCurrent date: ${options.date}`;
-	// Chat-class models have no filesystem tools, so cwd is unusable context and makes the hard
-	// prompt budget depend on host checkout-path length. Tool-capable profiles retain it.
-	if (options.modelCapability?.class !== "chat") {
+	// Constrained prompt budgets must not depend on host path length. Chat has no filesystem
+	// tools. Lean's 8192 envelope is too tight for Windows/temp cwd variation; tools still
+	// receive cwd at runtime. Full and minimal keep the path.
+	if (options.modelCapability?.class !== "chat" && options.modelCapability?.class !== "lean") {
 		result += `\nCurrent working directory: ${options.promptCwd}`;
 	}
 	// Prompt resources can come from CRLF checkouts or user files. Canonicalize once at the final

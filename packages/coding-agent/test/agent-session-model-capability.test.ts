@@ -271,6 +271,7 @@ describe("model capability auto-detection", () => {
 		});
 		try {
 			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
+			expect(harness.session.systemPrompt).not.toContain("Current working directory:");
 			seedActiveGoal(harness);
 			let seenMaxTokens: number | undefined;
 			harness.setResponses([
@@ -307,6 +308,7 @@ describe("model capability auto-detection", () => {
 				});
 				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(8_192);
 				expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
+				expect(harness.session.systemPrompt).not.toContain("Current working directory:");
 			} finally {
 				if (harness) {
 					await harness.cleanup();
