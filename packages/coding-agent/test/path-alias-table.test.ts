@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { describe, expect, it } from "vitest";
 import {
@@ -155,6 +156,19 @@ describe("path alias table", () => {
 		expect(entry?.path.endsWith("workspace/screenshots/latest-capture.png")).toBe(true);
 		expect(entry?.path.startsWith("~")).toBe(false);
 		expect(rewriteText(table, "see ~/workspace/screenshots/latest-capture.png")).toBe("see p/latest-capture.png");
+	});
+
+	it("still aliases ~/ text when the display picker already chose the absolute spelling", () => {
+		// Reproduces the Windows CI failure mode: cwd unrelated to home makes the
+		// cwd-relative display longer than the absolute one, so buildPathAliasTable
+		// stores an already-absolute entry.path. The ~/ text form must still be found.
+		const home = homedir().replace(/\\/g, "/");
+		const table: PathAliasTable = {
+			cwd: "/unrelated/cwd/far/from/home",
+			entries: [{ id: "p/x.ts", path: `${home}/workspace/x.ts` }],
+		};
+		expect(rewriteText(table, "read ~/workspace/x.ts")).toBe("read p/x.ts");
+		expect(rewriteText(table, `read ${home}/workspace/x.ts`)).toBe("read p/x.ts");
 	});
 
 	it("captures long single-separator relative paths but not MIME types", () => {

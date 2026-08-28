@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Fixed a Windows-only failure where a `~/` home-relative path mention was never aliased: when the display picker chose the absolute spelling over the cwd-relative one (common when cwd is unrelated to the home directory, e.g. CI runners), the tilde-form computation was skipped entirely instead of running independently of the display's own absoluteness.
 - Path-alias rewriting runs in a single pass with token-boundary guards, so overlapping alias substitutions can no longer cascade into corrupted `p/p/...` tokens and aliases no longer swallow the head of longer tokens such as `file.ts.bak`.
 - Provider request commit consumes the path-alias legend computed from the committed plan instead of re-peeking mutable session state, so a table that grows between preview and commit can no longer fail the request with a divergence error.
 

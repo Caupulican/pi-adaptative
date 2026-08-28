@@ -306,12 +306,15 @@ const rewriterCache = new WeakMap<readonly PathAliasEntry[], CompiledRewriter>()
 // directory, and the backslash variant of each.
 function rewriteForms(entry: PathAliasEntry, cwd: string, home: string): string[] {
 	const forms = [entry.path];
-	if (!/^[A-Za-z]:\//.test(entry.path)) {
-		if (!entry.path.startsWith("/")) forms.push(`./${entry.path}`);
-		const absolute = toPosix(resolvePath(entry.path, cwd));
-		if (absolute !== entry.path) forms.push(absolute);
-		if (home && absolute.startsWith(`${home}/`)) forms.push(`~${absolute.slice(home.length)}`);
-	}
+	// A display can already BE absolute (a Windows drive path, or a posix path whose
+	// display picker chose the absolute spelling because it was shorter than the
+	// cwd-relative one) — that must not skip computing its `~/` form when it happens to
+	// live under home, so absoluteness and tilde-eligibility are checked independently.
+	const isAbsoluteDisplay = /^[A-Za-z]:\//.test(entry.path) || entry.path.startsWith("/");
+	if (!isAbsoluteDisplay) forms.push(`./${entry.path}`);
+	const absolute = isAbsoluteDisplay ? entry.path : toPosix(resolvePath(entry.path, cwd));
+	if (absolute !== entry.path) forms.push(absolute);
+	if (home && absolute.startsWith(`${home}/`)) forms.push(`~${absolute.slice(home.length)}`);
 	for (const form of [...forms]) {
 		const windows = form.replaceAll("/", "\\");
 		if (windows !== form) forms.push(windows);
