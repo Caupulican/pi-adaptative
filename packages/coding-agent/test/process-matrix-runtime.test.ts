@@ -740,10 +740,13 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
+		// The orphan's own pid is dead, so it is never worth a loud per-startup warning (see
+		// runOrphanScan) -- sync on the actual repair it's testing instead of a diagnostic.
 		await awaitState(
-			async () => harness.diagnostics,
-			(diagnostics) => diagnostics.some((message) => message.includes("unrecovered orphan")),
+			() => readEntry(harness.agentDir, orphan.entryId),
+			(entry) => entry?.status === "resumable",
 		);
+		expect(harness.diagnostics.some((message) => message.includes("unrecovered orphan"))).toBe(false);
 
 		const repaired = await readEntry(harness.agentDir, orphan.entryId);
 		expect(repaired).toMatchObject({
@@ -998,10 +1001,10 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await awaitState(
-			async () => harness.diagnostics,
-			(diagnostics) => diagnostics.some((message) => message.includes("task identity")),
-		);
+		await handle.waitForIdle();
+		// A dead worker's entry is never worth a per-startup warning regardless of WHY
+		// automatic recovery is disallowed (see runOrphanScan) -- it's inert data.
+		expect(harness.diagnostics.some((message) => message.includes("task identity"))).toBe(false);
 
 		expect(resumeWorker).not.toHaveBeenCalled();
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
@@ -1026,10 +1029,8 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);
-		await awaitState(
-			async () => harness.diagnostics,
-			(diagnostics) => diagnostics.some((message) => message.includes("current goal state")),
-		);
+		await handle.waitForIdle();
+		expect(harness.diagnostics.some((message) => message.includes("current goal state"))).toBe(false);
 
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
 		await handle.stop();
@@ -1262,7 +1263,9 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 		await handle.waitForIdle();
 
 		expect(resumeWorker).not.toHaveBeenCalled();
-		expect(harness.diagnostics.some((message) => message.includes("unrecovered orphan"))).toBe(true);
+		// A dead foreign orphan is not worth a per-startup warning (see runOrphanScan): it's
+		// inert data with zero possible action, and bounded reconciliation already ages it out.
+		expect(harness.diagnostics.some((message) => message.includes("unrecovered orphan"))).toBe(false);
 		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
 		await handle.stop();
 	});
@@ -1278,6 +1281,24 @@ describe("startProcessMatrixRuntime (master branch)", () => {
 			status: "resumable",
 			resumable: { lastCode: "resumable", agent: base.agent, taskSummary: "Unrelated work" },
 		};
+		await writeEntry(harness.agentDir, orphan);
+
+		const handle = await startProcessMatrixRuntime(harness.config);
+		await handle.waitForIdle();
+
+		expect(resumeWorker).not.toHaveBeenCalled();
+		expect(harness.diagnostics.some((message) => message.includes("foreign parent session"))).toBe(false);
+		expect(await readEntry(harness.agentDir, orphan.entryId)).toEqual(orphan);
+		await handle.stop();
+	});
+
+	it("still warns loudly about a foreign orphan whose own process is still alive", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		useMasterEnv();
+		const resumeWorker = vi.fn();
+		const harness = makeHarness({ resumeWorker });
+		const orphan = orphanEntry();
+		harness.livePids.add(orphan.pid);
 		await writeEntry(harness.agentDir, orphan);
 
 		const handle = await startProcessMatrixRuntime(harness.config);

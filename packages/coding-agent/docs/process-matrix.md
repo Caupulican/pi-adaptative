@@ -66,9 +66,16 @@ resumable so TTL can prune them and pruning terminal or expired records; it does
 parent/session identity or launch, adopt, or clean them up.
 
 This behavior is identical in interactive, print, and RPC modes: the foreign-orphan claim/recovery
-scan logs without prompting, writes, launches, or kills. Neutral reconciliation may still perform
-the bounded lifecycle maintenance described above. Exact-session recovery remains active because it
-restores an already-recorded authority relationship rather than claiming another session's worker.
+scan never prompts, writes, launches, or kills. Neutral reconciliation may still perform the bounded
+lifecycle maintenance described above. Exact-session recovery remains active because it restores an
+already-recorded authority relationship rather than claiming another session's worker.
+
+The scan logs a warning only when the unclaimable orphan's own worker process is still alive --
+that is the one case with something a user could still act on (e.g. a still-running rogue process).
+An unclaimable orphan whose own process has already died is inert data with zero possible action;
+it is never logged, and bounded reconciliation ages it out of the matrix over
+`PROCESS_MATRIX_RESUMABLE_RETENTION_MS` (30 days) on its own, without repeating a warning on every
+startup in the meantime.
 
 ### A worker on parent death: wind down, never vanish
 

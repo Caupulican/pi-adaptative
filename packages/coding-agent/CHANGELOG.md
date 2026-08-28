@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stopped repeating the "found unrecovered orphan" process-matrix warning on every startup for an orphaned worker whose own process has already died. A dead, unclaimable orphan is inert data with zero possible action (its entry ages out of the matrix on its own via the existing 30-day TTL); only a still-live foreign orphan — a genuinely actionable rogue process — is warned about now.
+
 ## [0.97.14] - 2026-08-28
 
 ### Fixed

@@ -377,7 +377,13 @@ async function runOrphanScan(
 		if (!exactResumedParent) {
 			// Foreign workers are never claimed or cleaned up implicitly. This applies equally to
 			// dead workers (no resume prompt) and still-live workers (no adopt/cleanup prompt).
-			reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
+			// Only a still-live foreign worker is worth a loud, repeated warning -- it's a
+			// potentially resource-consuming rogue process the user could still act on. A foreign
+			// worker whose own process has already died is inert data with zero possible action;
+			// bounded reconciliation (see reconcileAndRunOrphanScan) already ages it out over
+			// PROCESS_MATRIX_RESUMABLE_RETENTION_MS without help from this diagnostic, so
+			// repeating the warning on every startup until that TTL elapses is pure noise.
+			if (config.isProcessAlive(orphan.pid)) reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
 			continue;
 		}
 		if (!config.isProcessAlive(orphan.pid)) {
