@@ -28,16 +28,44 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("default tools", () => {
-		test("batches independent read-only calls without weakening ordered mutations", () => {
-			const prompt = buildSystemPrompt({
+		test("emits independent tool calls together in one message across full, lean, and minimal capability classes", () => {
+			const fullPrompt = buildSystemPrompt({
+				selectedTools: ["read", "grep", "edit"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+			const leanPrompt = buildSystemPrompt({
+				modelCapability: {
+					class: "lean",
+					contextWindow: 16_384,
+					reasonCode: "test",
+					systemPromptMaxChars: 8_192,
+				},
+				selectedTools: ["read", "grep", "edit"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+			const minimalPrompt = buildSystemPrompt({
+				modelCapability: {
+					class: "minimal",
+					contextWindow: 8_192,
+					reasonCode: "test",
+					systemPromptMaxChars: 8_192,
+				},
 				selectedTools: ["read", "grep", "edit"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Batch independent reads");
-			expect(prompt).toContain("order dependent/mutating/stateful calls");
+			expect(fullPrompt).toContain("in one message");
+			expect(leanPrompt).toContain("in one message");
+			expect(minimalPrompt).toContain("in one message");
+			expect(fullPrompt).not.toContain("Batch independent reads");
+			expect(leanPrompt).not.toContain("Batch independent reads");
+			expect(minimalPrompt).not.toContain("Batch independent reads");
 		});
 
 		test("includes the compact Pi-Adaptative contract with skill pointers instead of standing statutes", () => {

@@ -62,6 +62,7 @@ OPERATING CONTRACT
 - Hold scope; verify unknowns from primary sources; simplest proven design, one owner/path per invariant.
 - User outcome governs, method does not. Outcome risk: show evidence, test when practical, offer safest effective path, execute.
 - Work over 15 seconds: managed background run, event terminal, bounded handoff, owner notice; never poll.
+- Emit independent tool calls together in one message; serialize only dependent, same-file, or stateful calls.
 - Facts: memory; specialization: skills; behavior: source. Discard noise.
 - Implementation/verification work loads skill evidence-gated-tdd; architecture/performance design loads skill n-plus-2-architecture; their gates bind only while that work is active.
 - Explicit user instruction in current message overrides standing style (length/format/tone); security, untrusted-content, and authorization rules are never overridable.
@@ -75,7 +76,7 @@ OPERATING CONTRACT
 - Complete current goal within scope, granted authority; keep progress, evidence concise.
 - Inspect relevant files and instructions before editing; make minimal coherent change, run focused checks.
 - Use active tools/schemas. On failure, follow error guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
-- Batch independent reads, order mutations; report real output, unresolved failures.
+- Emit independent calls in one message; order mutations; report real output, unresolved failures.
 - Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, scope expansion.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
@@ -85,7 +86,7 @@ EXECUTION RULES
 
 - Work one scoped task. Inspect before editing, make small coherent change, run narrowest useful check.
 - Use listed tools/schemas. On failure, follow error guidance. ${TOOL_FAILURE_RETRY_MODEL_RULE}
-- Batch independent reads, order mutations. Report actual results; never claim incomplete action.
+- Emit independent calls in one message; order mutations. Report actual results; never claim incomplete action.
 - Ask before destructive actions, credential disclosure or provider authentication changes, publication, push/tag/release, material scope change.
 - ${MODEL_BLIND_CREDENTIAL_AUTHORITY}`;
 
@@ -312,7 +313,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// File exploration guidelines
 	if (!fullPrompt && !leanPrompt) {
 		if (hasBash) addGuideline("Use bash for bounded shell commands");
-		if (hasReadOnlyTools) addGuideline("Batch independent reads; keep mutations and dependent calls ordered");
+		if (hasReadOnlyTools) addGuideline("Emit independent reads in one message; keep mutations and dependent calls ordered");
 	} else if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Bash: ls, rg, find");
 	}
@@ -324,7 +325,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			addGuideline("Python: bounded scripts/data, source edits via read/edit/write");
 		}
 		if (hasReadOnlyTools) {
-			addGuideline("Batch independent reads; order dependent/mutating/stateful calls");
+			addGuideline("Emit independent calls in one message; order dependent/mutating/stateful calls");
 		}
 	}
 

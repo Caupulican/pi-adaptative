@@ -767,7 +767,7 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 		name,
 		label: options.label ?? "Ask Question",
 		description:
-			"Ask the human owner one to four concise questions when a missing choice materially changes the work. The harness supplies Other and Skip choices, supports single- and multi-select answers, and returns a typed answer set.",
+			"Ask the human owner one to four concise questions when a missing choice materially changes the work. The harness supplies Other and Skip choices, supports single- and multi-select answers, and returns a typed answer set. Emit alone: never combine with other tool calls in the same message.",
 		promptSnippet: "Ask owner for consequential missing choice through native UI.",
 		promptGuidelines: [
 			"Use only when owner choice changes result/authority/risk/acceptance; else proceed with stated safe assumption.",
