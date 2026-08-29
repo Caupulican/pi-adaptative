@@ -59,14 +59,17 @@ describe("path alias projection is append-only across requests", () => {
 	});
 
 	it("keeps already-sent history byte-identical when a later turn mints an alias matching it", () => {
-		// `src/a.ts` is too short to mint an alias of its own on turn 1, so turn 1 goes to the provider
-		// spelled literally. Turn 2 mentions the same file ABSOLUTELY, which does clear the bar and
-		// mints `p/a.ts` — whose rewrite forms include the bare `src/a.ts` that turn 1 already sent.
+		// `src/a.ts` carries one separator and too few characters to mint an alias on turn 1, so turn 1
+		// goes to the provider spelled literally. Turn 2 names the same file as `./src/a.ts`, which does
+		// clear the bar and mints `p/a.ts` — whose rewrite forms include the bare `src/a.ts` that turn 1
+		// already sent. Both spellings are relative with forward slashes, so the trigger does not depend
+		// on how the host resolves an absolute path (an absolute spelling here passed on Linux and
+		// minted nothing on Windows).
 		const first: AgentMessage[] = [user("open src/a.ts", 1)];
 		const firstRender = runtime.sync(first);
 		expect(JSON.stringify(firstRender.messages[0])).toContain("src/a.ts");
 
-		const second: AgentMessage[] = [...first, user("now compare with /repo/src/a.ts", 2)];
+		const second: AgentMessage[] = [...first, user("now compare with ./src/a.ts", 2)];
 		const secondRender = runtime.sync(second);
 
 		expect(secondRender.legend).toContain("=src/a.ts");
