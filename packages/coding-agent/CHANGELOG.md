@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a UI stall introduced in 0.97.18 when a tool call streams a large argument. Alias expansion was applied to a tool call's arguments on every streamed chunk, and a message carrying a tool call bypasses the UI update throttle, so the whole (growing) payload was walked once per chunk — O(chunks x payload). A 200KB `write` arriving in 1,600 chunks cost 1,455ms of UI work and a 1MB write 2,065ms. Expansion now runs when the arguments are complete, which is also the only point at which they are meaningful to expand (mid-stream arguments are cut mid-token): the same cases now cost 1.98ms and 11ms, and are flat in chunk count. Message, tool-result and history rendering were never on this path and are unchanged.
+
 ## [0.97.18] - 2026-08-29
 
 ### Added

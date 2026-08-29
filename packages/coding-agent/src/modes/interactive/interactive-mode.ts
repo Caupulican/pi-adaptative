@@ -1795,11 +1795,20 @@ export class InteractiveMode {
 		});
 	}
 
-	private attachStreamingToolActions(message: AssistantMessage): void {
+	/**
+	 * @param argumentsComplete whether the tool call's arguments have finished streaming. Alias
+	 * expansion walks the whole argument payload, and this runs once per streamed chunk (a tool call
+	 * bypasses the UI update throttle), so expanding mid-stream is O(chunks x payload) — a 1MB write
+	 * cost 2.2s of UI work. Partial arguments are also mid-token, so expanding them is meaningless:
+	 * the value is only final, and only worth expanding, once the message ends.
+	 */
+	private attachStreamingToolActions(message: AssistantMessage, argumentsComplete: boolean): void {
 		for (const content of message.content) {
 			if (content.type !== "toolCall") continue;
 			const repair = getToolCallRepairInfo(content);
-			const args = expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments);
+			const args = argumentsComplete
+				? expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments)
+				: content.arguments;
 			if (!this.activeToolCalls.hasActive(content.id)) {
 				this.attachToolExecutionComponent(content.name, content.id, args, repair);
 			} else {
@@ -1821,10 +1830,13 @@ export class InteractiveMode {
 		const hasToolCall = message.content.some((content) => content.type === "toolCall");
 		const shouldUpdateNow = options.force || hasToolCall || elapsed >= STREAMING_UI_UPDATE_INTERVAL_MS;
 
+		// `force` marks the message_start and message_end updates; only at message_end are a tool
+		// call's arguments complete. Every other update is a mid-stream chunk.
+		const argumentsComplete = options.force === true;
 		const update = () => {
 			if (!this.streamingComponent || !this.streamingMessage) return;
 			this.streamingComponent.updateContent(this.streamingMessage);
-			this.attachStreamingToolActions(this.streamingMessage);
+			this.attachStreamingToolActions(this.streamingMessage, argumentsComplete);
 			this.lastStreamingUiUpdateAt = performance.now();
 			this.ui.requestRender();
 		};
@@ -2425,7 +2437,8 @@ export class InteractiveMode {
 			// Rebuilding the chat clears active call identity. Reattach
 			// any tool calls that are still arriving so toggling thinking visibility
 			// cannot make an in-flight tool disappear from the TUI.
-			this.attachStreamingToolActions(this.streamingMessage);
+			// A rebuild after the arguments already arrived: safe to expand, and it happens once.
+			this.attachStreamingToolActions(this.streamingMessage, true);
 		}
 
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);

@@ -14,7 +14,7 @@ type ToggleThinkingHost = {
 	rebuildChatFromMessages(): Promise<void>;
 	streamingComponent: StreamingMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
-	attachStreamingToolActions(message: AssistantMessage): void;
+	attachStreamingToolActions(message: AssistantMessage, argumentsComplete: boolean): void;
 	updateRuntimeStatus(message: AssistantMessage): void;
 	chatContainer: Container;
 	showStatus(message: string): void;
@@ -60,7 +60,9 @@ describe("InteractiveMode streaming thinking toggle", () => {
 	test("reattaches in-flight tool panels after rebuilding the chat", async () => {
 		await fakeThis.toggleThinkingBlockVisibility.call(fakeThis);
 
-		expect(fakeThis.attachStreamingToolActions).toHaveBeenCalledWith(message);
+		// Rebuilding after the arguments already arrived expands aliases; mid-stream chunks do not
+		// (see test/streaming-tool-args-expansion.test.ts).
+		expect(fakeThis.attachStreamingToolActions).toHaveBeenCalledWith(message, true);
 		expect(fakeThis.chatContainer.children).toEqual([fakeThis.streamingComponent, toolAction]);
 	});
 });
