@@ -9,6 +9,7 @@ import { sessionLifecycleToolIdentityKey } from "@caupulican/pi-agent-core/sessi
 import type { ProviderRequestSnapshotContext, ToolCallStartContext } from "@caupulican/pi-agent-core/types";
 import type { Api, Message, Model, ToolResultMessage } from "@caupulican/pi-ai";
 import type { ModelRouterController } from "./model-router-controller.ts";
+import { dumpProviderRequest } from "./request-dump.ts";
 
 const MAX_MESSAGE_ENTRY_IDS = 256;
 const MAX_WARNING_LENGTH = 500;
@@ -284,6 +285,7 @@ export class ForegroundLifecycleController {
 			historyFingerprint: fingerprint(providerHistoryMetadata(context.context.messages)),
 			messageEntryIds: messageEntryIds(this.deps.sessionManager),
 		});
+		dumpProviderRequest(requestId, context.context);
 		signal?.throwIfAborted();
 	}
 

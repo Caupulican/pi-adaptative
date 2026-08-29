@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `PI_REQUEST_DUMP_DIR=<dir>` dumps every accepted provider request (system prompt, tool names, messages) as one numbered JSON file, from the same choke point that records `request_snapshot` fingerprints. Diffing consecutive dumps shows the first divergent byte of the on-wire request — the ground truth for diagnosing provider prompt-cache misses that the fingerprints only summarize. Diagnostic only; off unless the variable is set.
+
 ### Fixed
 
 - Provider prompt caching no longer misses on nearly every request. Each request re-sends the whole conversation and providers prefill it against the longest byte-identical prefix, but three send-time passes were rewriting that prefix every turn: the path-alias legend was rendered into the system prompt (the first thing on the wire) and scoped to the aliases visible in the current window, so it flapped at byte zero as the window slid; alias rewriting retro-applied newly minted aliases to already-sent history, moving bytes deep inside the cached prefix; and context-GC packing advanced its boundary one position per appended message, restubbing the conversation tail on every request. Measured on real sessions: the composed system prompt differed on 17 of 17 consecutive requests, cache hit rates ran 6-37%, and cold requests took ~24s against ~16s warm. The legend now rides as the last transient message and never retracts a line, each text span keeps the spelling it was first sent with, and the packing boundary advances on a stride grid (`contextGc.packStrideMessages`, default half the preserve window) shared with prompt-policy enforcement.
